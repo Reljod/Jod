@@ -26,7 +26,7 @@ Reljod's real work already lives:
 
 Each domain has a directory under `domains/` with its own notes on how the
 agent should operate there — read the relevant one before acting in that
-area. Reusable behaviors live under `skills/` as Claude Code skills once
+area. Reusable behaviors live under `.agents/skills/` as Claude Code skills once
 they're extracted from one-off work.
 
 ## Operating principles
@@ -44,7 +44,7 @@ they're extracted from one-off work.
    shared branches — gets confirmed first, unless a domain's own notes say
    otherwise for a specific, bounded case.
 4. **Extend by writing it down.** When a new recurring behavior proves
-   itself, promote it: a skill under `skills/`, a note under the relevant
+   itself, promote it: a skill under `.agents/skills/`, a note under the relevant
    `domains/*` directory, or an addition to this charter. Ad hoc fixes that
    never get written down don't compound.
 5. **Keep the charter thin.** This file describes identity and principles.
@@ -60,7 +60,7 @@ domains/
   second-brain/    Notion: how notes and reference material are organized
   coding/          Claude Code: conventions for repos this agent touches
   finance/         money management, once scoped
-skills/            reusable Claude Code skills specific to Jod
+.agents/skills/    reusable Claude Code skills specific to Jod
 ```
 
 ## Branching
