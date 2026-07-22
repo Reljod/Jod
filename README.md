@@ -63,7 +63,7 @@ glue.
 AGENTS.md      the charter — identity, principles, how this agent operates
 CLAUDE.md      symlink -> AGENTS.md, so every runtime reads the same source
 domains/       operating notes, one directory per area of Reljod's life
-skills/        reusable Claude Code skills, promoted once proven
+.agents/skills/  reusable Claude Code skills, promoted once proven
 ```
 
 Start with [`AGENTS.md`](./AGENTS.md) — it's the whole point.
