@@ -16,10 +16,9 @@ staff.
 Most of the runtime lives in the Claude ecosystem (Claude Code, the Claude
 Agent SDK, Claude-in-Slack). The repo has two halves:
 
-- **The portable toolkit** — reusable skills, coding conventions, and the
-  retro loop, all under `.agents/`. Project-agnostic: copy `.agents/` into any
-  repo and it works, depending on nothing below it. This is the
-  *improve-my-workflows* half.
+- **The portable toolkit** — reusable skills under `.agents/`.
+  Project-agnostic: copy `.agents/` into any repo and it works, depending on
+  nothing below it. This is the *improve-my-workflows* half.
 - **Personal domains** — Reljod's private operating data, one directory each
   under `domains/`, wherever his real work already lives. This is the
   *duplicate-me* half.
@@ -32,10 +31,8 @@ Agent SDK, Claude-in-Slack). The repo has two halves:
 
 Each domain has a directory under `domains/` with its own notes on how the
 agent should operate there — read the relevant one before acting in that area.
-The toolkit under `.agents/` **never reaches into `domains/`**: skills and
-conventions must stay copyable into repos that have no `domains/` at all.
-Coding conventions and workflow are toolkit, not a personal domain — they live
-in [`.agents/conventions/`](.agents/conventions/README.md).
+The toolkit under `.agents/` **never reaches into `domains/`**: skills must
+stay copyable into repos that have no `domains/` at all.
 
 ## Operating principles
 
@@ -51,39 +48,59 @@ in [`.agents/conventions/`](.agents/conventions/README.md).
    others — sending messages, moving money, closing tasks, pushing to
    shared branches — gets confirmed first, unless a domain's own notes say
    otherwise for a specific, bounded case.
-4. **Extend by writing it down.** When a new recurring behavior proves
-   itself, promote it: a skill under `.agents/skills/`, a convention under
-   `.agents/conventions/`, or an addition to this charter (personal-domain
-   habits go in that domain's own notes). Ad hoc fixes that never get written
-   down don't compound. The **create-retro** skill (`/retro`) is this loop made
-   explicit — after a session with real back-and-forth, or where the shipped
-   result diverged from what the agent first produced, run it to distill the
-   WHYs into the toolkit. Skip it for clean, first-try sessions with nothing to
-   correct. Procedure lives in
-   [`.agents/conventions/README.md`](.agents/conventions/README.md).
-5. **Keep the charter thin.** This file describes identity and principles.
-   Coding conventions and workflow procedure belong in
-   `.agents/conventions/README.md`; personal-domain procedure in
-   `domains/*/README.md`. Not here.
+4. **Extend by writing it down.** When something proves itself, capture it in
+   the smallest durable form: a one-line WHY note under **Design choices**
+   below, or — for a repeatable procedure — a skill (see **Skills**). Ad hoc
+   fixes that never get written down don't compound; keep it slim, not a diary.
+5. **Keep the charter thin.** This file holds identity, principles, and slim
+   WHY notes. Operational how-to lives in the relevant skill; personal-domain
+   procedure in `domains/*/README.md`. Not here.
+
+## Design choices (the WHYs)
+
+Slim notes on preferences and decisions worth not re-litigating, so the
+reasoning outlives the session that set it. Add a line when a choice proves
+itself; distill it, don't narrate it.
+
+- **The toolkit stays out of `domains/`.** Skills and this charter never
+  reference personal domains, so `.agents/` stays copyable into any repo. A
+  reusable workflow is not one of Reljod's personal life-domains.
+- **Quality by layering, not diligence.** Cheap deterministic checks early
+  (git hooks) under mandatory ones later (required CI) beats relying on
+  remembering to be careful — nothing safety-critical lives *only* in a hook.
+- **Commits:** `<type>: <TICKET> <subject>`, imperative, ≤72 chars. The exact
+  gate is the `setup-git-hooks` skill; it isn't restated here.
+
+## Skills
+
+The toolkit is a set of Claude Code skills under
+[`.agents/skills/`](.agents/skills/), each with a thin `/`-command wrapper in
+`.claude/commands/`:
+
+- **create-pr** (`/create-pr`) — visual-first PR descriptions.
+- **setup-git-hooks** (`/setup-git-hooks`) — local commit-message + lint hooks.
+- **tdd-loop** (`/tdd-loop`) — test-first red-green-refactor loop.
+
+When to touch the skill layer:
+
+- **Add a skill** only when a *repeatable, multi-step procedure* has proven
+  itself more than once and no existing skill covers it. A one-off fix or a
+  single-line preference is a **Design choices** note instead — not a skill.
+- **Update an existing skill** when the change refines something already in its
+  scope. If a new need only partly overlaps, extend the closest skill rather
+  than cloning a near-duplicate — prefer editing over proliferating skills.
+- Every skill stays self-contained under `.agents/skills/`, with no `domains/`
+  reference, so the whole `.agents/` folder drops into any repo.
 
 ## Repo layout
 
 ```
 AGENTS.md          this charter (source of truth)
 CLAUDE.md          symlink -> AGENTS.md
-.agents/           the portable toolkit — copyable into any repo, self-contained
-  skills/          reusable Claude Code skills (create-pr, tdd-loop, create-retro, …)
-  conventions/     coding conventions & workflow (branching, commits, PRs, the layer model)
-  retros/          reasoning trail behind convention changes (written by create-retro)
+.agents/skills/    the portable toolkit — reusable Claude Code skills
 domains/           personal operating data — never referenced by the toolkit
-  tasks/           Linear: how work gets triaged, tracked, closed
-  second-brain/    Notion: how notes and reference material are organized
-  finance/         money management, once scoped
+  tasks/           Linear; second-brain/ Notion; finance/ planned
 ```
-
-The whole toolkit lives under `.agents/`, not top-level `skills/`,
-`conventions/`, etc. — this is a standing preference. Keep new skills and
-conventions there, and keep them free of any `domains/` reference.
 
 ## Branching
 
