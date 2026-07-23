@@ -49,6 +49,7 @@ the index of the ones that apply to coding, each with its slash command.
 | [`create-pr`](../../.agents/skills/create-pr/SKILL.md) | `/create-pr` | Opening a PR — builds a visual-first description a reviewer can approve from the description alone. |
 | [`setup-git-hooks`](../../.agents/skills/setup-git-hooks/SKILL.md) | `/setup-git-hooks` | Standing up local git hooks: commit-message convention, pre-commit lint/format, optional pre-push. |
 | [`tdd-loop`](../../.agents/skills/tdd-loop/SKILL.md) | `/tdd-loop` | Building a feature or fixing a bug test-first, in a tight red-green-refactor loop. |
+| [`create-retro`](../../.agents/skills/create-retro/SKILL.md) | `/retro` | Closing out a session that had real back-and-forth or diverged from the agent's first attempt — captures the WHYs into the reference docs. |
 
 Slash commands are thin wrappers in
 [`.claude/commands/`](../../.claude/commands/) that read and follow the
@@ -86,6 +87,19 @@ TDD run as an explicit loop: name the next behavior, write one failing test
 one-shot (read the RED/GREEN result each turn) or in `--watch` mode for a
 human at the keyboard. The one-shot form is also what a pre-push hook or CI
 calls.
+
+### create-retro — turn corrections into standing preferences
+
+The feedback loop for the agent itself. It gates first: run only when the
+session earned it — real back-and-forth with the user, or a shipped result
+that diverged from what the agent first produced — and stay quiet on clean,
+first-try sessions. When it runs, it mines each correction for the **WHY**
+(coding-style preference, design/architecture rationale, workflow correction),
+folds the distilled rule into the doc the next session will read (this README,
+another domain's, or the charter), and keeps the full reasoning trail as a
+dated entry under [`retros/`](retros/). Distinguishes a one-off (parked as
+not-yet-durable) from a real preference (promoted on the second occurrence),
+so the reference docs don't fill with over-fitted rules.
 
 ## Branching
 

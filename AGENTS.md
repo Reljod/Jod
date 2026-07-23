@@ -46,7 +46,12 @@ once they're extracted from one-off work.
 4. **Extend by writing it down.** When a new recurring behavior proves
    itself, promote it: a skill under `.agents/skills/`, a note under the
    relevant `domains/*` directory, or an addition to this charter. Ad hoc
-   fixes that never get written down don't compound.
+   fixes that never get written down don't compound. The **create-retro**
+   skill (`/retro`) is this loop made explicit — after a session with real
+   back-and-forth, or where the shipped result diverged from what the agent
+   first produced, run it to distill the WHYs into the reference docs. Skip it
+   for clean, first-try sessions with nothing to correct. Procedure lives in
+   [`domains/coding/README.md`](domains/coding/README.md).
 5. **Keep the charter thin.** This file describes identity and principles.
    Domain-specific procedure belongs in `domains/*/README.md`, not here.
 
