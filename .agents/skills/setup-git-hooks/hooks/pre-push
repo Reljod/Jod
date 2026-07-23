@@ -1,0 +1,35 @@
+#!/usr/bin/env sh
+# Optional pre-push gate. Runs PREPUSH_CMDS from ./commit-convention.conf.
+# Disabled by default (empty list) — only enable for a genuinely quick
+# suite. Slow pre-push checks train people to reach for --no-verify.
+set -eu
+
+HOOK_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+CONF="$HOOK_DIR/commit-convention.conf"
+
+PREPUSH_CMDS=""
+# shellcheck disable=SC1090
+[ -f "$CONF" ] && . "$CONF"
+
+[ -n "${PREPUSH_CMDS:-}" ] || exit 0
+
+RED=''; GRN=''; RST=''
+if [ -t 2 ]; then RED="$(printf '\033[31m')"; GRN="$(printf '\033[32m')"; RST="$(printf '\033[0m')"; fi
+
+status=0
+printf '%s\n' "$PREPUSH_CMDS" | while IFS= read -r cmd; do
+  [ -z "$cmd" ] && continue
+  printf '%s\n' "→ $cmd" >&2
+  if ! sh -c "$cmd" >&2; then
+    printf '%s\n' "${RED}✗ pre-push failed: $cmd${RST}" >&2
+    exit 1
+  fi
+done || status=1
+
+if [ "$status" -ne 0 ]; then
+  printf '%s\n' "${RED}pre-push checks failed. Bypass with --no-verify (CI still enforces).${RST}" >&2
+  exit 1
+fi
+
+printf '%s\n' "${GRN}✓ pre-push checks passed${RST}" >&2
+exit 0

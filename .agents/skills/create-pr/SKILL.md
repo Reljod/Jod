@@ -103,6 +103,13 @@ Mermaid diagrams need none of this — embed them directly as fenced
 
 ## 4. Assemble the body, visuals first
 
+Start from the skeleton, which seeds the sections from the categories the
+diff actually touches:
+
+```
+.agents/skills/create-pr/scripts/pr_body_skeleton.sh <base>...<head> > pr-body.md
+```
+
 Fixed section order, so a reviewer sees the visual before they scroll to
 any text:
 
@@ -110,7 +117,12 @@ any text:
 2. **Visuals** — screenshots/GIFs/diagrams, right after the summary.
 3. **What changed** — terse bullets, not paragraphs.
 4. **Test plan** — a checklist.
-5. Anything long (raw logs, full plan output) goes in a collapsed
+5. **Checks** — a short checklist confirming the deterministic gate is
+   green (CI required checks, lint/format/type-check, patch coverage). The
+   visuals tell the reviewer *what* changed; this tells them the machine
+   already verified the boring correctness, so their attention goes to
+   judgment, not to re-running your checks in their head.
+6. Anything long (raw logs, full plan output) goes in a collapsed
    `<details>` block at the end, not inline.
 
 If the target repo has its own PR template, populate its sections but
