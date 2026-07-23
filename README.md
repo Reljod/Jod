@@ -58,21 +58,18 @@ glue.
 
 ## The toolkit
 
-Coding conventions and workflow are the *other* half — the reusable,
-project-agnostic layer that lives entirely under [`.agents/`](./.agents) and
-never reaches into a personal domain. Copy `.agents/` into any repo and you get
-the skills, the [conventions](./.agents/conventions), and the
-[retro loop](./.agents/retros) that keeps improving them.
+The *other* half is the reusable, project-agnostic layer — a set of Claude Code
+skills under [`.agents/`](./.agents) that never reach into a personal domain.
+Copy `.agents/` into any repo and the skills come with it. Design choices and
+preferences (the WHYs) are kept slim in [`AGENTS.md`](./AGENTS.md), not a
+separate doc.
 
 ## Structure
 
 ```
-AGENTS.md          the charter — identity, principles, how this agent operates
+AGENTS.md          the charter — identity, principles, slim WHY notes
 CLAUDE.md          symlink -> AGENTS.md, so every runtime reads the same source
-.agents/           the portable toolkit — copyable into any repo, self-contained
-  skills/          reusable Claude Code skills, promoted once proven
-  conventions/     coding conventions & workflow (branching, commits, PRs, layers)
-  retros/          the reasoning trail behind convention changes
+.agents/skills/    the portable toolkit — reusable Claude Code skills
 domains/           personal operating notes, one per area of Reljod's life
 ```
 

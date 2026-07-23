@@ -108,7 +108,7 @@ syntax, and the spec/behavior-list template.
 - Don't over-fit the implementation to a single example. If two examples
   would force the real logic, write the second before generalizing.
 - The loop is local and fast; it is not the gate. The mandatory gate is
-  the same tests running green in CI (`.agents/conventions/README.md`). Keep the
+  the same tests running green in CI as a required status check. Keep the
   watch loop fast by focusing it; run the full suite in CI.
 - Don't chase a coverage number for its own sake — TDD produces coverage as
   a byproduct. Coverage-that-asserts-nothing is what mutation testing

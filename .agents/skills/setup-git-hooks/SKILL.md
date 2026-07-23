@@ -16,7 +16,7 @@ stack — deterministic checks that run on the developer's machine before a
 commit or push even exists. They are a *courtesy layer*, not the real gate:
 `git commit --no-verify` bypasses them, and every serious org assumes it
 can be bypassed. So nothing safety-critical lives *only* here — the same
-checks must also run server-side in CI (see `.agents/conventions/README.md`).
+checks must also run server-side in CI as required status checks.
 What hooks buy you is a sub-second feedback loop that catches typos,
 formatting drift, and malformed commit messages before they ever reach a
 PR.
