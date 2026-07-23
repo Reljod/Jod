@@ -109,4 +109,15 @@ domains/           personal operating data — never referenced by the toolkit
 ## Branching
 
 Development happens on feature branches, never directly on `main`. Branch
-names follow `claude/<short-description>-<id>` for agent-driven work.
+names mirror the commit convention: `<type>/<short-description>`, where
+`<type>` is the same set used for commits (`feat`, `fix`, `chore`, `refactor`,
+`docs`, …) and `<short-description>` is imperative and dash-separated —
+e.g. `feat/remove-claude-coauthoring`, `chore/setup-git-hooks`.
+
+## Attribution
+
+Commits and PRs carry no Claude co-authoring. `.claude/settings.json` sets
+empty `attribution.commit`/`attribution.pr` and `sessionUrl: false`, so no
+`Co-Authored-By` or `Claude-Session` trailer is appended. The config is
+committed (only `.claude/settings.local.json` stays local), so the policy
+travels with the repo.
