@@ -1,133 +1,135 @@
 #!/usr/bin/env bash
 #
 # test.sh — deterministic, dependency-free tests for setup-project.sh.
-# Scaffolds into throwaway temp dirs and asserts the outcome. No network,
-# no test framework. Run: .agents/skills/setup-project/tests/test.sh
+# Enumerated against test-scenarios/references/scenario-checklist.md and built
+# on its assert.sh helper. Run: .agents/skills/setup-project/tests/test.sh
 #
 set -u
 
 TEST_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT="$TEST_DIR/../scripts/setup-project.sh"
+# shellcheck source=/dev/null
+source "$TEST_DIR/../../test-scenarios/scripts/assert.sh"
+
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
-
-PASSED=0; FAILED=0
-pass() { printf '  \033[32mPASS\033[0m %s\n' "$1"; PASSED=$((PASSED+1)); }
-fail() { printf '  \033[31mFAIL\033[0m %s\n' "$1"; FAILED=$((FAILED+1)); }
-ok()   { if eval "$1"; then pass "$2"; else fail "$2"; fi; }
-
 fresh() { local d="$WORK/$1"; rm -rf "$d"; mkdir -p "$d"; printf '%s' "$d"; }
 
 echo "== setup-project.sh test suite =="
 
-# --- 1. --list ---------------------------------------------------------------
-echo "-- --list"
+# --- 1. happy path: --list ---------------------------------------------------
+section "--list"
 LIST="$("$SCRIPT" --list 2>&1)"
 for p in jod minimal team tdd-strict; do
   ok "grep -q '$p' <<<\"\$LIST\"" "--list shows preset '$p'"
 done
-for s in create-pr setup-git-hooks tdd-loop; do
+for s in create-pr setup-git-hooks tdd-loop test-scenarios; do
   ok "grep -q '$s' <<<\"\$LIST\"" "--list shows skill '$s'"
 done
-# self-exclusion: setup-project must not appear in the *skills* section
 SKILLS_SECTION="$(sed -n '/Skills available/,$p' <<<"$LIST")"
 ok "! grep -q 'setup-project' <<<\"\$SKILLS_SECTION\"" "--list excludes setup-project from skills"
+# A non-preset .md in the templates dir (README.md) must never be selectable.
+PRESET_SECTION="$(sed -n '/Behavior presets/,/Skills available/p' <<<"$LIST")"
+ok "! grep -qi 'README' <<<\"\$PRESET_SECTION\"" "--list excludes README from presets"
 
-# --- 2. every preset renders cleanly ----------------------------------------
-echo "-- preset rendering (all four)"
+# --- 2. happy path: EVERY preset renders cleanly ----------------------------
+section "preset rendering (all four variants)"
 for preset in jod minimal team tdd-strict; do
   d="$(fresh "p-$preset")"
   "$SCRIPT" --preset "$preset" --name "Proj-$preset" \
-    --desc "Desc for $preset." --ticket TKT --branch bot \
-    --target "$d" >/dev/null 2>&1
-  ok "[ -f '$d/AGENTS.md' ]"                        "$preset: AGENTS.md written"
-  ok "! grep -q '{{' '$d/AGENTS.md'"               "$preset: no leftover placeholders"
-  ok "grep -q 'Proj-$preset' '$d/AGENTS.md'"       "$preset: PROJECT_NAME substituted"
-  ok "grep -q 'Desc for $preset.' '$d/AGENTS.md'"  "$preset: PROJECT_DESC substituted"
-  ok "[ -L '$d/CLAUDE.md' ]"                        "$preset: CLAUDE.md is a symlink"
-  ok "[ \"\$(readlink '$d/CLAUDE.md')\" = 'AGENTS.md' ]" "$preset: symlink -> AGENTS.md"
+    --desc "Desc for $preset." --ticket TKT --branch bot --target "$d" >/dev/null 2>&1
+  assert_file    "$d/AGENTS.md"                       "$preset: AGENTS.md written"
+  assert_no_grep "{{" "$d/AGENTS.md"                  "$preset: no leftover placeholders"
+  assert_grep    "Proj-$preset" "$d/AGENTS.md"        "$preset: PROJECT_NAME substituted"
+  assert_grep    "Desc for $preset." "$d/AGENTS.md"   "$preset: PROJECT_DESC substituted"
+  assert_link_to "$d/CLAUDE.md" "AGENTS.md"           "$preset: CLAUDE.md -> AGENTS.md"
 done
-# presets that carry ticket/branch tokens actually substitute them
-ok "grep -q 'TKT-' '$WORK/p-jod/AGENTS.md'"        "jod: TICKET_PREFIX substituted"
-ok "grep -q 'bot/' '$WORK/p-jod/AGENTS.md'"        "jod: BRANCH_PREFIX substituted"
+assert_grep "TKT-" "$WORK/p-jod/AGENTS.md"            "jod: TICKET_PREFIX substituted"
+assert_grep "bot/" "$WORK/p-jod/AGENTS.md"            "jod: BRANCH_PREFIX substituted"
 
-# --- 3. --skills all copies everything, excludes self ------------------------
-echo "-- --skills all"
+# --- 3. boundary: special characters in name/desc ---------------------------
+section "special characters in --name / --desc"
+d="$(fresh special)"
+NAME='Acme & Co <widgets>'
+DESC='Pipes | slashes / and $vars & "quotes".'
+"$SCRIPT" --preset minimal --name "$NAME" --desc "$DESC" --target "$d" >/dev/null 2>&1
+assert_grep "$NAME" "$d/AGENTS.md"                    "special: name substituted literally"
+assert_grep "$DESC" "$d/AGENTS.md"                    "special: desc substituted literally"
+assert_no_grep "{{" "$d/AGENTS.md"                    "special: no leftover placeholders"
+
+# --- 4. --skills all / selective / whitespace -------------------------------
+section "--skills all"
 d="$(fresh skills-all)"
 "$SCRIPT" --preset team --skills all --name X --target "$d" >/dev/null 2>&1
-for s in create-pr setup-git-hooks tdd-loop; do
-  ok "[ -d '$d/.agents/skills/$s' ]"       "all: skill '$s' copied"
-  ok "[ -f '$d/.claude/commands/$s.md' ]"  "all: command '/$s' copied"
+for s in create-pr setup-git-hooks tdd-loop test-scenarios; do
+  assert_dir  "$d/.agents/skills/$s"      "all: skill '$s' copied"
+  assert_file "$d/.claude/commands/$s.md" "all: command '/$s' copied"
 done
-ok "[ ! -d '$d/.agents/skills/setup-project' ]" "all: setup-project NOT copied into target"
+assert_missing "$d/.agents/skills/setup-project" "all: setup-project NOT copied into target"
 
-# --- 4. selective skills -----------------------------------------------------
-echo "-- --skills create-pr,tdd-loop"
+section "--skills selective, with whitespace in the list"
 d="$(fresh skills-some)"
-"$SCRIPT" --preset jod --skills create-pr,tdd-loop --name X --target "$d" >/dev/null 2>&1
-ok "[ -d '$d/.agents/skills/create-pr' ]"        "some: create-pr copied"
-ok "[ -d '$d/.agents/skills/tdd-loop' ]"         "some: tdd-loop copied"
-ok "[ ! -d '$d/.agents/skills/setup-git-hooks' ]" "some: setup-git-hooks NOT copied"
+"$SCRIPT" --preset jod --skills "create-pr, tdd-loop" --name X --target "$d" >/dev/null 2>&1
+assert_dir     "$d/.agents/skills/create-pr"       "some: create-pr copied"
+assert_dir     "$d/.agents/skills/tdd-loop"        "some: tdd-loop copied (whitespace trimmed)"
+assert_missing "$d/.agents/skills/setup-git-hooks" "some: setup-git-hooks NOT copied"
 
 # --- 5. --no-symlink ---------------------------------------------------------
-echo "-- --no-symlink"
+section "--no-symlink"
 d="$(fresh nosym)"
 "$SCRIPT" --preset minimal --no-symlink --name X --target "$d" >/dev/null 2>&1
 ok "[ -f '$d/CLAUDE.md' ] && [ ! -L '$d/CLAUDE.md' ]" "no-symlink: CLAUDE.md is a regular file"
-ok "diff -q '$d/AGENTS.md' '$d/CLAUDE.md' >/dev/null" "no-symlink: CLAUDE.md == AGENTS.md"
+assert_ok diff -q "$d/AGENTS.md" "$d/CLAUDE.md"       # byte-identical to AGENTS.md
 
-# --- 6. overwrite guard + --force -------------------------------------------
-echo "-- overwrite guard"
+# --- 6. state: overwrite guard + --force ------------------------------------
+section "overwrite guard"
 d="$(fresh guard)"
 "$SCRIPT" --preset jod --name First --target "$d" >/dev/null 2>&1
-if "$SCRIPT" --preset jod --name Second --target "$d" >/dev/null 2>&1; then
-  fail "guard: second run without --force should fail"
-else
-  pass "guard: second run without --force refused"
-fi
-ok "grep -q 'First' '$d/AGENTS.md'" "guard: original AGENTS.md untouched"
-if "$SCRIPT" --preset jod --name Second --target "$d" --force >/dev/null 2>&1; then
-  pass "guard: --force succeeds"
-else
-  fail "guard: --force should succeed"
-fi
-ok "grep -q 'Second' '$d/AGENTS.md'" "guard: --force overwrote AGENTS.md"
+assert_fails "$SCRIPT" --preset jod --name Second --target "$d"   # refuses w/o --force
+assert_grep  "First" "$d/AGENTS.md"                  "guard: original untouched after refusal"
+assert_ok    "$SCRIPT" --preset jod --name Second --target "$d" --force
+assert_grep  "Second" "$d/AGENTS.md"                 "guard: --force overwrote AGENTS.md"
 
-# --- 7. unknown preset errors -----------------------------------------------
-echo "-- error handling"
-d="$(fresh badpreset)"
-if "$SCRIPT" --preset nope --target "$d" >/dev/null 2>&1; then
-  fail "unknown preset should exit non-zero"
-else
-  pass "unknown preset exits non-zero"
-fi
-ok "[ ! -f '$d/AGENTS.md' ]" "unknown preset writes nothing"
+# --- 7. invalid & hostile input ---------------------------------------------
+section "invalid & hostile input"
+d="$(fresh bad)"
+assert_fails "$SCRIPT" --preset nope --target "$d"                # unknown preset
+assert_missing "$d/AGENTS.md"                        "unknown preset: nothing written (no partial state)"
 
-# --- 8. unknown skill is skipped, scaffold still succeeds --------------------
+d="$(fresh traversal)"
+assert_fails "$SCRIPT" --preset "../../etc/passwd" --target "$d"  # path traversal in preset
+assert_missing "$d/AGENTS.md"                        "preset traversal: nothing written"
+
+d="$(fresh readmepreset)"
+assert_fails "$SCRIPT" --preset README --target "$d"             # README.md is not a preset
+assert_missing "$d/AGENTS.md"                        "README preset: nothing written"
+
 d="$(fresh badskill)"
-if "$SCRIPT" --preset jod --skills create-pr,doesnotexist --name X --target "$d" >/dev/null 2>&1; then
-  pass "unknown skill: scaffold still succeeds"
-else
-  fail "unknown skill: scaffold should still succeed"
-fi
-ok "[ -d '$d/.agents/skills/create-pr' ]"          "unknown skill: valid skill still copied"
-ok "[ ! -d '$d/.agents/skills/doesnotexist' ]"     "unknown skill: bogus skill not created"
+"$SCRIPT" --preset jod --skills "create-pr,../../../evil" --name X --target "$d" >/dev/null 2>&1
+assert_dir     "$d/.agents/skills/create-pr"         "hostile skill: valid skill still copied"
+assert_missing "$d/.agents/skills/../../../evil"     "hostile skill: traversal not written outside target"
 
-# --- 9. defaults: target=cwd, name=basename ---------------------------------
-echo "-- defaults"
+d="$(fresh missingdir)"; rmdir "$d"
+assert_fails "$SCRIPT" --preset jod --target "$d"                 # nonexistent target dir
+
+d="$(fresh unknownskill)"
+assert_ok  "$SCRIPT" --preset jod --skills "create-pr,doesnotexist" --name X --target "$d"
+assert_dir     "$d/.agents/skills/create-pr"         "unknown skill: valid one copied"
+assert_missing "$d/.agents/skills/doesnotexist"      "unknown skill: bogus one not created"
+
+# --- 8. environment: defaults ------------------------------------------------
+section "defaults (cwd target, basename name, trailing slash)"
 d="$(fresh widgetco)"
-( cd "$d" && "$SCRIPT" --preset minimal >/dev/null 2>&1 )
-ok "[ -f '$d/AGENTS.md' ]"              "default target: scaffolds into cwd"
-ok "grep -q 'widgetco' '$d/AGENTS.md'" "default name: falls back to dir basename"
+( cd "$d" && "$SCRIPT" --preset minimal >/dev/null 2>&1 )       # target defaults to cwd
+assert_file "$d/AGENTS.md"                            "default target: scaffolds into cwd"
+assert_grep "widgetco" "$d/AGENTS.md"                 "default name: falls back to dir basename"
 
-# --- 10. --help --------------------------------------------------------------
-if "$SCRIPT" --help 2>&1 | grep -q 'Usage:'; then
-  pass "--help renders usage"
-else
-  fail "--help should render usage"
-fi
+d="$(fresh trailing)"
+assert_ok "$SCRIPT" --preset minimal --name X --target "$d/"     # trailing slash on --target
+assert_file "$d/AGENTS.md"                            "trailing slash: normalised, scaffolds"
 
-# --- summary -----------------------------------------------------------------
-echo
-echo "== $PASSED passed, $FAILED failed =="
-[ "$FAILED" -eq 0 ]
+# --- 9. output contract: --help ---------------------------------------------
+section "output contract"
+ok "\"$SCRIPT\" --help 2>&1 | grep -q 'Usage:'"       "--help renders usage"
+
+assert_summary

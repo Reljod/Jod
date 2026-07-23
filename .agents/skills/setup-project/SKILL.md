@@ -40,11 +40,11 @@ unavailable), pre-selecting the Jod defaults:
    | `tdd-strict` | Test-first enforced, coverage as a required gate. | |
 
 2. **Skills to copy in** — a multi-select over the Jod skill library (run
-   `--list` for the live set): `create-pr`, `setup-git-hooks`, `tdd-loop`.
-   Each is copied into the target's `.agents/skills/` together with its
-   `.claude/commands/<skill>.md` wrapper. Recommended default: all three
-   for `jod`/`team`, `tdd-loop` + `setup-git-hooks` for `tdd-strict`, none
-   for `minimal`.
+   `--list` for the live set): `create-pr`, `setup-git-hooks`, `tdd-loop`,
+   `test-scenarios`. Each is copied into the target's `.agents/skills/`
+   together with its `.claude/commands/<skill>.md` wrapper. Recommended
+   default: everything for `jod`/`team`; `tdd-loop` + `test-scenarios` +
+   `setup-git-hooks` for `tdd-strict`; none for `minimal`.
 
 Also collect (or infer): **project name** (defaults to the target dir name),
 a **one-line description**, the **ticket prefix** (e.g. `JOD`), and the
