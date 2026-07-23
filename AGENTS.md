@@ -109,4 +109,27 @@ domains/           personal operating data — never referenced by the toolkit
 ## Branching
 
 Development happens on feature branches, never directly on `main`. Branch
-names follow `claude/<short-description>-<id>` for agent-driven work.
+names mirror the commit convention: `<type>/<short-description>`, where
+`<type>` is the same set used for commits (`feat`, `fix`, `chore`, `refactor`,
+`docs`, …) and `<short-description>` is imperative and dash-separated —
+e.g. `feat/remove-claude-coauthoring`, `chore/setup-git-hooks`.
+
+## Attribution
+
+Commits and PRs are Reljod's, with no Claude branding. `.claude/settings.json`
+(committed; only `.claude/settings.local.json` stays local) enforces two things
+so the policy travels with the repo:
+
+- **No trailers.** Empty `attribution.commit`/`attribution.pr` and
+  `sessionUrl: false` — no `Co-Authored-By` or `Claude-Session` line is
+  appended to commits or PRs.
+- **Reljod as author.** A `SessionStart` hook runs
+  `git config user.name Reljod && git config user.email oretareljod@gmail.com`
+  at the start of every session, overriding the agent runtime's default
+  `Claude <noreply@anthropic.com>` identity. GitHub keys the commit avatar and
+  name off that email, so agent-made commits show as Reljod, not `claude`.
+
+Note on the **Verified** badge: agent sessions have no signing key, so
+commits they author are shown Unverified. To get Verified under Reljod's name,
+sign locally with a GPG/SSH key registered to his GitHub account
+(`commit.gpgsign true`) — that key never enters the agent environment.
