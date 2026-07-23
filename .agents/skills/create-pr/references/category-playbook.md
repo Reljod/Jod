@@ -164,6 +164,36 @@ diff already reads at a glance and a screenshot adds nothing.
 or a quick local markdown render) and screenshot with Playwright the same
 way as a UI change.
 
+## Rules / conventions / gates
+
+**What to capture:** the *behavior* of the rule, by example — never a prose
+description or a raw regex. The reader wants to know two things: how do I
+trigger it, and what does it accept vs. reject. Answer both with one
+usage line and a ✓/✗ example set per rule.
+
+**How:** for each rule the PR adds or changes, run its own passing and
+failing inputs (you already have them from testing) and drop them into a
+two-column table. Group by rule so each gate is independently legible.
+
+**Worked example** (a commit-message gate):
+
+```md
+### commit-msg gate
+
+**How it's used:** every `git commit` runs it; the subject must be
+`<type>: <TICKET> <subject>`. `--no-verify` bypasses locally; CI does not.
+
+| ✓ Accepted | ✗ Rejected |
+|---|---|
+| `feat: ENG-123 add retry to sync worker` | `update stuff` — no type, no ticket |
+| `fix(api)!: PLATFORM-7 drop v1 route` | `feat: add retry` — missing ticket |
+| `chore: bump ruff to 0.6` — exempt type, no ticket needed | `feat ENG-1 x` — missing colon |
+```
+
+Keep each cell to the example plus a `—` reason fragment. If a rule needs
+more than a one-line reason, the rule is probably doing too much — that's
+a review signal worth surfacing, not padding to hide.
+
 ## Other / pure logic
 
 **What to capture:** nothing, by default. A tight bullet list of what
