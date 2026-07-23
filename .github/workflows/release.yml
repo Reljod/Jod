@@ -1,0 +1,74 @@
+name: Release
+
+# Manual only — cutting a release is a deliberate act, not a side effect of
+# every push. Semantic Versioning (semver.org): tags are vMAJOR.MINOR.PATCH.
+# install.sh installs the newest tag by default; `jod update` only ever
+# moves within the installed MAJOR.MINOR (latest patch), so a minor/major
+# bump here never yanks the rug out from under an existing install.
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Version part to bump"
+        required: true
+        type: choice
+        options: [patch, minor, major]
+        default: patch
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    uses: ./.github/workflows/tests.yml
+
+  release:
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.ref_name == github.event.repository.default_branch
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute next version
+        id: version
+        run: |
+          set -euo pipefail
+          # shellcheck source=bin/lib/semver.sh
+          source bin/lib/semver.sh
+          latest="$(git tag --list 'v*.*.*' | highest_semver_tag)"
+          ver="${latest:-v0.0.0}"; ver="${ver#v}"
+          major="${ver%%.*}"; rest="${ver#*.}"
+          minor="${rest%%.*}"; patch="${rest#*.}"
+          case "${{ inputs.bump }}" in
+            major) major=$((major + 1)); minor=0; patch=0 ;;
+            minor) minor=$((minor + 1)); patch=0 ;;
+            patch) patch=$((patch + 1)) ;;
+          esac
+          next="v${major}.${minor}.${patch}"
+          echo "previous=$latest" >> "$GITHUB_OUTPUT"
+          echo "next=$next" >> "$GITHUB_OUTPUT"
+
+      - name: Tag and push
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "${{ steps.version.outputs.next }}" \
+            -m "${{ steps.version.outputs.next }} (${{ inputs.bump }} bump from ${{ steps.version.outputs.previous }})"
+          git push origin "${{ steps.version.outputs.next }}"
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PREVIOUS: ${{ steps.version.outputs.previous }}
+          NEXT: ${{ steps.version.outputs.next }}
+        run: |
+          set -euo pipefail
+          args=(--title "$NEXT" --generate-notes)
+          # No previous tag on the very first release — --notes-start-tag
+          # would reference a tag that doesn't exist.
+          [ -n "$PREVIOUS" ] && args+=(--notes-start-tag "$PREVIOUS")
+          gh release create "$NEXT" "${args[@]}"

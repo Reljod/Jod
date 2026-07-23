@@ -1,2 +1,6 @@
 # Local, per-machine Claude Code settings — not shared policy.
 .claude/settings.local.json
+
+# install.sh's record of which version/ref is checked out. Only meaningful
+# inside a `jod` toolkit checkout ($JOD_HOME) — never relevant in this repo.
+.jod-version

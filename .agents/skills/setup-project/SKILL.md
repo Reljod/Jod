@@ -50,6 +50,22 @@ Also collect (or infer): **project name** (defaults to the target dir name),
 a **one-line description**, the **ticket prefix** (e.g. `JOD`), and the
 **branch prefix** (default `claude`).
 
+## Running it against a repo that isn't a Jod checkout
+
+This skill's script resolves its sources relative to its own location
+inside the Jod repo, so it needs a Jod checkout on disk — it does not need
+to be *this* repo's working directory. Two ways to get one, in order of
+convenience:
+
+- **Already have Jod cloned** (e.g. this session): pass `--target
+  /path/to/other-repo` as shown below.
+- **Fresh machine, no clone yet**: run the curlable installer
+  (`curl -fsSL https://raw.githubusercontent.com/Reljod/Jod/main/install.sh
+  | bash`, see the repo README) — it clones Jod to `~/.jod` and puts a
+  `jod` CLI on `PATH`. From there, `cd` into the target repo and run `jod
+  setup-project ...` directly; it defaults `--target` to the current
+  directory, so no path juggling is needed.
+
 ## How to run it
 
 1. **List what's available**, then present the choices to the user:

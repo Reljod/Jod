@@ -68,8 +68,24 @@ itself; distill it, don't narrate it.
 - **Quality by layering, not diligence.** Cheap deterministic checks early
   (git hooks) under mandatory ones later (required CI) beats relying on
   remembering to be careful — nothing safety-critical lives *only* in a hook.
+- **"Tested" means CI ran it, not that an agent says so.** Shipped
+  `install.sh`'s update logic with only a local test run as evidence — a
+  human reviewing the PR had no way to check that without re-running it
+  themselves. A `Tests` Action now runs every `*.test.sh` suite on every
+  push/PR, so pass/fail is a status on the PR itself, not a claim in chat.
 - **Commits:** `<type>: <TICKET> <subject>`, imperative, ≤72 chars. The exact
   gate is the `setup-git-hooks` skill; it isn't restated here.
+- **Toolkit distribution is a curlable installer, not a required clone.**
+  `install.sh` + `bin/jod` let any Linux/macOS machine bootstrap the
+  toolkit and run `jod setup-project` against a repo without cloning Jod
+  into every project — a package-manager-free installer beats asking
+  people to remember a path.
+- **Releases are semver tags, cut manually.** `vMAJOR.MINOR.PATCH` via the
+  Release Action's `workflow_dispatch`, never on every push — cutting a
+  release is a deliberate act. Install pins to latest by default;
+  `jod update` only ever takes newer patches within the installed
+  MAJOR.MINOR, so a minor/major bump can't yank the rug out from under an
+  existing install.
 
 ## Skills
 

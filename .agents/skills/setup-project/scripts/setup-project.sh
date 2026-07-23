@@ -142,7 +142,9 @@ fi
 # --- copy chosen skills + their slash commands ------------------------------
 if [ -n "$SKILLS" ]; then
   if [ "$SKILLS" = "all" ]; then
-    mapfile -t WANT < <(list_skills)
+    # Not mapfile: stock macOS ships bash 3.2, which lacks it.
+    WANT=()
+    while IFS= read -r s; do WANT+=("$s"); done < <(list_skills)
   else
     IFS=',' read -r -a WANT <<< "$SKILLS"
   fi

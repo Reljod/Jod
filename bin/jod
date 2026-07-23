@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+#
+# jod — CLI shim for the portable Jod toolkit, put on PATH by install.sh.
+# Dispatches into a Jod checkout's .agents/skills/ scripts so any repo on
+# this machine can run e.g. `jod setup-project` without knowing where Jod
+# itself lives, or cloning it manually.
+#
+# $JOD_HOME defaults to ~/.jod (where install.sh clones the toolkit), not
+# to this file's own location — that keeps the shim correct whether it's
+# reached directly or through the symlink install.sh drops on PATH.
+set -euo pipefail
+
+JOD_HOME="${JOD_HOME:-$HOME/.jod}"
+SKILLS="$JOD_HOME/.agents/skills"
+
+usage() {
+  cat <<EOF
+jod <command> [args]
+
+Commands:
+  setup-project [args]    Scaffold the current repo: AGENTS.md + chosen
+                           skills. Run 'jod setup-project --list' to see
+                           presets/skills, or --help for all flags.
+  setup-git-hooks [dir]   Install local commit-msg/lint hooks (default: cwd).
+  update                  Take newer PATCH releases within the installed
+                           MAJOR.MINOR (never jumps minor/major — re-run
+                           install.sh with JOD_VERSION for that).
+  version                 Print the installed version/ref.
+  home                    Print where the toolkit is checked out.
+  help                    Show this message.
+
+Toolkit: $JOD_HOME
+EOF
+}
+
+if [ ! -d "$SKILLS" ]; then
+  echo "error: no Jod toolkit found at $JOD_HOME — re-run install.sh, or set \$JOD_HOME" >&2
+  exit 1
+fi
+# shellcheck source=lib/semver.sh
+source "$JOD_HOME/bin/lib/semver.sh"
+
+current_ref() {
+  # install.sh/update record the exact ref they checked out — trust that
+  # over `git describe`, which is ambiguous when several tags land on the
+  # same commit (e.g. two patches cut back-to-back with no code change).
+  if [ -f "$JOD_HOME/.jod-version" ]; then
+    cat "$JOD_HOME/.jod-version"
+  else
+    git -C "$JOD_HOME" describe --tags --exact-match 2>/dev/null \
+      || git -C "$JOD_HOME" rev-parse --abbrev-ref HEAD
+  fi
+}
+
+cmd="${1:-help}"
+[ $# -gt 0 ] && shift
+
+case "$cmd" in
+  setup-project)
+    exec "$SKILLS/setup-project/scripts/setup-project.sh" "$@"
+    ;;
+  setup-git-hooks)
+    exec "$SKILLS/setup-git-hooks/scripts/install-hooks.sh" "${@:-.}"
+    ;;
+  update)
+    git -C "$JOD_HOME" fetch --quiet --tags origin
+    cur="$(current_ref)"
+    if is_semver_tag "$cur"; then
+      ver="${cur#v}"; major="${ver%%.*}"; rest="${ver#*.}"; minor="${rest%%.*}"
+      latest_patch="$(git -C "$JOD_HOME" tag --list "v$major.$minor.*" | highest_semver_tag)"
+      if [ -n "$latest_patch" ] && [ "$latest_patch" != "$cur" ]; then
+        git -C "$JOD_HOME" checkout --quiet "$latest_patch"
+        printf '%s\n' "$latest_patch" > "$JOD_HOME/.jod-version"
+        echo "✓ updated $JOD_HOME: $cur -> $latest_patch"
+      else
+        echo "✓ already at the latest v$major.$minor patch ($cur)"
+      fi
+      newest="$(git -C "$JOD_HOME" tag --list 'v*.*.*' | highest_semver_tag)"
+      if [ -n "$newest" ] && [ "$newest" != "${latest_patch:-$cur}" ]; then
+        echo "  a newer release is available: $newest (install.sh | JOD_VERSION=$newest bash)"
+      fi
+    else
+      git -C "$JOD_HOME" merge --quiet --ff-only "origin/$cur"
+      printf '%s\n' "$cur" > "$JOD_HOME/.jod-version"
+      echo "✓ updated $JOD_HOME (branch $cur)"
+    fi
+    ;;
+  version)
+    printf '%s\n' "$(current_ref)"
+    ;;
+  home)
+    printf '%s\n' "$JOD_HOME"
+    ;;
+  help|-h|--help)
+    usage
+    ;;
+  *)
+    echo "jod: unknown command '$cmd' (try 'jod help')" >&2
+    exit 1
+    ;;
+esac

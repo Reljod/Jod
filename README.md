@@ -64,11 +64,55 @@ Copy `.agents/` into any repo and the skills come with it. Design choices and
 preferences (the WHYs) are kept slim in [`AGENTS.md`](./AGENTS.md), not a
 separate doc.
 
+### Install the toolkit on a new machine
+
+One line, on any Linux or macOS box with `git`:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Reljod/Jod/main/install.sh | bash
+```
+
+This clones the toolkit to `~/.jod` and links a `jod` CLI onto your `PATH`.
+Then, in *any* repo on that machine:
+
+```sh
+cd ~/code/some-other-repo
+jod setup-project --list
+jod setup-project --preset jod --skills create-pr,setup-git-hooks,tdd-loop
+```
+
+`jod setup-project` scaffolds `AGENTS.md`/`CLAUDE.md` plus the chosen skills
+straight into the current repo — no need to clone Jod itself into every
+project. See [`bin/jod`](./bin/jod) and [`install.sh`](./install.sh) for what
+each command does.
+
+#### Versioning and updates
+
+Releases are tagged [Semantic Versioning](https://semver.org)
+`vMAJOR.MINOR.PATCH`, cut manually from the **Release** GitHub Action
+(Actions tab → Release → Run workflow → pick `patch`/`minor`/`major`) — it
+gates on the test suites, tags, and publishes a GitHub Release.
+
+- **Install** always pins to the newest release by default. Ask for another
+  version with `JOD_VERSION`:
+  ```sh
+  curl -fsSL .../install.sh | bash                      # latest release
+  curl -fsSL .../install.sh | JOD_VERSION=v1.2.0 bash    # a specific release
+  curl -fsSL .../install.sh | JOD_VERSION=main bash      # bleeding edge
+  ```
+- **`jod update`** only ever takes newer *patch* releases within the
+  installed `MAJOR.MINOR` — it never jumps you to a new minor/major release
+  on its own. To move to a new minor/major, re-run `install.sh` with the
+  `JOD_VERSION` you want.
+- **`jod version`** prints what's currently installed.
+
 ## Structure
 
 ```
 AGENTS.md          the charter — identity, principles, slim WHY notes
 CLAUDE.md          symlink -> AGENTS.md, so every runtime reads the same source
+install.sh         curlable bootstrap: clones this repo, links the `jod` CLI
+bin/jod            CLI shim — dispatches into .agents/skills/ from any repo
 .agents/skills/    the portable toolkit — reusable Claude Code skills
 domains/           personal operating notes, one per area of Reljod's life
 ```
