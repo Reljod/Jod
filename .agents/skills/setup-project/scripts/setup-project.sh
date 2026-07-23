@@ -26,10 +26,12 @@
 #
 set -euo pipefail
 
-# --- locate the Jod source repo (where templates + skills live) -------------
+# --- locate sources ---------------------------------------------------------
+# Templates ship *inside* this skill, so the whole toolkit under .agents/ stays
+# copyable into any repo without reaching into domains/ (the charter's rule).
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+TPL_DIR="$(cd -- "$SCRIPT_DIR/.." && pwd)/templates/agents"
 JOD_ROOT="$(cd -- "$SCRIPT_DIR/../../../.." && pwd)"
-TPL_DIR="$JOD_ROOT/domains/coding/templates/agents"
 SKILLS_SRC="$JOD_ROOT/.agents/skills"
 CMDS_SRC="$JOD_ROOT/.claude/commands"
 SELF_SKILL="setup-project"   # never copy the scaffolder into a target repo
@@ -58,7 +60,7 @@ list_skills()  {
 }
 
 do_list() {
-  info "Behavior presets (domains/coding/templates/agents/):"
+  info "Behavior presets (setup-project/templates/agents/):"
   while read -r p; do
     [ "$p" = "$PRESET" ] && printf '  %-12s (default)\n' "$p" || printf '  %s\n' "$p"
   done < <(list_presets)

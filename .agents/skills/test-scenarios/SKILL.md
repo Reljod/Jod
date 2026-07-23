@@ -20,9 +20,10 @@ handled and passing. The discipline is simple and non-negotiable:
 > A scenario without an assertion is not "handled" — it's unobserved.
 > "Probably fine" is an untested case. Enumerate, assert, drive to green.
 
-This belongs to the deterministic tier of the quality layer-model (see
-`domains/coding/README.md`): the tests are pure, repeatable, and exit
-non-zero on any failure, so the suite doubles as a pre-push / CI gate.
+This belongs to the deterministic tier of the quality layer-model (the
+charter's **Design choices** — quality by layering, not diligence): the tests
+are pure, repeatable, and exit non-zero on any failure, so the suite doubles
+as a pre-push / CI gate.
 
 ## The method
 

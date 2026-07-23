@@ -1,9 +1,9 @@
 # AGENTS.md presets
 
-Behavior presets the [`setup-project`](../../../../.agents/skills/setup-project/SKILL.md)
-skill offers when scaffolding a repo. Each `<name>.md` is a full `AGENTS.md`
-charter; `<name>` is what you pass to `--preset` (and what shows in
-`--list`).
+Behavior presets the [`setup-project`](../../SKILL.md) skill offers when
+scaffolding a repo. They live inside the skill so the whole `.agents/` toolkit
+stays copyable into any repo. Each `<name>.md` is a full `AGENTS.md` charter;
+`<name>` is what you pass to `--preset` (and what shows in `--list`).
 
 | Preset | For |
 |---|---|
