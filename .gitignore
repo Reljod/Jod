@@ -4,3 +4,7 @@
 # install.sh's record of which version/ref is checked out. Only meaningful
 # inside a `jod` toolkit checkout ($JOD_HOME) — never relevant in this repo.
 .jod-version
+
+# tests/e2e/run.sh's generated findings — regenerated on every run, not
+# something to track in version control.
+tests/e2e/gaps-report.md

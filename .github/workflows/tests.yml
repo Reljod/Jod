@@ -5,6 +5,10 @@ name: Tests
 # only visible in whoever's local run. Also callable from other workflows
 # (e.g. release.yml) so a release can require the same gate without
 # duplicating the discovery logic.
+#
+# tests/e2e/run.sh is deliberately excluded by naming (not path) — it's the
+# expensive, release-only scaffold-fitness check, wired into release.yml /
+# e2e.yml instead.
 on:
   pull_request:
   push:
