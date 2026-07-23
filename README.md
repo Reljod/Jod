@@ -50,20 +50,27 @@ flowchart LR
 |---|---|---|
 | 🗂️ | **Tasks** — what's in flight, what's next | [Linear](./domains/tasks) |
 | 🧠 | **Second brain** — notes, reference, memory | [Notion](./domains/second-brain) |
-| 💻 | **Coding** — everything built and shipped | [Claude Code](./domains/coding) |
 | 💰 | **Finance** — money in, money out | *planned* ([notes](./domains/finance)) |
 
 Each domain folder holds operating notes, not the data itself — Linear
 stays the kanban, Notion stays the brain. This repo is the charter and the
 glue.
 
+## The toolkit
+
+The *other* half is the reusable, project-agnostic layer — a set of Claude Code
+skills under [`.agents/`](./.agents) that never reach into a personal domain.
+Copy `.agents/` into any repo and the skills come with it. Design choices and
+preferences (the WHYs) are kept slim in [`AGENTS.md`](./AGENTS.md), not a
+separate doc.
+
 ## Structure
 
 ```
-AGENTS.md      the charter — identity, principles, how this agent operates
-CLAUDE.md      symlink -> AGENTS.md, so every runtime reads the same source
-domains/       operating notes, one directory per area of Reljod's life
-.agents/skills/ reusable Claude Code skills, promoted once proven
+AGENTS.md          the charter — identity, principles, slim WHY notes
+CLAUDE.md          symlink -> AGENTS.md, so every runtime reads the same source
+.agents/skills/    the portable toolkit — reusable Claude Code skills
+domains/           personal operating notes, one per area of Reljod's life
 ```
 
 Start with [`AGENTS.md`](./AGENTS.md) — it's the whole point.
