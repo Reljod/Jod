@@ -11,11 +11,24 @@ description: >
 # create-pr
 
 The goal is a PR a reviewer can approve from the description alone,
-without reading a wall of text. Default to showing, not telling: a
-screenshot, a short GIF, or a diagram beats a paragraph every time the
-change has something visual or structural to show. Where it doesn't
-(a pure logic fix, a config tweak), don't force one in — a tight bullet
-list is the right amount of visualization for that change.
+without reading a wall of text. Default to showing, not telling. There are
+three ways to show, and the change decides which:
+
+1. **Visuals** — a screenshot, short GIF, or diagram, when the change has
+   something visual or structural to show (UI, a flow, a topology).
+2. **Positive/negative examples** — when the change adds or changes a
+   **rule, convention, or gate** (a commit-message format, a lint rule, a
+   validator, a TDD RED/GREEN gate), don't describe the rule in prose.
+   Give one line on how it's invoked, then a compact ✓-passes / ✗-rejected
+   example set per rule. The examples *are* the spec — a reviewer sees
+   exactly what the rule does and doesn't do without parsing a regex or a
+   paragraph.
+3. **Tight bullets** — a pure logic fix or config tweak that's neither
+   visual nor rule-shaped. Don't force a visual or a table in; a short
+   bullet list is the right amount here.
+
+Prose is the fallback, not the default. If you're writing a paragraph to
+explain a rule, stop and write two examples instead.
 
 This is a companion to the repo/host's standing PR-creation instructions
 (draft PRs, template detection, etc.) — follow those for *whether and how*
@@ -66,6 +79,12 @@ Summary:
   for structural or layout changes. For wording-only edits, skip visuals
   entirely — the diff already reads at a glance, and a screenshot would
   just be padding.
+- **Rules / conventions / gates** — a commit-message format, a lint or
+  validation rule, a required-check, a TDD RED/GREEN gate. One line on how
+  it's invoked, then a compact **✓-passes / ✗-rejected** example set per
+  rule (a two-column table, or paired bullets). No prose describing the
+  rule — the examples define it. This is the digestible form for anything
+  deterministic: a reviewer reads five example rows faster than one regex.
 - **Other / pure logic** — no forced visualization. Tight bullets. Add a
   small flow diagram only if it genuinely clarifies non-obvious control
   flow, never as decoration.
