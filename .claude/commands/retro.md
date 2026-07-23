@@ -17,13 +17,14 @@ Steps:
    did first, what it became, and the reason behind the change. Keep only what
    stays true next session (coding-style preferences, design/architecture
    rationale, workflow corrections); drop task trivia and secrets.
-3. **Route each learning** to its durable home — coding prefs to
-   `domains/coding/README.md`, cross-domain identity to `AGENTS.md`
-   (sparingly), a repeatable behavior to a skill, domain prefs to that
-   domain's README. Fold in the distilled rule, in that doc's voice.
+3. **Route each learning** to its durable home in the toolkit — coding/workflow
+   prefs to `.agents/conventions/README.md`, cross-cutting identity to
+   `AGENTS.md` (sparingly), a repeatable behavior to a skill. Never route into
+   `domains/` — that's private data, not a portable convention. Fold in the
+   distilled rule, in that doc's voice.
 4. **Log the reasoning trail** — append a dated entry under
-   `domains/coding/retros/YYYY-MM-DD-<slug>.md` with the full context and the
-   WHYs, including anything parked as not-yet-durable.
+   `.agents/retros/YYYY-MM-DD-<slug>.md` with the full context and the WHYs,
+   including anything parked as not-yet-durable.
 5. **Report** which preferences you captured and where each was routed.
 
 Apply local doc edits (they're reversible) but surface each one; confirm
