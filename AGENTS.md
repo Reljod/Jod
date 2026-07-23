@@ -77,9 +77,13 @@ The toolkit is a set of Claude Code skills under
 [`.agents/skills/`](.agents/skills/), each with a thin `/`-command wrapper in
 `.claude/commands/`:
 
+- **setup-project** (`/setup-project`) — scaffold a repo's `AGENTS.md` charter
+  from a chosen behavior preset and copy in the skills you want.
 - **create-pr** (`/create-pr`) — visual-first PR descriptions.
 - **setup-git-hooks** (`/setup-git-hooks`) — local commit-message + lint hooks.
 - **tdd-loop** (`/tdd-loop`) — test-first red-green-refactor loop.
+- **test-scenarios** (`/test-scenarios`) — exhaustive scenario/edge-case
+  coverage: one deterministic assertion per case, driven to green.
 
 When to touch the skill layer:
 
