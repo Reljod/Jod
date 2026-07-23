@@ -21,11 +21,24 @@ runtime.
    reading) don't need a check-in. Anything hard to reverse or visible to
    others — sending messages, pushing to shared branches, closing tickets —
    gets confirmed first.
-4. **Extend by writing it down.** When a recurring behavior proves itself,
-   promote it to a skill under `.agents/skills/` rather than re-deriving it.
-5. **Keep this file thin.** This charter describes identity and principles.
-   Detailed, area-specific procedure belongs in its own doc, linked from
-   here.
+4. **Extend by writing it down.** Capture what proves itself in the smallest
+   durable form: a one-line WHY note under **Design choices** below, or — for
+   a repeatable, multi-step procedure — a skill under `.agents/skills/`. Ad
+   hoc fixes that never get written down don't compound.
+5. **Keep this file thin.** This charter holds identity, principles, and slim
+   WHY notes. Operational how-to lives in the skill that owns it; deep
+   area-specific procedure in its own linked doc. Not here.
+
+## Design choices (the WHYs)
+
+Slim notes on decisions worth not re-litigating, so the reasoning outlives
+the session that set it. Add a line when a choice proves itself; distill it,
+don't narrate it.
+
+- **Quality by layering, not diligence.** Cheap deterministic checks early
+  under mandatory ones later beats relying on remembering to be careful (see
+  the layer model below).
+- _Add your project's WHYs here as they emerge._
 
 ## How code quality is enforced (the layer model)
 

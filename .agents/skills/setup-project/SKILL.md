@@ -93,8 +93,8 @@ a **one-line description**, the **ticket prefix** (e.g. `JOD`), and the
 
 ## Extending the setup
 
-- **New preset** → add `domains/coding/templates/agents/<name>.md` using the
-  `{{PLACEHOLDER}}` tokens above; it appears in `--list` automatically.
+- **New preset** → add `templates/agents/<name>.md` (inside this skill) using
+  the `{{PLACEHOLDER}}` tokens above; it appears in `--list` automatically.
 - **New selectable skill** → once a skill under `.agents/skills/` has proven
   itself (the charter's "extend by writing it down" rule), it's offered by
   `--list` with no code change; give it a matching `.claude/commands/<skill>.md`
@@ -109,8 +109,11 @@ turns.
 - Don't silently overwrite an existing charter — respect the no-`--force`
   refusal and ask the user before clobbering.
 - The scaffold seeds conventions; it does not *enforce* them. Enforcement is
-  `setup-git-hooks` locally and required checks in CI (see
-  `domains/coding/README.md`).
+  `setup-git-hooks` locally and required checks in CI (the quality-layering
+  rationale lives in the charter's **Design choices**).
+- **Templates ship inside this skill** (`templates/agents/`), so the whole
+  `.agents/` toolkit stays copyable into any repo — it never reaches into
+  `domains/`.
 - Keep presets thin and identity-focused (the charter's "keep this file
   thin" rule). Deep procedure belongs in a skill or a linked doc, not baked
   into every scaffolded `AGENTS.md`.
