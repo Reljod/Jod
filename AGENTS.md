@@ -68,6 +68,11 @@ itself; distill it, don't narrate it.
 - **Quality by layering, not diligence.** Cheap deterministic checks early
   (git hooks) under mandatory ones later (required CI) beats relying on
   remembering to be careful — nothing safety-critical lives *only* in a hook.
+- **"Tested" means CI ran it, not that an agent says so.** Shipped
+  `install.sh`'s update logic with only a local test run as evidence — a
+  human reviewing the PR had no way to check that without re-running it
+  themselves. A `Tests` Action now runs every `*.test.sh` suite on every
+  push/PR, so pass/fail is a status on the PR itself, not a claim in chat.
 - **Commits:** `<type>: <TICKET> <subject>`, imperative, ≤72 chars. The exact
   gate is the `setup-git-hooks` skill; it isn't restated here.
 - **Toolkit distribution is a curlable installer, not a required clone.**

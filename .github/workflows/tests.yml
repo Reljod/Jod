@@ -1,0 +1,29 @@
+name: Tests
+
+# Runs every *.test.sh / */tests/test.sh suite on every push and PR, so
+# "does this pass" is a checkable status on the PR itself — not something
+# only visible in whoever's local run. Also callable from other workflows
+# (e.g. release.yml) so a release can require the same gate without
+# duplicating the discovery logic.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_call:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run test suites
+        run: |
+          set -euo pipefail
+          status=0
+          while IFS= read -r -d '' t; do
+            echo "::group::$t"
+            bash "$t" || status=1
+            echo "::endgroup::"
+          done < <(find . -type f \( -name '*.test.sh' -o -path '*/tests/test.sh' \) -print0)
+          exit "$status"
