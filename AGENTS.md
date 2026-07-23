@@ -14,20 +14,28 @@ designed to be delegated to with the same trust as a competent chief of
 staff.
 
 Most of the runtime lives in the Claude ecosystem (Claude Code, the Claude
-Agent SDK, Claude-in-Slack), but the domains it operates over are wherever
-Reljod's real work already lives:
+Agent SDK, Claude-in-Slack). The repo has two halves:
 
-| Domain | System of record | Status |
+- **The portable toolkit** — reusable skills, coding conventions, and the
+  retro loop, all under `.agents/`. Project-agnostic: copy `.agents/` into any
+  repo and it works, depending on nothing below it. This is the
+  *improve-my-workflows* half.
+- **Personal domains** — Reljod's private operating data, one directory each
+  under `domains/`, wherever his real work already lives. This is the
+  *duplicate-me* half.
+
+| Personal domain | System of record | Status |
 |---|---|---|
 | Tasks / kanban | Linear | active |
 | Second brain / notes | Notion | active |
-| Coding | Claude Code (this ecosystem) | active |
 | Finance | TBD | planned |
 
 Each domain has a directory under `domains/` with its own notes on how the
-agent should operate there — read the relevant one before acting in that
-area. Reusable behaviors live under `.agents/skills/` as Claude Code skills
-once they're extracted from one-off work.
+agent should operate there — read the relevant one before acting in that area.
+The toolkit under `.agents/` **never reaches into `domains/`**: skills and
+conventions must stay copyable into repos that have no `domains/` at all.
+Coding conventions and workflow are toolkit, not a personal domain — they live
+in [`.agents/conventions/`](.agents/conventions/README.md).
 
 ## Operating principles
 
@@ -44,33 +52,38 @@ once they're extracted from one-off work.
    shared branches — gets confirmed first, unless a domain's own notes say
    otherwise for a specific, bounded case.
 4. **Extend by writing it down.** When a new recurring behavior proves
-   itself, promote it: a skill under `.agents/skills/`, a note under the
-   relevant `domains/*` directory, or an addition to this charter. Ad hoc
-   fixes that never get written down don't compound. The **create-retro**
-   skill (`/retro`) is this loop made explicit — after a session with real
-   back-and-forth, or where the shipped result diverged from what the agent
-   first produced, run it to distill the WHYs into the reference docs. Skip it
-   for clean, first-try sessions with nothing to correct. Procedure lives in
-   [`domains/coding/README.md`](domains/coding/README.md).
+   itself, promote it: a skill under `.agents/skills/`, a convention under
+   `.agents/conventions/`, or an addition to this charter (personal-domain
+   habits go in that domain's own notes). Ad hoc fixes that never get written
+   down don't compound. The **create-retro** skill (`/retro`) is this loop made
+   explicit — after a session with real back-and-forth, or where the shipped
+   result diverged from what the agent first produced, run it to distill the
+   WHYs into the toolkit. Skip it for clean, first-try sessions with nothing to
+   correct. Procedure lives in
+   [`.agents/conventions/README.md`](.agents/conventions/README.md).
 5. **Keep the charter thin.** This file describes identity and principles.
-   Domain-specific procedure belongs in `domains/*/README.md`, not here.
+   Coding conventions and workflow procedure belong in
+   `.agents/conventions/README.md`; personal-domain procedure in
+   `domains/*/README.md`. Not here.
 
 ## Repo layout
 
 ```
 AGENTS.md          this charter (source of truth)
 CLAUDE.md          symlink -> AGENTS.md
-domains/
+.agents/           the portable toolkit — copyable into any repo, self-contained
+  skills/          reusable Claude Code skills (create-pr, tdd-loop, create-retro, …)
+  conventions/     coding conventions & workflow (branching, commits, PRs, the layer model)
+  retros/          reasoning trail behind convention changes (written by create-retro)
+domains/           personal operating data — never referenced by the toolkit
   tasks/           Linear: how work gets triaged, tracked, closed
   second-brain/    Notion: how notes and reference material are organized
-  coding/          Claude Code: conventions for repos this agent touches
   finance/         money management, once scoped
-.agents/
-  skills/          reusable Claude Code skills specific to Jod
 ```
 
-Skills live under `.agents/skills/`, not a top-level `skills/` directory —
-this is a standing preference, keep new skills there.
+The whole toolkit lives under `.agents/`, not top-level `skills/`,
+`conventions/`, etc. — this is a standing preference. Keep new skills and
+conventions there, and keep them free of any `domains/` reference.
 
 ## Branching
 

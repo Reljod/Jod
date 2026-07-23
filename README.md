@@ -50,20 +50,30 @@ flowchart LR
 |---|---|---|
 | 🗂️ | **Tasks** — what's in flight, what's next | [Linear](./domains/tasks) |
 | 🧠 | **Second brain** — notes, reference, memory | [Notion](./domains/second-brain) |
-| 💻 | **Coding** — everything built and shipped | [Claude Code](./domains/coding) |
 | 💰 | **Finance** — money in, money out | *planned* ([notes](./domains/finance)) |
 
 Each domain folder holds operating notes, not the data itself — Linear
 stays the kanban, Notion stays the brain. This repo is the charter and the
 glue.
 
+## The toolkit
+
+Coding conventions and workflow are the *other* half — the reusable,
+project-agnostic layer that lives entirely under [`.agents/`](./.agents) and
+never reaches into a personal domain. Copy `.agents/` into any repo and you get
+the skills, the [conventions](./.agents/conventions), and the
+[retro loop](./.agents/retros) that keeps improving them.
+
 ## Structure
 
 ```
-AGENTS.md      the charter — identity, principles, how this agent operates
-CLAUDE.md      symlink -> AGENTS.md, so every runtime reads the same source
-domains/       operating notes, one directory per area of Reljod's life
-.agents/skills/ reusable Claude Code skills, promoted once proven
+AGENTS.md          the charter — identity, principles, how this agent operates
+CLAUDE.md          symlink -> AGENTS.md, so every runtime reads the same source
+.agents/           the portable toolkit — copyable into any repo, self-contained
+  skills/          reusable Claude Code skills, promoted once proven
+  conventions/     coding conventions & workflow (branching, commits, PRs, layers)
+  retros/          the reasoning trail behind convention changes
+domains/           personal operating notes, one per area of Reljod's life
 ```
 
 Start with [`AGENTS.md`](./AGENTS.md) — it's the whole point.

@@ -74,4 +74,4 @@ required status check (that's the mandatory layer), and the whole suite —
 not just the focused test — runs there. Mutation testing is the periodic
 audit that answers "do these green tests actually assert anything"; run it
 occasionally against the modules you care about most, not on every commit.
-See `domains/coding/README.md` for how the layers stack.
+See `.agents/conventions/README.md` for how the layers stack.

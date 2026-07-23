@@ -72,23 +72,28 @@ private data pulled from the session — a preference is a rule, not a payload.
 ## 3. Route each learning to its durable home
 
 A learning only compounds if it lands where the next session will actually
-read it. Route by scope:
+read it. This skill is part of the portable toolkit, so it routes **only**
+into the toolkit — never into `domains/` (see the portability rule in
+[`.agents/conventions/README.md`](../../conventions/README.md)). Route by
+scope:
 
 | Learning is about… | Write it to |
 |---|---|
-| Coding style, PR habits, testing, review | [`domains/coding/README.md`](../../../domains/coding/README.md) |
-| A repeatable multi-step behavior | a skill under [`.agents/skills/`](../../) (new or existing) |
-| A cross-domain identity/principle | [`AGENTS.md`](../../../AGENTS.md) — sparingly; keep the charter thin |
-| Linear / task workflow | [`domains/tasks/README.md`](../../../domains/tasks/README.md) |
-| Notion / second-brain conventions | [`domains/second-brain/README.md`](../../../domains/second-brain/README.md) |
+| Coding style, PR habits, testing, review, general workflow | [`.agents/conventions/README.md`](../../conventions/README.md) |
+| A repeatable multi-step behavior | a skill under [`.agents/skills/`](../../skills/) (new or existing) |
+| Cross-cutting agent identity/principle | [`AGENTS.md`](../../../AGENTS.md) — sparingly; keep the charter thin |
+
+A preference about a personal domain (how to operate in Linear, Notion, etc.)
+is out of scope here — it's private operating data, not a portable convention.
+Leave it for that domain's own notes; don't route it from this skill.
 
 Fold the distilled **rule** into the target doc — phrased as guidance the next
 agent can follow, in that doc's existing voice, not as a diary entry. If a
 rule contradicts something already written there, update the existing line
 rather than appending a competing one.
 
-The charter edit is the one to be careful with: prefer a domain README, and
-only touch `AGENTS.md` for something that is genuinely cross-domain identity.
+The charter edit is the one to be careful with: prefer the conventions doc, and
+only touch `AGENTS.md` for something that is genuinely cross-cutting identity.
 Editing local docs is reversible, so apply the edits — but surface each one
 plainly in your summary. Confirm before anything irreversible or shared
 (pushing to a shared branch, opening a PR) per the charter's reversibility
@@ -101,7 +106,7 @@ and the WHY, so a future reader can see how a preference came to be. Append
 one dated entry per retro under:
 
 ```
-domains/coding/retros/YYYY-MM-DD-<short-slug>.md
+.agents/retros/YYYY-MM-DD-<short-slug>.md
 ```
 
 Use this shape:

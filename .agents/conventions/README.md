@@ -1,11 +1,22 @@
-# Coding
+# Conventions
 
-Primary tool: **Claude Code**.
+Portable coding conventions and workflow for any project this agent touches:
+branching, commit style, PR habits, and the quality-enforcement layers it sets
+up and respects.
 
-How this agent should behave across the repos it's given access to:
-branching, commit style, PR habits, and the quality-enforcement layers it
-sets up and respects. Domain-specific procedure lives here; identity and
-principles stay in [`AGENTS.md`](../../AGENTS.md).
+This is the reusable toolkit, not personal data. The whole `.agents/` folder is
+meant to be **dropped into any repo** — copy it in and you get the skills
+([`skills/`](../skills/)), these conventions, and the retro loop
+([`retros/`](../retros/)), all self-contained.
+
+## Portability rule
+
+Nothing in the toolkit — the skills, these conventions, or
+[`AGENTS.md`](../../AGENTS.md) — may reference or route into `domains/`.
+`domains/` holds one person's private operating data (Linear, Notion, finance
+notes); the toolkit is project-agnostic and must stay copyable into repos that
+have no `domains/` at all. Learnings about how the agent codes and works land
+**here**, in a skill, or in the charter — never in a personal domain.
 
 ## How code quality is enforced (the layer model)
 
@@ -38,22 +49,20 @@ They stack the same way everywhere that does this well:
 The skills below automate layer 1 and the test discipline feeding layers 1
 and 2. The PR skill makes the output of all of it legible to a reviewer.
 
-## Skills for this domain
+## Skills
 
-Skills stay canonical under [`.agents/skills/`](../../.agents/skills/) (one
-source of truth — the charter's rule, not duplicated per domain). This is
-the index of the ones that apply to coding, each with its slash command.
+Skills stay canonical under [`skills/`](../skills/) (one source of truth). This
+is the index, each with its slash command.
 
 | Skill | Slash command | Use it when |
 |---|---|---|
-| [`create-pr`](../../.agents/skills/create-pr/SKILL.md) | `/create-pr` | Opening a PR — builds a visual-first description a reviewer can approve from the description alone. |
-| [`setup-git-hooks`](../../.agents/skills/setup-git-hooks/SKILL.md) | `/setup-git-hooks` | Standing up local git hooks: commit-message convention, pre-commit lint/format, optional pre-push. |
-| [`tdd-loop`](../../.agents/skills/tdd-loop/SKILL.md) | `/tdd-loop` | Building a feature or fixing a bug test-first, in a tight red-green-refactor loop. |
-| [`create-retro`](../../.agents/skills/create-retro/SKILL.md) | `/retro` | Closing out a session that had real back-and-forth or diverged from the agent's first attempt — captures the WHYs into the reference docs. |
+| [`create-pr`](../skills/create-pr/SKILL.md) | `/create-pr` | Opening a PR — builds a visual-first description a reviewer can approve from the description alone. |
+| [`setup-git-hooks`](../skills/setup-git-hooks/SKILL.md) | `/setup-git-hooks` | Standing up local git hooks: commit-message convention, pre-commit lint/format, optional pre-push. |
+| [`tdd-loop`](../skills/tdd-loop/SKILL.md) | `/tdd-loop` | Building a feature or fixing a bug test-first, in a tight red-green-refactor loop. |
+| [`create-retro`](../skills/create-retro/SKILL.md) | `/retro` | Closing out a session that had real back-and-forth or diverged from the agent's first attempt — captures the WHYs into these conventions. |
 
-Slash commands are thin wrappers in
-[`.claude/commands/`](../../.claude/commands/) that read and follow the
-skill. Invoke either the command or the skill directly.
+Slash commands are thin wrappers in [`.claude/commands/`](../../.claude/commands/)
+that read and follow the skill. Invoke either the command or the skill directly.
 
 ### create-pr — digestible pull requests
 
@@ -95,21 +104,21 @@ session earned it — real back-and-forth with the user, or a shipped result
 that diverged from what the agent first produced — and stay quiet on clean,
 first-try sessions. When it runs, it mines each correction for the **WHY**
 (coding-style preference, design/architecture rationale, workflow correction),
-folds the distilled rule into the doc the next session will read (this README,
-another domain's, or the charter), and keeps the full reasoning trail as a
-dated entry under [`retros/`](retros/). Distinguishes a one-off (parked as
+folds the distilled rule into the doc the next session will read (these
+conventions, a skill, or the charter), and keeps the full reasoning trail as a
+dated entry under [`retros/`](../retros/). Distinguishes a one-off (parked as
 not-yet-durable) from a real preference (promoted on the second occurrence),
-so the reference docs don't fill with over-fitted rules.
+so the conventions don't fill with over-fitted rules.
 
 ## Branching
 
-Feature branches only, never directly on `main`. Names follow
-`claude/<short-description>-<id>` for agent-driven work (per the charter).
+Feature branches only, never directly on the default branch. For agent-driven
+work, names follow `claude/<short-description>-<id>`.
 
 ## Commits
 
-Match whatever `setup-git-hooks` installs for the repo you're in. The
-default convention this agent standardizes on:
+Match whatever `setup-git-hooks` installs for the repo you're in. The default
+convention this toolkit standardizes on:
 
 ```
 <type>: <TICKET> <subject>
@@ -117,7 +126,7 @@ default convention this agent standardizes on:
 
 - `type` ∈ feat, fix, bug, chore, docs, refactor, test, perf, ci, build,
   style, revert.
-- `TICKET` is the Linear issue key (e.g. `JOD-12`), required except for
+- `TICKET` is the issue tracker key (e.g. `JOD-12`), required except for
   housekeeping types (chore/docs/style/ci).
 - Keep the subject imperative and ≤ 72 chars.
 
