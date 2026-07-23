@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+#
+# jod — CLI shim for the portable Jod toolkit, put on PATH by install.sh.
+# Dispatches into a Jod checkout's .agents/skills/ scripts so any repo on
+# this machine can run e.g. `jod setup-project` without knowing where Jod
+# itself lives, or cloning it manually.
+#
+# $JOD_HOME defaults to ~/.jod (where install.sh clones the toolkit), not
+# to this file's own location — that keeps the shim correct whether it's
+# reached directly or through the symlink install.sh drops on PATH.
+set -euo pipefail
+
+JOD_HOME="${JOD_HOME:-$HOME/.jod}"
+SKILLS="$JOD_HOME/.agents/skills"
+
+usage() {
+  cat <<EOF
+jod <command> [args]
+
+Commands:
+  setup-project [args]    Scaffold the current repo: AGENTS.md + chosen
+                           skills. Run 'jod setup-project --list' to see
+                           presets/skills, or --help for all flags.
+  setup-git-hooks [dir]   Install local commit-msg/lint hooks (default: cwd).
+  update                  Fast-forward this toolkit checkout ($JOD_HOME).
+  home                    Print where the toolkit is checked out.
+  help                    Show this message.
+
+Toolkit: $JOD_HOME
+EOF
+}
+
+if [ ! -d "$SKILLS" ]; then
+  echo "error: no Jod toolkit found at $JOD_HOME — re-run install.sh, or set \$JOD_HOME" >&2
+  exit 1
+fi
+
+cmd="${1:-help}"
+[ $# -gt 0 ] && shift
+
+case "$cmd" in
+  setup-project)
+    exec "$SKILLS/setup-project/scripts/setup-project.sh" "$@"
+    ;;
+  setup-git-hooks)
+    exec "$SKILLS/setup-git-hooks/scripts/install-hooks.sh" "${@:-.}"
+    ;;
+  update)
+    branch="$(git -C "$JOD_HOME" rev-parse --abbrev-ref HEAD)"
+    git -C "$JOD_HOME" fetch --quiet origin "$branch"
+    git -C "$JOD_HOME" merge --quiet --ff-only "origin/$branch"
+    echo "✓ updated $JOD_HOME"
+    ;;
+  home)
+    printf '%s\n' "$JOD_HOME"
+    ;;
+  help|-h|--help)
+    usage
+    ;;
+  *)
+    echo "jod: unknown command '$cmd' (try 'jod help')" >&2
+    exit 1
+    ;;
+esac

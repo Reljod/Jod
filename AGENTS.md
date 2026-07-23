@@ -70,6 +70,11 @@ itself; distill it, don't narrate it.
   remembering to be careful — nothing safety-critical lives *only* in a hook.
 - **Commits:** `<type>: <TICKET> <subject>`, imperative, ≤72 chars. The exact
   gate is the `setup-git-hooks` skill; it isn't restated here.
+- **Toolkit distribution is a curlable installer, not a required clone.**
+  `install.sh` + `bin/jod` let any Linux/macOS machine bootstrap the
+  toolkit and run `jod setup-project` against a repo without cloning Jod
+  into every project — a package-manager-free installer beats asking
+  people to remember a path.
 
 ## Skills
 
