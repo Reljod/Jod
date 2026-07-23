@@ -42,6 +42,9 @@ if [ -n "$CATS" ]; then
 else
   echo "<!-- No categories detected; add a visual only if it genuinely helps. -->"
 fi
+echo "- **Rules/gates** — for any rule, convention, or gate this PR adds"
+echo "  (commit format, lint rule, validator, TDD gate): one usage line +"
+echo "  a ✓-passes / ✗-rejected example table per rule. Show, don't describe."
 echo
 echo "## What changed"
 echo
