@@ -1,0 +1,45 @@
+#!/usr/bin/env sh
+# Fast, deterministic pre-commit checks. Delegates to an existing hook
+# manager if the repo uses one; otherwise runs PRECOMMIT_CMDS from
+# ./commit-convention.conf. Keep everything here fast (< a few seconds) —
+# slow checks belong in pre-push or CI.
+set -eu
+
+HOOK_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+CONF="$HOOK_DIR/commit-convention.conf"
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+
+# Delegate to an established manager if present — don't run checks twice.
+if [ -f "$REPO_ROOT/lefthook.yml" ] && command -v lefthook >/dev/null 2>&1; then
+  exec lefthook run pre-commit
+fi
+if [ -f "$REPO_ROOT/.pre-commit-config.yaml" ] && command -v pre-commit >/dev/null 2>&1; then
+  exec pre-commit run
+fi
+
+PRECOMMIT_CMDS=""
+# shellcheck disable=SC1090
+[ -f "$CONF" ] && . "$CONF"
+
+[ -n "${PRECOMMIT_CMDS:-}" ] || exit 0
+
+RED=''; GRN=''; RST=''
+if [ -t 2 ]; then RED="$(printf '\033[31m')"; GRN="$(printf '\033[32m')"; RST="$(printf '\033[0m')"; fi
+
+status=0
+printf '%s\n' "$PRECOMMIT_CMDS" | while IFS= read -r cmd; do
+  [ -z "$cmd" ] && continue
+  printf '%s\n' "→ $cmd" >&2
+  if ! sh -c "$cmd" >&2; then
+    printf '%s\n' "${RED}✗ pre-commit failed: $cmd${RST}" >&2
+    exit 1
+  fi
+done || status=1
+
+if [ "$status" -ne 0 ]; then
+  printf '%s\n' "${RED}pre-commit checks failed. Fix, or bypass with --no-verify (CI still enforces).${RST}" >&2
+  exit 1
+fi
+
+printf '%s\n' "${GRN}✓ pre-commit checks passed${RST}" >&2
+exit 0
