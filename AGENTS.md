@@ -86,6 +86,14 @@ itself; distill it, don't narrate it.
   `jod update` only ever takes newer patches within the installed
   MAJOR.MINOR, so a minor/major bump can't yank the rug out from under an
   existing install.
+- **Scaffold fitness is checked at release time, not every push.**
+  `tests/e2e/run.sh` scaffolds `setup-project.sh` against a spread of
+  fixture repos (greenfield JS, existing OSS conventions, a monorepo, a
+  repo with a hand-written charter already, ...) and logs where the
+  generated `AGENTS.md` doesn't fit as a "gap" rather than failing the run
+  — spinning up N scaffolds is too expensive for every PR, and gaps are
+  findings to support later, not a merge-blocking contract. Wired into
+  `release.yml` / `e2e.yml`, not `tests.yml`.
 
 ## Skills
 

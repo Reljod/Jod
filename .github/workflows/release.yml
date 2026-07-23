@@ -22,8 +22,13 @@ jobs:
   test:
     uses: ./.github/workflows/tests.yml
 
+  # Expensive, exploratory scaffold-fitness check — worth the cost at release
+  # time (not on every push), so it rides along here instead of tests.yml.
+  e2e:
+    uses: ./.github/workflows/e2e.yml
+
   release:
-    needs: test
+    needs: [test, e2e]
     runs-on: ubuntu-latest
     if: github.ref_name == github.event.repository.default_branch
     steps:

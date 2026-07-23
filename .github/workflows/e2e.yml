@@ -1,0 +1,40 @@
+name: E2E Scaffold Fitness
+
+# Runs tests/e2e/run.sh — scaffolds setup-project.sh against a wide array of
+# fixture repos and checks whether the generated AGENTS.md/CLAUDE.md are a
+# plausible fit for each. Deliberately NOT on push/pull_request: spinning up
+# N scaffolds is comparatively expensive, and it's exploratory (some findings
+# are logged as "gaps" for future work, not failures) rather than a
+# merge-blocking contract. Run on demand, or via release.yml when cutting a
+# release.
+on:
+  workflow_dispatch:
+  workflow_call:
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run scaffold fitness check
+        run: tests/e2e/run.sh
+
+      - name: Publish gap report to job summary
+        if: always()
+        run: |
+          set -euo pipefail
+          echo "## Scaffold fitness gaps" >> "$GITHUB_STEP_SUMMARY"
+          if [ -s tests/e2e/gaps-report.md ]; then
+            cat tests/e2e/gaps-report.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "None found — every fixture scaffolded cleanly." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload gap report artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scaffold-fitness-gaps
+          path: tests/e2e/gaps-report.md
+          if-no-files-found: ignore

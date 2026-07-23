@@ -91,7 +91,8 @@ each command does.
 Releases are tagged [Semantic Versioning](https://semver.org)
 `vMAJOR.MINOR.PATCH`, cut manually from the **Release** GitHub Action
 (Actions tab → Release → Run workflow → pick `patch`/`minor`/`major`) — it
-gates on the test suites, tags, and publishes a GitHub Release.
+gates on the test suites and an e2e scaffold-fitness check (`tests/e2e/`,
+too expensive to run on every push), tags, and publishes a GitHub Release.
 
 - **Install** always pins to the newest release by default. Ask for another
   version with `JOD_VERSION`:
