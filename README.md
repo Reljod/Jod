@@ -83,9 +83,28 @@ jod setup-project --preset jod --skills create-pr,setup-git-hooks,tdd-loop
 
 `jod setup-project` scaffolds `AGENTS.md`/`CLAUDE.md` plus the chosen skills
 straight into the current repo — no need to clone Jod itself into every
-project. Re-run `install.sh` (or `jod update`) any time to pull the latest
-toolkit changes. See [`bin/jod`](./bin/jod) and [`install.sh`](./install.sh)
-for what each command does.
+project. See [`bin/jod`](./bin/jod) and [`install.sh`](./install.sh) for what
+each command does.
+
+#### Versioning and updates
+
+Releases are tagged [Semantic Versioning](https://semver.org)
+`vMAJOR.MINOR.PATCH`, cut manually from the **Release** GitHub Action
+(Actions tab → Release → Run workflow → pick `patch`/`minor`/`major`) — it
+gates on the test suites, tags, and publishes a GitHub Release.
+
+- **Install** always pins to the newest release by default. Ask for another
+  version with `JOD_VERSION`:
+  ```sh
+  curl -fsSL .../install.sh | bash                      # latest release
+  curl -fsSL .../install.sh | JOD_VERSION=v1.2.0 bash    # a specific release
+  curl -fsSL .../install.sh | JOD_VERSION=main bash      # bleeding edge
+  ```
+- **`jod update`** only ever takes newer *patch* releases within the
+  installed `MAJOR.MINOR` — it never jumps you to a new minor/major release
+  on its own. To move to a new minor/major, re-run `install.sh` with the
+  `JOD_VERSION` you want.
+- **`jod version`** prints what's currently installed.
 
 ## Structure
 

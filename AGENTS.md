@@ -75,6 +75,12 @@ itself; distill it, don't narrate it.
   toolkit and run `jod setup-project` against a repo without cloning Jod
   into every project — a package-manager-free installer beats asking
   people to remember a path.
+- **Releases are semver tags, cut manually.** `vMAJOR.MINOR.PATCH` via the
+  Release Action's `workflow_dispatch`, never on every push — cutting a
+  release is a deliberate act. Install pins to latest by default;
+  `jod update` only ever takes newer patches within the installed
+  MAJOR.MINOR, so a minor/major bump can't yank the rug out from under an
+  existing install.
 
 ## Skills
 

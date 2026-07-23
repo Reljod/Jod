@@ -22,7 +22,10 @@ Commands:
                            skills. Run 'jod setup-project --list' to see
                            presets/skills, or --help for all flags.
   setup-git-hooks [dir]   Install local commit-msg/lint hooks (default: cwd).
-  update                  Fast-forward this toolkit checkout ($JOD_HOME).
+  update                  Take newer PATCH releases within the installed
+                           MAJOR.MINOR (never jumps minor/major — re-run
+                           install.sh with JOD_VERSION for that).
+  version                 Print the installed version/ref.
   home                    Print where the toolkit is checked out.
   help                    Show this message.
 
@@ -34,6 +37,20 @@ if [ ! -d "$SKILLS" ]; then
   echo "error: no Jod toolkit found at $JOD_HOME — re-run install.sh, or set \$JOD_HOME" >&2
   exit 1
 fi
+# shellcheck source=lib/semver.sh
+source "$JOD_HOME/bin/lib/semver.sh"
+
+current_ref() {
+  # install.sh/update record the exact ref they checked out — trust that
+  # over `git describe`, which is ambiguous when several tags land on the
+  # same commit (e.g. two patches cut back-to-back with no code change).
+  if [ -f "$JOD_HOME/.jod-version" ]; then
+    cat "$JOD_HOME/.jod-version"
+  else
+    git -C "$JOD_HOME" describe --tags --exact-match 2>/dev/null \
+      || git -C "$JOD_HOME" rev-parse --abbrev-ref HEAD
+  fi
+}
 
 cmd="${1:-help}"
 [ $# -gt 0 ] && shift
@@ -46,10 +63,30 @@ case "$cmd" in
     exec "$SKILLS/setup-git-hooks/scripts/install-hooks.sh" "${@:-.}"
     ;;
   update)
-    branch="$(git -C "$JOD_HOME" rev-parse --abbrev-ref HEAD)"
-    git -C "$JOD_HOME" fetch --quiet origin "$branch"
-    git -C "$JOD_HOME" merge --quiet --ff-only "origin/$branch"
-    echo "✓ updated $JOD_HOME"
+    git -C "$JOD_HOME" fetch --quiet --tags origin
+    cur="$(current_ref)"
+    if is_semver_tag "$cur"; then
+      ver="${cur#v}"; major="${ver%%.*}"; rest="${ver#*.}"; minor="${rest%%.*}"
+      latest_patch="$(git -C "$JOD_HOME" tag --list "v$major.$minor.*" | highest_semver_tag)"
+      if [ -n "$latest_patch" ] && [ "$latest_patch" != "$cur" ]; then
+        git -C "$JOD_HOME" checkout --quiet "$latest_patch"
+        printf '%s\n' "$latest_patch" > "$JOD_HOME/.jod-version"
+        echo "✓ updated $JOD_HOME: $cur -> $latest_patch"
+      else
+        echo "✓ already at the latest v$major.$minor patch ($cur)"
+      fi
+      newest="$(git -C "$JOD_HOME" tag --list 'v*.*.*' | highest_semver_tag)"
+      if [ -n "$newest" ] && [ "$newest" != "${latest_patch:-$cur}" ]; then
+        echo "  a newer release is available: $newest (install.sh | JOD_VERSION=$newest bash)"
+      fi
+    else
+      git -C "$JOD_HOME" merge --quiet --ff-only "origin/$cur"
+      printf '%s\n' "$cur" > "$JOD_HOME/.jod-version"
+      echo "✓ updated $JOD_HOME (branch $cur)"
+    fi
+    ;;
+  version)
+    printf '%s\n' "$(current_ref)"
     ;;
   home)
     printf '%s\n' "$JOD_HOME"
