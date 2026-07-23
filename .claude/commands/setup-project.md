@@ -15,7 +15,7 @@ Steps:
    Jod defaults — this skill exists so the taste is theirs, not assumed:
    - **Behavior preset**: `jod` (default), `minimal`, `team`, or `tdd-strict`.
    - **Skills to copy in** (multi-select): `create-pr`, `setup-git-hooks`,
-     `tdd-loop`.
+     `tdd-loop`, `test-scenarios`.
    Also collect the project name, one-line description, ticket prefix, and
    branch prefix (infer sensible defaults from the target dir).
 3. Run the scaffolder with the chosen values:

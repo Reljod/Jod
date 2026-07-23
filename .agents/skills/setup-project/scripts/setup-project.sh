@@ -48,7 +48,10 @@ FORCE=0
 err()  { printf 'error: %s\n' "$*" >&2; exit 1; }
 info() { printf '%s\n' "$*"; }
 
-list_presets() { find "$TPL_DIR" -maxdepth 1 -name '*.md' -exec basename {} .md \; | sort; }
+list_presets() {
+  find "$TPL_DIR" -maxdepth 1 -name '*.md' ! -name 'README.md' \
+    -exec basename {} .md \; | sort
+}
 list_skills()  {
   find "$SKILLS_SRC" -maxdepth 1 -mindepth 1 -type d -exec basename {} \; \
     | grep -vx "$SELF_SKILL" | sort
@@ -84,8 +87,17 @@ while [ $# -gt 0 ]; do
 done
 
 # --- validate ---------------------------------------------------------------
+# Preset is a single filename segment — reject path traversal so --preset can
+# only ever name a template under templates/agents/.
+case "$PRESET" in
+  ''|*/*) err "invalid preset name: '$PRESET' (must not contain '/')" ;;
+esac
+# Validate against the actual preset set (not just file existence) so a stray
+# .md in the templates dir — e.g. README.md — can never be selected as one.
+if ! list_presets | grep -qxF "$PRESET"; then
+  err "unknown preset '$PRESET'. Available: $(list_presets | paste -sd', ' -)"
+fi
 TPL="$TPL_DIR/$PRESET.md"
-[ -f "$TPL" ] || err "unknown preset '$PRESET'. Available: $(list_presets | paste -sd', ' -)"
 [ -d "$TARGET" ] || err "target directory does not exist: $TARGET"
 TARGET="$(cd -- "$TARGET" && pwd)"
 [ -z "$PROJECT_NAME" ] && PROJECT_NAME="$(basename "$TARGET")"
@@ -98,11 +110,16 @@ if [ -e "$AGENTS_OUT" ] && [ "$FORCE" -ne 1 ]; then
   err "$AGENTS_OUT already exists (use --force to overwrite)"
 fi
 
+# Bash 5.x treats '&' (and '\') specially in the *replacement* half of
+# ${var//pat/repl} — like sed's '&'. Escape them so a value such as
+# "Acme & Co" is substituted verbatim instead of re-inserting the match.
+esc_repl() { local s=$1; s=${s//\\/\\\\}; s=${s//&/\\&}; printf '%s' "$s"; }
+
 content="$(cat "$TPL")"
-content="${content//\{\{PROJECT_NAME\}\}/$PROJECT_NAME}"
-content="${content//\{\{PROJECT_DESC\}\}/$PROJECT_DESC}"
-content="${content//\{\{TICKET_PREFIX\}\}/$TICKET_PREFIX}"
-content="${content//\{\{BRANCH_PREFIX\}\}/$BRANCH_PREFIX}"
+content="${content//\{\{PROJECT_NAME\}\}/$(esc_repl "$PROJECT_NAME")}"
+content="${content//\{\{PROJECT_DESC\}\}/$(esc_repl "$PROJECT_DESC")}"
+content="${content//\{\{TICKET_PREFIX\}\}/$(esc_repl "$TICKET_PREFIX")}"
+content="${content//\{\{BRANCH_PREFIX\}\}/$(esc_repl "$BRANCH_PREFIX")}"
 printf '%s\n' "$content" > "$AGENTS_OUT"
 info "✓ wrote $AGENTS_OUT  (preset: $PRESET)"
 
@@ -131,6 +148,11 @@ if [ -n "$SKILLS" ]; then
   for raw in "${WANT[@]}"; do
     s="$(printf '%s' "$raw" | tr -d '[:space:]')"
     [ -z "$s" ] && continue
+    # A skill is a single directory name — reject path traversal so a crafted
+    # --skills entry can't copy from or write to outside the intended trees.
+    case "$s" in
+      */*|..) info "· skipping unsafe skill name: $s"; continue ;;
+    esac
     [ "$s" = "$SELF_SKILL" ] && { info "· skipping $s (the scaffolder itself)"; continue; }
     src="$SKILLS_SRC/$s"
     [ -d "$src" ] || { info "· skipping unknown skill: $s"; continue; }
