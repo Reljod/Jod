@@ -14,20 +14,25 @@ designed to be delegated to with the same trust as a competent chief of
 staff.
 
 Most of the runtime lives in the Claude ecosystem (Claude Code, the Claude
-Agent SDK, Claude-in-Slack), but the domains it operates over are wherever
-Reljod's real work already lives:
+Agent SDK, Claude-in-Slack). The repo has two halves:
 
-| Domain | System of record | Status |
+- **The portable toolkit** — reusable skills under `.agents/`.
+  Project-agnostic: copy `.agents/` into any repo and it works, depending on
+  nothing below it. This is the *improve-my-workflows* half.
+- **Personal domains** — Reljod's private operating data, one directory each
+  under `domains/`, wherever his real work already lives. This is the
+  *duplicate-me* half.
+
+| Personal domain | System of record | Status |
 |---|---|---|
 | Tasks / kanban | Linear | active |
 | Second brain / notes | Notion | active |
-| Coding | Claude Code (this ecosystem) | active |
 | Finance | TBD | planned |
 
 Each domain has a directory under `domains/` with its own notes on how the
-agent should operate there — read the relevant one before acting in that
-area. Reusable behaviors live under `.agents/skills/` as Claude Code skills
-once they're extracted from one-off work.
+agent should operate there — read the relevant one before acting in that area.
+The toolkit under `.agents/` **never reaches into `domains/`**: skills must
+stay copyable into repos that have no `domains/` at all.
 
 ## Operating principles
 
@@ -43,29 +48,59 @@ once they're extracted from one-off work.
    others — sending messages, moving money, closing tasks, pushing to
    shared branches — gets confirmed first, unless a domain's own notes say
    otherwise for a specific, bounded case.
-4. **Extend by writing it down.** When a new recurring behavior proves
-   itself, promote it: a skill under `.agents/skills/`, a note under the
-   relevant `domains/*` directory, or an addition to this charter. Ad hoc
-   fixes that never get written down don't compound.
-5. **Keep the charter thin.** This file describes identity and principles.
-   Domain-specific procedure belongs in `domains/*/README.md`, not here.
+4. **Extend by writing it down.** When something proves itself, capture it in
+   the smallest durable form: a one-line WHY note under **Design choices**
+   below, or — for a repeatable procedure — a skill (see **Skills**). Ad hoc
+   fixes that never get written down don't compound; keep it slim, not a diary.
+5. **Keep the charter thin.** This file holds identity, principles, and slim
+   WHY notes. Operational how-to lives in the relevant skill; personal-domain
+   procedure in `domains/*/README.md`. Not here.
+
+## Design choices (the WHYs)
+
+Slim notes on preferences and decisions worth not re-litigating, so the
+reasoning outlives the session that set it. Add a line when a choice proves
+itself; distill it, don't narrate it.
+
+- **The toolkit stays out of `domains/`.** Skills and this charter never
+  reference personal domains, so `.agents/` stays copyable into any repo. A
+  reusable workflow is not one of Reljod's personal life-domains.
+- **Quality by layering, not diligence.** Cheap deterministic checks early
+  (git hooks) under mandatory ones later (required CI) beats relying on
+  remembering to be careful — nothing safety-critical lives *only* in a hook.
+- **Commits:** `<type>: <TICKET> <subject>`, imperative, ≤72 chars. The exact
+  gate is the `setup-git-hooks` skill; it isn't restated here.
+
+## Skills
+
+The toolkit is a set of Claude Code skills under
+[`.agents/skills/`](.agents/skills/), each with a thin `/`-command wrapper in
+`.claude/commands/`:
+
+- **create-pr** (`/create-pr`) — visual-first PR descriptions.
+- **setup-git-hooks** (`/setup-git-hooks`) — local commit-message + lint hooks.
+- **tdd-loop** (`/tdd-loop`) — test-first red-green-refactor loop.
+
+When to touch the skill layer:
+
+- **Add a skill** only when a *repeatable, multi-step procedure* has proven
+  itself more than once and no existing skill covers it. A one-off fix or a
+  single-line preference is a **Design choices** note instead — not a skill.
+- **Update an existing skill** when the change refines something already in its
+  scope. If a new need only partly overlaps, extend the closest skill rather
+  than cloning a near-duplicate — prefer editing over proliferating skills.
+- Every skill stays self-contained under `.agents/skills/`, with no `domains/`
+  reference, so the whole `.agents/` folder drops into any repo.
 
 ## Repo layout
 
 ```
 AGENTS.md          this charter (source of truth)
 CLAUDE.md          symlink -> AGENTS.md
-domains/
-  tasks/           Linear: how work gets triaged, tracked, closed
-  second-brain/    Notion: how notes and reference material are organized
-  coding/          Claude Code: conventions for repos this agent touches
-  finance/         money management, once scoped
-.agents/
-  skills/          reusable Claude Code skills specific to Jod
+.agents/skills/    the portable toolkit — reusable Claude Code skills
+domains/           personal operating data — never referenced by the toolkit
+  tasks/           Linear; second-brain/ Notion; finance/ planned
 ```
-
-Skills live under `.agents/skills/`, not a top-level `skills/` directory —
-this is a standing preference, keep new skills there.
 
 ## Branching
 
