@@ -108,6 +108,14 @@ itself; distill it, don't narrate it.
   — spinning up N scaffolds is too expensive for every PR, and gaps are
   findings to support later, not a merge-blocking contract. Wired into
   `release.yml` / `e2e.yml`, not `tests.yml`.
+- **Parallelism here is agent teams, and ownership is what makes it safe.**
+  Teams were chosen over worktree-isolated subagents because the work that
+  actually benefits is review and investigation, where teammates need to
+  argue with each other — and that's exactly what subagents can't do. The
+  cost is that teams share one checkout, so the isolation git would have
+  given us has to come from disjoint file ownership plus a `TaskCompleted`
+  test gate instead. Same layering principle as the git hooks: cheap
+  deterministic check early, required CI still the real authority.
 
 ## Skills
 
@@ -151,6 +159,29 @@ names mirror the commit convention: `<type>/<short-description>`, where
 `<type>` is the same set used for commits (`feat`, `fix`, `chore`, `refactor`,
 `docs`, …) and `<short-description>` is imperative and dash-separated —
 e.g. `feat/remove-claude-coauthoring`, `chore/setup-git-hooks`.
+
+## Working as a team
+
+Agent teams are enabled in `.claude/settings.json`. Teammates are separate
+Claude sessions that **share this one checkout** — they are not isolated in
+worktrees — so ownership is the whole safety mechanism:
+
+- **One owner per path.** Each teammate owns a disjoint set of files and edits
+  nothing outside it. `.agents/skills/<name>/` is one unit; `install.sh` +
+  `bin/` + `tests/install.test.sh` is another. Two teammates in one directory
+  means one of them loses work.
+- **The lead owns `AGENTS.md` and `README.md`.** Teammates report the charter
+  note they think is warranted; the lead writes it. This is the file every
+  teammate would otherwise touch.
+- **A task closes green or not at all.** A `TaskCompleted` hook
+  (`.claude/hooks/task-completed-tests.sh`) runs every `*.test.sh` suite and
+  refuses the completion if any fail, because a teammate can go green on its
+  own work while having broken a peer's.
+
+Reusable teammate roles live in `.claude/agents/`: `skill-author`,
+`toolkit-engineer` (write, one area each) and `reviewer`, `investigator`
+(read-only, one lens or hypothesis each). Spawn 3–5; scale by whether the work
+genuinely splits, not by how big it feels.
 
 ## Attribution
 
