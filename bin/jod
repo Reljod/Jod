@@ -19,8 +19,10 @@ jod <command> [args]
 
 Commands:
   setup-project [args]    Scaffold the current repo: AGENTS.md + chosen
-                           skills. Run 'jod setup-project --list' to see
-                           presets/skills, or --help for all flags.
+                           skills. With no flags it asks interactively
+                           (↑/↓ to move, space to toggle skills, enter to
+                           confirm); '--list' prints the presets/skills and
+                           '--help' every flag for scripted runs.
   setup-git-hooks [dir]   Install local commit-msg/lint hooks (default: cwd).
   update                  Take newer PATCH releases within the installed
                            MAJOR.MINOR (never jumps minor/major — re-run

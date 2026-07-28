@@ -20,8 +20,14 @@ The scaffolder substitutes these tokens when it renders a preset:
 |---|---|
 | `{{PROJECT_NAME}}` | `--name`, or the target directory name |
 | `{{PROJECT_DESC}}` | `--desc`, or a "replace me" stub |
-| `{{TICKET_PREFIX}}` | `--ticket` (e.g. `JOD`), default `PROJ` |
 | `{{BRANCH_PREFIX}}` | `--branch`, default `claude` |
+| `{{TICKET_PREFIX}}` | `--ticket` (e.g. `JOD`); empty by default |
+| `{{TICKET_RULE}}` | a one-line "reference the issue key" rule — **only when `--ticket` is given**; otherwise the whole line holding the token is dropped |
+
+Issue keys are opt-in, so a preset must not hard-code `<TICKET>` into its
+commit convention. Write the convention without one and put the optional
+rule on its own `{{TICKET_RULE}}` line (with the list marker, if any, on
+that same line so it disappears with it).
 
 ## Adding a preset
 

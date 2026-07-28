@@ -181,13 +181,13 @@ two-column table. Group by rule so each gate is independently legible.
 ### commit-msg gate
 
 **How it's used:** every `git commit` runs it; the subject must be
-`<type>: <TICKET> <subject>`. `--no-verify` bypasses locally; CI does not.
+`<type>: <subject>`. `--no-verify` bypasses locally; CI does not.
 
 | ✓ Accepted | ✗ Rejected |
 |---|---|
-| `feat: ENG-123 add retry to sync worker` | `update stuff` — no type, no ticket |
-| `fix(api)!: PLATFORM-7 drop v1 route` | `feat: add retry` — missing ticket |
-| `chore: bump ruff to 0.6` — exempt type, no ticket needed | `feat ENG-1 x` — missing colon |
+| `feat: add retry to sync worker` | `update stuff` — no type |
+| `fix(api)!: drop v1 route` | `feat add retry` — missing colon |
+| `chore: bump ruff to 0.6` | `feat: ` + 80 chars — over the length cap |
 ```
 
 Keep each cell to the example plus a `—` reason fragment. If a rule needs

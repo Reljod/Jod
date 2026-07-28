@@ -1,10 +1,13 @@
 #!/usr/bin/env sh
 # Deterministic commit-message gate.
 #
-# Enforces:  <type>(optional-scope)!: <TICKET> <subject>
-#   e.g.     feat: ENG-123 add retry to the sync worker
-#            fix(api)!: PLATFORM-7 drop the v1 orders route
-#            chore: bump ruff to 0.6         (exempt type, no ticket needed)
+# Enforces:  <type>(optional-scope)!: <subject>
+#   e.g.     feat: add retry to the sync worker
+#            fix(api)!: drop the v1 orders route
+#
+# An issue-key requirement is OPT-IN, not the default: set TICKET_REGEX in
+# commit-convention.conf and the subject must then read
+# `<type>: ENG-123 <subject>` for every non-exempt type.
 #
 # Same message in -> same pass/fail out. No network, no clock, no judgment.
 # Rules come from ./commit-convention.conf so this script never needs edits.
@@ -16,7 +19,7 @@ CONF="$HOOK_DIR/commit-convention.conf"
 
 # ---- defaults (overridden by conf if present) -----------------------------
 ALLOWED_TYPES="feat|fix|bug|chore|docs|refactor|test|perf|ci|build|style|revert"
-TICKET_REGEX="[A-Z][A-Z0-9]+-[0-9]+"
+TICKET_REGEX=""
 TICKET_EXEMPT_TYPES="chore|docs|style|ci"
 MAX_SUBJECT_LENGTH=72
 # shellcheck disable=SC1090
@@ -28,13 +31,22 @@ if [ -t 2 ]; then RED="$(printf '\033[31m')"; YEL="$(printf '\033[33m')"; RST="$
 fail() {
   printf '%s\n' "${RED}✗ commit rejected: $1${RST}" >&2
   printf '%s\n' "" >&2
-  printf '%s\n' "  Required format: ${YEL}<type>: <TICKET> <subject>${RST}" >&2
-  printf '%s\n' "  Types:   $ALLOWED_TYPES" >&2
-  printf '%s\n' "  Ticket:  matches /$TICKET_REGEX/  (e.g. ENG-123), required unless type is one of: $TICKET_EXEMPT_TYPES" >&2
-  printf '%s\n' "" >&2
-  printf '%s\n' "  Good:  feat: ENG-123 add retry to the sync worker" >&2
-  printf '%s\n' "  Good:  chore: bump ruff to 0.6" >&2
-  printf '%s\n' "  Bad:   update stuff        (no type, no ticket)" >&2
+  if [ -n "$TICKET_REGEX" ]; then
+    printf '%s\n' "  Required format: ${YEL}<type>: <TICKET> <subject>${RST}" >&2
+    printf '%s\n' "  Types:   $ALLOWED_TYPES" >&2
+    printf '%s\n' "  Ticket:  matches /$TICKET_REGEX/  (e.g. ENG-123), required unless type is one of: $TICKET_EXEMPT_TYPES" >&2
+    printf '%s\n' "" >&2
+    printf '%s\n' "  Good:  feat: ENG-123 add retry to the sync worker" >&2
+    printf '%s\n' "  Good:  chore: bump ruff to 0.6" >&2
+    printf '%s\n' "  Bad:   update stuff        (no type, no ticket)" >&2
+  else
+    printf '%s\n' "  Required format: ${YEL}<type>: <subject>${RST}" >&2
+    printf '%s\n' "  Types:   $ALLOWED_TYPES" >&2
+    printf '%s\n' "" >&2
+    printf '%s\n' "  Good:  feat: add retry to the sync worker" >&2
+    printf '%s\n' "  Good:  fix(api)!: drop the v1 orders route" >&2
+    printf '%s\n' "  Bad:   update stuff        (no type)" >&2
+  fi
   printf '%s\n' "" >&2
   printf '%s\n' "  This is a local courtesy check. --no-verify bypasses it; CI does not." >&2
   exit 1
@@ -59,8 +71,10 @@ fi
 TYPE="$(printf '%s' "$SUBJECT" | sed -E 's/^([a-zA-Z]+).*/\1/')"
 REST="$(printf '%s' "$SUBJECT" | sed -E 's/^[^:]*:[[:space:]]*//')"
 
-# Ticket requirement, unless the type is exempt or SKIP_TICKET is set.
-if [ "${SKIP_TICKET:-0}" != "1" ] && ! printf '%s' "$TYPE" | grep -qE "^($TICKET_EXEMPT_TYPES)$"; then
+# Ticket requirement — off unless TICKET_REGEX is set in the conf, and then
+# still skipped for exempt types or when SKIP_TICKET=1 is exported.
+if [ -n "$TICKET_REGEX" ] && [ "${SKIP_TICKET:-0}" != "1" ] \
+   && ! printf '%s' "$TYPE" | grep -qE "^($TICKET_EXEMPT_TYPES)$"; then
   if ! printf '%s' "$REST" | grep -qE "^$TICKET_REGEX .+"; then
     fail "\"$SUBJECT\" is missing a ticket key (expected /$TICKET_REGEX/ right after the colon)"
   fi

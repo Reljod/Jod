@@ -1,3 +1,4 @@
+<!-- blurb: lean identity + a few principles; grow it as needs get real -->
 # AGENTS.md — {{PROJECT_NAME}}
 
 Operating charter for any agent working in this repository (Claude Code,

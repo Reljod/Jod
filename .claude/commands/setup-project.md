@@ -16,11 +16,12 @@ Steps:
    - **Behavior preset**: `jod` (default), `minimal`, `team`, or `tdd-strict`.
    - **Skills to copy in** (multi-select): `create-pr`, `setup-git-hooks`,
      `tdd-loop`, `test-scenarios`.
-   Also collect the project name, one-line description, ticket prefix, and
-   branch prefix (infer sensible defaults from the target dir).
+   Also collect the project name, one-line description, and branch prefix
+   (infer sensible defaults from the target dir). Don't ask for a ticket
+   prefix unless the user brings up issue keys — `--ticket` is opt-in.
 3. Run the scaffolder with the chosen values:
    `setup-project.sh --preset <p> --skills <a,b,c> --name <..> --desc <..>
-   --ticket <..> --target $ARGUMENTS`. It writes `AGENTS.md`, symlinks
+   --target $ARGUMENTS`. It writes `AGENTS.md`, symlinks
    `CLAUDE.md`, and copies each chosen skill + its slash command. It refuses
    to overwrite an existing charter without `--force`.
 4. Read the generated `AGENTS.md` back and refine the description and any

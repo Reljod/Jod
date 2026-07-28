@@ -1,3 +1,4 @@
+<!-- blurb: test-first enforced, coverage as a required CI gate -->
 # AGENTS.md — {{PROJECT_NAME}}
 
 Operating charter for any agent working in this repository (Claude Code,
@@ -45,11 +46,13 @@ the code looks.
 Feature branches only, never on `main`: `{{BRANCH_PREFIX}}/<short-description>-<id>`.
 
 ```
-<type>: <TICKET> <subject>      e.g.  feat: {{TICKET_PREFIX}}-12 add retry to sync worker
+<type>: <subject>      e.g.  feat: add retry to sync worker
 ```
 
 `test`-type commits are first-class here — a commit that only adds a failing
 test is a normal, encouraged step. → **`setup-git-hooks`**
+
+{{TICKET_RULE}}
 
 ## PRs
 

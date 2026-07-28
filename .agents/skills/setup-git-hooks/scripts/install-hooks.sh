@@ -92,11 +92,13 @@ cat <<EOF
 
 ✓ Hooks installed. Verify both paths are deterministic:
 
-    echo "update stuff"              | "$DEST/commit-msg" /dev/stdin   # expect FAIL
-    echo "feat: ENG-123 add retries" | "$DEST/commit-msg" /dev/stdin   # expect PASS
+    echo "update stuff"      | "$DEST/commit-msg" /dev/stdin   # expect FAIL
+    echo "feat: add retries" | "$DEST/commit-msg" /dev/stdin   # expect PASS
 
 Next:
-  1. Review .githooks/commit-convention.conf (types, ticket regex, commands).
+  1. Review .githooks/commit-convention.conf (types, commands). Commits are
+     \`<type>: <subject>\` out of the box — no issue key required. To require
+     one, set TICKET_REGEX (e.g. "[A-Z][A-Z0-9]+-[0-9]+" for ENG-123).
   2. Commit the .githooks/ directory so teammates inherit the hooks.
   3. Note: core.hooksPath is LOCAL config. Each fresh clone must run this
      installer once, or:  git config core.hooksPath .githooks

@@ -47,9 +47,12 @@ scaffold() {
   rm -rf "$dst"; mkdir -p "$(dirname "$dst")"; cp -R "$src" "$dst"
   local skills_args=()
   [ -n "$skills" ] && skills_args=(--skills "$skills")
+  # No --ticket: issue keys are opt-in, so the fitness check measures what a
+  # default scaffold actually produces. Pass it per-fixture via "$@" to
+  # exercise the opt-in path.
   "$SETUP" --preset "$preset" "${skills_args[@]}" \
     --name "$fixture" --desc "Fixture repo for the setup-project e2e fitness check." \
-    --ticket JOD --target "$dst" "$@"
+    --target "$dst" "$@"
 }
 
 echo "== setup-project e2e fitness check =="
@@ -94,7 +97,7 @@ assert_file "$d/AGENTS.md" "monorepo: AGENTS.md written"
 pkg_count="$(find "$d/packages" -mindepth 2 -maxdepth 2 -name package.json 2>/dev/null | wc -l | tr -d ' ')"
 ok "[ '$pkg_count' -ge 2 ]" "monorepo: fixture has multiple sub-packages ($pkg_count)"
 if ! grep -qiE 'packages/|monorepo|sub-?package' "$d/AGENTS.md"; then
-  gap monorepo "repo has $pkg_count independently-versioned packages under packages/, but no preset has any concept of per-package scope (ticket prefix, branch prefix, test runner can all differ per package) — the charter is written as if the whole repo is one unit."
+  gap monorepo "repo has $pkg_count independently-versioned packages under packages/, but no preset has any concept of per-package scope (branch prefix, commit scope, test runner can all differ per package) — the charter is written as if the whole repo is one unit."
 fi
 
 # --- oss-project: existing CONTRIBUTING.md / CODE_OF_CONDUCT.md / PR template
