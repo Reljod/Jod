@@ -34,9 +34,9 @@ unavailable), pre-selecting the Jod defaults:
 
    | Preset | For | Default? |
    |---|---|---|
-   | `jod` | The full Jod charter: quality layer-model, `<type>: TICKET` commits, `claude/<desc>-<id>` branches, draft-PR habits. | ✅ default |
+   | `jod` | The full Jod charter: quality layer-model, `<type>: <subject>` commits, `claude/<desc>-<id>` branches, draft-PR habits. | ✅ default |
    | `minimal` | A lean identity + a couple of principles; grow it as needs get real. | |
-   | `team` | Conventional Commits (no ticket key), PR-template + review norms — open-source / multi-contributor repos. | |
+   | `team` | Conventional Commits, PR-template + review norms — open-source / multi-contributor repos. | |
    | `tdd-strict` | Test-first enforced, coverage as a required gate. | |
 
 2. **Skills to copy in** — a multi-select over the Jod skill library (run
@@ -47,8 +47,13 @@ unavailable), pre-selecting the Jod defaults:
    `setup-git-hooks` for `tdd-strict`; none for `minimal`.
 
 Also collect (or infer): **project name** (defaults to the target dir name),
-a **one-line description**, the **ticket prefix** (e.g. `JOD`), and the
-**branch prefix** (default `claude`).
+a **one-line description**, and the **branch prefix** (default `claude`).
+
+**Do not assume an issue-key convention.** `--ticket` is opt-in: leave it
+off and the scaffolded charter asks for `<type>: <subject>` with no ticket.
+Pass it only when the user says their repo requires one (e.g. `--ticket
+JOD` → `feat: JOD-12 add retry`), because a required key breaks on repos
+with no tracker and on contributors who can't see it.
 
 ## Running it against a repo that isn't a Jod checkout
 
@@ -68,6 +73,18 @@ convenience:
 
 ## How to run it
 
+The script has two front doors, and which one to use depends on who is
+driving:
+
+- **A human at a terminal** (`jod setup-project`, or the script with no
+  choice flags) gets an interactive wizard — ↑/↓ to move, space to toggle
+  skills, enter to confirm, `q` to cancel. Point them at it rather than
+  interviewing them yourself; it already shows every preset and skill with
+  a one-line summary and pre-selects the recommended defaults.
+- **An agent** (this skill, running the setup on the user's behalf) should
+  collect the choices with `AskUserQuestion` and pass them as flags. Two
+  prompts competing for the same terminal is the failure mode to avoid.
+
 1. **List what's available**, then present the choices to the user:
 
    ```
@@ -80,23 +97,26 @@ convenience:
    .agents/skills/setup-project/scripts/setup-project.sh \
      --preset jod --skills create-pr,setup-git-hooks,tdd-loop \
      --name "My Project" --desc "One line about it." \
-     --ticket JOD --target /path/to/repo
+     --target /path/to/repo
    ```
 
    Flags: `--preset`, `--skills a,b,c` (or `all`), `--name`, `--desc`,
-   `--ticket`, `--branch`, `--target` (defaults to cwd), `--no-symlink`
-   (write `CLAUDE.md` as a copy — for filesystems/repos where symlinks are a
-   problem), `--force` (overwrite existing `AGENTS.md`/`CLAUDE.md`). Without
-   `--force` it refuses to clobber an existing charter, so re-runs are safe.
+   `--branch`, `--ticket` (opt-in issue key), `-i`/`--interactive` and
+   `--no-interactive`, `--target` (defaults to cwd),
+   `--no-symlink` (write `CLAUDE.md` as a copy — for filesystems/repos where
+   symlinks are a problem), `--force` (overwrite existing
+   `AGENTS.md`/`CLAUDE.md`). Without `--force` it refuses to clobber an
+   existing charter, so re-runs are safe.
 
    The script renders the template (substituting `{{PROJECT_NAME}}`,
-   `{{PROJECT_DESC}}`, `{{TICKET_PREFIX}}`, `{{BRANCH_PREFIX}}`), creates the
-   `CLAUDE.md` → `AGENTS.md` symlink, and copies each chosen skill + command.
-   It never copies `setup-project` itself into a target repo.
+   `{{PROJECT_DESC}}`, `{{BRANCH_PREFIX}}`, and either filling or deleting
+   the optional `{{TICKET_RULE}}` line), creates the `CLAUDE.md` →
+   `AGENTS.md` symlink, and copies each chosen skill + command. It never
+   copies `setup-project` itself into a target repo.
 
 3. **Finish the charter with the user.** The template leaves the description
-   and any preset-specific assumptions (ticket/branch prefixes) for a human
-   to confirm. Read the generated `AGENTS.md` back and adjust anything that
+   and any preset-specific assumptions (the branch prefix, the quality
+   gates) for a human to confirm. Read the generated `AGENTS.md` back and adjust anything that
    doesn't fit the actual project — the scaffold is a starting point, not the
    final word.
 
@@ -113,8 +133,14 @@ convenience:
   the `{{PLACEHOLDER}}` tokens above; it appears in `--list` automatically.
 - **New selectable skill** → once a skill under `.agents/skills/` has proven
   itself (the charter's "extend by writing it down" rule), it's offered by
-  `--list` with no code change; give it a matching `.claude/commands/<skill>.md`
-  so its slash command travels with it.
+  `--list` and the wizard with no code change; give it a matching
+  `.claude/commands/<skill>.md` so its slash command travels with it — that
+  file's `description:` is also the one-line summary the picker shows.
+
+The picker's one-line summaries come from where the text already lives: a
+preset's own `<!-- blurb: ... -->` header line (stripped when the charter is
+rendered) and a skill's slash-command `description:`. Nothing to keep in
+sync in a second place.
 
 This is how the setup stays opinionated without being rigid: the defaults
 encode Jod's taste, and the preset/skill lists are the knobs everyone else

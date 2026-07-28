@@ -73,8 +73,22 @@ itself; distill it, don't narrate it.
   human reviewing the PR had no way to check that without re-running it
   themselves. A `Tests` Action now runs every `*.test.sh` suite on every
   push/PR, so pass/fail is a status on the PR itself, not a claim in chat.
-- **Commits:** `<type>: <TICKET> <subject>`, imperative, ≤72 chars. The exact
-  gate is the `setup-git-hooks` skill; it isn't restated here.
+- **Commits:** `<type>: <subject>`, imperative, ≤72 chars. The exact gate is
+  the `setup-git-hooks` skill; it isn't restated here.
+- **Issue keys are opt-in, never the default.** The commit gate shipped
+  requiring a Linear-style `ENG-123` in every non-housekeeping subject, and
+  the scaffolder baked that into the charters it generated. That is one
+  team's house rule, not a property of a good commit — it breaks on repos
+  with no tracker, on contributors who can't see one, and on the many real
+  commits that map to no issue. `TICKET_REGEX` now ships empty and
+  `--ticket` is an explicit flag; turning it on is a per-repo decision.
+- **The CLI asks; the script still takes flags.** `jod setup-project` with
+  no choices walks a human through them (↑/↓, space, enter) instead of
+  making them read `--list` and hand-assemble a comma-separated
+  `--skills`. The wizard only *fills in* the flags — the scaffold itself
+  stays flag-driven and deterministic, so scripts, CI, and agents keep the
+  exact same entry point, and no-tty falls back to `--list` rather than
+  hanging on a prompt.
 - **Toolkit distribution is a curlable installer, not a required clone.**
   `install.sh` + `bin/jod` let any Linux/macOS machine bootstrap the
   toolkit and run `jod setup-project` against a repo without cloning Jod

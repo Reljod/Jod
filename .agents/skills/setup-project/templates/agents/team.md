@@ -1,3 +1,4 @@
+<!-- blurb: Conventional Commits, PR/review norms — OSS & multi-contributor -->
 # AGENTS.md — {{PROJECT_NAME}}
 
 Operating charter for any agent (and any contributor) working in this
@@ -35,7 +36,7 @@ own convention. Keep branches short-lived.
   `BREAKING CHANGE:` footer.
 - No ticket key is required — this convention is designed for open
   contribution where not everyone shares an issue tracker. → **`setup-git-hooks`**
-  (set `TICKET_REGEX` empty to enforce Conventional Commits without a ticket).
+  (its `TICKET_REGEX` ships empty, so this is what it enforces by default).
 
 ## Pull requests
 

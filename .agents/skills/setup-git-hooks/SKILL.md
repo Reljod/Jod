@@ -34,24 +34,44 @@ Two properties matter for everything this skill installs:
 
 ## Worked example: the commit-message gate
 
-The canonical ask is "every commit must start with `feat/chore/bug:
-LINEAR-123`". A note on git mechanics first: **message validation belongs
-in the `commit-msg` hook, not `pre-commit`** — `pre-commit` runs *before*
-the message is written, so it can't see it. This skill puts the format
-check where it actually works. The check is a pure regex, so it is fully
+A note on git mechanics first: **message validation belongs in the
+`commit-msg` hook, not `pre-commit`** — `pre-commit` runs *before* the
+message is written, so it can't see it. This skill puts the format check
+where it actually works. The check is a pure regex, so it is fully
 deterministic:
 
 ```
-<type>(optional-scope)!: <TICKET> <subject>
-   │        │          │      │        └─ imperative description
-   │        │          │      └────────── Linear-style key, e.g. ENG-123
-   │        │          └───────────────── optional breaking-change marker
-   │        └──────────────────────────── optional scope, e.g. (api)
-   └───────────────────────────────────── feat | fix | bug | chore | ...
+<type>(optional-scope)!: <subject>
+   │        │          │     └─ imperative description, <= 72 chars
+   │        │          └─────── optional breaking-change marker
+   │        └────────────────── optional scope, e.g. (api)
+   └─────────────────────────── feat | fix | bug | chore | ...
 ```
 
-`feat: ENG-123 add retry to the sync worker` passes.
-`update stuff` fails. `feat: add retry` fails (no ticket).
+`feat: add retry to the sync worker` passes. `update stuff` fails (no
+type). `feat add retry` fails (no colon).
+
+### Issue keys are opt-in
+
+Plenty of repos want `feat: ENG-123 add retry` — a required issue key from
+Linear/Jira. That is **off by default**, because it is a house rule of a
+particular tracker-driven team, not a property of good commits: it breaks
+on repos with no tracker, on open contributions from people who can't see
+the tracker, and on the many real commits that legitimately map to no
+issue.
+
+Turn it on per-repo by setting `TICKET_REGEX` in
+`.githooks/commit-convention.conf`:
+
+```sh
+TICKET_REGEX="[A-Z][A-Z0-9]+-[0-9]+"   # ENG-123, JOD-42, PLATFORM-7
+TICKET_EXEMPT_TYPES="chore|docs|style|ci"
+```
+
+With it set, `feat: ENG-123 add retry` passes and `feat: add retry` fails;
+exempt types still pass without a key, and a one-off `SKIP_TICKET=1 git
+commit ...` bypasses the check. Leave `TICKET_REGEX` empty and the ticket
+rule is not evaluated at all.
 
 ## How to run it
 
@@ -70,17 +90,18 @@ deterministic:
    survives re-runs.
 
 2. **Tune the convention.** Open `.githooks/commit-convention.conf` and
-   adjust `ALLOWED_TYPES`, `TICKET_REGEX` (default matches Linear keys like
-   `ENG-123`), `TICKET_EXEMPT_TYPES`, and the `PRECOMMIT_CMDS` /
-   `PREPUSH_CMDS` lists. Everything the hooks enforce is driven from this
-   one file — no logic changes needed for the common cases.
+   adjust `ALLOWED_TYPES`, `MAX_SUBJECT_LENGTH`, and the `PRECOMMIT_CMDS` /
+   `PREPUSH_CMDS` lists — plus `TICKET_REGEX` /`TICKET_EXEMPT_TYPES` if the
+   repo wants issue keys (empty = off, see above). Everything the hooks
+   enforce is driven from this one file — no logic changes needed for the
+   common cases.
 
 3. **Verify it's live and deterministic.** Prove both the pass and fail
    paths before declaring done:
 
    ```
-   echo "update stuff"              | .githooks/commit-msg /dev/stdin   # should FAIL
-   echo "feat: ENG-123 add retries" | .githooks/commit-msg /dev/stdin   # should PASS
+   echo "update stuff"      | .githooks/commit-msg /dev/stdin   # should FAIL
+   echo "feat: add retries" | .githooks/commit-msg /dev/stdin   # should PASS
    ```
 
    (The installer prints the exact commands for the repo.) A real

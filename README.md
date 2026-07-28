@@ -77,6 +77,32 @@ Then, in *any* repo on that machine:
 
 ```sh
 cd ~/code/some-other-repo
+jod setup-project
+```
+
+That walks you through the setup in the terminal — **↑/↓** to move through
+the behavior presets, **space** to toggle each skill on or off, **enter** to
+confirm:
+
+```
+Behavior preset  ↑/↓ move · enter select · q cancel
+  ❯ jod         the full Jod charter — layered quality gates, draft-PR habits
+    minimal     lean identity + a few principles; grow it as needs get real
+    tdd-strict  test-first enforced, coverage as a required CI gate
+    team        Conventional Commits, PR/review norms — OSS & multi-contributor
+
+Skills to copy in  ↑/↓ move · space toggle · a all · n none · enter confirm
+  ❯ [x] create-pr        Build a visual-first PR description for the current change.
+    [x] setup-git-hooks  Install deterministic local git hooks for a repo.
+    [ ] tdd-loop         Build a feature or fix a bug test-first.
+    [x] test-scenarios   Exhaustively test a unit — every scenario, every edge case.
+```
+
+Every choice is also a flag, so the same scaffold is scriptable — and with
+no terminal attached (CI, a pipe) it prints the available presets/skills
+instead of hanging on a prompt:
+
+```sh
 jod setup-project --list
 jod setup-project --preset jod --skills create-pr,setup-git-hooks,tdd-loop
 ```

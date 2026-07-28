@@ -46,6 +46,36 @@ for preset in jod minimal team tdd-strict; do
 done
 assert_grep "TKT-" "$WORK/p-jod/AGENTS.md"            "jod: TICKET_PREFIX substituted"
 assert_grep "bot/" "$WORK/p-jod/AGENTS.md"            "jod: BRANCH_PREFIX substituted"
+for preset in jod minimal team tdd-strict; do
+  assert_no_grep "<!-- blurb" "$WORK/p-$preset/AGENTS.md" "$preset: picker blurb stripped from the charter"
+done
+
+# --- 2b. issue keys are OPT-IN, never scaffolded by default ------------------
+section "ticket rules are opt-in (no --ticket)"
+for preset in jod tdd-strict; do
+  d="$(fresh "noticket-$preset")"
+  "$SCRIPT" --preset "$preset" --name X --target "$d" >/dev/null 2>&1
+  assert_no_grep "{{"        "$d/AGENTS.md" "$preset/no-ticket: no leftover placeholders"
+  assert_no_grep "<TICKET>"  "$d/AGENTS.md" "$preset/no-ticket: commit format carries no <TICKET>"
+  assert_no_grep "issue key" "$d/AGENTS.md" "$preset/no-ticket: no issue-key rule at all"
+  assert_grep    "<type>: <subject>" "$d/AGENTS.md" "$preset/no-ticket: plain <type>: <subject>"
+  # Dropping the token must not leave a hole in the prose around it.
+  ok "! grep -qE '^[[:space:]]*-[[:space:]]*$' '$d/AGENTS.md'" "$preset/no-ticket: no orphaned list marker"
+  ok "[ -z \"\$(sed -n '/^$/{N;/^\n$/p}' '$d/AGENTS.md')\" ]" "$preset/no-ticket: no double blank lines left behind"
+done
+
+section "ticket rules when --ticket IS given"
+for preset in jod tdd-strict; do
+  d="$(fresh "ticket-$preset")"
+  "$SCRIPT" --preset "$preset" --name X --ticket ENG --target "$d" >/dev/null 2>&1
+  assert_grep    "ENG-12" "$d/AGENTS.md" "$preset/ticket: the prefix is used in the example"
+  assert_grep    "issue key" "$d/AGENTS.md" "$preset/ticket: the rule is stated"
+  assert_no_grep "{{" "$d/AGENTS.md"      "$preset/ticket: no leftover placeholders"
+done
+# The lean preset has no commit convention to attach a ticket rule to.
+d="$(fresh ticket-minimal)"
+"$SCRIPT" --preset minimal --name X --ticket ENG --target "$d" >/dev/null 2>&1
+assert_no_grep "ENG-12" "$d/AGENTS.md" "minimal/ticket: stays lean, no rule injected"
 
 # --- 3. boundary: special characters in name/desc ---------------------------
 section "special characters in --name / --desc"
@@ -128,8 +158,83 @@ d="$(fresh trailing)"
 assert_ok "$SCRIPT" --preset minimal --name X --target "$d/"     # trailing slash on --target
 assert_file "$d/AGENTS.md"                            "trailing slash: normalised, scaffolds"
 
-# --- 9. output contract: --help ---------------------------------------------
+# --- 9. interactive mode -----------------------------------------------------
+# Driven exactly as a terminal would drive it: keystrokes in, UI out. See
+# prompt.test.sh for the pickers themselves; these cases are about the wizard
+# actually deciding what gets scaffolded.
+section "interactive: a full run scaffolds what was picked"
+UI="$WORK/wizard-ui.log"
+wizard() {  # wizard <target> <keystrokes...>
+  local d="$1"; shift
+  # "$@", not "$*": joining the groups with a space would feed the picker a
+  # stray space, which is the toggle key.
+  printf '%s' "$@" > "$WORK/wizard-keys"
+  JOD_PROMPT_IN="$WORK/wizard-keys" JOD_PROMPT_OUT="$UI" "$SCRIPT" --target "$d"
+}
+DOWN=$'\033[B'; ENTER=$'\n'
+d="$(fresh wizard-full)"
+wizard "$d" \
+  "$DOWN$DOWN$ENTER" \
+  "n$DOWN $ENTER" \
+  "Widget Co$ENTER" \
+  "Widgets, at last.$ENTER" \
+  "bot$ENTER" \
+  "$ENTER" \
+  "y" >/dev/null 2>&1
+assert_file    "$d/AGENTS.md"                       "wizard: charter written"
+assert_grep    "Coverage is a required gate" "$d/AGENTS.md" "wizard: picked the 3rd preset (tdd-strict)"
+assert_grep    "Widget Co" "$d/AGENTS.md"           "wizard: typed name used"
+assert_grep    "Widgets, at last." "$d/AGENTS.md"   "wizard: typed description used"
+assert_grep    "bot/" "$d/AGENTS.md"                "wizard: typed branch prefix used"
+assert_no_grep "issue key" "$d/AGENTS.md"           "wizard: blank ticket answer -> no ticket rule"
+assert_dir     "$d/.agents/skills/setup-git-hooks"  "wizard: the toggled-on skill was copied"
+assert_missing "$d/.agents/skills/create-pr"        "wizard: untoggled skills were not"
+assert_link_to "$d/CLAUDE.md" "AGENTS.md"           "wizard: CLAUDE.md -> AGENTS.md"
+
+section "interactive: the ticket answer is honoured when given"
+d="$(fresh wizard-ticket)"
+wizard "$d" "$ENTER" "n$ENTER" "X$ENTER" "$ENTER" "$ENTER" "ENG$ENTER" "y" >/dev/null 2>&1
+assert_grep "ENG-12" "$d/AGENTS.md"                 "wizard: typed issue-key prefix reaches the charter"
+
+section "interactive: declining writes nothing"
+d="$(fresh wizard-no)"
+wizard "$d" "$ENTER" "n$ENTER" "X$ENTER" "$ENTER" "$ENTER" "$ENTER" "n" >/dev/null 2>&1
+assert_missing "$d/AGENTS.md"                       "wizard: answering 'no' at the summary writes nothing"
+
+d="$(fresh wizard-cancel)"
+wizard "$d" "q" >/dev/null 2>&1
+assert_missing "$d/AGENTS.md"                       "wizard: cancelling at the first picker writes nothing"
+
+section "interactive: an existing charter is never clobbered silently"
+d="$(fresh wizard-guard)"
+"$SCRIPT" --preset jod --name First --target "$d" >/dev/null 2>&1
+wizard "$d" "$ENTER" "n$ENTER" "Second$ENTER" "$ENTER" "$ENTER" "$ENTER" "n" >/dev/null 2>&1
+assert_grep "First" "$d/AGENTS.md"                  "wizard: declining the overwrite keeps the original"
+wizard "$d" "$ENTER" "n$ENTER" "Second$ENTER" "$ENTER" "$ENTER" "$ENTER" "yy" >/dev/null 2>&1
+assert_grep "Second" "$d/AGENTS.md"                 "wizard: confirming the overwrite replaces it"
+
+section "interactive: only choice-bearing flags turn the wizard off"
+d="$(fresh wizard-off)"
+# --preset answers a wizard question, so this must scaffold without prompting
+# even though a perfectly good key source is available.
+JOD_PROMPT_IN="$WORK/wizard-keys" JOD_PROMPT_OUT="$UI" \
+  "$SCRIPT" --preset minimal --name Flagged --target "$d" >/dev/null 2>&1
+assert_grep "Flagged" "$d/AGENTS.md"                "flags-only run scaffolds without prompting"
+
+d="$(fresh wizard-explicit-off)"
+JOD_PROMPT_IN="$WORK/wizard-keys" JOD_PROMPT_OUT="$UI" \
+  "$SCRIPT" --no-interactive --target "$d" >/dev/null 2>&1
+assert_file "$d/AGENTS.md"                          "--no-interactive scaffolds from defaults"
+
+section "interactive: no terminal falls back to --list"
+d="$(fresh wizard-notty)"
+OUT="$(JOD_PROMPT_IN="$WORK/no/such/tty" JOD_PROMPT_OUT="$UI" "$SCRIPT" --target "$d" 2>&1)"
+ok "grep -q 'Behavior presets' <<<\"\$OUT\""        "no tty: prints the list instead of hanging"
+assert_missing "$d/AGENTS.md"                       "no tty: writes nothing"
+
+# --- 10. output contract: --help ---------------------------------------------
 section "output contract"
 ok "\"$SCRIPT\" --help 2>&1 | grep -q 'Usage:'"       "--help renders usage"
+ok "\"$SCRIPT\" --help 2>&1 | grep -q -- '--interactive'" "--help documents interactive mode"
 
 assert_summary

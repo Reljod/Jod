@@ -1,3 +1,4 @@
+<!-- blurb: the full Jod charter — layered quality gates, draft-PR habits -->
 # AGENTS.md — {{PROJECT_NAME}}
 
 This file is the operating charter for any agent working in this repository —
@@ -65,14 +66,13 @@ Feature branches only, never directly on `main`. Names follow
 ## Commits
 
 ```
-<type>: <TICKET> <subject>
+<type>: <subject>
 ```
 
 - `type` ∈ feat, fix, bug, chore, docs, refactor, test, perf, ci, build,
   style, revert.
-- `TICKET` is the issue key (e.g. `{{TICKET_PREFIX}}-12`), required except
-  for housekeeping types (chore/docs/style/ci).
 - Keep the subject imperative and ≤ 72 chars.
+- {{TICKET_RULE}}
 
 Match whatever `setup-git-hooks` installs for this repo. → **`setup-git-hooks`**
 

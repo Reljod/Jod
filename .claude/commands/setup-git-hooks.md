@@ -13,10 +13,12 @@ Steps:
    to copy the hooks into `<repo>/.githooks/`, wire up `core.hooksPath`,
    and pre-fill `commit-convention.conf` for the detected ecosystem.
 2. Confirm the commit-message convention with the user before locking it
-   in — the default enforces `<type>: <TICKET> <subject>` with a
-   Linear-style ticket key (e.g. `feat: ENG-123 add retries`). Adjust
-   `ALLOWED_TYPES`, `TICKET_REGEX`, and `TICKET_EXEMPT_TYPES` in
-   `.githooks/commit-convention.conf` if they want different rules.
+   in — the default enforces `<type>: <subject>` (e.g. `feat: add retries`)
+   with **no** issue key required. Adjust `ALLOWED_TYPES` /
+   `MAX_SUBJECT_LENGTH` in `.githooks/commit-convention.conf` if they want
+   different rules, and only set `TICKET_REGEX` (plus
+   `TICKET_EXEMPT_TYPES`) if they explicitly ask to require a ticket key
+   like `ENG-123` — that one is opt-in, never assume it.
 3. Verify **both** the pass and fail paths deterministically (the installer
    prints the exact commands), then commit the `.githooks/` directory.
 4. Remind them these hooks are the fast *local* courtesy layer — the

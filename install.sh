@@ -10,8 +10,8 @@
 # run, e.g.:
 #
 #   cd ~/code/some-other-repo
-#   jod setup-project --list
-#   jod setup-project --preset jod --skills create-pr,setup-git-hooks,tdd-loop
+#   jod setup-project          # interactive: pick a preset and skills
+#   jod setup-project --preset jod --skills create-pr,setup-git-hooks  # scripted
 #
 # Versioning: releases are tagged vMAJOR.MINOR.PATCH (see
 # .github/workflows/release.yml — run it manually to cut one). By default
@@ -122,7 +122,10 @@ cat <<EOF
 
 Next, in the repo you want to set up:
   cd /path/to/your/repo
-  jod setup-project --list
+  jod setup-project
+
+That walks you through the choices — ↑/↓ to move, space to toggle skills,
+enter to confirm. Every choice is also a flag, for scripted setups:
   jod setup-project --preset jod --skills create-pr,setup-git-hooks,tdd-loop
 
 Run 'jod help' for all commands, 'jod version' to see what's installed, or
