@@ -70,6 +70,15 @@ as a pre-push / CI gate.
    of scope, say so explicitly (as a comment in the suite) rather than
    leaving it silently uncovered.
 
+   Fixing "the test is wrong" means making it assert the *right* thing — not
+   asserting less. Loosening an assertion, deleting the case, or widening an
+   `except` until it passes converts a real failure into a false one, which
+   is strictly worse than the red bar you started with. If a scenario can't
+   be observed here because a capability is missing, write it down as blocked
+   (`BLOCKED.md`: `Missing:` / `Tried:` / `Needs:` plus the suite path) and
+   leave the assertion in place. An honest red is a result; a bought green is
+   a lie the next reader will trust.
+
 ## What good coverage looks like
 
 - **Every variant, not a representative one.** Four presets → test four. The

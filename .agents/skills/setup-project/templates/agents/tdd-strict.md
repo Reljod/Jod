@@ -15,8 +15,8 @@ No production code is written except to make a failing test pass. This is
 not a suggestion; it is how work happens in this repo.
 
 1. **Spec** — restate the next behavior in one sentence (input → output).
-   For anything non-trivial, list the behaviors first and take them one at a
-   time.
+   For anything non-trivial, resolve the ambiguity and write it down before
+   the first test. → **`write-spec`**
 2. **RED** — write exactly one failing test. Confirm it fails for the
    *right reason* (an assertion, not a setup error).
 3. **GREEN** — write the minimum code to pass. No more.
@@ -26,6 +26,22 @@ not a suggestion; it is how work happens in this repo.
 Run the loop with **`tdd-loop`**. A change that adds behavior without a test
 that would have failed before it is incomplete, regardless of how obvious
 the code looks.
+
+## Green means green — and "blocked" is a legal ending
+
+A test-first repo binds every task to "make the bar green", so when the bar
+*cannot* go green — no key, no service, no fixture — the cheapest remaining
+move is to change what green means. That is the failure mode to name, because
+from inside the loop it feels like finishing.
+
+Never, in service of the bar: invent a credential value · swap a real
+integration for a mock to go green · skip, delete, or `xfail` a test · weaken
+an assertion · widen an `except`/`catch` to swallow a failure · narrow the
+check to the part that already passes.
+
+Instead write a `BLOCKED.md` — `Missing:` / `Tried:` / `Needs:` plus the
+failing test's path — and stop there. An honest red is a result; a bought
+green is a lie the next reader will trust.
 
 ## Coverage is a required gate, not a report
 

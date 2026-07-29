@@ -38,7 +38,9 @@ stay copyable into repos that have no `domains/` at all.
 
 1. **Act like Reljod would, not like a generic assistant.** Prefer decisive,
    well-reasoned action over hedged options when the call is clearly his to
-   make; escalate the genuinely ambiguous ones instead of guessing.
+   make; escalate the genuinely ambiguous ones instead of guessing. Before a
+   long unattended run, declare *what* would deserve an escalation up front
+   rather than stopping at every step to ask.
 2. **System of record over ad hoc storage.** Tasks belong in Linear, notes in
    Notion, code in the relevant repo. This repo holds the charter, the
    cross-domain glue, and reusable skills — not a shadow copy of the data
@@ -65,57 +67,75 @@ itself; distill it, don't narrate it.
 - **The toolkit stays out of `domains/`.** Skills and this charter never
   reference personal domains, so `.agents/` stays copyable into any repo. A
   reusable workflow is not one of Reljod's personal life-domains.
+- **"Blocked" is a legal way to finish — this is the anti-workaround rule.**
+  A gate whose only successful exit is "the check passes" *mathematically
+  requires* a fake when the check can't pass, and from inside the task the
+  cheapest path reads as success. So: never invent a credential value, swap a
+  real integration for a mock to go green, skip/delete/`xfail` a test, weaken
+  an assertion, widen an `except`/`catch` to swallow a failure, touch test
+  files or CI config during an implementation task, or narrow a check to the
+  part that already passes. Write a `BLOCKED.md` instead — `Missing:` /
+  `Tried:` / `Needs:` plus every failing suite path — and close as blocked.
+  The `TaskCompleted` hook accepts that note, so honesty is a real exit and
+  not merely an instruction.
+- **The human gate is the spec, not the diff.** Verifying is the bottleneck,
+  not writing, so the gate belongs where a decision is cheapest: one sentence
+  at spec time, one PR at review time — never a plan someone must read before
+  work can start. For non-trivial work, interview until nothing material is
+  guessed, write a self-contained `SPEC.md` (named files, out of scope, one
+  runnable check, sanctioned fakes, escalation list), then execute in a
+  *fresh* session. → **`write-spec`**
 - **Quality by layering, not diligence.** Cheap deterministic checks early
   (git hooks) under mandatory ones later (required CI) beats relying on
-  remembering to be careful — nothing safety-critical lives *only* in a hook.
-- **"Tested" means CI ran it, not that an agent says so.** Shipped
-  `install.sh`'s update logic with only a local test run as evidence — a
-  human reviewing the PR had no way to check that without re-running it
-  themselves. A `Tests` Action now runs every `*.test.sh` suite on every
-  push/PR, so pass/fail is a status on the PR itself, not a claim in chat.
+  remembering to be careful — nothing safety-critical lives *only* in a hook,
+  and no design may depend on a hook holding against an agent that cannot
+  possibly satisfy it.
+- **"Tested" means CI ran it, not that an agent says so.** `install.sh`'s
+  update logic shipped with only a local run as evidence, which a reviewer
+  had no way to check. A `Tests` Action now runs every `*.test.sh` on every
+  push/PR. Same rule at review time: PRs carry the check's **real output** and
+  the diff-derived deltas from `create-pr`'s evidence bundle, because a faked
+  pass is invisible in a summary and obvious in raw output.
 - **Commits:** `<type>: <subject>`, imperative, ≤72 chars. The exact gate is
   the `setup-git-hooks` skill; it isn't restated here.
-- **Issue keys are opt-in, never the default.** The commit gate shipped
-  requiring a Linear-style `ENG-123` in every non-housekeeping subject, and
-  the scaffolder baked that into the charters it generated. That is one
-  team's house rule, not a property of a good commit — it breaks on repos
-  with no tracker, on contributors who can't see one, and on the many real
-  commits that map to no issue. `TICKET_REGEX` now ships empty and
-  `--ticket` is an explicit flag; turning it on is a per-repo decision.
-- **The CLI asks; the script still takes flags.** `jod setup-project` with
-  no choices walks a human through them (↑/↓, space, enter) instead of
-  making them read `--list` and hand-assemble a comma-separated
-  `--skills`. The wizard only *fills in* the flags — the scaffold itself
-  stays flag-driven and deterministic, so scripts, CI, and agents keep the
-  exact same entry point, and no-tty falls back to `--list` rather than
-  hanging on a prompt.
+- **Issue keys are opt-in, never the default.** The commit gate first
+  required a Linear-style `ENG-123` in every subject and the scaffolder baked
+  that into generated charters. That's one team's house rule, not a property
+  of a good commit — it breaks on repos with no tracker and on the many real
+  commits that map to no issue. `TICKET_REGEX` ships empty; `--ticket` is an
+  explicit per-repo decision.
+- **The CLI asks; the script still takes flags.** `jod setup-project` with no
+  choices walks a human through them (↑/↓, space, enter) rather than making
+  them hand-assemble `--skills`. The wizard only *fills in* flags, so
+  scripts, CI, and agents keep the same deterministic entry point; no-tty
+  falls back to `--list` instead of hanging on a prompt.
 - **Toolkit distribution is a curlable installer, not a required clone.**
-  `install.sh` + `bin/jod` let any Linux/macOS machine bootstrap the
-  toolkit and run `jod setup-project` against a repo without cloning Jod
-  into every project — a package-manager-free installer beats asking
-  people to remember a path.
+  `install.sh` + `bin/jod` bootstrap the toolkit on any Linux/macOS box and
+  run `jod setup-project` against a repo without cloning Jod into every
+  project.
 - **Releases are semver tags, cut manually.** `vMAJOR.MINOR.PATCH` via the
-  Release Action's `workflow_dispatch`, never on every push — cutting a
-  release is a deliberate act. Install pins to latest by default;
-  `jod update` only ever takes newer patches within the installed
+  Release Action's `workflow_dispatch`, never on every push. Install pins to
+  latest; `jod update` only takes newer patches within the installed
   MAJOR.MINOR, so a minor/major bump can't yank the rug out from under an
   existing install.
 - **Scaffold fitness is checked at release time, not every push.**
-  `tests/e2e/run.sh` scaffolds `setup-project.sh` against a spread of
-  fixture repos (greenfield JS, existing OSS conventions, a monorepo, a
-  repo with a hand-written charter already, ...) and logs where the
-  generated `AGENTS.md` doesn't fit as a "gap" rather than failing the run
-  — spinning up N scaffolds is too expensive for every PR, and gaps are
-  findings to support later, not a merge-blocking contract. Wired into
-  `release.yml` / `e2e.yml`, not `tests.yml`.
+  `tests/e2e/run.sh` scaffolds against a spread of fixture repos (greenfield
+  JS, OSS conventions, a monorepo, a hand-written charter, …) and logs where
+  the generated `AGENTS.md` doesn't fit as a "gap" rather than failing —
+  N scaffolds is too expensive per PR, and gaps are findings to support
+  later, not a merge-blocking contract. Wired into `release.yml` / `e2e.yml`.
 - **Parallelism here is agent teams, and ownership is what makes it safe.**
-  Teams were chosen over worktree-isolated subagents because the work that
-  actually benefits is review and investigation, where teammates need to
-  argue with each other — and that's exactly what subagents can't do. The
-  cost is that teams share one checkout, so the isolation git would have
-  given us has to come from disjoint file ownership plus a `TaskCompleted`
-  test gate instead. Same layering principle as the git hooks: cheap
-  deterministic check early, required CI still the real authority.
+  Teams beat worktree-isolated subagents because the work that benefits is
+  review and investigation, where teammates need to argue with each other —
+  exactly what subagents can't do. The cost is one shared checkout, so the
+  isolation git would have given us comes from disjoint file ownership plus
+  the `TaskCompleted` gate instead.
+- **Review runs on a fresh context, briefed narrowly.** A reviewer that never
+  saw the reasoning judges the result on its own terms; one told to "find
+  gaps" invents them, and the diff grows abstraction and tests for impossible
+  states. So reviewers get the diff, the spec, and the substitutions
+  checklist — nothing else. `REVIEW.md` briefs the automated first pass,
+  `.claude/agents/reviewer.md` the in-session ones.
 
 ## Skills
 
@@ -123,9 +143,13 @@ The toolkit is a set of Claude Code skills under
 [`.agents/skills/`](.agents/skills/), each with a thin `/`-command wrapper in
 `.claude/commands/`:
 
+- **write-spec** (`/write-spec`) — interview with `AskUserQuestion` until the
+  ambiguity is gone, then write a `SPEC.md` a fresh session can execute.
 - **setup-project** (`/setup-project`) — scaffold a repo's `AGENTS.md` charter
   from a chosen behavior preset and copy in the skills you want.
-- **create-pr** (`/create-pr`) — visual-first PR descriptions.
+- **create-pr** (`/create-pr`) — visual-first PR descriptions, plus the
+  after-the-run evidence bundle (blast radius, contract diff, substitutions,
+  spec deviation).
 - **setup-git-hooks** (`/setup-git-hooks`) — local commit-message + lint hooks.
 - **tdd-loop** (`/tdd-loop`) — test-first red-green-refactor loop.
 - **test-scenarios** (`/test-scenarios`) — exhaustive scenario/edge-case
@@ -147,6 +171,7 @@ When to touch the skill layer:
 ```
 AGENTS.md          this charter (source of truth)
 CLAUDE.md          symlink -> AGENTS.md
+REVIEW.md          brief for the automated PR review
 .agents/skills/    the portable toolkit — reusable Claude Code skills
 domains/           personal operating data — never referenced by the toolkit
   tasks/           Linear; second-brain/ Notion; finance/ planned
@@ -173,10 +198,11 @@ worktrees — so ownership is the whole safety mechanism:
 - **The lead owns `AGENTS.md` and `README.md`.** Teammates report the charter
   note they think is warranted; the lead writes it. This is the file every
   teammate would otherwise touch.
-- **A task closes green or not at all.** A `TaskCompleted` hook
-  (`.claude/hooks/task-completed-tests.sh`) runs every `*.test.sh` suite and
-  refuses the completion if any fail, because a teammate can go green on its
-  own work while having broken a peer's.
+- **A task closes green, or blocked in writing — never quietly.** A
+  `TaskCompleted` hook (`.claude/hooks/task-completed-tests.sh`) runs every
+  `*.test.sh` suite and refuses the completion if any fail, because a teammate
+  can go green on its own work while having broken a peer's. It accepts a
+  `BLOCKED.md` covering every failing suite as the alternative exit.
 
 Reusable teammate roles live in `.claude/agents/`: `skill-author`,
 `toolkit-engineer` (write, one area each) and `reviewer`, `investigator`

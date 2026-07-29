@@ -51,16 +51,33 @@ echo
 echo "<!-- Terse bullets, not paragraphs. -->"
 echo "- "
 echo
-echo "## Test plan"
+echo "## Verification"
 echo
-echo "- [ ] "
+echo "<!-- The command a skeptic would run, and its REAL output. A ticked box is"
+echo "     an assertion; pasted output is evidence. If the check could not run,"
+echo "     say so here and link the BLOCKED.md — that is a valid outcome. -->"
 echo
-echo "## Checks"
+echo '```'
+echo "\$ "
+echo '```'
 echo
-echo "<!-- The deterministic gate. Surface that the required checks are green so a reviewer trusts the diff. -->"
-echo "- [ ] CI required checks green"
-echo "- [ ] Lint / format / type-check pass"
-echo "- [ ] Coverage on changed lines holds"
+echo "## Evidence"
+echo
+echo "<!-- Paste the output of:"
+echo "     .agents/skills/create-pr/scripts/evidence_bundle.sh <base>...<head>"
+echo "     Blast radius, contract diff, substitutions, spec deviation. Generated"
+echo "     after the run, so it costs no approval and answers 'where do I look?'"
+echo "     before the reviewer has to ask. -->"
+echo
+echo "## Decisions"
+echo
+echo "<!-- Calls made without asking, so review can read only the shaky ones."
+echo "     Anything on the spec's escalation list should have been asked, not"
+echo "     logged. Drop this section if there were none. -->"
+echo
+echo "| Decision | Why | Confidence |"
+echo "|---|---|---|"
+echo "|  |  | high/med/low |"
 echo
 echo "<!-- Long logs / full plan output go here, collapsed:"
 echo "<details><summary>details</summary>"

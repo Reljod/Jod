@@ -117,11 +117,12 @@ run_interactive() {
   fi
 
   # Preselect what this preset's charter actually leans on, per the skill's
-  # recommendation: everything for jod/team, the test-first trio for
-  # tdd-strict, nothing for minimal (it exists to stay lean).
+  # recommendation: everything for jod/team, the test-first set for
+  # tdd-strict (write-spec included — a spec is upstream of the first test),
+  # nothing for minimal (it exists to stay lean).
   case "$PRESET" in
     minimal)    preselect="" ;;
-    tdd-strict) preselect="tdd-loop,test-scenarios,setup-git-hooks" ;;
+    tdd-strict) preselect="write-spec,tdd-loop,test-scenarios,setup-git-hooks" ;;
     *)          preselect="$(list_skills | paste -sd',' -)" ;;
   esac
   opts=()

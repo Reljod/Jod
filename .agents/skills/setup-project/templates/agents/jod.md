@@ -39,6 +39,19 @@ don't narrate it.
 - **Quality by layering, not diligence.** Cheap deterministic checks early
   under mandatory ones later beats relying on remembering to be careful (see
   the layer model below).
+- **"Blocked" is a legal way to finish.** If the only successful ending is
+  "the check passes", a check that *cannot* pass mathematically requires a
+  fake — so the cheapest path becomes mocking the client, inventing a key, or
+  skipping the test, and from inside the task that reads as success. Never
+  invent a credential value, swap a real integration for a mock to go green,
+  skip/delete/`xfail` a test, weaken an assertion, widen an `except`/`catch`
+  to swallow a failure, or edit test/CI files during an implementation task.
+  Write a `BLOCKED.md` instead — `Missing:` / `Tried:` / `Needs:` plus the
+  failing check — and stop. That is a successful outcome, not a failure.
+- **The human gate is the spec, not the diff.** For non-trivial work, resolve
+  the ambiguity up front and write it down (named files, out of scope, one
+  runnable check, escalation list); then it can run unattended and review has
+  something to check the diff against. → **`write-spec`**
 - _Add your project's WHYs here as they emerge._
 
 ## How code quality is enforced (the layer model)
@@ -54,9 +67,9 @@ ones later, so nothing depends on remembering to be careful:
    thresholds actually bite.
 3. **Continuous, not per-PR** — heavier suites (E2E, fuzzing) on a schedule;
    they open a ticket, they don't block a merge.
-4. **Upstream of code** — a short behavior list before non-trivial work, so
-   "did we build the right thing" is answered before the code exists.
-   → **`tdd-loop`**
+4. **Upstream of code** — the ambiguity resolved and written down before
+   non-trivial work, so "did we build the right thing" is answered before the
+   code exists. → **`write-spec`**, then **`tdd-loop`**
 
 ## Branching
 
@@ -79,9 +92,9 @@ Match whatever `setup-git-hooks` installs for this repo. → **`setup-git-hooks`
 ## PRs
 
 Draft by default; open one after pushing if no open PR exists for the
-branch. Build the body with **`create-pr`** — visuals first, and surface
-that the deterministic checks are green so review attention goes to
-judgment, not to re-verifying the boring correctness.
+branch. Build the body with **`create-pr`** — visuals first, then the check's
+**real output** rather than a ticked box, so review attention goes to judgment
+instead of re-verifying the boring correctness.
 
 ## Skills
 

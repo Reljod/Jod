@@ -96,6 +96,7 @@ Skills to copy in  ↑/↓ move · space toggle · a all · n none · enter conf
     [x] setup-git-hooks  Install deterministic local git hooks for a repo.
     [ ] tdd-loop         Build a feature or fix a bug test-first.
     [x] test-scenarios   Exhaustively test a unit — every scenario, every edge case.
+    [x] write-spec       Interview, then write a SPEC.md a fresh session can execute.
 ```
 
 Every choice is also a flag, so the same scaffold is scriptable — and with
@@ -138,6 +139,7 @@ too expensive to run on every push), tags, and publishes a GitHub Release.
 ```
 AGENTS.md          the charter — identity, principles, slim WHY notes
 CLAUDE.md          symlink -> AGENTS.md, so every runtime reads the same source
+REVIEW.md          brief for the automated PR review — what to flag, what to ignore
 install.sh         curlable bootstrap: clones this repo, links the `jod` CLI
 bin/jod            CLI shim — dispatches into .agents/skills/ from any repo
 .agents/skills/    the portable toolkit — reusable Claude Code skills
