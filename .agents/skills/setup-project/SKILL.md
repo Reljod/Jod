@@ -152,8 +152,7 @@ turns.
 - Don't silently overwrite an existing charter — respect the no-`--force`
   refusal and ask the user before clobbering.
 - The scaffold seeds conventions; it does not *enforce* them. Enforcement is
-  `setup-git-hooks` locally and required checks in CI (the quality-layering
-  rationale lives in the charter's **Design choices**).
+  `setup-git-hooks` locally and required checks in CI (the charter records why).
 - **Templates ship inside this skill** (`templates/agents/`), so the whole
   `.agents/` toolkit stays copyable into any repo — it never reaches into
   `domains/`.

@@ -39,20 +39,21 @@ don't narrate it.
 - **Quality by layering, not diligence.** Cheap deterministic checks early
   under mandatory ones later beats relying on remembering to be careful (see
   the layer model below).
-- **"Blocked" is a legal way to finish.** If the only successful ending is
-  "the check passes", a check that *cannot* pass mathematically requires a
-  fake — so the cheapest path becomes mocking the client, inventing a key, or
-  skipping the test, and from inside the task that reads as success. Never
-  invent a credential value, swap a real integration for a mock to go green,
-  skip/delete/`xfail` a test, weaken an assertion, widen an `except`/`catch`
-  to swallow a failure, or edit test/CI files during an implementation task.
-  Write a `BLOCKED.md` instead — `Missing:` / `Tried:` / `Needs:` plus the
-  failing check — and stop. That is a successful outcome, not a failure.
-- **The human gate is the spec, not the diff.** For non-trivial work, resolve
-  the ambiguity up front and write it down (named files, out of scope, one
-  runnable check, escalation list); then it can run unattended and review has
-  something to check the diff against. → **`write-spec`**
+- **"Blocked" is a legal way to finish.** A check that *cannot* pass makes
+  faking it the cheapest path, so honesty gets to be a real exit (see the rule
+  below).
+- **The human gate is the spec, not the diff.** Verifying is the bottleneck, so
+  resolve ambiguity before the work, not after. → **`write-spec`**
 - _Add your project's WHYs here as they emerge._
+
+## Never work around a blocked check
+
+- **Never**, in service of a check: invent a credential value · swap a real
+  integration for a mock to go green · skip, delete or `xfail` a test · weaken
+  an assertion · widen an `except`/`catch` to swallow a failure · edit test or
+  CI files during an implementation task.
+- **Instead** write `BLOCKED.md` — `Missing:` / `Tried:` / `Needs:` plus the
+  failing check — and stop. That is a successful outcome.
 
 ## How code quality is enforced (the layer model)
 

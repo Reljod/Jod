@@ -136,7 +136,7 @@ run_interactive() {
   PROJECT_DESC="$(prompt_text "One-line description" "")"
   BRANCH_PREFIX="$(prompt_text "Branch prefix" "$BRANCH_PREFIX")"
   # Opt-in, and phrased so blank is the obvious answer: a required issue key
-  # is a house rule, not a default (see the charter's Design choices).
+  # is a house rule, not a default (see the charter's decision notes).
   TICKET_PREFIX="$(prompt_text "Issue-key prefix for commits, blank for none" "")"
 
   info ""
