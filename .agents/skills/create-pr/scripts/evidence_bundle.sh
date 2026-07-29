@@ -42,24 +42,45 @@ if [ -z "$FILES" ]; then
   exit 0
 fi
 
-# Added / removed lines only. Patterns are matched against these rather than
-# the whole file, so something that was already in the codebase is never
-# reported as introduced by this PR.
-added_lines()   { git diff -U0 "$RANGE" | grep '^+' | grep -v '^+++'; }
-removed_lines() { git diff -U0 "$RANGE" | grep '^-' | grep -v '^---'; }
-
-# scan_diff <+|-> <extended-regex> — matching lines on that side of the diff,
-# each prefixed with the file it landed in (awk keeps the current +++ header).
-scan_diff() {
-  git diff -U0 "$RANGE" | awk -v side="$1" -v pat="$2" '
-    /^\+\+\+ b\// { f = substr($0, 7); next }
-    /^\+\+\+ / { f = "?"; next }
-    /^(\+\+\+|---|@@|diff |index )/ { next }
-    substr($0, 1, 1) == side {
-      line = substr($0, 2)
-      if (line ~ pat) printf "  - `%s` — %s\n", f, substr(line, 1, 120)
+# diff_side <+|-> — added or removed lines as "<file>\t<text>". Patterns are
+# matched against these rather than whole files, so something already in the
+# codebase is never reported as introduced here.
+#
+# Prose is excluded. A markdown file cannot skip a test or swallow an
+# exception, but it very often *discusses* doing so — a charter, a review
+# brief, or this script's own docs would otherwise flag on every rule they
+# state. Contracts live in code; a doc describing one is not the contract.
+diff_side() {
+  git diff -U0 "$RANGE" | awk -v side="$1" '
+    /^\+\+\+ b\// {
+      f = substr($0, 7)
+      skip = (f ~ /\.(md|markdown|txt|rst|adoc|png|gif|jpe?g|svg)$/ || f ~ /(^|\/)docs?\//)
+      next
     }
+    /^\+\+\+ / { f = "?"; skip = 0; next }
+    /^(\+\+\+|---|@@|diff |index )/ { next }
+    !skip && substr($0, 1, 1) == side { printf "%s\t%s\n", f, substr($0, 2) }
   '
+}
+
+# cap — keep a section readable, and say what was left out rather than
+# silently truncating. A capped list that claims completeness is the same
+# failure mode as a summary that hides a skipped test.
+CAP=10
+cap() {
+  local n=0 line
+  while IFS= read -r line; do
+    n=$((n + 1))
+    [ "$n" -le "$CAP" ] && printf '%s\n' "$line"
+  done
+  [ "$n" -gt "$CAP" ] && printf '  - … and %d more (capped at %d, run the scan yourself for the rest)\n' "$((n - CAP))" "$CAP"
+  return 0
+}
+
+# scan_diff <+|-> <extended-regex> — matching lines, prefixed with their file.
+scan_diff() {
+  diff_side "$1" | grep -E -- "$2" \
+    | awk -F'\t' '{ printf "  - `%s` — %s\n", $1, substr($2, 1, 120) }' | cap
 }
 scan_added() { scan_diff "+" "$1"; }
 
@@ -102,8 +123,8 @@ echo "<!-- Anything a caller could be depending on. Empty here means this PR"
 echo "     is safe to read as internal-only. -->"
 echo
 CONTRACT_PAT='(export |public |def |func |class |type |interface |CREATE TABLE|ALTER TABLE|DROP TABLE|@(app|router|route|Get|Post|Put|Delete|Patch)\(|--[a-z][a-z0-9-]+|os\.environ|process\.env|getenv)'
-c_add="$(scan_added "$CONTRACT_PAT" | head -40)"
-c_del="$(scan_diff "-" "$CONTRACT_PAT" | head -40)"
+c_add="$(scan_added "$CONTRACT_PAT")"
+c_del="$(scan_diff "-" "$CONTRACT_PAT")"
 if [ -n "$c_add" ] || [ -n "$c_del" ]; then
   [ -n "$c_add" ] && { echo "Added / changed:"; echo; printf '%s\n' "$c_add"; echo; }
   [ -n "$c_del" ] && { echo "Removed (breaking if anything called it):"; echo; printf '%s\n' "$c_del"; echo; }
@@ -136,8 +157,8 @@ done <<< "$(scan_added '(mock|Mock|MagicMock|patch\(|stub|FakeClient|DummyClient
 [ -n "$mocks" ] && flagged+="**Mocks/stubs in non-test code**"$'\n\n'"$mocks"$'\n'
 
 # Assertions are supposed to accumulate. A net loss is worth one look.
-a_add="$(added_lines | grep -cE 'assert|expect\(|should\.' )"
-a_del="$(removed_lines | grep -cE 'assert|expect\(|should\.' )"
+a_add="$(diff_side "+" | grep -cE 'assert|expect\(|should\.')"
+a_del="$(diff_side "-" | grep -cE 'assert|expect\(|should\.')"
 if [ "$a_del" -gt "$a_add" ]; then
   flagged+="**Net assertions removed** — $a_del removed vs $a_add added."$'\n'
 fi

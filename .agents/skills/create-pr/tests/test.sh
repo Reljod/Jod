@@ -191,6 +191,32 @@ printf 'def run():\n    return 2\n' > src/app.py
 report >/dev/null
 assert_grep 'write-spec' report.md "the report says how to get a spec"
 
+section "prose is excluded — a doc that discusses a workaround isn't one"
+scenario subs-prose >/dev/null
+mkdir -p docs
+{
+  printf 'Never use @pytest.mark.skip to go green.\n'
+  printf 'Do not widen `except:` to swallow a failure.\n'
+  printf 'Do not swap a real client for a MagicMock.\n'
+  printf 'export function is a contract change.\n'
+  printf 'api_key = "sk_live_abc123def" is never acceptable.\n'
+} > docs/policy.md
+cp docs/policy.md CONTRIBUTING.md
+report >/dev/null
+assert_grep    'None flagged'    report.md "a policy doc stating the rules flags nothing"
+assert_grep    'No public surface' report.md "and is not read as a contract change"
+ok "! awk '/^## Contract diff/,/^## Spec deviation/' report.md | grep -q 'docs/policy.md'" "the doc is quoted in neither scan section"
+ok "! awk '/^## Contract diff/,/^## Spec deviation/' report.md | grep -q 'CONTRIBUTING.md'" "nor is a root-level markdown file"
+ok "awk '/^\*\*Low/,/^## Contract/' report.md | grep -q 'docs/policy.md'" "but it still shows in the blast radius"
+
+section "long scan sections are capped, and say so"
+scenario subs-cap >/dev/null
+for i in $(seq 1 14); do printf 'def test_%s():\n    pass\n' "$i" >> tests/test_many.py; done
+for i in $(seq 1 14); do printf '@pytest.mark.skip\ndef test_s%s():\n    pass\n' "$i" >> tests/test_skips.py; done
+report >/dev/null
+assert_grep 'and 4 more' report.md "the overflow count is stated, not silently dropped"
+ok "[ \"\$(grep -c 'pytest.mark.skip' report.md)\" -le 11 ]" "the section stays readable"
+
 # --- 7. determinism ----------------------------------------------------------
 section "deterministic output"
 scenario det >/dev/null

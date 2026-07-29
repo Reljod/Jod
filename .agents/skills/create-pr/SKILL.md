@@ -147,7 +147,11 @@ answer by reading everything:
   named that went untouched. The plan-vs-diff report, computed from git
   rather than from memory.
 
-Paste it in as-is. It flags, it doesn't judge; the reviewer weighs it.
+Paste it in as-is. It flags, it doesn't judge; the reviewer weighs it. Two
+things it deliberately does: skips prose (`*.md`, `docs/`) in the contract and
+substitution scans, since a doc that *states* a rule isn't breaking it, and
+caps long sections while printing the overflow count — a truncated list that
+looks complete is the same failure as a summary hiding a skipped test.
 
 ## 5. Assemble the body, visuals first
 
