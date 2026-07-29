@@ -141,11 +141,11 @@ echo "     workaround that should have been a BLOCKED.md. -->"
 echo
 flagged=""
 skips="$(scan_added '(\.skip\(|\.todo\(|\bxit\(|@pytest\.mark\.(skip|xfail)|unittest\.skip|t\.Skip\(|#\[ignore\]|--no-verify|continue-on-error: *true)')"
-[ -n "$skips" ] && flagged+="**Skipped / disabled checks**"$'\n\n'"$skips"$'\n'
+[ -n "$skips" ] && flagged+="**Skipped / disabled checks**"$'\n\n'"$skips"$'\n\n'
 silenced="$(scan_added '(except[[:space:]]*:|except (Exception|BaseException)|catch[[:space:]]*\{|catch[[:space:]]*\([^)]*\)[[:space:]]*\{[[:space:]]*\}|rescue[[:space:]]*$|# noqa|# nosec|# type: ignore|@ts-ignore|eslint-disable|\|\|[[:space:]]*true)')"
-[ -n "$silenced" ] && flagged+="**Silenced failures**"$'\n\n'"$silenced"$'\n'
+[ -n "$silenced" ] && flagged+="**Silenced failures**"$'\n\n'"$silenced"$'\n\n'
 creds="$(scan_added '(api[_-]?key|secret|token|password|passwd)[[:space:]]*[:=][[:space:]]*["'"'"'][^"'"'"']{6,}')"
-[ -n "$creds" ] && flagged+="**Hardcoded credential-shaped values**"$'\n\n'"$creds"$'\n'
+[ -n "$creds" ] && flagged+="**Hardcoded credential-shaped values**"$'\n\n'"$creds"$'\n\n'
 
 # A mock is unremarkable in a test and a red flag in shipped code.
 mocks=""
@@ -154,7 +154,7 @@ while IFS= read -r line; do
   f="$(printf '%s' "$line" | sed 's/^  - `\([^`]*\)`.*/\1/')"
   is_test_path "$f" || mocks+="$line"$'\n'
 done <<< "$(scan_added '(mock|Mock|MagicMock|patch\(|stub|FakeClient|DummyClient)')"
-[ -n "$mocks" ] && flagged+="**Mocks/stubs in non-test code**"$'\n\n'"$mocks"$'\n'
+[ -n "$mocks" ] && flagged+="**Mocks/stubs in non-test code**"$'\n\n'"$mocks"$'\n\n'
 
 # Assertions are supposed to accumulate. A net loss is worth one look.
 a_add="$(diff_side "+" | grep -cE 'assert|expect\(|should\.')"

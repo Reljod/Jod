@@ -191,6 +191,16 @@ printf 'def run():\n    return 2\n' > src/app.py
 report >/dev/null
 assert_grep 'write-spec' report.md "the report says how to get a spec"
 
+section "the report is valid markdown when several categories fire"
+scenario subs-multi >/dev/null
+printf '@pytest.mark.skip\ndef test_run():\n    pass\n' > tests/test_app.py
+printf 'def run():\n    try:\n        go()\n    except:\n        pass\n' > src/app.py
+report >/dev/null
+assert_grep 'Skipped / disabled checks' report.md "first category present"
+assert_grep 'Silenced failures'         report.md "second category present"
+ok "[ -z \"\$(grep -B1 '^\*\*Silenced failures\*\*' report.md | head -1 | tr -d '[:space:]')\" ]" \
+  "categories are blank-line separated so the bold headers render"
+
 section "prose is excluded — a doc that discusses a workaround isn't one"
 scenario subs-prose >/dev/null
 mkdir -p docs
