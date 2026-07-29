@@ -1,105 +1,74 @@
 <!-- blurb: the full Jod charter — layered quality gates, draft-PR habits -->
 # AGENTS.md — {{PROJECT_NAME}}
 
-This file is the operating charter for any agent working in this repository —
-Claude Code, a Claude Agent SDK process, or any other AGENTS.md-compatible
-tool. `CLAUDE.md` is a symlink to this file: one charter, read by every
-runtime.
+Operating charter for any agent working in this repo — Claude Code, a Claude
+Agent SDK process, or any AGENTS.md-compatible tool. `CLAUDE.md` symlinks here.
+
+**Guidelines only.** Every rule is a bullet. Put the reasoning in
+`docs/decisions.md` and the procedure in the skill that owns it — if a line here
+needs a paragraph, it belongs behind a link.
 
 ## What this repo is
 
 {{PROJECT_DESC}}
 
-## Operating principles
+## Principles
 
-1. **Act decisively where the call is clearly yours.** Prefer well-reasoned
-   action over hedged options; escalate the genuinely ambiguous decisions
-   instead of guessing.
-2. **System of record over ad hoc storage.** Keep each kind of information
-   where it actually belongs (tasks in the tracker, docs in the docs, code
-   in the repo) rather than scattering shadow copies.
-3. **Reversible by default.** Local, reversible actions (drafting, editing,
-   reading) don't need a check-in. Anything hard to reverse or visible to
-   others — sending messages, pushing to shared branches, closing tickets —
-   gets confirmed first.
-4. **Extend by writing it down.** Capture what proves itself in the smallest
-   durable form: a one-line WHY note under **Design choices** below, or — for
-   a repeatable, multi-step procedure — a skill under `.agents/skills/`. Ad
-   hoc fixes that never get written down don't compound.
-5. **Keep this file thin.** This charter holds identity, principles, and slim
-   WHY notes. Operational how-to lives in the skill that owns it; deep
-   area-specific procedure in its own linked doc. Not here.
-
-## Design choices (the WHYs)
-
-Slim notes on decisions worth not re-litigating, so the reasoning outlives
-the session that set it. Add a line when a choice proves itself; distill it,
-don't narrate it.
-
-- **Quality by layering, not diligence.** Cheap deterministic checks early
-  under mandatory ones later beats relying on remembering to be careful (see
-  the layer model below).
-- **"Blocked" is a legal way to finish.** A check that *cannot* pass makes
-  faking it the cheapest path, so honesty gets to be a real exit (see the rule
-  below).
-- **The human gate is the spec, not the diff.** Verifying is the bottleneck, so
-  resolve ambiguity before the work, not after. → **`write-spec`**
-- _Add your project's WHYs here as they emerge._
+1. **Act decisively where the call is clearly yours;** escalate the genuinely
+   ambiguous. Declare escalation triggers before a long unattended run.
+2. **System of record over ad hoc storage.** Tasks in the tracker, docs in the
+   docs, code in the repo. No shadow copies.
+3. **Reversible by default.** Reading, drafting, editing need no check-in.
+   Hard-to-reverse or externally-visible actions get confirmed first.
+4. **Extend by writing it down.** A line in `docs/decisions.md`, or a skill for
+   a repeatable procedure. Undocumented fixes don't compound.
+5. **Keep this file thin.** Guidelines here; detail behind a link.
 
 ## Never work around a blocked check
+
+A check that can't pass makes faking it the cheapest path, so honesty is a real
+exit here.
 
 - **Never**, in service of a check: invent a credential value · swap a real
   integration for a mock to go green · skip, delete or `xfail` a test · weaken
   an assertion · widen an `except`/`catch` to swallow a failure · edit test or
-  CI files during an implementation task.
-- **Instead** write `BLOCKED.md` — `Missing:` / `Tried:` / `Needs:` plus the
-  failing check — and stop. That is a successful outcome.
+  CI files during an implementation task · narrow a check to the part that
+  already passes.
+- **Instead** write `BLOCKED.md` — `Missing:` / `Tried:` / `Needs:` + the
+  failing check — and stop. Blocked is a successful ending.
 
-## How code quality is enforced (the layer model)
+## How work runs
 
-Quality comes from layering cheap deterministic checks early with mandatory
-ones later, so nothing depends on remembering to be careful:
+- **Non-trivial work starts with a spec, not a plan.** Resolve the ambiguity
+  first → `SPEC.md` → execute in a *fresh* session. → **`write-spec`**
+- **Every task needs one runnable check.** Without one, "looks done" is the only
+  stop signal.
+- **Unattended runs need their whole dependency set present.** Missing key,
+  service, or fixture → prepare it first or run attended.
+- **PRs carry evidence, not claims** — the check's real output, visuals first.
+  → **`create-pr`**
 
-1. **Local, fast, skippable** — git hooks catch typos, formatting, and
-   malformed commit messages in under a second. Bypassable; never the real
-   gate. → **`setup-git-hooks`**
-2. **Server-side, slower, mandatory** — branch protection + required CI
-   checks + required reviewers. This is where "tests must pass" and coverage
-   thresholds actually bite.
-3. **Continuous, not per-PR** — heavier suites (E2E, fuzzing) on a schedule;
-   they open a ticket, they don't block a merge.
-4. **Upstream of code** — the ambiguity resolved and written down before
-   non-trivial work, so "did we build the right thing" is answered before the
-   code exists. → **`write-spec`**, then **`tdd-loop`**
+## Quality gates (layered, so nothing rests on being careful)
 
-## Branching
+1. **Local, fast, skippable** — git hooks; never the real gate.
+   → **`setup-git-hooks`**
+2. **Server-side, mandatory** — branch protection + required CI checks. Where
+   "tests must pass" actually bites.
+3. **Continuous, not per-PR** — heavier suites on a schedule; they open a
+   ticket, they don't block a merge.
+4. **Upstream of code** — the spec, before any of the above.
 
-Feature branches only, never directly on `main`. Names follow
-`{{BRANCH_PREFIX}}/<short-description>-<id>` for agent-driven work.
+## Conventions
 
-## Commits
-
-```
-<type>: <subject>
-```
-
-- `type` ∈ feat, fix, bug, chore, docs, refactor, test, perf, ci, build,
-  style, revert.
-- Keep the subject imperative and ≤ 72 chars.
+- **Branches:** `{{BRANCH_PREFIX}}/<short-description>-<id>`, never `main`.
+- **Commits:** `<type>: <subject>` — imperative, ≤72 chars, `type` ∈ feat, fix,
+  chore, docs, refactor, test, perf, ci, build, style, revert.
+  → **`setup-git-hooks`**
 - {{TICKET_RULE}}
-
-Match whatever `setup-git-hooks` installs for this repo. → **`setup-git-hooks`**
-
-## PRs
-
-Draft by default; open one after pushing if no open PR exists for the
-branch. Build the body with **`create-pr`** — visuals first, then the check's
-**real output** rather than a ticked box, so review attention goes to judgment
-instead of re-verifying the boring correctness.
+- **PRs:** draft by default; open one after pushing if none is open.
 
 ## Skills
 
-Reusable skills live under `.agents/skills/<skill-name>/SKILL.md`, each with
-a thin slash-command wrapper in `.claude/commands/`. Invoke either the
-command or the skill directly. Promote a new skill here once a behavior has
-proven itself more than once.
+Under `.agents/skills/<name>/SKILL.md`, each with a `/`-command wrapper in
+`.claude/commands/`. Add one only for a repeatable procedure proven more than
+once; otherwise it's a `docs/decisions.md` line.
