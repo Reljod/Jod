@@ -42,6 +42,9 @@ preset here follows the same shape:
   `docs/decisions.md` as the place to *write* reasoning; don't hyperlink it,
   since a freshly scaffolded repo doesn't have it yet.
 - **The test for a line:** would removing it cause a mistake? If not, cut it.
+  That kills meta-commentary about the file's own form, "keep this file thin"
+  principles, and a `## Skills` section restating where skills live — the
+  runtime already surfaces them.
 - **One exception to "keep it short":** the never-work-around-a-blocked-check
   list stays enumerated inline in every preset. "Don't cheat" is too abstract to
   bind behavior, and that rule has to be in context at the moment of temptation
@@ -49,7 +52,7 @@ preset here follows the same shape:
 - **Keep presets identity-focused.** Deep procedure belongs in a skill, not
   baked into every scaffolded charter.
 
-Current sizes are the budget: 35–80 lines per preset. If a new one lands well
+Current sizes are the budget: 35–70 lines per preset. If a new one lands well
 past that, it's carrying detail that belongs in a skill.
 
 ## Adding a preset

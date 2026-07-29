@@ -137,7 +137,7 @@ too expensive to run on every push), tags, and publishes a GitHub Release.
 ## Structure
 
 ```
-AGENTS.md          the charter — identity, principles, slim WHY notes
+AGENTS.md          the charter — identity, principles, conventions
 CLAUDE.md          symlink -> AGENTS.md, so every runtime reads the same source
 REVIEW.md          brief for the automated PR review — what to flag, what to ignore
 docs/              the WHYs behind the charter's guidelines

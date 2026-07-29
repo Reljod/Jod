@@ -2,10 +2,8 @@
 # AGENTS.md — {{PROJECT_NAME}}
 
 Operating charter for any agent working in this repo (Claude Code, Claude Agent
-SDK, or any AGENTS.md-compatible tool). `CLAUDE.md` symlinks here.
-
-**Guidelines only.** Reasoning goes in `docs/decisions.md`, procedure in the
-skill that owns it.
+SDK, any AGENTS.md-compatible tool). `CLAUDE.md` symlinks here. Reasoning goes
+in `docs/decisions.md`; procedure in the skill that owns it.
 
 ## What this repo is
 
@@ -28,9 +26,9 @@ incomplete, however obvious the code looks.
 
 ## Green means green — and blocked is a legal ending
 
-"Make the bar green" is a binding goal, so when the bar *cannot* go green — no
-key, no service, no fixture — the cheapest move is to change what green means.
-From inside the loop that feels like finishing. It isn't.
+When the bar *cannot* go green — no key, no service, no fixture — the cheapest
+move is to change what green means. From inside the loop that feels like
+finishing. It isn't.
 
 - **Never**, in service of the bar: invent a credential value · swap a real
   integration for a mock to go green · skip, delete or `xfail` a test · weaken
@@ -66,8 +64,3 @@ From inside the loop that feels like finishing. It isn't.
 - **PRs:** draft by default. Build the body with **`create-pr`**; make the
   RED→GREEN evidence and the coverage delta visible, so a reviewer sees the
   discipline was followed rather than claimed.
-
-## Skills
-
-Under `.agents/skills/<name>/SKILL.md`, each with a `/`-command wrapper in
-`.claude/commands/`.

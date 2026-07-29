@@ -3,10 +3,8 @@
 
 Operating charter for any agent — and any contributor — working in this repo.
 Read by Claude Code, the Claude Agent SDK, and any AGENTS.md-compatible tool.
-`CLAUDE.md` symlinks here.
-
-**Guidelines only.** Reasoning goes in `docs/decisions.md`, contributor detail
-in `CONTRIBUTING.md`, procedure in the skill that owns it.
+`CLAUDE.md` symlinks here. Reasoning goes in `docs/decisions.md`, contributor
+detail in `CONTRIBUTING.md`, procedure in the skill that owns it.
 
 ## What this repo is
 
@@ -23,9 +21,8 @@ in `CONTRIBUTING.md`, procedure in the skill that owns it.
 
 ## Never work around a blocked check
 
-A check that can't pass makes faking it the cheapest path — and in a repo with
-outside contributors, a green-but-hollow check is trusted by people who can't
-see how it got that way.
+A check that can't pass makes faking it the cheapest path — and here a
+green-but-hollow check is trusted by people who can't see how it got that way.
 
 - **Never**, in service of a check: invent a credential value · swap a real
   integration for a mock to go green · skip, delete or `xfail` a test · weaken
@@ -66,8 +63,3 @@ see how it got that way.
 - Behavior changes arrive with tests. → **`tdd-loop`**
 - Non-trivial work gets its ambiguity resolved in writing first, so review has a
   stated intent to check the diff against. → **`write-spec`**
-
-## Skills
-
-Under `.agents/skills/<name>/SKILL.md`, each with a `/`-command wrapper in
-`.claude/commands/`.

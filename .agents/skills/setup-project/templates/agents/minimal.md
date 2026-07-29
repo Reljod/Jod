@@ -2,7 +2,7 @@
 # AGENTS.md — {{PROJECT_NAME}}
 
 Operating charter for any agent working in this repo (Claude Code, Claude Agent
-SDK, or any AGENTS.md-compatible tool). `CLAUDE.md` symlinks here.
+SDK, any AGENTS.md-compatible tool). `CLAUDE.md` symlinks here.
 
 ## What this repo is
 
@@ -32,7 +32,6 @@ Feature branches, not `main`. Suggested: `{{BRANCH_PREFIX}}/<short-description>`
 
 ## Grow this file
 
-A deliberately lean starting point. Add sections — commit convention, quality
-gates, PR habits, skills under `.agents/skills/` — as the needs become real, and
-keep them as bullets with the reasoning in `docs/decisions.md`. Don't pre-build
-process for hypothetical futures.
+Deliberately lean. Add sections — commit convention, quality gates, PR habits —
+as the needs become real, as bullets, with the reasoning in `docs/decisions.md`.
+Don't pre-build process for hypothetical futures.
