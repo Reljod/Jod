@@ -158,3 +158,45 @@ and investigation, where teammates need to argue with each other — exactly wha
 subagents can't do. The cost is one shared checkout, so the isolation git would
 have given us comes from disjoint file ownership plus the `TaskCompleted` gate
 instead. → [`teamwork.md`](teamwork.md)
+
+## The plugin is the repo root, not a copy of it
+
+Claude Code installs the toolkit as one plugin, `jod`, whose manifest lives at
+`.claude-plugin/plugin.json` and whose component paths point straight at the
+trees that already exist — `./.agents/skills/`, `./.claude/agents/`. A
+`plugin/` directory holding copies would need a sync step and would drift the
+first time someone edited only one side; a generated-then-committed copy is the
+same trap with extra machinery. The cost of pointing instead of copying is that
+a moved directory ships a plugin with no skills *silently*, which is why
+`tests/plugin.test.sh` asserts every declared path resolves.
+
+The same repo root is also the marketplace (`.claude-plugin/marketplace.json`,
+entry `source: "./"`), so `/plugin marketplace add Reljod/Jod` and
+`/plugin install jod@reljod` need no second repository to maintain.
+
+Not shipped in the plugin: the `SessionStart` hook that sets `user.name` /
+`user.email`. Rewriting git identity in every repo the plugin is enabled in is
+invasive and wrong in a work checkout — it stays project-local in
+`.claude/settings.json`.
+
+## Skills locate their own scripts with `${CLAUDE_SKILL_DIR}`
+
+A plugin's skills run from `~/.claude/plugins/cache/…` while the cwd is the
+user's project, so a skill that said `.agents/skills/create-pr/scripts/x.sh`
+worked only in this checkout and was dead on arrival for every plugin user.
+Claude Code substitutes `${CLAUDE_SKILL_DIR}` in skill content for personal,
+project *and* plugin installs, so it is the one form that works in all three.
+
+The `.claude/commands/<skill>.md` wrappers reach a skill by *reading the file*,
+which performs no substitution — so each wrapper now states what the variable
+resolves to in that repo. That keeps `setup-project`'s copy-into-a-repo install
+working, and `tests/plugin.test.sh` fails if a wrapper loses the line.
+
+## The release stamps the plugin manifest onto the tag
+
+Claude Code only offers a plugin update when `version` in `plugin.json`
+changes, so a tag-only release would move the tag and tell installed copies
+nothing. `release.yml` writes the computed version into the manifest, commits
+it onto the tagged commit, and pushes *only the tag* — tags are already the
+source of truth here (`install.sh` resolves the newest one), so the released
+artifact carries its own version without CI needing write access to `main`.

@@ -64,6 +64,42 @@ Copy `.agents/` into any repo and the skills come with it.
 [`AGENTS.md`](./AGENTS.md) holds the guidelines as bullets; the reasoning behind
 them lives in [`docs/decisions.md`](./docs/decisions.md).
 
+### Install as a Claude Code plugin
+
+This repo is also a Claude Code plugin — the same skills and subagents, with no
+clone and nothing copied into your project:
+
+```
+/plugin marketplace add Reljod/Jod
+/plugin install jod@reljod
+```
+
+Plugin components are namespaced, so the skills arrive as `/jod:write-spec`,
+`/jod:tdd-loop`, `/jod:test-scenarios`, `/jod:create-pr`, `/jod:setup-git-hooks`
+and `/jod:setup-project`, and Claude invokes them on its own when a task matches
+their description. It also brings the four subagents (`reviewer`,
+`investigator`, `skill-author`, `toolkit-engineer`) and the `TaskCompleted`
+gate, which refuses to close a task while a test suite is red unless a
+`BLOCKED.md` documents why — the anti-workaround rule from
+[`AGENTS.md`](./AGENTS.md), enforced rather than requested.
+
+Two things worth knowing:
+
+- **The gate is a no-op in repos it finds no suites in.** It looks for
+  `*.test.sh` and `*/tests/test.sh`; a project with neither is never blocked.
+- **`jod` lands on your `PATH`** while the plugin is enabled, because Claude
+  Code exposes a plugin's `bin/`. The CLI still expects a toolkit checkout at
+  `$JOD_HOME` (`~/.jod`), so run the installer below if you want it working —
+  otherwise it exits with a message telling you exactly that.
+
+Not included: the `SessionStart` hook that pins git identity. That one is
+project-local on purpose ([why](./docs/decisions.md)).
+
+To hack on the plugin without installing it, point Claude Code at a checkout —
+`claude --plugin-dir /path/to/Jod` — and `/reload-plugins` after each edit.
+`tests/plugin.test.sh` validates the manifest, the catalog, and that every
+skill, agent, hook and bundled script the plugin declares actually resolves.
+
 ### Install the toolkit on a new machine
 
 One line, on any Linux or macOS box with `git`:
@@ -143,6 +179,8 @@ REVIEW.md          brief for the automated PR review — what to flag, what to i
 docs/              the WHYs behind the charter's guidelines
 install.sh         curlable bootstrap: clones this repo, links the `jod` CLI
 bin/jod            CLI shim — dispatches into .agents/skills/ from any repo
+.claude-plugin/    plugin manifest + marketplace catalog (installs this repo as a plugin)
+hooks/hooks.json   the TaskCompleted gate, as the plugin ships it
 .agents/skills/    the portable toolkit — reusable Claude Code skills
 domains/           personal operating notes, one per area of Reljod's life
 ```
