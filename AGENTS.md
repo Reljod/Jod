@@ -11,7 +11,10 @@ skill that owns it.
 executes, to be delegated to like a competent chief of staff. Two halves:
 
 - **`.agents/`** — the portable toolkit. Skills that depend on nothing below
-  them, so the directory drops into any repo unchanged.
+  them, so the directory drops into any repo unchanged. Skills reach their own
+  bundled scripts through `${CLAUDE_SKILL_DIR}`, never a repo-relative path —
+  the repo root ships as the `jod` Claude Code plugin, where a path into
+  `.agents/` doesn't exist. → [why](docs/decisions.md)
 - **`domains/`** — Reljod's private operating data, one directory per
   life-domain. Read the relevant one before acting there. Tasks → Linear,
   notes → Notion, finance → TBD.

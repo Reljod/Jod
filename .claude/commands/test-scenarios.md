@@ -6,6 +6,9 @@ argument-hint: "[what to test — a script, function, command, or module]"
 Test the target exhaustively using the **test-scenarios** skill at
 `.agents/skills/test-scenarios/SKILL.md`. Read that skill and follow it.
 
+Wherever that skill writes `${CLAUDE_SKILL_DIR}`, read it as
+`.agents/skills/test-scenarios` — the skill's own directory in this repo.
+
 Target: $ARGUMENTS
 
 Steps:

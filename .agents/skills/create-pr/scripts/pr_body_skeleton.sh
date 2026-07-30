@@ -64,7 +64,10 @@ echo
 echo "## Evidence"
 echo
 echo "<!-- Paste the output of:"
-echo "     .agents/skills/create-pr/scripts/evidence_bundle.sh <base>...<head>"
+# Named, not pathed: this text lands in the PR body, where an absolute path
+# into a plugin cache would be noise — and the skill already gives the caller
+# the resolved path via \${CLAUDE_SKILL_DIR}.
+echo "     the create-pr skill's scripts/evidence_bundle.sh <base>...<head>"
 echo "     Blast radius, contract diff, substitutions, spec deviation. Generated"
 echo "     after the run, so it costs no approval and answers 'where do I look?'"
 echo "     before the reviewer has to ask. -->"

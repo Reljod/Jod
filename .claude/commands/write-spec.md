@@ -8,6 +8,9 @@ Write a spec for: $ARGUMENTS
 Use the **write-spec** skill at `.agents/skills/write-spec/SKILL.md`. Read it
 and its `references/interview.md` question bank, then follow it.
 
+Wherever that skill writes `${CLAUDE_SKILL_DIR}`, read it as
+`.agents/skills/write-spec` — the skill's own directory in this repo.
+
 Do not start implementing. The output of this command is a spec, not a diff.
 
 1. Read the relevant code first — never ask what the repo already answers.

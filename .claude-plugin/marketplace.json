@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-marketplace.json",
+  "name": "reljod",
+  "description": "Reljod's Claude Code plugins.",
+  "owner": {
+    "name": "Reljod",
+    "url": "https://github.com/Reljod"
+  },
+  "plugins": [
+    {
+      "name": "jod",
+      "source": "./",
+      "category": "workflow",
+      "tags": [
+        "spec-driven",
+        "tdd",
+        "testing",
+        "pull-request",
+        "git-hooks",
+        "scaffolding",
+        "subagents"
+      ]
+    }
+  ]
+}

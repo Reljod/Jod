@@ -40,7 +40,7 @@ any failure, so the suite doubles as a pre-push / CI gate.
    Source the shared helper so you're not re-inventing pass/fail plumbing:
 
    ```bash
-   source "path/to/.agents/skills/test-scenarios/scripts/assert.sh"
+   source "${CLAUDE_SKILL_DIR}/scripts/assert.sh"
 
    section "happy path — all variants"
    assert_ok    mytool --mode a

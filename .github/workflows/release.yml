@@ -57,13 +57,28 @@ jobs:
           echo "next=$next" >> "$GITHUB_OUTPUT"
 
       - name: Tag and push
+        env:
+          NEXT: ${{ steps.version.outputs.next }}
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag -a "${{ steps.version.outputs.next }}" \
-            -m "${{ steps.version.outputs.next }} (${{ inputs.bump }} bump from ${{ steps.version.outputs.previous }})"
-          git push origin "${{ steps.version.outputs.next }}"
+          # Stamp the plugin manifest onto the tagged commit. Claude Code only
+          # offers a plugin update when `version` in plugin.json *changes*, so
+          # a release that left it alone would be invisible to everyone who
+          # installed the plugin — the tag would move and nobody would be told.
+          #
+          # Committed onto the tag only, never pushed to main: tags are already
+          # this repo's source of truth for versions (install.sh resolves the
+          # newest tag), so the released artifact carrying its own version needs
+          # no write access to the default branch.
+          sed -i "s/\"version\": \"[^\"]*\"/\"version\": \"${NEXT#v}\"/" \
+            .claude-plugin/plugin.json
+          git add .claude-plugin/plugin.json
+          git commit -q -m "chore: stamp the plugin manifest $NEXT"
+          git tag -a "$NEXT" \
+            -m "$NEXT (${{ inputs.bump }} bump from ${{ steps.version.outputs.previous }})"
+          git push origin "$NEXT"
 
       - name: Create GitHub release
         env:

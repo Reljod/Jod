@@ -6,6 +6,9 @@ argument-hint: "[target repo dir, defaults to current repo] [--force]"
 Set up local git hooks using the **setup-git-hooks** skill at
 `.agents/skills/setup-git-hooks/SKILL.md`. Read that skill and follow it.
 
+Wherever that skill writes `${CLAUDE_SKILL_DIR}`, read it as
+`.agents/skills/setup-git-hooks` — the skill's own directory in this repo.
+
 Target: $ARGUMENTS (if empty, the current repository).
 
 Steps:
