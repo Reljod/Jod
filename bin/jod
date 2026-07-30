@@ -10,6 +10,15 @@
 # reached directly or through the symlink install.sh drops on PATH.
 set -euo pipefail
 
+# Claude Code puts a plugin's bin/ on PATH, so this shim can be reached from a
+# plugin install where no ~/.jod checkout exists — or, worse, where a stale one
+# does and would silently answer with an older toolkit. When the plugin runtime
+# tells us where it unpacked us, trust that over the default.
+if [ -z "${JOD_HOME:-}" ] \
+  && [ -n "${CLAUDE_PLUGIN_ROOT:-}" ] \
+  && [ -d "$CLAUDE_PLUGIN_ROOT/.agents/skills" ]; then
+  JOD_HOME="$CLAUDE_PLUGIN_ROOT"
+fi
 JOD_HOME="${JOD_HOME:-$HOME/.jod}"
 SKILLS="$JOD_HOME/.agents/skills"
 
@@ -24,6 +33,10 @@ Commands:
                            confirm); '--list' prints the presets/skills and
                            '--help' every flag for scripted runs.
   setup-git-hooks [dir]   Install local commit-msg/lint hooks (default: cwd).
+  orc <subcommand>        Run Claude Code background sessions as an agent
+                           team: spawn one per project, message an existing
+                           one in context, fan a task out across several.
+                           'jod orc help' lists the subcommands.
   update                  Take newer PATCH releases within the installed
                            MAJOR.MINOR (never jumps minor/major — re-run
                            install.sh with JOD_VERSION for that).
@@ -63,6 +76,13 @@ case "$cmd" in
     ;;
   setup-git-hooks)
     exec "$SKILLS/setup-git-hooks/scripts/install-hooks.sh" "${@:-.}"
+    ;;
+  orc)
+    command -v node >/dev/null 2>&1 || {
+      echo "error: 'jod orc' needs node on PATH" >&2
+      exit 1
+    }
+    exec node "$SKILLS/orchestrate/scripts/orc.mjs" "$@"
     ;;
   update)
     git -C "$JOD_HOME" fetch --quiet --tags origin

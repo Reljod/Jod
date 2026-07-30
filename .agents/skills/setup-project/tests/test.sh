@@ -15,6 +15,16 @@ WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 fresh() { local d="$WORK/$1"; rm -rf "$d"; mkdir -p "$d"; printf '%s' "$d"; }
 
+# The interactive cases drive the skill picker by cursor position, so they need
+# to know which skill actually sits at a given row. Derive that the same way
+# the script does rather than hard-coding names — otherwise adding a skill
+# silently re-points every keystroke-driven assertion below.
+SKILLS_SRC="$(cd -- "$TEST_DIR/../.." && pwd)"
+skill_at() {  # skill_at <0-based row in the picker>
+  find "$SKILLS_SRC" -maxdepth 1 -mindepth 1 -type d -exec basename {} \; \
+    | grep -vx setup-project | sort | sed -n "$(($1 + 1))p"
+}
+
 echo "== setup-project.sh test suite =="
 
 # --- 1. happy path: --list ---------------------------------------------------
@@ -23,7 +33,7 @@ LIST="$("$SCRIPT" --list 2>&1)"
 for p in jod minimal team tdd-strict; do
   ok "grep -q '$p' <<<\"\$LIST\"" "--list shows preset '$p'"
 done
-for s in create-pr setup-git-hooks tdd-loop test-scenarios write-spec; do
+for s in create-pr orchestrate setup-git-hooks tdd-loop test-scenarios write-spec; do
   ok "grep -q '$s' <<<\"\$LIST\"" "--list shows skill '$s'"
 done
 SKILLS_SECTION="$(sed -n '/Skills available/,$p' <<<"$LIST")"
@@ -91,7 +101,7 @@ assert_no_grep "{{" "$d/AGENTS.md"                    "special: no leftover plac
 section "--skills all"
 d="$(fresh skills-all)"
 "$SCRIPT" --preset team --skills all --name X --target "$d" >/dev/null 2>&1
-for s in create-pr setup-git-hooks tdd-loop test-scenarios write-spec; do
+for s in create-pr orchestrate setup-git-hooks tdd-loop test-scenarios write-spec; do
   assert_dir  "$d/.agents/skills/$s"      "all: skill '$s' copied"
   assert_file "$d/.claude/commands/$s.md" "all: command '/$s' copied"
 done
@@ -187,8 +197,9 @@ assert_grep    "Widget Co" "$d/AGENTS.md"           "wizard: typed name used"
 assert_grep    "Widgets, at last." "$d/AGENTS.md"   "wizard: typed description used"
 assert_grep    "bot/" "$d/AGENTS.md"                "wizard: typed branch prefix used"
 assert_no_grep "issue key" "$d/AGENTS.md"           "wizard: blank ticket answer -> no ticket rule"
-assert_dir     "$d/.agents/skills/setup-git-hooks"  "wizard: the toggled-on skill was copied"
-assert_missing "$d/.agents/skills/create-pr"        "wizard: untoggled skills were not"
+# "n" deselects all, one DOWN moves to row 1, space toggles just that one.
+assert_dir     "$d/.agents/skills/$(skill_at 1)"    "wizard: the toggled-on skill was copied"
+assert_missing "$d/.agents/skills/$(skill_at 0)"    "wizard: untoggled skills were not"
 assert_link_to "$d/CLAUDE.md" "AGENTS.md"           "wizard: CLAUDE.md -> AGENTS.md"
 
 section "interactive: the ticket answer is honoured when given"
