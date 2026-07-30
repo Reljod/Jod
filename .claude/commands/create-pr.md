@@ -6,6 +6,9 @@ argument-hint: "[base ref, defaults to the merge-base with the default branch]"
 Create a pull request for the current branch using the **create-pr** skill
 at `.agents/skills/create-pr/SKILL.md`. Read that skill and follow it.
 
+Wherever that skill writes `${CLAUDE_SKILL_DIR}`, read it as
+`.agents/skills/create-pr` — the skill's own directory in this repo.
+
 Base ref for the diff: $ARGUMENTS (if empty, use the merge-base between this
 branch and the repo's default branch).
 

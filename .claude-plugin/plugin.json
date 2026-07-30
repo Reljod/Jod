@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "jod",
+  "displayName": "Jod",
+  "description": "Reljod's portable agent toolkit: spec-first planning, a TDD loop, exhaustive scenario testing, evidence-carrying PRs, deterministic git hooks, project scaffolding, and the review/investigate/author subagents — plus a TaskCompleted gate that makes \"blocked\" a legal ending instead of inviting a faked check.",
+  "version": "1.0.0",
+  "author": {
+    "name": "Reljod",
+    "url": "https://github.com/Reljod"
+  },
+  "homepage": "https://github.com/Reljod/Jod",
+  "repository": "https://github.com/Reljod/Jod",
+  "keywords": [
+    "spec-driven",
+    "tdd",
+    "testing",
+    "pull-request",
+    "git-hooks",
+    "scaffolding",
+    "subagents"
+  ],
+  "skills": [
+    "./.agents/skills/"
+  ]
+}

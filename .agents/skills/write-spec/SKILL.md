@@ -65,7 +65,7 @@ What makes it self-contained:
 Then check it deterministically:
 
 ```
-.agents/skills/write-spec/scripts/check-spec.sh SPEC.md
+${CLAUDE_SKILL_DIR}/scripts/check-spec.sh SPEC.md
 ```
 
 It fails on a missing section, an unfilled placeholder, or a `TBD` — the
