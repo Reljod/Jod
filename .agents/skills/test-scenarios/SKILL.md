@@ -20,10 +20,9 @@ handled and passing. The discipline is simple and non-negotiable:
 > A scenario without an assertion is not "handled" — it's unobserved.
 > "Probably fine" is an untested case. Enumerate, assert, drive to green.
 
-This belongs to the deterministic tier of the quality layer-model (the
-charter's **Design choices** — quality by layering, not diligence): the tests
-are pure, repeatable, and exit non-zero on any failure, so the suite doubles
-as a pre-push / CI gate.
+This belongs to the deterministic tier of the quality layer-model (the charter's
+quality-by-layering rule): the tests are pure, repeatable, and exit non-zero on
+any failure, so the suite doubles as a pre-push / CI gate.
 
 ## The method
 
@@ -69,6 +68,15 @@ as a pre-push / CI gate.
    assertion passes and the summary exits 0. If a scenario is genuinely out
    of scope, say so explicitly (as a comment in the suite) rather than
    leaving it silently uncovered.
+
+   Fixing "the test is wrong" means making it assert the *right* thing — not
+   asserting less. Loosening an assertion, deleting the case, or widening an
+   `except` until it passes converts a real failure into a false one, which
+   is strictly worse than the red bar you started with. If a scenario can't
+   be observed here because a capability is missing, write it down as blocked
+   (`BLOCKED.md`: `Missing:` / `Tried:` / `Needs:` plus the suite path) and
+   leave the assertion in place. An honest red is a result; a bought green is
+   a lie the next reader will trust.
 
 ## What good coverage looks like
 

@@ -13,8 +13,13 @@ Steps:
 1. Classify the diff with `scripts/categorize_diff.sh <base>...<head>`.
 2. Capture the right visual per category (screenshots/GIFs for UI, mermaid
    for API/architecture/infra, terminal output for CLI). Show, don't tell.
-3. Scaffold the body with `scripts/pr_body_skeleton.sh <base>...<head>`,
-   then fill it in — visuals first, then What changed, Test plan, Checks.
-4. Open the PR as a **draft**, honoring this repo's standing PR rules
+3. Generate the deltas with `scripts/evidence_bundle.sh <base>...<head>`
+   (add `--spec <path>` if the work had a spec). Paste it in whole — do not
+   drop lines it flagged.
+4. Scaffold the body with `scripts/pr_body_skeleton.sh <base>...<head>`,
+   then fill it in — visuals first, then What changed, Verification (the
+   command and its **real output**), Evidence, Decisions.
+5. Open the PR as a **draft**, honoring this repo's standing PR rules
    (template detection, draft-by-default) and the attribution footer.
-5. Report back which visual strategy you used per category.
+6. Report back which visual strategy you used per category, and anything the
+   substitutions scan flagged.

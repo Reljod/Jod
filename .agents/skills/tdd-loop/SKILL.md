@@ -42,7 +42,10 @@ flowchart LR
    sentence (an input → expected output). Keep the slice small enough that
    one test captures it. For a non-trivial feature, list the behaviors
    up front (see `references/red-green-refactor.md`) and take them one at
-   a time — that list *is* your lightweight spec.
+   a time — that list *is* your lightweight spec. If the feature is big
+   enough that the *requirements* are still ambiguous, stop and use
+   `write-spec` first; a behavior list can't resolve a question only the
+   user can answer.
 2. **RED** — write exactly one test for that behavior and run it. It must
    fail, and fail for the *right reason* (assertion, not import error or
    typo). A test that passes immediately tested nothing new; a test that
@@ -50,7 +53,9 @@ flowchart LR
    before moving on.
 3. **GREEN** — write the *minimum* code to make it pass. Not the elegant
    version, not the general version — the smallest change that turns the
-   bar green. Resist building ahead of the test.
+   bar green. Resist building ahead of the test. "Minimum" means minimum
+   *implementation*, never a cheaper definition of passing — see
+   **Green means green** below.
 4. **REFACTOR** — with the test green as a safety net, clean up naming,
    duplication, and structure. Re-run; stay green. Refactoring without a
    green bar to fall back on is just editing.
@@ -90,6 +95,32 @@ For long unattended runs ("keep going until the whole feature's suite is
 green"), the built-in `/loop` skill can re-invoke `/tdd-loop` on an
 interval — but prefer finishing the loop directly while you have context;
 reach for `/loop` only when the work genuinely needs to span idle time.
+
+## Green means green
+
+The loop binds you to "make the bar green", so the moment the bar *can't* go
+green — no API key, no service running, no fixture — the cheapest remaining
+move is to change what green means. That's the failure mode to name, because
+from inside the loop it feels like finishing the task.
+
+Never, in service of the bar:
+
+- invent a credential, key, token, or endpoint value
+- swap a real integration for a mock to go green
+- skip, delete, or `xfail` the test you're driving
+- weaken the assertion, or widen an `except`/`catch` to swallow the failure
+- narrow the focus to the subset that already passes
+
+**Blocked is a legal way to finish.** If the behavior genuinely cannot be
+verified here, stop and write a `BLOCKED.md`: what capability is *Missing:*,
+what you *Tried:*, what it *Needs:*, and the failing test's path. A red bar
+with an honest note is a better outcome than a green bar that proves nothing
+— and it's the ending this repo's `TaskCompleted` gate accepts.
+
+Two things prevent most of this before it starts: check the test's whole
+dependency set exists *before* entering the loop, and if a stand-in is
+genuinely needed, get it sanctioned up front — which fake, where it lives,
+when it applies. An undefined fake is one you'll invent at the worst moment.
 
 ## Where to point it
 

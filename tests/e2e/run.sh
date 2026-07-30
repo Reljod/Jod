@@ -61,11 +61,11 @@ echo "fixtures: $E2E_DIR/fixtures"
 # --- node-lib: greenfield JS library, no existing conventions ---------------
 section "node-lib -> jod preset (greenfield, no test setup yet)"
 d="$WORK/run/node-lib"
-assert_ok scaffold node-lib jod "create-pr,setup-git-hooks,tdd-loop,test-scenarios"
+assert_ok scaffold node-lib jod "create-pr,setup-git-hooks,tdd-loop,test-scenarios,write-spec"
 assert_file    "$d/AGENTS.md"          "node-lib: AGENTS.md written"
 assert_link_to "$d/CLAUDE.md" "AGENTS.md" "node-lib: CLAUDE.md -> AGENTS.md"
 assert_no_grep "{{" "$d/AGENTS.md"     "node-lib: no leftover placeholders"
-for s in create-pr setup-git-hooks tdd-loop test-scenarios; do
+for s in create-pr setup-git-hooks tdd-loop test-scenarios write-spec; do
   assert_dir "$d/.agents/skills/$s" "node-lib: skill $s copied"
 done
 if runner="$(cd "$d" && bash "$DETECT_RUNNER" 2>/dev/null)"; then
@@ -77,7 +77,7 @@ fi
 # --- python-cli: existing tests/, pyproject.toml -----------------------------
 section "python-cli -> tdd-strict preset (existing tests/ dir)"
 d="$WORK/run/python-cli"
-assert_ok scaffold python-cli tdd-strict "tdd-loop,test-scenarios,setup-git-hooks"
+assert_ok scaffold python-cli tdd-strict "write-spec,tdd-loop,test-scenarios,setup-git-hooks"
 assert_file "$d/AGENTS.md" "python-cli: AGENTS.md written"
 assert_grep "Coverage is a required gate" "$d/AGENTS.md" "python-cli: tdd-strict coverage language present"
 if runner="$(cd "$d" && bash "$DETECT_RUNNER" 2>/dev/null)"; then

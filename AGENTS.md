@@ -1,204 +1,69 @@
 # AGENTS.md — Jod
 
-This file is the operating charter for any agent working in this repository —
-Claude Code, a Claude Agent SDK process, or any other AGENTS.md-compatible
-tool. `CLAUDE.md` is a symlink to this file: one charter, read by every
-runtime.
+Operating charter for any agent working in this repo — Claude Code, a Claude
+Agent SDK process, any AGENTS.md-compatible tool. `CLAUDE.md` symlinks here.
+Reasoning lives in [`docs/decisions.md`](docs/decisions.md); procedure in the
+skill that owns it.
 
 ## What this repo is
 
-**Jod** is Reljod's autonomous agent — a duplicate of how he plans, decides,
-and executes, built to keep running whether or not he's at the keyboard.
-It is not a product for other people; it is infrastructure for one person,
-designed to be delegated to with the same trust as a competent chief of
-staff.
+**Jod** is Reljod's autonomous agent — a duplicate of how he plans, decides, and
+executes, to be delegated to like a competent chief of staff. Two halves:
 
-Most of the runtime lives in the Claude ecosystem (Claude Code, the Claude
-Agent SDK, Claude-in-Slack). The repo has two halves:
+- **`.agents/`** — the portable toolkit. Skills that depend on nothing below
+  them, so the directory drops into any repo unchanged.
+- **`domains/`** — Reljod's private operating data, one directory per
+  life-domain. Read the relevant one before acting there. Tasks → Linear,
+  notes → Notion, finance → TBD.
 
-- **The portable toolkit** — reusable skills under `.agents/`.
-  Project-agnostic: copy `.agents/` into any repo and it works, depending on
-  nothing below it. This is the *improve-my-workflows* half.
-- **Personal domains** — Reljod's private operating data, one directory each
-  under `domains/`, wherever his real work already lives. This is the
-  *duplicate-me* half.
+## Never work around a blocked check
 
-| Personal domain | System of record | Status |
-|---|---|---|
-| Tasks / kanban | Linear | active |
-| Second brain / notes | Notion | active |
-| Finance | TBD | planned |
+A check that can't pass makes faking it the cheapest path.
+→ [why](docs/decisions.md#blocked-is-a-legal-ending)
 
-Each domain has a directory under `domains/` with its own notes on how the
-agent should operate there — read the relevant one before acting in that area.
-The toolkit under `.agents/` **never reaches into `domains/`**: skills must
-stay copyable into repos that have no `domains/` at all.
+- **Never**, in service of a check: invent a credential value · swap a real
+  integration for a mock to go green · skip, delete or `xfail` a test · weaken
+  an assertion · widen an `except`/`catch` to swallow a failure · edit test or
+  CI files during an implementation task · narrow a check to the part that
+  already passes.
+- **Instead** write `BLOCKED.md` — `Missing:` / `Tried:` / `Needs:` + every
+  failing suite path — and stop. Blocked is a successful ending, and the
+  `TaskCompleted` hook accepts it.
 
-## Operating principles
+## Principles
 
-1. **Act like Reljod would, not like a generic assistant.** Prefer decisive,
-   well-reasoned action over hedged options when the call is clearly his to
-   make; escalate the genuinely ambiguous ones instead of guessing.
-2. **System of record over ad hoc storage.** Tasks belong in Linear, notes in
-   Notion, code in the relevant repo. This repo holds the charter, the
-   cross-domain glue, and reusable skills — not a shadow copy of the data
-   itself.
-3. **Reversible by default.** Local, reversible actions (drafting, editing,
-   reading) don't need a check-in. Anything hard to reverse or visible to
-   others — sending messages, moving money, closing tasks, pushing to
-   shared branches — gets confirmed first, unless a domain's own notes say
-   otherwise for a specific, bounded case.
-4. **Extend by writing it down.** When something proves itself, capture it in
-   the smallest durable form: a one-line WHY note under **Design choices**
-   below, or — for a repeatable procedure — a skill (see **Skills**). Ad hoc
-   fixes that never get written down don't compound; keep it slim, not a diary.
-5. **Keep the charter thin.** This file holds identity, principles, and slim
-   WHY notes. Operational how-to lives in the relevant skill; personal-domain
-   procedure in `domains/*/README.md`. Not here.
+1. **Act like Reljod, not a generic assistant.** Decide what's clearly his call;
+   escalate the genuinely ambiguous. Declare escalation triggers before a long
+   unattended run, not at every step.
+2. **System of record over ad hoc storage.** Tasks in Linear, notes in Notion,
+   code in the repo — no shadow copy here.
+3. **Reversible by default.** Reading, drafting, editing need no check-in.
+   Hard-to-reverse or externally-visible actions get confirmed first.
+4. **Extend by writing it down** — a `docs/decisions.md` line, or a skill for a
+   procedure proven more than once. Undocumented fixes don't compound.
 
-## Design choices (the WHYs)
+## How work runs
 
-Slim notes on preferences and decisions worth not re-litigating, so the
-reasoning outlives the session that set it. Add a line when a choice proves
-itself; distill it, don't narrate it.
+- **Non-trivial work starts with a spec, not a plan.** Interview until nothing
+  material is guessed → `SPEC.md` → execute in a *fresh* session.
+  → **`/write-spec`**
+- **Every task needs one runnable check.** Without one, "looks done" is the only
+  stop signal and you are the loop.
+- **Unattended runs need their whole dependency set present.** Missing key,
+  service, or fixture → prepare it first or run attended.
+- **PRs carry evidence, not claims** — real output plus diff-derived deltas.
+  → **`/create-pr`**
+- **Reviewers get the diff, the spec, and the substitutions list — nothing
+  else.** → [`REVIEW.md`](REVIEW.md),
+  [`.claude/agents/reviewer.md`](.claude/agents/reviewer.md)
+- **Teammates share one checkout, so one owner per path,** and a task closes
+  green or blocked in writing. → [`docs/teamwork.md`](docs/teamwork.md)
 
-- **The toolkit stays out of `domains/`.** Skills and this charter never
-  reference personal domains, so `.agents/` stays copyable into any repo. A
-  reusable workflow is not one of Reljod's personal life-domains.
-- **Quality by layering, not diligence.** Cheap deterministic checks early
-  (git hooks) under mandatory ones later (required CI) beats relying on
-  remembering to be careful — nothing safety-critical lives *only* in a hook.
-- **"Tested" means CI ran it, not that an agent says so.** Shipped
-  `install.sh`'s update logic with only a local test run as evidence — a
-  human reviewing the PR had no way to check that without re-running it
-  themselves. A `Tests` Action now runs every `*.test.sh` suite on every
-  push/PR, so pass/fail is a status on the PR itself, not a claim in chat.
-- **Commits:** `<type>: <subject>`, imperative, ≤72 chars. The exact gate is
-  the `setup-git-hooks` skill; it isn't restated here.
-- **Issue keys are opt-in, never the default.** The commit gate shipped
-  requiring a Linear-style `ENG-123` in every non-housekeeping subject, and
-  the scaffolder baked that into the charters it generated. That is one
-  team's house rule, not a property of a good commit — it breaks on repos
-  with no tracker, on contributors who can't see one, and on the many real
-  commits that map to no issue. `TICKET_REGEX` now ships empty and
-  `--ticket` is an explicit flag; turning it on is a per-repo decision.
-- **The CLI asks; the script still takes flags.** `jod setup-project` with
-  no choices walks a human through them (↑/↓, space, enter) instead of
-  making them read `--list` and hand-assemble a comma-separated
-  `--skills`. The wizard only *fills in* the flags — the scaffold itself
-  stays flag-driven and deterministic, so scripts, CI, and agents keep the
-  exact same entry point, and no-tty falls back to `--list` rather than
-  hanging on a prompt.
-- **Toolkit distribution is a curlable installer, not a required clone.**
-  `install.sh` + `bin/jod` let any Linux/macOS machine bootstrap the
-  toolkit and run `jod setup-project` against a repo without cloning Jod
-  into every project — a package-manager-free installer beats asking
-  people to remember a path.
-- **Releases are semver tags, cut manually.** `vMAJOR.MINOR.PATCH` via the
-  Release Action's `workflow_dispatch`, never on every push — cutting a
-  release is a deliberate act. Install pins to latest by default;
-  `jod update` only ever takes newer patches within the installed
-  MAJOR.MINOR, so a minor/major bump can't yank the rug out from under an
-  existing install.
-- **Scaffold fitness is checked at release time, not every push.**
-  `tests/e2e/run.sh` scaffolds `setup-project.sh` against a spread of
-  fixture repos (greenfield JS, existing OSS conventions, a monorepo, a
-  repo with a hand-written charter already, ...) and logs where the
-  generated `AGENTS.md` doesn't fit as a "gap" rather than failing the run
-  — spinning up N scaffolds is too expensive for every PR, and gaps are
-  findings to support later, not a merge-blocking contract. Wired into
-  `release.yml` / `e2e.yml`, not `tests.yml`.
-- **Parallelism here is agent teams, and ownership is what makes it safe.**
-  Teams were chosen over worktree-isolated subagents because the work that
-  actually benefits is review and investigation, where teammates need to
-  argue with each other — and that's exactly what subagents can't do. The
-  cost is that teams share one checkout, so the isolation git would have
-  given us has to come from disjoint file ownership plus a `TaskCompleted`
-  test gate instead. Same layering principle as the git hooks: cheap
-  deterministic check early, required CI still the real authority.
+## Conventions
 
-## Skills
-
-The toolkit is a set of Claude Code skills under
-[`.agents/skills/`](.agents/skills/), each with a thin `/`-command wrapper in
-`.claude/commands/`:
-
-- **setup-project** (`/setup-project`) — scaffold a repo's `AGENTS.md` charter
-  from a chosen behavior preset and copy in the skills you want.
-- **create-pr** (`/create-pr`) — visual-first PR descriptions.
-- **setup-git-hooks** (`/setup-git-hooks`) — local commit-message + lint hooks.
-- **tdd-loop** (`/tdd-loop`) — test-first red-green-refactor loop.
-- **test-scenarios** (`/test-scenarios`) — exhaustive scenario/edge-case
-  coverage: one deterministic assertion per case, driven to green.
-
-When to touch the skill layer:
-
-- **Add a skill** only when a *repeatable, multi-step procedure* has proven
-  itself more than once and no existing skill covers it. A one-off fix or a
-  single-line preference is a **Design choices** note instead — not a skill.
-- **Update an existing skill** when the change refines something already in its
-  scope. If a new need only partly overlaps, extend the closest skill rather
-  than cloning a near-duplicate — prefer editing over proliferating skills.
-- Every skill stays self-contained under `.agents/skills/`, with no `domains/`
-  reference, so the whole `.agents/` folder drops into any repo.
-
-## Repo layout
-
-```
-AGENTS.md          this charter (source of truth)
-CLAUDE.md          symlink -> AGENTS.md
-.agents/skills/    the portable toolkit — reusable Claude Code skills
-domains/           personal operating data — never referenced by the toolkit
-  tasks/           Linear; second-brain/ Notion; finance/ planned
-```
-
-## Branching
-
-Development happens on feature branches, never directly on `main`. Branch
-names mirror the commit convention: `<type>/<short-description>`, where
-`<type>` is the same set used for commits (`feat`, `fix`, `chore`, `refactor`,
-`docs`, …) and `<short-description>` is imperative and dash-separated —
-e.g. `feat/remove-claude-coauthoring`, `chore/setup-git-hooks`.
-
-## Working as a team
-
-Agent teams are enabled in `.claude/settings.json`. Teammates are separate
-Claude sessions that **share this one checkout** — they are not isolated in
-worktrees — so ownership is the whole safety mechanism:
-
-- **One owner per path.** Each teammate owns a disjoint set of files and edits
-  nothing outside it. `.agents/skills/<name>/` is one unit; `install.sh` +
-  `bin/` + `tests/install.test.sh` is another. Two teammates in one directory
-  means one of them loses work.
-- **The lead owns `AGENTS.md` and `README.md`.** Teammates report the charter
-  note they think is warranted; the lead writes it. This is the file every
-  teammate would otherwise touch.
-- **A task closes green or not at all.** A `TaskCompleted` hook
-  (`.claude/hooks/task-completed-tests.sh`) runs every `*.test.sh` suite and
-  refuses the completion if any fail, because a teammate can go green on its
-  own work while having broken a peer's.
-
-Reusable teammate roles live in `.claude/agents/`: `skill-author`,
-`toolkit-engineer` (write, one area each) and `reviewer`, `investigator`
-(read-only, one lens or hypothesis each). Spawn 3–5; scale by whether the work
-genuinely splits, not by how big it feels.
-
-## Attribution
-
-Commits and PRs are Reljod's, with no Claude branding. `.claude/settings.json`
-(committed; only `.claude/settings.local.json` stays local) enforces two things
-so the policy travels with the repo:
-
-- **No trailers.** Empty `attribution.commit`/`attribution.pr` and
-  `sessionUrl: false` — no `Co-Authored-By` or `Claude-Session` line is
-  appended to commits or PRs.
-- **Reljod as author.** A `SessionStart` hook runs
-  `git config user.name Reljod && git config user.email oretareljod@gmail.com`
-  at the start of every session, overriding the agent runtime's default
-  `Claude <noreply@anthropic.com>` identity. GitHub keys the commit avatar and
-  name off that email, so agent-made commits show as Reljod, not `claude`.
-
-Note on the **Verified** badge: agent sessions have no signing key, so
-commits they author are shown Unverified. To get Verified under Reljod's name,
-sign locally with a GPG/SSH key registered to his GitHub account
-(`commit.gpgsign true`) — that key never enters the agent environment.
+- **Branches:** `<type>/<short-description>`, never `main`.
+- **Commits:** `<type>: <subject>`, imperative, ≤72 chars. No issue key.
+  → **`/setup-git-hooks`**
+- **PRs:** draft by default.
+- **Attribution:** commits and PRs are Reljod's, no Claude branding.
+  → [`docs/attribution.md`](docs/attribution.md)

@@ -117,11 +117,12 @@ run_interactive() {
   fi
 
   # Preselect what this preset's charter actually leans on, per the skill's
-  # recommendation: everything for jod/team, the test-first trio for
-  # tdd-strict, nothing for minimal (it exists to stay lean).
+  # recommendation: everything for jod/team, the test-first set for
+  # tdd-strict (write-spec included — a spec is upstream of the first test),
+  # nothing for minimal (it exists to stay lean).
   case "$PRESET" in
     minimal)    preselect="" ;;
-    tdd-strict) preselect="tdd-loop,test-scenarios,setup-git-hooks" ;;
+    tdd-strict) preselect="write-spec,tdd-loop,test-scenarios,setup-git-hooks" ;;
     *)          preselect="$(list_skills | paste -sd',' -)" ;;
   esac
   opts=()
@@ -135,7 +136,7 @@ run_interactive() {
   PROJECT_DESC="$(prompt_text "One-line description" "")"
   BRANCH_PREFIX="$(prompt_text "Branch prefix" "$BRANCH_PREFIX")"
   # Opt-in, and phrased so blank is the obvious answer: a required issue key
-  # is a house rule, not a default (see the charter's Design choices).
+  # is a house rule, not a default (see the charter's decision notes).
   TICKET_PREFIX="$(prompt_text "Issue-key prefix for commits, blank for none" "")"
 
   info ""

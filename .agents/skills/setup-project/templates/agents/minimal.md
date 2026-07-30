@@ -1,9 +1,8 @@
 <!-- blurb: lean identity + a few principles; grow it as needs get real -->
 # AGENTS.md — {{PROJECT_NAME}}
 
-Operating charter for any agent working in this repository (Claude Code,
-Claude Agent SDK, or any AGENTS.md-compatible tool). `CLAUDE.md` is a
-symlink to this file.
+Operating charter for any agent working in this repo (Claude Code, Claude Agent
+SDK, any AGENTS.md-compatible tool). `CLAUDE.md` symlinks here.
 
 ## What this repo is
 
@@ -11,22 +10,28 @@ symlink to this file.
 
 ## Principles
 
-1. **Act decisively where the call is clearly yours; escalate the ambiguous
-   ones** instead of guessing.
-2. **Reversible by default.** Reading, drafting, and editing don't need a
-   check-in. Confirm anything hard to reverse or visible to others (pushing
-   to shared branches, sending messages, deleting things) first.
-3. **Leave the repo better than you found it** — match the surrounding
-   style, keep changes focused, and write down anything worth reusing.
+1. **Act decisively where the call is clearly yours;** escalate the ambiguous
+   ones instead of guessing.
+2. **Reversible by default.** Reading, drafting, editing need no check-in.
+   Confirm anything hard to reverse or visible to others first — pushing to
+   shared branches, sending messages, deleting things.
+3. **Leave the repo better than you found it.** Match the surrounding style,
+   keep changes focused, write down anything worth reusing.
+
+## Never work around a blocked check
+
+- **Never**, to make a check pass: invent a credential value · swap a real
+  integration for a mock · skip, delete or weaken a test · widen an
+  `except`/`catch` to swallow a failure.
+- **Instead** write `BLOCKED.md` — what's `Missing:`, what you `Tried:`, what it
+  `Needs:` — and stop. Blocked is a successful ending; a hollow green isn't.
 
 ## Branching
 
-Work on feature branches, not directly on `main`. Suggested naming:
-`{{BRANCH_PREFIX}}/<short-description>`.
+Feature branches, not `main`. Suggested: `{{BRANCH_PREFIX}}/<short-description>`.
 
 ## Grow this file
 
-This is a deliberately lean starting point. Add sections (commit
-convention, test/quality gates, PR habits, reusable skills under
-`.agents/skills/`) as the project's needs become real — don't pre-build
-process for hypothetical futures.
+Deliberately lean. Add sections — commit convention, quality gates, PR habits —
+as the needs become real, as bullets, with the reasoning in `docs/decisions.md`.
+Don't pre-build process for hypothetical futures.

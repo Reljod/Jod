@@ -23,7 +23,7 @@ LIST="$("$SCRIPT" --list 2>&1)"
 for p in jod minimal team tdd-strict; do
   ok "grep -q '$p' <<<\"\$LIST\"" "--list shows preset '$p'"
 done
-for s in create-pr setup-git-hooks tdd-loop test-scenarios; do
+for s in create-pr setup-git-hooks tdd-loop test-scenarios write-spec; do
   ok "grep -q '$s' <<<\"\$LIST\"" "--list shows skill '$s'"
 done
 SKILLS_SECTION="$(sed -n '/Skills available/,$p' <<<"$LIST")"
@@ -91,7 +91,7 @@ assert_no_grep "{{" "$d/AGENTS.md"                    "special: no leftover plac
 section "--skills all"
 d="$(fresh skills-all)"
 "$SCRIPT" --preset team --skills all --name X --target "$d" >/dev/null 2>&1
-for s in create-pr setup-git-hooks tdd-loop test-scenarios; do
+for s in create-pr setup-git-hooks tdd-loop test-scenarios write-spec; do
   assert_dir  "$d/.agents/skills/$s"      "all: skill '$s' copied"
   assert_file "$d/.claude/commands/$s.md" "all: command '/$s' copied"
 done

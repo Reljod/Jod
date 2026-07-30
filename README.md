@@ -60,9 +60,9 @@ glue.
 
 The *other* half is the reusable, project-agnostic layer — a set of Claude Code
 skills under [`.agents/`](./.agents) that never reach into a personal domain.
-Copy `.agents/` into any repo and the skills come with it. Design choices and
-preferences (the WHYs) are kept slim in [`AGENTS.md`](./AGENTS.md), not a
-separate doc.
+Copy `.agents/` into any repo and the skills come with it.
+[`AGENTS.md`](./AGENTS.md) holds the guidelines as bullets; the reasoning behind
+them lives in [`docs/decisions.md`](./docs/decisions.md).
 
 ### Install the toolkit on a new machine
 
@@ -96,6 +96,7 @@ Skills to copy in  ↑/↓ move · space toggle · a all · n none · enter conf
     [x] setup-git-hooks  Install deterministic local git hooks for a repo.
     [ ] tdd-loop         Build a feature or fix a bug test-first.
     [x] test-scenarios   Exhaustively test a unit — every scenario, every edge case.
+    [x] write-spec       Interview, then write a SPEC.md a fresh session can execute.
 ```
 
 Every choice is also a flag, so the same scaffold is scriptable — and with
@@ -136,8 +137,10 @@ too expensive to run on every push), tags, and publishes a GitHub Release.
 ## Structure
 
 ```
-AGENTS.md          the charter — identity, principles, slim WHY notes
+AGENTS.md          the charter — identity, principles, conventions
 CLAUDE.md          symlink -> AGENTS.md, so every runtime reads the same source
+REVIEW.md          brief for the automated PR review — what to flag, what to ignore
+docs/              the WHYs behind the charter's guidelines
 install.sh         curlable bootstrap: clones this repo, links the `jod` CLI
 bin/jod            CLI shim — dispatches into .agents/skills/ from any repo
 .agents/skills/    the portable toolkit — reusable Claude Code skills

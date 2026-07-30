@@ -30,6 +30,11 @@ three ways to show, and the change decides which:
 Prose is the fallback, not the default. If you're writing a paragraph to
 explain a rule, stop and write two examples instead.
 
+Whichever way you show it, the body also carries **evidence** — the real
+output of the check, plus the diff-derived deltas from step 4. Writing the
+code was never the expensive part; verifying it is, so the PR's job is to
+make verification cheap rather than to describe the work well.
+
 This is a companion to the repo/host's standing PR-creation instructions
 (draft PRs, template detection, etc.) — follow those for *whether and how*
 to open the PR. This skill is about what goes *in* the description.
@@ -101,26 +106,54 @@ Commit any screenshots/GIFs/composites into the same branch/push, under:
 .github/pr-assets/<branch-slug>/
 ```
 
-Reference them in the PR body via the **commit SHA**, not the branch
-name:
+Reference them by **commit SHA**, not branch name:
 
 ```
 https://raw.githubusercontent.com/<owner>/<repo>/<head-sha>/.github/pr-assets/<branch-slug>/<file>
 ```
 
-Branch-name-pinned URLs break the moment the branch is deleted after
-merge; SHA-pinned URLs keep working as long as that commit stays
-reachable. Know the limit: this is reliable while the PR is open and
-through GitHub's dangling-commit retention window after merge — it is
-not a long-term archival guarantee, especially under squash-merge, where
-the original commit can eventually become unreachable. That's an accepted
-trade-off for review-time speed, not something to build extra
-infrastructure around.
+Branch-pinned URLs die when the branch is deleted after merge. SHA-pinned
+ones survive while the commit stays reachable — reliable through review and
+GitHub's post-merge retention window, not an archival guarantee (squash-merge
+eventually orphans the commit). Accepted trade-off for review speed.
 
-Mermaid diagrams need none of this — embed them directly as fenced
-` ```mermaid ` blocks; GitHub renders them natively in PR bodies.
+Mermaid needs none of this — embed fenced ` ```mermaid ` blocks; GitHub
+renders them natively.
 
-## 4. Assemble the body, visuals first
+## 4. Generate the evidence bundle
+
+"Visual" doesn't mean prettier prose — it means **deltas**. Run this after
+the work is done, which is what makes it free: a bundle attached to the PR
+costs zero synchronous approval, unlike a plan someone has to read first.
+
+```
+.agents/skills/create-pr/scripts/evidence_bundle.sh <base>...<head> [--spec SPEC.md]
+```
+
+Four sections, each answering a question the reviewer would otherwise
+answer by reading everything:
+
+- **Blast radius** — changed files tiered high/medium/low, so attention goes
+  to auth, money, migrations, contracts, CI and deps first.
+- **Contract diff** — the public surface that moved: exports, routes, flags,
+  env vars, schema. "Nothing detected" is itself a useful result.
+- **Substitutions** — newly skipped tests, silenced failures, mocks in
+  shipped code, credential-shaped literals, net assertions removed. Every
+  line is either deliberate (say so in one sentence) or a workaround that
+  should have been a `BLOCKED.md`. Never delete a flagged line from the
+  report: a substitution that's invisible in a summary is obvious in raw
+  output, and hiding it is what destroys review trust.
+- **Spec deviation** — files changed that the spec never named, and files it
+  named that went untouched. The plan-vs-diff report, computed from git
+  rather than from memory.
+
+Paste it in as-is. It flags, it doesn't judge; the reviewer weighs it. Two
+things it deliberately does: skips prose (`*.md`, `docs/`) in the contract and
+substitution scans, since a doc that *states* a rule isn't breaking it, and
+caps long sections while printing the overflow count — a truncated list that
+looks complete is the same failure as a summary hiding a skipped test.
+
+## 5. Assemble the body, visuals first
 
 Start from the skeleton, which seeds the sections from the categories the
 diff actually touches:
@@ -129,30 +162,42 @@ diff actually touches:
 .agents/skills/create-pr/scripts/pr_body_skeleton.sh <base>...<head> > pr-body.md
 ```
 
-Fixed section order, so a reviewer sees the visual before they scroll to
-any text:
+Fixed order, so the reviewer sees the artifact before any prose:
 
 1. **Summary** — 1-2 sentences, no filler.
 2. **Visuals** — screenshots/GIFs/diagrams, right after the summary.
-3. **What changed** — terse bullets, not paragraphs.
-4. **Test plan** — a checklist.
-5. **Checks** — a short checklist confirming the deterministic gate is
-   green (CI required checks, lint/format/type-check, patch coverage). The
-   visuals tell the reviewer *what* changed; this tells them the machine
-   already verified the boring correctness, so their attention goes to
-   judgment, not to re-running your checks in their head.
-6. Anything long (raw logs, full plan output) goes in a collapsed
-   `<details>` block at the end, not inline.
+3. **What changed** — terse bullets.
+4. **Verification** — the command a skeptic would run and its **real
+   output**, pasted. A ticked checkbox is an assertion; output is evidence,
+   and it's the only form that works for a session nobody watched. If the
+   check couldn't run, say so and link the `BLOCKED.md` — a documented
+   blockage is a valid outcome, not something to paper over.
+5. **Evidence** — the bundle from step 4.
+6. **Decisions** — calls made without asking, one line each with a
+   confidence marker, so review reads the shaky ones instead of all of them.
+7. Long logs in a collapsed `<details>` at the end.
 
-If the target repo has its own PR template, populate its sections but
-still front-load visuals wherever they fit (or add a "Visuals" section
-near the top if the template doesn't already have an equivalent) — treat
-the template as a layout to fill in, not a reason to bury the images
-under prose.
+If the repo has its own PR template, populate its sections but still
+front-load visuals and keep Verification/Evidence somewhere — treat the
+template as a layout, not a reason to bury the proof.
 
-## 5. Create and clean up
+## 6. Size the review ask to the blast radius
 
-Open the PR per the standing draft/template rules already in force for
-this session. Remove any temporary git worktree you created for
-before/after capture. Report back, briefly, which visual strategy you
-used per category — this is a decision worth surfacing, not narrating.
+Too many PRs is a routing problem, not a rendering one. Say in the body
+which kind this is, so a reviewer knows how hard to look:
+
+- **Reversible, tested, no contract change** → automated review plus a spot
+  check. Say so outright.
+- **Auth, money, migrations, deletion, public contracts** → ask for full
+  attention, and name the specific decision you want checked.
+
+For a stack of related PRs, one digest across the feature with each PR's
+evidence attached beats N independent review loads.
+
+## 7. Create and clean up
+
+Open the PR per the standing draft/template rules already in force for this
+session. Remove any temporary git worktree you created for before/after
+capture. Report back briefly which visual strategy you used per category,
+plus anything the substitutions scan flagged — decisions worth surfacing,
+not narrating.
