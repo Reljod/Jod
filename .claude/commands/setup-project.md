@@ -6,6 +6,9 @@ argument-hint: "[target repo dir, defaults to current repo]"
 Bootstrap the project using the **setup-project** skill at
 `.agents/skills/setup-project/SKILL.md`. Read that skill and follow it.
 
+Wherever that skill writes `${CLAUDE_SKILL_DIR}`, read it as
+`.agents/skills/setup-project` — the skill's own directory in this repo.
+
 Target: $ARGUMENTS (if empty, the current repository).
 
 Steps:

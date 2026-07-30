@@ -79,7 +79,7 @@ rule is not evaluated at all.
    the hooks (or pass its path):
 
    ```
-   .agents/skills/setup-git-hooks/scripts/install-hooks.sh [target-repo-dir]
+   ${CLAUDE_SKILL_DIR}/scripts/install-hooks.sh [target-repo-dir]
    ```
 
    This copies the hook templates into `<repo>/.githooks/`, sets

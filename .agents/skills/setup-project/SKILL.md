@@ -89,13 +89,13 @@ driving:
 1. **List what's available**, then present the choices to the user:
 
    ```
-   .agents/skills/setup-project/scripts/setup-project.sh --list
+   ${CLAUDE_SKILL_DIR}/scripts/setup-project.sh --list
    ```
 
 2. **Scaffold** with the chosen preset and skills:
 
    ```
-   .agents/skills/setup-project/scripts/setup-project.sh \
+   ${CLAUDE_SKILL_DIR}/scripts/setup-project.sh \
      --preset jod --skills create-pr,setup-git-hooks,tdd-loop \
      --name "My Project" --desc "One line about it." \
      --target /path/to/repo

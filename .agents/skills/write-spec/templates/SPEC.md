@@ -2,7 +2,7 @@
 
 <!-- Written after the interview, before any code. A fresh session with no
      memory of that conversation must be able to execute this file alone.
-     Validate with: .agents/skills/write-spec/scripts/check-spec.sh SPEC.md -->
+     Validate with the write-spec skill's scripts/check-spec.sh SPEC.md -->
 
 ## Goal
 

@@ -67,11 +67,12 @@ The tight loop needs the focused test to re-run on every save. Use the
 runner:
 
 ```
-.agents/skills/tdd-loop/scripts/tdd-loop.sh --watch -- <test command / focus>
+${CLAUDE_SKILL_DIR}/scripts/tdd-loop.sh --watch -- <test command / focus>
 ```
 
 - With no command it auto-detects the runner
-  (`scripts/detect-test-runner.sh`) and runs the whole suite — fine to
+  (`${CLAUDE_SKILL_DIR}/scripts/detect-test-runner.sh`) and runs the whole
+  suite — fine to
   start, but **focus it** on the test you're driving for speed, e.g.:
   - `tdd-loop.sh --watch -- pytest tests/test_sync.py::test_retry`
   - `tdd-loop.sh --watch -- npx vitest run sync.test.ts`

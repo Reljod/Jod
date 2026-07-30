@@ -6,6 +6,9 @@ argument-hint: "[what to build/fix, and/or a focused test command]"
 Drive the work test-first using the **tdd-loop** skill at
 `.agents/skills/tdd-loop/SKILL.md`. Read that skill and follow it.
 
+Wherever that skill writes `${CLAUDE_SKILL_DIR}`, read it as
+`.agents/skills/tdd-loop` — the skill's own directory in this repo.
+
 Task / focus: $ARGUMENTS
 
 Steps:

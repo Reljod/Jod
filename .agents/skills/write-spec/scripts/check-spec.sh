@@ -18,9 +18,15 @@ set -uo pipefail
 
 SPEC="${1:-SPEC.md}"
 
+# Self-locating rather than repo-relative: this skill runs copied into a repo,
+# installed as the `jod` plugin (from ~/.claude/plugins/cache/…), or straight
+# out of a Jod checkout, and only an absolute path derived from $0 names the
+# template correctly in all three.
+SKILL_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+
 if [ ! -f "$SPEC" ]; then
   echo "check-spec: no such spec file: $SPEC" >&2
-  echo "Create one from .agents/skills/write-spec/templates/SPEC.md" >&2
+  echo "Create one from $SKILL_DIR/templates/SPEC.md" >&2
   exit 2
 fi
 

@@ -44,7 +44,7 @@ to open the PR. This skill is about what goes *in* the description.
 Run the categorizer against the diff you're about to open a PR for:
 
 ```
-.agents/skills/create-pr/scripts/categorize_diff.sh <base>...<head>
+${CLAUDE_SKILL_DIR}/scripts/categorize_diff.sh <base>...<head>
 ```
 
 It buckets changed paths into `ui`, `api`, `architecture`, `tooling`,
@@ -65,7 +65,7 @@ Summary:
   then Playwright (Chromium is pre-installed) to capture each state. If
   the change is interactive or animated, a short GIF beats a static shot.
   When before/after are comparable in size, stitch them into one labeled
-  image with `scripts/compose_side_by_side.py` instead of posting two
+  image with `${CLAUDE_SKILL_DIR}/scripts/compose_side_by_side.py` instead
   (needs Pillow: `pip install pillow` if not already available).
 - **API** — a compact `mermaid sequenceDiagram` of the request/response
   flow, but only when the flow itself is the non-obvious part. Pair it
@@ -127,7 +127,7 @@ the work is done, which is what makes it free: a bundle attached to the PR
 costs zero synchronous approval, unlike a plan someone has to read first.
 
 ```
-.agents/skills/create-pr/scripts/evidence_bundle.sh <base>...<head> [--spec SPEC.md]
+${CLAUDE_SKILL_DIR}/scripts/evidence_bundle.sh <base>...<head> [--spec SPEC.md]
 ```
 
 Four sections, each answering a question the reviewer would otherwise
@@ -159,7 +159,7 @@ Start from the skeleton, which seeds the sections from the categories the
 diff actually touches:
 
 ```
-.agents/skills/create-pr/scripts/pr_body_skeleton.sh <base>...<head> > pr-body.md
+${CLAUDE_SKILL_DIR}/scripts/pr_body_skeleton.sh <base>...<head> > pr-body.md
 ```
 
 Fixed order, so the reviewer sees the artifact before any prose:
