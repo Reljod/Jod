@@ -90,14 +90,28 @@ while IFS= read -r p; do
 done < <(json_list "$MANIFEST" skills)
 ok "[ ${#skill_roots[@]} -gt 0 ]" "manifest declares at least one skills path"
 
-agent_roots=()
+# `agents` takes FILES, not a directory — the asymmetry with `skills` is real
+# and the installer enforces it ("Validation errors: agents: Invalid input" on
+# a directory). `skills` takes directories; `commands` takes either.
+agent_files=()
 while IFS= read -r p; do
   [ -n "$p" ] || continue
   ok "[[ '$p' == ./* ]]" "agents path is plugin-root-relative: $p"
-  assert_dir "${p#./}" "agents path exists: $p"
-  agent_roots+=("${p#./}")
+  ok "[[ '$p' == *.md ]]" "agents path is a .md file, not a directory: $p"
+  assert_file "${p#./}" "agents file exists: $p"
+  agent_files+=("${p#./}")
 done < <(json_list "$MANIFEST" agents)
-ok "[ ${#agent_roots[@]} -gt 0 ]" "manifest declares at least one agents path"
+ok "[ ${#agent_files[@]} -gt 0 ]" "manifest declares at least one agent file"
+
+# An explicit file list is what the schema requires, and its cost is drift: a
+# new agent added to the directory ships nowhere until it is listed here.
+AGENT_DIR=".claude/agents"
+while IFS= read -r f; do
+  [ -n "$f" ] || continue
+  listed=0
+  for a in "${agent_files[@]}"; do [ "$a" = "$f" ] && listed=1; done
+  ok "[ $listed -eq 1 ]" "$(basename "$f" .md): listed in the manifest"
+done < <(find "$AGENT_DIR" -maxdepth 1 -name '*.md' | sort)
 
 HOOKS_PATH="$(json_str "$MANIFEST" hooks)"
 assert_file "${HOOKS_PATH#./}" "hooks config exists: $HOOKS_PATH"
@@ -133,17 +147,15 @@ ok "[ $skill_count -ge 5 ]" "all $skill_count skills load"
 # --- 4. every agent is loadable as a subagent -------------------------------
 section "agents load"
 agent_count=0
-for root in "${agent_roots[@]}"; do
-  for f in "$root"*.md; do
-    [ -f "$f" ] || continue
-    name="$(basename "$f" .md)"
-    agent_count=$((agent_count + 1))
-    fm="$(awk 'NR==1 && $0!="---"{exit} NR==1{next} $0=="---"{exit} {print}' "$f")"
-    assert_eq "$(printf '%s\n' "$fm" | sed -n 's/^name:[[:space:]]*//p' | head -n1)" \
-      "$name" "$name: frontmatter name matches its filename"
-    ok "[ -n \"\$(printf '%s\n' \"\$fm\" | sed -n 's/^description:[[:space:]]*//p')\" ]" \
-      "$name: has a description"
-  done
+for f in "${agent_files[@]}"; do
+  [ -f "$f" ] || continue
+  name="$(basename "$f" .md)"
+  agent_count=$((agent_count + 1))
+  fm="$(awk 'NR==1 && $0!="---"{exit} NR==1{next} $0=="---"{exit} {print}' "$f")"
+  assert_eq "$(printf '%s\n' "$fm" | sed -n 's/^name:[[:space:]]*//p' | head -n1)" \
+    "$name" "$name: frontmatter name matches its filename"
+  ok "[ -n \"\$(printf '%s\n' \"\$fm\" | sed -n 's/^description:[[:space:]]*//p')\" ]" \
+    "$name: has a description"
 done
 ok "[ $agent_count -ge 4 ]" "all $agent_count agents load"
 
