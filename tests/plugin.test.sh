@@ -5,17 +5,26 @@
 # `.claude-plugin/marketplace.json` (the catalog that serves it).
 #
 # Why a suite and not just `claude plugin validate`: that command needs the
-# `claude` CLI on PATH, which CI and a fresh box don't have, and it checks the
-# manifest's *shape* — not the two things that actually break this plugin:
+# `claude` CLI, which CI and a fresh box don't have — and, more to the point,
+# it passed on two manifests that were badly broken at *install* time. It
+# checks shape, not loading. What actually breaks this plugin:
 #
-#   1. The manifest points at `.agents/skills/` and `.claude/agents/` instead
-#      of copying them, so a renamed or moved directory silently ships a
-#      plugin with no skills. Every declared path is asserted to resolve.
-#   2. A plugin's skills run from `~/.claude/plugins/cache/...`, not from the
+#   1. Declaring `agents` or `hooks` in the manifest. Both validate clean and
+#      then fail: `agents` loads nothing at all, `hooks` double-loads the
+#      standard file and takes the whole plugin down. Section 2 fails if
+#      either key comes back.
+#   2. The manifest points `skills` at `.agents/skills/` instead of copying it,
+#      so a renamed or moved directory silently ships a plugin with no skills.
+#      Every declared path is asserted to resolve.
+#   3. A plugin's skills run from `~/.claude/plugins/cache/...`, not from the
 #      user's repo, so any script path written relative to the *repo* is dead
 #      on arrival. Skills reference bundled scripts via ${CLAUDE_SKILL_DIR};
 #      section 6 fails if a repo-relative invocation comes back, and checks
 #      that every substituted path names a file that exists.
+#   4. Agents ship from `agents/` but the repo also needs them in
+#      `.claude/agents/` to work here without the plugin. Symlinks aren't
+#      followed by the plugin loader, so both are real copies and section 2
+#      fails the moment they drift apart.
 #
 # Deliberately offline and read-only — no install, no network, no `claude`.
 # Run: tests/plugin.test.sh
@@ -90,31 +99,62 @@ while IFS= read -r p; do
 done < <(json_list "$MANIFEST" skills)
 ok "[ ${#skill_roots[@]} -gt 0 ]" "manifest declares at least one skills path"
 
-# `agents` takes FILES, not a directory — the asymmetry with `skills` is real
-# and the installer enforces it ("Validation errors: agents: Invalid input" on
-# a directory). `skills` takes directories; `commands` takes either.
-agent_files=()
-while IFS= read -r p; do
-  [ -n "$p" ] || continue
-  ok "[[ '$p' == ./* ]]" "agents path is plugin-root-relative: $p"
-  ok "[[ '$p' == *.md ]]" "agents path is a .md file, not a directory: $p"
-  assert_file "${p#./}" "agents file exists: $p"
-  agent_files+=("${p#./}")
-done < <(json_list "$MANIFEST" agents)
-ok "[ ${#agent_files[@]} -gt 0 ]" "manifest declares at least one agent file"
+# Agents and hooks load ONLY from their default locations. Both manifest keys
+# are actively harmful here, and each failed differently against Claude Code
+# 2.1.220 — `claude plugin validate` passes on both, so only an install shows it:
+#
+#   "agents": [...]  -> validates, then loads nothing. Agents (0). A directory
+#                       value is rejected outright ("agents: Invalid input"); an
+#                       explicit .md file list validates and still loads nothing.
+#   "hooks": "./hooks/hooks.json"
+#                    -> "Duplicate hooks file detected", plugin fails to load
+#                       entirely, because hooks/hooks.json is auto-discovered.
+#
+# So the manifest must stay silent about both and let discovery do it.
+for key in agents hooks; do
+  declared="$(json_list "$MANIFEST" "$key")"
+  n="$(printf '%s' "$declared" | grep -c . || true)"
+  ok "[ ${n:-0} -eq 0 ]" "manifest does not declare '$key' (breaks loading; discovery handles it)"
+done
 
-# An explicit file list is what the schema requires, and its cost is drift: a
-# new agent added to the directory ships nowhere until it is listed here.
-AGENT_DIR=".claude/agents"
+# Agents live in agents/ at the plugin root — the only place a plugin reads
+# them from. .claude/agents/ is NOT read for plugins even when named explicitly.
+AGENT_DIR="agents"
+PROJECT_AGENT_DIR=".claude/agents"
+assert_dir "$AGENT_DIR" "agents/ exists at the plugin root"
+agent_files=()
 while IFS= read -r f; do
   [ -n "$f" ] || continue
-  listed=0
-  for a in "${agent_files[@]}"; do [ "$a" = "$f" ] && listed=1; done
-  ok "[ $listed -eq 1 ]" "$(basename "$f" .md): listed in the manifest"
+  agent_files+=("$f")
 done < <(find "$AGENT_DIR" -maxdepth 1 -name '*.md' | sort)
+ok "[ ${#agent_files[@]} -gt 0 ]" "agents/ holds at least one agent"
 
-HOOKS_PATH="$(json_str "$MANIFEST" hooks)"
-assert_file "${HOOKS_PATH#./}" "hooks config exists: $HOOKS_PATH"
+# The repo needs the same agents in .claude/agents/ so they work here without
+# the plugin installed, and symlinks are not followed by the plugin loader —
+# so these are two real copies and this is the gate that keeps them identical.
+while IFS= read -r f; do
+  [ -n "$f" ] || continue
+  name="$(basename "$f")"
+  twin="$PROJECT_AGENT_DIR/$name"
+  assert_file "$twin" "${name%.md}: present in $PROJECT_AGENT_DIR too"
+  [ -f "$twin" ] || continue
+  if diff -q "$f" "$twin" >/dev/null 2>&1; then
+    pass "${name%.md}: agents/ and $PROJECT_AGENT_DIR/ copies are identical"
+  else
+    fail "${name%.md}: agents/ and $PROJECT_AGENT_DIR/ have DRIFTED"
+  fi
+done < <(printf '%s\n' "${agent_files[@]}")
+# ...and the reverse, so an agent added only on the project side still ships.
+while IFS= read -r f; do
+  [ -n "$f" ] || continue
+  assert_file "$AGENT_DIR/$(basename "$f")" \
+    "$(basename "$f" .md): present in $AGENT_DIR/ too (or it never ships)"
+done < <(find "$PROJECT_AGENT_DIR" -maxdepth 1 -name '*.md' | sort)
+
+# Fixed, not read from the manifest: this is the auto-discovered location, and
+# naming it in the manifest is what breaks the plugin (see above).
+HOOKS_PATH="hooks/hooks.json"
+assert_file "$HOOKS_PATH" "hooks config exists at the discovered path: $HOOKS_PATH"
 
 # --- 3. every skill is loadable as a skill ----------------------------------
 # A directory under a declared skills path with no SKILL.md, or whose
@@ -163,7 +203,7 @@ ok "[ $agent_count -ge 4 ]" "all $agent_count agents load"
 # ${CLAUDE_PLUGIN_ROOT} is mandatory here: a plugin hook runs from the cache
 # directory, so a bare relative path finds nothing.
 section "hooks"
-assert_ok python3 -c "import json;json.load(open('${HOOKS_PATH#./}'))"
+assert_ok python3 -c "import json;json.load(open('$HOOKS_PATH'))"
 # The resolving happens in python, not sed: BSD sed (macOS) has no `\?`, and
 # the raw command contains `${CLAUDE_PLUGIN_ROOT}` — which bash would try to
 # expand if it ever reached an `eval`. Emits: anchored?<TAB>repo-relative path.
@@ -179,7 +219,7 @@ for entries in cfg.values():
             # The plugin root is this repo, so strip the variable (and the
             # quotes around it) and keep the leading word: the script path.
             p=cmd.replace("\"${CLAUDE_PLUGIN_ROOT}\"","").replace("${CLAUDE_PLUGIN_ROOT}","")
-            print("%s\t%s" % (anchored, p.split()[0].lstrip("/")))' "${HOOKS_PATH#./}")"
+            print("%s\t%s" % (anchored, p.split()[0].lstrip("/")))' "$HOOKS_PATH")"
 hook_n="$(printf '%s' "$hook_cmds" | grep -c . || true)"
 ok "[ ${hook_n:-0} -ge 1 ]" "hooks config declares at least one command ($hook_n)"
 while IFS=$'\t' read -r anchored script; do

@@ -21,12 +21,5 @@
   ],
   "skills": [
     "./.agents/skills/"
-  ],
-  "agents": [
-    "./.claude/agents/investigator.md",
-    "./.claude/agents/reviewer.md",
-    "./.claude/agents/skill-author.md",
-    "./.claude/agents/toolkit-engineer.md"
-  ],
-  "hooks": "./hooks/hooks.json"
+  ]
 }

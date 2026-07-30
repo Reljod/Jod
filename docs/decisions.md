@@ -200,3 +200,35 @@ nothing. `release.yml` writes the computed version into the manifest, commits
 it onto the tagged commit, and pushes *only the tag* — tags are already the
 source of truth here (`install.sh` resolves the newest one), so the released
 artifact carries its own version without CI needing write access to `main`.
+
+## The plugin manifest declares skills and nothing else
+
+`claude plugin validate` passes on manifests that are broken at install time,
+so the manifest was written twice from the docs and wrong both times. What the
+installer actually enforces, against Claude Code 2.1.220:
+
+- **`agents` must not be declared.** A directory value is rejected outright
+  (`Validation errors: agents: Invalid input`). An explicit `.md` file list
+  validates cleanly — and then loads nothing, `Agents (0)`. Only the default
+  `agents/` scan works.
+- **`hooks` must not be declared.** `hooks/hooks.json` is auto-discovered, so
+  naming it too is a *duplicate* load and the whole plugin fails with
+  `Duplicate hooks file detected`.
+- **`skills` is declared**, because it is the one component whose files don't
+  live in the default location, and a directory value works there.
+
+The rule that falls out: let discovery do its job, and declare a path only when
+a component genuinely lives somewhere else. `tests/plugin.test.sh` fails if
+either key reappears, since validation won't.
+
+## The four agents exist twice, and a test keeps them identical
+
+A plugin reads agents only from `agents/` at its root; the repo reads them only
+from `.claude/agents/`. Both are needed — the plugin ships them, and they have
+to work in this checkout for anyone who hasn't installed it. Symlinking one to
+the other doesn't work: the plugin loader doesn't follow them and silently
+reports `Agents (0)`.
+
+So they are two real copies, and `tests/plugin.test.sh` diffs them in both
+directions — drift fails, and an agent added to only one side fails too. A copy
+guarded by a check beats a clever link that fails silently.

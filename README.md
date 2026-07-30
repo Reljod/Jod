@@ -222,6 +222,8 @@ install.sh         curlable bootstrap: clones this repo, links the `jod` CLI
 bin/jod            CLI shim — dispatches into .agents/skills/ from any repo
 .claude-plugin/    plugin manifest + marketplace catalog (installs this repo as a plugin)
 hooks/hooks.json   the TaskCompleted gate, as the plugin ships it
+agents/            the four subagents, where a plugin reads them from
+.claude/agents/    the same four, so they work here without the plugin
 .agents/skills/    the portable toolkit — reusable Claude Code skills
 domains/           personal operating notes, one per area of Reljod's life
 ```
