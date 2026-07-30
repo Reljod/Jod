@@ -35,6 +35,19 @@ sessions as the team members.
 
 Everything below is those two commands plus bookkeeping.
 
+## Running it
+
+The CLI is a single Node script. Invoke it directly — this always works,
+including from a plugin install where the `jod` shim is absent:
+
+```sh
+node "${CLAUDE_SKILL_DIR}/scripts/orc.mjs" <subcommand> [args]
+```
+
+With the toolkit installed (`install.sh`), `jod orc <subcommand>` is the same
+thing, shorter. The examples below use `jod orc`; substitute the `node …` form
+if `jod` is not on your PATH.
+
 ## Commands
 
 ```sh

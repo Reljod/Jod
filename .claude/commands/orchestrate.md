@@ -5,7 +5,13 @@ argument-hint: "[what to delegate, e.g. \"@Jod @Socially audit the README\"]"
 
 Act as an orchestrator over background Claude sessions using the
 **orchestrate** skill at `.agents/skills/orchestrate/SKILL.md`. Read that
-skill and follow it. The CLI is `jod orc` (`jod orc help`).
+skill and follow it.
+
+Wherever that skill writes `${CLAUDE_SKILL_DIR}`, read it as
+`.agents/skills/orchestrate` — the skill's own directory in this repo.
+
+The CLI is `jod orc` (`jod orc help`), or equivalently
+`node .agents/skills/orchestrate/scripts/orc.mjs` when `jod` is not on PATH.
 
 Request: $ARGUMENTS
 
