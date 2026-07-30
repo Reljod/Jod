@@ -67,11 +67,46 @@ them lives in [`docs/decisions.md`](./docs/decisions.md).
 ### Install as a Claude Code plugin
 
 This repo is also a Claude Code plugin — the same skills and subagents, with no
-clone and nothing copied into your project:
+clone and nothing copied into your project. The repo *is* the plugin and the
+catalog that serves it: `.claude-plugin/plugin.json` and
+`.claude-plugin/marketplace.json` sit at the root because Claude Code looks for
+them at exactly that path, and only those two files go in that folder.
+
+**Someone installing it on their machine** — two steps, because adding a
+catalog and installing from it are separate acts:
 
 ```
-/plugin marketplace add Reljod/Jod
-/plugin install jod@reljod
+/plugin marketplace add Reljod/Jod     # register the catalog (installs nothing)
+/plugin install jod@reljod             # install the plugin from it
+/reload-plugins                        # activate without restarting
+```
+
+`jod@reljod` reads as *plugin `jod`, from marketplace `reljod`*.
+
+**A repo that wants everyone who opens it to get the plugin** — commit the
+marketplace into that repo's `.claude/settings.json`, then install once at
+**project scope**, which writes the enable-entry alongside it:
+
+```json
+{
+  "extraKnownMarketplaces": {
+    "reljod": {
+      "source": { "source": "github", "repo": "Reljod/Jod" }
+    }
+  }
+}
+```
+
+Collaborators get prompted to install it when they trust the repo folder. Run
+`/plugin install jod@reljod` and pick **Project scope** rather than hand-writing
+the enable-entry — Claude Code writes the correct shape into
+`.claude/settings.json` itself.
+
+**Installing from a branch or tag** — the `owner/repo` shorthand always reads
+the repo's *default branch*. To pin a ref, use the full git URL with `#`:
+
+```
+/plugin marketplace add https://github.com/Reljod/Jod.git#v1.2.0
 ```
 
 Plugin components are namespaced, so the skills arrive as `/jod:write-spec`,
@@ -96,9 +131,15 @@ Not included: the `SessionStart` hook that pins git identity. That one is
 project-local on purpose ([why](./docs/decisions.md)).
 
 To hack on the plugin without installing it, point Claude Code at a checkout —
-`claude --plugin-dir /path/to/Jod` — and `/reload-plugins` after each edit.
-`tests/plugin.test.sh` validates the manifest, the catalog, and that every
-skill, agent, hook and bundled script the plugin declares actually resolves.
+`claude --plugin-dir /path/to/Jod` — and `/reload-plugins` after each edit. That
+needs no marketplace and no install, so it's also the fastest way to try the
+plugin before committing to it. `tests/plugin.test.sh` validates the manifest,
+the catalog, and that every skill, agent, hook and bundled script the plugin
+declares actually resolves.
+
+If `/plugin marketplace add` reports that it can't find the catalog, the usual
+cause is the ref: the marketplace files have to exist **on the branch being
+fetched**, and the shorthand fetches the default branch.
 
 ### Install the toolkit on a new machine
 
