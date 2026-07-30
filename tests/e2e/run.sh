@@ -50,7 +50,12 @@ scaffold() {
   # No --ticket: issue keys are opt-in, so the fitness check measures what a
   # default scaffold actually produces. Pass it per-fixture via "$@" to
   # exercise the opt-in path.
-  "$SETUP" --preset "$preset" "${skills_args[@]}" \
+  #
+  # ${a[@]+"${a[@]}"}, not "${a[@]}": under `set -u`, bash 3.2 (still macOS's
+  # /bin/bash) treats expanding an *empty* array as an unbound variable and
+  # kills the run. That aborted this suite at the first fixture scaffolded
+  # with no skills, so every fixture after it silently never ran.
+  "$SETUP" --preset "$preset" ${skills_args[@]+"${skills_args[@]}"} \
     --name "$fixture" --desc "Fixture repo for the setup-project e2e fitness check." \
     --target "$dst" "$@"
 }

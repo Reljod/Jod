@@ -224,10 +224,18 @@ if [ -e "$AGENTS_OUT" ] && [ "$FORCE" -ne 1 ]; then
   err "$AGENTS_OUT already exists (use --force to overwrite)"
 fi
 
-# Bash 5.x treats '&' (and '\') specially in the *replacement* half of
-# ${var//pat/repl} — like sed's '&'. Escape them so a value such as
-# "Acme & Co" is substituted verbatim instead of re-inserting the match.
-esc_repl() { local s=$1; s=${s//\\/\\\\}; s=${s//&/\\&}; printf '%s' "$s"; }
+# Bash 5.2 made '&' (and '\') special in the *replacement* half of
+# ${var//pat/repl}, where '&' re-inserts the match like sed's. Older bashes —
+# including the 3.2 that ships with macOS — take the replacement literally, so
+# escaping unconditionally is itself the bug: "Acme & Co" lands as
+# "Acme \& Co". Probe the running shell once and escape only if it needs it.
+_amp_probe="X"; _amp_probe="${_amp_probe//X/&}"
+if [ "$_amp_probe" = "X" ]; then
+  esc_repl() { local s=$1; s=${s//\\/\\\\}; s=${s//&/\\&}; printf '%s' "$s"; }
+else
+  esc_repl() { printf '%s' "$1"; }
+fi
+unset _amp_probe
 
 # The leading `<!-- blurb: ... -->` line is picker metadata, not charter
 # text — drop it so it never lands in a scaffolded AGENTS.md.
