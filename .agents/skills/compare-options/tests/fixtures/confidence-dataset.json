@@ -1,0 +1,18 @@
+{
+  "_meta": {
+    "reference_spec": "A/B fixture: a cheaper contender against a dearer incumbent.",
+    "note": "tests/test.sh rewrites the contender's `confidence` and re-scores. Everything else is held fixed, so any change in stability is attributable to the confidence mechanism alone."
+  },
+  "_schema": {
+    "required": ["id", "confidence"],
+    "ratings_1_5": ["reliability", "strictness"]
+  },
+  "candidates": [
+    {"id": "contender", "name": "Contender", "price": 4.5, "currency": "USD", "capacity": 4,
+     "reliability": 3, "strictness": 2, "has_api": true, "confidence": "high",
+     "sources": ["x"], "flags": []},
+    {"id": "incumbent", "name": "Incumbent", "price": 5.0, "currency": "USD", "capacity": 4,
+     "reliability": 3, "strictness": 2, "has_api": true, "confidence": "high",
+     "sources": ["x"], "flags": []}
+  ]
+}

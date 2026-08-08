@@ -1,0 +1,53 @@
+{
+  "_note": "Weights are relative — the scorer normalizes them, so they need not sum to 1. Filters are absolute and run BEFORE scoring.",
+
+  "uncertain_field": "price",
+  "_uncertain_field_note": "Which field the Monte Carlo perturbs by each row's confidence. Usually price. Set to null to perturb only the weights.",
+
+  "fx_to_usd": {
+    "_as_of": "YYYY-MM-DD — update before trusting absolute figures",
+    "USD": 1.0,
+    "EUR": 1.09,
+    "GBP": 1.27
+  },
+
+  "profiles": {
+    "stated-goal": {
+      "label": "The user's stated goal",
+      "description": "Weighted in the order the user stated their priorities.",
+      "weights": {
+        "cost": 0.35,
+        "reliability": 0.30,
+        "permissiveness": 0.25,
+        "ops": 0.10
+      },
+      "filters": {
+        "min_capacity": 4,
+        "require_true": ["has_api"],
+        "exclude_flags": ["excluded:"]
+      }
+    },
+
+    "cheapest": {
+      "label": "Pure cost",
+      "description": "Single-axis extreme. Shows what the balanced model trades away.",
+      "weights": {"cost": 1.0, "reliability": 0.0, "permissiveness": 0.0, "ops": 0.0},
+      "filters": {
+        "min_capacity": 4,
+        "require_true": ["has_api"],
+        "exclude_flags": ["excluded:"]
+      }
+    },
+
+    "reliability-first": {
+      "label": "Reliability above all",
+      "description": "The opposite extreme. If this and 'cheapest' pick the same candidate, the recommendation is unusually robust.",
+      "weights": {"reliability": 1.0, "cost": 0.0, "permissiveness": 0.0, "ops": 0.0},
+      "filters": {
+        "min_capacity": 4,
+        "require_true": ["has_api"],
+        "exclude_flags": ["excluded:"]
+      }
+    }
+  }
+}

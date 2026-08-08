@@ -1,0 +1,539 @@
+{
+  "measured_from": "jod.local",
+  "samples": 5,
+  "port": 443,
+  "caveat": "Latency to public web endpoints, not to purchasable datacenters. CDN-fronted hosts appear faster than their metal.",
+  "results": {
+    "hetzner": {
+      "host": "hetzner.com",
+      "cdn": false,
+      "ok": true,
+      "median_ms": 217.2,
+      "min_ms": 191.5,
+      "jitter_ms": 40.6,
+      "loss_pct": 0.0
+    },
+    "netcup": {
+      "host": "www.netcup.com",
+      "cdn": false,
+      "ok": true,
+      "median_ms": 271.6,
+      "min_ms": 198.6,
+      "jitter_ms": 79.8,
+      "loss_pct": 0.0
+    },
+    "contabo": {
+      "host": "contabo.com",
+      "cdn": true,
+      "ok": true,
+      "median_ms": 37.8,
+      "min_ms": 36.4,
+      "jitter_ms": 65.4,
+      "loss_pct": 0.0
+    },
+    "ovh": {
+      "host": "www.ovhcloud.com",
+      "cdn": true,
+      "ok": true,
+      "median_ms": 53.3,
+      "min_ms": 44.7,
+      "jitter_ms": 44.9,
+      "loss_pct": 0.0
+    },
+    "ionos": {
+      "host": "www.ionos.com",
+      "cdn": true,
+      "ok": true,
+      "median_ms": 235.4,
+      "min_ms": 204.6,
+      "jitter_ms": 76.2,
+      "loss_pct": 0.0
+    },
+    "scaleway": {
+      "host": "www.scaleway.com",
+      "cdn": true,
+      "ok": true,
+      "median_ms": 38.3,
+      "min_ms": 36.9,
+      "jitter_ms": 82.1,
+      "loss_pct": 0.0
+    },
+    "time4vps": {
+      "host": "www.time4vps.com",
+      "cdn": true,
+      "ok": true,
+      "median_ms": 81.7,
+      "min_ms": 36.9,
+      "jitter_ms": 115.9,
+      "loss_pct": 0.0
+    },
+    "webdock": {
+      "host": "webdock.io",
+      "cdn": true,
+      "ok": true,
+      "median_ms": 93.0,
+      "min_ms": 37.1,
+      "jitter_ms": 73.2,
+      "loss_pct": 0.0
+    },
+    "liteserver": {
+      "host": "www.liteserver.nl",
+      "cdn": false,
+      "ok": true,
+      "median_ms": 38.3,
+      "min_ms": 35.2,
+      "jitter_ms": 117.6,
+      "loss_pct": 0.0
+    },
+    "zomro": {
+      "host": "zomro.com",
+      "cdn": true,
+      "ok": true,
+      "median_ms": 97.1,
+      "min_ms": 63.1,
+      "jitter_ms": 80.4,
+      "loss_pct": 0.0
+    },
+    "vdsina": {
+      "host": "vdsina.com",
+      "cdn": true,
+      "ok": true,
+      "median_ms": 37.9,
+      "min_ms": 37.6,
+      "jitter_ms": 66.5,
+      "loss_pct": 0.0
+    },
+    "pqhosting": {
+      "host": "pq.hosting",
+      "cdn": true,
+      "ok": true,
+      "median_ms": 38.3,
+      "min_ms": 37.2,
+      "jitter_ms": 80.4,
+      "loss_pct": 0.0
+    },
+    "gcore": {
+      "host": "gcore.com",
+      "cdn": true,
+      "ok": true,
+      "median_ms": 38.0,
+      "min_ms": 36.0,
+      "jitter_ms": 79.8,
+      "loss_pct": 0.0
+    },
+    "upcloud": {
+      "host": "upcloud.com",
+      "cdn": true,
+      "ok": true,
+      "median_ms": 40.6,
+      "min_ms": 36.9,
+      "jitter_ms": 68.5,
+      "loss_pct": 0.0
+    },
+    "exoscale": {
+      "host": "www.exoscale.com",
+      "cdn": true,
+      "ok": true,
+      "median_ms": 194.4,
+      "min_ms": 190.0,
+      "jitter_ms": 34.3,
+      "loss_pct": 0.0
+    },
+    "hostkey": {
+      "host": "hostkey.com",
+      "cdn": true,
+      "ok": true,
+      "median_ms": 36.7,
+      "min_ms": 35.3,
+      "jitter_ms": 49.3,
+      "loss_pct": 0.0
+    },
+    "digitalocean": {
+      "host": "www.digitalocean.com",
+      "cdn": true,
+      "ok": true,
+      "median_ms": 37.6,
+      "min_ms": 35.9,
+      "jitter_ms": 60.4,
+      "loss_pct": 0.0
+    },
+    "vultr": {
+      "host": "www.vultr.com",
+      "cdn": true,
+      "ok": true,
+      "median_ms": 35.8,
+      "min_ms": 35.3,
+      "jitter_ms": 49.5,
+      "loss_pct": 0.0
+    },
+    "linode": {
+      "host": "www.linode.com",
+      "cdn": true,
+      "ok": true,
+      "median_ms": 22.2,
+      "min_ms": 21.4,
+      "jitter_ms": 3.6,
+      "loss_pct": 0.0
+    },
+    "lightsail": {
+      "host": "aws.amazon.com",
+      "cdn": true,
+      "ok": true,
+      "median_ms": 6.1,
+      "min_ms": 5.3,
+      "jitter_ms": 1.5,
+      "loss_pct": 0.0
+    },
+    "gcp": {
+      "host": "cloud.google.com",
+      "cdn": true,
+      "ok": true,
+      "median_ms": 6.1,
+      "min_ms": 5.8,
+      "jitter_ms": 1.2,
+      "loss_pct": 0.0
+    },
+    "azure": {
+      "host": "azure.microsoft.com",
+      "cdn": true,
+      "ok": true,
+      "median_ms": 24.4,
+      "min_ms": 21.7,
+      "jitter_ms": 53.7,
+      "loss_pct": 0.0
+    },
+    "oracle": {
+      "host": "www.oracle.com",
+      "cdn": true,
+      "ok": true,
+      "median_ms": 22.1,
+      "min_ms": 21.7,
+      "jitter_ms": 78.9,
+      "loss_pct": 0.0
+    },
+    "alibaba": {
+      "host": "www.alibabacloud.com",
+      "cdn": true,
+      "ok": true,
+      "median_ms": 36.6,
+      "min_ms": 35.4,
+      "jitter_ms": 63.7,
+      "loss_pct": 0.0
+    },
+    "tencent": {
+      "host": "www.tencentcloud.com",
+      "cdn": true,
+      "ok": true,
+      "median_ms": 7.0,
+      "min_ms": 5.7,
+      "jitter_ms": 3.0,
+      "loss_pct": 0.0
+    },
+    "civo": {
+      "host": "www.civo.com",
+      "cdn": true,
+      "ok": true,
+      "median_ms": 216.5,
+      "min_ms": 202.5,
+      "jitter_ms": 59.5,
+      "loss_pct": 0.0
+    },
+    "kamatera": {
+      "host": "www.kamatera.com",
+      "cdn": true,
+      "ok": true,
+      "median_ms": 38.1,
+      "min_ms": 35.9,
+      "jitter_ms": 40.0,
+      "loss_pct": 0.0
+    },
+    "hivelocity": {
+      "host": "www.hivelocity.net",
+      "cdn": true,
+      "ok": true,
+      "median_ms": 38.3,
+      "min_ms": 35.2,
+      "jitter_ms": 87.7,
+      "loss_pct": 0.0
+    },
+    "phoenixnap": {
+      "host": "phoenixnap.com",
+      "cdn": true,
+      "ok": true,
+      "median_ms": 37.8,
+      "min_ms": 35.5,
+      "jitter_ms": 87.2,
+      "loss_pct": 0.0
+    },
+    "latitude": {
+      "host": "www.latitude.sh",
+      "cdn": true,
+      "ok": true,
+      "median_ms": 6.4,
+      "min_ms": 5.8,
+      "jitter_ms": 39.3,
+      "loss_pct": 0.0
+    },
+    "racknerd": {
+      "host": "www.racknerd.com",
+      "cdn": false,
+      "ok": true,
+      "median_ms": 36.6,
+      "min_ms": 35.7,
+      "jitter_ms": 74.4,
+      "loss_pct": 0.0
+    },
+    "buyvm": {
+      "host": "buyvm.net",
+      "cdn": true,
+      "ok": true,
+      "median_ms": 175.3,
+      "min_ms": 166.8,
+      "jitter_ms": 82.2,
+      "loss_pct": 0.0
+    },
+    "hosthatch": {
+      "host": "hosthatch.com",
+      "cdn": true,
+      "ok": true,
+      "median_ms": 36.2,
+      "min_ms": 35.8,
+      "jitter_ms": 70.0,
+      "loss_pct": 0.0
+    },
+    "greencloud": {
+      "host": "greencloudvps.com",
+      "cdn": true,
+      "ok": true,
+      "median_ms": 38.2,
+      "min_ms": 36.0,
+      "jitter_ms": 63.6,
+      "loss_pct": 0.0
+    },
+    "servarica": {
+      "host": "servarica.com",
+      "cdn": false,
+      "ok": true,
+      "median_ms": 233.5,
+      "min_ms": 222.3,
+      "jitter_ms": 13.8,
+      "loss_pct": 0.0
+    },
+    "advinservers": {
+      "host": "advinservers.com",
+      "cdn": true,
+      "ok": true,
+      "median_ms": 36.3,
+      "min_ms": 35.3,
+      "jitter_ms": 1005.1,
+      "loss_pct": 0.0
+    },
+    "virmach": {
+      "host": "virmach.com",
+      "cdn": true,
+      "ok": true,
+      "median_ms": 25.4,
+      "min_ms": 22.3,
+      "jitter_ms": 80.5,
+      "loss_pct": 0.0
+    },
+    "interserver": {
+      "host": "www.interserver.net",
+      "cdn": false,
+      "ok": true,
+      "median_ms": 38.2,
+      "min_ms": 35.1,
+      "jitter_ms": 68.8,
+      "loss_pct": 0.0
+    },
+    "hostwinds": {
+      "host": "www.hostwinds.com",
+      "cdn": true,
+      "ok": true,
+      "median_ms": 37.7,
+      "min_ms": 36.2,
+      "jitter_ms": 2.9,
+      "loss_pct": 0.0
+    },
+    "vpsdime": {
+      "host": "vpsdime.com",
+      "cdn": false,
+      "ok": true,
+      "median_ms": 37.9,
+      "min_ms": 36.4,
+      "jitter_ms": 7.0,
+      "loss_pct": 0.0
+    },
+    "cloudzy": {
+      "host": "cloudzy.com",
+      "cdn": true,
+      "ok": true,
+      "median_ms": 36.3,
+      "min_ms": 35.3,
+      "jitter_ms": 2.1,
+      "loss_pct": 0.0
+    },
+    "hostinger": {
+      "host": "www.hostinger.com",
+      "cdn": true,
+      "ok": true,
+      "median_ms": 37.1,
+      "min_ms": 35.9,
+      "jitter_ms": 2.6,
+      "loss_pct": 0.0
+    },
+    "scalahosting": {
+      "host": "www.scalahosting.com",
+      "cdn": true,
+      "ok": true,
+      "median_ms": 36.8,
+      "min_ms": 35.7,
+      "jitter_ms": 1000.4,
+      "loss_pct": 0.0
+    },
+    "ultahost": {
+      "host": "ultahost.com",
+      "cdn": true,
+      "ok": true,
+      "median_ms": 38.1,
+      "min_ms": 35.6,
+      "jitter_ms": 10.0,
+      "loss_pct": 0.0
+    },
+    "flokinet": {
+      "host": "flokinet.is",
+      "cdn": false,
+      "ok": true,
+      "median_ms": 277.3,
+      "min_ms": 264.1,
+      "jitter_ms": 16.8,
+      "loss_pct": 0.0
+    },
+    "abelohost": {
+      "host": "abelohost.com",
+      "cdn": true,
+      "ok": true,
+      "median_ms": 336.9,
+      "min_ms": 324.8,
+      "jitter_ms": 16.1,
+      "loss_pct": 0.0
+    },
+    "shinjiru": {
+      "host": "shinjiru.com",
+      "cdn": true,
+      "ok": true,
+      "median_ms": 172.2,
+      "min_ms": 169.9,
+      "jitter_ms": 8.3,
+      "loss_pct": 0.0
+    },
+    "orangewebsite": {
+      "host": "www.orangewebsite.com",
+      "cdn": false,
+      "ok": true,
+      "median_ms": 226.3,
+      "min_ms": 223.2,
+      "jitter_ms": 5.7,
+      "loss_pct": 0.0
+    },
+    "1984hosting": {
+      "host": "1984.hosting",
+      "cdn": false,
+      "ok": true,
+      "median_ms": 271.6,
+      "min_ms": 265.8,
+      "jitter_ms": 11.6,
+      "loss_pct": 0.0
+    },
+    "njalla": {
+      "host": "njal.la",
+      "cdn": false,
+      "ok": true,
+      "median_ms": 213.8,
+      "min_ms": 210.6,
+      "jitter_ms": 11.4,
+      "loss_pct": 0.0
+    },
+    "m247": {
+      "host": "www.m247.com",
+      "cdn": true,
+      "ok": true,
+      "median_ms": 36.8,
+      "min_ms": 36.0,
+      "jitter_ms": 3.0,
+      "loss_pct": 0.0
+    },
+    "hostslick": {
+      "host": "hostslick.com",
+      "cdn": true,
+      "ok": true,
+      "median_ms": 38.0,
+      "min_ms": 37.0,
+      "jitter_ms": 2.3,
+      "loss_pct": 0.0
+    },
+    "incognet": {
+      "host": "incognet.io",
+      "cdn": true,
+      "ok": true,
+      "median_ms": 202.6,
+      "min_ms": 197.0,
+      "jitter_ms": 18.5,
+      "loss_pct": 0.0
+    },
+    "prq": {
+      "host": "prq.se",
+      "cdn": false,
+      "ok": true,
+      "median_ms": 274.3,
+      "min_ms": 264.2,
+      "jitter_ms": 36.1,
+      "loss_pct": 0.0
+    },
+    "melbicom": {
+      "host": "www.melbicom.net",
+      "cdn": true,
+      "ok": true,
+      "median_ms": 37.0,
+      "min_ms": 35.6,
+      "jitter_ms": 25.3,
+      "loss_pct": 0.0
+    },
+    "vpsserver": {
+      "host": "www.vpsserver.com",
+      "cdn": true,
+      "ok": true,
+      "median_ms": 39.0,
+      "min_ms": 37.6,
+      "jitter_ms": 1002.1,
+      "loss_pct": 0.0
+    },
+    "ovhkimsufi": {
+      "host": "www.kimsufi.com",
+      "cdn": true,
+      "ok": true,
+      "median_ms": 47.6,
+      "min_ms": 45.2,
+      "jitter_ms": 1002.8,
+      "loss_pct": 0.0
+    },
+    "flyio": {
+      "host": "fly.io",
+      "cdn": true,
+      "ok": true,
+      "median_ms": 37.5,
+      "min_ms": 35.9,
+      "jitter_ms": 24.1,
+      "loss_pct": 0.0
+    },
+    "railway": {
+      "host": "railway.app",
+      "cdn": true,
+      "ok": true,
+      "median_ms": 36.4,
+      "min_ms": 36.1,
+      "jitter_ms": 2.3,
+      "loss_pct": 0.0
+    }
+  }
+}

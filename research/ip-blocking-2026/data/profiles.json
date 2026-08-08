@@ -1,0 +1,62 @@
+{
+  "_note": "Weights are relative — the scorer normalizes them. Filters are absolute and run before scoring. All profiles share one filter set so the columns stay comparable: anything below a 40% pass rate is not a solution, and flagged rows are disqualified outright.",
+
+  "uncertain_field": "success_pct",
+  "_uncertain_field_note": "Unusually, the Monte Carlo perturbs success rate rather than price. In this market prices are published and stable while pass rates are the contested claim — many are vendor self-reports on vendor-designed benchmarks. Perturbing the number everyone is motivated to inflate is the more honest stress test.",
+
+  "_shared_filters": {
+    "min_success_pct": 40,
+    "exclude_flags": ["excluded:"]
+  },
+
+  "profiles": {
+    "jod": {
+      "label": "Jod's browsing agent (stated goal)",
+      "description": "Don't get blocked, keep it cheap, keep the integration and compliance friction low.",
+      "weights": {
+        "effectiveness": 0.30,
+        "cost": 0.25,
+        "completeness": 0.20,
+        "integration": 0.10,
+        "ethics": 0.10,
+        "ops": 0.05
+      },
+      "filters": {"min_success_pct": 40, "exclude_flags": ["excluded:"]}
+    },
+
+    "cheapest": {
+      "label": "Pure cost",
+      "description": "Single-axis extreme, among options that actually clear the 40% bar.",
+      "weights": {
+        "cost": 1.0,
+        "effectiveness": 0.0, "completeness": 0.0,
+        "integration": 0.0, "ethics": 0.0, "ops": 0.0
+      },
+      "filters": {"min_success_pct": 40, "exclude_flags": ["excluded:"]}
+    },
+
+    "max-success": {
+      "label": "Never get blocked",
+      "description": "The opposite extreme: pass rate above all, cost irrelevant.",
+      "weights": {
+        "effectiveness": 0.75,
+        "completeness": 0.25,
+        "cost": 0.0, "integration": 0.0, "ethics": 0.0, "ops": 0.0
+      },
+      "filters": {"min_success_pct": 40, "exclude_flags": ["excluded:"]}
+    },
+
+    "ethical": {
+      "label": "Consented IPs only",
+      "description": "Weights sourcing ethics heavily. Worth running because the cheapest large pools are the ones with the worst consent stories.",
+      "weights": {
+        "ethics": 0.45,
+        "effectiveness": 0.30,
+        "cost": 0.15,
+        "completeness": 0.10,
+        "integration": 0.0, "ops": 0.0
+      },
+      "filters": {"min_success_pct": 40, "exclude_flags": ["excluded:"]}
+    }
+  }
+}

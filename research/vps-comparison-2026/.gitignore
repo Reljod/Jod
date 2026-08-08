@@ -1,0 +1,6 @@
+# Regenerated on every run by scripts/report.py — tracking them is pure churn.
+# The readable output (out/RANKINGS.md) and the point-in-time network
+# measurement (out/netcheck.json) ARE tracked: one is the deliverable, the
+# other cannot be reproduced later because it measures a moment on a network.
+out/scores-*.json
+out/scores-*.csv
