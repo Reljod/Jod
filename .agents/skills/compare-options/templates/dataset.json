@@ -1,0 +1,83 @@
+{
+  "_meta": {
+    "reference_spec": "REPLACE ME — the one sentence defining what is priced/measured on every row, e.g. 'cheapest plan with >=2 vCPU, >=4 GB RAM, >=40 GB SSD'. Without this the rows are not comparable.",
+    "compiled": "YYYY-MM-DD",
+    "scales": "REPLACE ME — say which end of each 1-5 rating is good, e.g. 'strictness/risk: 1=best. quality/reliability: 5=best.'",
+    "note": "confidence=low means the figure is plausible but was not confirmed against a live source. The report must surface this next to the number."
+  },
+
+  "_schema": {
+    "required": ["id", "name", "price", "currency", "confidence", "sources"],
+    "ratings_1_5": ["reliability", "strictness"],
+    "enums": {
+      "currency": ["USD", "EUR", "GBP"],
+      "tier": ["budget", "mainstream", "premium"]
+    },
+    "non_negative": ["price", "capacity"]
+  },
+
+  "_display": ["usd", "tier"],
+
+  "candidates": [
+    {
+      "id": "example-a",
+      "name": "Example A",
+      "tier": "budget",
+      "price": 5.0,
+      "currency": "USD",
+      "capacity": 4,
+      "reliability": 3,
+      "strictness": 2,
+      "has_api": true,
+      "confidence": "high",
+      "sources": ["https://example.com/pricing"],
+      "notes": "Verified against the live pricing page.",
+      "flags": []
+    },
+    {
+      "id": "example-b",
+      "name": "Example B",
+      "tier": "premium",
+      "price": 18.0,
+      "currency": "EUR",
+      "capacity": 8,
+      "reliability": 5,
+      "strictness": 4,
+      "has_api": true,
+      "confidence": "low",
+      "sources": ["https://example.com/b"],
+      "notes": "Price is a market estimate — verify before relying on it.",
+      "flags": ["renewal-hike"]
+    },
+    {
+      "id": "example-c",
+      "name": "Example C",
+      "tier": "budget",
+      "price": 2.0,
+      "currency": "USD",
+      "capacity": 4,
+      "reliability": 2,
+      "strictness": 1,
+      "has_api": true,
+      "confidence": "low",
+      "sources": [],
+      "notes": "The cheapest row here, and still disqualified — this is what filtering before scoring is for. A weighted average would have ranked it first.",
+      "flags": ["excluded:unsupported"]
+    },
+    {
+      "id": "example-d",
+      "name": "Example D",
+      "tier": "mainstream",
+      "price": 4.0,
+      "currency": "USD",
+      "capacity": 2,
+      "reliability": 4,
+      "strictness": 2,
+      "has_api": true,
+      "confidence": "medium",
+      "sources": ["https://example.com/d"],
+      "notes": "Fails the numeric capacity floor rather than a flag.",
+      "flags": []
+    }
+  ]
+}
