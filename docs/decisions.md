@@ -15,6 +15,69 @@ Skills and the charter never reference personal domains, so `.agents/` stays
 copyable into any repo. A reusable workflow is not one of Reljod's personal
 life-domains.
 
+## Jod delegates to harnesses; it never calls a model
+
+`jod-core` has no model client, no prompt templates and no tools. It shells out
+to an agent CLI — Claude Code, OpenCode — and normalises the output.
+
+The tempting alternative is to call the Messages API directly and own the loop.
+That means re-solving context management, tool dispatch, permission prompts and
+retries, all of which the harnesses already solved and keep improving. Worse, it
+makes Jod the thing that must be upgraded every time an agent gets better.
+
+Delegating instead makes the harness a *replaceable part*: adding one is a
+single file implementing `Harness`, and the desktop app, the planned iOS client
+and a VPS daemon never learn that anything changed. It also means an agent's
+token budget is the agent's own problem, which is the only place it can actually
+be managed.
+
+The cost is real and accepted: Jod can only do what a harness CLI exposes, and a
+harness changing its JSON breaks an adapter. That is why unrecognised output
+becomes a `Raw` event rather than being dropped — the prototype found OpenCode's
+`tool_use` rename that way, on the first real run.
+
+## Agents run in tmux, not as child processes
+
+Every delegated task gets its own `tmux` session. A child process would have
+been less code.
+
+tmux buys four things at once that would otherwise each need building: a live
+view (`tmux attach`), a kill switch that works when the app is closed, survival
+of the app quitting, and one transport that is identical on a laptop and over
+SSH on a VPS. The generated launcher pipes the harness through `tee`, so the
+pane a human watches and the JSONL Jod parses are the same bytes — there is no
+second code path that can disagree with what was actually shown.
+
+It also makes tmux a hard dependency, which the UI states plainly rather than
+discovering at spawn time.
+
+## An agent's tmux session outlives the agent
+
+Jod's sessions used to end when their agent did. That closed the terminal window
+of anyone watching, and the chain is worth writing down because every link is a
+sensible default on its own:
+
+1. tmux's `detach-on-destroy` defaults to **on** — destroying a session makes an
+   attached client *exit* rather than fall back to another session.
+2. oh-my-zsh's tmux plugin sets `ZSH_TMUX_AUTOQUIT` from `ZSH_TMUX_AUTOSTART`,
+   and runs `exit` the moment its tmux client returns.
+3. So: watch an agent → agent finishes → session destroyed → client exits →
+   the shell exits → **the terminal window closes.**
+
+Two fixes, because either alone leaves a hole. The launcher now `exec`s a shell
+after the agent exits, so a *completed* run never destroys anything. And Jod
+sets `detach-on-destroy off` **on its own sessions only**, so an explicit kill
+returns the watcher to another session instead of ending their client. The
+user's global tmux config is never touched — it is not ours to change.
+
+The cost is that sessions accumulate until closed. That is the behaviour that
+was asked for ("kill the session if it's not needed"), it leaves the final
+output on screen with the agent's directory ready to inspect, and the UI keeps
+its close button live after a run finishes rather than greying it out.
+
+The general lesson: **a long-running process Jod spawns must never be able to
+take a user's terminal with it when it ends.**
+
 ## Blocked is a legal ending
 
 This is the anti-workaround rule, and it is the highest-leverage thing in the

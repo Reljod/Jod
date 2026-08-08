@@ -29,6 +29,28 @@ pnpm install
 pnpm tauri dev          # or: pnpm tauri build  →  src-tauri/target/release/bundle
 ```
 
+## Watching an agent
+
+**Watch in tmux** opens a new window in iTerm2 (or Terminal.app if iTerm2 is not
+installed) already showing the agent. To do it by hand, the right command
+depends on where you are — the UI shows both:
+
+```sh
+tmux attach -t jod-<id>          # from outside tmux
+tmux switch-client -t jod-<id>   # from inside tmux, where attach refuses to nest
+```
+
+**An agent's tmux session outlives the agent.** When a run finishes the pane
+prints the exit status and becomes a normal shell in the agent's working
+directory. This is deliberate: a session that destroys itself takes any attached
+client with it, which closes the terminal window of whoever was watching
+([why](../../docs/decisions.md)). Jod also sets `detach-on-destroy off` on its
+own sessions — never globally — so closing one returns you to another session
+instead of ending your client.
+
+Sessions therefore stay until you close them: **Close session** in the app, or
+`Ctrl-D` in the pane.
+
 ## Without the GUI
 
 The same core, driven from a terminal — useful for debugging a harness adapter:
