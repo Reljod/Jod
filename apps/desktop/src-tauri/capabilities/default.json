@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Jod's desktop shell talks to jod-core through commands only; it needs no extra plugin permissions.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

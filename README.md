@@ -56,9 +56,33 @@ Each domain folder holds operating notes, not the data itself — Linear
 stays the kanban, Notion stays the brain. This repo is the charter and the
 glue.
 
+## The application
+
+Jod is also a program you run. It delegates work to agent harnesses — it never
+answers a prompt itself — and gives you one place to watch every agent at once.
+
+| | | |
+|---|---|---|
+| 🦀 | [`crates/jod-core`](./crates/jod-core) | the service: harness seam, tmux runner, event stream |
+| 🖥️ | [`apps/desktop`](./apps/desktop) | Tauri v2 shell over the core |
+| 📱 | iOS, VPS daemon | *planned — same core behind an API* |
+
+Each delegated task runs in its own `tmux` session under **Claude Code** or
+**OpenCode**, so you can attach to any agent, kill it, or close the app without
+stopping the work. Output from both harnesses is normalised into one event
+vocabulary, and runs stay readable as plain files under `~/.jod`.
+
+```sh
+cd apps/desktop && pnpm install && pnpm tauri dev
+```
+
+The full design — including the planned knowledge graph (Open Knowledge Format
+notes indexed by GraphQLite) and agent-to-agent messaging — is in
+[`docs/jod-system.md`](./docs/jod-system.md).
+
 ## The toolkit
 
-The *other* half is the reusable, project-agnostic layer — a set of Claude Code
+The reusable, project-agnostic layer — a set of Claude Code
 skills under [`.agents/`](./.agents) that never reach into a personal domain.
 Copy `.agents/` into any repo and the skills come with it.
 [`AGENTS.md`](./AGENTS.md) holds the guidelines as bullets; the reasoning behind
@@ -226,6 +250,8 @@ agents/            the four subagents, where a plugin reads them from
 .claude/agents/    the same four, so they work here without the plugin
 .agents/skills/    the portable toolkit — reusable Claude Code skills
 domains/           personal operating notes, one per area of Reljod's life
+crates/jod-core    the orchestrator service — harnesses, tmux, event stream
+apps/desktop/      the Tauri desktop app, a thin shell over jod-core
 ```
 
 Start with [`AGENTS.md`](./AGENTS.md) — it's the whole point.
