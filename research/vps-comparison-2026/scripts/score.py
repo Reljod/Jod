@@ -82,7 +82,19 @@ def usd_price(p, fx):
 
 
 def passes_filters(p, f):
-    """Return (ok, reason). Reason is the first disqualifier hit."""
+    """Return (ok, reason). Reason is the first disqualifier hit.
+
+    Stock is checked before the spec floors because it is the more fundamental
+    objection: telling the reader that a sold-out box has too little disk
+    implies a bigger one would do, when in fact nothing here is orderable.
+    """
+    if p.get("stock") in f.get("exclude_stock", []):
+        return False, f"cannot be ordered (stock: {p['stock']})"
+
+    allowed_basis = f.get("require_price_basis")
+    if allowed_basis and p.get("price_basis") not in allowed_basis:
+        return False, f"price not confirmed against the standing catalogue ({p.get('price_basis')})"
+
     if p["ram_gb"] < f.get("min_ram_gb", 0):
         return False, f"below RAM floor ({p['ram_gb']} GB)"
     if p["vcpu"] < f.get("min_vcpu", 0):
