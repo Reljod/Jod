@@ -93,6 +93,30 @@ is a program that lives near some notes.
 Scanned over **added** lines only. Lockfiles are excluded — they already
 block via `deps`, and grepping a 30k-line lock for "token" is pure noise.
 
+### What gets scanned
+
+Most content rules describe what a change *does when it runs*, so they are
+scanned over the files that can run — everything except `docs`, `research`
+and `assets`. A research writeup quoting `sudo apt install` is describing a
+machine, not administering one; a markdown example of `except: pass` is
+teaching, not swallowing a failure.
+
+This isn't hypothetical tuning. A real 440-line research doc in this repo
+was blocked for quoting a provisioning script, which is exactly the change
+the gate is supposed to wave through.
+
+Two deliberate exceptions:
+
+- **`rules` files are scanned like code.** A charter or a skill is
+  *prescriptive*, and "always start by running `rm -rf ~/.cache`" gets
+  obeyed more literally than a script does.
+- **The credential rule scans everything, prose included.** A live key
+  pasted into a research note is leaked exactly as thoroughly as one in a
+  config file. Nothing has to run for that to be true.
+
+Scripts under `research/` were already reclassified as `code`, so they are
+scanned in full.
+
 | Finding | Fires on | Why |
 |---|---|---|
 | `substitution` | `@pytest.mark.skip`/`xfail`, `#[ignore]`, `t.Skip(`, `xit(`, `.only(`, `.skip(` | A skipped test is a check narrowed to what already passes |
@@ -119,10 +143,14 @@ switched off within a week. A rule nobody keeps enabled protects nothing.
 
 ### Why size counts code, not lines
 
-Prose and assets are excluded from both limits. Volume is not risk when
-nothing runs — a long research writeup would otherwise be permanently
-human-review for the crime of being thorough, which is the exact opposite
-of what this gate is for.
+Prose and assets are excluded from both limits, using the same definition
+of "code" the content scans use, so the two can't drift apart. Volume is
+not risk when nothing runs — a long research writeup would otherwise be
+permanently human-review for the crime of being thorough, which is the
+exact opposite of what this gate is for.
+
+`rules` files do count toward the limits, since they are scanned as code.
+A 500-line charter rewrite getting a human read is the right outcome.
 
 ## Tuning
 

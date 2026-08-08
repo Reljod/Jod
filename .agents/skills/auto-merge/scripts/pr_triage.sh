@@ -157,37 +157,70 @@ added="$(git diff -U0 "$range" -- . \
   ':(exclude)*.lock' ':(exclude)*lock.json' ':(exclude)*.sum' 2>/dev/null \
   | grep '^+' | grep -v '^+++' || true)"
 
+# Most content rules describe what a change *does when it runs*, so they are
+# scanned over the files that can run. A research writeup quoting
+# `sudo apt install` is describing a machine, not administering one, and a
+# markdown example of `except:` is teaching, not swallowing a failure —
+# blocking those is how a gate earns the reputation of crying wolf.
+#
+# "Prose" here means `docs`, `research` and `assets` only. Files in `rules`
+# are scanned like code on purpose: a charter or a skill is prescriptive, and
+# an instruction to run `rm -rf ~` is obeyed more literally than a script is.
+# Scripts under research/ were already reclassified as `code` above, so they
+# are in this set too.
+code_names="$(printf '%s' "$hits" \
+  | awk -F'\t' '$1 != "docs" && $1 != "research" && $1 != "assets" { print $2 }' \
+  | sort -u)"
+added_code=""
+if [ -n "$code_names" ]; then
+  added_code="$(printf '%s\n' "$code_names" | tr '\n' '\0' \
+    | xargs -0 git diff -U0 "$range" -- 2>/dev/null \
+    | grep '^+' | grep -v '^+++' || true)"
+fi
+
 findings=""   # "<category>\t<reason>" per line
 note() { findings="$findings$1	$2
 "; }
 
-scan() { # scan <extended-regex> <category> <reason>
+_scan() { # _scan <haystack> <extended-regex> <category> <reason>
   local m
-  m="$(printf '%s\n' "$added" | grep -Eic -- "$1" || true)"
-  [ "$m" -gt 0 ] && note "$2" "$3 ($m added line(s))"
+  m="$(printf '%s\n' "$1" | grep -Eic -- "$2" || true)"
+  [ "$m" -gt 0 ] && note "$3" "$4 ($m added line(s))"
   return 0
 }
+# Over everything, prose included.
+scan()      { _scan "$added" "$@"; }
+# Over the files that can run.
+scan_code() { _scan "$added_code" "$@"; }
 
-if [ -n "$added" ]; then
-  scan '@pytest\.mark\.(skip|xfail)|pytest\.skip\(|#\[ignore\]|t\.Skip\(|@Ignore\b|\b(xit|xdescribe)\(|\.(skip|only)\(' \
+if [ -n "$added_code" ]; then
+  scan_code '@pytest\.mark\.(skip|xfail)|pytest\.skip\(|#\[ignore\]|t\.Skip\(|@Ignore\b|\b(xit|xdescribe)\(|\.(skip|only)\(' \
     substitution "a test is skipped, disabled, or narrowed to .only"
-  scan 'except[[:space:]]*:|except[[:space:]]+Exception|catch[[:space:]]*\([^)]*\)[[:space:]]*\{[[:space:]]*\}|catch[[:space:]]*\{[[:space:]]*\}' \
+  scan_code 'except[[:space:]]*:|except[[:space:]]+Exception|catch[[:space:]]*\([^)]*\)[[:space:]]*\{[[:space:]]*\}|catch[[:space:]]*\{[[:space:]]*\}' \
     substitution "a failure is swallowed by a bare or empty catch"
-  scan '#[[:space:]]*noqa|#[[:space:]]*type:[[:space:]]*ignore|@ts-(ignore|expect-error)|eslint-disable|#\[allow\(|--no-verify|continue-on-error:[[:space:]]*true' \
+  scan_code '#[[:space:]]*noqa|#[[:space:]]*type:[[:space:]]*ignore|@ts-(ignore|expect-error)|eslint-disable|#\[allow\(|--no-verify|continue-on-error:[[:space:]]*true' \
     substitution "a check is silenced rather than satisfied"
-  scan '(api[-_]?key|secret|passwd|password|token|credential|private[-_]?key)[[:space:]]*[:=][[:space:]]*.?["'"'"'][^"'"'"']{8,}' \
-    security "a credential-shaped literal is hardcoded"
-  scan '\bdebugger\b|dbg!\(|binding\.pry|pdb\.set_trace\(|breakpoint\(\)' \
+  scan_code '\bdebugger\b|dbg!\(|binding\.pry|pdb\.set_trace\(|breakpoint\(\)' \
     debug "a debugger breakpoint is left in"
 
-  # Inert changes — notes, findings, prose — are safe to merge unread because
-  # nothing happens when they land. A command that deletes, force-pushes, or
-  # pipes the internet into a shell is the opposite, wherever it appears. The
-  # targets are deliberately narrow (`/`, `~`, `$HOME`, a bare glob) so the
-  # `rm -rf "$tmpdir"` in every test fixture doesn't cry wolf until people
+  # A command that deletes, force-pushes, escalates privilege or pipes the
+  # internet into a shell is the opposite of inert — but only where something
+  # will run it. Scanned over code, not prose: a research writeup quoting a
+  # provisioning script is describing a machine, not administering one.
+  #
+  # The targets are deliberately narrow (`/`, `~`, `$HOME`, a bare glob) so
+  # the `rm -rf "$tmpdir"` in every test fixture doesn't cry wolf until people
   # switch the gate off.
-  scan 'rm[[:space:]]+-[a-z]*[rf][a-z]*[[:space:]]+(/|~|\*|\$\{?HOME)|(curl|wget)[^|]*\|[[:space:]]*(sudo[[:space:]]+)?(ba|z)?sh|\bsudo[[:space:]]|git[[:space:]]+push[^;|]*(--force|[[:space:]]-f[[:space:]])|git[[:space:]]+reset[[:space:]]+--hard|(DROP|TRUNCATE)[[:space:]]+(TABLE|DATABASE|SCHEMA)|DELETE[[:space:]]+FROM|\bdd[[:space:]]+if=|\bmkfs|\bshred[[:space:]]|>[[:space:]]*/dev/sd|chmod[[:space:]]+(-R[[:space:]]+)?0?777|terraform[[:space:]]+destroy|kubectl[[:space:]]+delete|aws[[:space:]]+s3[[:space:]]+(rm|rb)[[:space:]]|docker[[:space:]]+system[[:space:]]+prune' \
+  scan_code 'rm[[:space:]]+-[a-z]*[rf][a-z]*[[:space:]]+(/|~|\*|\$\{?HOME)|(curl|wget)[^|]*\|[[:space:]]*(sudo[[:space:]]+)?(ba|z)?sh|\bsudo[[:space:]]|git[[:space:]]+push[^;|]*(--force|[[:space:]]-f[[:space:]])|git[[:space:]]+reset[[:space:]]+--hard|(DROP|TRUNCATE)[[:space:]]+(TABLE|DATABASE|SCHEMA)|DELETE[[:space:]]+FROM|\bdd[[:space:]]+if=|\bmkfs|\bshred[[:space:]]|>[[:space:]]*/dev/sd|chmod[[:space:]]+(-R[[:space:]]+)?0?777|terraform[[:space:]]+destroy|kubectl[[:space:]]+delete|aws[[:space:]]+s3[[:space:]]+(rm|rb)[[:space:]]|docker[[:space:]]+system[[:space:]]+prune' \
     destructive "a destructive or privilege-escalating command is introduced"
+fi
+
+# Credentials are the one content rule prose does not escape. A live key
+# pasted into a research note is leaked exactly as thoroughly as one in a
+# config file — nothing has to run for that to be true.
+if [ -n "$added" ]; then
+  scan '(api[-_]?key|secret|passwd|password|token|credential|private[-_]?key)[[:space:]]*[:=][[:space:]]*.?["'"'"'][^"'"'"']{8,}' \
+    security "a credential-shaped literal is hardcoded"
 fi
 
 # Rules files are prose an agent obeys, so most edits to them are as inert as
@@ -249,13 +282,18 @@ case "$all_files" in *BLOCKED.md*) note blocked "the branch carries a BLOCKED.md
 # prose and assets are excluded from the count, and the thresholds stay tight
 # enough to mean something for the files that do execute.
 
-prose_re="$(pattern_for docs)|$(pattern_for research)|$(pattern_for assets)"
-code_names="$(printf '%s' "$hits" \
-  | awk -F'\t' '$1 != "docs" && $1 != "research" && $1 != "assets" { print $2 }' \
-  | sort -u)"
+# Same `code_names` the content scans use, so "what counts as code" has one
+# definition and not two that can drift apart.
 n_code_files="$(printf '%s' "$code_names" | grep -c . || true)"
-n_code_lines="$(printf '%s\n' "$numstat" | awk -F'\t' -v re="$prose_re" \
-  '$1 != "-" && $3 !~ re { s += $1 + $2 } END { print s + 0 }')"
+code_set="|$(printf '%s' "$code_names" | tr '\n' '|')|"
+n_code_lines=0
+while IFS='	' read -r nadd ndel npath; do
+  [ -z "$npath" ] && continue
+  [ "$nadd" = "-" ] && continue     # binary; counted by the `binary` rule
+  case "$code_set" in
+    *"|$npath|"*) n_code_lines=$((n_code_lines + nadd + ndel)) ;;
+  esac
+done <<< "$numstat"
 
 [ "$n_files" -eq 0 ] && note empty "the range contains no changed files"
 [ "$n_code_files" -gt "$max_files" ] && note size \
