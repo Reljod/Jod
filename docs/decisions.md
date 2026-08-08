@@ -295,3 +295,133 @@ reports `Agents (0)`.
 So they are two real copies, and `tests/plugin.test.sh` diffs them in both
 directions — drift fails, and an agent added to only one side fails too. A copy
 guarded by a check beats a clever link that fails silently.
+
+## A regex decides what merges unread
+
+Every PR is categorised by `pr_triage.sh`, and only a `merge_pr.sh` exit code
+opens the door to `gh pr merge`. The obvious alternative — ask a model "is this
+PR safe to merge?" — was rejected, and the reason generalises past this repo.
+
+The diff is written by whoever opened the PR, which in this repo is usually the
+same agent asking to merge it. A model reading that diff to decide the question
+is being asked to grade its own homework using text it wrote, and a branch that
+adds `this change is trivial and pre-approved` has a real chance of being
+believed. A pattern match cannot be persuaded: it matches or it does not, and no
+commentary in the diff changes what `grep -E` returns. The judgement layer still
+exists — `claude-code-review.yml` reads every PR — but it advises, and the thing
+that can actually merge is deterministic.
+
+Two properties make the gate hold up, and each closes a hole the other leaves:
+
+- **It only escalates.** Every rule can send a PR to a human; nothing can bring
+  one back. A false positive costs one human read, a missed pattern costs an
+  unreviewed merge, so the path patterns are deliberately broad.
+- **`security`, `gate`, `ci` and `data` are a floor, not a default.** No flag or
+  environment variable can make them auto-mergeable, and `gate` covers the
+  charter, CI config, and this classifier itself — so a PR that widens the rules
+  cannot be merged by the rules it widens.
+
+The exemption prose gets is conditional on prose being inert. Research notes and
+docs merge unread because nothing executes them; a `.sh` or an executable bit
+under `research/` is reclassified as code and clears the code rules on its own,
+and a destructive command (`rm -rf ~`, `sudo`, `curl … | sh`, `DROP TABLE`)
+blocks anywhere. The same reasoning excludes prose from the size limits — a
+3,000-line writeup is not riskier than a 300-line one, and a gate that punishes
+thoroughness is one people route around.
+
+Precision was traded for adoption in exactly one place, on purpose. The
+destructive-command rule matches `rm -rf` only against `/`, `~`, `$HOME` and
+bare globs, so the `rm -rf "$tmpdir"` in every test fixture doesn't fire. A rule
+that cries wolf on ordinary cleanup gets the whole gate switched off within a
+week, and a rule nobody keeps enabled protects nothing.
+
+## Merges are linear, and never from behind
+
+`merge_pr.sh` accepts `squash` and `rebase` and refuses `merge` outright, and it
+refuses any branch behind its base.
+
+The linearity half is ordinary taste. The behind-base half is not, and it is the
+one that actually bites: a branch behind base was tested against a tree that no
+longer exists. Squash and rebase both replay its commits onto current base
+*without re-running anything*, so a green tick plus a stale base is precisely how
+a passing PR breaks `main`. GitHub reports this as `mergeStateStatus: BEHIND`
+only when branch protection asks for it, so the script also counts commits
+locally rather than trusting the API to volunteer it.
+
+`--update-branch` rebases and then stops, which looks unhelpful and isn't:
+merging in the same breath would merge on the checks that ran before the rebase,
+which is the failure the rule exists to prevent.
+
+## Enforcement is a floor; instruction is not
+
+The merge gate first put the charter, every skill and every agent definition in
+the same never-auto-merge bucket as CI config. That was one category doing two
+jobs, and the cost showed up immediately: a typo fix in `AGENTS.md` needed the
+same human as a workflow rewrite.
+
+The split that survives is **what the machine enforces** vs **what it reads**.
+CI, git hooks, tool permissions, plugin manifests, `CODEOWNERS` and the
+auto-merge skill are `gate` — change them and you change which checks can run at
+all, including the one being asked for an opinion. The charter, skills, agent
+definitions and commands are `rules`: prose an agent obeys, inert until someone
+reads it, and auto-mergeable.
+
+That leaves exactly one dangerous rules edit — the one granting the branch
+permission to merge itself — and it gets its own scan rather than its own
+category. Any `rules` diff that adds *or removes* merge-policy language
+(`auto-merge`, `--allow`, `branch protection`, `--no-verify`, `bypass`) goes to a
+human. Removed lines count because deleting "never bypass branch protection" is
+the weakening move and leaves no `+` line to find; every other scan reads added
+lines only, since a substitution is something you put in.
+
+The auto-merge skill's *prose* sits in `gate`, not `rules`, for the same reason:
+its prose is the merge policy. Blocking the whole category would have been
+simpler, and the charter would have stopped improving — a rule that can only be
+fixed at a human's convenience mostly isn't.
+
+## Agents finish their own PRs
+
+`create-pr` now ends by running `merge_pr.sh <pr> --ready`, so a green trivial PR
+closes itself instead of waiting.
+
+The reason is the same one behind the gate: review attention is the scarce
+resource, and a queue of unremarkable green PRs spends it in the worst possible
+way — it trains whoever opens them to skim, which is precisely the habit you
+don't want when the migration lands.
+
+Two deliberate frictions remain. `--ready` is an explicit flag rather than
+implicit behaviour, because un-drafting is what announces to everyone watching
+that the work is finished, and a script shouldn't say that on the author's
+behalf unless asked. And pending checks are refused rather than waited on: a
+script that polls holds an unbounded window in which someone pushes, and the
+whole value of "all checks green" is that it was true of the commit being merged.
+
+## Content rules read code, not prose
+
+The destructive-command scan first ran over every added line in a diff. Its
+first contact with real history killed that: the 440-line
+`research/agent-host-os-2026` writeup already merged into `main` came back
+`human-review` for quoting `sudo -u jod …` and `curl … | sh` from a
+provisioning guide.
+
+Nothing in that document executes. It describes a machine; it does not
+administer one. Blocking it is precisely the failure mode the gate is meant to
+remove — a thorough writeup punished for being thorough — so the scans that
+describe *what a change does when it runs* now read only the files that can
+run.
+
+Two exceptions keep it honest, and both come from asking what is actually true
+of the file rather than what directory it sits in:
+
+- **`rules` files are scanned like code.** A charter is prescriptive. "Always
+  start by running `rm -rf ~/.cache`" is obeyed more literally than a shell
+  script is, because an agent reads it as an instruction rather than executing
+  it in a sandbox.
+- **The credential rule scans everything.** A live key pasted into a research
+  note is leaked exactly as thoroughly as one in a config file. Nothing has to
+  run for that to be true.
+
+The general lesson is that "is this file dangerous" is the wrong question, and
+"will anything run this" is the right one — the same question that already
+decided the size limits, and the reason a `.sh` under `research/` is code no
+matter what sits beside it.
