@@ -8,3 +8,10 @@
 # tests/e2e/run.sh's generated findings — regenerated on every run, not
 # something to track in version control.
 tests/e2e/gaps-report.md
+
+# Rust build output.
+/target
+
+# Desktop app build output and dependencies.
+node_modules/
+apps/desktop/dist/
