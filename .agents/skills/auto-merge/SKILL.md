@@ -89,13 +89,20 @@ A script inside a skill (`skills/foo/scripts/run.sh`) is `code`, not
 Research and docs are auto-merged because **nothing executes them**. That
 exemption is conditional, not a property of the directory: a `.sh`, a
 `.py`, or anything carrying the executable bit is reclassified `code` even
-under `research/`, and has to clear the code rules on its own. A destructive
-command — `rm -rf ~`, `sudo`, `curl … | sh`, `git push --force`,
-`DROP TABLE` — blocks anywhere it appears.
+under `research/`, and has to clear the code rules on its own.
 
-The same exemption is why size limits count only executable weight. A
-3,000-line writeup is not riskier than a 300-line one; 400 lines of new code
-is about as much as anyone reads carefully.
+The same reasoning scopes the content scans. A destructive command
+(`rm -rf ~`, `sudo`, `curl … | sh`, `DROP TABLE`) blocks wherever something
+will *run* it — but a writeup quoting a provisioning script is describing a
+machine, not administering one, so prose is not scanned for it. Two
+exceptions: `rules` files are scanned like code, because a charter is
+prescriptive and gets obeyed literally; and the credential rule scans
+everything, because a live key pasted into a note is leaked whether or not
+anything runs.
+
+It is also why size limits count only executable weight. A 3,000-line
+writeup is not riskier than a 300-line one; 400 lines of new code is about
+as much as anyone reads carefully.
 
 Content rules mirror `REVIEW.md`'s substitutions list, so the thing a human
 reviewer is told to flag is the thing that mechanically blocks a merge:

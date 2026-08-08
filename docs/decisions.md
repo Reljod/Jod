@@ -395,3 +395,33 @@ that the work is finished, and a script shouldn't say that on the author's
 behalf unless asked. And pending checks are refused rather than waited on: a
 script that polls holds an unbounded window in which someone pushes, and the
 whole value of "all checks green" is that it was true of the commit being merged.
+
+## Content rules read code, not prose
+
+The destructive-command scan first ran over every added line in a diff. Its
+first contact with real history killed that: the 440-line
+`research/agent-host-os-2026` writeup already merged into `main` came back
+`human-review` for quoting `sudo -u jod …` and `curl … | sh` from a
+provisioning guide.
+
+Nothing in that document executes. It describes a machine; it does not
+administer one. Blocking it is precisely the failure mode the gate is meant to
+remove — a thorough writeup punished for being thorough — so the scans that
+describe *what a change does when it runs* now read only the files that can
+run.
+
+Two exceptions keep it honest, and both come from asking what is actually true
+of the file rather than what directory it sits in:
+
+- **`rules` files are scanned like code.** A charter is prescriptive. "Always
+  start by running `rm -rf ~/.cache`" is obeyed more literally than a shell
+  script is, because an agent reads it as an instruction rather than executing
+  it in a sandbox.
+- **The credential rule scans everything.** A live key pasted into a research
+  note is leaked exactly as thoroughly as one in a config file. Nothing has to
+  run for that to be true.
+
+The general lesson is that "is this file dangerous" is the wrong question, and
+"will anything run this" is the right one — the same question that already
+decided the size limits, and the reason a `.sh` under `research/` is code no
+matter what sits beside it.

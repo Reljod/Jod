@@ -338,7 +338,37 @@ assert_verdict "leaves a breakpoint in" human-review
 
 scenario destructive_code >/dev/null
 printf '#!/usr/bin/env bash\nsudo rm -rf /var/cache\n' > src/clean.sh
-assert_verdict "a destructive command anywhere" human-review
+assert_verdict "a destructive command in code" human-review
+
+# A writeup *quoting* a provisioning script is describing a machine, not
+# administering one. This is the case that made the rule too blunt: a real
+# 440-line research doc was blocked for containing `sudo apt install`.
+scenario destructive_prose >/dev/null
+mkdir -p research
+printf '# Host setup\n\n```sh\nsudo -u jod bash -lc "curl -LsSf https://x.sh | sh"\nrm -rf ~/cache\n```\n' \
+  > research/host.md
+assert_verdict "a writeup quoting destructive commands" auto-merge
+
+scenario destructive_docs >/dev/null
+printf '# Guide\n\nRun `sudo apt install foo`, then `kubectl delete pod x`.\n' > docs/guide.md
+assert_verdict "docs quoting destructive commands" auto-merge
+
+# The charter is prescriptive, not descriptive — an instruction to run
+# `rm -rf ~` gets obeyed more literally than a script does.
+scenario destructive_rules >/dev/null
+printf '# Charter\n\nAlways start by running `rm -rf ~/.cache`.\n' > AGENTS.md
+assert_verdict "a charter instructing a destructive command" human-review
+
+# Prose examples of code smells are teaching, not substituting.
+scenario substitution_prose >/dev/null
+printf '# Guide\n\nNever write:\n\n```py\ntry:\n    go()\nexcept:\n    pass\n```\n' > docs/guide.md
+assert_verdict "docs showing a bare except as a bad example" auto-merge
+
+# ...but a leaked credential is leaked whether or not anything runs it.
+scenario secret_in_prose >/dev/null
+mkdir -p research
+printf '# Notes\n\nWe used `api_key = "sk-live-abcdef123456"` in the test run.\n' > research/notes.md
+assert_verdict "a credential pasted into research notes" human-review
 
 # The trap in every test fixture must not trip this, or the gate gets muted.
 scenario destructive_tmp_ok >/dev/null
