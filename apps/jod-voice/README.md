@@ -60,8 +60,22 @@ fixtures, 0.76s p50). The dropdown shows measured WER and latency for each
 option; entries marked ⚠ fail on Tagalog and are listed only so you can see the
 failure yourself.
 
-**Language hint** — leave on auto-detect. Forcing `tl` or `en` tends to pull
-mixed speech toward one language, which is the failure you are trying to avoid.
+**Language hint** — leave on auto. Pinning `tl` or `en` tends to pull mixed
+speech toward one language, which is the failure you are trying to avoid.
+
+Auto is guarded to Tagalog and English. Whisper hallucinates canned phrases when
+fed silence or room tone, and its language detector can wander — Korean being
+the usual stray — so the app:
+
+1. **refuses to send non-speech at all** (duration, peak, and a gain-invariant
+   peak-to-RMS check that separates speech from fans and hiss),
+2. **checks the language the provider reports** and retries once pinned to
+   Tagalog if it is outside Tagalog/Filipino/English,
+3. **rejects any non-Latin script** in the transcript, since Tagalog and English
+   are both Latin — this catches Hangul even when the provider claims English.
+
+The detected language is shown next to the latency, so a bad detection is
+visible rather than silent.
 
 **Taglish repair pass** — off by default. Sends the *text* (not the audio)
 through a cheap LLM with an explicit "never translate, never drop a language"
@@ -95,6 +109,7 @@ src/                     frontend — push-to-talk UI, model roster, compare pan
   models.ts              measured WER/latency per model
 src-tauri/src/
   audio.rs               cpal capture → mono → 16kHz → WAV
+  guard.rs               speech gate + Tagalog/English language and script guard
   openrouter.rs          transcription + optional Taglish repair pass
   sessions.rs            `orc` bridge to running Claude sessions
 scripts/
@@ -108,7 +123,7 @@ docs/RESEARCH.md         why these models, why this architecture
 ## Tests
 
 ```sh
-cd src-tauri && cargo test    # 11 tests: audio conversion, session bridge
+cd src-tauri && cargo test    # 30 tests: audio, speech gate, language guard, sessions
 pnpm build                    # strict TypeScript + production bundle
 ```
 

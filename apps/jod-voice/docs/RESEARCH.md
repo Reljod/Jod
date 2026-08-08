@@ -112,6 +112,68 @@ So: buffer locally, send once on release. If you later want live partials,
 Silero VAD (<2MB, <1ms per 30ms frame) plus 400ms overlapping windows is the
 standard route — but it buys nothing for this use case.
 
+### Hallucination on non-speech, and stray language detection
+
+Whisper does not return "nothing" for silence. Fed an empty or noise-only
+buffer it emits canned phrases learned from subtitle corpora. Measured on
+`whisper-large-v3-turbo`:
+
+| Input | Output |
+| --- | --- |
+| 2s digital silence | `" Thank you."` |
+| 0.2s silence | `" Thank you."` |
+| pink noise @0.005 | `" Okay."` |
+| white noise, hum, breath | `" ."` |
+| 3s hiss, pinned to `tl` | `" Outro"` |
+
+Those same subtitle corpora are multilingual, so the equivalent artifact appears
+in other languages — Korean `시청해주셔서 감사합니다` ("thanks for watching") is a
+well-known one. When the language detector free-runs on a buffer with no speech
+in it, it can land anywhere, and once it picks Korean the decoder emits Hangul.
+
+`verbose_json` confirms the mechanism — it returns the detected language
+alongside the text:
+
+| Input | Reported language | Text |
+| --- | --- | --- |
+| real Taglish | `Tagalog` | correct |
+| 2s silence | `English` | `" Thank you."` |
+| 2s noise | `English` | `" ."` |
+
+**The cure is not to send non-speech.** Every spurious detection we measured came
+from a buffer containing no speech. `guard.rs` gates on three things before any
+request goes out:
+
+- **duration** ≥ 0.35s — shorter is a key-tap misfire, not an utterance
+- **peak** ≥ 0.003 — rejects digital silence and a muted mic
+- **crest factor** (peak ÷ RMS) ≥ 2.5
+
+Crest factor is the discriminator that matters, because it is **gain-invariant**
+— it separates speech from noise without caring how loud the mic is. Measured:
+
+| Signal | Crest factor |
+| --- | --- |
+| Taglish speech (any gain) | 6.0 – 6.6 |
+| white / pink noise | ~1.73 |
+| mains hum | ~1.4 |
+
+RMS alone cannot do this: loud noise (RMS 0.029) outranks quiet speech
+(RMS 0.003), so a level-only gate either admits fans or rejects softly-spoken
+users. The ratio holds across a 100× change in recording level.
+
+Two backstops sit behind the gate, for real speech that is still misread:
+
+1. **Language allowlist** — `verbose_json` reports the language; anything
+   outside Tagalog/Filipino/English triggers one retry pinned to `tl`.
+2. **Script guard** — Tagalog and English are both Latin-script, so any Hangul,
+   CJK, Cyrillic, Thai, Arabic or Devanagari character proves the transcript is
+   wrong regardless of the reported language. This also covers providers that
+   ignore `verbose_json` and return no language field at all.
+
+If both the first attempt and the pinned retry come back outside the allowed
+set, the app refuses rather than returning garbage — an empty result is honest;
+Hangul pasted into a terminal is not.
+
 ### The `prompt` field is a dead end
 
 The single most important API detail: **OpenRouter's `/audio/transcriptions`
