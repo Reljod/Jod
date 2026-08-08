@@ -1,0 +1,110 @@
+name: PR Triage
+
+# Categorises every PR and publishes a verdict: can this merge unread, or does
+# a human have to look at it? The answer lands as a label (`merge:auto` /
+# `merge:human`), a sticky comment, and a job summary.
+#
+# This job is deliberately **not** a failing gate. A PR that needs a human is
+# the normal case, not a broken one, and a red X on half of all PRs teaches
+# people to merge past red. The verdict is data; `merge_pr.sh` is what refuses
+# to act on it.
+#
+# It is also not the authority. merge_pr.sh re-derives the verdict from the
+# diff at merge time rather than reading the label this job writes — labels
+# are mutable by anyone with write access, the diff is not.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write        # labels are issue-scoped, even on a PR
+
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout the PR head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      # checkout leaves the base branch unfetched, and `git diff base...head`
+      # has no merge-base without it — the triage would silently see the whole
+      # branch as new.
+      - name: Fetch the base branch
+        run: |
+          git fetch --no-tags origin \
+            "+refs/heads/${{ github.base_ref }}:refs/remotes/origin/${{ github.base_ref }}"
+
+      - name: Triage the diff
+        id: triage
+        env:
+          RANGE: origin/${{ github.base_ref }}...${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          script=.agents/skills/auto-merge/scripts/pr_triage.sh
+          bash "$script" "$RANGE" --format env >> "$GITHUB_OUTPUT"
+          bash "$script" "$RANGE" > triage.md
+          cat triage.md >> "$GITHUB_STEP_SUMMARY"
+
+      # Fork PRs get a read-only token, so labelling and commenting would fail.
+      # The step summary above still carries the full verdict for those.
+      - name: Label the PR
+        if: github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          WANT: ${{ steps.triage.outputs.labels }}
+        run: |
+          set -euo pipefail
+          want="$(echo "$WANT" | tr ',' '\n' | grep . || true)"
+
+          # Idempotent: --force updates an existing label instead of erroring.
+          while IFS= read -r l; do
+            [ -z "$l" ] && continue
+            case "$l" in
+              merge:auto)  colour=0e8a16 ;;
+              merge:human) colour=fbca04 ;;
+              *)           colour=ededed ;;
+            esac
+            gh label create "$l" --color "$colour" --force \
+              --description "Set by PR Triage" >/dev/null
+          done <<< "$want"
+
+          # Drop the labels this job owns but no longer asserts, so a PR that
+          # was `merge:human` and got fixed doesn't keep the old verdict.
+          have="$(gh pr view "$PR" --json labels -q '.labels[].name')"
+          stale="$(echo "$have" | grep -E '^(merge|area):' || true)"
+          while IFS= read -r l; do
+            [ -z "$l" ] && continue
+            echo "$want" | grep -qxF "$l" || gh pr edit "$PR" --remove-label "$l"
+          done <<< "$stale"
+
+          gh pr edit "$PR" --add-label "$(echo "$want" | paste -sd, -)"
+
+      - name: Post or update the triage comment
+        if: github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # One comment that gets rewritten, not one per push — a triage
+          # history nobody reads buries the review conversation.
+          existing="$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
+            -q '.[] | select(.body | contains("<!-- jod:pr-triage -->")) | .id' \
+            | head -n1)"
+          if [ -n "$existing" ]; then
+            gh api -X PATCH "repos/$REPO/issues/comments/$existing" \
+              -F body=@triage.md >/dev/null
+            echo "Updated triage comment $existing."
+          else
+            gh api -X POST "repos/$REPO/issues/$PR/comments" \
+              -F body=@triage.md >/dev/null
+            echo "Posted a new triage comment."
+          fi
