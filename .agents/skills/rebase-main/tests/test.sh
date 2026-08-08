@@ -197,6 +197,9 @@ log_has "shared.txt" "the conflicted file is listed"
 code 0 "$r" status
 log_has "IN PROGRESS"
 log_has "shared.txt"
+# HEAD is detached mid-rebase; status still has to name the branch being
+# replayed, or the one line a reader needs is the one line it drops.
+log_has "feat/thing" "status names the branch being replayed, not '<detached>'"
 
 section "continue refuses to bury an unfinished resolution"
 code 1 "$r" continue

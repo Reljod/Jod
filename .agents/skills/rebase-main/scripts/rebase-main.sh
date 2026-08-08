@@ -235,7 +235,15 @@ cmd_start() {
 
 cmd_status() {
   banner "status"
+  # Mid-rebase, HEAD is detached and `current_branch` is empty — reporting
+  # "<detached>" there is true and useless, so fall back to the branch git
+  # recorded as the one being replayed.
   local branch; branch="$(current_branch)"
+  if [ -z "$branch" ] && rebase_in_progress; then
+    branch="$(cat "$GIT_DIR/rebase-merge/head-name" "$GIT_DIR/rebase-apply/head-name" 2>/dev/null | head -n1)"
+    branch="${branch#refs/heads/}"
+    [ -n "$branch" ] && branch="$branch (detached while replaying)"
+  fi
   info "branch:   ${branch:-<detached>}"
   info "base:     $(state_get base || echo '<unknown — run preflight>')"
   if rebase_in_progress; then
