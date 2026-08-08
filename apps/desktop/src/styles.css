@@ -296,6 +296,12 @@ button.danger:hover:not(:disabled) {
   user-select: all;
 }
 
+.hint {
+  font-family: ui-sans-serif, system-ui, sans-serif;
+  opacity: 0.65;
+  user-select: none;
+}
+
 .actions {
   display: flex;
   gap: 8px;

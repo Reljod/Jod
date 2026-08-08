@@ -112,20 +112,23 @@ async fn report(state: tauri::State<'_, AppState>) -> Result<Report, String> {
     Ok(state.jod.report().await)
 }
 
-/// Open a real terminal already attached to the agent's tmux session.
+/// Open a real terminal already watching the agent's tmux session.
+///
+/// Uses `watch_command` rather than a bare `tmux attach`: the new window's
+/// login shell may auto-start tmux before our command runs (oh-my-zsh's tmux
+/// plugin does exactly this), and `attach` refuses to nest.
 #[tauri::command]
 async fn open_in_terminal(state: tauri::State<'_, AppState>, id: String) -> Result<(), String> {
     let agent = state.jod.agent(&id).await.map_err(to_msg)?;
-    let command = agent.attach_command;
+    if agent.session_closed {
+        return Err("this agent's tmux session has been closed".into());
+    }
+    let command = jod_core::tmux::watch_command(&agent.tmux_session);
 
     #[cfg(target_os = "macos")]
     {
-        let script = format!(
-            r#"tell application "Terminal" to do script "{command}"
-tell application "Terminal" to activate"#
-        );
         std::process::Command::new("osascript")
-            .args(["-e", &script])
+            .args(["-e", &terminal_script(&command)])
             .status()
             .map_err(to_msg)?;
         Ok(())
@@ -136,6 +139,34 @@ tell application "Terminal" to activate"#
         Err(format!(
             "opening a terminal is macOS-only for now — run `{command}` yourself"
         ))
+    }
+}
+
+/// AppleScript that opens `command` in the user's terminal.
+///
+/// Prefers iTerm2 when it is installed, because someone who has it does not
+/// want Terminal.app windows appearing instead.
+#[cfg(target_os = "macos")]
+fn terminal_script(command: &str) -> String {
+    // AppleScript string literals escape with backslashes, and the command
+    // contains double quotes (`[ -n "$TMUX" ]`).
+    let escaped = command.replace('\\', r"\\").replace('"', "\\\"");
+
+    if std::path::Path::new("/Applications/iTerm.app").exists() {
+        format!(
+            r#"tell application "iTerm"
+  activate
+  set w to (create window with default profile)
+  tell current session of w to write text "{escaped}"
+end tell"#
+        )
+    } else {
+        format!(
+            r#"tell application "Terminal"
+  activate
+  do script "{escaped}"
+end tell"#
+        )
     }
 }
 
@@ -218,6 +249,33 @@ mod contract {
         for (event, expected) in cases {
             let v = serde_json::to_value(&event).unwrap();
             assert_eq!(v["kind"], expected, "unexpected tag for {event:?}");
+        }
+    }
+
+    /// The command is embedded in an AppleScript string literal, and it
+    /// contains double quotes (`[ -n "$TMUX" ]`). Unescaped, they terminate
+    /// the literal and the script fails to compile.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_terminal_script_escapes_the_quotes_in_the_watch_command() {
+        let command = jod_core::tmux::watch_command("jod-x");
+        assert!(command.contains('"'), "precondition: the command has quotes");
+
+        let script = terminal_script(&command);
+        assert!(script.contains("\\\"$TMUX\\\""), "quotes must be escaped:\n{script}");
+        assert!(script.contains("switch-client -t jod-x"));
+        assert!(script.contains("attach -t jod-x"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_terminal_script_targets_an_installed_terminal() {
+        let script = terminal_script("echo hi");
+        let iterm = std::path::Path::new("/Applications/iTerm.app").exists();
+        if iterm {
+            assert!(script.contains(r#"tell application "iTerm""#), "{script}");
+        } else {
+            assert!(script.contains(r#"tell application "Terminal""#), "{script}");
         }
     }
 

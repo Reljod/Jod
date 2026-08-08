@@ -61,6 +61,16 @@ code=${{PIPESTATUS[0]}}
 printf '{marker}%s\n' "$code" >> {stream}
 echo
 echo "[jod] agent {name_q} exited with code $code"
+echo "[jod] this session stays open on purpose — see docs/jod-system.md."
+echo "[jod] close it with Ctrl-D, or from Jod's Kill button."
+
+# Hand the pane a shell instead of letting the session die.
+#
+# A session that destroys itself takes any attached client with it
+# (tmux's detach-on-destroy defaults to on), which closes the terminal
+# window of anyone who was watching. Staying alive also leaves the final
+# output on screen and the agent's directory ready to inspect.
+exec "${{SHELL:-/bin/bash}}" -l
 "#,
         name = agent_name,
         name_q = sq(agent_name),
@@ -258,6 +268,29 @@ mod tests {
         let s = script_for(&[]);
         assert!(s.contains("${PIPESTATUS[0]}"));
         assert!(s.contains(EXIT_MARKER));
+    }
+
+    /// Regression: a session that destroys itself takes any attached client
+    /// with it (tmux's `detach-on-destroy` defaults to `on`), which closed the
+    /// terminal window of whoever was watching the agent.
+    #[test]
+    fn the_session_outlives_the_agent_so_watching_one_cannot_close_a_terminal() {
+        let s = script_for(&[ArgPart::lit("-p")]);
+        assert!(
+            s.contains(r#"exec "${SHELL:-/bin/bash}" -l"#),
+            "the pane must get a shell rather than letting the session die:\n{s}"
+        );
+    }
+
+    #[test]
+    fn the_exit_marker_is_written_before_the_pane_becomes_a_shell() {
+        let s = script_for(&[]);
+        let marker = s.find(EXIT_MARKER).expect("marker must be written");
+        let exec = s.find("exec \"${SHELL").expect("shell must be exec'd");
+        assert!(
+            marker < exec,
+            "the run must be reported finished before the pane is handed over"
+        );
     }
 
     #[test]

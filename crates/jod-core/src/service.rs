@@ -48,6 +48,11 @@ pub struct AgentSummary {
     pub permission: PermissionPolicy,
     pub tmux_session: String,
     pub attach_command: String,
+    /// What to run from inside an existing tmux session, where `attach` refuses.
+    pub switch_command: String,
+    /// Agent sessions outlive the agent, so "is the run over" and "is the
+    /// session gone" are different questions. This answers the second.
+    pub session_closed: bool,
     pub created_at_ms: i64,
     pub session_id: Option<String>,
     pub usage: Usage,
@@ -150,6 +155,8 @@ impl Jod {
             permission: req.permission,
             tmux_session: session.clone(),
             attach_command: tmux::attach_command(&session),
+            switch_command: tmux::switch_command(&session),
+            session_closed: false,
             created_at_ms: chrono::Utc::now().timestamp_millis(),
             session_id: None,
             usage: Usage::default(),
@@ -223,7 +230,12 @@ impl Jod {
             .ok_or_else(|| JodError::UnknownAgent(id.to_string()))
     }
 
-    /// Kill an agent's tmux session. The tailer notices and finalises the run.
+    /// Close an agent's tmux session.
+    ///
+    /// While the agent is still running this stops it, and the tailer notices
+    /// and finalises the run. After it has finished this just reclaims the
+    /// session, which outlives the agent so that watching one can never close
+    /// the watcher's terminal.
     pub async fn kill_agent(&self, id: &str) -> Result<()> {
         let session = {
             let guard = self.state.read().await;
@@ -236,6 +248,7 @@ impl Jod {
         tmux::kill_session(&session).await?;
         let mut guard = self.state.write().await;
         if let Some(record) = guard.agents.get_mut(id) {
+            record.summary.session_closed = true;
             if record.summary.status == AgentStatus::Running {
                 record.summary.status = AgentStatus::Killed;
             }
@@ -330,6 +343,8 @@ mod tests {
                 permission: PermissionPolicy::Ask,
                 tmux_session: "jod-a".into(),
                 attach_command: "tmux attach -t jod-a".into(),
+                switch_command: "tmux switch-client -t jod-a".into(),
+                session_closed: false,
                 created_at_ms: 0,
                 session_id: None,
                 usage: Usage::default(),
@@ -390,6 +405,25 @@ mod tests {
             }),
         );
         assert_eq!(r.summary.status, AgentStatus::Failed);
+    }
+
+    #[test]
+    fn a_finished_agent_still_has_a_session_to_reclaim() {
+        let mut r = record();
+        apply(
+            &mut r,
+            &env(AgentEvent::Finished {
+                text: None,
+                exit_code: Some(0),
+                is_error: false,
+                usage: Usage::default(),
+            }),
+        );
+        assert_eq!(r.summary.status, AgentStatus::Completed);
+        assert!(
+            !r.summary.session_closed,
+            "the tmux session outlives the agent, so it is still closeable"
+        );
     }
 
     #[test]

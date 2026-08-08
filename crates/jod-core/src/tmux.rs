@@ -68,7 +68,24 @@ pub async fn new_session(name: &str, cwd: &Path, script: &Path) -> Result<()> {
     if !ok {
         return Err(JodError::Tmux(out));
     }
+    protect_attached_clients(name).await;
     Ok(())
+}
+
+/// Stop this session's destruction from taking a user's terminal with it.
+///
+/// tmux's `detach-on-destroy` defaults to `on`, which makes an attached client
+/// *exit* when its session is destroyed rather than fall back to another
+/// session. That is fatal in a common setup: oh-my-zsh's tmux plugin with
+/// `ZSH_TMUX_AUTOSTART` sets `ZSH_TMUX_AUTOQUIT`, which runs `exit` the moment
+/// its tmux client returns — so killing a Jod agent while watching it would
+/// close the user's terminal window.
+///
+/// Set per-session, never globally: this is Jod's session to configure, and the
+/// user's own sessions are none of our business. Best-effort — an older tmux
+/// without the option should not fail a spawn.
+async fn protect_attached_clients(name: &str) {
+    let _ = run(&["set-option", "-t", name, "detach-on-destroy", "off"]).await;
 }
 
 pub async fn has_session(name: &str) -> bool {
@@ -97,9 +114,29 @@ pub async fn list_sessions() -> Vec<String> {
     }
 }
 
-/// The command a human would type to watch this agent.
+/// The command a human types to watch this agent from outside tmux.
 pub fn attach_command(name: &str) -> String {
     format!("tmux attach -t {name}")
+}
+
+/// The command to use from *inside* an existing tmux session.
+///
+/// `tmux attach` refuses to nest, and most people running Jod already live in
+/// tmux — so offering only `attach` hands them a command that errors.
+pub fn switch_command(name: &str) -> String {
+    format!("tmux switch-client -t {name}")
+}
+
+/// One command that is correct whether or not the caller is inside tmux.
+///
+/// Used when Jod drives a terminal itself, where it cannot know what the new
+/// window's shell will do — a login shell may auto-start tmux before this runs.
+pub fn watch_command(name: &str) -> String {
+    format!(
+        "if [ -n \"$TMUX\" ]; then {}; else {}; fi",
+        switch_command(name),
+        attach_command(name)
+    )
 }
 
 #[cfg(test)]
@@ -129,5 +166,18 @@ mod tests {
     #[test]
     fn the_attach_command_targets_the_session() {
         assert_eq!(attach_command("jod-x"), "tmux attach -t jod-x");
+    }
+
+    #[test]
+    fn the_switch_command_is_offered_because_attach_refuses_to_nest() {
+        assert_eq!(switch_command("jod-x"), "tmux switch-client -t jod-x");
+    }
+
+    #[test]
+    fn the_watch_command_picks_the_right_one_at_runtime() {
+        let cmd = watch_command("jod-x");
+        assert!(cmd.contains("$TMUX"), "must branch on being inside tmux: {cmd}");
+        assert!(cmd.contains("switch-client -t jod-x"));
+        assert!(cmd.contains("attach -t jod-x"));
     }
 }

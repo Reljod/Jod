@@ -80,16 +80,30 @@ export function EventStream({ agent, events, onKill, onOpenTerminal }: Props) {
             {agent.harness_label}
             {agent.model ? ` · ${agent.model}` : ""} · {agent.cwd}
           </p>
-          <p className="sub mono">{agent.attach_command}</p>
+          {agent.session_closed ? (
+            <p className="sub">tmux session closed</p>
+          ) : (
+            <>
+              <p className="sub mono">{agent.attach_command}</p>
+              <p className="sub mono">{agent.switch_command} <span className="hint">(from inside tmux)</span></p>
+            </>
+          )}
         </div>
         <div className="actions">
-          <button onClick={() => onOpenTerminal(agent.id)}>Watch in tmux</button>
+          <button
+            onClick={() => onOpenTerminal(agent.id)}
+            disabled={agent.session_closed}
+          >
+            Watch in tmux
+          </button>
+          {/* The session outlives the agent, so this stays available after a
+              run finishes — that is the only way to reclaim it. */}
           <button
             className="danger"
             onClick={() => onKill(agent.id)}
-            disabled={agent.status !== "running"}
+            disabled={agent.session_closed}
           >
-            Kill
+            {agent.status === "running" ? "Kill" : "Close session"}
           </button>
         </div>
       </header>

@@ -37,6 +37,10 @@ export interface AgentSummary {
   permission: PermissionPolicy;
   tmux_session: string;
   attach_command: string;
+  /** Use this instead of attach_command from inside an existing tmux session. */
+  switch_command: string;
+  /** Sessions outlive the agent, so this is a different question to `status`. */
+  session_closed: boolean;
   created_at_ms: number;
   session_id: string | null;
   usage: Usage;
