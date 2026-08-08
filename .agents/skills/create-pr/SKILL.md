@@ -208,11 +208,16 @@ A green, trivial PR left open for a human who has nothing to add is the
 review budget being spent in the wrong place — and it trains whoever does
 open it to skim. If the change is genuinely unremarkable, finish the job.
 
-Once checks have **finished** (not merely started):
+Once checks have **finished** (not merely started), hand the PR to the
+**auto-merge** skill and follow it. If it is installed alongside this one,
+its script is the sibling directory:
 
 ```
 ${CLAUDE_SKILL_DIR}/../auto-merge/scripts/merge_pr.sh <pr> --ready
 ```
+
+If that path doesn't exist, this repo didn't take the auto-merge skill —
+leave the PR open and say so. Do not hand-roll the checks.
 
 That script decides, not you. It merges only if the triage verdict is
 `auto-merge`, every check is green, the branch is not behind base, and no
