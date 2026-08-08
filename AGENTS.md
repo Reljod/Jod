@@ -66,10 +66,14 @@ A check that can't pass makes faking it the cheapest path.
 - **Teammates share one checkout, so one owner per path,** and a task closes
   green or blocked in writing. → [`docs/teamwork.md`](docs/teamwork.md)
 - **A PR merges unread only when a script says so.** CI categorises every PR;
-  prose, research and small clean code changes may be merged by an agent, and
-  anything touching auth, CI, migrations or the rules themselves waits for a
-  human. Never `gh pr merge` by hand — run `merge_pr.sh` and obey its exit
+  prose, research, charter/skill edits and small clean code changes may be
+  merged by an agent, and anything touching auth, CI, migrations or the
+  enforcement machinery waits for a human. Never `gh pr merge` by hand — run
+  `merge_pr.sh` and obey its exit
   code. → **`/auto-merge`**, [why](docs/decisions.md#a-regex-decides-what-merges-unread)
+- **Finish your own PRs.** After opening one, wait for checks to finish and run
+  `merge_pr.sh <pr> --ready`. On a refusal, report the reasons verbatim and
+  leave it open. Only for work you carried end to end. → **`/create-pr`**
 
 ## Conventions
 

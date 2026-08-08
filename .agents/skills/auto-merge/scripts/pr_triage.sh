@@ -28,7 +28,7 @@ range=""
 format="md"
 max_files="${TRIAGE_MAX_FILES:-20}"
 max_lines="${TRIAGE_MAX_LINES:-400}"
-allow="${TRIAGE_AUTOMERGE_CATEGORIES:-docs research tests code assets}"
+allow="${TRIAGE_AUTOMERGE_CATEGORIES:-docs research rules tests code assets}"
 
 die() { echo "$*" >&2; exit 1; }
 
@@ -71,18 +71,23 @@ exec_list=" $(git diff --raw "$range" | awk '$2 == "100755" { print $NF }' \
 # Descriptive buckets, not exclusive: AGENTS.md is both `docs` and `gate`, and
 # the blocking one wins. Anything a pattern doesn't claim is `code`.
 
-CATEGORIES="security gate ci deps data contract docs research tests assets"
+CATEGORIES="security gate rules ci deps data contract docs research tests assets"
 
 pattern_for() {
   case "$1" in
     # Auth, secrets, crypto, permissions. Highest-consequence code there is.
     security) printf '%s' '(^|/)(auth|authz|authentication|security|secrets?|crypto|keys?|credentials?)/|(^|/)\.env|(^|/)secrets?\.(ya?ml|json|toml)$|\.(pem|key|p12|keystore)$|(^|/)permissions?\.' ;;
-    # The rules themselves: the charter, the agent toolkit, every skill, the
-    # hooks, CODEOWNERS. A PR that edits the gate cannot be judged by the gate
-    # it is editing — which includes this script, since it lives under
-    # `skills/`. Matched by shape rather than by a spelled-out path, so the
-    # rule still holds wherever the toolkit is installed.
-    gate)     printf '%s' '(^|/)(AGENTS|CLAUDE|REVIEW)\.md$|(^|/)\.agents/|(^|/)skills/|(^|/)\.claude/|(^|/)\.claude-plugin/|(^|/)CODEOWNERS$|(^|/)\.githooks/' ;;
+    # What the machine *enforces*: CI, hooks, tool permissions, the plugin
+    # manifests, required reviewers — and this skill, prose included, since
+    # its prose is the merge policy. Editing any of it changes what checks
+    # can even run, so it is never judged by the checks it is editing.
+    # Matched by shape, not by a spelled-out path, so the rule survives
+    # being installed somewhere else.
+    gate)     printf '%s' '(^|/)auto-merge/|(^|/)\.github/|(^|/)\.githooks/|(^|/)\.claude/(hooks|settings)|(^|/)\.claude-plugin/|(^|/)CODEOWNERS$' ;;
+    # What the machine *reads*: the charter, skills, agent definitions,
+    # commands. Instructions, not enforcement — auto-mergeable unless the
+    # change edits the merge policy itself (see the self-amendment scan).
+    rules)    printf '%s' '(^|/)(AGENTS|CLAUDE|REVIEW)\.md$|(^|/)\.agents/.*\.md$|(^|/)skills/.*\.md$|(^|/)\.claude/(commands|agents)/|(^|/)agents/.*\.md$' ;;
     # CI can disable every other check, so changing it is never routine.
     ci)       printf '%s' '(^|/)\.github/|(^|/)\.gitlab-ci\.ya?ml$|(^|/)\.circleci/|(^|/)Jenkinsfile$|(^|/)azure-pipelines\.ya?ml$' ;;
     # Supply chain: a lockfile bump is a code change you did not write.
@@ -183,6 +188,26 @@ if [ -n "$added" ]; then
   # switch the gate off.
   scan 'rm[[:space:]]+-[a-z]*[rf][a-z]*[[:space:]]+(/|~|\*|\$\{?HOME)|(curl|wget)[^|]*\|[[:space:]]*(sudo[[:space:]]+)?(ba|z)?sh|\bsudo[[:space:]]|git[[:space:]]+push[^;|]*(--force|[[:space:]]-f[[:space:]])|git[[:space:]]+reset[[:space:]]+--hard|(DROP|TRUNCATE)[[:space:]]+(TABLE|DATABASE|SCHEMA)|DELETE[[:space:]]+FROM|\bdd[[:space:]]+if=|\bmkfs|\bshred[[:space:]]|>[[:space:]]*/dev/sd|chmod[[:space:]]+(-R[[:space:]]+)?0?777|terraform[[:space:]]+destroy|kubectl[[:space:]]+delete|aws[[:space:]]+s3[[:space:]]+(rm|rb)[[:space:]]|docker[[:space:]]+system[[:space:]]+prune' \
     destructive "a destructive or privilege-escalating command is introduced"
+fi
+
+# Rules files are prose an agent obeys, so most edits to them are as inert as
+# any other writing — a clarified charter paragraph, a new skill, a fixed
+# example. What is not inert is a rules change that edits the merge policy
+# itself, because that is the branch quietly granting itself permission.
+#
+# Removed lines count as much as added ones here, and only here: deleting
+# "never merge X" is the dangerous direction, and it leaves no `+` line to
+# find.
+rules_files="$(printf '%s' "$hits" | awk -F'\t' '$1 == "rules" { print $2 }' | sort -u)"
+if [ -n "$rules_files" ]; then
+  rules_diff="$(printf '%s\n' "$rules_files" | tr '\n' '\0' \
+    | xargs -0 git diff -U0 "$range" -- 2>/dev/null \
+    | grep -E '^[+-]' | grep -Ev '^(\+\+\+|---)' || true)"
+  amend="$(printf '%s\n' "$rules_diff" | grep -Eic \
+    'auto[-_ ]?merge|merge:auto|human-review|never_automerge|triage_[a-z]|--allow[[:space:]]|max-(files|lines)|merge_pr|pr_triage|branch protection|required[[:space:]]+(status[[:space:]]+)?check|--no-verify|--admin|bypass' \
+    || true)"
+  [ "$amend" -gt 0 ] && note self-amendment \
+    "a rules file edits the merge policy itself ($amend changed line(s))"
 fi
 
 # A mock in shipped code is a substitution; a mock in a test is the point.

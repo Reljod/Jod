@@ -17,7 +17,8 @@ and any blocking category decides the verdict.
 | Category | Matches | Auto-merge |
 |---|---|---|
 | `security` | `auth/`, `security/`, `secrets/`, `crypto/`, `keys/`, `.env*`, `*.pem`, `*.key`, `permissions.*` | **never** |
-| `gate` | `AGENTS.md`, `CLAUDE.md`, `REVIEW.md`, `.agents/`, any `skills/`, `.claude/`, `.claude-plugin/`, `.githooks/`, `CODEOWNERS` | **never** |
+| `gate` | `.github/`, `.githooks/`, `.claude/hooks/`, `.claude/settings*`, `.claude-plugin/`, `CODEOWNERS`, and everything under `auto-merge/` | **never** |
+| `rules` | `AGENTS.md`, `CLAUDE.md`, `REVIEW.md`, `*.md` under `.agents/` or any `skills/`, `.claude/commands/`, `.claude/agents/` | yes, unless it amends the merge policy |
 | `ci` | `.github/`, `.gitlab-ci.yml`, `.circleci/`, `Jenkinsfile`, `azure-pipelines.yml` | **never** |
 | `data` | `migrations/`, `alembic/`, `prisma/`, `*.sql`, `schema.*` | **never** |
 | `deps` | lockfiles, `package.json`, `Cargo.toml`, `pyproject.toml`, `go.mod`, `Gemfile`, `requirements*.txt` | off by default |
@@ -32,18 +33,39 @@ and any blocking category decides the verdict.
 `TRIAGE_AUTOMERGE_CATEGORIES` can *remove* categories from the
 auto-mergeable set but can never add these four.
 
-### Why `gate` covers this skill
+### `gate` vs `rules`: enforcement vs instruction
 
-A PR that widens the auto-merge rules is judged by the rules it is
-widening. Putting the classifier, the charter, every skill, CI config and
-the hooks in one always-human category closes that loop — the only way to
-loosen the gate is for a person to agree.
+The split is the difference between what the machine **enforces** and what
+it **reads**.
 
-The pattern matches by shape (`skills/`, `.agents/`, `.claude/`) rather
-than by this skill's own path. Spelling the path would both break the
+`gate` is enforcement: CI workflows, git hooks, tool permissions, the
+plugin manifests, `CODEOWNERS`, and this skill. Change any of it and you
+change which checks can run at all — including the check being asked for
+an opinion. Never auto-mergeable, no exceptions.
+
+`rules` is instruction: the charter, skills, agent definitions, commands.
+Prose an agent obeys. Most edits are as inert as any other writing — a
+clarified paragraph, a new skill, a fixed example — and blocking all of
+them means the charter can only be improved at a human's convenience,
+which mostly means it isn't.
+
+The one rules edit that cannot be self-approved is the one that grants the
+branch permission to merge itself. That is what the `self-amendment` scan
+catches, and it is why the auto-merge skill's own prose sits in `gate`
+rather than `rules`: its prose **is** the merge policy.
+
+The patterns match by shape (`auto-merge/`, `skills/`, `.claude/`) rather
+than by this skill's repo-relative path. Spelling the path would break the
 portability rule `tests/plugin.test.sh` enforces — a plugin user's
-checkout has no `.agents/` — and under-protect: a rewrite of any other
-skill is a rules change too.
+checkout has no `.agents/`.
+
+### Why removed lines count, but only for rules
+
+Everywhere else the scans read added lines: a substitution is something
+you *put in*. Self-amendment is the opposite — deleting `never bypass
+branch protection` weakens the rules and leaves no `+` line behind. So the
+self-amendment scan reads both sides of the diff, and only for files in
+`rules`.
 
 ### Why `deps` and `contract` are off but not banned
 
@@ -80,6 +102,7 @@ block via `deps`, and grepping a 30k-line lock for "token" is pure noise.
 | `substitution` | deleted test files | The substitution a diff makes hardest to notice |
 | `security` | `key`/`secret`/`password`/`token`/`credential` assigned an 8+ char literal | A credential that was invented rather than read from the environment |
 | `destructive` | `rm -rf /`, `~`, `$HOME` or a bare glob; `sudo`; `curl … \| sh`; `git push --force`; `git reset --hard`; `DROP`/`TRUNCATE`/`DELETE FROM`; `dd if=`; `mkfs`; `shred`; `chmod 777`; `terraform destroy`; `kubectl delete`; `aws s3 rm`; `docker system prune` | The line between "inert change" and "this does something when it lands" |
+| `self-amendment` | merge-policy language (`auto-merge`, `human-review`, `--allow`, `max-files`, `branch protection`, `--no-verify`, `--admin`, `bypass`, …) **added or removed** in a `rules` file | A branch granting itself permission to merge |
 | `debug` | `debugger`, `dbg!(`, `binding.pry`, `pdb.set_trace(`, `breakpoint()` | Left-in breakpoints are unfinished work |
 | `deletion` | any deleted non-doc file | Removal is the change a diff shows least legibly |
 | `binary` | binary files outside the `assets` extensions | Unreviewable as text, so never unattended |
@@ -107,6 +130,6 @@ of what this gate is for.
 |---|---|---|
 | `--max-files` / `TRIAGE_MAX_FILES` | 20 | Code-file limit |
 | `--max-lines` / `TRIAGE_MAX_LINES` | 400 | Code-line limit |
-| `--allow` / `TRIAGE_AUTOMERGE_CATEGORIES` | `docs research tests code assets` | Which categories may auto-merge; the four floor categories are unaffected |
+| `--allow` / `TRIAGE_AUTOMERGE_CATEGORIES` | `docs research rules tests code assets` | Which categories may auto-merge; the four floor categories are unaffected |
 
 To tighten a repo to prose only: `--allow "docs research assets"`.

@@ -45,21 +45,46 @@ Two properties follow, and both are load-bearing:
    never auto-mergeable, and `--allow` cannot make them so. A knob that
    switches the gate off for CI is the gate being optional.
 
-`gate` includes this skill and its own scripts. A PR that widens what
-auto-merges cannot be auto-merged by the rules it is widening.
+`gate` includes this skill — its prose as much as its scripts, because its
+prose is the merge policy. A PR that widens what auto-merges cannot be
+auto-merged by the rules it is widening.
 
 ## What gets categorised
 
-Ten categories, assigned by path and never exclusive — `AGENTS.md` is both
-`docs` and `gate`, and the blocking one wins.
+Eleven categories, assigned by path and never exclusive — `AGENTS.md` is
+both `docs` and `rules`, and the blocking one wins.
 
 | Auto-mergeable | Never auto-mergeable |
 |---|---|
 | `docs` — markdown, prose, `docs/` | `security` — auth, secrets, crypto, keys |
-| `research` — findings, notes, datasets | `gate` — the charter, CI config, this skill |
-| `tests` — test files and fixtures | `ci` — workflows, pipelines, hooks |
-| `code` — everything else, under the size limits | `data` — migrations, schema, SQL |
-| `assets` — images and fonts | `deps`, `contract` — off by default, tunable |
+| `research` — findings, notes, datasets | `gate` — CI, hooks, permissions, this skill |
+| `rules` — the charter, skills, agent defs | `ci` — workflows and pipelines |
+| `tests` — test files and fixtures | `data` — migrations, schema, SQL |
+| `code` — everything else, under the size limits | `deps`, `contract` — off by default, tunable |
+| `assets` — images and fonts | |
+
+### `gate` vs `rules`
+
+The split is what the machine **enforces** versus what it **reads**.
+
+`gate` is enforcement — CI, git hooks, tool permissions, plugin manifests,
+`CODEOWNERS`, this skill. Change it and you change which checks can run at
+all. Never auto-mergeable.
+
+`rules` is instruction — the charter, skills, agent definitions, commands.
+Prose an agent obeys. Clarifying a paragraph, adding a skill, fixing an
+example: inert, and auto-mergeable. Blocking all of it would mean the
+charter improves only when a human has time, which mostly means it doesn't.
+
+The exception is the edit that grants the branch permission to merge
+itself. Any `rules` change whose diff adds **or removes** merge-policy
+language — `auto-merge`, `human-review`, `--allow`, `max-files`, `branch
+protection`, `--no-verify`, `bypass` — is a `self-amendment` finding and
+goes to a human. Removed lines count here because deleting *never bypass
+branch protection* weakens the rules and leaves no `+` line to find.
+
+A script inside a skill (`skills/foo/scripts/run.sh`) is `code`, not
+`rules` — it executes, so it clears the code rules on its own.
 
 Research and docs are auto-merged because **nothing executes them**. That
 exemption is conditional, not a property of the directory: a `.sh`, a
@@ -144,6 +169,34 @@ exists to prevent. Re-run once CI is green on the new head.
 3. **Merge, or hand it over.** On exit 0, `merge_pr.sh <pr>`. On exit 1,
    say which reason sent it to a human — name the reason, don't summarise
    it as "needs review".
+
+## Closing out a PR you just opened
+
+This is the common case: you finished a task, `/create-pr` opened a draft,
+and CI is running. Finish the job rather than leaving a green trivial PR
+sitting for a human who has nothing to add.
+
+```
+${CLAUDE_SKILL_DIR}/scripts/merge_pr.sh <pr> --ready
+```
+
+`--ready` publishes the draft and merges, but **only if every other
+precondition already holds** — it is an opt-in for un-drafting, not a
+bypass for anything else. Without it a draft is refused, because
+publishing is normally the author's call.
+
+Order matters, and the temptation is to compress it:
+
+1. Open the PR (draft, per this repo's convention).
+2. **Wait for checks to finish.** Pending is refused, not waited on — the
+   script will not poll for you, and merging on a check that had not
+   finished is the thing the rule exists to stop.
+3. Run `merge_pr.sh <pr> --ready`.
+4. Exit 0 → say so, with the categories and the merge commit. Exit 1 →
+   report the reasons verbatim and leave the PR open.
+
+Only do this for work **you** carried end to end. A teammate's branch
+closes when they say it does, however green it looks.
 
 ## Boundaries
 
