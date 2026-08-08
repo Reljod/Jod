@@ -3,15 +3,17 @@
     "reference_spec": "REPLACE ME — the one sentence defining what is priced/measured on every row, e.g. 'cheapest plan with >=2 vCPU, >=4 GB RAM, >=40 GB SSD'. Without this the rows are not comparable.",
     "compiled": "YYYY-MM-DD",
     "scales": "REPLACE ME — say which end of each 1-5 rating is good, e.g. 'strictness/risk: 1=best. quality/reliability: 5=best.'",
-    "note": "confidence=low means the figure is plausible but was not confirmed against a live source. The report must surface this next to the number."
+    "note": "confidence=low means the figure is plausible but was not confirmed against a live source. The report must surface this next to the number.",
+    "availability_note": "`availability` is whether the priced option can actually be BOUGHT right now, which is not the same question as whether it is any good. Price it from the standing catalogue, not from a promo or a 'starting at' banner: the cheapest row in a comparison is very often the one nobody can order."
   },
 
   "_schema": {
-    "required": ["id", "name", "price", "currency", "confidence", "sources"],
+    "required": ["id", "name", "price", "currency", "availability", "confidence", "sources"],
     "ratings_1_5": ["reliability", "strictness"],
     "enums": {
       "currency": ["USD", "EUR", "GBP"],
-      "tier": ["budget", "mainstream", "premium"]
+      "tier": ["budget", "mainstream", "premium"],
+      "availability": ["in", "partial", "out", "unknown"]
     },
     "non_negative": ["price", "capacity"]
   },
@@ -29,6 +31,7 @@
       "reliability": 3,
       "strictness": 2,
       "has_api": true,
+      "availability": "in",
       "confidence": "high",
       "sources": ["https://example.com/pricing"],
       "notes": "Verified against the live pricing page.",
@@ -44,6 +47,7 @@
       "reliability": 5,
       "strictness": 4,
       "has_api": true,
+      "availability": "in",
       "confidence": "low",
       "sources": ["https://example.com/b"],
       "notes": "Price is a market estimate — verify before relying on it.",
@@ -59,6 +63,7 @@
       "reliability": 2,
       "strictness": 1,
       "has_api": true,
+      "availability": "in",
       "confidence": "low",
       "sources": [],
       "notes": "The cheapest row here, and still disqualified — this is what filtering before scoring is for. A weighted average would have ranked it first.",
@@ -74,9 +79,26 @@
       "reliability": 4,
       "strictness": 2,
       "has_api": true,
+      "availability": "in",
       "confidence": "medium",
       "sources": ["https://example.com/d"],
       "notes": "Fails the numeric capacity floor rather than a flag.",
+      "flags": []
+    },
+    {
+      "id": "example-e",
+      "name": "Example E",
+      "tier": "budget",
+      "price": 2.5,
+      "currency": "USD",
+      "capacity": 4,
+      "reliability": 4,
+      "strictness": 1,
+      "has_api": true,
+      "availability": "out",
+      "confidence": "high",
+      "sources": ["https://example.com/e"],
+      "notes": "Meets every requirement and is nearly the cheapest row — but it cannot be bought. An option you cannot acquire is not a cheap option, it is not an option, so this is a filter and not a scoring penalty.",
       "flags": []
     }
   ]

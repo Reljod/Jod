@@ -60,7 +60,9 @@ echo "filters run before scoring"
 out="$(python3 "$SCORE" "$S" --profile stated-goal --trials 200 2>&1)"
 check     "excluded flag disqualifies"       "Example C: flagged excluded:unsupported" "$out"
 check     "numeric floor disqualifies"       "Example D: capacity=2 below minimum 4"   "$out"
+check     "unbuyable row disqualifies"       "Example E: availability='out' is excluded" "$out"
 check_not "excluded row absent from ranking" "Example C |" "$out"
+check_not "unbuyable row absent from ranking" "Example E |" "$out"
 
 # The point of filtering before scoring: Example C is the CHEAPEST row in the
 # template. Under a pure-cost weighting it would rank first if it were scored
@@ -68,6 +70,11 @@ check_not "excluded row absent from ranking" "Example C |" "$out"
 out2="$(python3 "$SCORE" "$S" --profile cheapest --trials 200 2>&1)"
 check_not "cheapest row never ranks despite lowest price" "  1  Example C" "$out2"
 check     "and is reported as filtered"                   "flagged excluded:unsupported" "$out2"
+
+# Same property for the out-of-stock row, which is the failure this suite exists
+# to catch: Example E is the cheapest row that passes every other rule, so under
+# a pure-cost weighting it wins outright unless availability gates it first.
+check_not "unbuyable row never ranks despite near-lowest price" "  1  Example E" "$out2"
 
 # --- confidence changes the ranking ---------------------------------------
 echo

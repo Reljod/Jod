@@ -24,6 +24,7 @@
       "filters": {
         "min_capacity": 4,
         "require_true": ["has_api"],
+        "exclude_availability": ["out"],
         "exclude_flags": ["excluded:"]
       }
     },
@@ -35,6 +36,7 @@
       "filters": {
         "min_capacity": 4,
         "require_true": ["has_api"],
+        "exclude_availability": ["out"],
         "exclude_flags": ["excluded:"]
       }
     },
@@ -46,6 +48,7 @@
       "filters": {
         "min_capacity": 4,
         "require_true": ["has_api"],
+        "exclude_availability": ["out"],
         "exclude_flags": ["excluded:"]
       }
     }
