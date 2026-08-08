@@ -351,3 +351,47 @@ locally rather than trusting the API to volunteer it.
 `--update-branch` rebases and then stops, which looks unhelpful and isn't:
 merging in the same breath would merge on the checks that ran before the rebase,
 which is the failure the rule exists to prevent.
+
+## Enforcement is a floor; instruction is not
+
+The merge gate first put the charter, every skill and every agent definition in
+the same never-auto-merge bucket as CI config. That was one category doing two
+jobs, and the cost showed up immediately: a typo fix in `AGENTS.md` needed the
+same human as a workflow rewrite.
+
+The split that survives is **what the machine enforces** vs **what it reads**.
+CI, git hooks, tool permissions, plugin manifests, `CODEOWNERS` and the
+auto-merge skill are `gate` — change them and you change which checks can run at
+all, including the one being asked for an opinion. The charter, skills, agent
+definitions and commands are `rules`: prose an agent obeys, inert until someone
+reads it, and auto-mergeable.
+
+That leaves exactly one dangerous rules edit — the one granting the branch
+permission to merge itself — and it gets its own scan rather than its own
+category. Any `rules` diff that adds *or removes* merge-policy language
+(`auto-merge`, `--allow`, `branch protection`, `--no-verify`, `bypass`) goes to a
+human. Removed lines count because deleting "never bypass branch protection" is
+the weakening move and leaves no `+` line to find; every other scan reads added
+lines only, since a substitution is something you put in.
+
+The auto-merge skill's *prose* sits in `gate`, not `rules`, for the same reason:
+its prose is the merge policy. Blocking the whole category would have been
+simpler, and the charter would have stopped improving — a rule that can only be
+fixed at a human's convenience mostly isn't.
+
+## Agents finish their own PRs
+
+`create-pr` now ends by running `merge_pr.sh <pr> --ready`, so a green trivial PR
+closes itself instead of waiting.
+
+The reason is the same one behind the gate: review attention is the scarce
+resource, and a queue of unremarkable green PRs spends it in the worst possible
+way — it trains whoever opens them to skim, which is precisely the habit you
+don't want when the migration lands.
+
+Two deliberate frictions remain. `--ready` is an explicit flag rather than
+implicit behaviour, because un-drafting is what announces to everyone watching
+that the work is finished, and a script shouldn't say that on the author's
+behalf unless asked. And pending checks are refused rather than waited on: a
+script that polls holds an unbounded window in which someone pushes, and the
+whole value of "all checks green" is that it was true of the commit being merged.

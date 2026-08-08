@@ -201,3 +201,30 @@ session. Remove any temporary git worktree you created for before/after
 capture. Report back briefly which visual strategy you used per category,
 plus anything the substitutions scan flagged — decisions worth surfacing,
 not narrating.
+
+## 8. Close it out yourself when it's safe to
+
+A green, trivial PR left open for a human who has nothing to add is the
+review budget being spent in the wrong place — and it trains whoever does
+open it to skim. If the change is genuinely unremarkable, finish the job.
+
+Once checks have **finished** (not merely started):
+
+```
+${CLAUDE_SKILL_DIR}/../auto-merge/scripts/merge_pr.sh <pr> --ready
+```
+
+That script decides, not you. It merges only if the triage verdict is
+`auto-merge`, every check is green, the branch is not behind base, and no
+reviewer asked for changes; otherwise it exits 1 and prints why. `--ready`
+publishes the draft as part of merging, and only when everything else
+already holds.
+
+On exit 1, report the reasons verbatim and leave the PR open. Do not run
+`gh pr merge`, do not edit the classifier, do not re-run hoping for a
+different answer — a refusal is a correct outcome, and the whole point of
+routing through a script is that your read of your own diff is not the
+check. Only ever do this for work you carried end to end; a teammate's
+branch closes when they say it does.
+
+See the **auto-merge** skill for what the categories mean.

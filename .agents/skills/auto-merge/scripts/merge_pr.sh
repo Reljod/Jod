@@ -2,7 +2,7 @@
 # Merges a pull request only if every unattended-merge precondition holds.
 #
 # Usage: merge_pr.sh <pr-number> [--repo owner/name] [--method squash|rebase]
-#                    [--dry-run] [--update-branch] [--base <ref>]
+#                    [--dry-run] [--ready] [--update-branch] [--base <ref>]
 #
 # Exit 0 = merged (or, with --dry-run, would have merged). Exit 1 = refused,
 # with every reason printed. Refusing is the normal outcome, not an error.
@@ -27,6 +27,7 @@ pr=""
 repo=""
 method="squash"
 dry_run=""
+ready=""
 update_branch=""
 base_override=""
 
@@ -38,6 +39,7 @@ while [ $# -gt 0 ]; do
     --method)  method="${2:-}"; shift 2 ;;
     --base)    base_override="${2:-}"; shift 2 ;;
     --dry-run) dry_run="1"; shift ;;
+    --ready) ready="1"; shift ;;
     --update-branch) update_branch="1"; shift ;;
     -h|--help) sed -n '2,15p' "$0"; exit 0 ;;
     -*)        die "Unknown flag: $1" ;;
@@ -82,7 +84,20 @@ echo
 # --- 1. the PR is in a mergeable state ---------------------------------------
 
 [ "$(field .state)" = "OPEN" ] || refuse "PR is $(field .state), not OPEN"
-[ "$(field .isDraft)" = "false" ] || refuse "PR is a draft — publishing it is the author's call"
+
+# Draft is the repo's default, so an agent finishing its own work has to
+# publish before it can merge. `--ready` is that opt-in, and it stays an
+# explicit flag rather than an implicit side effect: un-drafting is what
+# tells everyone watching the PR that it is finished, and a script should
+# not announce that on the author's behalf unless asked.
+was_draft=""
+if [ "$(field .isDraft)" != "false" ]; then
+  if [ -n "$ready" ]; then
+    was_draft="1"
+  else
+    refuse "PR is a draft — publishing it is the author's call (pass --ready)"
+  fi
+fi
 
 case "$(field .mergeable)" in
   MERGEABLE) ;;
@@ -191,8 +206,16 @@ fi
 
 if [ -n "$dry_run" ]; then
   echo "DRY RUN — every precondition holds; would run:"
+  [ -n "$was_draft" ] && echo "  gh pr ready $pr"
   echo "  gh pr merge $pr --$method --delete-branch"
   exit 0
+fi
+
+if [ -n "$was_draft" ]; then
+  ready_args=()
+  [ -n "$repo" ] && ready_args+=(--repo "$repo")
+  gh pr ready "$pr" "${ready_args[@]}"
+  echo "Marked PR #$pr ready for review."
 fi
 
 merge_args=("--$method" --delete-branch)

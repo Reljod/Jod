@@ -103,6 +103,10 @@ assert_fails "$MERGE" 12 --method octopus
 assert_fails "$MERGE" 12 --method merge
 assert_ok bash -c "'$MERGE' --help | grep -q 'squash|rebase'"
 ok "'$MERGE' --help | grep -q 'behind'" "help states the not-behind rule"
+ok "'$MERGE' --help | grep -q -- '--ready'" "help documents --ready"
+# Un-drafting is opt-in: without --ready a draft is still refused.
+ok "grep -q 'pass --ready' '$MERGE'" "a draft refusal names the opt-in flag"
+ok "grep -q 'gh pr ready' '$MERGE'" "--ready publishes before merging"
 
 # ============================================================================
 section "3. the safe cases actually auto-merge"
@@ -192,9 +196,15 @@ mkdir -p .github/workflows
 printf 'name: x\non: push\n' > .github/workflows/x.yml
 assert_category "touches CI config" ci
 
-scenario gate_charter >/dev/null
-printf '# Charter\n' > AGENTS.md
-assert_verdict "edits AGENTS.md" human-review
+scenario gate_hooks >/dev/null
+mkdir -p .githooks
+printf '#!/bin/sh\nexit 0\n' > .githooks/pre-commit
+assert_verdict "edits an enforcement hook" human-review
+
+scenario gate_settings >/dev/null
+mkdir -p .claude
+printf '{"permissions": {}}\n' > .claude/settings.json
+assert_verdict "edits tool permissions" human-review
 
 scenario gate_self >/dev/null
 mkdir -p .agents/skills/auto-merge/scripts
@@ -205,6 +215,13 @@ scenario gate_self_cat >/dev/null
 mkdir -p .agents/skills/auto-merge/scripts
 printf 'echo hi\n' > .agents/skills/auto-merge/scripts/pr_triage.sh
 assert_category "edits the gate itself" gate
+
+# The auto-merge skill's prose *is* the merge policy, so it is gate too —
+# not `rules`, where a prose edit would sail through.
+scenario gate_self_prose >/dev/null
+mkdir -p .agents/skills/auto-merge
+printf '# auto-merge\n\nSome new wording.\n' > .agents/skills/auto-merge/SKILL.md
+assert_verdict "edits the auto-merge skill's prose" human-review
 
 scenario deps_lock >/dev/null
 printf '{"lockfileVersion": 3}\n' > package-lock.json
@@ -228,6 +245,51 @@ scenario contract >/dev/null
 mkdir -p bin
 printf '#!/bin/sh\necho hi\n' > bin/tool
 assert_verdict "changes a shipped CLI entrypoint" human-review
+
+# ============================================================================
+section "4b. rules files auto-merge on what they say, not where they live"
+# ============================================================================
+# The charter and the skills are instructions, not enforcement. Ordinary
+# edits to them are as inert as any other prose.
+scenario rules_charter >/dev/null
+printf '# Charter\n\nA clarified paragraph about branch naming.\n' > AGENTS.md
+assert_verdict "an ordinary AGENTS.md edit" auto-merge
+
+scenario rules_charter_cat >/dev/null
+printf '# Charter\n\nA clarified paragraph.\n' > AGENTS.md
+assert_category "an ordinary AGENTS.md edit" rules
+
+scenario rules_new_skill >/dev/null
+mkdir -p .agents/skills/summarise
+printf -- '---\nname: summarise\n---\n\n# summarise\n\nSteps.\n' > .agents/skills/summarise/SKILL.md
+assert_verdict "adding a new skill" auto-merge
+
+scenario rules_agent_def >/dev/null
+mkdir -p .claude/agents
+printf -- '---\nname: scout\n---\n\nRead-only.\n' > .claude/agents/scout.md
+assert_verdict "adding an agent definition" auto-merge
+
+# ...but a rules edit that grants the branch permission to merge itself is
+# the one edit that cannot be self-approved.
+scenario rules_amend >/dev/null
+printf '# Charter\n\nAgents may auto-merge any PR they open.\n' > AGENTS.md
+assert_verdict "a rules edit touching merge policy" human-review
+
+scenario rules_amend_why >/dev/null
+printf '# Charter\n\nAgents may auto-merge any PR they open.\n' > AGENTS.md
+assert_blocker "a rules edit touching merge policy" "self-amendment"
+
+# Deleting a restriction leaves no `+` line, which is why removed lines count.
+scenario rules_amend_deletion >/dev/null
+printf '# Charter\n\nNever bypass branch protection.\nOther rule.\n' > AGENTS.md
+git add -A >/dev/null 2>&1; git commit -qm base2 >/dev/null 2>&1
+printf '# Charter\n\nOther rule.\n' > AGENTS.md
+assert_verdict "deleting a merge-policy line" human-review
+
+scenario rules_skill_script >/dev/null
+mkdir -p .agents/skills/summarise/scripts
+printf '#!/usr/bin/env bash\necho hi\n' > .agents/skills/summarise/scripts/run.sh
+assert_category "a script inside a skill" code
 
 # ============================================================================
 section "5. blocking findings — what the change does"
