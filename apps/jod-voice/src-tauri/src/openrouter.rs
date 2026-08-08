@@ -164,16 +164,14 @@ async fn transcribe_once(
     ))
 }
 
-/// True when a result is not Tagalog or English — either because the provider
-/// said so, or because the text contains a non-Latin script.
-fn is_wrong_language(text: &str, reported: Option<&str>) -> Option<String> {
-    if let Some(c) = guard::disallowed_script_char(text) {
-        return Some(format!("non-Latin script in transcript (U+{:04X})", c as u32));
-    }
-    match reported {
-        Some(l) if !guard::is_allowed_language(l) => Some(format!("detected language {l}")),
-        _ => None,
-    }
+/// Rejects a transcript whose script proves it is not Tagalog or English.
+///
+/// Deliberately the *only* check applied to the returned text. Anything that
+/// re-requests or rewrites risks turning transcription into translation, which
+/// is worse than the problem it would solve.
+fn wrong_script(text: &str) -> Option<String> {
+    guard::disallowed_script_char(text)
+        .map(|c| format!("non-Latin script in transcript (U+{:04X})", c as u32))
 }
 
 pub async fn transcribe(
@@ -186,31 +184,18 @@ pub async fn transcribe(
     let b64 = base64::engine::general_purpose::STANDARD.encode(wav);
 
     let started = Instant::now();
-    let (mut text, mut reported, mut cost) =
-        transcribe_once(&key, &b64, model, language).await?;
+    let (text, reported, mut cost) = transcribe_once(&key, &b64, model, language).await?;
 
-    // Auto-detect occasionally lands outside Tagalog/English — Korean is the
-    // usual stray. One retry pinned to Tagalog fixes it; Taglish still comes
-    // back mixed, because the hint biases detection rather than forcing
-    // translation.
+    // The transcript is returned exactly as the model produced it. There is no
+    // retry and no second opinion: the speech gate already removed the case
+    // that caused stray detections, and re-requesting with a language hint is
+    // precisely what makes Whisper translate rather than transcribe.
     //
-    // A pinned request gets no retry (there is nothing left to pin), but its
-    // output is still checked — a non-Latin transcript is wrong either way.
-    if let Some(reason) = is_wrong_language(&text, reported.as_deref()) {
-        if language.is_some() {
-            return Err(format!("Transcript was not Tagalog or English ({reason})."));
-        }
-        eprintln!("[jod-voice] {reason}; retrying pinned to Tagalog");
-        let (retry_text, retry_lang, retry_cost) =
-            transcribe_once(&key, &b64, model, Some("tl")).await?;
-        cost += retry_cost;
-        if is_wrong_language(&retry_text, retry_lang.as_deref()).is_some() {
-            // Two strays in a row means this is not Taglish speech. Refusing is
-            // honest; pasting garbage into a terminal is not.
-            return Err("Could not transcribe that as Tagalog or English — please try again.".into());
-        }
-        text = retry_text;
-        reported = retry_lang;
+    // A non-Latin script is the one thing still worth refusing outright, since
+    // Tagalog and English cannot produce it.
+    if let Some(reason) = wrong_script(&text) {
+        eprintln!("[jod-voice] rejecting transcript: {reason}");
+        return Err("That came back in another language — please try again.".into());
     }
     let latency_ms = started.elapsed().as_millis() as u64;
 
@@ -221,6 +206,21 @@ pub async fn transcribe(
             match repair(&text, repair_model, &key).await {
                 Ok((fixed, repair_cost)) => {
                     cost += repair_cost;
+                    // The repair model is instructed never to translate, but an
+                    // instruction is not a guarantee. If the Tagalog went in and
+                    // did not come out, keep the raw transcript.
+                    if guard::looks_translated(&text, &fixed) {
+                        eprintln!("[jod-voice] repair pass translated the text; keeping raw");
+                        return Ok(Transcript {
+                            text,
+                            latency_ms,
+                            cost_usd: cost,
+                            model: model.to_string(),
+                            raw_text: None,
+                            repair_ms: None,
+                            language: reported,
+                        });
+                    }
                     return Ok(Transcript {
                         text: fixed,
                         latency_ms,
@@ -350,35 +350,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn accepts_taglish_reported_as_tagalog() {
-        assert!(is_wrong_language("Pwede mo bang i-refactor yung module?", Some("Tagalog")).is_none());
+    fn passes_taglish_through_untouched() {
+        assert!(wrong_script("Pwede mo bang i-refactor yung module?").is_none());
     }
 
     #[test]
-    fn accepts_english() {
-        assert!(is_wrong_language("Refactor the auth module", Some("English")).is_none());
+    fn passes_english_through_untouched() {
+        assert!(wrong_script("Refactor the auth module").is_none());
     }
 
     #[test]
-    fn rejects_reported_korean() {
-        let r = is_wrong_language("something", Some("Korean")).unwrap();
-        assert!(r.contains("Korean"), "{r}");
-    }
-
-    #[test]
-    fn rejects_hangul_even_when_language_looks_fine() {
-        // The case that matters: provider claims English, emits Korean.
-        let r = is_wrong_language("시청해주셔서 감사합니다", Some("English")).unwrap();
+    fn rejects_hangul() {
+        let r = wrong_script("시청해주셔서 감사합니다").unwrap();
         assert!(r.contains("non-Latin"), "{r}");
     }
 
     #[test]
-    fn rejects_hangul_when_language_is_missing() {
-        assert!(is_wrong_language("감사합니다", None).is_some());
-    }
-
-    #[test]
-    fn accepts_when_language_is_missing_but_text_is_latin() {
-        assert!(is_wrong_language("Grabe ang traffic sa EDSA", None).is_none());
+    fn the_repair_system_prompt_forbids_translation() {
+        // The prohibition is load-bearing; keep it from being edited away.
+        assert!(REPAIR_SYSTEM.contains("NEVER translate"));
     }
 }

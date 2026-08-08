@@ -130,6 +130,20 @@ const normalize = (s) =>
     .split(/\s+/)
     .filter(Boolean);
 
+/**
+ * Tagalog function words with no English homograph. Used to catch a model that
+ * translates instead of transcribing — measured behaviour when `language=en` is
+ * pinned, and the reason the app never sends that hint.
+ */
+const TAGALOG_MARKERS = new Set([
+  "ang", "ng", "mga", "yung", "iyong", "kasi", "tapos", "pwede", "puwede", "hindi", "naman",
+  "ako", "akong", "ikaw", "siya", "niya", "nila", "natin", "namin", "ninyo", "kong", "mong",
+  "yun", "iyon", "ito", "dito", "diyan", "ganito", "talaga", "grabe", "muntik", "buti",
+  "kaya", "bang",
+]);
+
+const tagalogMarkers = (s) => normalize(s).filter((w) => TAGALOG_MARKERS.has(w)).length;
+
 /** Levenshtein over words, divided by reference length. */
 function wer(ref, hyp) {
   const r = normalize(ref);
@@ -197,17 +211,21 @@ for (const model of MODELS) {
   const wers = [];
   const lats = [];
   let cost = 0;
+  let translated = 0;
   results.forEach((r, i) => {
     if (r.error) return;
     wers.push(wer(cases[i].ref, r.text));
     lats.push(r.ms);
     cost += r.cost ?? 0;
+    // Reference had Tagalog, output has none: the model translated it.
+    if (tagalogMarkers(cases[i].ref) >= 2 && tagalogMarkers(r.text) === 0) translated++;
   });
   const ok = wers.length === cases.length;
   scores.set(model, {
     wer: ok ? wers.reduce((a, b) => a + b, 0) / wers.length : null,
     lat: lats.length ? Math.round(lats.reduce((a, b) => a + b, 0) / lats.length) : null,
     cost,
+    translated,
     sample: results[0]?.text ?? results[0]?.error ?? "",
   });
 }
@@ -220,11 +238,13 @@ console.log("MODEL".padEnd(42) + "WER".padStart(8) + "AVG ms".padStart(9) + "  V
 console.log("-".repeat(78));
 for (const [model, s] of rows) {
   const w = s.wer === null ? "  ERR" : `${(s.wer * 100).toFixed(1)}%`;
-  const verdict = s.wer === null ? "failed" : s.wer < 0.06 ? "usable" : s.wer < 0.2 ? "marginal" : "unusable";
+  let verdict =
+    s.wer === null ? "failed" : s.wer < 0.06 ? "usable" : s.wer < 0.2 ? "marginal" : "unusable";
+  if (s.translated) verdict = `TRANSLATED (${s.translated}/${cases.length}) — do not use`;
   console.log(model.padEnd(42) + w.padStart(8) + String(s.lat ?? "-").padStart(9) + "  " + verdict);
 }
 
-const best = rows.find(([, s]) => s.wer !== null && s.wer < 0.06);
+const best = rows.find(([, s]) => s.wer !== null && s.wer < 0.06 && !s.translated);
 if (best) {
   console.log(`\nRecommended default: ${best[0]}`);
   console.log(`Sample: ${scores.get(best[0]).sample}`);

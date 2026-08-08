@@ -40,10 +40,9 @@
             <select id="model"></select>
           </label>
           <label>Language hint
-            <select id="language" title="Auto-detect is guarded: anything other than Tagalog or English is retried pinned to Tagalog, then rejected.">
-              <option value="">auto, guarded to Tagalog/English</option>
+            <select id="language" title="Auto keeps your words exactly as spoken. Pinning English is not offered because it makes the model translate Tagalog instead of transcribing it.">
+              <option value="">auto — transcribe as spoken</option>
               <option value="tl">pin to Tagalog (tl)</option>
-              <option value="en">pin to English (en)</option>
             </select>
           </label>
         </div>

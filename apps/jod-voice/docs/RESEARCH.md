@@ -161,18 +161,41 @@ RMS alone cannot do this: loud noise (RMS 0.029) outranks quiet speech
 (RMS 0.003), so a level-only gate either admits fans or rejects softly-spoken
 users. The ratio holds across a 100× change in recording level.
 
-Two backstops sit behind the gate, for real speech that is still misread:
+One backstop sits behind the gate: a **script guard**. Tagalog and English are
+both Latin-script, so any Hangul, CJK, Cyrillic, Thai, Arabic or Devanagari
+character proves the transcript is wrong. The app refuses rather than returning
+it — an empty result is honest; Hangul pasted into a terminal is not.
 
-1. **Language allowlist** — `verbose_json` reports the language; anything
-   outside Tagalog/Filipino/English triggers one retry pinned to `tl`.
-2. **Script guard** — Tagalog and English are both Latin-script, so any Hangul,
-   CJK, Cyrillic, Thai, Arabic or Devanagari character proves the transcript is
-   wrong regardless of the reported language. This also covers providers that
-   ignore `verbose_json` and return no language field at all.
+Nothing else touches the returned text. That restraint is deliberate, for the
+reason in the next section.
 
-If both the first attempt and the pinned retry come back outside the allowed
-set, the app refuses rather than returning garbage — an empty result is honest;
-Hangul pasted into a terminal is not.
+### Never pin the language to English — it translates
+
+An earlier version retried failed detections with a language hint. That was a
+mistake, and measuring it showed why. Passing `language=en` does not bias
+detection toward English — on Taglish it makes Whisper **translate**:
+
+| Request | Output for the same Taglish audio |
+| --- | --- |
+| no `language` | `"Pwede mo bang i-refactor yung authentication module? Yung login flow kasi may bug pa rin…"` |
+| `language=tl` | `"Pwede mo bang i-refactor yung authentication module? …"` |
+| **`language=en`** | **`"Can you refactor your authentication module? The login flow is still a bug…"`** |
+
+The response still reports `task: "transcribe"`. There is no flag saying a
+translation happened — the Tagalog is simply gone, replaced by fluent English.
+For a dictation tool this is the worst possible failure: the output looks
+perfect and says something you did not say.
+
+So the app:
+
+- **never sends `language=en`**, and does not offer it in the UI;
+- **never retries** a transcript with a different language hint;
+- **discards the repair pass** if the Tagalog markers present in the raw
+  transcript are all absent from the repaired one, since an LLM instructed not
+  to translate may still do it.
+
+`pnpm bench` flags any model whose output loses every Tagalog marker as
+`TRANSLATED — do not use`, and refuses to recommend it as a default.
 
 ### The `prompt` field is a dead end
 
