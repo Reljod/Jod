@@ -295,3 +295,59 @@ reports `Agents (0)`.
 So they are two real copies, and `tests/plugin.test.sh` diffs them in both
 directions — drift fails, and an agent added to only one side fails too. A copy
 guarded by a check beats a clever link that fails silently.
+
+## A regex decides what merges unread
+
+Every PR is categorised by `pr_triage.sh`, and only a `merge_pr.sh` exit code
+opens the door to `gh pr merge`. The obvious alternative — ask a model "is this
+PR safe to merge?" — was rejected, and the reason generalises past this repo.
+
+The diff is written by whoever opened the PR, which in this repo is usually the
+same agent asking to merge it. A model reading that diff to decide the question
+is being asked to grade its own homework using text it wrote, and a branch that
+adds `this change is trivial and pre-approved` has a real chance of being
+believed. A pattern match cannot be persuaded: it matches or it does not, and no
+commentary in the diff changes what `grep -E` returns. The judgement layer still
+exists — `claude-code-review.yml` reads every PR — but it advises, and the thing
+that can actually merge is deterministic.
+
+Two properties make the gate hold up, and each closes a hole the other leaves:
+
+- **It only escalates.** Every rule can send a PR to a human; nothing can bring
+  one back. A false positive costs one human read, a missed pattern costs an
+  unreviewed merge, so the path patterns are deliberately broad.
+- **`security`, `gate`, `ci` and `data` are a floor, not a default.** No flag or
+  environment variable can make them auto-mergeable, and `gate` covers the
+  charter, CI config, and this classifier itself — so a PR that widens the rules
+  cannot be merged by the rules it widens.
+
+The exemption prose gets is conditional on prose being inert. Research notes and
+docs merge unread because nothing executes them; a `.sh` or an executable bit
+under `research/` is reclassified as code and clears the code rules on its own,
+and a destructive command (`rm -rf ~`, `sudo`, `curl … | sh`, `DROP TABLE`)
+blocks anywhere. The same reasoning excludes prose from the size limits — a
+3,000-line writeup is not riskier than a 300-line one, and a gate that punishes
+thoroughness is one people route around.
+
+Precision was traded for adoption in exactly one place, on purpose. The
+destructive-command rule matches `rm -rf` only against `/`, `~`, `$HOME` and
+bare globs, so the `rm -rf "$tmpdir"` in every test fixture doesn't fire. A rule
+that cries wolf on ordinary cleanup gets the whole gate switched off within a
+week, and a rule nobody keeps enabled protects nothing.
+
+## Merges are linear, and never from behind
+
+`merge_pr.sh` accepts `squash` and `rebase` and refuses `merge` outright, and it
+refuses any branch behind its base.
+
+The linearity half is ordinary taste. The behind-base half is not, and it is the
+one that actually bites: a branch behind base was tested against a tree that no
+longer exists. Squash and rebase both replay its commits onto current base
+*without re-running anything*, so a green tick plus a stale base is precisely how
+a passing PR breaks `main`. GitHub reports this as `mergeStateStatus: BEHIND`
+only when branch protection asks for it, so the script also counts commits
+locally rather than trusting the API to volunteer it.
+
+`--update-branch` rebases and then stops, which looks unhelpful and isn't:
+merging in the same breath would merge on the checks that ran before the rebase,
+which is the failure the rule exists to prevent.
