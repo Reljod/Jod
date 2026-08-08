@@ -18,71 +18,68 @@ FX used: 1 USD = 1.0 USD, 1 EUR = 1.09 USD, 1 GBP = 1.27 USD.
 - **performance** — 3%
 - **ops** — 1%
 
-Hard filters applied before scoring: {"min_ram_gb": 4, "min_vcpu": 2, "min_disk_gb": 40, "require_virt": ["KVM", "Hyper-V", "bare-metal"], "require_docker": true, "exclude_flags": ["excluded:", "sanctions-risk"]}
+Hard filters applied before scoring: {"min_ram_gb": 4, "min_vcpu": 2, "min_disk_gb": 40, "require_virt": ["KVM", "Hyper-V", "bare-metal"], "require_docker": true, "exclude_stock": ["out"], "exclude_flags": ["excluded:", "sanctions-risk"]}
 
-**57 of 60** candidates survived the filters.
+**54 of 60** candidates survived the filters.
 
 ## Full ranking — Jod profile
 
 | # | Provider | $/mo | Score | Perm | Cost | Avail | Net | Loc | Top-5 stability | Confidence |
 |---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
-| 1 | **HostHatch** | $2.42 | 73.0 | 84 | 89 | 54 | 69 | 43 | 100% | medium |
-| 2 | **Advin Servers** | $6.00 | 71.0 | 84 | 66 | 65 | 78 | 46 | 100% | medium |
-| 3 | **IncogNET** | $12.00 | 69.0 | 100 | 48 | 70 | 62 | 41 | 81% | medium |
-| 4 | **GreenCloudVPS** | $5.00 | 67.3 | 84 | 70 | 54 | 55 | 58 | 35% | _low_ |
-| 5 | **Melbicom** | $13.08 | 67.3 | 78 | 45 | 75 | 62 | 84 | 39% | medium |
-| 6 | **PQ.Hosting** | $7.52 | 67.2 | 84 | 60 | 54 | 51 | 89 | 35% | _low_ |
-| 7 | **VPSDime** | $7.00 | 67.0 | 84 | 62 | 72 | 69 | 29 | 27% | _low_ |
-| 8 | **RackNerd** | $3.62 | 66.9 | 84 | 79 | 48 | 56 | 52 | 25% | medium |
-| 9 | **Servarica** | $6.00 | 66.4 | 84 | 66 | 70 | 69 | 17 | 15% | _low_ |
-| 10 | **Hivelocity** | $12.00 | 66.2 | 66 | 48 | 77 | 63 | 89 | 19% | _low_ |
-| 11 | **LiteServer** | $5.45 | 65.8 | 84 | 68 | 65 | 72 | 6 | 9% | _low_ |
-| 12 | **BuyVM (FranTech)** | $30.00 | 65.6 | 100 | 32 | 75 | 68 | 29 | 12% | **high** |
-| 13 | **HOSTKEY** | $9.81 | 64.6 | 78 | 53 | 70 | 68 | 38 | 0% | _low_ |
-| 14 | **VDSina** | $6.00 | 63.4 | 84 | 66 | 54 | 51 | 34 | 0% | _low_ |
-| 15 | **AbeloHost** | $16.35 | 62.8 | 100 | 39 | 70 | 56 | 17 | 0% | medium |
-| 16 | **Zomro** | $6.00 | 62.6 | 89 | 66 | 54 | 51 | 24 | 0% | _low_ |
-| 17 | **Vultr** | $20.00 | 62.3 | 53 | 34 | 95 | 58 | 96 | 0% | **high** |
-| 18 | **Shinjiru** | $25.00 | 62.2 | 100 | 28 | 70 | 52 | 43 | 0% | medium |
-| 19 | **M247** | $19.62 | 61.9 | 68 | 35 | 70 | 59 | 100 | 0% | _low_ |
-| 20 | **UpCloud** | $18.00 | 61.6 | 43 | 37 | 100 | 77 | 65 | 1% | medium |
-| 21 | **HostSlick** | $8.72 | 61.5 | 84 | 56 | 54 | 60 | 29 | 0% | _low_ |
-| 22 | **FlokiNET** | $23.98 | 61.2 | 100 | 29 | 70 | 54 | 28 | 0% | medium |
-| 23 | **OrangeWebsite** | $19.62 | 61.1 | 100 | 35 | 70 | 62 | 6 | 0% | _low_ |
-| 24 | **VirMach** | $3.50 | 61.0 | 84 | 80 | 32 | 37 | 52 | 0% | _low_ |
-| 25 | **1984 Hosting** | $17.44 | 60.8 | 84 | 38 | 70 | 71 | 17 | 0% | _low_ |
-| 26 | **OVHcloud** | $7.09 | 60.6 | 56 | 61 | 65 | 56 | 67 | 0% | medium |
-| 27 | **Kamatera** | $22.00 | 60.5 | 68 | 32 | 72 | 61 | 80 | 0% | medium |
-| 28 | **Cloudzy** | $15.95 | 60.5 | 84 | 40 | 56 | 51 | 67 | 0% | _low_ |
-| 29 | **Latitude.sh** | $110.00 | 60.3 | 60 | 14 | 82 | 89 | 76 | 0% | _low_ |
-| 30 | **Hetzner Cloud** | $4.13 | 59.7 | 32 | 75 | 81 | 64 | 46 | 0% | **high** |
-| 31 | **Webdock** | $8.18 | 59.7 | 56 | 58 | 70 | 72 | 29 | 0% | _low_ |
-| 32 | **VPSServer.com** | $16.00 | 59.5 | 59 | 40 | 72 | 61 | 77 | 0% | _low_ |
-| 33 | **Time4VPS** | $6.53 | 58.4 | 66 | 63 | 65 | 62 | 6 | 0% | _low_ |
-| 34 | **phoenixNAP** | $30.00 | 57.8 | 42 | 24 | 100 | 80 | 61 | 0% | _low_ |
-| 35 | **Hostinger VPS** | $7.99 | 57.7 | 42 | 66 | 65 | 63 | 57 | 0% | medium |
-| 36 | **InterServer** | $12.00 | 56.7 | 59 | 48 | 70 | 69 | 24 | 0% | medium |
-| 37 | **netcup** | $7.62 | 55.8 | 43 | 67 | 60 | 70 | 29 | 0% | medium |
-| 38 | **Gcore** | $13.08 | 55.7 | 32 | 45 | 72 | 68 | 87 | 0% | _low_ |
-| 39 | **Contabo** | $4.91 | 55.4 | 43 | 79 | 48 | 45 | 62 | 0% | **high** |
-| 40 | **OVH Kimsufi / SoYouStart** | $15.26 | 55.0 | 56 | 57 | 64 | 56 | 29 | 0% | _low_ |
-| 41 | **UltaHost** | $14.00 | 54.2 | 59 | 44 | 54 | 60 | 55 | 0% | _low_ |
-| 42 | **Hostwinds** | $28.99 | 52.7 | 59 | 24 | 84 | 58 | 29 | 0% | _low_ |
-| 43 | **Civo** | $20.00 | 52.4 | 43 | 34 | 70 | 76 | 40 | 0% | _low_ |
-| 44 | **Akamai (Linode)** | $24.00 | 52.4 | 26 | 29 | 88 | 67 | 82 | 0% | **high** |
-| 45 | **Njalla** | $32.70 | 52.3 | 100 | 21 | 38 | 54 | 17 | 0% | _low_ |
-| 46 | **Oracle Cloud (Ampere A1)** | $0.00 | 52.0 | 8 | 100 | 26 | 55 | 94 | 0% | **high** |
-| 47 | **IONOS** | $13.08 | 52.0 | 26 | 53 | 77 | 68 | 45 | 0% | _low_ |
-| 48 | **PRQ** | $32.70 | 51.8 | 100 | 21 | 38 | 60 | 6 | 0% | _low_ |
-| 49 | **DigitalOcean** | $24.00 | 49.4 | 26 | 29 | 88 | 59 | 67 | 0% | **high** |
-| 50 | **ScalaHosting** | $16.95 | 46.9 | 32 | 38 | 70 | 60 | 40 | 0% | _low_ |
-| 51 | **Scaleway** | $11.99 | 46.5 | 26 | 48 | 70 | 64 | 24 | 0% | _low_ |
-| 52 | **AWS Lightsail** | $24.00 | 46.4 | 14 | 29 | 88 | 51 | 81 | 0% | **high** |
-| 53 | **Exoscale** | $22.89 | 45.2 | 26 | 31 | 72 | 69 | 35 | 0% | _low_ |
-| 54 | **Google Cloud (e2-medium)** | $32.00 | 43.4 | 8 | 22 | 88 | 44 | 100 | 0% | medium |
-| 55 | **Microsoft Azure (B2s)** | $35.00 | 41.8 | 8 | 20 | 88 | 40 | 100 | 0% | medium |
-| 56 | **Alibaba Cloud** | $15.00 | 41.0 | 2 | 42 | 69 | 48 | 77 | 0% | _low_ |
-| 57 | **Tencent Cloud** | $16.00 | 39.5 | 2 | 40 | 69 | 48 | 67 | 0% | _low_ |
+| 1 | **GreenCloudVPS** | $5.00 | 67.3 | 84 | 70 | 54 | 55 | 58 | 82% | _low_ |
+| 2 | **Melbicom** | $13.08 | 67.3 | 78 | 45 | 75 | 62 | 84 | 88% | medium |
+| 3 | **PQ.Hosting** | $7.52 | 67.2 | 84 | 60 | 54 | 51 | 89 | 80% | _low_ |
+| 4 | **IncogNET** | $20.00 | 66.7 | 100 | 34 | 70 | 68 | 41 | 66% | **high** |
+| 5 | **Hivelocity** | $12.00 | 66.2 | 66 | 48 | 77 | 63 | 89 | 55% | _low_ |
+| 6 | **LiteServer** | $5.45 | 65.8 | 84 | 68 | 65 | 72 | 6 | 42% | _low_ |
+| 7 | **HostHatch** | $12.00 | 65.7 | 84 | 60 | 54 | 67 | 43 | 29% | **high** |
+| 8 | **BuyVM (FranTech)** | $30.00 | 65.6 | 100 | 32 | 75 | 68 | 29 | 34% | **high** |
+| 9 | **HOSTKEY** | $9.81 | 64.6 | 78 | 53 | 70 | 68 | 38 | 8% | _low_ |
+| 10 | **VDSina** | $6.00 | 63.4 | 84 | 66 | 54 | 51 | 34 | 2% | _low_ |
+| 11 | **AbeloHost** | $16.35 | 62.8 | 100 | 39 | 70 | 56 | 17 | 1% | medium |
+| 12 | **Zomro** | $6.00 | 62.6 | 89 | 66 | 54 | 51 | 24 | 1% | _low_ |
+| 13 | **Vultr** | $20.00 | 62.3 | 53 | 34 | 95 | 58 | 96 | 5% | **high** |
+| 14 | **Shinjiru** | $25.00 | 62.2 | 100 | 28 | 70 | 52 | 43 | 0% | medium |
+| 15 | **M247** | $19.62 | 61.9 | 68 | 35 | 70 | 59 | 100 | 0% | _low_ |
+| 16 | **UpCloud** | $18.00 | 61.6 | 43 | 37 | 100 | 77 | 65 | 4% | medium |
+| 17 | **HostSlick** | $8.72 | 61.5 | 84 | 56 | 54 | 60 | 29 | 0% | _low_ |
+| 18 | **FlokiNET** | $23.98 | 61.2 | 100 | 29 | 70 | 54 | 28 | 0% | medium |
+| 19 | **OrangeWebsite** | $19.62 | 61.1 | 100 | 35 | 70 | 62 | 6 | 0% | _low_ |
+| 20 | **VirMach** | $3.50 | 61.0 | 84 | 80 | 32 | 37 | 52 | 1% | _low_ |
+| 21 | **1984 Hosting** | $17.44 | 60.8 | 84 | 38 | 70 | 71 | 17 | 0% | _low_ |
+| 22 | **OVHcloud** | $7.09 | 60.6 | 56 | 61 | 65 | 56 | 67 | 0% | medium |
+| 23 | **Kamatera** | $22.00 | 60.5 | 68 | 32 | 72 | 61 | 80 | 0% | medium |
+| 24 | **Cloudzy** | $15.95 | 60.5 | 84 | 40 | 56 | 51 | 67 | 0% | _low_ |
+| 25 | **Latitude.sh** | $110.00 | 60.3 | 60 | 14 | 82 | 89 | 76 | 1% | _low_ |
+| 26 | **Hetzner Cloud** | $4.13 | 59.7 | 32 | 75 | 81 | 64 | 46 | 1% | **high** |
+| 27 | **Webdock** | $8.18 | 59.7 | 56 | 58 | 70 | 72 | 29 | 0% | _low_ |
+| 28 | **VPSServer.com** | $16.00 | 59.5 | 59 | 40 | 72 | 61 | 77 | 0% | _low_ |
+| 29 | **Time4VPS** | $6.53 | 58.4 | 66 | 63 | 65 | 62 | 6 | 0% | _low_ |
+| 30 | **phoenixNAP** | $30.00 | 57.8 | 42 | 24 | 100 | 80 | 61 | 0% | _low_ |
+| 31 | **Hostinger VPS** | $7.99 | 57.7 | 42 | 66 | 65 | 63 | 57 | 0% | medium |
+| 32 | **InterServer** | $12.00 | 56.7 | 59 | 48 | 70 | 69 | 24 | 0% | medium |
+| 33 | **netcup** | $7.62 | 55.8 | 43 | 67 | 60 | 70 | 29 | 0% | medium |
+| 34 | **Gcore** | $13.08 | 55.7 | 32 | 45 | 72 | 68 | 87 | 0% | _low_ |
+| 35 | **Contabo** | $4.91 | 55.4 | 43 | 79 | 48 | 45 | 62 | 0% | **high** |
+| 36 | **OVH Kimsufi / SoYouStart** | $15.26 | 55.0 | 56 | 57 | 64 | 56 | 29 | 0% | _low_ |
+| 37 | **RackNerd** | $24.59 | 54.3 | 84 | 29 | 48 | 52 | 52 | 0% | **high** |
+| 38 | **UltaHost** | $14.00 | 54.2 | 59 | 44 | 54 | 60 | 55 | 0% | _low_ |
+| 39 | **Hostwinds** | $28.99 | 52.7 | 59 | 24 | 84 | 58 | 29 | 0% | _low_ |
+| 40 | **Civo** | $20.00 | 52.4 | 43 | 34 | 70 | 76 | 40 | 0% | _low_ |
+| 41 | **Akamai (Linode)** | $24.00 | 52.4 | 26 | 29 | 88 | 67 | 82 | 0% | **high** |
+| 42 | **Njalla** | $32.70 | 52.3 | 100 | 21 | 38 | 54 | 17 | 0% | _low_ |
+| 43 | **Oracle Cloud (Ampere A1)** | $0.00 | 52.0 | 8 | 100 | 26 | 55 | 94 | 0% | **high** |
+| 44 | **IONOS** | $13.08 | 52.0 | 26 | 53 | 77 | 68 | 45 | 0% | _low_ |
+| 45 | **PRQ** | $32.70 | 51.8 | 100 | 21 | 38 | 60 | 6 | 0% | _low_ |
+| 46 | **DigitalOcean** | $24.00 | 49.4 | 26 | 29 | 88 | 59 | 67 | 0% | **high** |
+| 47 | **ScalaHosting** | $16.95 | 46.9 | 32 | 38 | 70 | 60 | 40 | 0% | _low_ |
+| 48 | **Scaleway** | $11.99 | 46.5 | 26 | 48 | 70 | 64 | 24 | 0% | _low_ |
+| 49 | **AWS Lightsail** | $24.00 | 46.4 | 14 | 29 | 88 | 51 | 81 | 0% | **high** |
+| 50 | **Exoscale** | $22.89 | 45.2 | 26 | 31 | 72 | 69 | 35 | 0% | _low_ |
+| 51 | **Google Cloud (e2-medium)** | $32.00 | 43.4 | 8 | 22 | 88 | 44 | 100 | 0% | medium |
+| 52 | **Microsoft Azure (B2s)** | $35.00 | 41.8 | 8 | 20 | 88 | 40 | 100 | 0% | medium |
+| 53 | **Alibaba Cloud** | $15.00 | 41.0 | 2 | 42 | 69 | 48 | 77 | 0% | _low_ |
+| 54 | **Tencent Cloud** | $16.00 | 39.5 | 2 | 40 | 69 | 48 | 67 | 0% | _low_ |
 
 Columns are 0-100 sub-scores. "Top-5 stability" is the share of 20,000
 Monte Carlo trials in which the provider held a top-5 position while weights were
@@ -90,13 +87,13 @@ perturbed +/-35% and prices were perturbed by their confidence-scaled error bar.
 
 ## What wins under different priorities
 
-| Rank | Jod orchestrator (stated goal) | Pure cost | Maximum permissiveness | Reliability-first |
-|---:|---|---|---|---|
-| 1 | HostHatch ($2) | Oracle Cloud (Ampere A1) ($0) | BuyVM (FranTech) ($30) | UpCloud ($18) |
-| 2 | Advin Servers ($6) | HostHatch ($2) | FlokiNET ($24) | phoenixNAP ($30) |
-| 3 | IncogNET ($12) | VirMach ($4) | AbeloHost ($16) | Latitude.sh ($110) |
-| 4 | GreenCloudVPS ($5) | RackNerd ($4) | Shinjiru ($25) | Vultr ($20) |
-| 5 | Melbicom ($13) | Contabo ($5) | OrangeWebsite ($20) | Hivelocity ($12) |
+| Rank | Jod orchestrator (stated goal) | Jod weighting, verified rows only | Pure cost | Maximum permissiveness | Reliability-first |
+|---:|---|---|---|---|---|
+| 1 | GreenCloudVPS ($5) | IncogNET ($20) | Oracle Cloud (Ampere A1) ($0) | BuyVM (FranTech) ($30) | UpCloud ($18) |
+| 2 | Melbicom ($13) | HostHatch ($12) | VirMach ($4) | FlokiNET ($24) | phoenixNAP ($30) |
+| 3 | PQ.Hosting ($8) | RackNerd ($25) | Contabo ($5) | AbeloHost ($16) | Latitude.sh ($110) |
+| 4 | IncogNET ($20) | — | Hetzner Cloud ($4) | Shinjiru ($25) | Vultr ($20) |
+| 5 | Hivelocity ($12) | — | GreenCloudVPS ($5) | OrangeWebsite ($20) | Hivelocity ($12) |
 
 Where a provider tops several columns, the recommendation is robust. Where the
 columns disagree entirely, the "best" VPS is genuinely a matter of what you
@@ -109,17 +106,17 @@ Top candidates only. Measured from the machine that ran `netcheck.py`.
 | Provider | Median RTT | Jitter | Endpoint | Reading |
 |---|---:|---:|---|---|
 | HostHatch | 36 ms | 70 ms | `hosthatch.com` | CDN-fronted — not the metal |
-| Advin Servers | 36 ms | 1005 ms | `advinservers.com` | packet loss (SYN retransmits) |
-| RackNerd | 37 ms | 74 ms | `www.racknerd.com` | direct |
+| HOSTKEY | 37 ms | 49 ms | `hostkey.com` | CDN-fronted — not the metal |
 | Melbicom | 37 ms | 25 ms | `www.melbicom.net` | CDN-fronted — not the metal |
-| VPSDime | 38 ms | 7 ms | `vpsdime.com` | direct |
+| VDSina | 38 ms | 66 ms | `vdsina.com` | CDN-fronted — not the metal |
 | GreenCloudVPS | 38 ms | 64 ms | `greencloudvps.com` | CDN-fronted — not the metal |
 | LiteServer | 38 ms | 118 ms | `www.liteserver.nl` | direct |
 | PQ.Hosting | 38 ms | 80 ms | `pq.hosting` | CDN-fronted — not the metal |
 | Hivelocity | 38 ms | 88 ms | `www.hivelocity.net` | CDN-fronted — not the metal |
+| Zomro | 97 ms | 80 ms | `zomro.com` | CDN-fronted — not the metal |
 | BuyVM (FranTech) | 175 ms | 82 ms | `buyvm.net` | CDN-fronted — not the metal |
 | IncogNET | 203 ms | 18 ms | `incognet.io` | CDN-fronted — not the metal |
-| Servarica | 234 ms | 14 ms | `servarica.com` | direct |
+| AbeloHost | 337 ms | 16 ms | `abelohost.com` | CDN-fronted — not the metal |
 
 Read this cautiously: it is TCP-connect time to each company's public website,
 which for most is a CDN edge rather than a datacenter you can buy in. It tells
@@ -131,6 +128,9 @@ how fast your VPS will be.
 | Provider | Disqualified because |
 |---|---|
 | Aeza Group | flagged excluded:ofac-sanctioned |
+| Servarica | cannot be ordered (stock: out) |
+| Advin Servers | cannot be ordered (stock: out) |
+| VPSDime | below disk floor (30 GB) |
 | Fly.io | virtualization container cannot run the workload |
 | Railway | virtualization container cannot run the workload |
 
@@ -138,9 +138,9 @@ how fast your VPS will be.
 
 | Confidence | Providers | Share | Meaning |
 |---|---:|---:|---|
-| **high** | 8 | 13% | Price and policy confirmed against the provider's own live page |
-| medium | 17 | 28% | Confirmed against a reputable secondary source or a partial live fetch |
-| _low_ | 35 | 58% | Plausible market figure, **not** confirmed — verify before purchase |
+| **high** | 13 | 22% | Price and policy confirmed against the provider's own live page |
+| medium | 14 | 23% | Confirmed against a reputable secondary source or a partial live fetch |
+| _low_ | 33 | 55% | Plausible market figure, **not** confirmed — verify before purchase |
 
 Every figure marked _low_ is a research lead, not a quotation. The Monte Carlo
 above already penalises them: low-confidence prices are perturbed +/-25% versus

@@ -6,6 +6,13 @@ internet, reliably available, well-connected, globally reachable, and cheap.
 
 **→ Read [`REPORT.md`](REPORT.md).** That is the deliverable.
 
+> **Corrected 2026-08-09.** The original recommendation, Advin Servers, is sold
+> out in every region and never had the plan it was priced at. Chasing that led
+> to a systematic fault: the dataset priced *advertisements* rather than
+> purchases. Six providers have now had their order page opened and **all six
+> were wrong**, by up to 6.8×. Prices, stock and the recommendation have all
+> changed — see the top of the report.
+
 ## Layout
 
 ```
@@ -16,6 +23,7 @@ data/
   schema.md            what every field means
 scripts/
   validate.py          dataset integrity check (run first)
+  check_stock.py       can these plans still be ordered? (fails on contradictions)
   score.py             filters, weighted scoring, Monte Carlo sensitivity
   netcheck.py          measures real TCP latency from your machine
   report.py            regenerates every table in out/
@@ -54,6 +62,13 @@ universally best VPS, only a best one for a stated weighting.
 - **Hard filters run before scoring.** A host that can't run Docker is not a
   low-scoring option, it's not an option. Weighted averages otherwise let a good
   price paper over a disqualifying flaw.
+- **Being purchasable is one of those filters.** Added after the original
+  recommendation turned out to be sold out. A plan nobody can buy is not a cheap
+  plan; `stock: out` never reaches the scoring stage.
+- **Where a price came from is recorded.** `price_basis` separates a standing
+  catalogue price from a promo or a "starting at" banner. The
+  `--profile verified` ranking contains only rows priced from a real catalogue,
+  and it is currently three rows long out of sixty.
 - **Uncertainty is propagated, not hidden.** Every row carries a `confidence`.
   The Monte Carlo perturbs unverified prices ±25% against ±4% for verified ones,
   so a cheap-but-unconfirmed provider must survive being wrong about its own
