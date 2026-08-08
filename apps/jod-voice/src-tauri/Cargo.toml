@@ -1,0 +1,33 @@
+[package]
+name = "jod-voice"
+version = "0.1.0"
+description = "Taglish-aware push-to-talk dictation for CLI and coding harnesses"
+edition = "2021"
+rust-version = "1.77"
+
+[lib]
+name = "jod_voice_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-clipboard-manager = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+cpal = "0.15"
+hound = "3.5"
+base64 = "0.22"
+reqwest = { version = "0.12", features = ["json", "multipart"] }
+tokio = { version = "1", features = ["full"] }
+thiserror = "2"
+dirs = "5"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true

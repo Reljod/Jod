@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Jod Voice</title>
+    <link rel="stylesheet" href="/src/styles.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>Jod Voice</h1>
+        <span id="key-status" class="pill pill-warn">checking key…</span>
+      </header>
+
+      <section class="record">
+        <button id="ptt" class="ptt">
+          <span class="ptt-label">Hold to talk</span>
+          <span class="ptt-hint">or press <kbd>⌥</kbd><kbd>Space</kbd></span>
+        </button>
+        <div class="meter"><div id="meter-fill"></div></div>
+        <p id="status" class="status">Ready.</p>
+      </section>
+
+      <section class="output">
+        <textarea id="transcript" placeholder="Your transcript lands here…" spellcheck="false"></textarea>
+        <div id="metrics" class="metrics"></div>
+        <div class="row">
+          <button id="copy">Copy</button>
+          <button id="clear">Clear</button>
+          <select id="session"><option value="">— no Jod session —</option></select>
+          <button id="send" disabled>Send to session</button>
+        </div>
+        <p id="send-status" class="status subtle"></p>
+      </section>
+
+      <section class="config">
+        <div class="row">
+          <label>Model
+            <select id="model"></select>
+          </label>
+          <label>Language hint
+            <select id="language">
+              <option value="">auto-detect (best for Taglish)</option>
+              <option value="tl">Tagalog (tl)</option>
+              <option value="en">English (en)</option>
+            </select>
+          </label>
+        </div>
+        <label class="check">
+          <input type="checkbox" id="repair" />
+          Taglish repair pass <span class="subtle">(fixes jargon &amp; punctuation, +~400ms)</span>
+        </label>
+      </section>
+
+      <section class="compare">
+        <div class="row">
+          <button id="compare-btn">Compare models on last recording</button>
+        </div>
+        <div id="compare-out"></div>
+      </section>
+    </main>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
