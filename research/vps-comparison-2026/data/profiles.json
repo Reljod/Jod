@@ -1,0 +1,106 @@
+{
+  "_meta": {
+    "note": "Weights are relative, not required to sum to 1 — the scorer normalizes them. Hard filters run before scoring and are absolute.",
+    "criteria": [
+      "cost", "permissiveness", "availability", "network", "locations", "performance", "ops"
+    ]
+  },
+
+  "profiles": {
+    "jod": {
+      "label": "Jod orchestrator (stated goal)",
+      "description": "Free to do anything, good availability, good internet access, good location coverage, cheapest. Weighted in the order the goal was stated.",
+      "weights": {
+        "permissiveness": 0.28,
+        "cost": 0.24,
+        "availability": 0.18,
+        "network": 0.16,
+        "locations": 0.10,
+        "performance": 0.03,
+        "ops": 0.01
+      },
+      "filters": {
+        "min_ram_gb": 4,
+        "min_vcpu": 2,
+        "min_disk_gb": 40,
+        "require_virt": ["KVM", "Hyper-V", "bare-metal"],
+        "require_docker": true,
+        "exclude_flags": ["excluded:", "sanctions-risk"]
+      }
+    },
+
+    "cheapest": {
+      "label": "Pure cost",
+      "description": "Sanity check: what wins if only price matters. Used to show what the balanced model is trading away.",
+      "weights": {
+        "cost": 1.0,
+        "permissiveness": 0.0,
+        "availability": 0.0,
+        "network": 0.0,
+        "locations": 0.0,
+        "performance": 0.0,
+        "ops": 0.0
+      },
+      "filters": {
+        "min_ram_gb": 4,
+        "min_vcpu": 2,
+        "min_disk_gb": 40,
+        "require_virt": ["KVM", "Hyper-V", "bare-metal"],
+        "require_docker": true,
+        "exclude_flags": ["excluded:", "sanctions-risk"]
+      }
+    },
+
+    "freedom": {
+      "label": "Maximum permissiveness",
+      "description": "Sanity check: what wins if only 'free to do anything' matters.",
+      "weights": {
+        "permissiveness": 1.0,
+        "cost": 0.0,
+        "availability": 0.0,
+        "network": 0.0,
+        "locations": 0.0,
+        "performance": 0.0,
+        "ops": 0.0
+      },
+      "filters": {
+        "min_ram_gb": 4,
+        "min_vcpu": 2,
+        "min_disk_gb": 40,
+        "require_virt": ["KVM", "Hyper-V", "bare-metal"],
+        "require_docker": true,
+        "exclude_flags": ["excluded:", "sanctions-risk"]
+      }
+    },
+
+    "production": {
+      "label": "Reliability-first",
+      "description": "Sanity check: what wins if Jod must not go down, cost secondary.",
+      "weights": {
+        "availability": 0.35,
+        "network": 0.20,
+        "performance": 0.15,
+        "permissiveness": 0.12,
+        "ops": 0.10,
+        "locations": 0.05,
+        "cost": 0.03
+      },
+      "filters": {
+        "min_ram_gb": 4,
+        "min_vcpu": 2,
+        "min_disk_gb": 40,
+        "require_virt": ["KVM", "Hyper-V", "bare-metal"],
+        "require_docker": true,
+        "exclude_flags": ["excluded:", "sanctions-risk", "no-sla", "poor-reliability"]
+      }
+    }
+  },
+
+  "fx_to_usd": {
+    "_note": "Update these before trusting absolute dollar figures. Rates are the single biggest source of drift in this dataset.",
+    "_as_of": "2026-08-08",
+    "USD": 1.0,
+    "EUR": 1.09,
+    "GBP": 1.27
+  }
+}

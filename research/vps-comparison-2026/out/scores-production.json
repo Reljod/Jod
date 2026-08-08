@@ -1,0 +1,1542 @@
+{
+  "profile": "production",
+  "profile_label": "Reliability-first",
+  "weights": {
+    "availability": 0.35,
+    "network": 0.2,
+    "performance": 0.15,
+    "permissiveness": 0.12,
+    "ops": 0.1,
+    "locations": 0.05,
+    "cost": 0.03
+  },
+  "filters": {
+    "min_ram_gb": 4,
+    "min_vcpu": 2,
+    "min_disk_gb": 40,
+    "require_virt": [
+      "KVM",
+      "Hyper-V",
+      "bare-metal"
+    ],
+    "require_docker": true,
+    "exclude_flags": [
+      "excluded:",
+      "sanctions-risk",
+      "no-sla",
+      "poor-reliability"
+    ]
+  },
+  "fx_to_usd": {
+    "USD": 1.0,
+    "EUR": 1.09,
+    "GBP": 1.27
+  },
+  "trials": 20000,
+  "seed": 20260808,
+  "counts": {
+    "total": 60,
+    "eligible": 53,
+    "rejected": 7
+  },
+  "rejected": [
+    {
+      "id": "aeza",
+      "name": "Aeza Group",
+      "reason": "flagged excluded:ofac-sanctioned"
+    },
+    {
+      "id": "oracle",
+      "name": "Oracle Cloud (Ampere A1)",
+      "reason": "flagged no-sla"
+    },
+    {
+      "id": "virmach",
+      "name": "VirMach",
+      "reason": "flagged poor-reliability"
+    },
+    {
+      "id": "njalla",
+      "name": "Njalla",
+      "reason": "flagged no-sla"
+    },
+    {
+      "id": "prq",
+      "name": "PRQ",
+      "reason": "flagged no-sla"
+    },
+    {
+      "id": "flyio",
+      "name": "Fly.io",
+      "reason": "virtualization container cannot run the workload"
+    },
+    {
+      "id": "railway",
+      "name": "Railway",
+      "reason": "virtualization container cannot run the workload"
+    }
+  ],
+  "ranking": [
+    {
+      "id": "upcloud",
+      "name": "UpCloud",
+      "category": "mainstream",
+      "usd_mo": 18.0,
+      "plan": "General Purpose 4GB",
+      "spec": "2vCPU/4GB/80GB",
+      "locations": 13,
+      "confidence": "medium",
+      "flags": [],
+      "subscores": {
+        "cost": 36.9,
+        "permissiveness": 43.0,
+        "availability": 100.0,
+        "network": 76.9,
+        "locations": 64.6,
+        "performance": 100.0,
+        "ops": 100.0
+      },
+      "total": 84.87,
+      "stability": {
+        "top_n_pct": 100.0,
+        "win_pct": 100.0,
+        "mean_rank": 1.0
+      }
+    },
+    {
+      "id": "phoenixnap",
+      "name": "phoenixNAP",
+      "category": "mainstream",
+      "usd_mo": 30.0,
+      "plan": "BMC s1.c1.small equiv",
+      "spec": "2vCPU/4GB/60GB",
+      "locations": 15,
+      "confidence": "low",
+      "flags": [],
+      "subscores": {
+        "cost": 23.6,
+        "permissiveness": 41.8,
+        "availability": 100.0,
+        "network": 79.6,
+        "locations": 61.2,
+        "performance": 87.5,
+        "ops": 100.0
+      },
+      "total": 82.82,
+      "stability": {
+        "top_n_pct": 100.0,
+        "win_pct": 0.0,
+        "mean_rank": 2.1
+      }
+    },
+    {
+      "id": "latitude",
+      "name": "Latitude.sh",
+      "category": "mainstream",
+      "usd_mo": 110.0,
+      "plan": "Metal c2.small (smallest)",
+      "spec": "4vCPU/32GB/500GB",
+      "locations": 18,
+      "confidence": "low",
+      "flags": [
+        "over-budget"
+      ],
+      "subscores": {
+        "cost": 13.5,
+        "permissiveness": 60.0,
+        "availability": 81.7,
+        "network": 89.2,
+        "locations": 75.6,
+        "performance": 100.0,
+        "ops": 75.0
+      },
+      "total": 80.33,
+      "stability": {
+        "top_n_pct": 100.0,
+        "win_pct": 0.0,
+        "mean_rank": 3.1
+      }
+    },
+    {
+      "id": "vultr",
+      "name": "Vultr",
+      "category": "mainstream",
+      "usd_mo": 20.0,
+      "plan": "Regular Cloud Compute 4GB",
+      "spec": "2vCPU/4GB/80GB",
+      "locations": 32,
+      "confidence": "high",
+      "flags": [],
+      "subscores": {
+        "cost": 34.2,
+        "permissiveness": 53.0,
+        "availability": 95.0,
+        "network": 58.5,
+        "locations": 96.4,
+        "performance": 73.5,
+        "ops": 100.0
+      },
+      "total": 78.18,
+      "stability": {
+        "top_n_pct": 99.6,
+        "win_pct": 0.0,
+        "mean_rank": 3.9
+      }
+    },
+    {
+      "id": "hivelocity",
+      "name": "Hivelocity",
+      "category": "mainstream",
+      "usd_mo": 12.0,
+      "plan": "VPS Medium",
+      "spec": "2vCPU/4GB/50GB",
+      "locations": 40,
+      "confidence": "low",
+      "flags": [],
+      "subscores": {
+        "cost": 47.5,
+        "permissiveness": 66.2,
+        "availability": 76.7,
+        "network": 63.4,
+        "locations": 88.6,
+        "performance": 82.5,
+        "ops": 100.0
+      },
+      "total": 75.71,
+      "stability": {
+        "top_n_pct": 79.1,
+        "win_pct": 0.0,
+        "mean_rank": 5.2
+      }
+    },
+    {
+      "id": "linode",
+      "name": "Akamai (Linode)",
+      "category": "mainstream",
+      "usd_mo": 24.0,
+      "plan": "Nanode/Shared 4GB",
+      "spec": "2vCPU/4GB/80GB",
+      "locations": 26,
+      "confidence": "high",
+      "flags": [],
+      "subscores": {
+        "cost": 29.4,
+        "permissiveness": 25.5,
+        "availability": 88.0,
+        "network": 66.9,
+        "locations": 81.6,
+        "performance": 82.5,
+        "ops": 100.0
+      },
+      "total": 74.57,
+      "stability": {
+        "top_n_pct": 20.6,
+        "win_pct": 0.0,
+        "mean_rank": 6.4
+      }
+    },
+    {
+      "id": "advinservers",
+      "name": "Advin Servers",
+      "category": "lowend",
+      "usd_mo": 6.0,
+      "plan": "Cloud Server 4GB",
+      "spec": "2vCPU/4GB/60GB",
+      "locations": 6,
+      "confidence": "medium",
+      "flags": [],
+      "subscores": {
+        "cost": 65.5,
+        "permissiveness": 83.8,
+        "availability": 64.8,
+        "network": 77.5,
+        "locations": 46.3,
+        "performance": 77.5,
+        "ops": 85.0
+      },
+      "total": 72.62,
+      "stability": {
+        "top_n_pct": 0.6,
+        "win_pct": 0.0,
+        "mean_rank": 8.4
+      }
+    },
+    {
+      "id": "melbicom",
+      "name": "Melbicom",
+      "category": "mainstream",
+      "usd_mo": 13.08,
+      "plan": "VPS 4GB",
+      "spec": "2vCPU/4GB/60GB",
+      "locations": 21,
+      "confidence": "medium",
+      "flags": [
+        "soft-capped-bandwidth",
+        "weak-apac-transit"
+      ],
+      "subscores": {
+        "cost": 45.2,
+        "permissiveness": 77.5,
+        "availability": 74.6,
+        "network": 62.5,
+        "locations": 83.8,
+        "performance": 70.0,
+        "ops": 85.0
+      },
+      "total": 72.48,
+      "stability": {
+        "top_n_pct": 0.0,
+        "win_pct": 0.0,
+        "mean_rank": 8.3
+      }
+    },
+    {
+      "id": "buyvm",
+      "name": "BuyVM (FranTech)",
+      "category": "lowend",
+      "usd_mo": 30.0,
+      "plan": "High Volume 8GB (2 core)",
+      "spec": "2vCPU/8GB/160GB",
+      "locations": 3,
+      "confidence": "high",
+      "flags": [
+        "stock-limited"
+      ],
+      "subscores": {
+        "cost": 31.5,
+        "permissiveness": 100.0,
+        "availability": 74.8,
+        "network": 67.5,
+        "locations": 29.3,
+        "performance": 66.0,
+        "ops": 85.0
+      },
+      "total": 72.47,
+      "stability": {
+        "top_n_pct": 0.1,
+        "win_pct": 0.0,
+        "mean_rank": 8.8
+      }
+    },
+    {
+      "id": "kamatera",
+      "name": "Kamatera",
+      "category": "mainstream",
+      "usd_mo": 22.0,
+      "plan": "Type B 2vCPU/4GB",
+      "spec": "2vCPU/4GB/50GB",
+      "locations": 24,
+      "confidence": "medium",
+      "flags": [],
+      "subscores": {
+        "cost": 31.7,
+        "permissiveness": 67.5,
+        "availability": 71.9,
+        "network": 61.3,
+        "locations": 80.3,
+        "performance": 73.5,
+        "ops": 100.0
+      },
+      "total": 71.49,
+      "stability": {
+        "top_n_pct": 0.0,
+        "win_pct": 0.0,
+        "mean_rank": 11.0
+      }
+    },
+    {
+      "id": "hostkey",
+      "name": "HOSTKEY",
+      "category": "mainstream",
+      "usd_mo": 9.81,
+      "plan": "VPS 4GB",
+      "spec": "2vCPU/4GB/60GB",
+      "locations": 5,
+      "confidence": "low",
+      "flags": [],
+      "subscores": {
+        "cost": 52.7,
+        "permissiveness": 77.5,
+        "availability": 69.8,
+        "network": 67.5,
+        "locations": 37.6,
+        "performance": 70.0,
+        "ops": 100.0
+      },
+      "total": 71.17,
+      "stability": {
+        "top_n_pct": 0.0,
+        "win_pct": 0.0,
+        "mean_rank": 12.3
+      }
+    },
+    {
+      "id": "digitalocean",
+      "name": "DigitalOcean",
+      "category": "mainstream",
+      "usd_mo": 24.0,
+      "plan": "Basic Droplet 4GB",
+      "spec": "2vCPU/4GB/80GB",
+      "locations": 15,
+      "confidence": "high",
+      "flags": [
+        "kyc-lockouts"
+      ],
+      "subscores": {
+        "cost": 29.4,
+        "permissiveness": 25.5,
+        "availability": 88.0,
+        "network": 59.4,
+        "locations": 66.9,
+        "performance": 73.5,
+        "ops": 100.0
+      },
+      "total": 70.98,
+      "stability": {
+        "top_n_pct": 0.0,
+        "win_pct": 0.0,
+        "mean_rank": 12.3
+      }
+    },
+    {
+      "id": "gcore",
+      "name": "Gcore",
+      "category": "mainstream",
+      "usd_mo": 13.08,
+      "plan": "Basic VM 4GB",
+      "spec": "2vCPU/4GB/50GB",
+      "locations": 25,
+      "confidence": "low",
+      "flags": [],
+      "subscores": {
+        "cost": 45.2,
+        "permissiveness": 31.8,
+        "availability": 71.9,
+        "network": 68.1,
+        "locations": 86.6,
+        "performance": 82.5,
+        "ops": 100.0
+      },
+      "total": 70.65,
+      "stability": {
+        "top_n_pct": 0.0,
+        "win_pct": 0.0,
+        "mean_rank": 13.1
+      }
+    },
+    {
+      "id": "incognet",
+      "name": "IncogNET",
+      "category": "offshore",
+      "usd_mo": 12.0,
+      "plan": "KVM 4GB",
+      "spec": "2vCPU/4GB/60GB",
+      "locations": 6,
+      "confidence": "medium",
+      "flags": [
+        "small-operator",
+        "price-estimated"
+      ],
+      "subscores": {
+        "cost": 47.5,
+        "permissiveness": 100.0,
+        "availability": 69.8,
+        "network": 62.5,
+        "locations": 40.6,
+        "performance": 82.5,
+        "ops": 55.0
+      },
+      "total": 70.25,
+      "stability": {
+        "top_n_pct": 0.0,
+        "win_pct": 0.0,
+        "mean_rank": 15.0
+      }
+    },
+    {
+      "id": "civo",
+      "name": "Civo",
+      "category": "mainstream",
+      "usd_mo": 20.0,
+      "plan": "Medium",
+      "spec": "2vCPU/4GB/50GB",
+      "locations": 4,
+      "confidence": "low",
+      "flags": [],
+      "subscores": {
+        "cost": 34.2,
+        "permissiveness": 43.0,
+        "availability": 69.8,
+        "network": 76.2,
+        "locations": 39.7,
+        "performance": 82.5,
+        "ops": 100.0
+      },
+      "total": 70.21,
+      "stability": {
+        "top_n_pct": 0.0,
+        "win_pct": 0.0,
+        "mean_rank": 14.8
+      }
+    },
+    {
+      "id": "hetzner",
+      "name": "Hetzner Cloud",
+      "category": "eu-budget",
+      "usd_mo": 4.13,
+      "plan": "CX22",
+      "spec": "2vCPU/4GB/40GB",
+      "locations": 6,
+      "confidence": "high",
+      "flags": [
+        "ipv4-extra"
+      ],
+      "subscores": {
+        "cost": 75.3,
+        "permissiveness": 31.8,
+        "availability": 81.0,
+        "network": 64.2,
+        "locations": 46.3,
+        "performance": 82.5,
+        "ops": 80.0
+      },
+      "total": 69.94,
+      "stability": {
+        "top_n_pct": 0.0,
+        "win_pct": 0.0,
+        "mean_rank": 15.7
+      }
+    },
+    {
+      "id": "hostwinds",
+      "name": "Hostwinds",
+      "category": "lowend",
+      "usd_mo": 28.99,
+      "plan": "Unmanaged 4GB",
+      "spec": "2vCPU/4GB/75GB",
+      "locations": 3,
+      "confidence": "low",
+      "flags": [],
+      "subscores": {
+        "cost": 24.5,
+        "permissiveness": 59.2,
+        "availability": 83.7,
+        "network": 58.5,
+        "locations": 29.3,
+        "performance": 61.0,
+        "ops": 100.0
+      },
+      "total": 69.48,
+      "stability": {
+        "top_n_pct": 0.0,
+        "win_pct": 0.0,
+        "mean_rank": 17.2
+      }
+    },
+    {
+      "id": "webdock",
+      "name": "Webdock",
+      "category": "eu-budget",
+      "usd_mo": 8.18,
+      "plan": "NVMe Bit",
+      "spec": "2vCPU/4GB/60GB",
+      "locations": 3,
+      "confidence": "low",
+      "flags": [],
+      "subscores": {
+        "cost": 57.5,
+        "permissiveness": 56.2,
+        "availability": 69.8,
+        "network": 72.1,
+        "locations": 29.3,
+        "performance": 70.0,
+        "ops": 100.0
+      },
+      "total": 69.27,
+      "stability": {
+        "top_n_pct": 0.0,
+        "win_pct": 0.0,
+        "mean_rank": 17.9
+      }
+    },
+    {
+      "id": "vpsserver",
+      "name": "VPSServer.com",
+      "category": "mainstream",
+      "usd_mo": 16.0,
+      "plan": "Standard 4GB",
+      "spec": "2vCPU/4GB/50GB",
+      "locations": 20,
+      "confidence": "low",
+      "flags": [],
+      "subscores": {
+        "cost": 40.0,
+        "permissiveness": 59.2,
+        "availability": 71.7,
+        "network": 60.6,
+        "locations": 77.3,
+        "performance": 65.0,
+        "ops": 100.0
+      },
+      "total": 69.16,
+      "stability": {
+        "top_n_pct": 0.0,
+        "win_pct": 0.0,
+        "mean_rank": 18.1
+      }
+    },
+    {
+      "id": "lightsail",
+      "name": "AWS Lightsail",
+      "category": "hyperscaler",
+      "usd_mo": 24.0,
+      "plan": "4 GB Linux",
+      "spec": "2vCPU/4GB/80GB",
+      "locations": 25,
+      "confidence": "high",
+      "flags": [
+        "worst-ip-reputation"
+      ],
+      "subscores": {
+        "cost": 29.4,
+        "permissiveness": 14.5,
+        "availability": 88.0,
+        "network": 50.6,
+        "locations": 80.9,
+        "performance": 73.5,
+        "ops": 100.0
+      },
+      "total": 68.62,
+      "stability": {
+        "top_n_pct": 0.0,
+        "win_pct": 0.0,
+        "mean_rank": 19.4
+      }
+    },
+    {
+      "id": "1984hosting",
+      "name": "1984 Hosting",
+      "category": "offshore",
+      "usd_mo": 17.44,
+      "plan": "VPS 4GB",
+      "spec": "2vCPU/4GB/50GB",
+      "locations": 2,
+      "confidence": "low",
+      "flags": [
+        "eu-only"
+      ],
+      "subscores": {
+        "cost": 37.7,
+        "permissiveness": 83.8,
+        "availability": 69.8,
+        "network": 71.3,
+        "locations": 17.0,
+        "performance": 61.0,
+        "ops": 85.0
+      },
+      "total": 68.35,
+      "stability": {
+        "top_n_pct": 0.0,
+        "win_pct": 0.0,
+        "mean_rank": 20.4
+      }
+    },
+    {
+      "id": "m247",
+      "name": "M247",
+      "category": "mainstream",
+      "usd_mo": 19.62,
+      "plan": "Cloud VPS 4GB",
+      "spec": "2vCPU/4GB/50GB",
+      "locations": 40,
+      "confidence": "low",
+      "flags": [
+        "shared-abuse-ranges"
+      ],
+      "subscores": {
+        "cost": 34.7,
+        "permissiveness": 67.5,
+        "availability": 69.8,
+        "network": 58.8,
+        "locations": 100.0,
+        "performance": 61.0,
+        "ops": 85.0
+      },
+      "total": 67.95,
+      "stability": {
+        "top_n_pct": 0.0,
+        "win_pct": 0.0,
+        "mean_rank": 21.5
+      }
+    },
+    {
+      "id": "hosthatch",
+      "name": "HostHatch",
+      "category": "lowend",
+      "usd_mo": 2.42,
+      "plan": "NVMe VPS 4GB (annual)",
+      "spec": "2vCPU/4GB/50GB",
+      "locations": 7,
+      "confidence": "medium",
+      "flags": [
+        "support-quality",
+        "annual-prepay-only"
+      ],
+      "subscores": {
+        "cost": 89.2,
+        "permissiveness": 83.8,
+        "availability": 53.5,
+        "network": 68.8,
+        "locations": 43.1,
+        "performance": 77.5,
+        "ops": 85.0
+      },
+      "total": 67.49,
+      "stability": {
+        "top_n_pct": 0.0,
+        "win_pct": 0.0,
+        "mean_rank": 22.1
+      }
+    },
+    {
+      "id": "ionos",
+      "name": "IONOS",
+      "category": "mainstream",
+      "usd_mo": 13.08,
+      "plan": "VPS Linux L",
+      "spec": "4vCPU/8GB/240GB",
+      "locations": 8,
+      "confidence": "low",
+      "flags": [
+        "renewal-hike"
+      ],
+      "subscores": {
+        "cost": 53.1,
+        "permissiveness": 25.5,
+        "availability": 76.7,
+        "network": 67.5,
+        "locations": 45.3,
+        "performance": 70.0,
+        "ops": 85.0
+      },
+      "total": 66.28,
+      "stability": {
+        "top_n_pct": 0.0,
+        "win_pct": 0.0,
+        "mean_rank": 24.7
+      }
+    },
+    {
+      "id": "exoscale",
+      "name": "Exoscale",
+      "category": "mainstream",
+      "usd_mo": 22.89,
+      "plan": "Medium",
+      "spec": "2vCPU/4GB/50GB",
+      "locations": 6,
+      "confidence": "low",
+      "flags": [
+        "eu-only"
+      ],
+      "subscores": {
+        "cost": 30.6,
+        "permissiveness": 25.5,
+        "availability": 71.9,
+        "network": 69.4,
+        "locations": 34.9,
+        "performance": 73.5,
+        "ops": 100.0
+      },
+      "total": 65.77,
+      "stability": {
+        "top_n_pct": 0.0,
+        "win_pct": 0.0,
+        "mean_rank": 26.3
+      }
+    },
+    {
+      "id": "interserver",
+      "name": "InterServer",
+      "category": "lowend",
+      "usd_mo": 12.0,
+      "plan": "2 slices",
+      "spec": "2vCPU/4GB/60GB",
+      "locations": 3,
+      "confidence": "medium",
+      "flags": [
+        "us-only"
+      ],
+      "subscores": {
+        "cost": 47.5,
+        "permissiveness": 59.2,
+        "availability": 69.8,
+        "network": 69.4,
+        "locations": 23.6,
+        "performance": 61.0,
+        "ops": 85.0
+      },
+      "total": 65.65,
+      "stability": {
+        "top_n_pct": 0.0,
+        "win_pct": 0.0,
+        "mean_rank": 25.9
+      }
+    },
+    {
+      "id": "gcp",
+      "name": "Google Cloud (e2-medium)",
+      "category": "hyperscaler",
+      "usd_mo": 32.0,
+      "plan": "e2-medium",
+      "spec": "2vCPU/4GB/50GB",
+      "locations": 40,
+      "confidence": "medium",
+      "flags": [
+        "metered-egress",
+        "worst-ip-reputation"
+      ],
+      "subscores": {
+        "cost": 21.9,
+        "permissiveness": 8.2,
+        "availability": 88.0,
+        "network": 43.9,
+        "locations": 100.0,
+        "performance": 73.5,
+        "ops": 80.0
+      },
+      "total": 65.25,
+      "stability": {
+        "top_n_pct": 0.0,
+        "win_pct": 0.0,
+        "mean_rank": 27.9
+      }
+    },
+    {
+      "id": "ovh",
+      "name": "OVHcloud",
+      "category": "mainstream",
+      "usd_mo": 7.09,
+      "plan": "VPS-2 Value",
+      "spec": "2vCPU/4GB/80GB",
+      "locations": 15,
+      "confidence": "medium",
+      "flags": [],
+      "subscores": {
+        "cost": 61.2,
+        "permissiveness": 56.2,
+        "availability": 64.8,
+        "network": 56.5,
+        "locations": 66.9,
+        "performance": 65.0,
+        "ops": 85.0
+      },
+      "total": 64.14,
+      "stability": {
+        "top_n_pct": 0.0,
+        "win_pct": 0.0,
+        "mean_rank": 29.4
+      }
+    },
+    {
+      "id": "vpsdime",
+      "name": "VPSDime",
+      "category": "lowend",
+      "usd_mo": 7.0,
+      "plan": "Basic 4GB",
+      "spec": "2vCPU/4GB/60GB",
+      "locations": 3,
+      "confidence": "low",
+      "flags": [
+        "no-api"
+      ],
+      "subscores": {
+        "cost": 61.5,
+        "permissiveness": 83.8,
+        "availability": 71.7,
+        "network": 68.8,
+        "locations": 29.3,
+        "performance": 56.0,
+        "ops": 30.0
+      },
+      "total": 63.63,
+      "stability": {
+        "top_n_pct": 0.0,
+        "win_pct": 0.0,
+        "mean_rank": 30.6
+      }
+    },
+    {
+      "id": "pqhosting",
+      "name": "PQ.Hosting",
+      "category": "offshore",
+      "usd_mo": 7.52,
+      "plan": "VPS Ultra",
+      "spec": "2vCPU/4GB/60GB",
+      "locations": 40,
+      "confidence": "low",
+      "flags": [
+        "verify-corporate-structure"
+      ],
+      "subscores": {
+        "cost": 59.7,
+        "permissiveness": 83.8,
+        "availability": 53.5,
+        "network": 51.2,
+        "locations": 88.6,
+        "performance": 65.0,
+        "ops": 85.0
+      },
+      "total": 63.49,
+      "stability": {
+        "top_n_pct": 0.0,
+        "win_pct": 0.0,
+        "mean_rank": 31.3
+      }
+    },
+    {
+      "id": "servarica",
+      "name": "Servarica",
+      "category": "lowend",
+      "usd_mo": 6.0,
+      "plan": "KVM 4GB",
+      "spec": "2vCPU/4GB/100GB",
+      "locations": 2,
+      "confidence": "low",
+      "flags": [
+        "single-location",
+        "hdd-storage"
+      ],
+      "subscores": {
+        "cost": 65.5,
+        "permissiveness": 83.8,
+        "availability": 69.8,
+        "network": 68.8,
+        "locations": 17.0,
+        "performance": 46.0,
+        "ops": 55.0
+      },
+      "total": 63.43,
+      "stability": {
+        "top_n_pct": 0.0,
+        "win_pct": 0.0,
+        "mean_rank": 31.3
+      }
+    },
+    {
+      "id": "hostinger",
+      "name": "Hostinger VPS",
+      "category": "mainstream",
+      "usd_mo": 7.99,
+      "plan": "KVM 2",
+      "spec": "2vCPU/8GB/100GB",
+      "locations": 8,
+      "confidence": "medium",
+      "flags": [
+        "renewal-hike",
+        "multiyear-prepay"
+      ],
+      "subscores": {
+        "cost": 66.0,
+        "permissiveness": 41.8,
+        "availability": 64.8,
+        "network": 62.7,
+        "locations": 56.7,
+        "performance": 65.0,
+        "ops": 85.0
+      },
+      "total": 63.27,
+      "stability": {
+        "top_n_pct": 0.0,
+        "win_pct": 0.0,
+        "mean_rank": 32.7
+      }
+    },
+    {
+      "id": "greencloud",
+      "name": "GreenCloudVPS",
+      "category": "lowend",
+      "usd_mo": 5.0,
+      "plan": "KVM 4GB (annual)",
+      "spec": "2vCPU/4GB/60GB",
+      "locations": 12,
+      "confidence": "low",
+      "flags": [],
+      "subscores": {
+        "cost": 70.3,
+        "permissiveness": 83.8,
+        "availability": 53.5,
+        "network": 55.2,
+        "locations": 57.6,
+        "performance": 65.0,
+        "ops": 85.0
+      },
+      "total": 63.05,
+      "stability": {
+        "top_n_pct": 0.0,
+        "win_pct": 0.0,
+        "mean_rank": 33.1
+      }
+    },
+    {
+      "id": "vdsina",
+      "name": "VDSina",
+      "category": "offshore",
+      "usd_mo": 6.0,
+      "plan": "VPS 4GB",
+      "spec": "2vCPU/4GB/60GB",
+      "locations": 4,
+      "confidence": "low",
+      "flags": [
+        "geopolitical-risk"
+      ],
+      "subscores": {
+        "cost": 65.5,
+        "permissiveness": 83.8,
+        "availability": 53.5,
+        "network": 51.2,
+        "locations": 34.0,
+        "performance": 65.0,
+        "ops": 100.0
+      },
+      "total": 62.44,
+      "stability": {
+        "top_n_pct": 0.0,
+        "win_pct": 0.0,
+        "mean_rank": 35.6
+      }
+    },
+    {
+      "id": "azure",
+      "name": "Microsoft Azure (B2s)",
+      "category": "hyperscaler",
+      "usd_mo": 35.0,
+      "plan": "B2s",
+      "spec": "2vCPU/4GB/50GB",
+      "locations": 60,
+      "confidence": "medium",
+      "flags": [
+        "metered-egress",
+        "burstable-cpu"
+      ],
+      "subscores": {
+        "cost": 19.6,
+        "permissiveness": 8.2,
+        "availability": 88.0,
+        "network": 39.6,
+        "locations": 100.0,
+        "performance": 61.0,
+        "ops": 80.0
+      },
+      "total": 62.44,
+      "stability": {
+        "top_n_pct": 0.0,
+        "win_pct": 0.0,
+        "mean_rank": 35.4
+      }
+    },
+    {
+      "id": "liteserver",
+      "name": "LiteServer",
+      "category": "lowend",
+      "usd_mo": 5.45,
+      "plan": "Budget KVM 4GB",
+      "spec": "2vCPU/4GB/60GB",
+      "locations": 1,
+      "confidence": "low",
+      "flags": [
+        "single-location",
+        "no-api"
+      ],
+      "subscores": {
+        "cost": 68.0,
+        "permissiveness": 83.8,
+        "availability": 64.8,
+        "network": 72.1,
+        "locations": 5.7,
+        "performance": 65.0,
+        "ops": 30.0
+      },
+      "total": 62.21,
+      "stability": {
+        "top_n_pct": 0.0,
+        "win_pct": 0.0,
+        "mean_rank": 35.7
+      }
+    },
+    {
+      "id": "time4vps",
+      "name": "Time4VPS",
+      "category": "eu-budget",
+      "usd_mo": 6.53,
+      "plan": "Linux SSD VPS 4",
+      "spec": "2vCPU/4GB/80GB",
+      "locations": 1,
+      "confidence": "low",
+      "flags": [
+        "single-location"
+      ],
+      "subscores": {
+        "cost": 63.3,
+        "permissiveness": 66.2,
+        "availability": 64.8,
+        "network": 61.9,
+        "locations": 5.7,
+        "performance": 56.0,
+        "ops": 85.0
+      },
+      "total": 62.07,
+      "stability": {
+        "top_n_pct": 0.0,
+        "win_pct": 0.0,
+        "mean_rank": 36.7
+      }
+    },
+    {
+      "id": "shinjiru",
+      "name": "Shinjiru",
+      "category": "offshore",
+      "usd_mo": 25.0,
+      "plan": "Offshore VPS Medium",
+      "spec": "2vCPU/4GB/60GB",
+      "locations": 5,
+      "confidence": "medium",
+      "flags": [],
+      "subscores": {
+        "cost": 28.3,
+        "permissiveness": 100.0,
+        "availability": 69.8,
+        "network": 52.3,
+        "locations": 43.3,
+        "performance": 61.0,
+        "ops": 30.0
+      },
+      "total": 62.03,
+      "stability": {
+        "top_n_pct": 0.0,
+        "win_pct": 0.0,
+        "mean_rank": 35.8
+      }
+    },
+    {
+      "id": "abelohost",
+      "name": "AbeloHost",
+      "category": "offshore",
+      "usd_mo": 16.35,
+      "plan": "SSD VPS 4GB",
+      "spec": "2vCPU/4GB/60GB",
+      "locations": 2,
+      "confidence": "medium",
+      "flags": [
+        "eu-only"
+      ],
+      "subscores": {
+        "cost": 39.4,
+        "permissiveness": 100.0,
+        "availability": 69.8,
+        "network": 55.9,
+        "locations": 17.0,
+        "performance": 61.0,
+        "ops": 30.0
+      },
+      "total": 61.76,
+      "stability": {
+        "top_n_pct": 0.0,
+        "win_pct": 0.0,
+        "mean_rank": 37.2
+      }
+    },
+    {
+      "id": "flokinet",
+      "name": "FlokiNET",
+      "category": "offshore",
+      "usd_mo": 23.98,
+      "plan": "VPS Medium",
+      "spec": "2vCPU/4GB/60GB",
+      "locations": 4,
+      "confidence": "medium",
+      "flags": [
+        "eu-only",
+        "no-api"
+      ],
+      "subscores": {
+        "cost": 29.4,
+        "permissiveness": 100.0,
+        "availability": 69.8,
+        "network": 53.8,
+        "locations": 28.3,
+        "performance": 61.0,
+        "ops": 30.0
+      },
+      "total": 61.61,
+      "stability": {
+        "top_n_pct": 0.0,
+        "win_pct": 0.0,
+        "mean_rank": 38.4
+      }
+    },
+    {
+      "id": "scaleway",
+      "name": "Scaleway",
+      "category": "mainstream",
+      "usd_mo": 11.99,
+      "plan": "DEV1-M",
+      "spec": "3vCPU/4GB/80GB",
+      "locations": 3,
+      "confidence": "low",
+      "flags": [
+        "eu-only"
+      ],
+      "subscores": {
+        "cost": 47.5,
+        "permissiveness": 25.5,
+        "availability": 69.8,
+        "network": 63.6,
+        "locations": 23.6,
+        "performance": 70.0,
+        "ops": 80.0
+      },
+      "total": 61.29,
+      "stability": {
+        "top_n_pct": 0.0,
+        "win_pct": 0.0,
+        "mean_rank": 38.7
+      }
+    },
+    {
+      "id": "orangewebsite",
+      "name": "OrangeWebsite",
+      "category": "offshore",
+      "usd_mo": 19.62,
+      "plan": "VPS 4GB",
+      "spec": "2vCPU/4GB/50GB",
+      "locations": 1,
+      "confidence": "low",
+      "flags": [
+        "single-location"
+      ],
+      "subscores": {
+        "cost": 34.7,
+        "permissiveness": 100.0,
+        "availability": 69.8,
+        "network": 61.9,
+        "locations": 5.7,
+        "performance": 48.5,
+        "ops": 30.0
+      },
+      "total": 60.39,
+      "stability": {
+        "top_n_pct": 0.0,
+        "win_pct": 0.0,
+        "mean_rank": 42.2
+      }
+    },
+    {
+      "id": "cloudzy",
+      "name": "Cloudzy",
+      "category": "lowend",
+      "usd_mo": 15.95,
+      "plan": "Linux VPS 4GB",
+      "spec": "2vCPU/4GB/60GB",
+      "locations": 15,
+      "confidence": "low",
+      "flags": [
+        "shared-abuse-ranges"
+      ],
+      "subscores": {
+        "cost": 40.1,
+        "permissiveness": 83.8,
+        "availability": 55.6,
+        "network": 51.2,
+        "locations": 66.9,
+        "performance": 65.0,
+        "ops": 55.0
+      },
+      "total": 59.56,
+      "stability": {
+        "top_n_pct": 0.0,
+        "win_pct": 0.0,
+        "mean_rank": 43.6
+      }
+    },
+    {
+      "id": "scalahosting",
+      "name": "ScalaHosting",
+      "category": "mainstream",
+      "usd_mo": 16.95,
+      "plan": "Build #2",
+      "spec": "2vCPU/4GB/50GB",
+      "locations": 4,
+      "confidence": "low",
+      "flags": [],
+      "subscores": {
+        "cost": 38.5,
+        "permissiveness": 31.8,
+        "availability": 69.8,
+        "network": 60.0,
+        "locations": 39.7,
+        "performance": 70.0,
+        "ops": 55.0
+      },
+      "total": 59.36,
+      "stability": {
+        "top_n_pct": 0.0,
+        "win_pct": 0.0,
+        "mean_rank": 43.8
+      }
+    },
+    {
+      "id": "netcup",
+      "name": "netcup",
+      "category": "eu-budget",
+      "usd_mo": 7.62,
+      "plan": "VPS 1000 G11",
+      "spec": "4vCPU/8GB/256GB",
+      "locations": 3,
+      "confidence": "medium",
+      "flags": [
+        "no-api",
+        "contract-term"
+      ],
+      "subscores": {
+        "cost": 67.2,
+        "permissiveness": 43.0,
+        "availability": 60.5,
+        "network": 70.5,
+        "locations": 29.3,
+        "performance": 65.0,
+        "ops": 55.0
+      },
+      "total": 59.18,
+      "stability": {
+        "top_n_pct": 0.0,
+        "win_pct": 0.0,
+        "mean_rank": 44.3
+      }
+    },
+    {
+      "id": "hostslick",
+      "name": "HostSlick",
+      "category": "offshore",
+      "usd_mo": 8.72,
+      "plan": "NVMe VPS 4GB",
+      "spec": "2vCPU/4GB/80GB",
+      "locations": 3,
+      "confidence": "low",
+      "flags": [],
+      "subscores": {
+        "cost": 55.8,
+        "permissiveness": 83.8,
+        "availability": 53.5,
+        "network": 60.0,
+        "locations": 29.3,
+        "performance": 65.0,
+        "ops": 55.0
+      },
+      "total": 59.16,
+      "stability": {
+        "top_n_pct": 0.0,
+        "win_pct": 0.0,
+        "mean_rank": 44.7
+      }
+    },
+    {
+      "id": "alibaba",
+      "name": "Alibaba Cloud",
+      "category": "hyperscaler",
+      "usd_mo": 15.0,
+      "plan": "ecs.t6 4GB",
+      "spec": "2vCPU/4GB/40GB",
+      "locations": 28,
+      "confidence": "low",
+      "flags": [
+        "heavy-kyc"
+      ],
+      "subscores": {
+        "cost": 41.7,
+        "permissiveness": 2.0,
+        "availability": 69.0,
+        "network": 47.7,
+        "locations": 77.1,
+        "performance": 56.0,
+        "ops": 100.0
+      },
+      "total": 57.42,
+      "stability": {
+        "top_n_pct": 0.0,
+        "win_pct": 0.0,
+        "mean_rank": 46.9
+      }
+    },
+    {
+      "id": "ultahost",
+      "name": "UltaHost",
+      "category": "mainstream",
+      "usd_mo": 14.0,
+      "plan": "Basic VPS 4GB",
+      "spec": "2vCPU/4GB/50GB",
+      "locations": 10,
+      "confidence": "low",
+      "flags": [
+        "renewal-hike"
+      ],
+      "subscores": {
+        "cost": 43.5,
+        "permissiveness": 59.2,
+        "availability": 53.5,
+        "network": 60.0,
+        "locations": 54.6,
+        "performance": 65.0,
+        "ops": 55.0
+      },
+      "total": 57.12,
+      "stability": {
+        "top_n_pct": 0.0,
+        "win_pct": 0.0,
+        "mean_rank": 48.4
+      }
+    },
+    {
+      "id": "ovhkimsufi",
+      "name": "OVH Kimsufi / SoYouStart",
+      "category": "eu-budget",
+      "usd_mo": 15.26,
+      "plan": "KS-A dedicated",
+      "spec": "4vCPU/16GB/500GB",
+      "locations": 3,
+      "confidence": "low",
+      "flags": [
+        "old-hardware"
+      ],
+      "subscores": {
+        "cost": 57.0,
+        "permissiveness": 56.2,
+        "availability": 63.5,
+        "network": 56.5,
+        "locations": 29.3,
+        "performance": 51.0,
+        "ops": 60.0
+      },
+      "total": 57.1,
+      "stability": {
+        "top_n_pct": 0.0,
+        "win_pct": 0.0,
+        "mean_rank": 48.5
+      }
+    },
+    {
+      "id": "tencent",
+      "name": "Tencent Cloud",
+      "category": "hyperscaler",
+      "usd_mo": 16.0,
+      "plan": "SA2 4GB",
+      "spec": "2vCPU/4GB/50GB",
+      "locations": 21,
+      "confidence": "low",
+      "flags": [
+        "heavy-kyc"
+      ],
+      "subscores": {
+        "cost": 40.0,
+        "permissiveness": 2.0,
+        "availability": 69.0,
+        "network": 47.7,
+        "locations": 66.7,
+        "performance": 56.0,
+        "ops": 100.0
+      },
+      "total": 56.85,
+      "stability": {
+        "top_n_pct": 0.0,
+        "win_pct": 0.0,
+        "mean_rank": 48.7
+      }
+    },
+    {
+      "id": "racknerd",
+      "name": "RackNerd",
+      "category": "lowend",
+      "usd_mo": 3.62,
+      "plan": "4GB KVM (annual)",
+      "spec": "3vCPU/4GB/75GB",
+      "locations": 12,
+      "confidence": "medium",
+      "flags": [
+        "annual-prepay-only",
+        "no-api",
+        "oversold-cpu"
+      ],
+      "subscores": {
+        "cost": 78.7,
+        "permissiveness": 83.8,
+        "availability": 48.5,
+        "network": 55.9,
+        "locations": 51.8,
+        "performance": 38.5,
+        "ops": 55.0
+      },
+      "total": 54.42,
+      "stability": {
+        "top_n_pct": 0.0,
+        "win_pct": 0.0,
+        "mean_rank": 50.9
+      }
+    },
+    {
+      "id": "zomro",
+      "name": "Zomro",
+      "category": "offshore",
+      "usd_mo": 6.0,
+      "plan": "VPS NL-4",
+      "spec": "2vCPU/4GB/50GB",
+      "locations": 3,
+      "confidence": "low",
+      "flags": [
+        "shared-abuse-ranges"
+      ],
+      "subscores": {
+        "cost": 65.6,
+        "permissiveness": 88.8,
+        "availability": 53.5,
+        "network": 51.2,
+        "locations": 23.6,
+        "performance": 52.5,
+        "ops": 30.0
+      },
+      "total": 53.65,
+      "stability": {
+        "top_n_pct": 0.0,
+        "win_pct": 0.0,
+        "mean_rank": 51.8
+      }
+    },
+    {
+      "id": "contabo",
+      "name": "Contabo",
+      "category": "eu-budget",
+      "usd_mo": 4.91,
+      "plan": "Cloud VPS 10",
+      "spec": "3vCPU/8GB/75GB",
+      "locations": 11,
+      "confidence": "high",
+      "flags": [
+        "oversold-cpu",
+        "slow-port"
+      ],
+      "subscores": {
+        "cost": 78.7,
+        "permissiveness": 43.0,
+        "availability": 48.5,
+        "network": 45.3,
+        "locations": 61.9,
+        "performance": 47.5,
+        "ops": 85.0
+      },
+      "total": 52.28,
+      "stability": {
+        "top_n_pct": 0.0,
+        "win_pct": 0.0,
+        "mean_rank": 52.7
+      }
+    }
+  ]
+}
