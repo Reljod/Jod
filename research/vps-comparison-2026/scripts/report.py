@@ -21,7 +21,7 @@ ROOT = os.path.dirname(HERE)
 DATA = os.path.join(ROOT, "data")
 OUT = os.path.join(ROOT, "out")
 
-PROFILES = ["jod", "cheapest", "freedom", "production"]
+PROFILES = ["jod", "verified", "cheapest", "freedom", "production"]
 
 
 def run_profile(name, trials):

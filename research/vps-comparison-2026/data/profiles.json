@@ -1,6 +1,7 @@
 {
   "_meta": {
     "note": "Weights are relative, not required to sum to 1 — the scorer normalizes them. Hard filters run before scoring and are absolute.",
+    "stock_note": "`exclude_stock: [\"out\"]` is a filter and not a scoring penalty on purpose. A plan nobody can buy is not a cheap plan, it is not a plan, and no weighting should be able to average that away. `unknown` is deliberately allowed through — most rows were never checked, and silently dropping them would be a bigger distortion than admitting the gap. The report says which rows were checked.",
     "criteria": [
       "cost", "permissiveness", "availability", "network", "locations", "performance", "ops"
     ]
@@ -25,6 +26,31 @@
         "min_disk_gb": 40,
         "require_virt": ["KVM", "Hyper-V", "bare-metal"],
         "require_docker": true,
+        "exclude_stock": ["out"],
+        "exclude_flags": ["excluded:", "sanctions-risk"]
+      }
+    },
+
+    "verified": {
+      "label": "Jod weighting, verified rows only",
+      "description": "Same weights as `jod`, restricted to rows whose price was read off the standing catalogue and whose order path was actually opened. Every row checked on 2026-08-09 turned out to be wrong in the original dataset, so an unverified row outranking a verified one is not evidence that it is better — only that nobody has looked yet. This profile is the defensible answer; `jod` is the optimistic one.",
+      "weights": {
+        "permissiveness": 0.28,
+        "cost": 0.24,
+        "availability": 0.18,
+        "network": 0.16,
+        "locations": 0.10,
+        "performance": 0.03,
+        "ops": 0.01
+      },
+      "filters": {
+        "min_ram_gb": 4,
+        "min_vcpu": 2,
+        "min_disk_gb": 40,
+        "require_virt": ["KVM", "Hyper-V", "bare-metal"],
+        "require_docker": true,
+        "exclude_stock": ["out"],
+        "require_price_basis": ["standing"],
         "exclude_flags": ["excluded:", "sanctions-risk"]
       }
     },
@@ -47,6 +73,7 @@
         "min_disk_gb": 40,
         "require_virt": ["KVM", "Hyper-V", "bare-metal"],
         "require_docker": true,
+        "exclude_stock": ["out"],
         "exclude_flags": ["excluded:", "sanctions-risk"]
       }
     },
@@ -69,6 +96,7 @@
         "min_disk_gb": 40,
         "require_virt": ["KVM", "Hyper-V", "bare-metal"],
         "require_docker": true,
+        "exclude_stock": ["out"],
         "exclude_flags": ["excluded:", "sanctions-risk"]
       }
     },
@@ -91,6 +119,7 @@
         "min_disk_gb": 40,
         "require_virt": ["KVM", "Hyper-V", "bare-metal"],
         "require_docker": true,
+        "exclude_stock": ["out"],
         "exclude_flags": ["excluded:", "sanctions-risk", "no-sla", "poor-reliability"]
       }
     }
