@@ -6,6 +6,7 @@
 //! sentence) and cost, while the perceived wait stays under a second.
 
 mod audio;
+mod guard;
 mod openrouter;
 mod sessions;
 

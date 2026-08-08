@@ -10,6 +10,8 @@ use std::sync::{Arc, Mutex};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Sample, SampleFormat, Stream};
 
+use crate::guard;
+
 /// Target rate for every model on the OpenRouter transcription endpoint.
 pub const TARGET_RATE: u32 = 16_000;
 
@@ -96,6 +98,11 @@ impl Recorder {
     }
 
     /// Stops capture and returns a 16 kHz mono WAV as raw bytes.
+    ///
+    /// Refuses buffers that hold no speech. This is the primary defence against
+    /// hallucinated transcripts: fed silence or room tone, Whisper invents
+    /// canned phrases and its language detector can wander into Korean. Not
+    /// sending the request at all is both the correct answer and the cheap one.
     pub fn stop(&mut self) -> Result<Vec<u8>, String> {
         let stream = self.stream.take().ok_or_else(|| "not recording".to_string())?;
         drop(stream); // closing the stream flushes the last callback
@@ -110,7 +117,11 @@ impl Recorder {
 
         let mono = downmix(&samples, channels);
         let resampled = resample(&mono, rate, TARGET_RATE);
-        encode_wav(&resampled)
+
+        match guard::assess(&resampled, TARGET_RATE) {
+            guard::Speech::Present => encode_wav(&resampled),
+            verdict => Err(verdict.message().to_string()),
+        }
     }
 
     /// Peak amplitude of the most recent window, for the level meter.

@@ -40,10 +40,10 @@
             <select id="model"></select>
           </label>
           <label>Language hint
-            <select id="language">
-              <option value="">auto-detect (best for Taglish)</option>
-              <option value="tl">Tagalog (tl)</option>
-              <option value="en">English (en)</option>
+            <select id="language" title="Auto-detect is guarded: anything other than Tagalog or English is retried pinned to Tagalog, then rejected.">
+              <option value="">auto, guarded to Tagalog/English</option>
+              <option value="tl">pin to Tagalog (tl)</option>
+              <option value="en">pin to English (en)</option>
             </select>
           </label>
         </div>

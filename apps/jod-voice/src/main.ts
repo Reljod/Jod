@@ -10,6 +10,7 @@ interface Transcript {
   model: string;
   raw_text: string | null;
   repair_ms: number | null;
+  language: string | null;
 }
 
 interface ModelResult {
@@ -109,6 +110,7 @@ async function stopRecording() {
     const bits = [
       `${t.latency_ms} ms`,
       t.repair_ms !== null ? `+${t.repair_ms} ms repair` : null,
+      t.language,
       `$${t.cost_usd.toFixed(5)}`,
       t.model,
     ].filter(Boolean);
