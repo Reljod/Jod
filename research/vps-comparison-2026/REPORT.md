@@ -88,9 +88,18 @@ Jod orchestrator on a cheap, permissive VPS   ← this report picks the box
         └── Open-web browsing/scraping → through a residential/mobile proxy
 ```
 
-Budget roughly $6/mo for the box and expect proxy costs to exceed it if Jod does
-serious browsing. **The VPS is the cheap part of this problem.** Picking a $2.42
-host over a $6 host is noise next to getting the egress path right.
+Budget roughly $6/mo for the box. **The VPS is the cheap part of this problem.**
+Picking a $2.42 host over a $6 host is noise next to getting the egress path
+right.
+
+> **Follow-up, 2026-08-08:** the egress path is now its own study —
+> [`research/ip-blocking-2026`](../ip-blocking-2026/REPORT.md), 55 solutions
+> compared. It partly **corrects** the advice above: a residential proxy fixes
+> only one of the six checks Cloudflare runs, and the IP is checked *fifth*,
+> after the TLS handshake has already given a plain HTTP client away. The
+> working answer is a stealth browser plus ~10 static ISP proxy IPs for about
+> **$3/month** — cheaper than the residential proxy assumed here, not more
+> expensive.
 
 ---
 

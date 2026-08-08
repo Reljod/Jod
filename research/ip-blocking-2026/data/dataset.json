@@ -1,0 +1,637 @@
+{
+  "_meta": {
+    "reference_spec": "Cost and effectiveness normalized to ONE workload: 10,000 successful fetches per month of Cloudflare-protected pages, ~500 KB each (~5 GB egress), 20% needing a persistent session, driven from Jod's VPS. Per-IP options are costed at 10 IPs; browser-hour options at 25 hours/month.",
+    "compiled": "2026-08-08",
+    "scales": "success_pct: measured/claimed pass rate against Cloudflare-class protection, 0-100. integration/ops_burden: 1=best (trivial), 5=worst (heavy). ethics: 1=best (clean sourcing), 5=worst (non-consensual).",
+    "layers": "Cloudflare chains SIX checks: tls (JA3/JA4), http2 (SETTINGS frame), js (challenge/Turnstile), behavior, ip_rep, captcha. `layers_fixed` lists which a solution actually addresses. This is the central finding: a proxy fixes ip_rep ONLY.",
+    "note": "success_pct is the contested number in this market, so it — not price — is the field the Monte Carlo perturbs. Vendor-reported figures carry low confidence and are perturbed hardest."
+  },
+
+  "_schema": {
+    "required": ["id", "name", "category", "pricing_model", "success_pct", "confidence", "sources"],
+    "ratings_1_5": ["integration", "ops_burden", "ethics"],
+    "enums": {
+      "pricing_model": ["per_gb", "per_1k_req", "per_ip_mo", "per_hour", "flat_mo", "free"],
+      "success_source": ["independent", "vendor", "estimated"],
+      "category": ["residential", "isp", "mobile", "datacenter", "unblocker-api", "browser-infra", "self-hosted", "baseline"]
+    },
+    "non_negative": ["unit_price", "plan_min_mo", "success_pct"]
+  },
+
+  "_display": ["monthly_usd", "category", "success_pct"],
+
+  "candidates": [
+    {
+      "id": "baseline-requests", "name": "Plain HTTP client from the VPS", "category": "baseline",
+      "pricing_model": "free", "unit_price": 0, "plan_min_mo": 0,
+      "success_pct": 3, "success_source": "independent",
+      "layers_fixed": [],
+      "integration": 1, "ops_burden": 1, "ethics": 1, "geo_control": false, "sticky_sessions": false,
+      "confidence": "high",
+      "sources": ["https://scrapfly.io/blog/posts/how-cloudflare-detects-bots"],
+      "notes": "The default state. Fails at the TLS handshake before the IP is even scored — Python's requests/httpx present a JA3/JA4 hash no browser produces. This is the row that shows why 'just buy a proxy' misdiagnoses the problem.",
+      "flags": []
+    },
+    {
+      "id": "baseline-playwright", "name": "Stock Playwright/Puppeteer from the VPS", "category": "baseline",
+      "pricing_model": "free", "unit_price": 0, "plan_min_mo": 0,
+      "success_pct": 12, "success_source": "independent",
+      "layers_fixed": ["tls", "http2"],
+      "integration": 2, "ops_burden": 3, "ethics": 1, "geo_control": false, "sticky_sessions": true,
+      "confidence": "medium",
+      "sources": ["https://humanbrowser.cloud/blog/playwright-stealth-not-working-2026"],
+      "notes": "Real browser TLS, but CDP automation leaks are detected directly and the datacenter IP is still scored. puppeteer-stealth was deprecated in Feb 2025 and its patch patterns are now fingerprinted.",
+      "flags": []
+    },
+    {
+      "id": "tor", "name": "Tor", "category": "baseline",
+      "pricing_model": "free", "unit_price": 0, "plan_min_mo": 0,
+      "success_pct": 1, "success_source": "estimated",
+      "layers_fixed": ["ip_rep"],
+      "integration": 2, "ops_burden": 2, "ethics": 1, "geo_control": false, "sticky_sessions": false,
+      "confidence": "medium",
+      "sources": ["https://developers.cloudflare.com/waf/tools/ip-access-rules/"],
+      "notes": "Worse than no proxy. Cloudflare treats exit nodes as a named category and challenges them by default. Changes ip_rep from 'datacenter' to 'known anonymizer', which scores lower.",
+      "flags": ["excluded:counterproductive"]
+    },
+
+    {
+      "id": "curl-cffi", "name": "curl_cffi / curl-impersonate", "category": "self-hosted",
+      "pricing_model": "free", "unit_price": 0, "plan_min_mo": 0,
+      "success_pct": 45, "success_source": "independent",
+      "layers_fixed": ["tls", "http2"],
+      "integration": 1, "ops_burden": 2, "ethics": 1, "geo_control": false, "sticky_sessions": false,
+      "confidence": "medium",
+      "sources": ["https://scrapfly.io/blog/posts/curl-impersonate-scrape-chrome-firefox-tls-http2-fingerprint", "https://www.jibaoproxy.com/blog/bypass-tls-fingerprinting-curl-cffi.html"],
+      "notes": "Reproduces real browser JA3/JA4 and HTTP/2 fingerprints at the cost of a plain HTTP request — no browser needed. Free, one-line drop-in for requests. Defeated by JS challenges and Turnstile, and does nothing for IP reputation.",
+      "flags": ["free"]
+    },
+    {
+      "id": "camoufox", "name": "Camoufox", "category": "self-hosted",
+      "pricing_model": "free", "unit_price": 0, "plan_min_mo": 0,
+      "success_pct": 72, "success_source": "independent",
+      "layers_fixed": ["tls", "http2", "js", "behavior"],
+      "integration": 2, "ops_burden": 3, "ethics": 1, "geo_control": false, "sticky_sessions": true,
+      "confidence": "medium",
+      "sources": ["https://ianlpaterson.com/blog/anti-detect-browser-benchmark-patchright-nodriver-curl-cffi/", "https://dev.to/ianlpaterson/anti-detect-browser-benchmark-2026-7-stealth-tools-31-cloudflare-targets-651-verdicts-4361"],
+      "notes": "Firefox patched at the C++ level rather than by injecting JavaScript, which is why it beats Patchright on Cloudflare Enterprise in the 651-verdict benchmark. Free. Still uses your datacenter IP unless paired with a proxy.",
+      "flags": ["free", "pairs-with-proxy"]
+    },
+    {
+      "id": "patchright", "name": "Patchright", "category": "self-hosted",
+      "pricing_model": "free", "unit_price": 0, "plan_min_mo": 0,
+      "success_pct": 65, "success_source": "independent",
+      "layers_fixed": ["tls", "http2", "js", "behavior"],
+      "integration": 1, "ops_burden": 3, "ethics": 1, "geo_control": false, "sticky_sessions": true,
+      "confidence": "medium",
+      "sources": ["https://ianlpaterson.com/blog/anti-detect-browser-benchmark-patchright-nodriver-curl-cffi/"],
+      "notes": "Playwright fork patching CDP-layer leaks at startup, tracking current Chrome (148). Drop-in for existing Playwright code, which makes it the lowest-friction upgrade for an agent already driving a browser.",
+      "flags": ["free", "pairs-with-proxy"]
+    },
+    {
+      "id": "nodriver", "name": "nodriver", "category": "self-hosted",
+      "pricing_model": "free", "unit_price": 0, "plan_min_mo": 0,
+      "success_pct": 58, "success_source": "independent",
+      "layers_fixed": ["tls", "http2", "js", "behavior"],
+      "integration": 2, "ops_burden": 3, "ethics": 1, "geo_control": false, "sticky_sessions": true,
+      "confidence": "low",
+      "sources": ["https://ianlpaterson.com/blog/anti-detect-browser-benchmark-patchright-nodriver-curl-cffi/"],
+      "notes": "Successor to undetected-chromedriver, driving Chrome without a WebDriver binary.",
+      "flags": ["free", "pairs-with-proxy"]
+    },
+    {
+      "id": "rebrowser", "name": "rebrowser-playwright", "category": "self-hosted",
+      "pricing_model": "free", "unit_price": 0, "plan_min_mo": 0,
+      "success_pct": 52, "success_source": "independent",
+      "layers_fixed": ["tls", "http2", "js", "behavior"],
+      "integration": 1, "ops_burden": 3, "ethics": 1, "geo_control": false, "sticky_sessions": true,
+      "confidence": "low",
+      "sources": ["https://ianlpaterson.com/blog/anti-detect-browser-benchmark-patchright-nodriver-curl-cffi/"],
+      "notes": "Same idea as Patchright with a different patch strategy, but bundles Chromium 136 — twelve versions behind, which itself is a fingerprint.",
+      "flags": ["free", "stale-chromium"]
+    },
+    {
+      "id": "playwright-stealth", "name": "playwright-stealth / puppeteer-extra-stealth", "category": "self-hosted",
+      "pricing_model": "free", "unit_price": 0, "plan_min_mo": 0,
+      "success_pct": 18, "success_source": "independent",
+      "layers_fixed": ["tls", "http2"],
+      "integration": 1, "ops_burden": 4, "ethics": 1, "geo_control": false, "sticky_sessions": true,
+      "confidence": "medium",
+      "sources": ["https://humanbrowser.cloud/blog/playwright-stealth-not-working-2026"],
+      "notes": "DEPRECATED since February 2025. Its JS monkey-patches are themselves a detection signal now. Listed because it is still the top search result and the most common wrong answer.",
+      "flags": ["excluded:deprecated"]
+    },
+    {
+      "id": "home-tunnel", "name": "Self-hosted tunnel via home connection", "category": "self-hosted",
+      "pricing_model": "free", "unit_price": 0, "plan_min_mo": 0,
+      "success_pct": 88, "success_source": "estimated",
+      "layers_fixed": ["ip_rep"],
+      "integration": 3, "ops_burden": 4, "ethics": 1, "geo_control": false, "sticky_sessions": true,
+      "confidence": "low",
+      "sources": ["https://www.joinmassive.com/blog/why-ai-agents-get-blocked-on-datacenter-ips-and-how-to-fix-it"],
+      "notes": "Route egress through your own residential line (WireGuard/Tailscale back home). A genuinely residential IP with perfect consent and zero per-GB cost. Limits: one IP, your home bandwidth, your ISP's ToS, and it ties Jod's uptime to your house. Best combined with Camoufox.",
+      "flags": ["free", "single-ip", "pairs-with-stealth-browser"]
+    },
+
+    {
+      "id": "brightdata-res", "name": "Bright Data Residential", "category": "residential",
+      "pricing_model": "per_gb", "unit_price": 8.0, "plan_min_mo": 0,
+      "success_pct": 80, "success_source": "vendor",
+      "layers_fixed": ["ip_rep"],
+      "integration": 1, "ops_burden": 2, "ethics": 4, "geo_control": true, "sticky_sessions": true,
+      "confidence": "medium",
+      "sources": ["https://brightdata.com/blog/proxy-101/best-residential-proxy-providers", "https://thehackernews.com/2026/06/free-apps-are-quietly-turning-smart-tvs.html"],
+      "notes": "Largest pool (150M+ IPs). ~$8/GB list, ~$4 on promo, ~$2.50 at high volume. ETHICS FLAG: June 2026 reporting showed its SDK shipped inside free Smart TV apps with consent dialogs written by the app publisher, often not disclosing that third-party scraping traffic routes through the user's IP.",
+      "flags": ["sourcing-controversy"]
+    },
+    {
+      "id": "oxylabs-res", "name": "Oxylabs Residential", "category": "residential",
+      "pricing_model": "per_gb", "unit_price": 6.0, "plan_min_mo": 0,
+      "success_pct": 78, "success_source": "vendor",
+      "layers_fixed": ["ip_rep"],
+      "integration": 1, "ops_burden": 2, "ethics": 3, "geo_control": true, "sticky_sessions": true,
+      "confidence": "medium",
+      "sources": ["https://dataimpulse.com/blog/oxylabs-pricing-explained/"],
+      "notes": "$6/GB on the 5 GB Starter, down to $2.50/GB on the 1 TB Corporate tier.",
+      "flags": []
+    },
+    {
+      "id": "decodo-res", "name": "Decodo (Smartproxy) Residential", "category": "residential",
+      "pricing_model": "per_gb", "unit_price": 5.5, "plan_min_mo": 0,
+      "success_pct": 75, "success_source": "vendor",
+      "layers_fixed": ["ip_rep"],
+      "integration": 1, "ops_burden": 2, "ethics": 3, "geo_control": true, "sticky_sessions": true,
+      "confidence": "medium",
+      "sources": ["https://trustmyip.com/blog/best-residential-proxy-providers"],
+      "notes": "$55 for 10 GB at entry. Best per-GB economics past 1 TB.",
+      "flags": []
+    },
+    {
+      "id": "iproyal-res", "name": "IPRoyal Royal Residential", "category": "residential",
+      "pricing_model": "per_gb", "unit_price": 4.9, "plan_min_mo": 0,
+      "success_pct": 72, "success_source": "vendor",
+      "layers_fixed": ["ip_rep"],
+      "integration": 1, "ops_burden": 2, "ethics": 2, "geo_control": true, "sticky_sessions": true,
+      "confidence": "medium",
+      "sources": ["https://aimultiple.com/residential-proxy-providers", "https://dataimpulse.com/blog/where-do-residential-proxies-come-from/"],
+      "notes": "$7/GB at 1 GB, $4.90/GB at standard volume, $1.75/GB at 500 GB+. Cleanest sourcing story of the big pools: Pawns.app pays users directly to share bandwidth rather than bundling an SDK into someone else's app.",
+      "flags": ["clean-sourcing"]
+    },
+    {
+      "id": "webshare-res", "name": "Webshare Residential", "category": "residential",
+      "pricing_model": "per_gb", "unit_price": 3.0, "plan_min_mo": 0,
+      "success_pct": 65, "success_source": "estimated",
+      "layers_fixed": ["ip_rep"],
+      "integration": 1, "ops_burden": 2, "ethics": 3, "geo_control": true, "sticky_sessions": true,
+      "confidence": "low",
+      "sources": ["https://aimultiple.com/proxy-pricing"],
+      "notes": "Anchors the budget tier at $3/GB with a self-serve signup.",
+      "flags": []
+    },
+    {
+      "id": "dataimpulse", "name": "DataImpulse", "category": "residential",
+      "pricing_model": "per_gb", "unit_price": 1.0, "plan_min_mo": 5,
+      "success_pct": 60, "success_source": "vendor",
+      "layers_fixed": ["ip_rep"],
+      "integration": 1, "ops_burden": 2, "ethics": 3, "geo_control": true, "sticky_sessions": true,
+      "confidence": "low",
+      "sources": ["https://dataimpulse.com/blog/cheapest-proxies/"],
+      "notes": "Around $1/GB, the cheapest credible residential pool. Smaller pool means more repeat IPs, which is itself a detection signal at volume.",
+      "flags": []
+    },
+    {
+      "id": "iproyal-payg", "name": "IPRoyal Residential (pay-as-you-go)", "category": "residential",
+      "pricing_model": "per_gb", "unit_price": 1.75, "plan_min_mo": 0,
+      "success_pct": 72, "success_source": "vendor",
+      "layers_fixed": ["ip_rep"],
+      "integration": 1, "ops_burden": 2, "ethics": 2, "geo_control": true, "sticky_sessions": true,
+      "confidence": "low",
+      "sources": ["https://aimultiple.com/residential-proxy-providers"],
+      "notes": "The $1.75/GB headline requires a 500 GB+ commitment — far past this workload's 5 GB. Included to show the gap between advertised and achievable pricing.",
+      "flags": ["volume-gated-price"]
+    },
+    {
+      "id": "soax", "name": "SOAX", "category": "residential",
+      "pricing_model": "per_gb", "unit_price": 4.5, "plan_min_mo": 0,
+      "success_pct": 70, "success_source": "estimated",
+      "layers_fixed": ["ip_rep"],
+      "integration": 1, "ops_burden": 2, "ethics": 3, "geo_control": true, "sticky_sessions": true,
+      "confidence": "low",
+      "sources": ["https://aimultiple.com/residential-proxy-providers"],
+      "notes": "Mid-market pool with strong geo-targeting granularity.",
+      "flags": []
+    },
+    {
+      "id": "netnut", "name": "NetNut", "category": "residential",
+      "pricing_model": "per_gb", "unit_price": 5.0, "plan_min_mo": 0,
+      "success_pct": 72, "success_source": "estimated",
+      "layers_fixed": ["ip_rep"],
+      "integration": 1, "ops_burden": 2, "ethics": 2, "geo_control": true, "sticky_sessions": true,
+      "confidence": "low",
+      "sources": ["https://aimultiple.com/residential-proxy-providers"],
+      "notes": "Sources from ISP partnerships rather than a peer SDK, which is a materially cleaner consent model.",
+      "flags": ["clean-sourcing"]
+    },
+    {
+      "id": "massive", "name": "Massive", "category": "residential",
+      "pricing_model": "per_gb", "unit_price": 4.5, "plan_min_mo": 0,
+      "success_pct": 70, "success_source": "vendor",
+      "layers_fixed": ["ip_rep"],
+      "integration": 1, "ops_burden": 2, "ethics": 2, "geo_control": true, "sticky_sessions": true,
+      "confidence": "low",
+      "sources": ["https://www.joinmassive.com/blog/why-ai-agents-get-blocked-on-datacenter-ips-and-how-to-fix-it"],
+      "notes": "Markets explicitly on consented sourcing and on the AI-agent use case.",
+      "flags": ["clean-sourcing"]
+    },
+    {
+      "id": "infatica", "name": "Infatica", "category": "residential",
+      "pricing_model": "per_gb", "unit_price": 3.0, "plan_min_mo": 0,
+      "success_pct": 65, "success_source": "estimated",
+      "layers_fixed": ["ip_rep"],
+      "integration": 1, "ops_burden": 2, "ethics": 3, "geo_control": true, "sticky_sessions": true,
+      "confidence": "low",
+      "sources": ["https://aimultiple.com/proxy-pricing"],
+      "notes": "Mid-tier pool, mid-tier price.",
+      "flags": []
+    },
+    {
+      "id": "packetstream", "name": "PacketStream", "category": "residential",
+      "pricing_model": "per_gb", "unit_price": 1.0, "plan_min_mo": 0,
+      "success_pct": 50, "success_source": "estimated",
+      "layers_fixed": ["ip_rep"],
+      "integration": 1, "ops_burden": 2, "ethics": 2, "geo_control": true, "sticky_sessions": false,
+      "confidence": "low",
+      "sources": ["https://dataimpulse.com/blog/cheapest-proxies/"],
+      "notes": "$1/GB peer-to-peer marketplace where sharers are paid directly. Small pool, variable quality, no real SLA.",
+      "flags": []
+    },
+
+    {
+      "id": "webshare-isp", "name": "Webshare Static Residential (ISP)", "category": "isp",
+      "pricing_model": "per_ip_mo", "unit_price": 0.30, "plan_min_mo": 0,
+      "success_pct": 62, "success_source": "estimated",
+      "layers_fixed": ["ip_rep"],
+      "integration": 1, "ops_burden": 1, "ethics": 1, "geo_control": true, "sticky_sessions": true,
+      "confidence": "medium",
+      "sources": ["https://aimultiple.com/isp-proxies", "https://www.webshare.io/rayobyte-alternative"],
+      "notes": "$0.30/IP/month — at 10 IPs this is $3/mo flat with no per-GB meter. ISP IPs are registered to consumer ISPs but held in a datacenter, so they read residential on ASN lookup while being stable and fully consented. The best cost-per-trust ratio in the whole market for steady-state use.",
+      "flags": ["flat-cost", "clean-sourcing"]
+    },
+    {
+      "id": "decodo-isp", "name": "Decodo ISP", "category": "isp",
+      "pricing_model": "per_ip_mo", "unit_price": 0.27, "plan_min_mo": 0,
+      "success_pct": 62, "success_source": "estimated",
+      "layers_fixed": ["ip_rep"],
+      "integration": 1, "ops_burden": 1, "ethics": 1, "geo_control": true, "sticky_sessions": true,
+      "confidence": "medium",
+      "sources": ["https://aimultiple.com/isp-proxies"],
+      "notes": "$0.27/IP/month, the cheapest per-IP figure found, with unlimited bandwidth on the per-IP plans.",
+      "flags": ["flat-cost", "clean-sourcing"]
+    },
+    {
+      "id": "proxyseller-isp", "name": "Proxy-Seller ISP", "category": "isp",
+      "pricing_model": "per_ip_mo", "unit_price": 0.75, "plan_min_mo": 0,
+      "success_pct": 60, "success_source": "estimated",
+      "layers_fixed": ["ip_rep"],
+      "integration": 1, "ops_burden": 1, "ethics": 2, "geo_control": true, "sticky_sessions": true,
+      "confidence": "low",
+      "sources": ["https://aimultiple.com/isp-proxies"],
+      "notes": "Unlimited bandwidth per IP; good value alongside Decodo.",
+      "flags": ["flat-cost"]
+    },
+    {
+      "id": "iproyal-isp", "name": "IPRoyal ISP", "category": "isp",
+      "pricing_model": "per_ip_mo", "unit_price": 1.80, "plan_min_mo": 0,
+      "success_pct": 64, "success_source": "estimated",
+      "layers_fixed": ["ip_rep"],
+      "integration": 1, "ops_burden": 1, "ethics": 1, "geo_control": true, "sticky_sessions": true,
+      "confidence": "low",
+      "sources": ["https://aimultiple.com/isp-proxies"],
+      "notes": "Reported to have the strongest static sticky-session behaviour of the ISP tier.",
+      "flags": ["flat-cost"]
+    },
+    {
+      "id": "oxylabs-isp", "name": "Oxylabs ISP", "category": "isp",
+      "pricing_model": "per_ip_mo", "unit_price": 2.10, "plan_min_mo": 16,
+      "success_pct": 68, "success_source": "vendor",
+      "layers_fixed": ["ip_rep"],
+      "integration": 1, "ops_burden": 1, "ethics": 1, "geo_control": true, "sticky_sessions": true,
+      "confidence": "medium",
+      "sources": ["https://oxylabs.io/products/isp-proxies"],
+      "notes": "$2.10/IP with a ~$16/mo plan floor. Premium ISP tier.",
+      "flags": ["flat-cost"]
+    },
+    {
+      "id": "rayobyte-isp", "name": "Rayobyte ISP", "category": "isp",
+      "pricing_model": "per_ip_mo", "unit_price": 1.35, "plan_min_mo": 0,
+      "success_pct": 62, "success_source": "estimated",
+      "layers_fixed": ["ip_rep"],
+      "integration": 1, "ops_burden": 1, "ethics": 1, "geo_control": true, "sticky_sessions": true,
+      "confidence": "low",
+      "sources": ["https://aimultiple.com/isp-proxies"],
+      "notes": "$5/IP list, ~$1.35/IP on an annual commitment.",
+      "flags": ["flat-cost", "annual-commit-for-price"]
+    },
+    {
+      "id": "brightdata-isp", "name": "Bright Data ISP", "category": "isp",
+      "pricing_model": "per_ip_mo", "unit_price": 0.90, "plan_min_mo": 0,
+      "success_pct": 66, "success_source": "vendor",
+      "layers_fixed": ["ip_rep"],
+      "integration": 1, "ops_burden": 1, "ethics": 2, "geo_control": true, "sticky_sessions": true,
+      "confidence": "low",
+      "sources": ["https://aimultiple.com/isp-proxies"],
+      "notes": "ISP product does not share the peer-network sourcing concerns of the residential pool.",
+      "flags": ["flat-cost"]
+    },
+
+    {
+      "id": "iproyal-mobile", "name": "IPRoyal Mobile (4G/5G)", "category": "mobile",
+      "pricing_model": "per_gb", "unit_price": 7.0, "plan_min_mo": 0,
+      "success_pct": 90, "success_source": "estimated",
+      "layers_fixed": ["ip_rep"],
+      "integration": 1, "ops_burden": 2, "ethics": 2, "geo_control": true, "sticky_sessions": true,
+      "confidence": "low",
+      "sources": ["https://www.proxies.sx/blog/why-cloudflare-blocks-residential-proxies-mobile-ips-difference"],
+      "notes": "Mobile carrier IPs are CGNAT-shared by thousands of real phones, so blocking one punishes real users. Anti-bot vendors therefore treat them far more leniently than residential. Highest trust per request of any IP source.",
+      "flags": []
+    },
+    {
+      "id": "brightdata-mobile", "name": "Bright Data Mobile", "category": "mobile",
+      "pricing_model": "per_gb", "unit_price": 9.0, "plan_min_mo": 0,
+      "success_pct": 92, "success_source": "vendor",
+      "layers_fixed": ["ip_rep"],
+      "integration": 1, "ops_burden": 2, "ethics": 4, "geo_control": true, "sticky_sessions": true,
+      "confidence": "low",
+      "sources": ["https://brightdata.com/blog/proxy-101/best-residential-proxy-providers"],
+      "notes": "Largest mobile pool; same sourcing questions as the residential product.",
+      "flags": ["sourcing-controversy"]
+    },
+    {
+      "id": "proxidize", "name": "Proxidize (self-hosted mobile farm)", "category": "mobile",
+      "pricing_model": "flat_mo", "unit_price": 60.0, "plan_min_mo": 0,
+      "success_pct": 92, "success_source": "estimated",
+      "layers_fixed": ["ip_rep"],
+      "integration": 4, "ops_burden": 5, "ethics": 1, "geo_control": false, "sticky_sessions": true,
+      "confidence": "low",
+      "sources": ["https://proxidize.com/blog/residential-proxy-pricing/"],
+      "notes": "Build your own mobile proxy from SIM cards and modems. Unbeatable trust and perfect consent, but it is hardware you own, in one country, that you must keep alive. Wrong shape for an agent that should not need a rack.",
+      "flags": ["hardware-required"]
+    },
+
+    {
+      "id": "webshare-dc", "name": "Webshare Datacenter Proxies", "category": "datacenter",
+      "pricing_model": "per_ip_mo", "unit_price": 0.05, "plan_min_mo": 0,
+      "success_pct": 8, "success_source": "estimated",
+      "layers_fixed": [],
+      "integration": 1, "ops_burden": 1, "ethics": 1, "geo_control": true, "sticky_sessions": true,
+      "confidence": "medium",
+      "sources": ["https://decodo.com/blog/error-1009"],
+      "notes": "Nearly free and nearly useless here: swapping one datacenter ASN for another datacenter ASN does not change how Cloudflare scores the IP. Included because it is the cheapest thing that looks like a solution.",
+      "flags": ["excluded:does-not-address-problem"]
+    },
+
+    {
+      "id": "brightdata-unlocker", "name": "Bright Data Web Unlocker", "category": "unblocker-api",
+      "pricing_model": "per_1k_req", "unit_price": 1.5, "plan_min_mo": 0,
+      "success_pct": 98, "success_source": "independent",
+      "layers_fixed": ["tls", "http2", "js", "behavior", "ip_rep", "captcha"],
+      "integration": 1, "ops_burden": 1, "ethics": 4, "geo_control": true, "sticky_sessions": true,
+      "confidence": "high",
+      "sources": ["https://scrape.do/blog/zenrows-alternatives/", "https://brightdata.com/blog/web-data/best-web-scraping-apis"],
+      "notes": "98.44% success in Scrape.do's independent 11-provider benchmark, the highest measured. Pay per successful request, all six layers handled. Ethics rating reflects the underlying residential pool's sourcing.",
+      "flags": ["sourcing-controversy"]
+    },
+    {
+      "id": "zenrows", "name": "ZenRows", "category": "unblocker-api",
+      "pricing_model": "per_1k_req", "unit_price": 4.62, "plan_min_mo": 69.99,
+      "success_pct": 95, "success_source": "vendor",
+      "layers_fixed": ["tls", "http2", "js", "behavior", "ip_rep", "captcha"],
+      "integration": 1, "ops_burden": 1, "ethics": 3, "geo_control": true, "sticky_sessions": true,
+      "confidence": "medium",
+      "sources": ["https://www.zenrows.com/blog/best-web-scraping-apis-in-2026-benchmarked/", "https://scrape.do/blog/zenrows-alternatives/"],
+      "notes": "Claims 99.93% self-reported; independent benchmarking put effective cost at $4.62/1k. Second-fastest at ~10.0s average. Plans carry 5x multiplier for JS rendering and 10x for premium proxies, so the headline request count is not what you get.",
+      "flags": ["multiplier-pricing", "plan-floor"]
+    },
+    {
+      "id": "scrapfly", "name": "ScrapFly", "category": "unblocker-api",
+      "pricing_model": "per_1k_req", "unit_price": 2.0, "plan_min_mo": 30,
+      "success_pct": 96, "success_source": "vendor",
+      "layers_fixed": ["tls", "http2", "js", "behavior", "ip_rep", "captcha"],
+      "integration": 1, "ops_burden": 1, "ethics": 3, "geo_control": true, "sticky_sessions": true,
+      "confidence": "medium",
+      "sources": ["https://scrapfly.io/bypass/cloudflare", "https://scrapfly.io/blog/posts/how-cloudflare-detects-bots"],
+      "notes": "Advertises 98% on Cloudflare specifically. Publishes unusually detailed technical writing on how the detection layers work, which is at least evidence they understand the problem.",
+      "flags": ["plan-floor"]
+    },
+    {
+      "id": "scrapedo", "name": "Scrape.do", "category": "unblocker-api",
+      "pricing_model": "per_1k_req", "unit_price": 1.2, "plan_min_mo": 30,
+      "success_pct": 94, "success_source": "vendor",
+      "layers_fixed": ["tls", "http2", "js", "behavior", "ip_rep", "captcha"],
+      "integration": 1, "ops_burden": 1, "ethics": 3, "geo_control": true, "sticky_sessions": true,
+      "confidence": "low",
+      "sources": ["https://scrape.do/blog/zenrows-alternatives/"],
+      "notes": "$30/mo entry, materially below ZenRows' $69. Publishes its own benchmark, so treat its self-placement with care.",
+      "flags": ["plan-floor"]
+    },
+    {
+      "id": "zyte", "name": "Zyte API", "category": "unblocker-api",
+      "pricing_model": "per_1k_req", "unit_price": 1.01, "plan_min_mo": 0,
+      "success_pct": 75, "success_source": "independent",
+      "layers_fixed": ["tls", "http2", "js", "behavior", "ip_rep", "captcha"],
+      "integration": 2, "ops_burden": 1, "ethics": 2, "geo_control": true, "sticky_sessions": true,
+      "confidence": "medium",
+      "sources": ["https://scrape.do/blog/zenrows-alternatives/"],
+      "notes": "74.75% measured across four protected targets, at 13.6s average — the slowest of the tier. $1.01/1k applies to easy targets; protected pages cost substantially more, so the headline rate understates real cost.",
+      "flags": ["tiered-by-difficulty"]
+    },
+    {
+      "id": "scraperapi", "name": "ScraperAPI", "category": "unblocker-api",
+      "pricing_model": "per_1k_req", "unit_price": 1.4, "plan_min_mo": 49,
+      "success_pct": 69, "success_source": "independent",
+      "layers_fixed": ["tls", "http2", "js", "ip_rep", "captcha"],
+      "integration": 1, "ops_burden": 1, "ethics": 3, "geo_control": true, "sticky_sessions": true,
+      "confidence": "medium",
+      "sources": ["https://www.scraperapi.com/blog/zenrows-alternatives/"],
+      "notes": "68.95% in Proxyway's 2025 benchmark, the lower tier for protected sites. $49/mo floor.",
+      "flags": ["plan-floor"]
+    },
+    {
+      "id": "scrapingbee", "name": "ScrapingBee", "category": "unblocker-api",
+      "pricing_model": "per_1k_req", "unit_price": 3.0, "plan_min_mo": 49,
+      "success_pct": 80, "success_source": "estimated",
+      "layers_fixed": ["tls", "http2", "js", "behavior", "ip_rep", "captcha"],
+      "integration": 1, "ops_burden": 1, "ethics": 3, "geo_control": true, "sticky_sessions": true,
+      "confidence": "low",
+      "sources": ["https://brightdata.com/blog/web-data/best-web-scraping-apis"],
+      "notes": "$49/mo entry. Developer-friendly API, mid-tier success on hard targets.",
+      "flags": ["plan-floor"]
+    },
+    {
+      "id": "oxylabs-unblocker", "name": "Oxylabs Web Unblocker", "category": "unblocker-api",
+      "pricing_model": "per_1k_req", "unit_price": 3.0, "plan_min_mo": 49,
+      "success_pct": 90, "success_source": "vendor",
+      "layers_fixed": ["tls", "http2", "js", "behavior", "ip_rep", "captcha"],
+      "integration": 1, "ops_burden": 1, "ethics": 2, "geo_control": true, "sticky_sessions": true,
+      "confidence": "low",
+      "sources": ["https://dataimpulse.com/blog/oxylabs-pricing-explained/"],
+      "notes": "Enterprise-grade with matching pricing and contract friction.",
+      "flags": ["plan-floor"]
+    },
+    {
+      "id": "decodo-api", "name": "Decodo Web Scraping API", "category": "unblocker-api",
+      "pricing_model": "per_1k_req", "unit_price": 2.0, "plan_min_mo": 29,
+      "success_pct": 88, "success_source": "vendor",
+      "layers_fixed": ["tls", "http2", "js", "behavior", "ip_rep", "captcha"],
+      "integration": 1, "ops_burden": 1, "ethics": 3, "geo_control": true, "sticky_sessions": true,
+      "confidence": "low",
+      "sources": ["https://brightdata.com/blog/web-data/best-web-scraping-apis"],
+      "notes": "$29/mo entry, the lowest plan floor among the established unblockers.",
+      "flags": ["plan-floor"]
+    },
+    {
+      "id": "scrappey", "name": "Scrappey", "category": "unblocker-api",
+      "pricing_model": "per_1k_req", "unit_price": 1.0, "plan_min_mo": 0,
+      "success_pct": 85, "success_source": "vendor",
+      "layers_fixed": ["tls", "http2", "js", "behavior", "ip_rep", "captcha"],
+      "integration": 1, "ops_burden": 1, "ethics": 3, "geo_control": true, "sticky_sessions": true,
+      "confidence": "low",
+      "sources": ["https://scrappey.com/ai-web-access"],
+      "notes": "From $0.001 per request on pay-per-success with no monthly floor — unusually friendly to a workload this size. Smaller operator; verify before depending on it.",
+      "flags": ["no-plan-floor", "small-operator"]
+    },
+    {
+      "id": "hasdata", "name": "HasData", "category": "unblocker-api",
+      "pricing_model": "per_1k_req", "unit_price": 0.5, "plan_min_mo": 29,
+      "success_pct": 80, "success_source": "vendor",
+      "layers_fixed": ["tls", "http2", "js", "ip_rep", "captcha"],
+      "integration": 1, "ops_burden": 1, "ethics": 3, "geo_control": true, "sticky_sessions": false,
+      "confidence": "low",
+      "sources": ["https://scrape.do/blog/zenrows-alternatives/"],
+      "notes": "Among the lowest effective CPM in the category at scale ($0.08 quoted at volume).",
+      "flags": ["plan-floor"]
+    },
+    {
+      "id": "firecrawl", "name": "Firecrawl", "category": "unblocker-api",
+      "pricing_model": "per_1k_req", "unit_price": 3.0, "plan_min_mo": 19,
+      "success_pct": 78, "success_source": "estimated",
+      "layers_fixed": ["tls", "http2", "js", "ip_rep"],
+      "integration": 1, "ops_burden": 1, "ethics": 2, "geo_control": false, "sticky_sessions": false,
+      "confidence": "low",
+      "sources": ["https://www.firecrawl.dev/blog/best-web-scraping-api"],
+      "notes": "Built for LLM ingestion — returns clean markdown rather than raw HTML, which removes a parsing step for an agent. Weaker on the hardest anti-bot targets than the dedicated unblockers.",
+      "flags": ["llm-native"]
+    },
+
+    {
+      "id": "browserbase", "name": "Browserbase", "category": "browser-infra",
+      "pricing_model": "per_hour", "unit_price": 0.11, "plan_min_mo": 20,
+      "success_pct": 42, "success_source": "independent",
+      "layers_fixed": ["tls", "http2", "js", "behavior"],
+      "integration": 1, "ops_burden": 1, "ethics": 2, "geo_control": true, "sticky_sessions": true,
+      "confidence": "medium",
+      "sources": ["https://browser-use.com/posts/web-scraping-guide-2026", "https://apiscout.dev/guides/browserbase-vs-steel-vs-hyperbrowser-browser-infrastructure-2026"],
+      "notes": "42% stealth success on the Browser Use benchmark across 71 anti-bot-protected sites — the weakest measured result among managed browsers, despite being the best-known. $20/mo Developer plan, ~$0.10-0.12/browser-hour, proxies metered separately on top.",
+      "flags": ["proxy-billed-separately"]
+    },
+    {
+      "id": "browseruse-cloud", "name": "Browser Use Cloud", "category": "browser-infra",
+      "pricing_model": "per_hour", "unit_price": 0.15, "plan_min_mo": 30,
+      "success_pct": 81, "success_source": "independent",
+      "layers_fixed": ["tls", "http2", "js", "behavior", "ip_rep"],
+      "integration": 1, "ops_burden": 1, "ethics": 2, "geo_control": true, "sticky_sessions": true,
+      "confidence": "medium",
+      "sources": ["https://browser-use.com/posts/web-scraping-guide-2026"],
+      "notes": "81% on its own 71-site stealth benchmark, nearly double Browserbase's 42%. Self-published benchmark, so treat the margin with some caution — but it is the same test run across both.",
+      "flags": ["self-published-benchmark"]
+    },
+    {
+      "id": "hyperbrowser", "name": "Hyperbrowser", "category": "browser-infra",
+      "pricing_model": "per_hour", "unit_price": 0.10, "plan_min_mo": 30,
+      "success_pct": 70, "success_source": "estimated",
+      "layers_fixed": ["tls", "http2", "js", "behavior", "ip_rep"],
+      "integration": 1, "ops_burden": 1, "ethics": 2, "geo_control": true, "sticky_sessions": true,
+      "confidence": "low",
+      "sources": ["https://apiscout.dev/guides/browserbase-vs-steel-vs-hyperbrowser-browser-infrastructure-2026"],
+      "notes": "$0.10/hour session plus $0.02 per agent step, from a $30/mo floor. The per-step charge suits agent workloads specifically.",
+      "flags": ["per-step-billing"]
+    },
+    {
+      "id": "steel", "name": "Steel.dev (self-hosted)", "category": "browser-infra",
+      "pricing_model": "free", "unit_price": 0, "plan_min_mo": 0,
+      "success_pct": 55, "success_source": "estimated",
+      "layers_fixed": ["tls", "http2", "js", "behavior"],
+      "integration": 3, "ops_burden": 4, "ethics": 1, "geo_control": false, "sticky_sessions": true,
+      "confidence": "low",
+      "sources": ["https://apiscout.dev/guides/browserbase-vs-steel-vs-hyperbrowser-browser-infrastructure-2026"],
+      "notes": "Open source and free — you pay only for hosting, and it runs on Jod's own VPS. No managed stealth or residential egress, so pair it with an ISP proxy.",
+      "flags": ["free", "pairs-with-proxy"]
+    },
+    {
+      "id": "stack-camoufox-isp", "name": "STACK: Camoufox + Webshare ISP", "category": "self-hosted",
+      "pricing_model": "per_ip_mo", "unit_price": 0.30, "plan_min_mo": 0,
+      "success_pct": 88, "success_source": "estimated",
+      "layers_fixed": ["tls", "http2", "js", "behavior", "ip_rep"],
+      "integration": 2, "ops_burden": 3, "ethics": 1, "geo_control": true, "sticky_sessions": true,
+      "confidence": "low",
+      "sources": ["https://ianlpaterson.com/blog/anti-detect-browser-benchmark-patchright-nodriver-curl-cffi/", "https://aimultiple.com/isp-proxies"],
+      "notes": "COMPOSED, NOT MEASURED. Camoufox (best-measured free stealth browser, 4 layers) egressing through 10 ISP proxy IPs (~$3/mo, fixes ip_rep). Covers 5 of 6 layers for the price of a coffee. The 88% is an estimate from combining two separately-measured figures — no benchmark tested this pairing.",
+      "flags": ["composed-estimate", "free-software"]
+    },
+    {
+      "id": "stack-patchright-isp", "name": "STACK: Patchright + Decodo ISP", "category": "self-hosted",
+      "pricing_model": "per_ip_mo", "unit_price": 0.27, "plan_min_mo": 0,
+      "success_pct": 84, "success_source": "estimated",
+      "layers_fixed": ["tls", "http2", "js", "behavior", "ip_rep"],
+      "integration": 1, "ops_burden": 3, "ethics": 1, "geo_control": true, "sticky_sessions": true,
+      "confidence": "low",
+      "sources": ["https://ianlpaterson.com/blog/anti-detect-browser-benchmark-patchright-nodriver-curl-cffi/", "https://aimultiple.com/isp-proxies"],
+      "notes": "COMPOSED, NOT MEASURED. Same shape as the Camoufox stack but a drop-in for existing Playwright code, so the integration cost is near zero. Slightly lower ceiling: Patchright patches at the CDP layer where Camoufox patches Firefox's C++.",
+      "flags": ["composed-estimate", "free-software"]
+    },
+    {
+      "id": "stack-camoufox-res", "name": "STACK: Camoufox + IPRoyal Residential", "category": "self-hosted",
+      "pricing_model": "per_gb", "unit_price": 4.9, "plan_min_mo": 0,
+      "success_pct": 92, "success_source": "estimated",
+      "layers_fixed": ["tls", "http2", "js", "behavior", "ip_rep"],
+      "integration": 2, "ops_burden": 3, "ethics": 2, "geo_control": true, "sticky_sessions": true,
+      "confidence": "low",
+      "sources": ["https://ianlpaterson.com/blog/anti-detect-browser-benchmark-patchright-nodriver-curl-cffi/", "https://aimultiple.com/residential-proxy-providers"],
+      "notes": "COMPOSED, NOT MEASURED. Rotating residential IPs instead of static ISP ones — higher trust and defeats rate-limits per IP, but metered per GB so cost scales with traffic rather than sitting flat.",
+      "flags": ["composed-estimate", "free-software"]
+    },
+    {
+      "id": "stack-home-camoufox", "name": "STACK: Camoufox + home tunnel", "category": "self-hosted",
+      "pricing_model": "free", "unit_price": 0, "plan_min_mo": 0,
+      "success_pct": 93, "success_source": "estimated",
+      "layers_fixed": ["tls", "http2", "js", "behavior", "ip_rep"],
+      "integration": 3, "ops_burden": 4, "ethics": 1, "geo_control": false, "sticky_sessions": true,
+      "confidence": "low",
+      "sources": ["https://www.joinmassive.com/blog/why-ai-agents-get-blocked-on-datacenter-ips-and-how-to-fix-it"],
+      "notes": "COMPOSED, NOT MEASURED. Genuinely free and genuinely residential: a real consumer IP with perfect consent, behind the best free stealth browser. The catches are structural — one IP (so rate-limitable and correlatable), your home uplink, your ISP's ToS, and Jod's browsing dies when your router reboots.",
+      "flags": ["composed-estimate", "free-software", "single-ip", "ties-uptime-to-home"]
+    },
+    {
+      "id": "stack-curlcffi-isp", "name": "STACK: curl_cffi + Webshare ISP", "category": "self-hosted",
+      "pricing_model": "per_ip_mo", "unit_price": 0.30, "plan_min_mo": 0,
+      "success_pct": 62, "success_source": "estimated",
+      "layers_fixed": ["tls", "http2", "ip_rep"],
+      "integration": 1, "ops_burden": 2, "ethics": 1, "geo_control": true, "sticky_sessions": false,
+      "confidence": "low",
+      "sources": ["https://scrapfly.io/blog/posts/curl-impersonate-scrape-chrome-firefox-tls-http2-fingerprint", "https://aimultiple.com/isp-proxies"],
+      "notes": "COMPOSED, NOT MEASURED. The cheap, fast tier: correct TLS fingerprint plus a clean IP, with no browser to run. Milliseconds and megabytes rather than seconds and hundreds of megabytes. Fails anything with a JS challenge or Turnstile, so it is the fast path in a tiered setup, not the whole answer.",
+      "flags": ["composed-estimate", "free-software", "no-js"]
+    },
+    {
+      "id": "anchor", "name": "Anchor Browser", "category": "browser-infra",
+      "pricing_model": "per_hour", "unit_price": 0.15, "plan_min_mo": 30,
+      "success_pct": 70, "success_source": "estimated",
+      "layers_fixed": ["tls", "http2", "js", "behavior", "ip_rep"],
+      "integration": 1, "ops_burden": 1, "ethics": 2, "geo_control": true, "sticky_sessions": true,
+      "confidence": "low",
+      "sources": ["https://o-mega.ai/articles/top-10-anchor-browser-alternatives-2026"],
+      "notes": "Managed browser aimed at AI agents, with authenticated-session handling.",
+      "flags": []
+    }
+  ]
+}
