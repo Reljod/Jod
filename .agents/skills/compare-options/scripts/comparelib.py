@@ -112,6 +112,7 @@ def passes_filters(candidate, filters):
       min_<field> / max_<field>   numeric bounds
       require_<field>             value must be in the given list
       require_true                list of fields that must be truthy
+      exclude_<field>             value must NOT be in the given list
       exclude_flags               flag prefixes that disqualify
 
     Flags are checked first so that when a candidate fails several rules, the
@@ -147,6 +148,11 @@ def passes_filters(candidate, filters):
             field = key[8:]
             if field in candidate and candidate[field] not in want:
                 return False, f"{field}={candidate[field]!r} not in {want}"
+
+        elif key.startswith("exclude_"):
+            field = key[8:]
+            if field in candidate and candidate[field] in want:
+                return False, f"{field}={candidate[field]!r} is excluded"
 
     return True, ""
 

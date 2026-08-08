@@ -4,3 +4,9 @@
 # other cannot be reproduced later because it measures a moment on a network.
 out/scores-*.json
 out/scores-*.csv
+
+# check_stock.py output. Not tracked, unlike netcheck.json, because it decays
+# rather than dates: a stock reading is worthless a week later, and 54 of its 60
+# rows say "no-markers" (meaning "learned nothing"). The findings that mattered
+# are written into REPORT.md and stamped per row as `stock_checked`.
+out/stock-check.json

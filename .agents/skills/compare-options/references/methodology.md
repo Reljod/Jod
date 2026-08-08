@@ -108,6 +108,48 @@ something. A report stating "verification moved four rows, here they are" is
 far more trustworthy than one implying every figure was right first time,
 because the reader can see the process actually had teeth.
 
+## Availability: the option that does not exist
+
+The methodology above has a blind spot large enough to invalidate a whole
+study, and it was found the hard way.
+
+A VPS comparison built with this skill recommended a host at $6.00/mo. The host
+had nothing to sell: every plan on its order page read *"Out of Stock"* and all
+six regions reported *"No Available Plans"*. The $6.00 came from a homepage
+banner reading *"Starting at $6.00/month"* — not a plan, a rate card. The row was
+annotated "VERIFIED against the live site", and that was true. The wrong page had
+been verified.
+
+Pulling that thread found the same class of error in three more rows. Prices had
+been recorded from **promotional SKUs** and from **smaller tiers than the row
+claimed**, understating cost by as much as **6.8×**. Six providers were checked;
+six were wrong.
+
+Three lessons generalise beyond hosting:
+
+1. **Purchasability is a filter, not a score.** An option you cannot acquire is
+   not a cheap option. It must be excluded before scoring, exactly like a
+   sanctioned vendor or an unsupported architecture — otherwise a weighted
+   average will happily rank a sold-out product first, since being unavailable
+   improves none of its columns.
+
+2. **Record where the price came from.** A promo is not a lie, but it expires,
+   sells out, and often has different specs from the standing plan sharing its
+   name. Rank on the standing catalogue and keep the promo in `notes`. A large
+   gap between the two is itself a finding about the vendor.
+
+3. **Propagated uncertainty does not cover this.** The Monte Carlo perturbs a
+   low-confidence price by ±25%, which models *noise* in a number you read
+   correctly. It cannot model reading the *wrong number*. A 6.8× error is not in
+   the distribution. This is why §Verification cannot be skipped on the strength
+   of good error bars — the two mechanisms address different failures, and only
+   one of them requires you to open the page.
+
+The structural fix, when most rows stay unchecked: add a **verified-only
+profile** — same weights, restricted to rows priced from a standing catalogue —
+and recommend from that, presenting the broad ranking as a queue of candidates
+to verify. A three-row honest answer beats a sixty-row confident one.
+
 ## Separating generated numbers from written judgement
 
 Two files, one rule: **the script owns every number, the human owns every
