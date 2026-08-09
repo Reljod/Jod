@@ -85,6 +85,8 @@ const PROTECTED_GETS: &[&str] = &[
     "/v1/agents/some-id/events",
     "/v1/agents/some-id/stream",
     "/v1/events",
+    "/v1/teams",
+    "/v1/teams/crew",
 ];
 
 #[tokio::test]
@@ -506,4 +508,101 @@ async fn signing_out_clears_the_cookie_and_stops_it_working() {
         StatusCode::UNAUTHORIZED,
         "the revoked cookie still worked"
     );
+}
+
+// ─── teams ──────────────────────────────────────────────────────────────────
+//
+// Read-only by design: the panel a remote client draws is a *view* of a board
+// that agents on the box play on. These prove the view is mounted, scoped, and
+// honest about a team that does not exist.
+
+/// A harness whose service has a real (temporary) database behind it, which is
+/// the only way a team can exist at all — `Jod::new()` keeps nothing.
+fn persistent_harness(store: std::sync::Arc<jod_core::store::Store>) -> Harness {
+    let mut tokens = TokenStore::default();
+    let read_token = tokens.issue("phone", Scope::Read);
+    let write_token = tokens.issue("laptop", Scope::Write);
+    let audit = AuditLog::new(std::env::temp_dir().join("jod-api-test-audit.jsonl"));
+    let state = AppState::new(
+        jod_core::Jod::with_store(store),
+        Config::default(),
+        tokens,
+        audit,
+    );
+    Harness {
+        app: jod_api::router(state),
+        read_token,
+        write_token,
+    }
+}
+
+fn store_with_a_team() -> std::sync::Arc<jod_core::store::Store> {
+    let store = std::sync::Arc::new(jod_core::store::Store::in_memory().unwrap());
+    store
+        .join_team("crew", "scout", jod_core::HarnessKind::Agy, "research")
+        .unwrap();
+    store.add_team_task("crew", "t1", "read the docs").unwrap();
+    store
+}
+
+#[tokio::test]
+async fn a_read_token_may_list_teams() {
+    let h = persistent_harness(store_with_a_team());
+    let (status, body, _) = send(&h.app, get("/v1/teams", Some(&h.read_token))).await;
+    assert_eq!(status, StatusCode::OK);
+    let names: Vec<String> = serde_json::from_slice(&body).unwrap();
+    assert_eq!(names, vec!["crew".to_string()]);
+}
+
+#[tokio::test]
+async fn a_team_answers_with_its_roster_and_its_board_together() {
+    let h = persistent_harness(store_with_a_team());
+    let (status, body, _) = send(&h.app, get("/v1/teams/crew", Some(&h.read_token))).await;
+    assert_eq!(status, StatusCode::OK);
+    let view: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(view["team"], "crew");
+    assert_eq!(view["members"][0]["name"], "scout");
+    // The harness is the wire id, not the label: a client that switches on it
+    // must see the same spelling `/v1/agents` uses.
+    assert_eq!(view["members"][0]["harness"], "agy");
+    assert_eq!(view["members"][0]["status"], "ready");
+    assert_eq!(view["tasks"][0]["title"], "read the docs");
+    assert_eq!(view["tasks"][0]["status"], "open");
+}
+
+/// A mistyped name must not look like an idle team — the panel shows very
+/// different things for the two.
+#[tokio::test]
+async fn an_unknown_team_is_a_404_rather_than_an_empty_board() {
+    let h = persistent_harness(store_with_a_team());
+    let (status, body, _) = send(&h.app, get("/v1/teams/nope", Some(&h.read_token))).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let problem: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(problem["status"], 404);
+}
+
+/// Without a store there is nowhere a team could live, and saying "none" is
+/// more honest than failing a panel that is only asking what exists.
+#[tokio::test]
+async fn a_service_with_no_store_reports_no_teams_rather_than_erroring() {
+    let h = default_harness();
+    let (status, body, _) = send(&h.app, get("/v1/teams", Some(&h.read_token))).await;
+    assert_eq!(status, StatusCode::OK);
+    let names: Vec<String> = serde_json::from_slice(&body).unwrap();
+    assert!(names.is_empty());
+
+    let (status, _, _) = send(&h.app, get("/v1/teams/crew", Some(&h.read_token))).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+/// The write token is unused by these routes on purpose; this pins that a
+/// read token is genuinely sufficient, so a phone holding one is not silently
+/// locked out of the panel.
+#[tokio::test]
+async fn watching_a_team_needs_no_write_scope() {
+    let h = persistent_harness(store_with_a_team());
+    let (read, _, _) = send(&h.app, get("/v1/teams/crew", Some(&h.read_token))).await;
+    let (write, _, _) = send(&h.app, get("/v1/teams/crew", Some(&h.write_token))).await;
+    assert_eq!(read, StatusCode::OK);
+    assert_eq!(write, StatusCode::OK);
 }

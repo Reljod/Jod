@@ -126,6 +126,9 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/agents/{id}/stream", get(sse::agent_stream))
         .route("/v1/events", get(sse::all_agents_stream))
         .route("/v1/report", get(routes::report))
+        // Read-only: a phone watches a team, it does not join one.
+        .route("/v1/teams", get(routes::list_teams))
+        .route("/v1/teams/{team}", get(routes::get_team))
         .route("/v1/session", axum::routing::delete(routes::end_session))
         // Layers apply to the routes declared above them. The state is captured
         // by the closure rather than extracted, which keeps the middleware's
