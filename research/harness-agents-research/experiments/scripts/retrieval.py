@@ -182,7 +182,10 @@ class Index:
         mul = _mul
         doc_vec = self.doc_vec
         scored = [(cid, sum(map(mul, qv, doc_vec[cid]))) for cid in self.ids]
-        scored.sort(key=lambda x: -x[1])
+        # Tie-break on id: without it, equal scores resolve by set-iteration
+        # order, which Python randomises per process and makes the artefacts
+        # unreproducible run to run.
+        scored.sort(key=lambda x: (-x[1], x[0]))
         self._dense_cache[qid] = scored
         return scored
 
@@ -277,7 +280,7 @@ def fuse(
             break
 
     out = [(cid, vw * v[0] + tw * v[1]) for cid, v in merged.items()]
-    out.sort(key=lambda x: -x[1])
+    out.sort(key=lambda x: (-x[1], x[0]))
     return out
 
 
@@ -301,7 +304,9 @@ def expansion_terms(
             if t in qt:
                 continue
             best[t] = max(best.get(t, 0.0), index.idf.get(t, 0.0))
-    return [t for t, _ in sorted(best.items(), key=lambda x: -x[1])[:top_n]]
+    # Secondary key on the term for the same reason as the score sorts above:
+    # equal-idf ties must not depend on set-iteration order.
+    return [t for t, _ in sorted(best.items(), key=lambda x: (-x[1], x[0]))[:top_n]]
 
 
 def mmr(

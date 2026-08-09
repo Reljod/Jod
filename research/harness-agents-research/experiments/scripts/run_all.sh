@@ -24,4 +24,17 @@ python3 scripts/stability.py
 echo "==> rendering out/RANKINGS.md"
 python3 scripts/report.py
 
-echo "done. see out/RANKINGS.md and FINDINGS.md"
+echo "==> round 2: multi-workspace corpus"
+python3 scripts/corpus_scoped.py
+
+echo "==> round 2: scoring the lab mechanisms"
+python3 scripts/evaluate_lab.py
+
+echo "==> round 2: security sweep + seed stability"
+python3 scripts/sweep_lab.py
+
+echo "==> rendering out/RANKINGS-2.md"
+python3 scripts/report_lab.py
+
+echo "done. round 1: out/RANKINGS.md + FINDINGS.md"
+echo "      round 2: out/RANKINGS-2.md + FINDINGS-2.md"

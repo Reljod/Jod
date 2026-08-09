@@ -191,7 +191,7 @@ class Hybrid(Strategy):
             if self.decay:
                 s *= temporal_decay(max(0, query["day"] - c["day"]))
             out.append((cid, s))
-        out.sort(key=lambda x: -x[1])
+        out.sort(key=lambda x: (-x[1], x[0]))
         return out
 
     def retrieve(self, query: dict) -> list[str]:
@@ -466,7 +466,7 @@ class TwoPlane(VersionedFactStore):
         for cid, score in ranked:
             c = self.index.by_id[cid]
             scored.append((cid, score * importance_multiplier(c.get("importance"))))
-        scored.sort(key=lambda x: -x[1])
+        scored.sort(key=lambda x: (-x[1], x[0]))
         if not scored:
             return []
         if scored[0][0] in retractions:

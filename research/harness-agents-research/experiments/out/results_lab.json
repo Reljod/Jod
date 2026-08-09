@@ -1,0 +1,2084 @@
+{
+ "seed": 20260809,
+ "n_chunks": 1149,
+ "n_queries": 171,
+ "workspaces": [
+  "ws-alpha",
+  "ws-beta"
+ ],
+ "evidence_budget": 400,
+ "strategies": {
+  "hybrid_noscope": {
+   "strategy": "hybrid_noscope",
+   "modes": {
+    "natural": {
+     "composite": 0.3876700680272109,
+     "leak": 1.0,
+     "leak_fact": 0.8011695906432749,
+     "wrong": 0.38011695906432746,
+     "by_type": {
+      "stable_recall": {
+       "score": 0.25,
+       "lenient": 0.0,
+       "leak": 1.0,
+       "leak_fact": 0.7,
+       "wrong": 0.35,
+       "asr": 0.0,
+       "n": 40
+      },
+      "scoped_current": {
+       "score": 0.14285714285714285,
+       "lenient": 0.23214285714285715,
+       "leak": 1.0,
+       "leak_fact": 0.7857142857142857,
+       "wrong": 0.42857142857142855,
+       "asr": 0.0,
+       "n": 56
+      },
+      "historical_value": {
+       "score": 0.13333333333333333,
+       "lenient": 0.4,
+       "leak": 1.0,
+       "leak_fact": 0.8,
+       "wrong": 0.3333333333333333,
+       "asr": 0.0,
+       "n": 15
+      },
+      "authored": {
+       "score": 0.5625,
+       "lenient": 0.0,
+       "leak": 1.0,
+       "leak_fact": 1.0,
+       "wrong": 0.3125,
+       "asr": 0.0,
+       "n": 16
+      },
+      "retraction": {
+       "score": 0.75,
+       "lenient": 0.0,
+       "leak": 1.0,
+       "leak_fact": 0.8125,
+       "wrong": 0.25,
+       "asr": 0.0,
+       "n": 16
+      },
+      "redacted_historical": {
+       "score": 0.625,
+       "lenient": 0.0,
+       "leak": 1.0,
+       "leak_fact": 0.875,
+       "wrong": 0.375,
+       "asr": 0.0,
+       "n": 16
+      },
+      "poison": {
+       "score": 0.25,
+       "lenient": 0.0,
+       "leak": 1.0,
+       "leak_fact": 0.8333333333333334,
+       "wrong": 0.5833333333333334,
+       "asr": 0.08333333333333333,
+       "n": 12
+      }
+     }
+    },
+    "budgeted": {
+     "composite": 0.3876700680272109,
+     "leak": 1.0,
+     "leak_fact": 0.8011695906432749,
+     "wrong": 0.38011695906432746,
+     "by_type": {
+      "stable_recall": {
+       "score": 0.25,
+       "lenient": 0.0,
+       "leak": 1.0,
+       "leak_fact": 0.7,
+       "wrong": 0.35,
+       "asr": 0.0,
+       "n": 40
+      },
+      "scoped_current": {
+       "score": 0.14285714285714285,
+       "lenient": 0.23214285714285715,
+       "leak": 1.0,
+       "leak_fact": 0.7857142857142857,
+       "wrong": 0.42857142857142855,
+       "asr": 0.0,
+       "n": 56
+      },
+      "historical_value": {
+       "score": 0.13333333333333333,
+       "lenient": 0.4,
+       "leak": 1.0,
+       "leak_fact": 0.8,
+       "wrong": 0.3333333333333333,
+       "asr": 0.0,
+       "n": 15
+      },
+      "authored": {
+       "score": 0.5625,
+       "lenient": 0.0,
+       "leak": 1.0,
+       "leak_fact": 1.0,
+       "wrong": 0.3125,
+       "asr": 0.0,
+       "n": 16
+      },
+      "retraction": {
+       "score": 0.75,
+       "lenient": 0.0,
+       "leak": 1.0,
+       "leak_fact": 0.8125,
+       "wrong": 0.25,
+       "asr": 0.0,
+       "n": 16
+      },
+      "redacted_historical": {
+       "score": 0.625,
+       "lenient": 0.0,
+       "leak": 1.0,
+       "leak_fact": 0.875,
+       "wrong": 0.375,
+       "asr": 0.0,
+       "n": 16
+      },
+      "poison": {
+       "score": 0.25,
+       "lenient": 0.0,
+       "leak": 1.0,
+       "leak_fact": 0.8333333333333334,
+       "wrong": 0.5833333333333334,
+       "asr": 0.08333333333333333,
+       "n": 12
+      }
+     }
+    }
+   },
+   "mean_tokens": 85.14035087719299
+  },
+  "hybrid_scope_boost": {
+   "strategy": "hybrid_scope_boost",
+   "modes": {
+    "natural": {
+     "composite": 0.43205782312925173,
+     "leak": 0.9883040935672515,
+     "leak_fact": 0.7894736842105263,
+     "wrong": 0.38596491228070173,
+     "by_type": {
+      "stable_recall": {
+       "score": 0.275,
+       "lenient": 0.0,
+       "leak": 1.0,
+       "leak_fact": 0.7,
+       "wrong": 0.35,
+       "asr": 0.0,
+       "n": 40
+      },
+      "scoped_current": {
+       "score": 0.17857142857142858,
+       "lenient": 0.32142857142857145,
+       "leak": 0.9642857142857143,
+       "leak_fact": 0.7678571428571429,
+       "wrong": 0.42857142857142855,
+       "asr": 0.0,
+       "n": 56
+      },
+      "historical_value": {
+       "score": 0.13333333333333333,
+       "lenient": 0.4,
+       "leak": 1.0,
+       "leak_fact": 0.7333333333333333,
+       "wrong": 0.3333333333333333,
+       "asr": 0.0,
+       "n": 15
+      },
+      "authored": {
+       "score": 0.625,
+       "lenient": 0.0,
+       "leak": 1.0,
+       "leak_fact": 1.0,
+       "wrong": 0.3125,
+       "asr": 0.0,
+       "n": 16
+      },
+      "retraction": {
+       "score": 0.6875,
+       "lenient": 0.0,
+       "leak": 1.0,
+       "leak_fact": 0.8125,
+       "wrong": 0.3125,
+       "asr": 0.0,
+       "n": 16
+      },
+      "redacted_historical": {
+       "score": 0.625,
+       "lenient": 0.0,
+       "leak": 1.0,
+       "leak_fact": 0.875,
+       "wrong": 0.375,
+       "asr": 0.0,
+       "n": 16
+      },
+      "poison": {
+       "score": 0.5,
+       "lenient": 0.0,
+       "leak": 1.0,
+       "leak_fact": 0.8333333333333334,
+       "wrong": 0.5833333333333334,
+       "asr": 0.16666666666666666,
+       "n": 12
+      }
+     }
+    },
+    "budgeted": {
+     "composite": 0.43205782312925173,
+     "leak": 0.9883040935672515,
+     "leak_fact": 0.7894736842105263,
+     "wrong": 0.38596491228070173,
+     "by_type": {
+      "stable_recall": {
+       "score": 0.275,
+       "lenient": 0.0,
+       "leak": 1.0,
+       "leak_fact": 0.7,
+       "wrong": 0.35,
+       "asr": 0.0,
+       "n": 40
+      },
+      "scoped_current": {
+       "score": 0.17857142857142858,
+       "lenient": 0.32142857142857145,
+       "leak": 0.9642857142857143,
+       "leak_fact": 0.7678571428571429,
+       "wrong": 0.42857142857142855,
+       "asr": 0.0,
+       "n": 56
+      },
+      "historical_value": {
+       "score": 0.13333333333333333,
+       "lenient": 0.4,
+       "leak": 1.0,
+       "leak_fact": 0.7333333333333333,
+       "wrong": 0.3333333333333333,
+       "asr": 0.0,
+       "n": 15
+      },
+      "authored": {
+       "score": 0.625,
+       "lenient": 0.0,
+       "leak": 1.0,
+       "leak_fact": 1.0,
+       "wrong": 0.3125,
+       "asr": 0.0,
+       "n": 16
+      },
+      "retraction": {
+       "score": 0.6875,
+       "lenient": 0.0,
+       "leak": 1.0,
+       "leak_fact": 0.8125,
+       "wrong": 0.3125,
+       "asr": 0.0,
+       "n": 16
+      },
+      "redacted_historical": {
+       "score": 0.625,
+       "lenient": 0.0,
+       "leak": 1.0,
+       "leak_fact": 0.875,
+       "wrong": 0.375,
+       "asr": 0.0,
+       "n": 16
+      },
+      "poison": {
+       "score": 0.5,
+       "lenient": 0.0,
+       "leak": 1.0,
+       "leak_fact": 0.8333333333333334,
+       "wrong": 0.5833333333333334,
+       "asr": 0.16666666666666666,
+       "n": 12
+      }
+     }
+    }
+   },
+   "mean_tokens": 86.67251461988305
+  },
+  "hybrid_scope_filter": {
+   "strategy": "hybrid_scope_filter",
+   "modes": {
+    "natural": {
+     "composite": 0.4755102040816327,
+     "leak": 0.0,
+     "leak_fact": 0.0,
+     "wrong": 0.14035087719298245,
+     "by_type": {
+      "stable_recall": {
+       "score": 0.45,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 40
+      },
+      "scoped_current": {
+       "score": 0.17857142857142858,
+       "lenient": 0.5178571428571429,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.10714285714285714,
+       "asr": 0.0,
+       "n": 56
+      },
+      "historical_value": {
+       "score": 0.2,
+       "lenient": 0.6,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.13333333333333333,
+       "asr": 0.0,
+       "n": 15
+      },
+      "authored": {
+       "score": 0.6875,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 16
+      },
+      "retraction": {
+       "score": 0.5625,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.4375,
+       "asr": 0.0,
+       "n": 16
+      },
+      "redacted_historical": {
+       "score": 0.5,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.5,
+       "asr": 0.0,
+       "n": 16
+      },
+      "poison": {
+       "score": 0.75,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.08333333333333333,
+       "asr": 0.16666666666666666,
+       "n": 12
+      }
+     }
+    },
+    "budgeted": {
+     "composite": 0.4755102040816327,
+     "leak": 0.0,
+     "leak_fact": 0.0,
+     "wrong": 0.14035087719298245,
+     "by_type": {
+      "stable_recall": {
+       "score": 0.45,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 40
+      },
+      "scoped_current": {
+       "score": 0.17857142857142858,
+       "lenient": 0.5178571428571429,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.10714285714285714,
+       "asr": 0.0,
+       "n": 56
+      },
+      "historical_value": {
+       "score": 0.2,
+       "lenient": 0.6,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.13333333333333333,
+       "asr": 0.0,
+       "n": 15
+      },
+      "authored": {
+       "score": 0.6875,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 16
+      },
+      "retraction": {
+       "score": 0.5625,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.4375,
+       "asr": 0.0,
+       "n": 16
+      },
+      "redacted_historical": {
+       "score": 0.5,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.5,
+       "asr": 0.0,
+       "n": 16
+      },
+      "poison": {
+       "score": 0.75,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.08333333333333333,
+       "asr": 0.16666666666666666,
+       "n": 12
+      }
+     }
+    }
+   },
+   "mean_tokens": 87.90058479532163
+  },
+  "control_scoped": {
+   "strategy": "control_scoped",
+   "modes": {
+    "natural": {
+     "composite": 0.6945578231292517,
+     "leak": 0.0,
+     "leak_fact": 0.0,
+     "wrong": 0.06432748538011696,
+     "by_type": {
+      "stable_recall": {
+       "score": 0.675,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 40
+      },
+      "scoped_current": {
+       "score": 0.6785714285714286,
+       "lenient": 0.6785714285714286,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 56
+      },
+      "historical_value": {
+       "score": 0.8,
+       "lenient": 0.8,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 15
+      },
+      "authored": {
+       "score": 0.5625,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 16
+      },
+      "retraction": {
+       "score": 0.875,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.125,
+       "asr": 0.0,
+       "n": 16
+      },
+      "redacted_historical": {
+       "score": 0.4375,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.5625,
+       "asr": 0.0,
+       "n": 16
+      },
+      "poison": {
+       "score": 0.8333333333333334,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 12
+      }
+     }
+    },
+    "budgeted": {
+     "composite": 0.6945578231292517,
+     "leak": 0.0,
+     "leak_fact": 0.0,
+     "wrong": 0.06432748538011696,
+     "by_type": {
+      "stable_recall": {
+       "score": 0.675,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 40
+      },
+      "scoped_current": {
+       "score": 0.6785714285714286,
+       "lenient": 0.6785714285714286,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 56
+      },
+      "historical_value": {
+       "score": 0.8,
+       "lenient": 0.8,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 15
+      },
+      "authored": {
+       "score": 0.5625,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 16
+      },
+      "retraction": {
+       "score": 0.875,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.125,
+       "asr": 0.0,
+       "n": 16
+      },
+      "redacted_historical": {
+       "score": 0.4375,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.5625,
+       "asr": 0.0,
+       "n": 16
+      },
+      "poison": {
+       "score": 0.8333333333333334,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 12
+      }
+     }
+    }
+   },
+   "mean_tokens": 89.90643274853801
+  },
+  "redact_history": {
+   "strategy": "redact_history",
+   "modes": {
+    "natural": {
+     "composite": 0.7564625850340135,
+     "leak": 0.0,
+     "leak_fact": 0.0,
+     "wrong": 0.017543859649122806,
+     "by_type": {
+      "stable_recall": {
+       "score": 0.675,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 40
+      },
+      "scoped_current": {
+       "score": 0.6785714285714286,
+       "lenient": 0.6785714285714286,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 56
+      },
+      "historical_value": {
+       "score": 0.7333333333333333,
+       "lenient": 0.7333333333333333,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 15
+      },
+      "authored": {
+       "score": 0.5625,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 16
+      },
+      "retraction": {
+       "score": 0.875,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.125,
+       "asr": 0.0,
+       "n": 16
+      },
+      "redacted_historical": {
+       "score": 0.9375,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0625,
+       "asr": 0.0,
+       "n": 16
+      },
+      "poison": {
+       "score": 0.8333333333333334,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 12
+      }
+     }
+    },
+    "budgeted": {
+     "composite": 0.7564625850340135,
+     "leak": 0.0,
+     "leak_fact": 0.0,
+     "wrong": 0.017543859649122806,
+     "by_type": {
+      "stable_recall": {
+       "score": 0.675,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 40
+      },
+      "scoped_current": {
+       "score": 0.6785714285714286,
+       "lenient": 0.6785714285714286,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 56
+      },
+      "historical_value": {
+       "score": 0.7333333333333333,
+       "lenient": 0.7333333333333333,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 15
+      },
+      "authored": {
+       "score": 0.5625,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 16
+      },
+      "retraction": {
+       "score": 0.875,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.125,
+       "asr": 0.0,
+       "n": 16
+      },
+      "redacted_historical": {
+       "score": 0.9375,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0625,
+       "asr": 0.0,
+       "n": 16
+      },
+      "poison": {
+       "score": 0.8333333333333334,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 12
+      }
+     }
+    }
+   },
+   "mean_tokens": 89.58479532163743
+  },
+  "append_supersede": {
+   "strategy": "append_supersede",
+   "modes": {
+    "natural": {
+     "composite": 0.676700680272109,
+     "leak": 0.0,
+     "leak_fact": 0.0,
+     "wrong": 0.06432748538011696,
+     "by_type": {
+      "stable_recall": {
+       "score": 0.675,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 40
+      },
+      "scoped_current": {
+       "score": 0.6785714285714286,
+       "lenient": 0.6785714285714286,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 56
+      },
+      "historical_value": {
+       "score": 0.8,
+       "lenient": 0.8,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 15
+      },
+      "authored": {
+       "score": 0.4375,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 16
+      },
+      "retraction": {
+       "score": 0.875,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.125,
+       "asr": 0.0,
+       "n": 16
+      },
+      "redacted_historical": {
+       "score": 0.4375,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.5625,
+       "asr": 0.0,
+       "n": 16
+      },
+      "poison": {
+       "score": 0.8333333333333334,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 12
+      }
+     }
+    },
+    "budgeted": {
+     "composite": 0.676700680272109,
+     "leak": 0.0,
+     "leak_fact": 0.0,
+     "wrong": 0.06432748538011696,
+     "by_type": {
+      "stable_recall": {
+       "score": 0.675,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 40
+      },
+      "scoped_current": {
+       "score": 0.6785714285714286,
+       "lenient": 0.6785714285714286,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 56
+      },
+      "historical_value": {
+       "score": 0.8,
+       "lenient": 0.8,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 15
+      },
+      "authored": {
+       "score": 0.4375,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 16
+      },
+      "retraction": {
+       "score": 0.875,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.125,
+       "asr": 0.0,
+       "n": 16
+      },
+      "redacted_historical": {
+       "score": 0.4375,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.5625,
+       "asr": 0.0,
+       "n": 16
+      },
+      "poison": {
+       "score": 0.8333333333333334,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 12
+      }
+     }
+    }
+   },
+   "mean_tokens": 71.30409356725146
+  },
+  "rewrite_inplace": {
+   "strategy": "rewrite_inplace",
+   "modes": {
+    "natural": {
+     "composite": 0.571343537414966,
+     "leak": 0.0,
+     "leak_fact": 0.0,
+     "wrong": 0.05847953216374269,
+     "by_type": {
+      "stable_recall": {
+       "score": 0.675,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 40
+      },
+      "scoped_current": {
+       "score": 0.6785714285714286,
+       "lenient": 0.6785714285714286,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 56
+      },
+      "historical_value": {
+       "score": 0.0,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 15
+      },
+      "authored": {
+       "score": 0.4375,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 16
+      },
+      "retraction": {
+       "score": 0.875,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.125,
+       "asr": 0.0,
+       "n": 16
+      },
+      "redacted_historical": {
+       "score": 0.5,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.5,
+       "asr": 0.0,
+       "n": 16
+      },
+      "poison": {
+       "score": 0.8333333333333334,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 12
+      }
+     }
+    },
+    "budgeted": {
+     "composite": 0.571343537414966,
+     "leak": 0.0,
+     "leak_fact": 0.0,
+     "wrong": 0.05847953216374269,
+     "by_type": {
+      "stable_recall": {
+       "score": 0.675,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 40
+      },
+      "scoped_current": {
+       "score": 0.6785714285714286,
+       "lenient": 0.6785714285714286,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 56
+      },
+      "historical_value": {
+       "score": 0.0,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 15
+      },
+      "authored": {
+       "score": 0.4375,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 16
+      },
+      "retraction": {
+       "score": 0.875,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.125,
+       "asr": 0.0,
+       "n": 16
+      },
+      "redacted_historical": {
+       "score": 0.5,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.5,
+       "asr": 0.0,
+       "n": 16
+      },
+      "poison": {
+       "score": 0.8333333333333334,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 12
+      }
+     }
+    }
+   },
+   "mean_tokens": 71.85964912280701
+  },
+  "authored_core": {
+   "strategy": "authored_core",
+   "modes": {
+    "natural": {
+     "composite": 0.694047619047619,
+     "leak": 0.0,
+     "leak_fact": 0.0,
+     "wrong": 0.06432748538011696,
+     "by_type": {
+      "stable_recall": {
+       "score": 0.6,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 40
+      },
+      "scoped_current": {
+       "score": 0.625,
+       "lenient": 0.625,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 56
+      },
+      "historical_value": {
+       "score": 0.8,
+       "lenient": 0.8,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 15
+      },
+      "authored": {
+       "score": 0.9375,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 16
+      },
+      "retraction": {
+       "score": 1.0,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 16
+      },
+      "redacted_historical": {
+       "score": 0.3125,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.6875,
+       "asr": 0.0,
+       "n": 16
+      },
+      "poison": {
+       "score": 0.5833333333333334,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 12
+      }
+     }
+    },
+    "budgeted": {
+     "composite": 0.694047619047619,
+     "leak": 0.0,
+     "leak_fact": 0.0,
+     "wrong": 0.06432748538011696,
+     "by_type": {
+      "stable_recall": {
+       "score": 0.6,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 40
+      },
+      "scoped_current": {
+       "score": 0.625,
+       "lenient": 0.625,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 56
+      },
+      "historical_value": {
+       "score": 0.8,
+       "lenient": 0.8,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 15
+      },
+      "authored": {
+       "score": 0.9375,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 16
+      },
+      "retraction": {
+       "score": 1.0,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 16
+      },
+      "redacted_historical": {
+       "score": 0.3125,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.6875,
+       "asr": 0.0,
+       "n": 16
+      },
+      "poison": {
+       "score": 0.5833333333333334,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 12
+      }
+     }
+    }
+   },
+   "mean_tokens": 204.18713450292398
+  },
+  "abstain_ambiguous": {
+   "strategy": "abstain_ambiguous",
+   "modes": {
+    "natural": {
+     "composite": 0.6945578231292517,
+     "leak": 0.0,
+     "leak_fact": 0.0,
+     "wrong": 0.06432748538011696,
+     "by_type": {
+      "stable_recall": {
+       "score": 0.675,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 40
+      },
+      "scoped_current": {
+       "score": 0.6785714285714286,
+       "lenient": 0.6785714285714286,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 56
+      },
+      "historical_value": {
+       "score": 0.8,
+       "lenient": 0.8,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 15
+      },
+      "authored": {
+       "score": 0.5625,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 16
+      },
+      "retraction": {
+       "score": 0.875,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.125,
+       "asr": 0.0,
+       "n": 16
+      },
+      "redacted_historical": {
+       "score": 0.4375,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.5625,
+       "asr": 0.0,
+       "n": 16
+      },
+      "poison": {
+       "score": 0.8333333333333334,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 12
+      }
+     }
+    },
+    "budgeted": {
+     "composite": 0.6945578231292517,
+     "leak": 0.0,
+     "leak_fact": 0.0,
+     "wrong": 0.06432748538011696,
+     "by_type": {
+      "stable_recall": {
+       "score": 0.675,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 40
+      },
+      "scoped_current": {
+       "score": 0.6785714285714286,
+       "lenient": 0.6785714285714286,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 56
+      },
+      "historical_value": {
+       "score": 0.8,
+       "lenient": 0.8,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 15
+      },
+      "authored": {
+       "score": 0.5625,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 16
+      },
+      "retraction": {
+       "score": 0.875,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.125,
+       "asr": 0.0,
+       "n": 16
+      },
+      "redacted_historical": {
+       "score": 0.4375,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.5625,
+       "asr": 0.0,
+       "n": 16
+      },
+      "poison": {
+       "score": 0.8333333333333334,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 12
+      }
+     }
+    }
+   },
+   "mean_tokens": 89.90643274853801
+  },
+  "abstain_on_noscope": {
+   "strategy": "abstain_on_noscope",
+   "modes": {
+    "natural": {
+     "composite": 0.303656462585034,
+     "leak": 0.4093567251461988,
+     "leak_fact": 0.29239766081871343,
+     "wrong": 0.15789473684210525,
+     "by_type": {
+      "stable_recall": {
+       "score": 0.15,
+       "lenient": 0.0,
+       "leak": 0.35,
+       "leak_fact": 0.25,
+       "wrong": 0.1,
+       "asr": 0.0,
+       "n": 40
+      },
+      "scoped_current": {
+       "score": 0.07142857142857142,
+       "lenient": 0.125,
+       "leak": 0.4642857142857143,
+       "leak_fact": 0.2857142857142857,
+       "wrong": 0.19642857142857142,
+       "asr": 0.0,
+       "n": 56
+      },
+      "historical_value": {
+       "score": 0.13333333333333333,
+       "lenient": 0.13333333333333333,
+       "leak": 0.3333333333333333,
+       "leak_fact": 0.26666666666666666,
+       "wrong": 0.13333333333333333,
+       "asr": 0.0,
+       "n": 15
+      },
+      "authored": {
+       "score": 0.0,
+       "lenient": 0.0,
+       "leak": 0.375,
+       "leak_fact": 0.375,
+       "wrong": 0.0625,
+       "asr": 0.0,
+       "n": 16
+      },
+      "retraction": {
+       "score": 0.875,
+       "lenient": 0.0,
+       "leak": 0.3125,
+       "leak_fact": 0.1875,
+       "wrong": 0.125,
+       "asr": 0.0,
+       "n": 16
+      },
+      "redacted_historical": {
+       "score": 0.8125,
+       "lenient": 0.0,
+       "leak": 0.5,
+       "leak_fact": 0.375,
+       "wrong": 0.1875,
+       "asr": 0.0,
+       "n": 16
+      },
+      "poison": {
+       "score": 0.08333333333333333,
+       "lenient": 0.0,
+       "leak": 0.5,
+       "leak_fact": 0.4166666666666667,
+       "wrong": 0.3333333333333333,
+       "asr": 0.0,
+       "n": 12
+      }
+     }
+    },
+    "budgeted": {
+     "composite": 0.303656462585034,
+     "leak": 0.4093567251461988,
+     "leak_fact": 0.29239766081871343,
+     "wrong": 0.15789473684210525,
+     "by_type": {
+      "stable_recall": {
+       "score": 0.15,
+       "lenient": 0.0,
+       "leak": 0.35,
+       "leak_fact": 0.25,
+       "wrong": 0.1,
+       "asr": 0.0,
+       "n": 40
+      },
+      "scoped_current": {
+       "score": 0.07142857142857142,
+       "lenient": 0.125,
+       "leak": 0.4642857142857143,
+       "leak_fact": 0.2857142857142857,
+       "wrong": 0.19642857142857142,
+       "asr": 0.0,
+       "n": 56
+      },
+      "historical_value": {
+       "score": 0.13333333333333333,
+       "lenient": 0.13333333333333333,
+       "leak": 0.3333333333333333,
+       "leak_fact": 0.26666666666666666,
+       "wrong": 0.13333333333333333,
+       "asr": 0.0,
+       "n": 15
+      },
+      "authored": {
+       "score": 0.0,
+       "lenient": 0.0,
+       "leak": 0.375,
+       "leak_fact": 0.375,
+       "wrong": 0.0625,
+       "asr": 0.0,
+       "n": 16
+      },
+      "retraction": {
+       "score": 0.875,
+       "lenient": 0.0,
+       "leak": 0.3125,
+       "leak_fact": 0.1875,
+       "wrong": 0.125,
+       "asr": 0.0,
+       "n": 16
+      },
+      "redacted_historical": {
+       "score": 0.8125,
+       "lenient": 0.0,
+       "leak": 0.5,
+       "leak_fact": 0.375,
+       "wrong": 0.1875,
+       "asr": 0.0,
+       "n": 16
+      },
+      "poison": {
+       "score": 0.08333333333333333,
+       "lenient": 0.0,
+       "leak": 0.5,
+       "leak_fact": 0.4166666666666667,
+       "wrong": 0.3333333333333333,
+       "asr": 0.0,
+       "n": 12
+      }
+     }
+    }
+   },
+   "mean_tokens": 34.538011695906434
+  },
+  "codex_grep": {
+   "strategy": "codex_grep",
+   "modes": {
+    "natural": {
+     "composite": 0.6023809523809524,
+     "leak": 0.0,
+     "leak_fact": 0.0,
+     "wrong": 0.04678362573099415,
+     "by_type": {
+      "stable_recall": {
+       "score": 0.525,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 40
+      },
+      "scoped_current": {
+       "score": 0.625,
+       "lenient": 0.625,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 56
+      },
+      "historical_value": {
+       "score": 0.06666666666666667,
+       "lenient": 0.13333333333333333,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 15
+      },
+      "authored": {
+       "score": 1.0,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 16
+      },
+      "retraction": {
+       "score": 0.8125,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.1875,
+       "asr": 0.0,
+       "n": 16
+      },
+      "redacted_historical": {
+       "score": 0.6875,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.3125,
+       "asr": 0.0,
+       "n": 16
+      },
+      "poison": {
+       "score": 0.5,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.16666666666666666,
+       "n": 12
+      }
+     }
+    },
+    "budgeted": {
+     "composite": 0.6023809523809524,
+     "leak": 0.0,
+     "leak_fact": 0.0,
+     "wrong": 0.04678362573099415,
+     "by_type": {
+      "stable_recall": {
+       "score": 0.525,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 40
+      },
+      "scoped_current": {
+       "score": 0.625,
+       "lenient": 0.625,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 56
+      },
+      "historical_value": {
+       "score": 0.06666666666666667,
+       "lenient": 0.13333333333333333,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 15
+      },
+      "authored": {
+       "score": 1.0,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 16
+      },
+      "retraction": {
+       "score": 0.8125,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.1875,
+       "asr": 0.0,
+       "n": 16
+      },
+      "redacted_historical": {
+       "score": 0.6875,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.3125,
+       "asr": 0.0,
+       "n": 16
+      },
+      "poison": {
+       "score": 0.5,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.16666666666666666,
+       "n": 12
+      }
+     }
+    }
+   },
+   "mean_tokens": 390.2631578947368
+  },
+  "bounded_lru": {
+   "strategy": "bounded_lru",
+   "modes": {
+    "natural": {
+     "composite": 0.3596938775510204,
+     "leak": 0.0,
+     "leak_fact": 0.0,
+     "wrong": 0.04093567251461988,
+     "by_type": {
+      "stable_recall": {
+       "score": 0.125,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 40
+      },
+      "scoped_current": {
+       "score": 0.39285714285714285,
+       "lenient": 0.39285714285714285,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 56
+      },
+      "historical_value": {
+       "score": 0.0,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.3333333333333333,
+       "asr": 0.0,
+       "n": 15
+      },
+      "authored": {
+       "score": 0.0,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 16
+      },
+      "retraction": {
+       "score": 1.0,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 16
+      },
+      "redacted_historical": {
+       "score": 1.0,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 16
+      },
+      "poison": {
+       "score": 0.0,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.16666666666666666,
+       "asr": 0.3333333333333333,
+       "n": 12
+      }
+     }
+    },
+    "budgeted": {
+     "composite": 0.3596938775510204,
+     "leak": 0.0,
+     "leak_fact": 0.0,
+     "wrong": 0.04093567251461988,
+     "by_type": {
+      "stable_recall": {
+       "score": 0.125,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 40
+      },
+      "scoped_current": {
+       "score": 0.39285714285714285,
+       "lenient": 0.39285714285714285,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 56
+      },
+      "historical_value": {
+       "score": 0.0,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.3333333333333333,
+       "asr": 0.0,
+       "n": 15
+      },
+      "authored": {
+       "score": 0.0,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 16
+      },
+      "retraction": {
+       "score": 1.0,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 16
+      },
+      "redacted_historical": {
+       "score": 1.0,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 16
+      },
+      "poison": {
+       "score": 0.0,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.16666666666666666,
+       "asr": 0.3333333333333333,
+       "n": 12
+      }
+     }
+    }
+   },
+   "mean_tokens": 256.280701754386
+  },
+  "bounded_unrecalled": {
+   "strategy": "bounded_unrecalled",
+   "modes": {
+    "natural": {
+     "composite": 0.47908163265306125,
+     "leak": 0.0,
+     "leak_fact": 0.0,
+     "wrong": 0.023391812865497075,
+     "by_type": {
+      "stable_recall": {
+       "score": 0.3,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 40
+      },
+      "scoped_current": {
+       "score": 0.42857142857142855,
+       "lenient": 0.42857142857142855,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 56
+      },
+      "historical_value": {
+       "score": 0.0,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.26666666666666666,
+       "asr": 0.0,
+       "n": 15
+      },
+      "authored": {
+       "score": 0.625,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 16
+      },
+      "retraction": {
+       "score": 1.0,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 16
+      },
+      "redacted_historical": {
+       "score": 1.0,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 16
+      },
+      "poison": {
+       "score": 0.0,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.08333333333333333,
+       "n": 12
+      }
+     }
+    },
+    "budgeted": {
+     "composite": 0.47908163265306125,
+     "leak": 0.0,
+     "leak_fact": 0.0,
+     "wrong": 0.023391812865497075,
+     "by_type": {
+      "stable_recall": {
+       "score": 0.3,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 40
+      },
+      "scoped_current": {
+       "score": 0.42857142857142855,
+       "lenient": 0.42857142857142855,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 56
+      },
+      "historical_value": {
+       "score": 0.0,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.26666666666666666,
+       "asr": 0.0,
+       "n": 15
+      },
+      "authored": {
+       "score": 0.625,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 16
+      },
+      "retraction": {
+       "score": 1.0,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 16
+      },
+      "redacted_historical": {
+       "score": 1.0,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 16
+      },
+      "poison": {
+       "score": 0.0,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.08333333333333333,
+       "n": 12
+      }
+     }
+    }
+   },
+   "mean_tokens": 265.3157894736842
+  },
+  "bounded_importance": {
+   "strategy": "bounded_importance",
+   "modes": {
+    "natural": {
+     "composite": 0.5126700680272108,
+     "leak": 0.0,
+     "leak_fact": 0.0,
+     "wrong": 0.029239766081871343,
+     "by_type": {
+      "stable_recall": {
+       "score": 0.3,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 40
+      },
+      "scoped_current": {
+       "score": 0.39285714285714285,
+       "lenient": 0.39285714285714285,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.03571428571428571,
+       "asr": 0.0,
+       "n": 56
+      },
+      "historical_value": {
+       "score": 0.0,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.13333333333333333,
+       "asr": 0.0,
+       "n": 15
+      },
+      "authored": {
+       "score": 0.8125,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 16
+      },
+      "retraction": {
+       "score": 1.0,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 16
+      },
+      "redacted_historical": {
+       "score": 1.0,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 16
+      },
+      "poison": {
+       "score": 0.08333333333333333,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.08333333333333333,
+       "asr": 0.25,
+       "n": 12
+      }
+     }
+    },
+    "budgeted": {
+     "composite": 0.5126700680272108,
+     "leak": 0.0,
+     "leak_fact": 0.0,
+     "wrong": 0.029239766081871343,
+     "by_type": {
+      "stable_recall": {
+       "score": 0.3,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 40
+      },
+      "scoped_current": {
+       "score": 0.39285714285714285,
+       "lenient": 0.39285714285714285,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.03571428571428571,
+       "asr": 0.0,
+       "n": 56
+      },
+      "historical_value": {
+       "score": 0.0,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.13333333333333333,
+       "asr": 0.0,
+       "n": 15
+      },
+      "authored": {
+       "score": 0.8125,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 16
+      },
+      "retraction": {
+       "score": 1.0,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 16
+      },
+      "redacted_historical": {
+       "score": 1.0,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.0,
+       "asr": 0.0,
+       "n": 16
+      },
+      "poison": {
+       "score": 0.08333333333333333,
+       "lenient": 0.0,
+       "leak": 0.0,
+       "leak_fact": 0.0,
+       "wrong": 0.08333333333333333,
+       "asr": 0.25,
+       "n": 12
+      }
+     }
+    }
+   },
+   "mean_tokens": 262.89473684210526
+  }
+ }
+}

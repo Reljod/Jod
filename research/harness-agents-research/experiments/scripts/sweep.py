@@ -45,7 +45,7 @@ class WeightedHybrid(Hybrid):
         for cid, score in ranked:
             c = self.index.by_id[cid]
             out.append((cid, score * importance_multiplier(c.get("importance"))))
-        out.sort(key=lambda x: -x[1])
+        out.sort(key=lambda x: (-x[1], x[0]))
         return out
 
 

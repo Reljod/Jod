@@ -19,7 +19,7 @@ bearing for us. → [`docs/jod-system.md`](../../docs/jod-system.md)
 | [`OPENCLAW-MEMORY.md`](OPENCLAW-MEMORY.md) | **Focus.** OpenClaw's remembering only — database, schema, embeddings, ranking algorithm, consolidation. |
 | [`FUTURE-OF-MEMORY.md`](FUTURE-OF-MEMORY.md) | Where LLM memory is going — 2026 papers and repos, the benchmark credibility problem, and a per-situation verdict on whether any of it is worth adopting. |
 | [`BIG-LAB-MEMORY.md`](BIG-LAB-MEMORY.md) | How Anthropic, OpenAI, Google and the IDEs actually ship memory — Claude's three surfaces, ChatGPT "dreaming", Codex CLI's on-disk memories, Gemini Memory Bank, Cursor. |
-| [`experiments/`](experiments/) | A runnable comparison of 17 memory architectures on an adversarial corpus. Pre-registered predictions, measured results, prediction scorecard. |
+| [`experiments/`](experiments/) | A runnable comparison of 31 memory architectures across two rounds — the open-source designs, then the mechanisms the big labs ship. Pre-registered predictions, measured results, scorecards, combined conclusion. |
 
 Read `HARNESS-ENGINEERING.md` first if you want the frame; go straight to the
 two deep dives if you want the mechanics; read
@@ -39,6 +39,14 @@ versioned facts, real deletion, write-time trust admission — which lifted
 current-value accuracy from 0.17 to 0.73 while being the cheapest strategy
 tested. Raw long context scored 1.00 on recall, 0.00 on freshness, 0.00 on
 deletion, and had a 100% poisoning attack success rate, at 314× the tokens.
+
+Round 2 then tested the mechanisms the labs actually ship, and sharpened it into
+one sentence: **memory quality is a write-path property, and the industry
+measures the read path.** Across both rounds every large effect came from what
+gets stored, partitioned, admitted and deleted — control plane, redaction,
+scope, trust admission, eviction policy — while ranking, fusion, diversity and
+promotion moved the needle by a few points. The one read-path exception worth
+keeping is a second retrieval hop for multi-hop questions.
 
 ## Subjects at a glance
 
