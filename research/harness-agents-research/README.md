@@ -17,9 +17,27 @@ bearing for us. → [`docs/jod-system.md`](../../docs/jod-system.md)
 | [`HARNESS-ENGINEERING.md`](HARNESS-ENGINEERING.md) | The field. What a harness is, its seven subsystems, and the two rival answers to "how does an agent remember?" |
 | [`HERMES.md`](HERMES.md) | **Focus.** Nous Research's Hermes Agent — how it remembers, and how it *grows with the user*. |
 | [`OPENCLAW-MEMORY.md`](OPENCLAW-MEMORY.md) | **Focus.** OpenClaw's remembering only — database, schema, embeddings, ranking algorithm, consolidation. |
+| [`FUTURE-OF-MEMORY.md`](FUTURE-OF-MEMORY.md) | Where LLM memory is going — 2026 papers and repos, the benchmark credibility problem, and a per-situation verdict on whether any of it is worth adopting. |
+| [`experiments/`](experiments/) | A runnable comparison of 17 memory architectures on an adversarial corpus. Pre-registered predictions, measured results, prediction scorecard. |
 
 Read `HARNESS-ENGINEERING.md` first if you want the frame; go straight to the
-two deep dives if you want the mechanics.
+two deep dives if you want the mechanics; read
+[`experiments/FINDINGS.md`](experiments/FINDINGS.md) if you want measurements
+rather than claims.
+
+## The through-line
+
+The two subjects sit at opposite ends of one axis — Hermes caps memory at ~1,300
+tokens and errors on overflow; OpenClaw lets the corpus grow and buys precision
+back with hybrid retrieval and nightly consolidation. `FUTURE-OF-MEMORY.md` asks
+which bet the field is converging on; the experiment tests it directly.
+
+What emerged: **both are optimising recall, and recall is not where the failures
+are.** The highest-value component measured was a deterministic control plane —
+versioned facts, real deletion, write-time trust admission — which lifted
+current-value accuracy from 0.17 to 0.73 while being the cheapest strategy
+tested. Raw long context scored 1.00 on recall, 0.00 on freshness, 0.00 on
+deletion, and had a 100% poisoning attack success rate, at 314× the tokens.
 
 ## Subjects at a glance
 
