@@ -64,27 +64,48 @@ jobs:
       - name: Generate the Xcode project
         run: npx tauri ios init --ci
 
-      - name: List what was generated
-        run: |
-          ls -la src-tauri/gen/apple
-          xcodebuild -list -workspace src-tauri/gen/apple/*.xcworkspace || true
-
-      # Unsigned, for the simulator. This is the step that proves the Rust
-      # staticlib links against UIKit/WebKit and produces a real .app.
-      - name: Build the app for the simulator
+      # Tauri emits a plain `.xcodeproj` plus a Podfile; a `.xcworkspace` only
+      # appears once `pod install` has run. Install pods when the Podfile
+      # actually declares any, then prefer whichever container exists rather
+      # than assuming one.
+      - name: Install pods, if there are any
         run: |
           set -euxo pipefail
-          workspace=$(ls -d src-tauri/gen/apple/*.xcworkspace | head -1)
-          scheme=$(xcodebuild -list -workspace "$workspace" -json \
-            | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const j=JSON.parse(s);console.log((j.workspace?.schemes??[])[0]??"")})')
-          echo "workspace=$workspace scheme=$scheme"
+          cd src-tauri/gen/apple
+          ls -la
+          if [ -f Podfile ] && grep -qE '^\s*pod ' Podfile; then
+            pod install
+          else
+            echo "no pods declared — building the xcodeproj directly"
+          fi
+
+      - name: Build the app for the simulator
+        # Unsigned, for the simulator: this is the step that proves the Rust
+        # staticlib links against UIKit/WebKit and yields a real .app.
+        run: |
+          set -euxo pipefail
+          cd src-tauri/gen/apple
+
+          if compgen -G "*.xcworkspace" > /dev/null; then
+            container=(-workspace "$(ls -d *.xcworkspace | head -1)")
+            key=workspace
+          else
+            container=(-project "$(ls -d *.xcodeproj | head -1)")
+            key=project
+          fi
+
+          xcodebuild -list "${container[@]}"
+          scheme=$(xcodebuild -list "${container[@]}" -json \
+            | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const j=JSON.parse(s);const c=j['$key']||{};console.log((c.schemes||[])[0]||'')})")
+          test -n "$scheme"
+          echo "building scheme '$scheme'"
+
           xcodebuild \
-            -workspace "$workspace" \
+            "${container[@]}" \
             -scheme "$scheme" \
-            -configuration Debug \
+            -configuration debug \
             -sdk iphonesimulator \
-            -destination 'generic/platform=iOS Simulator' \
-            -derivedDataPath build \
+            -derivedDataPath "$GITHUB_WORKSPACE/apps/ios/build" \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             build
@@ -92,28 +113,37 @@ jobs:
       - name: Boot a simulator, install the app, and launch it
         run: |
           set -euxo pipefail
-          app=$(find build/Build/Products -name '*.app' -maxdepth 3 | head -1)
+          app=$(find build/Build/Products -maxdepth 3 -name '*.app' | head -1)
           test -n "$app"
           echo "built: $app"
-          /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Info.plist"
           bundle_id=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Info.plist")
+          echo "bundle id: $bundle_id"
 
-          device=$(xcrun simctl create jod-ci com.apple.CoreSimulator.SimDeviceType.iPhone-16)
+          # Whatever iPhone this Xcode actually ships, rather than a hard-coded
+          # model that disappears with the next image bump.
+          device_type=$(xcrun simctl list devicetypes -j \
+            | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const t=JSON.parse(s).devicetypes.filter(d=>/iPhone/.test(d.name));console.log(t[t.length-1].identifier)})")
+          echo "device type: $device_type"
+
+          device=$(xcrun simctl create jod-ci "$device_type")
           xcrun simctl boot "$device"
           xcrun simctl bootstatus "$device" -b
           xcrun simctl install "$device" "$app"
-          xcrun simctl launch --console-pty "$device" "$bundle_id" &
-          launch_pid=$!
+          xcrun simctl launch "$device" "$bundle_id"
 
-          # Give the webview time to load its assets before judging it.
-          sleep 20
+          # Let the webview load its assets before judging it.
+          sleep 25
           xcrun simctl io "$device" screenshot simulator.png
-          kill "$launch_pid" 2>/dev/null || true
 
-          # A process still present is the evidence that it did not crash on
-          # launch — an app that fell over would be gone by now.
-          xcrun simctl spawn "$device" launchctl list | grep -c "$bundle_id" \
-            && echo "the app is still running in the simulator"
+          # Still resident is the evidence it did not crash on launch: an app
+          # that fell over is gone from the device's process list by now.
+          if xcrun simctl spawn "$device" launchctl list | grep -q "$bundle_id"; then
+            echo "PASS: the app is running in the simulator"
+          else
+            echo "FAIL: the app is not running — it launched and then exited"
+            xcrun simctl diagnose -b -X --no-archive --output=. || true
+            exit 1
+          fi
 
       - name: Upload the simulator screenshot and the app bundle
         if: always()
