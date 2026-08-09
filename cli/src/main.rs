@@ -133,6 +133,17 @@ enum Command {
         /// Pick up the last conversation instead of starting a new one.
         #[arg(short = 'C', long = "continue")]
         continue_last: bool,
+        /// Watch a team: Ctrl-G shows its members and its task board.
+        #[arg(long)]
+        team: Option<String>,
+    },
+    /// Agent teams: several agents on one job, talking to each other.
+    ///
+    /// A team can mix harnesses — a lead on Claude Code with teammates on AGY
+    /// and OpenCode — which is the thing no single harness can do.
+    Team {
+        #[command(subcommand)]
+        what: TeamCommand,
     },
     /// Hold a conversation on a plain terminal, without the full-screen UI.
     Chat {
@@ -148,6 +159,50 @@ enum Command {
         #[arg(short = 'C', long = "continue")]
         continue_last: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum TeamCommand {
+    /// Put a member on a team, or update the one already there.
+    Join {
+        team: String,
+        member: String,
+        #[arg(short = 'H', long, value_enum, default_value_t = HarnessArg::Claude)]
+        harness: HarnessArg,
+        #[arg(short, long, default_value = "")]
+        role: String,
+    },
+    /// Put a task on the team's board.
+    Task {
+        team: String,
+        id: String,
+        title: Vec<String>,
+    },
+    /// Take ownership of a task. Reports whether this member won the race.
+    Claim { id: String, member: String },
+    /// Mark a task finished.
+    Done { id: String },
+    /// Send a message. Without --to it goes to every member but the sender.
+    Msg {
+        team: String,
+        #[arg(short, long)]
+        from: String,
+        #[arg(short, long)]
+        to: Option<String>,
+        text: Vec<String>,
+    },
+    /// Read a member's waiting messages and mark them delivered.
+    Inbox {
+        team: String,
+        member: String,
+        /// Look without consuming, so the next turn still sees them.
+        #[arg(long)]
+        peek: bool,
+    },
+    /// Who is on the team, and what is on its board.
+    Show { team: String },
+    /// Every team that has a member.
+    List,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, ValueEnum)]
@@ -376,6 +431,7 @@ async fn main() -> Result<()> {
             model,
             permission,
             continue_last,
+            team,
         } => {
             if !jod.tmux_available() {
                 bail!("tmux is not installed, and every agent runs inside a tmux session");
@@ -385,6 +441,7 @@ async fn main() -> Result<()> {
                 jod,
                 tui::Options {
                     harness: harness.into(),
+                    team,
                     cwd: cwd.unwrap_or_else(jod_core::service::default_cwd),
                     model,
                     permission: permission.into(),
@@ -396,6 +453,83 @@ async fn main() -> Result<()> {
                 },
             )
             .await?;
+        }
+
+        Command::Team { what } => {
+            let store = jod.store().context("teams need the database")?;
+            match what {
+                TeamCommand::Join {
+                    team,
+                    member,
+                    harness,
+                    role,
+                } => {
+                    store.join_team(&team, &member, harness.into(), &role)?;
+                    println!("{member} joined {team}");
+                }
+                TeamCommand::Task { team, id, title } => {
+                    let title = title.join(" ");
+                    let title = if title.is_empty() { id.clone() } else { title };
+                    store.add_team_task(&team, &id, &title)?;
+                    println!("{id} on {team}'s board");
+                }
+                TeamCommand::Claim { id, member } => {
+                    // The exit code matters: a teammate scripting this needs to
+                    // branch on whether it actually won.
+                    if store.claim_task(&id, &member)? {
+                        println!("{member} claimed {id}");
+                    } else {
+                        bail!("{id} is already owned by someone else");
+                    }
+                }
+                TeamCommand::Done { id } => {
+                    store.complete_task(&id)?;
+                    println!("{id} done");
+                }
+                TeamCommand::Msg {
+                    team,
+                    from,
+                    to,
+                    text,
+                } => {
+                    let sent = store.send_team_message(
+                        &team,
+                        &from,
+                        to.as_deref(),
+                        &text.join(" "),
+                    )?;
+                    if sent.is_empty() {
+                        println!("nobody on {team} to message");
+                    } else {
+                        println!("sent to {}", sent.join(", "));
+                    }
+                }
+                TeamCommand::Inbox { team, member, peek } => {
+                    let messages = if peek {
+                        store.team_unread(&team, &member)?
+                    } else {
+                        store.drain_inbox(&team, &member)?
+                    };
+                    for m in &messages {
+                        println!("{}", m.as_prompt());
+                    }
+                    if messages.is_empty() {
+                        println!("nothing waiting for {member}");
+                    }
+                }
+                TeamCommand::Show { team } => {
+                    render::team(&store.team_members(&team)?, &store.team_tasks(&team)?);
+                }
+                TeamCommand::List => {
+                    let teams = store.teams()?;
+                    if teams.is_empty() {
+                        println!("no teams yet");
+                    }
+                    for name in teams {
+                        println!("{name}");
+                    }
+                }
+            }
         }
 
         Command::Chat {

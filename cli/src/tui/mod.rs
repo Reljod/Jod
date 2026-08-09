@@ -35,6 +35,9 @@ use std::path::PathBuf;
 
 pub struct Options {
     pub harness: HarnessKind,
+    /// The team to watch, if any. `None` leaves the team panel saying so
+    /// rather than showing an empty board.
+    pub team: Option<String>,
     pub cwd: PathBuf,
     pub model: Option<String>,
     pub permission: PermissionPolicy,
@@ -77,8 +80,10 @@ async fn event_loop(
     opts: Options,
 ) -> Result<()> {
     let mut app = App::new(opts.harness, opts.model.clone(), opts.resume.clone());
+    app.team = opts.team.clone();
+    refresh_team(&jod, &mut app);
     app.push(Entry::Notice(format!(
-        "{} · type to talk · Enter send · Ctrl-A agents · Ctrl-T thinking · Ctrl-C quit",
+        "{} · Enter send · Ctrl-A agents · Ctrl-G team · Ctrl-T thinking · Ctrl-C quit",
         opts.harness.label()
     )));
 
@@ -114,6 +119,7 @@ async fn event_loop(
                                 Err(e) => app.push(Entry::Notice(format!("could not start: {e}"))),
                             }
                             app.agents = list_agents(&jod).await;
+                            refresh_team(&jod, &mut app);
                         }
                     }
                     Event::Mouse(m) => match m.kind {
@@ -132,6 +138,7 @@ async fn event_loop(
                     app.apply(&envelope.event);
                     if finished {
                         app.agents = list_agents(&jod).await;
+                        refresh_team(&jod, &mut app);
                     }
                 }
             }
@@ -165,6 +172,14 @@ fn on_key(app: &mut App, key: KeyEvent, viewport: usize) -> Option<String> {
                     Pane::Chat
                 } else {
                     Pane::Agents
+                };
+                return None;
+            }
+            KeyCode::Char('g') => {
+                app.pane = if app.pane == Pane::Team {
+                    Pane::Chat
+                } else {
+                    Pane::Team
                 };
                 return None;
             }
@@ -250,6 +265,25 @@ async fn spawn(jod: &Arc<Jod>, app: &App, opts: &Options, prompt: String) -> Res
         })
         .await?;
     Ok(agent.id)
+}
+
+/// Re-read the team from the store.
+///
+/// Members and tasks are written by the teammates themselves, in their own
+/// processes, so the only way to know the current state is to ask the store —
+/// there is no in-memory copy that could be authoritative.
+fn refresh_team(jod: &Arc<Jod>, app: &mut App) {
+    let (Some(team), Some(store)) = (app.team.clone(), jod.store()) else {
+        return;
+    };
+    // A store error here must not take the UI down: the panel showing what it
+    // last knew beats the whole session ending over a locked database.
+    if let Ok(members) = store.team_members(&team) {
+        app.members = members;
+    }
+    if let Ok(tasks) = store.team_tasks(&team) {
+        app.tasks = tasks;
+    }
 }
 
 async fn list_agents(jod: &Arc<Jod>) -> Vec<AgentLine> {

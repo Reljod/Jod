@@ -192,6 +192,55 @@ pub fn agents(list: &[AgentSummary]) {
     }
 }
 
+/// A team: who is on it, then what is on its board.
+pub fn team(members: &[jod_core::team::Member], tasks: &[jod_core::team::TeamTask]) {
+    use jod_core::team::MemberStatus;
+
+    if members.is_empty() {
+        println!("{}", paint(DIM, "no members"));
+    }
+    for m in members {
+        let status = match m.status {
+            MemberStatus::Ready => paint(GREEN, "ready"),
+            MemberStatus::Busy => paint(YELLOW, "busy"),
+            MemberStatus::Error => paint(RED, "error"),
+            other => paint(DIM, other.as_str()),
+        };
+        println!(
+            "{:<12} {:<9} {:<13} {}",
+            m.name,
+            status,
+            m.harness.label(),
+            m.role
+        );
+    }
+
+    if tasks.is_empty() {
+        return;
+    }
+    println!();
+    for t in tasks {
+        // Open / claimed / done, so progress reads at a glance.
+        let mark = if t.is_done() {
+            paint(GREEN, "done")
+        } else if t.is_claimed() {
+            paint(YELLOW, "taken")
+        } else {
+            paint(DIM, "open")
+        };
+        println!(
+            "{:<10} {:<8} {}{}",
+            &t.id[..t.id.len().min(8)],
+            mark,
+            t.title,
+            t.owner
+                .as_ref()
+                .map(|o| paint(DIM, &format!("  ({o})")))
+                .unwrap_or_default()
+        );
+    }
+}
+
 pub fn history(runs: &[jod_core::store::StoredRun]) {
     if runs.is_empty() {
         println!("{}", paint(DIM, "nothing recorded yet"));

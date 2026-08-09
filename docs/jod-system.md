@@ -147,6 +147,11 @@ every delegation. That panel is the reason it is not just a chat window — Jod'
 job is watching several agents, and it shows runs from earlier processes too,
 because `rehydrate` puts them back.
 
+`jod tui --team <name>` adds `Ctrl-G`: the team's members, their harnesses and
+statuses, and the task board. It is read from the store on every refresh rather
+than kept in memory, because teammates run in their own processes and no
+in-memory copy could be authoritative.
+
 Two behaviours it takes care over, both easy to get wrong:
 
 - **Scrolling up does not get yanked back down.** New output only follows the
@@ -250,15 +255,41 @@ it does not.
 **Built:** agents run under all three harnesses, each in its own tmux session,
 each managing its own context.
 
-**Planned:** agent-to-agent communication, following the same local-files
-principle, so it needs no broker. An agent sends a message by appending one JSON
-line; Jod's tailer already knows how to follow an append-only file. Two paths,
-in order of cost:
+**Built: agent teams.** `core/src/team.rs`, with the state in the same SQLite
+file as everything else. A team has members, a message bus, and a shared task
+board; `jod team` drives it and `Ctrl-G` in the TUI shows it.
 
-1. **Prompt-level** — Jod injects pending inbox messages into the next
-   delegation. Works with any harness today.
-2. **MCP-level** — a small `jod-mcp` server exposing `send_message`,
-   `read_inbox`, `list_agents`. All three harnesses support MCP.
+```sh
+jod team join crew lead   --harness claude   --role coordinator
+jod team join crew scout  --harness agy      --role research
+jod team join crew builder --harness opencode --role implement
+jod team task crew t1 port the parser
+jod team claim t1 scout        # exits non-zero if someone else already has it
+jod team msg crew --from lead stand up please
+jod team inbox crew scout      # drains, so a message is never replayed
+```
+
+Every harness is growing a team feature of its own, and each one can only ever
+contain that harness. Jod owns the bus instead, which buys the thing none of
+them can do alone: **one team whose lead runs on Claude Code and whose teammates
+run on AGY and OpenCode.** The command above is that, and it works today.
+
+Two operations are contended and both are single statements rather than
+read-then-write, for the reason the rest of the store already documents:
+
+- **Claiming a task** reuses the existing `claim_task`, whose `owner IS NULL`
+  guard makes two agents racing produce one winner.
+- **Draining an inbox** selects and marks delivered in one transaction, so the
+  same instruction is never injected into two turns.
+
+Delivery is deliberately dumb: a message becomes a synthetic user turn in the
+recipient's next prompt. Because every harness resumes a session by id, that
+works on all three without any harness knowing teams exist.
+
+**Still to build:** auto-wake — a message to an idle member should resume it
+rather than waiting for something else to. Today a member picks up its inbox on
+its next turn. An `jod-mcp` server exposing `send_message` / `read_inbox` to
+agents directly is the natural next step after that.
 
 **Collaboration on code** uses git rather than messages: each agent gets its own
 worktree, and integration is a merge. → [`teamwork.md`](teamwork.md)

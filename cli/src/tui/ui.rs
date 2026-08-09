@@ -7,6 +7,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
 
+use jod_core::team::MemberStatus;
+
 use super::app::{App, Entry, Pane};
 
 const USER: Color = Color::Cyan;
@@ -33,7 +35,109 @@ pub fn draw(f: &mut Frame, app: &App) -> usize {
     if app.pane == Pane::Agents {
         draw_agents(f, app, f.area());
     }
+    if app.pane == Pane::Team {
+        draw_team(f, app, f.area());
+    }
     height
+}
+
+/// The team panel: who is on it, and what each of them is doing.
+///
+/// Members and the task board share one floating panel because they are one
+/// question — "is this team making progress" — and splitting them across two
+/// keystrokes would make the answer take two looks.
+fn draw_team(f: &mut Frame, app: &App, area: Rect) {
+    let rows = app.members.len() + app.tasks.len() + 3;
+    let w = area.width.saturating_sub(8).clamp(24, 76).min(area.width);
+    let h = (rows as u16)
+        .clamp(6, area.height.saturating_sub(4).max(6))
+        .min(area.height);
+    let panel = Rect {
+        x: area.x + (area.width.saturating_sub(w)) / 2,
+        y: area.y + (area.height.saturating_sub(h)) / 2,
+        width: w,
+        height: h,
+    };
+
+    let mut items: Vec<ListItem> = Vec::new();
+
+    if app.team.is_none() {
+        items.push(ListItem::new(Span::styled(
+            "no team — start one with `jod tui --team <name>`",
+            Style::default().fg(MUTED),
+        )));
+    } else if app.members.is_empty() {
+        items.push(ListItem::new(Span::styled(
+            "no members yet",
+            Style::default().fg(MUTED),
+        )));
+    } else {
+        for m in &app.members {
+            let colour = match m.status {
+                MemberStatus::Busy => WARN,
+                MemberStatus::Ready => GOOD,
+                MemberStatus::Error => BAD,
+                _ => MUTED,
+            };
+            items.push(ListItem::new(Line::from(vec![
+                Span::styled(format!("{:<12}", m.name), Style::default().fg(USER)),
+                Span::styled(
+                    format!("{:<11}", m.status.as_str()),
+                    Style::default().fg(colour),
+                ),
+                Span::styled(
+                    format!("{:<13}", m.harness.label()),
+                    Style::default().fg(MUTED),
+                ),
+                Span::raw(m.role.clone()),
+            ])));
+        }
+    }
+
+    if !app.tasks.is_empty() {
+        items.push(ListItem::new(Span::styled(
+            "── board ──",
+            Style::default().fg(MUTED),
+        )));
+        for t in &app.tasks {
+            // Open / claimed / done, so progress is readable at a glance.
+            let (mark, colour) = if t.is_done() {
+                ("✓", GOOD)
+            } else if t.is_claimed() {
+                ("◐", WARN)
+            } else {
+                ("○", MUTED)
+            };
+            items.push(ListItem::new(Line::from(vec![
+                Span::styled(format!("{mark} "), Style::default().fg(colour)),
+                Span::raw(t.title.clone()),
+                Span::styled(
+                    t.owner
+                        .as_ref()
+                        .map(|o| format!("  ({o})"))
+                        .unwrap_or_default(),
+                    Style::default().fg(MUTED),
+                ),
+            ])));
+        }
+    }
+
+    let title = match &app.team {
+        Some(name) => format!(" team {name} · Ctrl-G to close "),
+        None => " team · Ctrl-G to close ".to_string(),
+    };
+
+    // Clear first: this floats over the transcript.
+    f.render_widget(Clear, panel);
+    f.render_widget(
+        List::new(items).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(USER))
+                .title(title),
+        ),
+        panel,
+    );
 }
 
 fn draw_transcript(f: &mut Frame, app: &App, area: Rect) -> usize {
@@ -190,7 +294,7 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
 fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     let left = Span::styled(app.status(), Style::default().fg(MUTED));
     let right = Span::styled(
-        "Ctrl-A agents · Ctrl-T thinking · Ctrl-C quit",
+        "Ctrl-A agents · Ctrl-G team · Ctrl-T thinking · Ctrl-C quit",
         Style::default().fg(MUTED),
     );
     let gap = (area.width as usize)
@@ -273,6 +377,7 @@ fn _wrap_marker(_: Wrap) {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use jod_core::team::{Member, TeamTask};
     use jod_core::{HarnessKind, Resume};
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
@@ -297,6 +402,116 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    fn member(name: &str, harness: HarnessKind, status: MemberStatus) -> Member {
+        Member {
+            team: "crew".into(),
+            name: name.into(),
+            harness,
+            role: "research".into(),
+            status,
+            agent_id: None,
+            session_id: None,
+        }
+    }
+
+    fn task(id: &str, title: &str, owner: Option<&str>, status: &str) -> TeamTask {
+        TeamTask {
+            id: id.into(),
+            title: title.into(),
+            owner: owner.map(str::to_string),
+            status: status.into(),
+        }
+    }
+
+    #[test]
+    fn the_team_panel_lists_members_with_their_harness_and_status() {
+        let mut a = app();
+        a.pane = Pane::Team;
+        a.team = Some("crew".into());
+        a.members = vec![
+            member("lead", HarnessKind::ClaudeCode, MemberStatus::Busy),
+            member("scout", HarnessKind::Agy, MemberStatus::Ready),
+        ];
+        let screen = rendered(&a, 100, 20);
+        assert!(screen.contains("team crew"));
+        assert!(screen.contains("lead"));
+        assert!(screen.contains("scout"));
+        assert!(screen.contains("busy"));
+        assert!(screen.contains("Antigravity") || screen.contains("AGY"));
+    }
+
+    /// The board has to distinguish open, claimed and done at a glance, or it
+    /// is just a list of strings.
+    #[test]
+    fn the_task_board_shows_progress_and_who_owns_what() {
+        let mut a = app();
+        a.pane = Pane::Team;
+        a.team = Some("crew".into());
+        a.members = vec![member("scout", HarnessKind::OpenCode, MemberStatus::Busy)];
+        a.tasks = vec![
+            task("t1", "port the parser", Some("scout"), "open"),
+            task("t2", "write the docs", None, "open"),
+            task("t3", "ship it", Some("lead"), "done"),
+        ];
+        let screen = rendered(&a, 100, 24);
+        assert!(screen.contains("board"));
+        assert!(screen.contains("port the parser"));
+        assert!(screen.contains("(scout)"), "a claimed task names its owner");
+        assert!(screen.contains("write the docs"));
+        assert!(screen.contains("✓"), "a done task is marked");
+        assert!(screen.contains("○"), "an unclaimed task is marked");
+    }
+
+    /// Without a team the panel must explain itself rather than show an empty
+    /// box that reads as a bug.
+    #[test]
+    fn the_team_panel_says_so_when_there_is_no_team() {
+        let mut a = app();
+        a.pane = Pane::Team;
+        let screen = rendered(&a, 100, 20);
+        assert!(screen.contains("no team"), "got:\n{screen}");
+    }
+
+    #[test]
+    fn a_team_with_no_members_yet_says_so() {
+        let mut a = app();
+        a.pane = Pane::Team;
+        a.team = Some("crew".into());
+        let screen = rendered(&a, 100, 20);
+        assert!(screen.contains("no members yet"));
+    }
+
+    #[test]
+    fn the_team_panel_is_hidden_unless_its_pane_is_open() {
+        let mut a = app();
+        a.team = Some("crew".into());
+        a.members = vec![member("scout", HarnessKind::OpenCode, MemberStatus::Ready)];
+        assert!(!rendered(&a, 100, 20).contains("scout"));
+
+        a.pane = Pane::Team;
+        assert!(rendered(&a, 100, 20).contains("scout"));
+    }
+
+    /// The panel floats over the transcript, so it must fit a small terminal
+    /// rather than being placed outside the buffer.
+    #[test]
+    fn the_team_panel_fits_a_small_terminal() {
+        let mut a = app();
+        a.pane = Pane::Team;
+        a.team = Some("crew".into());
+        a.members = (0..40)
+            .map(|i| {
+                member(
+                    &format!("m{i}"),
+                    HarnessKind::ClaudeCode,
+                    MemberStatus::Ready,
+                )
+            })
+            .collect();
+        let _ = rendered(&a, 30, 8);
+        let _ = rendered(&a, 12, 5);
     }
 
     #[test]

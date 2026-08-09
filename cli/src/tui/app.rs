@@ -5,6 +5,7 @@
 //! cursor movement, scrollback, which turn a message belongs to — is testable
 //! without a terminal.
 
+use jod_core::team::{Member, TeamTask};
 use jod_core::{AgentEvent, HarnessKind, Resume};
 
 /// One line in the transcript, tagged with what produced it so the renderer can
@@ -32,6 +33,8 @@ pub enum Entry {
 pub enum Pane {
     Chat,
     Agents,
+    /// The team: who is on it, and what they are each doing.
+    Team,
 }
 
 pub struct App {
@@ -52,6 +55,11 @@ pub struct App {
     /// True while an agent is working, so the UI can refuse a second prompt.
     pub busy: bool,
     pub agents: Vec<AgentLine>,
+    /// The team this session is watching, if any. `None` means teams are not
+    /// in play and the panel says so rather than showing an empty box.
+    pub team: Option<String>,
+    pub members: Vec<Member>,
+    pub tasks: Vec<TeamTask>,
     pub should_quit: bool,
     /// Set when the user asks to leave while an agent is still running.
     pub confirm_quit: bool,
@@ -81,6 +89,9 @@ impl App {
             pane: Pane::Chat,
             busy: false,
             agents: Vec::new(),
+            team: None,
+            members: Vec::new(),
+            tasks: Vec::new(),
             should_quit: false,
             confirm_quit: false,
         }
