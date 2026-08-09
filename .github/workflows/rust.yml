@@ -19,7 +19,7 @@ env:
 
 jobs:
   core:
-    name: jod-core (tests + coverage floor)
+    name: workspace (tests + coverage floor)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -35,9 +35,13 @@ jobs:
       # tmux is not needed: the tests drive a fake tmux binary via
       # JOD_TMUX_BIN (crates/jod-core/src/testsupport.rs) so they never depend
       # on — or disturb — a real tmux server.
+      # --workspace so a new crate (a TUI client, a daemon) is gated the day it
+      # lands rather than the day someone remembers to add it here. jod-desktop
+      # is excluded only because it needs the system webkit/gtk stack; it has
+      # its own job below.
       - name: Test with coverage
         run: |
-          cargo llvm-cov -p jod-core \
+          cargo llvm-cov --workspace --exclude jod-desktop \
             --fail-under-lines "$COVERAGE_FLOOR" \
             --summary-only
 
@@ -46,9 +50,9 @@ jobs:
         run: |
           set -euo pipefail
           {
-            echo "## jod-core coverage (floor: ${COVERAGE_FLOOR}%)"
+            echo "## Coverage (floor: ${COVERAGE_FLOOR}%)"
             echo '```'
-            cargo llvm-cov -p jod-core --summary-only 2>/dev/null | tail -n 20 || true
+            cargo llvm-cov --workspace --exclude jod-desktop --summary-only 2>/dev/null | tail -n 20 || true
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
