@@ -43,7 +43,8 @@ pub struct Options {
 
 pub async fn run(jod: Arc<Jod>, opts: Options) -> Result<()> {
     let mut terminal = enter().context("taking over the terminal")?;
-    let result = event_loop(&mut terminal, jod, opts).await;
+    let mut keys = EventStream::new();
+    let result = event_loop(&mut terminal, &mut keys, jod, opts).await;
     // Restore before surfacing any error, or the message prints into a raw-mode
     // terminal that mangles it.
     restore();
@@ -71,18 +72,32 @@ fn restore() {
     let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture);
 }
 
-async fn event_loop(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+/// The loop itself, over *any* backend and *any* source of key events.
+///
+/// Generic on both so the loop that ships is the loop the tests drive: with a
+/// real terminal and crossterm's `EventStream` in `run`, and with ratatui's
+/// `TestBackend` and a scripted list of keypresses under test. Welding it to
+/// `CrosstermBackend<Stdout>` would have left the whole loop — the quit path,
+/// the spawn path, the event/keypress race — permanently untestable.
+async fn event_loop<B, K>(
+    terminal: &mut Terminal<B>,
+    keys: &mut K,
     jod: Arc<Jod>,
     opts: Options,
-) -> Result<()> {
+) -> Result<()>
+where
+    B: ratatui::backend::Backend,
+    // `?` on `terminal.draw` needs the backend's error to be carryable by
+    // anyhow; CrosstermBackend and TestBackend both satisfy this.
+    B::Error: std::error::Error + Send + Sync + 'static,
+    K: futures::Stream<Item = io::Result<Event>> + Unpin,
+{
     let mut app = App::new(opts.harness, opts.model.clone(), opts.resume.clone());
     app.push(Entry::Notice(format!(
         "{} · type to talk · Enter send · Ctrl-A agents · Ctrl-T thinking · Ctrl-C quit",
         opts.harness.label()
     )));
 
-    let mut keys = EventStream::new();
     let mut events = jod.subscribe();
     // The id of the delegation whose output belongs on screen. Events from any
     // other agent are ignored here; the agents panel is where they show up.
@@ -605,5 +620,231 @@ mod tests {
     async fn a_service_with_no_delegations_lists_none() {
         let jod = Jod::new();
         assert!(list_agents(&jod).await.is_empty());
+    }
+
+    // --- the loop itself -------------------------------------------------
+    //
+    // These drive the real `event_loop` — the same function `run` calls — with
+    // ratatui's TestBackend and a scripted list of keypresses, so the quit
+    // path, the redraw and the spawn path are exercised rather than assumed.
+
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    fn opts() -> Options {
+        Options {
+            harness: HarnessKind::ClaudeCode,
+            cwd: PathBuf::from("/tmp"),
+            model: None,
+            permission: PermissionPolicy::Ask,
+            resume: Resume::Fresh,
+        }
+    }
+
+    /// A finite key stream, as crossterm would deliver it.
+    fn scripted(keys: Vec<KeyEvent>) -> impl futures::Stream<Item = io::Result<Event>> + Unpin {
+        futures::stream::iter(keys.into_iter().map(|k| Ok(Event::Key(k))).collect::<Vec<_>>())
+    }
+
+    fn screen(terminal: &Terminal<TestBackend>) -> String {
+        let buffer = terminal.backend().buffer().clone();
+        (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[tokio::test]
+    async fn the_loop_draws_the_banner_and_leaves_on_ctrl_c() {
+        let mut terminal = Terminal::new(TestBackend::new(90, 16)).unwrap();
+        let mut keys = scripted(vec![ctrl('c')]);
+
+        event_loop(&mut terminal, &mut keys, Jod::new(), opts())
+            .await
+            .expect("a clean quit is not an error");
+
+        let out = screen(&terminal);
+        assert!(out.contains("Ctrl-C quit"), "the banner must be shown:\n{out}");
+    }
+
+    #[tokio::test]
+    async fn what_is_typed_before_quitting_appears_on_screen() {
+        let mut terminal = Terminal::new(TestBackend::new(90, 16)).unwrap();
+        let typed: Vec<KeyEvent> = "hello".chars().map(|c| press(KeyCode::Char(c))).collect();
+        let mut keys = scripted([typed, vec![ctrl('c')]].concat());
+
+        event_loop(&mut terminal, &mut keys, Jod::new(), opts())
+            .await
+            .unwrap();
+
+        assert!(screen(&terminal).contains("hello"));
+    }
+
+    #[tokio::test]
+    async fn the_agents_panel_opens_from_inside_the_loop() {
+        let mut terminal = Terminal::new(TestBackend::new(90, 18)).unwrap();
+        let mut keys = scripted(vec![ctrl('a'), ctrl('c')]);
+
+        event_loop(&mut terminal, &mut keys, Jod::new(), opts())
+            .await
+            .unwrap();
+
+        let out = screen(&terminal);
+        assert!(out.contains("agents"), "Ctrl-A must open the panel:\n{out}");
+    }
+
+    /// Enter with no harness installed must report the failure into the
+    /// transcript and keep running, not abort the loop.
+    #[tokio::test]
+    async fn a_spawn_that_cannot_start_is_reported_and_the_loop_survives() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut terminal = Terminal::new(TestBackend::new(90, 18)).unwrap();
+        let typed: Vec<KeyEvent> = "do it".chars().map(|c| press(KeyCode::Char(c))).collect();
+        let mut keys = scripted(
+            [typed, vec![press(KeyCode::Enter), ctrl('c'), ctrl('c')]].concat(),
+        );
+
+        // No harness binary is reachable, so spawn_agent fails.
+        let saved_path = std::env::var("PATH").unwrap_or_default();
+        let saved_home = std::env::var("HOME").unwrap_or_default();
+        std::env::set_var("PATH", "/definitely/not/a/dir");
+        std::env::set_var("HOME", "/definitely/not/a/home");
+        std::env::set_var("JOD_CLAUDE_BIN", "/definitely/not/a/binary");
+
+        let result = event_loop(&mut terminal, &mut keys, Jod::new(), opts()).await;
+
+        std::env::set_var("PATH", saved_path);
+        std::env::set_var("HOME", saved_home);
+        std::env::remove_var("JOD_CLAUDE_BIN");
+
+        result.expect("a failed spawn must not end the session");
+        let out = screen(&terminal);
+        assert!(
+            out.contains("could not start"),
+            "the failure must be shown, not swallowed:\n{out}"
+        );
+    }
+
+    /// Tests that set `JOD_*`, `PATH` or `HOME` must hold this. Rust runs tests
+    /// as threads of one process, so two of them mutating the environment at
+    /// once make each other flaky — which is exactly what happened here.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// A fake tmux and a fake harness binary, so a spawn can actually succeed
+    /// without a tmux server or a real Claude install — and, crucially, without
+    /// touching the developer's own `jod-*` sessions.
+    struct Sandbox {
+        dir: PathBuf,
+    }
+
+    impl Sandbox {
+        fn new(tag: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!("jod-tui-test-{tag}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+
+            let sessions = dir.join("sessions");
+            std::fs::write(&sessions, b"").unwrap();
+            Self::executable(
+                &dir.join("tmux"),
+                &format!(
+                    "#!/bin/bash\nPATH=/usr/bin:/bin\nexport PATH\nSESSIONS={:?}\n\
+                     cmd=\"${{1:-}}\"; shift || true\n\
+                     case \"$cmd\" in\n\
+                       has-session) grep -qxF \"$2\" \"$SESSIONS\" ;;\n\
+                       new-session) while [ $# -gt 0 ]; do case \"$1\" in -s) printf '%s\\n' \"$2\" >> \"$SESSIONS\"; shift 2 ;; *) shift ;; esac; done ;;\n\
+                       list-sessions) cat \"$SESSIONS\" ;;\n\
+                       *) : ;;\n\
+                     esac\n",
+                    sessions.to_string_lossy()
+                ),
+            );
+            Self::executable(&dir.join("claude"), "#!/bin/bash\nexit 0\n");
+            Self { dir }
+        }
+
+        fn executable(path: &std::path::Path, body: &str) {
+            std::fs::write(path, body).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+        }
+
+        fn apply(&self) {
+            std::env::set_var("JOD_TMUX_BIN", self.dir.join("tmux"));
+            std::env::set_var("JOD_CLAUDE_BIN", self.dir.join("claude"));
+            std::env::set_var("JOD_HOME", self.dir.join("home"));
+        }
+    }
+
+    impl Drop for Sandbox {
+        fn drop(&mut self) {
+            std::env::remove_var("JOD_TMUX_BIN");
+            std::env::remove_var("JOD_CLAUDE_BIN");
+            std::env::remove_var("JOD_HOME");
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    /// The whole point of the thing: type a task, press Enter, and an agent is
+    /// delegated. Also pins the quit-confirmation, since the app is now busy.
+    #[tokio::test]
+    async fn pressing_enter_delegates_the_task_and_shows_it_in_the_transcript() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let sandbox = Sandbox::new("spawn");
+        sandbox.apply();
+
+        let mut terminal = Terminal::new(TestBackend::new(90, 18)).unwrap();
+        let typed: Vec<KeyEvent> = "summarise it".chars().map(|c| press(KeyCode::Char(c))).collect();
+        // Two quits: the first only warns, because a delegation is in flight.
+        let mut keys = scripted(
+            [typed, vec![press(KeyCode::Enter), ctrl('c'), ctrl('c')]].concat(),
+        );
+
+        let jod = Jod::new();
+        event_loop(&mut terminal, &mut keys, jod.clone(), opts())
+            .await
+            .expect("a successful delegation is not an error");
+
+        let out = screen(&terminal);
+        assert!(
+            out.contains("summarise it"),
+            "the task must appear as the user's own line:\n{out}"
+        );
+        assert!(
+            !out.contains("could not start"),
+            "the spawn should have succeeded:\n{out}"
+        );
+        assert_eq!(jod.agents().await.len(), 1, "exactly one agent was delegated");
+    }
+
+    #[tokio::test]
+    async fn a_mouse_scroll_is_handled_without_ending_the_loop() {
+        let mut terminal = Terminal::new(TestBackend::new(90, 16)).unwrap();
+        let wheel = |kind| {
+            Ok(Event::Mouse(crossterm::event::MouseEvent {
+                kind,
+                column: 1,
+                row: 1,
+                modifiers: KeyModifiers::NONE,
+            }))
+        };
+        let mut keys = futures::stream::iter(vec![
+            wheel(MouseEventKind::ScrollUp),
+            wheel(MouseEventKind::ScrollDown),
+            wheel(MouseEventKind::Moved),
+            Ok(Event::Resize(40, 10)),
+            Ok(Event::Key(ctrl('c'))),
+        ]);
+
+        event_loop(&mut terminal, &mut keys, Jod::new(), opts())
+            .await
+            .expect("scrolling and resizing are not errors");
     }
 }
