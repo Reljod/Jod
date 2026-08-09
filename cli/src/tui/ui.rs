@@ -38,7 +38,65 @@ pub fn draw(f: &mut Frame, app: &App) -> usize {
     if app.pane == Pane::Team {
         draw_team(f, app, f.area());
     }
+    // Last, so it floats over everything including the panels.
+    draw_completions(f, app, chunks[1]);
     height
+}
+
+/// The slash-command popup, sitting directly above the input box.
+///
+/// Above rather than below because the input is already near the bottom of the
+/// screen, and a list that grows downwards would be clipped exactly when it is
+/// longest.
+fn draw_completions(f: &mut Frame, app: &App, input: Rect) {
+    let suggestions = crate::tui::command::completions(&app.input);
+    if suggestions.is_empty() {
+        return;
+    }
+
+    let widest = suggestions
+        .iter()
+        .map(|c| c.line.chars().count() + c.hint.chars().count() + 6)
+        .max()
+        .unwrap_or(20);
+    let w = (widest as u16).clamp(24, 64).min(input.width);
+    // Only as tall as it needs to be, and never taller than the space above.
+    let h = ((suggestions.len() + 2) as u16).min(input.y.saturating_sub(1)).max(3);
+    let panel = Rect {
+        x: input.x,
+        y: input.y.saturating_sub(h),
+        width: w,
+        height: h,
+    };
+
+    let selected = app.suggestion.min(suggestions.len().saturating_sub(1));
+    let items: Vec<ListItem> = suggestions
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            let (mark, style) = if i == selected {
+                ("▸ ", Style::default().fg(USER).add_modifier(Modifier::BOLD))
+            } else {
+                ("  ", Style::default())
+            };
+            ListItem::new(Line::from(vec![
+                Span::styled(mark, style),
+                Span::styled(c.line.clone(), style),
+                Span::styled(format!("  {}", c.hint), Style::default().fg(MUTED)),
+            ]))
+        })
+        .collect();
+
+    f.render_widget(Clear, panel);
+    f.render_widget(
+        List::new(items).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(MUTED))
+                .title(" Tab completes · ↑↓ choose "),
+        ),
+        panel,
+    );
 }
 
 /// The team panel: who is on it, and what each of them is doing.
@@ -423,6 +481,63 @@ mod tests {
             owner: owner.map(str::to_string),
             status: status.into(),
         }
+    }
+
+    #[test]
+    fn typing_a_slash_opens_the_completion_popup() {
+        let mut a = app();
+        assert!(!rendered(&a, 100, 20).contains("Tab completes"));
+
+        a.input = "/".into();
+        let screen = rendered(&a, 100, 20);
+        assert!(screen.contains("Tab completes"));
+        assert!(screen.contains("/help"));
+        assert!(screen.contains("/harness"));
+    }
+
+    #[test]
+    fn the_popup_narrows_as_you_type_and_shows_the_hint() {
+        let mut a = app();
+        a.input = "/th".into();
+        let screen = rendered(&a, 100, 20);
+        assert!(screen.contains("/thinking"));
+        assert!(screen.contains("show or hide reasoning"), "the hint is shown");
+        assert!(!screen.contains("/help"));
+    }
+
+    #[test]
+    fn the_highlighted_suggestion_is_marked() {
+        let mut a = app();
+        a.input = "/".into();
+        a.suggestion = 1;
+        assert!(rendered(&a, 100, 20).contains("▸"));
+    }
+
+    #[test]
+    fn harness_arguments_are_offered_in_the_popup() {
+        let mut a = app();
+        a.input = "/harness ".into();
+        let screen = rendered(&a, 100, 20);
+        assert!(screen.contains("claude"));
+        assert!(screen.contains("agy"));
+    }
+
+    #[test]
+    fn a_plain_prompt_shows_no_popup() {
+        let mut a = app();
+        a.input = "what is in this repo".into();
+        assert!(!rendered(&a, 100, 20).contains("Tab completes"));
+    }
+
+    /// The popup sits above the input, so it must not be drawn outside the
+    /// buffer on a short terminal.
+    #[test]
+    fn the_popup_fits_a_short_terminal() {
+        let mut a = app();
+        a.input = "/".into();
+        let _ = rendered(&a, 60, 8);
+        let _ = rendered(&a, 30, 6);
+        let _ = rendered(&a, 24, 5);
     }
 
     #[test]

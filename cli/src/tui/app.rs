@@ -55,6 +55,9 @@ pub struct App {
     /// True while an agent is working, so the UI can refuse a second prompt.
     pub busy: bool,
     pub agents: Vec<AgentLine>,
+    /// Which entry of the slash-command popup is highlighted. Meaningless when
+    /// there is no popup, and clamped every time the input changes.
+    pub suggestion: usize,
     /// The team this session is watching, if any. `None` means teams are not
     /// in play and the panel says so rather than showing an empty box.
     pub team: Option<String>,
@@ -89,11 +92,40 @@ impl App {
             pane: Pane::Chat,
             busy: false,
             agents: Vec::new(),
+            suggestion: 0,
             team: None,
             members: Vec::new(),
             tasks: Vec::new(),
             should_quit: false,
             confirm_quit: false,
+        }
+    }
+
+    /// Replace the input with a chosen completion, cursor at the end.
+    pub fn accept_completion(&mut self, line: &str) {
+        self.input = line.to_string();
+        self.cursor = self.input.len();
+        self.suggestion = 0;
+    }
+
+    /// Keep the highlight inside the list as it shrinks under the cursor.
+    pub fn clamp_suggestion(&mut self, count: usize) {
+        if count == 0 {
+            self.suggestion = 0;
+        } else if self.suggestion >= count {
+            self.suggestion = count - 1;
+        }
+    }
+
+    pub fn next_suggestion(&mut self, count: usize) {
+        if count > 0 {
+            self.suggestion = (self.suggestion + 1) % count;
+        }
+    }
+
+    pub fn prev_suggestion(&mut self, count: usize) {
+        if count > 0 {
+            self.suggestion = (self.suggestion + count - 1) % count;
         }
     }
 

@@ -11,6 +11,7 @@
 //! as well as run on the normal path.
 
 mod app;
+mod command;
 mod ui;
 
 pub use app::{AgentLine, App, Entry, Pane};
@@ -223,8 +224,45 @@ fn on_key(app: &mut App, key: KeyEvent, viewport: usize) -> Option<String> {
         app.confirm_quit = false;
     }
 
+    // While the completion popup is up it owns Tab and the arrows, and Enter
+    // finishes the word rather than sending a half-typed command.
+    let suggestions = command::completions(&app.input);
+    if !suggestions.is_empty() {
+        app.clamp_suggestion(suggestions.len());
+        match key.code {
+            KeyCode::Tab => {
+                let line = suggestions[app.suggestion].line.clone();
+                app.accept_completion(&line);
+                return None;
+            }
+            KeyCode::Up => {
+                app.prev_suggestion(suggestions.len());
+                return None;
+            }
+            KeyCode::Down => {
+                app.next_suggestion(suggestions.len());
+                return None;
+            }
+            KeyCode::Enter if !command::is_complete(app.input.trim()) => {
+                let line = suggestions[app.suggestion].line.clone();
+                app.accept_completion(&line);
+                return None;
+            }
+            _ => {}
+        }
+    }
+
     match key.code {
         KeyCode::Enter => {
+            // A slash line is an instruction to Jod, not to the agent, so it
+            // works while an agent is busy — switching the model for the *next*
+            // turn is exactly the sort of thing you do while waiting.
+            if let Some(slash) = command::parse(app.input.trim()) {
+                app.input.clear();
+                app.cursor = 0;
+                apply_slash(app, slash);
+                return None;
+            }
             if app.busy {
                 app.push(Entry::Notice(
                     "still working — wait for this turn to finish".into(),
@@ -250,14 +288,93 @@ fn on_key(app: &mut App, key: KeyEvent, viewport: usize) -> Option<String> {
     None
 }
 
+/// Carry out a slash command. Everything it touches is app state, so this
+/// stays synchronous and testable; anything needing the service is handled by
+/// setting a flag the loop picks up.
+fn apply_slash(app: &mut App, slash: command::Slash) {
+    use command::Slash;
+    match slash {
+        Slash::Help => {
+            for (usage, what) in command::HELP {
+                app.push(Entry::Notice(format!("{usage:<18} {what}")));
+            }
+        }
+        Slash::Harness(kind) => {
+            app.harness = kind;
+            // Conversations belong to a harness, so carrying the old session
+            // cursor across would try to resume a conversation the new harness
+            // has never heard of.
+            app.resume = Resume::Fresh;
+            app.session = None;
+            app.push(Entry::Notice(format!(
+                "{} from the next turn — starting a fresh conversation",
+                kind.label()
+            )));
+        }
+        Slash::Model(model) => {
+            let said = match &model {
+                Some(m) => format!("model: {m}"),
+                None => "model: the harness default".to_string(),
+            };
+            app.model = model;
+            app.push(Entry::Notice(said));
+        }
+        Slash::Thinking => {
+            app.show_thinking = !app.show_thinking;
+            app.push(Entry::Notice(format!(
+                "thinking {}",
+                if app.show_thinking { "shown" } else { "hidden" }
+            )));
+        }
+        Slash::New => {
+            app.resume = Resume::Fresh;
+            app.session = None;
+            app.cost_usd = 0.0;
+            app.transcript.clear();
+            app.scroll_to_bottom();
+            app.push(Entry::Notice("new conversation".into()));
+        }
+        Slash::Sessions => {
+            app.pane = Pane::Agents;
+            app.push(Entry::Notice(
+                "pick an id from the panel, then /resume <id>".into(),
+            ));
+        }
+        Slash::Resume(id) => {
+            app.resume = Resume::Session(id.clone());
+            app.session = Some(id.clone());
+            app.push(Entry::Notice(format!("continuing {id}")));
+        }
+        Slash::Agents => {
+            app.pane = if app.pane == Pane::Agents { Pane::Chat } else { Pane::Agents };
+        }
+        Slash::Team => {
+            app.pane = if app.pane == Pane::Team { Pane::Chat } else { Pane::Team };
+        }
+        Slash::Clear => {
+            app.transcript.clear();
+            app.scroll_to_bottom();
+        }
+        Slash::Exit => app.should_quit = true,
+        Slash::NeedsArgument(usage) => {
+            app.push(Entry::Notice(format!("usage: {usage}")));
+        }
+        Slash::Unknown(what) => {
+            app.push(Entry::Notice(format!("{what} is not a command — /help lists them")));
+        }
+    }
+}
+
 async fn spawn(jod: &Arc<Jod>, app: &App, opts: &Options, prompt: String) -> Result<String> {
     let agent = jod
         .spawn_agent(SpawnRequest {
             name: crate::default_name(&prompt),
-            harness: opts.harness,
+            // From the app, not the options: `/harness` and `/model` change
+            // these mid-session, and a spawn must use what is current.
+            harness: app.harness,
             prompt,
             cwd: opts.cwd.clone(),
-            model: opts.model.clone(),
+            model: app.model.clone(),
             permission: opts.permission,
             // App owns the conversation cursor: it advances to the exact
             // session the harness reported on the previous turn.
