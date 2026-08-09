@@ -25,6 +25,7 @@ pub mod paths;
 pub mod runner;
 pub mod service;
 pub mod store;
+pub mod team;
 pub mod tmux;
 
 /// Re-exported so clients can name the subscription channel's types without

@@ -147,6 +147,85 @@ every delegation. That panel is the reason it is not just a chat window — Jod'
 job is watching several agents, and it shows runs from earlier processes too,
 because `rehydrate` puts them back.
 
+`jod tui --team <name>` adds `Ctrl-G`: the team's members, their harnesses and
+statuses, and the task board. It is read from the store on every refresh rather
+than kept in memory, because teammates run in their own processes and no
+in-memory copy could be authoritative.
+
+### Slash commands
+
+Typing `/` opens a completion popup — `Tab` completes, `↑↓` choose — and
+arguments are completed too, so `/harness ` offers the three spellings rather
+than expecting them to be remembered.
+
+| | |
+|---|---|
+| `/harness <name>` | switch harness mid-session |
+| `/model <name>` | set the model; no argument restores the default |
+| `/thinking` · `/details` | show or hide reasoning, and what tools returned |
+| `/new` · `/resume <id>` · `/sessions` | move between conversations |
+| `/agents` · `/team` | the panels, same as `Ctrl-A` and `Ctrl-G` |
+| `/help` · `/clear` · `/exit` | |
+
+Two rules keep the set honest. **A command exists only if Jod can do it**: there
+is no `/compact` or `/undo`, because a command that silently does nothing is
+worse than one that is absent — an unknown `/word` is named back rather than
+sent to the agent as a prompt. And **switching harness starts a fresh
+conversation**, because a session id belongs to the harness that issued it;
+carrying it across would try to resume a conversation the new harness has never
+heard of.
+
+Parsing and completion are pure functions over a string, so the whole of "what
+did the user ask for" is tested without a terminal.
+
+#### What OpenCode has that this does not
+
+Written down so the gap is a decision rather than an oversight. Nothing here is
+stubbed: a command Jod cannot honour is absent, and an unknown `/word` is named
+back rather than quietly accepted.
+
+**Buildable today — nothing is in the way but the work:**
+
+| Missing | What it needs |
+|---|---|
+| `/export` | The transcript is already in SQLite; this is a formatter. |
+| `/editor` | Compose in `$EDITOR`, read the file back into the input. |
+| `@file` references | Fuzzy-find a path and inline its content into the prompt. |
+| `ctrl+p` palette | The completion popup generalised past `/`. |
+| Leader keys (`ctrl+x …`) | A second keymap layer; today every binding is a bare chord. |
+| `/models` listing | No harness lists its models through Jod — `jod models` does not exist, so `/model` can set a name but not offer one. |
+| `/themes` | Colours are constants in `ui.rs`. |
+
+**Half-built:** `/sessions` opens the agents panel and tells you to
+`/resume <id>`; it is not yet a picker you can arrow through. The id it shows
+does now work — `/resume` takes a prefix of either the agent id on screen or
+the harness's own conversation id and resolves it. It refuses an ambiguous
+prefix, and refuses an agent that has never reported a conversation, because
+resuming that would silently start a fresh one instead of continuing anything.
+
+**Blocked on something Jod does not have:**
+
+| Missing | Why |
+|---|---|
+| `/undo`, `/redo` | Reverting file changes needs snapshots of the working tree. Jod keeps a transcript, not a filesystem history — and git already does this properly. |
+| `/compact` | No harness exposes conversation compaction through its headless interface. It is the harness's own context to manage, which is the seam working as intended. |
+| `/share`, `/unshare` | OpenCode-specific hosted sessions; there is nothing for Jod to share *to*. |
+| `/connect` | Provider credentials belong to the harness. Jod never holds an API key, by design. |
+| Reasoning-effort cycling | Each harness spells it differently — AGY `--effort`, OpenCode `--variant`, Claude model-side — so there is no uniform control to expose yet. |
+
+The last two rows of that table are the harness seam's cost showing up in the
+UI, and are the expected price of [delegating rather than owning the
+loop](decisions.md).
+
+### Watching the work
+
+The transcript shows what the harness is *doing*, not just what it concluded:
+a tool call carries the most useful field of its arguments — `Bash · cargo
+test`, not a bare `Bash` — and what the tool gave back is shown underneath it,
+trimmed to a few lines. `/details` turns the output off for a quieter view; a
+*failed* tool is shown either way, because it is the reason the answer is about
+to be wrong.
+
 Two behaviours it takes care over, both easy to get wrong:
 
 - **Scrolling up does not get yanked back down.** New output only follows the
@@ -250,15 +329,78 @@ it does not.
 **Built:** agents run under all three harnesses, each in its own tmux session,
 each managing its own context.
 
-**Planned:** agent-to-agent communication, following the same local-files
-principle, so it needs no broker. An agent sends a message by appending one JSON
-line; Jod's tailer already knows how to follow an append-only file. Two paths,
-in order of cost:
+**Built: agent teams.** `core/src/team.rs`, with the state in the same SQLite
+file as everything else. A team has members, a message bus, and a shared task
+board; `jod team` drives it and `Ctrl-G` in the TUI shows it.
 
-1. **Prompt-level** — Jod injects pending inbox messages into the next
-   delegation. Works with any harness today.
-2. **MCP-level** — a small `jod-mcp` server exposing `send_message`,
-   `read_inbox`, `list_agents`. All three harnesses support MCP.
+```sh
+jod team join crew lead   --harness claude   --role coordinator
+jod team join crew scout  --harness agy      --role research
+jod team join crew builder --harness opencode --role implement
+jod team task crew t1 port the parser
+jod team claim t1 scout        # exits non-zero if someone else already has it
+jod team msg crew --from lead stand up please
+jod team inbox crew scout      # drains, so a message is never replayed
+```
+
+Every harness is growing a team feature of its own, and each one can only ever
+contain that harness. Jod owns the bus instead, which buys the thing none of
+them can do alone: **one team whose lead runs on Claude Code and whose teammates
+run on AGY and OpenCode.** The command above is that, and it works today.
+
+Two operations are contended and both are single statements rather than
+read-then-write, for the reason the rest of the store already documents:
+
+- **Claiming a task** reuses the existing `claim_task`, whose `owner IS NULL`
+  guard makes two agents racing produce one winner.
+- **Draining an inbox** selects and marks delivered in one transaction, so the
+  same instruction is never injected into two turns.
+
+Delivery is deliberately dumb: a message becomes a synthetic user turn in the
+recipient's next prompt. Because every harness resumes a session by id, that
+works on all three without any harness knowing teams exist.
+
+### Auto-wake
+
+`jod team wake <team>` delivers waiting mail by resuming every idle member that
+has some, which is what makes a team react rather than sit there.
+
+```sh
+jod team start crew scout "read the parser and report"   # first turn
+jod team msg   crew --from lead --to scout "what did you find?"
+jod team wake  crew                                      # resumes that session
+```
+
+The decision of *whether* to wake is a pure function, `team::wake_order`, kept
+separate from the spawning so the judgement in it can be tested without a tmux
+server or a harness. It declines in four cases, each on purpose:
+
+- **Nothing waiting** — waking an agent to tell it nothing burns a turn.
+- **Not idle** — a busy member reads its inbox on its next turn anyway, and
+  resuming a conversation that is mid-turn would fork it.
+- **Shutting down or failed** — waking it would undo the request.
+- **No session id** — the important one. Spawning without one starts a *fresh*
+  context, so the member would answer having forgotten everything. Staying
+  asleep holding visible unread mail is better than answering with amnesia.
+
+That last rule is why `jod team start` exists: a member has no conversation
+until it has run once, and `start` is the first turn that creates one.
+
+**Both commands wait for their runs by default**, and that is not a UI
+preference — it is forced by where the tailer lives. The task that follows a
+run's output and records its events belongs to the process that spawned it, so
+a command that returned early would take the tailer with it: no `Finished`
+event would ever be written, and the member would stay marked busy for ever,
+never eligible to be woken again. Waiting is what lets the command record the
+session id and mark the member idle before it exits. `--detach` is available and
+honest about the consequence — the state is reconciled on the next `wake`.
+
+Mail is drained only *after* a spawn succeeds, so a failure leaves it waiting
+rather than losing it.
+
+**Still to build:** a `jod-mcp` server exposing `send_message` / `read_inbox` to
+agents directly. Today a teammate cannot message another from inside a run —
+only the human, or a script between turns, can.
 
 **Collaboration on code** uses git rather than messages: each agent gets its own
 worktree, and integration is a merge. → [`teamwork.md`](teamwork.md)

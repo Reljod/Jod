@@ -146,9 +146,12 @@ impl ClaudeCode {
                 .get("is_error")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
-            if is_error {
-                self.acc.errored = true;
-            }
+            // Deliberately *not* latched onto the run. A tool that fails is
+            // ordinary and usually recoverable — an agent that tries `python`,
+            // is told there is no such command, and succeeds with `python3` has
+            // not failed. Marking the run here reported `✗ failed` for work that
+            // finished correctly. Whether the *run* failed is the harness's own
+            // `result.is_error` and the exit code; this flag stays on the tool.
             out.push(AgentEvent::ToolResult {
                 name,
                 summary: block.get("content").map(|c| summarize(c, 400)),
@@ -327,6 +330,33 @@ mod tests {
                 is_error: false
             }]
         );
+    }
+
+    /// The case seen live: `python` is missing, the agent retries with
+    /// `python3` and finishes correctly. The tool is marked failed; the run is
+    /// not, because the harness's own result says the run succeeded.
+    #[test]
+    fn a_tool_that_fails_does_not_fail_a_run_that_recovered() {
+        let mut h = ClaudeCode::default();
+        h.parse_line(
+            r#"{"type":"assistant","message":{"content":[
+                {"type":"tool_use","id":"tu_1","name":"Bash","input":{"command":"python x.py"}}]}}"#,
+        );
+        let out = h.parse_line(
+            r#"{"type":"user","message":{"content":[
+                {"type":"tool_result","tool_use_id":"tu_1","content":"command not found","is_error":true}]}}"#,
+        );
+        assert!(out
+            .iter()
+            .any(|e| matches!(e, AgentEvent::ToolResult { is_error: true, .. })));
+
+        h.parse_line(r#"{"type":"result","subtype":"success","is_error":false,"result":"done"}"#);
+        match h.finalize(Some(0)) {
+            AgentEvent::Finished { is_error, .. } => {
+                assert!(!is_error, "a recovered run must not be reported as failed")
+            }
+            other => panic!("expected Finished, got {other:?}"),
+        }
     }
 
     #[test]

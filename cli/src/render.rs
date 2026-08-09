@@ -4,6 +4,14 @@ use jod_core::service::{AgentStatus, AgentSummary, HarnessInfo, Report};
 use jod_core::store::Origin;
 use jod_core::{broadcast, AgentEnvelope, AgentEvent};
 
+/// The first `n` *characters* of an id.
+///
+/// Slicing bytes here panics the moment an id is not pure ASCII, and task ids
+/// are whatever the user typed.
+fn short(id: &str, n: usize) -> String {
+    id.chars().take(n).collect()
+}
+
 const DIM: &str = "\x1b[2m";
 const BOLD: &str = "\x1b[1m";
 const RED: &str = "\x1b[31m";
@@ -184,10 +192,62 @@ pub fn agents(list: &[AgentSummary]) {
         };
         println!(
             "{:<10} {:<9} {:<12} {}",
-            &a.id[..a.id.len().min(8)],
+            short(&a.id, 8),
             status,
             a.harness_label,
             a.name
+        );
+    }
+}
+
+/// A team: who is on it, then what is on its board.
+pub fn team(members: &[jod_core::team::Member], tasks: &[jod_core::team::TeamTask]) {
+    use jod_core::team::MemberStatus;
+
+    if members.is_empty() {
+        println!("{}", paint(DIM, "no members"));
+    }
+    for m in members {
+        let status = match m.status {
+            MemberStatus::Ready => paint(GREEN, "ready"),
+            MemberStatus::Busy => paint(YELLOW, "busy"),
+            MemberStatus::Error => paint(RED, "error"),
+            other => paint(DIM, other.as_str()),
+        };
+        println!(
+            "{:<12} {:<9} {:<13} {}",
+            m.name,
+            status,
+            m.harness.label(),
+            m.role
+        );
+    }
+
+    if tasks.is_empty() {
+        return;
+    }
+    println!();
+    for t in tasks {
+        // Open / claimed / done, so progress reads at a glance.
+        let mark = if t.is_done() {
+            paint(GREEN, "done")
+        } else if t.is_claimed() {
+            paint(YELLOW, "taken")
+        } else {
+            paint(DIM, "open")
+        };
+        // The id in full, not a prefix: this board is the only place to learn
+        // it, and `jod team claim` needs it exactly. A truncated id looked
+        // copyable and was not.
+        println!(
+            "{:<10} {:<8} {}{}",
+            t.id,
+            mark,
+            t.title,
+            t.owner
+                .as_ref()
+                .map(|o| paint(DIM, &format!("  ({o})")))
+                .unwrap_or_default()
         );
     }
 }
@@ -203,7 +263,7 @@ pub fn history(runs: &[jod_core::store::StoredRun]) {
             .unwrap_or_default();
         println!(
             "{:<8} {} {:<10} {}",
-            &r.id[..r.id.len().min(8)],
+            short(&r.id, 8),
             paint(DIM, &when),
             r.status,
             r.name

@@ -33,6 +33,12 @@ impl HarnessKind {
         HarnessKind::Agy,
     ];
 
+    /// The inverse of [`HarnessKind::id`], for reading a kind back out of
+    /// storage. Unknown text yields `None` rather than a guess.
+    pub fn from_id(id: &str) -> Option<HarnessKind> {
+        HarnessKind::ALL.into_iter().find(|k| k.id() == id)
+    }
+
     pub fn id(&self) -> &'static str {
         match self {
             HarnessKind::ClaudeCode => "claude_code",

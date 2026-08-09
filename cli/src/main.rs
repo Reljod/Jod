@@ -10,6 +10,7 @@ mod tui;
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use jod_core::store::{NewFact, Origin};
+use jod_core::team::MemberStatus;
 use jod_core::{HarnessKind, Jod, PermissionPolicy, Resume, SpawnRequest};
 use std::path::PathBuf;
 
@@ -133,6 +134,17 @@ enum Command {
         /// Pick up the last conversation instead of starting a new one.
         #[arg(short = 'C', long = "continue")]
         continue_last: bool,
+        /// Watch a team: Ctrl-G shows its members and its task board.
+        #[arg(long)]
+        team: Option<String>,
+    },
+    /// Agent teams: several agents on one job, talking to each other.
+    ///
+    /// A team can mix harnesses — a lead on Claude Code with teammates on AGY
+    /// and OpenCode — which is the thing no single harness can do.
+    Team {
+        #[command(subcommand)]
+        what: TeamCommand,
     },
     /// Hold a conversation on a plain terminal, without the full-screen UI.
     Chat {
@@ -148,6 +160,83 @@ enum Command {
         #[arg(short = 'C', long = "continue")]
         continue_last: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum TeamCommand {
+    /// Put a member on a team, or update the one already there.
+    Join {
+        team: String,
+        member: String,
+        #[arg(short = 'H', long, value_enum, default_value_t = HarnessArg::Claude)]
+        harness: HarnessArg,
+        #[arg(short, long, default_value = "")]
+        role: String,
+    },
+    /// Put a task on the team's board.
+    Task {
+        team: String,
+        id: String,
+        title: Vec<String>,
+    },
+    /// Take ownership of a task. Reports whether this member won the race.
+    Claim { id: String, member: String },
+    /// Mark a task finished.
+    Done { id: String },
+    /// Send a message. Without --to it goes to every member but the sender.
+    Msg {
+        team: String,
+        #[arg(short, long)]
+        from: String,
+        #[arg(short, long)]
+        to: Option<String>,
+        text: Vec<String>,
+    },
+    /// Read a member's waiting messages and mark them delivered.
+    Inbox {
+        team: String,
+        member: String,
+        /// Look without consuming, so the next turn still sees them.
+        #[arg(long)]
+        peek: bool,
+    },
+    /// Deliver waiting messages: resume every idle member that has mail.
+    ///
+    /// Safe to run repeatedly — a member with nothing waiting, or one still
+    /// working, is left alone.
+    Wake {
+        team: String,
+        #[arg(short, long)]
+        cwd: Option<PathBuf>,
+        #[arg(short, long, value_enum, default_value_t = PermissionArg::Ask)]
+        permission: PermissionArg,
+        /// Say what would happen without spawning anything.
+        #[arg(long)]
+        dry_run: bool,
+        /// Return as soon as the agents are launched, instead of waiting.
+        #[arg(short, long)]
+        detach: bool,
+    },
+    /// Give a member its first turn, so it has a conversation to resume.
+    ///
+    /// A member has no session until it has run once; `wake` refuses to resume
+    /// one it cannot identify, so this is how a teammate gets started.
+    Start {
+        team: String,
+        member: String,
+        prompt: Vec<String>,
+        #[arg(short, long)]
+        cwd: Option<PathBuf>,
+        #[arg(short, long, value_enum, default_value_t = PermissionArg::Ask)]
+        permission: PermissionArg,
+        /// Return as soon as the agent is launched, instead of waiting for it.
+        #[arg(short, long)]
+        detach: bool,
+    },
+    /// Who is on the team, and what is on its board.
+    Show { team: String },
+    /// Every team that has a member.
+    List,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, ValueEnum)]
@@ -376,6 +465,7 @@ async fn main() -> Result<()> {
             model,
             permission,
             continue_last,
+            team,
         } => {
             if !jod.tmux_available() {
                 bail!("tmux is not installed, and every agent runs inside a tmux session");
@@ -385,6 +475,7 @@ async fn main() -> Result<()> {
                 jod,
                 tui::Options {
                     harness: harness.into(),
+                    team,
                     cwd: cwd.unwrap_or_else(jod_core::service::default_cwd),
                     model,
                     permission: permission.into(),
@@ -396,6 +487,234 @@ async fn main() -> Result<()> {
                 },
             )
             .await?;
+        }
+
+        Command::Team { what } => {
+            let store = jod.store().context("teams need the database")?;
+            match what {
+                TeamCommand::Join {
+                    team,
+                    member,
+                    harness,
+                    role,
+                } => {
+                    store.join_team(&team, &member, harness.into(), &role)?;
+                    println!("{member} joined {team}");
+                }
+                TeamCommand::Task { team, id, title } => {
+                    let title = title.join(" ");
+                    let title = if title.is_empty() { id.clone() } else { title };
+                    store.add_team_task(&team, &id, &title)?;
+                    println!("{id} on {team}'s board");
+                }
+                TeamCommand::Claim { id, member } => {
+                    // Refuse an id that is on no board. `claim_task` would
+                    // otherwise invent it and report success, so a typo looked
+                    // like a win and left a task nobody could see.
+                    if !store.is_team_task(&id)? {
+                        bail!("no task {id} on any team's board — `jod team show <team>` lists them");
+                    }
+                    // The exit code matters: a teammate scripting this needs to
+                    // branch on whether it actually won.
+                    if store.claim_task(&id, &member)? {
+                        println!("{member} claimed {id}");
+                    } else {
+                        bail!("{id} is already owned by someone else");
+                    }
+                }
+                TeamCommand::Done { id } => {
+                    if !store.complete_task(&id)? {
+                        bail!("no task {id} — `jod team show <team>` lists them");
+                    }
+                    println!("{id} done");
+                }
+                TeamCommand::Msg {
+                    team,
+                    from,
+                    to,
+                    text,
+                } => {
+                    let sent = store.send_team_message(
+                        &team,
+                        &from,
+                        to.as_deref(),
+                        &text.join(" "),
+                    )?;
+                    if sent.is_empty() {
+                        println!("nobody on {team} to message");
+                    } else {
+                        println!("sent to {}", sent.join(", "));
+                    }
+                }
+                TeamCommand::Inbox { team, member, peek } => {
+                    let messages = if peek {
+                        store.team_unread(&team, &member)?
+                    } else {
+                        store.drain_inbox(&team, &member)?
+                    };
+                    for m in &messages {
+                        println!("{}", m.as_prompt());
+                    }
+                    if messages.is_empty() {
+                        println!("nothing waiting for {member}");
+                    }
+                }
+                TeamCommand::Wake {
+                    team,
+                    cwd,
+                    permission,
+                    dry_run,
+                    detach,
+                } => {
+                    // A member marked busy whose run has since ended is idle
+                    // again. Reconciling here rather than in a daemon keeps
+                    // this command the only thing that has to run.
+                    jod.rehydrate(200).await?;
+                    let runs: std::collections::HashMap<String, (bool, Option<String>)> = jod
+                        .agents()
+                        .await
+                        .into_iter()
+                        .map(|a| {
+                            (
+                                a.id,
+                                (a.status == jod_core::AgentStatus::Running, a.session_id),
+                            )
+                        })
+                        .collect();
+                    for m in store.team_members(&team)? {
+                        let Some(run) = m.agent_id.as_deref().and_then(|id| runs.get(id)) else {
+                            continue;
+                        };
+                        let (running, session) = run;
+                        // Learn the conversation the harness assigned. This is
+                        // the only place a member gets a session id, and
+                        // without one it can never be woken — a run whose id we
+                        // never recorded would be resumed into an empty
+                        // context, which is worse than staying asleep.
+                        if session.is_some() {
+                            store.bind_member(&team, &m.name, m.agent_id.as_deref(), session.as_deref())?;
+                        }
+                        if !running && m.status == MemberStatus::Busy {
+                            store.set_member_status(&team, &m.name, MemberStatus::Ready)?;
+                        }
+                    }
+
+                    let cwd = cwd.unwrap_or_else(jod_core::service::default_cwd);
+                    let mut woken = 0usize;
+                    // Subscribe before any spawn, so no early event is missed.
+                    let events = jod.subscribe();
+                    let mut spawned: Vec<(String, String)> = Vec::new();
+                    for m in store.team_members(&team)? {
+                        let pending = store.team_unread(&team, &m.name)?;
+                        let Some(order) = jod_core::team::wake_order(&m, &pending) else {
+                            continue;
+                        };
+                        if dry_run {
+                            println!(
+                                "would wake {} on {} with {} message(s)",
+                                order.member,
+                                order.harness.label(),
+                                order.messages
+                            );
+                            woken += 1;
+                            continue;
+                        }
+                        let agent = jod
+                            .spawn_agent(SpawnRequest {
+                                name: format!("{team}-{}", order.member),
+                                harness: order.harness,
+                                prompt: order.prompt,
+                                cwd: cwd.clone(),
+                                model: None,
+                                permission: permission.into(),
+                                resume: Resume::Session(order.session_id),
+                            })
+                            .await?;
+                        // Drain only once the spawn succeeded, so a failure
+                        // leaves the mail waiting rather than losing it.
+                        store.drain_inbox(&team, &m.name)?;
+                        store.set_member_status(&team, &m.name, MemberStatus::Busy)?;
+                        store.bind_member(&team, &m.name, Some(&agent.id), None)?;
+                        println!(
+                            "woke {} on {} ({} message(s)) as {}",
+                            order.member,
+                            order.harness.label(),
+                            order.messages,
+                            &agent.id[..agent.id.len().min(8)]
+                        );
+                        spawned.push((m.name.clone(), agent.id));
+                        woken += 1;
+                    }
+                    if woken == 0 {
+                        println!("nobody to wake");
+                    } else if detach {
+                        println!("detached — run `jod team wake {team}` again once they finish");
+                    } else {
+                        // Wait, then record what each run taught us. Without
+                        // this the members stay busy for ever: the tailer lives
+                        // in this process and dies with it.
+                        wait_for_all(events, spawned.iter().map(|(_, id)| id.clone()).collect())
+                            .await;
+                        for (member, id) in &spawned {
+                            settle_member(&jod, store, &team, member, id).await?;
+                        }
+                        println!("{woken} member(s) idle again");
+                    }
+                }
+                TeamCommand::Start {
+                    team,
+                    member,
+                    prompt,
+                    cwd,
+                    permission,
+                    detach,
+                } => {
+                    let who = store
+                        .team_members(&team)?
+                        .into_iter()
+                        .find(|m| m.name == member)
+                        .with_context(|| format!("{member} is not on {team}"))?;
+                    // Subscribe before spawning, so no early event is missed.
+                    let events = jod.subscribe();
+                    let agent = jod
+                        .spawn_agent(SpawnRequest {
+                            name: format!("{team}-{member}"),
+                            harness: who.harness,
+                            prompt: prompt.join(" "),
+                            cwd: cwd.unwrap_or_else(jod_core::service::default_cwd),
+                            model: None,
+                            permission: permission.into(),
+                            resume: Resume::Fresh,
+                        })
+                        .await?;
+                    store.set_member_status(&team, &member, MemberStatus::Busy)?;
+                    store.bind_member(&team, &member, Some(&agent.id), None)?;
+                    println!(
+                        "{member} started on {} as {}",
+                        who.harness.label(),
+                        &agent.id[..agent.id.len().min(8)]
+                    );
+                    if detach {
+                        println!("detached — run `jod team wake {team}` once it finishes");
+                    } else {
+                        wait_for_all(events, [agent.id.clone()].into_iter().collect()).await;
+                        settle_member(&jod, store, &team, &member, &agent.id).await?;
+                        println!("{member} is idle again, ready to be woken");
+                    }
+                }
+                TeamCommand::Show { team } => {
+                    render::team(&store.team_members(&team)?, &store.team_tasks(&team)?);
+                }
+                TeamCommand::List => {
+                    let teams = store.teams()?;
+                    if teams.is_empty() {
+                        println!("no teams yet");
+                    }
+                    for name in teams {
+                        println!("{name}");
+                    }
+                }
+            }
         }
 
         Command::Chat {
@@ -487,6 +806,45 @@ fn read_stdin() -> std::io::Result<String> {
 }
 
 /// A short, human-recognisable name derived from the prompt's first words.
+/// Wait until every one of `pending` has finished.
+///
+/// A team command that returned before its runs ended would leave the members
+/// marked busy for ever: the tailer lives in *this* process, so nothing would
+/// ever record that they stopped.
+async fn wait_for_all(
+    mut events: jod_core::broadcast::Receiver<jod_core::AgentEnvelope>,
+    mut pending: std::collections::HashSet<String>,
+) {
+    use jod_core::broadcast::error::RecvError;
+    while !pending.is_empty() {
+        match events.recv().await {
+            Ok(env) => {
+                if matches!(env.event, jod_core::AgentEvent::Finished { .. }) {
+                    pending.remove(&env.agent_id);
+                }
+            }
+            // Nothing more is coming; stop rather than hang.
+            Err(RecvError::Closed) => return,
+            Err(RecvError::Lagged(_)) => continue,
+        }
+    }
+}
+
+/// Record what a finished run taught us: the conversation to resume next time,
+/// and that the member is idle again.
+async fn settle_member(
+    jod: &std::sync::Arc<Jod>,
+    store: &jod_core::store::Store,
+    team: &str,
+    member: &str,
+    agent_id: &str,
+) -> Result<()> {
+    let session = jod.agent(agent_id).await.ok().and_then(|a| a.session_id);
+    store.bind_member(team, member, Some(agent_id), session.as_deref())?;
+    store.set_member_status(team, member, MemberStatus::Ready)?;
+    Ok(())
+}
+
 fn default_name(prompt: &str) -> String {
     let words: Vec<&str> = prompt.split_whitespace().take(5).collect();
     let name = words.join(" ");

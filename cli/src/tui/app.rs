@@ -5,6 +5,7 @@
 //! cursor movement, scrollback, which turn a message belongs to — is testable
 //! without a terminal.
 
+use jod_core::team::{Member, TeamTask};
 use jod_core::{AgentEvent, HarnessKind, Resume};
 
 /// One line in the transcript, tagged with what produced it so the renderer can
@@ -17,8 +18,16 @@ pub enum Entry {
     Agent(String),
     /// The agent's reasoning, shown only when thinking is toggled on.
     Thinking(String),
-    /// A tool the agent called.
-    Tool { name: String, failed: bool },
+    /// A tool the agent called, with a one-line summary of its argument —
+    /// `Bash · cargo test`, not a bare `Bash`.
+    Tool {
+        name: String,
+        detail: Option<String>,
+        failed: bool,
+    },
+    /// What a tool gave back. Shown when details are on, which is the point of
+    /// watching a harness work rather than waiting for its conclusion.
+    ToolOut { text: String, failed: bool },
     /// A run finished: the summary line.
     Done { text: String, failed: bool },
     /// Something Jod itself wants to say.
@@ -32,6 +41,8 @@ pub enum Entry {
 pub enum Pane {
     Chat,
     Agents,
+    /// The team: who is on it, and what they are each doing.
+    Team,
 }
 
 pub struct App {
@@ -43,15 +54,32 @@ pub struct App {
     /// How many lines the view is scrolled up from the bottom. 0 = following.
     pub scroll: usize,
     pub harness: HarnessKind,
+    /// The model to *ask* for, or `None` for whatever the harness picks itself.
+    /// Only `/model` and the `-m` flag set this.
     pub model: Option<String>,
+    /// The model the harness said it was using. Display only — it must never
+    /// feed back into a spawn, because a name one harness reports (say
+    /// `claude-sonnet-4-5`) is not a name another harness accepts.
+    pub reported_model: Option<String>,
     pub session: Option<String>,
     pub resume: Resume,
     pub cost_usd: f64,
     pub show_thinking: bool,
+    /// Whether tool output is shown. On by default: the reason to watch a
+    /// harness work is to see what it is doing.
+    pub show_details: bool,
     pub pane: Pane,
     /// True while an agent is working, so the UI can refuse a second prompt.
     pub busy: bool,
     pub agents: Vec<AgentLine>,
+    /// Which entry of the slash-command popup is highlighted. Meaningless when
+    /// there is no popup, and clamped every time the input changes.
+    pub suggestion: usize,
+    /// The team this session is watching, if any. `None` means teams are not
+    /// in play and the panel says so rather than showing an empty box.
+    pub team: Option<String>,
+    pub members: Vec<Member>,
+    pub tasks: Vec<TeamTask>,
     pub should_quit: bool,
     /// Set when the user asks to leave while an agent is still running.
     pub confirm_quit: bool,
@@ -63,6 +91,100 @@ pub struct AgentLine {
     pub name: String,
     pub harness: String,
     pub status: String,
+    /// The harness's own conversation id, once it has reported one. This is
+    /// what `/resume` actually needs — the panel shows Jod's agent id, which is
+    /// a different thing entirely.
+    pub session: Option<String>,
+}
+
+/// What `/resume <id>` turned out to mean.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Resolved {
+    /// A conversation the harness can continue.
+    Session(String),
+    /// Not recognised here; hand it to the harness as typed.
+    Verbatim(String),
+    /// Matches a known agent that has no conversation id yet.
+    NoSession(String),
+    /// Matches this many agents, so it names none of them.
+    Ambiguous(usize),
+}
+
+/// The most useful single field of a tool's arguments.
+///
+/// Harnesses name things differently, so the common keys are tried in order of
+/// how much they tell a reader, and anything unrecognised falls back to compact
+/// JSON rather than being dropped.
+fn tool_detail(input: &serde_json::Value) -> Option<String> {
+    // Compared with case and underscores ignored, so `file_path`, `filePath`
+    // and `FilePath` all match one entry. The harnesses genuinely disagree
+    // here: AGY names its parameters `TargetFile` and `DirectoryPath`, and
+    // without them its calls rendered as raw JSON.
+    const KEYS: [&str; 12] = [
+        "command",
+        "cmd",
+        "filepath",
+        "path",
+        "targetfile",
+        "directorypath",
+        "pattern",
+        "query",
+        "url",
+        "description",
+        "prompt",
+        "searchterm",
+    ];
+    fn normalise(key: &str) -> String {
+        key.chars()
+            .filter(|c| *c != '_')
+            .flat_map(char::to_lowercase)
+            .collect()
+    }
+    if let Some(map) = input.as_object() {
+        for key in KEYS {
+            for (found, value) in map {
+                if normalise(found) != key {
+                    continue;
+                }
+                if let Some(v) = value.as_str() {
+                    if !v.trim().is_empty() {
+                        return Some(one_line(v, 90));
+                    }
+                }
+            }
+        }
+    }
+    match input {
+        serde_json::Value::Null => None,
+        serde_json::Value::String(s) if s.trim().is_empty() => None,
+        serde_json::Value::String(s) => Some(one_line(s, 90)),
+        other => {
+            let text = other.to_string();
+            (text != "{}").then(|| one_line(&text, 90))
+        }
+    }
+}
+
+/// Collapse to one line and truncate, so a payload cannot own the transcript.
+fn one_line(s: &str, max: usize) -> String {
+    let flat = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() <= max {
+        return flat;
+    }
+    format!("{}…", flat.chars().take(max).collect::<String>())
+}
+
+/// Keep the first `n` lines of tool output, saying how much was left.
+fn first_lines(s: &str, n: usize) -> String {
+    let lines: Vec<&str> = s.lines().collect();
+    if lines.len() <= n {
+        return s.trim_end().to_string();
+    }
+    format!(
+        "{}\n… (+{} more lines)",
+        lines[..n].join("\n"),
+        lines.len() - n
+    )
 }
 
 impl App {
@@ -74,15 +196,49 @@ impl App {
             scroll: 0,
             harness,
             model,
+            reported_model: None,
             session: None,
             resume,
             cost_usd: 0.0,
             show_thinking: false,
+            show_details: true,
             pane: Pane::Chat,
             busy: false,
             agents: Vec::new(),
+            suggestion: 0,
+            team: None,
+            members: Vec::new(),
+            tasks: Vec::new(),
             should_quit: false,
             confirm_quit: false,
+        }
+    }
+
+    /// Replace the input with a chosen completion, cursor at the end.
+    pub fn accept_completion(&mut self, line: &str) {
+        self.input = line.to_string();
+        self.cursor = self.input.len();
+        self.suggestion = 0;
+    }
+
+    /// Keep the highlight inside the list as it shrinks under the cursor.
+    pub fn clamp_suggestion(&mut self, count: usize) {
+        if count == 0 {
+            self.suggestion = 0;
+        } else if self.suggestion >= count {
+            self.suggestion = count - 1;
+        }
+    }
+
+    pub fn next_suggestion(&mut self, count: usize) {
+        if count > 0 {
+            self.suggestion = (self.suggestion + 1) % count;
+        }
+    }
+
+    pub fn prev_suggestion(&mut self, count: usize) {
+        if count > 0 {
+            self.suggestion = (self.suggestion + count - 1) % count;
         }
     }
 
@@ -231,7 +387,7 @@ impl App {
                     self.resume = Resume::Session(s.clone());
                 }
                 if let Some(m) = model {
-                    self.model = Some(m.clone());
+                    self.reported_model = Some(m.clone());
                 }
             }
             AgentEvent::Thinking { text } => {
@@ -240,18 +396,42 @@ impl App {
                 }
             }
             AgentEvent::Message { text } => self.push(Entry::Agent(text.clone())),
-            AgentEvent::ToolCall { name, .. } => self.push(Entry::Tool {
+            AgentEvent::ToolCall { name, input } => self.push(Entry::Tool {
                 name: name.clone(),
+                detail: input.as_ref().and_then(tool_detail),
                 failed: false,
             }),
-            AgentEvent::ToolResult { name, is_error, .. } => {
-                // A tool that worked is noise; one that failed is the reason
-                // the answer is about to be wrong.
-                if *is_error {
+            AgentEvent::ToolResult {
+                name,
+                summary,
+                is_error,
+            } => {
+                // A failure is always shown: it is the reason the answer is
+                // about to be wrong. Success is shown when details are on.
+                //
+                // A result also needs a call line above it when none was
+                // announced. OpenCode reports a fast tool as already
+                // `completed`, so no ToolCall ever arrives and the output was
+                // rendered as a bare `└ Wrote file successfully.` — an answer
+                // with its question missing.
+                let announced = matches!(
+                    self.transcript.last(),
+                    Some(Entry::Tool { name: n, .. }) if n == name
+                );
+                if *is_error || !announced {
                     self.push(Entry::Tool {
                         name: name.clone(),
-                        failed: true,
+                        detail: None,
+                        failed: *is_error,
                     });
+                }
+                if let Some(text) = summary.as_ref().filter(|s| !s.trim().is_empty()) {
+                    if *is_error || self.show_details {
+                        self.push(Entry::ToolOut {
+                            text: first_lines(text, 6),
+                            failed: *is_error,
+                        });
+                    }
                 }
             }
             AgentEvent::Finished {
@@ -282,10 +462,50 @@ impl App {
         }
     }
 
+    /// Turn what the user typed at `/resume` into a harness session id.
+    ///
+    /// The agents panel shows a *shortened Jod agent id*, and `/sessions` tells
+    /// you to feed it to `/resume` — but `/resume` hands its argument to the
+    /// harness as a conversation id, which an agent id never is. So a prefix of
+    /// either is accepted and translated, and anything unrecognised is passed
+    /// through untouched, because a session id copied from elsewhere is still a
+    /// legitimate thing to type.
+    pub fn resolve_session(&self, typed: &str) -> Resolved {
+        let exact_session = self
+            .agents
+            .iter()
+            .find(|a| a.session.as_deref() == Some(typed));
+        if let Some(a) = exact_session {
+            return Resolved::Session(a.session.clone().unwrap());
+        }
+
+        let matches: Vec<&AgentLine> = self
+            .agents
+            .iter()
+            .filter(|a| {
+                a.id.starts_with(typed)
+                    || a.session.as_deref().is_some_and(|s| s.starts_with(typed))
+            })
+            .collect();
+
+        match matches.as_slice() {
+            [] => Resolved::Verbatim(typed.to_string()),
+            [only] => match &only.session {
+                Some(s) => Resolved::Session(s.clone()),
+                // Known agent, but it never reported a conversation — resuming
+                // it would silently start a fresh one instead.
+                None => Resolved::NoSession(only.id.clone()),
+            },
+            many => Resolved::Ambiguous(many.len()),
+        }
+    }
+
     /// The one-line summary shown in the status bar.
     pub fn status(&self) -> String {
         let mut parts = vec![self.harness.label().to_string()];
-        if let Some(m) = &self.model {
+        // What the harness actually ran beats what was asked for; before the
+        // first turn there is nothing to report, so the request stands in.
+        if let Some(m) = self.reported_model.as_ref().or(self.model.as_ref()) {
             parts.push(m.clone());
         }
         if self.cost_usd > 0.0 {
@@ -505,28 +725,234 @@ mod tests {
         assert_eq!(a.transcript, vec![Entry::Thinking("hmm".into())]);
     }
 
-    /// A tool that worked is noise. A tool that failed explains the answer.
+    /// A tool already announced adds nothing when it merely worked; a failure
+    /// always earns its line, because it explains the answer.
     #[test]
-    fn only_failing_tool_results_reach_the_transcript() {
+    fn an_announced_tool_that_worked_adds_no_second_line() {
         let mut a = app();
+        a.apply(&AgentEvent::ToolCall {
+            name: "read".into(),
+            input: None,
+        });
         a.apply(&AgentEvent::ToolResult {
             name: "read".into(),
             summary: None,
             is_error: false,
         });
-        assert!(a.transcript.is_empty());
+        assert_eq!(
+            a.transcript,
+            vec![Entry::Tool {
+                name: "read".into(),
+                detail: None,
+                failed: false
+            }],
+            "the result must not repeat the call line"
+        );
+
         a.apply(&AgentEvent::ToolResult {
             name: "write".into(),
             summary: None,
             is_error: true,
         });
+        assert_eq!(a.transcript.len(), 2);
+        assert!(matches!(
+            a.transcript[1],
+            Entry::Tool { failed: true, .. }
+        ));
+    }
+
+    /// OpenCode reports a fast tool as already `completed`, so no call is ever
+    /// announced. Without a line of its own the output rendered as a bare
+    /// `└ …` — an answer with its question missing.
+    #[test]
+    fn a_result_with_no_announced_call_still_names_its_tool() {
+        let mut a = app();
+        a.apply(&AgentEvent::ToolResult {
+            name: "write".into(),
+            summary: Some("Wrote file successfully.".into()),
+            is_error: false,
+        });
+        assert_eq!(
+            a.transcript,
+            vec![
+                Entry::Tool {
+                    name: "write".into(),
+                    detail: None,
+                    failed: false
+                },
+                Entry::ToolOut {
+                    text: "Wrote file successfully.".into(),
+                    failed: false
+                },
+            ]
+        );
+    }
+
+    /// The harnesses disagree on how a parameter is spelled. AGY's PascalCase
+    /// names fell through and its calls rendered as raw JSON.
+    #[test]
+    fn a_parameter_is_found_however_the_harness_spells_it() {
+        for input in [
+            serde_json::json!({"file_path": "/tmp/sq.py"}),
+            serde_json::json!({"filePath": "/tmp/sq.py"}),
+            serde_json::json!({"TargetFile": "/tmp/sq.py"}),
+        ] {
+            assert_eq!(tool_detail(&input).as_deref(), Some("/tmp/sq.py"));
+        }
+        assert_eq!(
+            tool_detail(&serde_json::json!({"DirectoryPath": "/home"})).as_deref(),
+            Some("/home")
+        );
+    }
+
+    /// The point of watching a harness work: the transcript must say what the
+    /// tool was actually asked to do, not just its name.
+    #[test]
+    fn a_tool_call_shows_its_most_useful_argument() {
+        let mut a = app();
+        a.apply(&AgentEvent::ToolCall {
+            name: "Bash".into(),
+            input: Some(serde_json::json!({"command": "cargo test --workspace"})),
+        });
         assert_eq!(
             a.transcript,
             vec![Entry::Tool {
-                name: "write".into(),
-                failed: true
+                name: "Bash".into(),
+                detail: Some("cargo test --workspace".into()),
+                failed: false
             }]
         );
+    }
+
+    #[test]
+    fn a_file_tool_shows_its_path() {
+        let mut a = app();
+        a.apply(&AgentEvent::ToolCall {
+            name: "Read".into(),
+            input: Some(serde_json::json!({"file_path": "/src/main.rs"})),
+        });
+        match &a.transcript[0] {
+            Entry::Tool { detail, .. } => assert_eq!(detail.as_deref(), Some("/src/main.rs")),
+            other => panic!("expected a tool, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_unrecognised_argument_shape_is_still_shown() {
+        let mut a = app();
+        a.apply(&AgentEvent::ToolCall {
+            name: "Odd".into(),
+            input: Some(serde_json::json!({"wibble": 3})),
+        });
+        match &a.transcript[0] {
+            Entry::Tool { detail, .. } => {
+                assert!(detail.as_deref().unwrap().contains("wibble"))
+            }
+            other => panic!("expected a tool, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_tool_with_no_arguments_shows_just_its_name() {
+        let mut a = app();
+        a.apply(&AgentEvent::ToolCall {
+            name: "Ls".into(),
+            input: Some(serde_json::json!({})),
+        });
+        match &a.transcript[0] {
+            Entry::Tool { detail, .. } => assert!(detail.is_none()),
+            other => panic!("expected a tool, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tool_output_is_shown_by_default() {
+        let mut a = app();
+        a.apply(&AgentEvent::ToolCall {
+            name: "Bash".into(),
+            input: None,
+        });
+        a.apply(&AgentEvent::ToolResult {
+            name: "Bash".into(),
+            summary: Some("test result: ok. 93 passed".into()),
+            is_error: false,
+        });
+        assert_eq!(
+            a.transcript[1],
+            Entry::ToolOut {
+                text: "test result: ok. 93 passed".into(),
+                failed: false
+            }
+        );
+    }
+
+    #[test]
+    fn tool_output_can_be_turned_off() {
+        let mut a = app();
+        a.show_details = false;
+        a.apply(&AgentEvent::ToolCall {
+            name: "Bash".into(),
+            input: None,
+        });
+        a.apply(&AgentEvent::ToolResult {
+            name: "Bash".into(),
+            summary: Some("chatter".into()),
+            is_error: false,
+        });
+        assert_eq!(a.transcript.len(), 1, "the call, but not its output");
+    }
+
+    /// A failure is shown whether or not details are on: it is the reason the
+    /// answer is about to be wrong.
+    #[test]
+    fn a_failure_is_shown_even_with_details_off() {
+        let mut a = app();
+        a.show_details = false;
+        a.apply(&AgentEvent::ToolResult {
+            name: "Bash".into(),
+            summary: Some("command not found".into()),
+            is_error: true,
+        });
+        assert_eq!(a.transcript.len(), 2, "the failed tool and its output");
+        assert!(matches!(a.transcript[1], Entry::ToolOut { failed: true, .. }));
+    }
+
+    #[test]
+    fn long_tool_output_is_cut_down_with_a_count() {
+        let mut a = app();
+        let long = (0..40).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        a.apply(&AgentEvent::ToolCall {
+            name: "Bash".into(),
+            input: None,
+        });
+        a.apply(&AgentEvent::ToolResult {
+            name: "Bash".into(),
+            summary: Some(long),
+            is_error: false,
+        });
+        match &a.transcript[1] {
+            Entry::ToolOut { text, .. } => {
+                assert!(text.contains("line 0"));
+                assert!(text.contains("more lines"), "got {text}");
+                assert!(text.lines().count() <= 8);
+            }
+            other => panic!("expected output, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn empty_tool_output_is_not_shown() {
+        let mut a = app();
+        a.apply(&AgentEvent::ToolCall {
+            name: "Bash".into(),
+            input: None,
+        });
+        a.apply(&AgentEvent::ToolResult {
+            name: "Bash".into(),
+            summary: Some("   ".into()),
+            is_error: false,
+        });
+        assert_eq!(a.transcript.len(), 1, "the call, and no empty output line");
     }
 
     /// The next turn must continue *this* conversation, not "the most recent",
@@ -540,7 +966,8 @@ mod tests {
         });
         assert_eq!(a.resume, Resume::Session("sess-1".into()));
         assert_eq!(a.session.as_deref(), Some("sess-1"));
-        assert_eq!(a.model.as_deref(), Some("some-model"));
+        // Reported for display, never folded into the request.
+        assert_eq!(a.reported_model.as_deref(), Some("some-model"));
     }
 
     #[test]

@@ -7,6 +7,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
 
+use jod_core::team::MemberStatus;
+
 use super::app::{App, Entry, Pane};
 
 const USER: Color = Color::Cyan;
@@ -33,7 +35,167 @@ pub fn draw(f: &mut Frame, app: &App) -> usize {
     if app.pane == Pane::Agents {
         draw_agents(f, app, f.area());
     }
+    if app.pane == Pane::Team {
+        draw_team(f, app, f.area());
+    }
+    // Last, so it floats over everything including the panels.
+    draw_completions(f, app, chunks[1]);
     height
+}
+
+/// The slash-command popup, sitting directly above the input box.
+///
+/// Above rather than below because the input is already near the bottom of the
+/// screen, and a list that grows downwards would be clipped exactly when it is
+/// longest.
+fn draw_completions(f: &mut Frame, app: &App, input: Rect) {
+    let suggestions = crate::tui::command::completions(&app.input);
+    if suggestions.is_empty() {
+        return;
+    }
+
+    let widest = suggestions
+        .iter()
+        .map(|c| c.line.chars().count() + c.hint.chars().count() + 6)
+        .max()
+        .unwrap_or(20);
+    let w = (widest as u16).clamp(24, 64).min(input.width);
+    // Only as tall as it needs to be, and never taller than the space above.
+    let h = ((suggestions.len() + 2) as u16).min(input.y.saturating_sub(1)).max(3);
+    let panel = Rect {
+        x: input.x,
+        y: input.y.saturating_sub(h),
+        width: w,
+        height: h,
+    };
+
+    let selected = app.suggestion.min(suggestions.len().saturating_sub(1));
+    let items: Vec<ListItem> = suggestions
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            let (mark, style) = if i == selected {
+                ("▸ ", Style::default().fg(USER).add_modifier(Modifier::BOLD))
+            } else {
+                ("  ", Style::default())
+            };
+            ListItem::new(Line::from(vec![
+                Span::styled(mark, style),
+                Span::styled(c.line.clone(), style),
+                Span::styled(format!("  {}", c.hint), Style::default().fg(MUTED)),
+            ]))
+        })
+        .collect();
+
+    f.render_widget(Clear, panel);
+    f.render_widget(
+        List::new(items).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(MUTED))
+                .title(" Tab completes · ↑↓ choose "),
+        ),
+        panel,
+    );
+}
+
+/// The team panel: who is on it, and what each of them is doing.
+///
+/// Members and the task board share one floating panel because they are one
+/// question — "is this team making progress" — and splitting them across two
+/// keystrokes would make the answer take two looks.
+fn draw_team(f: &mut Frame, app: &App, area: Rect) {
+    let rows = app.members.len() + app.tasks.len() + 3;
+    let w = area.width.saturating_sub(8).clamp(24, 76).min(area.width);
+    let h = (rows as u16)
+        .clamp(6, area.height.saturating_sub(4).max(6))
+        .min(area.height);
+    let panel = Rect {
+        x: area.x + (area.width.saturating_sub(w)) / 2,
+        y: area.y + (area.height.saturating_sub(h)) / 2,
+        width: w,
+        height: h,
+    };
+
+    let mut items: Vec<ListItem> = Vec::new();
+
+    if app.team.is_none() {
+        items.push(ListItem::new(Span::styled(
+            "no team — start one with `jod tui --team <name>`",
+            Style::default().fg(MUTED),
+        )));
+    } else if app.members.is_empty() {
+        items.push(ListItem::new(Span::styled(
+            "no members yet",
+            Style::default().fg(MUTED),
+        )));
+    } else {
+        for m in &app.members {
+            let colour = match m.status {
+                MemberStatus::Busy => WARN,
+                MemberStatus::Ready => GOOD,
+                MemberStatus::Error => BAD,
+                _ => MUTED,
+            };
+            items.push(ListItem::new(Line::from(vec![
+                Span::styled(format!("{:<12}", m.name), Style::default().fg(USER)),
+                Span::styled(
+                    format!("{:<11}", m.status.as_str()),
+                    Style::default().fg(colour),
+                ),
+                Span::styled(
+                    format!("{:<13}", m.harness.label()),
+                    Style::default().fg(MUTED),
+                ),
+                Span::raw(m.role.clone()),
+            ])));
+        }
+    }
+
+    if !app.tasks.is_empty() {
+        items.push(ListItem::new(Span::styled(
+            "── board ──",
+            Style::default().fg(MUTED),
+        )));
+        for t in &app.tasks {
+            // Open / claimed / done, so progress is readable at a glance.
+            let (mark, colour) = if t.is_done() {
+                ("✓", GOOD)
+            } else if t.is_claimed() {
+                ("◐", WARN)
+            } else {
+                ("○", MUTED)
+            };
+            items.push(ListItem::new(Line::from(vec![
+                Span::styled(format!("{mark} "), Style::default().fg(colour)),
+                Span::raw(t.title.clone()),
+                Span::styled(
+                    t.owner
+                        .as_ref()
+                        .map(|o| format!("  ({o})"))
+                        .unwrap_or_default(),
+                    Style::default().fg(MUTED),
+                ),
+            ])));
+        }
+    }
+
+    let title = match &app.team {
+        Some(name) => format!(" team {name} · Ctrl-G to close "),
+        None => " team · Ctrl-G to close ".to_string(),
+    };
+
+    // Clear first: this floats over the transcript.
+    f.render_widget(Clear, panel);
+    f.render_widget(
+        List::new(items).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(USER))
+                .title(title),
+        ),
+        panel,
+    );
 }
 
 fn draw_transcript(f: &mut Frame, app: &App, area: Rect) -> usize {
@@ -85,11 +247,26 @@ fn render(entry: &Entry, width: u16) -> Vec<Line<'static>> {
             Style::default().fg(MUTED).add_modifier(Modifier::ITALIC),
             t.clone(),
         ),
-        Entry::Tool { name, failed } => {
+        Entry::Tool {
+            name,
+            detail,
+            failed,
+        } => {
             let mark = if *failed { "✗ " } else { "⚙ " };
             let style = Style::default().fg(if *failed { BAD } else { MUTED });
-            (mark, style, name.clone())
+            let body = match detail {
+                Some(d) => format!("{name} · {d}"),
+                None => name.clone(),
+            };
+            (mark, style, body)
         }
+        // Indented under its call, so output reads as belonging to the tool
+        // above it rather than as the agent speaking.
+        Entry::ToolOut { text, failed } => (
+            "  └ ",
+            Style::default().fg(if *failed { BAD } else { MUTED }),
+            text.clone(),
+        ),
         Entry::Done { text, failed } => {
             let mark = if *failed { "✗ failed" } else { "✓ done" };
             let style = Style::default().fg(if *failed { BAD } else { GOOD });
@@ -127,12 +304,19 @@ pub fn wrap(text: &str, width: usize, indent: usize) -> Vec<String> {
     let width = width.saturating_sub(indent).max(1);
     let mut out = Vec::new();
     for raw in text.split('\n') {
-        if raw.is_empty() {
+        if raw.trim().is_empty() {
             out.push(String::new());
             continue;
         }
+        // Leading spaces are content, not separators. Splitting on ' ' throws
+        // them away, which silently reflowed every code block the agent
+        // printed — `def f():` and its body ended up in the same column.
+        let lead: String = raw.chars().take_while(|c| *c == ' ').collect();
+        let body = raw[lead.len()..].to_string();
+        let width = width.saturating_sub(lead.chars().count()).max(1);
+        let before = out.len();
         let mut line = String::new();
-        for word in raw.split(' ') {
+        for word in body.split(' ') {
             // A word longer than the line gets hard-split rather than
             // overflowing the pane.
             if word.chars().count() > width {
@@ -165,6 +349,12 @@ pub fn wrap(text: &str, width: usize, indent: usize) -> Vec<String> {
             }
         }
         out.push(line);
+        // Re-apply the indent to every line this source line produced.
+        for produced in out.iter_mut().skip(before) {
+            if !produced.is_empty() {
+                produced.insert_str(0, &lead);
+            }
+        }
     }
     out
 }
@@ -190,7 +380,7 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
 fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     let left = Span::styled(app.status(), Style::default().fg(MUTED));
     let right = Span::styled(
-        "Ctrl-A agents · Ctrl-T thinking · Ctrl-C quit",
+        "Ctrl-A agents · Ctrl-G team · Ctrl-T thinking · Ctrl-C quit",
         Style::default().fg(MUTED),
     );
     let gap = (area.width as usize)
@@ -273,6 +463,7 @@ fn _wrap_marker(_: Wrap) {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use jod_core::team::{Member, TeamTask};
     use jod_core::{HarnessKind, Resume};
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
@@ -297,6 +488,203 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    fn member(name: &str, harness: HarnessKind, status: MemberStatus) -> Member {
+        Member {
+            team: "crew".into(),
+            name: name.into(),
+            harness,
+            role: "research".into(),
+            status,
+            agent_id: None,
+            session_id: None,
+        }
+    }
+
+    fn task(id: &str, title: &str, owner: Option<&str>, status: &str) -> TeamTask {
+        TeamTask {
+            id: id.into(),
+            title: title.into(),
+            owner: owner.map(str::to_string),
+            status: status.into(),
+        }
+    }
+
+    #[test]
+    fn typing_a_slash_opens_the_completion_popup() {
+        let mut a = app();
+        assert!(!rendered(&a, 100, 20).contains("Tab completes"));
+
+        a.input = "/".into();
+        let screen = rendered(&a, 100, 20);
+        assert!(screen.contains("Tab completes"));
+        assert!(screen.contains("/help"));
+        assert!(screen.contains("/harness"));
+    }
+
+    #[test]
+    fn the_popup_narrows_as_you_type_and_shows_the_hint() {
+        let mut a = app();
+        a.input = "/th".into();
+        let screen = rendered(&a, 100, 20);
+        assert!(screen.contains("/thinking"));
+        assert!(screen.contains("show or hide reasoning"), "the hint is shown");
+        assert!(!screen.contains("/help"));
+    }
+
+    #[test]
+    fn the_highlighted_suggestion_is_marked() {
+        let mut a = app();
+        a.input = "/".into();
+        a.suggestion = 1;
+        assert!(rendered(&a, 100, 20).contains("▸"));
+    }
+
+    #[test]
+    fn harness_arguments_are_offered_in_the_popup() {
+        let mut a = app();
+        a.input = "/harness ".into();
+        let screen = rendered(&a, 100, 20);
+        assert!(screen.contains("claude"));
+        assert!(screen.contains("agy"));
+    }
+
+    #[test]
+    fn a_plain_prompt_shows_no_popup() {
+        let mut a = app();
+        a.input = "what is in this repo".into();
+        assert!(!rendered(&a, 100, 20).contains("Tab completes"));
+    }
+
+    /// The popup sits above the input, so it must not be drawn outside the
+    /// buffer on a short terminal.
+    #[test]
+    fn the_popup_fits_a_short_terminal() {
+        let mut a = app();
+        a.input = "/".into();
+        let _ = rendered(&a, 60, 8);
+        let _ = rendered(&a, 30, 6);
+        let _ = rendered(&a, 24, 5);
+    }
+
+    #[test]
+    fn the_team_panel_lists_members_with_their_harness_and_status() {
+        let mut a = app();
+        a.pane = Pane::Team;
+        a.team = Some("crew".into());
+        a.members = vec![
+            member("lead", HarnessKind::ClaudeCode, MemberStatus::Busy),
+            member("scout", HarnessKind::Agy, MemberStatus::Ready),
+        ];
+        let screen = rendered(&a, 100, 20);
+        assert!(screen.contains("team crew"));
+        assert!(screen.contains("lead"));
+        assert!(screen.contains("scout"));
+        assert!(screen.contains("busy"));
+        assert!(screen.contains("Antigravity") || screen.contains("AGY"));
+    }
+
+    /// The board has to distinguish open, claimed and done at a glance, or it
+    /// is just a list of strings.
+    #[test]
+    fn the_task_board_shows_progress_and_who_owns_what() {
+        let mut a = app();
+        a.pane = Pane::Team;
+        a.team = Some("crew".into());
+        a.members = vec![member("scout", HarnessKind::OpenCode, MemberStatus::Busy)];
+        a.tasks = vec![
+            task("t1", "port the parser", Some("scout"), "open"),
+            task("t2", "write the docs", None, "open"),
+            task("t3", "ship it", Some("lead"), "done"),
+        ];
+        let screen = rendered(&a, 100, 24);
+        assert!(screen.contains("board"));
+        assert!(screen.contains("port the parser"));
+        assert!(screen.contains("(scout)"), "a claimed task names its owner");
+        assert!(screen.contains("write the docs"));
+        assert!(screen.contains("✓"), "a done task is marked");
+        assert!(screen.contains("○"), "an unclaimed task is marked");
+    }
+
+    /// Without a team the panel must explain itself rather than show an empty
+    /// box that reads as a bug.
+    #[test]
+    fn the_team_panel_says_so_when_there_is_no_team() {
+        let mut a = app();
+        a.pane = Pane::Team;
+        let screen = rendered(&a, 100, 20);
+        assert!(screen.contains("no team"), "got:\n{screen}");
+    }
+
+    #[test]
+    fn a_team_with_no_members_yet_says_so() {
+        let mut a = app();
+        a.pane = Pane::Team;
+        a.team = Some("crew".into());
+        let screen = rendered(&a, 100, 20);
+        assert!(screen.contains("no members yet"));
+    }
+
+    #[test]
+    fn the_team_panel_is_hidden_unless_its_pane_is_open() {
+        let mut a = app();
+        a.team = Some("crew".into());
+        a.members = vec![member("scout", HarnessKind::OpenCode, MemberStatus::Ready)];
+        assert!(!rendered(&a, 100, 20).contains("scout"));
+
+        a.pane = Pane::Team;
+        assert!(rendered(&a, 100, 20).contains("scout"));
+    }
+
+    /// The panel floats over the transcript, so it must fit a small terminal
+    /// rather than being placed outside the buffer.
+    #[test]
+    fn the_team_panel_fits_a_small_terminal() {
+        let mut a = app();
+        a.pane = Pane::Team;
+        a.team = Some("crew".into());
+        a.members = (0..40)
+            .map(|i| {
+                member(
+                    &format!("m{i}"),
+                    HarnessKind::ClaudeCode,
+                    MemberStatus::Ready,
+                )
+            })
+            .collect();
+        let _ = rendered(&a, 30, 8);
+        let _ = rendered(&a, 12, 5);
+    }
+
+    /// Regression: agents print code, and splitting on spaces threw the
+    /// leading ones away — `def f():` and its body came out in one column.
+    #[test]
+    fn code_indentation_survives_wrapping() {
+        let code = "def greet(name):\n    return f\"Hello, {name}!\"";
+        let lines = wrap(code, 60, 0);
+        assert_eq!(lines[0], "def greet(name):");
+        assert_eq!(lines[1], "    return f\"Hello, {name}!\"");
+    }
+
+    #[test]
+    fn a_wrapped_indented_line_keeps_its_indent_on_every_row() {
+        let lines = wrap("    alpha beta gamma delta", 14, 0);
+        assert!(lines.len() > 1, "should have wrapped: {lines:?}");
+        for line in &lines {
+            assert!(line.starts_with("    "), "lost the indent: {line:?}");
+        }
+    }
+
+    #[test]
+    fn deeper_indentation_is_preserved_too() {
+        let lines = wrap("        deeply nested", 40, 0);
+        assert_eq!(lines[0], "        deeply nested");
+    }
+
+    #[test]
+    fn a_whitespace_only_line_stays_blank() {
+        assert_eq!(wrap("a\n   \nb", 20, 0), vec!["a", "", "b"]);
     }
 
     #[test]
@@ -377,6 +765,7 @@ mod tests {
             name: "do the thing".into(),
             harness: "AGY".into(),
             status: "running".into(),
+            session: None,
         }];
         let out = rendered(&a, 80, 16);
         assert!(out.contains("agents"), "{out}");
@@ -413,6 +802,7 @@ mod tests {
                 name: format!("agent {i}"),
                 harness: "AGY".into(),
                 status: "running".into(),
+                session: None,
             })
             .collect();
         for (w, h) in [(10, 4), (12, 5), (18, 6), (21, 7), (40, 8)] {

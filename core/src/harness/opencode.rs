@@ -158,10 +158,11 @@ impl OpenCode {
 
         match status.as_str() {
             "completed" | "error" => {
+                // Not latched onto the run: a failed tool is recoverable, and
+                // the agent usually does recover. `step_finish` with
+                // `reason: "error"` is the run-level signal. See the note in
+                // the Claude adapter.
                 let is_error = status == "error";
-                if is_error {
-                    self.acc.errored = true;
-                }
                 // Distinguish the completed part from the earlier running part,
                 // which shares the same part id.
                 if let Some(id) = str_at(part, "id") {
@@ -366,12 +367,28 @@ mod tests {
         );
     }
 
+    /// A tool may fail without the run failing — agents retry, and usually
+    /// succeed. Only the run-level signal decides the run.
     #[test]
-    fn a_failed_tool_marks_the_run_errored() {
+    fn a_failed_tool_does_not_fail_the_whole_run() {
         let mut h = OpenCode::default();
-        h.parse_line(
+        let out = h.parse_line(
             r#"{"type":"tool","part":{"id":"p","tool":"bash","state":{"status":"error","error":"nope"}}}"#,
         );
+        // The tool itself is still reported as failed.
+        assert!(out
+            .iter()
+            .any(|e| matches!(e, AgentEvent::ToolResult { is_error: true, .. })));
+        match h.finalize(Some(0)) {
+            AgentEvent::Finished { is_error, .. } => assert!(!is_error),
+            other => panic!("expected Finished, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_step_that_ends_in_error_does_fail_the_run() {
+        let mut h = OpenCode::default();
+        h.parse_line(r#"{"type":"step_finish","part":{"reason":"error"}}"#);
         match h.finalize(Some(0)) {
             AgentEvent::Finished { is_error, .. } => assert!(is_error),
             other => panic!("expected Finished, got {other:?}"),

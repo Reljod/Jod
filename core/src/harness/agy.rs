@@ -31,6 +31,13 @@ pub struct Agy {
     /// brand new conversation and reports success. Without this the caller
     /// would believe it was continuing a thread that had actually been lost.
     expected_session: std::cell::RefCell<Option<String>>,
+    /// `step_index` → the prose accumulated for that step so far.
+    ///
+    /// AGY streams *fragments*: one step arrives ACTIVE carrying part of a
+    /// sentence and again DONE carrying the rest. Surfacing each fragment as
+    /// its own message splits words across lines ("I have creat" / "ed the
+    /// file"), so they are joined and emitted once the step completes.
+    partials: std::collections::HashMap<u64, String>,
 }
 
 impl Harness for Agy {
@@ -47,6 +54,13 @@ impl Harness for Agy {
             ArgPart::lit("--print-timeout"),
             ArgPart::lit(PRINT_TIMEOUT),
         ];
+        // AGY resolves its workspace from its own settings, *not* from the cwd
+        // of the shell that launched it. Without this it reports "there was no
+        // active workspace set" and writes into
+        // `~/.gemini/antigravity-cli/scratch` — while reporting success, so a
+        // run that edited nothing in the repo looks like one that worked.
+        args.push(ArgPart::lit("--add-dir"));
+        args.push(ArgPart::lit(req.cwd.to_string_lossy().to_string()));
         if let Some(model) = &req.model {
             args.push(ArgPart::lit("--model"));
             args.push(ArgPart::lit(model));
@@ -192,13 +206,23 @@ impl Agy {
         }
 
         match step_type.as_str() {
-            "agent_response" => match str_at(step, "text_delta") {
-                Some(text) if !text.trim().is_empty() => {
-                    self.acc.note_text(&text);
-                    vec![AgentEvent::Message { text }]
+            "agent_response" => {
+                let index = step.get("step_index").and_then(Value::as_u64).unwrap_or(0);
+                if let Some(delta) = str_at(step, "text_delta") {
+                    self.partials.entry(index).or_default().push_str(&delta);
                 }
-                _ => vec![],
-            },
+                // Only a completed step is whole enough to show.
+                if state != "DONE" {
+                    return vec![];
+                }
+                match self.partials.remove(&index) {
+                    Some(text) if !text.trim().is_empty() => {
+                        self.acc.note_text(&text);
+                        vec![AgentEvent::Message { text }]
+                    }
+                    _ => vec![],
+                }
+            }
             "tool" => {
                 let name = str_at(step, "tool_name")
                     .or_else(|| step.get("tool_info").and_then(|i| str_at(i, "name")))
@@ -275,6 +299,67 @@ fn strip_ansi(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression, seen in a real run: AGY sends prose in fragments, one per
+    /// `step_update`, so emitting each on sight split words across transcript
+    /// lines — "I have creat" then "ed the file".
+    #[test]
+    fn prose_fragments_are_joined_into_one_message() {
+        let mut h = Agy::default();
+        assert!(
+            h.parse_line(
+                r#"{"event":"step_update","step_update":{"step_index":2,"state":"ACTIVE","step_type":"agent_response","text_delta":"I have creat"}}"#
+            )
+            .is_empty(),
+            "a half-finished sentence must not be shown"
+        );
+        let events = h.parse_line(
+            r#"{"event":"step_update","step_update":{"step_index":2,"state":"DONE","step_type":"agent_response","text_delta":"ed the file."}}"#,
+        );
+        assert_eq!(
+            events,
+            vec![AgentEvent::Message { text: "I have created the file.".into() }]
+        );
+    }
+
+    #[test]
+    fn two_steps_accumulate_independently() {
+        let mut h = Agy::default();
+        h.parse_line(r#"{"event":"step_update","step_update":{"step_index":1,"state":"ACTIVE","step_type":"agent_response","text_delta":"first"}}"#);
+        h.parse_line(r#"{"event":"step_update","step_update":{"step_index":2,"state":"ACTIVE","step_type":"agent_response","text_delta":"second"}}"#);
+        let a = h.parse_line(r#"{"event":"step_update","step_update":{"step_index":2,"state":"DONE","step_type":"agent_response","text_delta":"!"}}"#);
+        let b = h.parse_line(r#"{"event":"step_update","step_update":{"step_index":1,"state":"DONE","step_type":"agent_response","text_delta":"!"}}"#);
+        assert_eq!(a, vec![AgentEvent::Message { text: "second!".into() }]);
+        assert_eq!(b, vec![AgentEvent::Message { text: "first!".into() }]);
+    }
+
+    /// A step that completes in one update still produces its message.
+    #[test]
+    fn a_single_update_step_is_still_emitted() {
+        let mut h = Agy::default();
+        let events = h.parse_line(
+            r#"{"event":"step_update","step_update":{"step_index":3,"state":"DONE","step_type":"agent_response","text_delta":"all at once"}}"#,
+        );
+        assert_eq!(
+            events,
+            vec![AgentEvent::Message { text: "all at once".into() }]
+        );
+    }
+
+    /// Regression, found by asking AGY to write a file: it ignores the cwd of
+    /// the shell that launched it and falls back to its own scratch directory,
+    /// reporting success while the repo is untouched.
+    #[test]
+    fn the_working_directory_is_added_to_the_workspace() {
+        let mut r = req();
+        r.cwd = std::path::PathBuf::from("/work/repo");
+        let args = lits(&Agy::default().args(&r));
+        let at = args
+            .iter()
+            .position(|a| a == "--add-dir")
+            .expect("the cwd must be given to AGY explicitly");
+        assert_eq!(args[at + 1], "/work/repo");
+    }
 
     fn req() -> SpawnRequest {
         SpawnRequest {

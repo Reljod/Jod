@@ -533,6 +533,25 @@ self-assessment.** Exit codes, status fields and error arrays are all claims by
 the program about itself, and a program that has just misbehaved is exactly the
 one least able to report it.
 
+### And the converse, which is easy to get wrong while fixing the above
+
+Suspicion has a cost in the other direction. Every adapter used to latch the
+whole run as failed the moment any single tool call returned an error, which
+sounds like the cautious reading and is not. Driving the TUI turned it up
+immediately: an agent ran `python`, was told there was no such command, retried
+with `python3`, produced correct output — and the run was reported `✗ failed`.
+
+A failed tool is ordinary. Agents probe, guess a path, try a command that is not
+installed, and recover; that recovery is the loop working, not breaking. So the
+two questions are kept apart. **Did this tool call fail** is answered per call
+and shown per call. **Did the run fail** is answered only by the harness's own
+result record and the exit code, checked against the absence-of-success tests
+above.
+
+Collapsing the two in either direction destroys the same thing — the ability to
+tell the two apart at a glance — and a status line that cries failure over
+recovered work is ignored exactly as fast as one that never cries at all.
+
 ## Memory is governance first and retrieval last
 
 The instinct with agent memory is to reach for embeddings, and the measured
