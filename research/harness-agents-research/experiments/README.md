@@ -69,11 +69,19 @@ every reported number comes from seed 20260809 or the stability sweep.
 **Both channels are computed once and shared.** Every strategy sees identical
 BM25 and dense rankings, so differences come from architecture, not jitter.
 
-**Byte-reproducible.** Every score sort carries a secondary key on the chunk id.
-Without it, equal scores resolved by set-iteration order — which Python
-randomises per process — so token counts drifted between otherwise identical
-runs. Two consecutive `run_all.sh` invocations now produce byte-identical
-`out/*.json`.
+**Byte-reproducible**, which took three fixes rather than one. Every score sort
+carries a secondary key on the chunk id, so equal scores no longer resolve by
+set-iteration order. The dense channel accumulates over `sorted(uniq)` rather
+than the raw set, because float addition is not associative and a different
+summation order flips the occasional near-tie. And `run_all.sh` pins
+`PYTHONHASHSEED=0`, which removes the whole class at the root — Python
+randomises string hashing per process, so set order varies between runs by
+default.
+
+The first two fixes alone were not enough: a token average still drifted by
+±0.4 on one strategy. Three consecutive `run_all.sh` invocations now produce
+byte-identical `out/*.json`. No composite or reported score was affected by any
+of this — only derived token averages moved.
 
 ## Known limitations
 

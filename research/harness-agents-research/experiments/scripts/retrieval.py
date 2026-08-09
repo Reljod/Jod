@@ -126,12 +126,17 @@ class Index:
             # Weight each contribution by idf, or ubiquitous terms (project
             # names appearing in hundreds of chunks) dominate every context
             # vector and the whole space collapses toward one direction.
+            # Iterate sorted, not the raw set: float addition is not
+            # associative, so a different summation order gives very slightly
+            # different vectors, which flips the occasional near-tie in
+            # ranking. Set order is randomised per process, so without this the
+            # artefacts are not reproducible run to run.
             pooled = [0.0] * DIM
-            for t in uniq:
+            for t in sorted(uniq):
                 w = self.idf.get(t, 1.0)
                 for p, v in signature[t]:
                     pooled[p] += w * v
-            for t in uniq:
+            for t in sorted(uniq):
                 ctx = context[t]
                 w = self.idf.get(t, 1.0)
                 for i in range(DIM):

@@ -5,6 +5,12 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 export PYTHONPATH=scripts
+# Python randomises string hashing per process, so set iteration order — and
+# therefore float summation order in the dense channel — varies run to run.
+# That flips the occasional near-tie and makes the artefacts non-reproducible.
+# Pinning the seed removes the whole class; the sorted() iterations in
+# retrieval.py cover the paths that matter even without it.
+export PYTHONHASHSEED=0
 
 echo "==> generating corpus"
 python3 scripts/corpus.py
