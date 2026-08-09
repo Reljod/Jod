@@ -118,6 +118,39 @@ the glass.
 `tests/test.sh` is the CI-discoverable entry point, so this suite runs on every
 push rather than on whoever remembered to type `npm test`.
 
+### And 27 more in WebKit, the engine iOS actually uses
+
+```
+npx playwright install --with-deps webkit    # once
+npm run test:e2e
+```
+
+The unit suites inject a fake `fetch` and a fake `EventSource`. That proves the
+*rules* and nothing about the runtime — and a phone fails in ways a fake cannot
+reproduce. So `e2e/run.mjs` builds the app, serves it from a stand-in daemon
+(`e2e/daemon.mjs`), and drives it in **Playwright's WebKit at an iPhone 15 Pro
+viewport**. WKWebView on iOS is WebKit, so this is the closest a Linux box gets
+to a device.
+
+What it catches that nothing above can:
+
+- WebKit **really storing** the `HttpOnly` session cookie from `POST /v1/session`,
+  and a real `EventSource` handshake carrying it;
+- the bearer token being absent from `localStorage`/`sessionStorage` afterwards,
+  and only `jod.scope` remaining;
+- the page never scrolling sideways at 393pt;
+- every input being ≥16px, below which **iOS silently zooms the page** on focus
+  and leaves it panned with no way back;
+- every visible control meeting Apple's 44px touch target;
+- zero console or page errors in WebKit specifically.
+
+This is deliberately **not** in `tests/test.sh`: it needs a browser download, and
+the repo already keeps its expensive end-to-end suite out of the fast gate
+(`tests/e2e/run.sh`). Run it before touching layout or the auth flow.
+
+Pass `--screenshots <dir>` to capture each state; that is how the screenshots on
+the PR were produced.
+
 The ones worth knowing about assert the semantics that bite on a phone: that a
 replayed event is drawn once, that a `lagged` frame re-reads from the last event
 *rendered*, that resuming from the background does not restart the conversation,
@@ -129,14 +162,27 @@ recent".
 ## Building for the device
 
 **This is the one step that cannot happen on the VPS or in CI, and has not been
-run.** An `.ipa` needs Xcode, which exists only on macOS. Everything above —
-typecheck, tests, production bundle — is verified on Linux.
+run.** An `.ipa` needs Xcode, which exists only on macOS.
 
-What *is* known about the shell: `tauri info` parses `tauri.conf.json` and
-resolves it correctly (frontend dist, dev URL, CSP, React). What is **not**
-known: whether the crate compiles and links, because that needs the iOS SDK.
-Treat `src-tauri/` as a first draft until a Mac has run it, and expect the two
-manual steps below to be where the time goes.
+The boundary is exact rather than vague, so nobody has to rediscover it:
+
+| Checked on Linux | Result |
+|---|---|
+| `tauri info` parses `tauri.conf.json` | ✓ resolves dist, dev URL, CSP, React |
+| iOS dependency graph (`cargo tree --target aarch64-apple-ios`) | ✓ 796 crates, **zero** gtk/glib/soup, the Apple `objc2-*`/UIKit family present |
+| `cargo check --target aarch64-apple-ios` | ✗ stops at **one** crate |
+
+The one crate is `objc2-exception-helper`, whose build script compiles a small
+Objective-C shim and therefore needs `clang` plus the iOS SDK, located through
+`xcrun`. That SDK ships only inside Xcode, so this is a licensing boundary and
+not a fixable configuration problem — it cannot be worked around, and pretending
+otherwise would be exactly the kind of faked check the charter forbids.
+
+What that leaves: the graph is provably right for iOS (no Linux desktop stack
+leaked in), the pure-Rust tree compiles for `aarch64-apple-ios`, and the shim,
+the link step and the simulator are unexercised. Treat `src-tauri/` as a first
+draft until a Mac has run it; expect the two manual steps below to be where the
+time goes.
 
 On a Mac with Xcode and the iOS Rust targets:
 
