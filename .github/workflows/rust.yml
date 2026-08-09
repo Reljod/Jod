@@ -1,12 +1,19 @@
 name: Rust
 
 # The Rust half of the repo had no gate at all: tests.yml discovers shell
-# suites (`*.test.sh`), so `cargo test` never ran on a PR and jod-core's tests
-# could rot unnoticed. This runs them, and holds the crate to a line-coverage
-# floor so a feature can't land with its behaviour untested.
+# suites (`*.test.sh`), so `cargo test` never ran on a PR and the crates' tests
+# could rot unnoticed. This runs the whole workspace's tests, and holds `core`
+# to a line-coverage floor.
 #
-# The floor is deliberately a hard failure rather than a report. A coverage
-# number nobody blocks on is a number that only ever goes down.
+# The floor is a hard failure rather than a report. A coverage number nobody
+# blocks on is a number that only ever goes down.
+#
+# Why the floor is on `core` alone, not --workspace: `core` is at 97% and can
+# hold 95 today. `cli` and `api` cannot — at the time of writing cli/src/main.rs
+# is at 9%, cli/src/tui/mod.rs at 0% and api/src/routes.rs at 73%, so a
+# workspace-wide floor would fail every PR on day one and be switched off within
+# the week. Their numbers print on every run so the gap stays visible; add each
+# to the gated step as it gets there.
 on:
   pull_request:
   push:
@@ -18,8 +25,8 @@ env:
   COVERAGE_FLOOR: 95
 
 jobs:
-  core:
-    name: workspace (tests + coverage floor)
+  test:
+    name: workspace tests + core coverage floor
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -32,53 +39,29 @@ jobs:
 
       - uses: taiki-e/install-action@cargo-llvm-cov
 
-      # tmux is not needed: the tests drive a fake tmux binary via
-      # JOD_TMUX_BIN (crates/jod-core/src/testsupport.rs) so they never depend
-      # on — or disturb — a real tmux server.
-      # --workspace so a new crate (a TUI client, a daemon) is gated the day it
-      # lands rather than the day someone remembers to add it here. jod-desktop
-      # is excluded only because it needs the system webkit/gtk stack; it has
-      # its own job below.
-      - name: Test with coverage
+      # tmux is not needed: the tests drive a fake tmux binary via JOD_TMUX_BIN
+      # (core/src/testsupport.rs) so they never depend on — or disturb — a real
+      # tmux server.
+      - name: Test the whole workspace
+        run: cargo test --workspace
+
+      - name: Hold core to the coverage floor
         run: |
-          cargo llvm-cov --workspace --exclude jod-desktop \
+          cargo llvm-cov -p jod-core \
             --fail-under-lines "$COVERAGE_FLOOR" \
             --summary-only
 
-      - name: Coverage summary
+      - name: Report coverage for every crate
         if: always()
         run: |
           set -euo pipefail
           {
-            echo "## Coverage (floor: ${COVERAGE_FLOOR}%)"
+            echo "## Coverage"
+            echo
+            echo "\`core\` is gated at ${COVERAGE_FLOOR}% lines. Everything else is"
+            echo "reported only — see the note in .github/workflows/rust.yml."
+            echo
             echo '```'
-            cargo llvm-cov --workspace --exclude jod-desktop --summary-only 2>/dev/null | tail -n 20 || true
+            cargo llvm-cov --workspace --summary-only 2>/dev/null | tail -n 30 || true
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
-
-  desktop:
-    name: jod-desktop (tests)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-
-      # Tauri links against the system webkit/gtk stack. Without these the
-      # crate cannot even be configured, which is why its tests are run in
-      # their own job rather than gating jod-core's.
-      - name: Install Tauri system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev \
-            libgtk-3-dev \
-            libayatana-appindicator3-dev \
-            librsvg2-dev \
-            patchelf \
-            pkg-config
-
-      - name: Test
-        run: cargo test -p jod-desktop

@@ -318,7 +318,7 @@ mod tests {
 
     // --- following a live run -------------------------------------------
 
-    use crate::harness::{HarnessKind, PermissionPolicy};
+    use crate::harness::{HarnessKind, PermissionPolicy, Resume};
     use crate::testsupport::{EchoHarness, EnvGuard, FakeTmux, TempDir};
     use tokio::sync::mpsc;
 
@@ -500,6 +500,7 @@ mod tests {
             cwd: cwd.to_path_buf(),
             model: None,
             permission: PermissionPolicy::Ask,
+            resume: Resume::Fresh,
         }
     }
 

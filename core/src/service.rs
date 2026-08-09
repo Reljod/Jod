@@ -833,6 +833,7 @@ mod tests {
     // --- driving a real spawn -------------------------------------------
 
     use crate::event::AgentEvent;
+    use crate::harness::Resume;
     use crate::testsupport::{write_executable, EnvGuard, FakeTmux, TempDir};
 
     /// A spawnable world: a fake tmux, a fake `claude` binary, and a private
@@ -870,6 +871,7 @@ mod tests {
                 cwd: self.cwd.path().to_path_buf(),
                 model: Some("claude-opus-5".into()),
                 permission: PermissionPolicy::Bypass,
+                resume: Resume::Fresh,
             }
         }
     }
