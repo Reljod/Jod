@@ -178,6 +178,41 @@ heard of.
 Parsing and completion are pure functions over a string, so the whole of "what
 did the user ask for" is tested without a terminal.
 
+#### What OpenCode has that this does not
+
+Written down so the gap is a decision rather than an oversight. Nothing here is
+stubbed: a command Jod cannot honour is absent, and an unknown `/word` is named
+back rather than quietly accepted.
+
+**Buildable today — nothing is in the way but the work:**
+
+| Missing | What it needs |
+|---|---|
+| `/export` | The transcript is already in SQLite; this is a formatter. |
+| `/editor` | Compose in `$EDITOR`, read the file back into the input. |
+| `@file` references | Fuzzy-find a path and inline its content into the prompt. |
+| `ctrl+p` palette | The completion popup generalised past `/`. |
+| Leader keys (`ctrl+x …`) | A second keymap layer; today every binding is a bare chord. |
+| `/models` listing | No harness lists its models through Jod — `jod models` does not exist, so `/model` can set a name but not offer one. |
+| `/themes` | Colours are constants in `ui.rs`. |
+
+**Half-built:** `/sessions` opens the agents panel and tells you to
+`/resume <id>`; it is not yet a picker you can arrow through.
+
+**Blocked on something Jod does not have:**
+
+| Missing | Why |
+|---|---|
+| `/undo`, `/redo` | Reverting file changes needs snapshots of the working tree. Jod keeps a transcript, not a filesystem history — and git already does this properly. |
+| `/compact` | No harness exposes conversation compaction through its headless interface. It is the harness's own context to manage, which is the seam working as intended. |
+| `/share`, `/unshare` | OpenCode-specific hosted sessions; there is nothing for Jod to share *to*. |
+| `/connect` | Provider credentials belong to the harness. Jod never holds an API key, by design. |
+| Reasoning-effort cycling | Each harness spells it differently — AGY `--effort`, OpenCode `--variant`, Claude model-side — so there is no uniform control to expose yet. |
+
+The last two rows of that table are the harness seam's cost showing up in the
+UI, and are the expected price of [delegating rather than owning the
+loop](decisions.md).
+
 ### Watching the work
 
 The transcript shows what the harness is *doing*, not just what it concluded:
