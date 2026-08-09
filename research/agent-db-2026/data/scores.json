@@ -1,0 +1,152 @@
+{
+  "_meta": {
+    "note": "Only candidates that survive the hard filters in gates.json are scored. 0-5 per criterion; see schema.md. `measured` lists the criteria whose score is anchored in out/raw-results.jsonl from this machine — everything else is a judgement from documentation and reported behaviour, and is jittered +/-0.5 by the sensitivity analysis.",
+    "scored": "2026-08-09"
+  },
+  "scores": {
+    "sqlite-wal": {
+      "measured": ["concurrency", "correctness", "latency", "recall"],
+      "criteria": {
+        "concurrency": 4, "correctness": 5, "latency": 5, "recall": 3,
+        "breadth": 4, "ops_burden": 5, "local_first": 5, "rust_fit": 5,
+        "queryability": 5, "survival": 5
+      },
+      "note": "Fastest measured on every workload: ~45k append ops/s essentially flat from 1 to 16 writers, 26k correct read-modify-write ops/s, and reads unaffected by concurrent writes (p99 0.06 ms). Concurrency is 4 not 5 because the curve is flat-to-declining while Postgres and Redis rise — it has no headroom above ~45k, it merely starts far above the requirement. Correctness is 5: the only engine that refused unsafe work rather than losing it. Recall is 3 — sqlite-vec returned 100% recall at 19 ms, but it is brute force with no ANN index and weak metadata filtering, so that latency grows linearly with the corpus."
+    },
+    "graphqlite": {
+      "measured": [],
+      "criteria": {
+        "concurrency": 4, "correctness": 5, "latency": 5, "recall": 3,
+        "breadth": 5, "ops_burden": 5, "local_first": 5, "rust_fit": 4,
+        "queryability": 5, "survival": 2
+      },
+      "note": "SQLite's numbers plus openCypher in the same file and the same transaction. Survival is the whole risk: a young extension with a small community."
+    },
+    "libsql": {
+      "measured": [],
+      "criteria": {
+        "concurrency": 4, "correctness": 5, "latency": 5, "recall": 3,
+        "breadth": 4, "ops_burden": 5, "local_first": 5, "rust_fit": 5,
+        "queryability": 5, "survival": 4
+      },
+      "note": "SQLite semantics with a first-party Rust client and an optional server mode. Scored as embedded; server mode would trade latency for concurrency."
+    },
+    "turso-db": {
+      "measured": [],
+      "criteria": {
+        "concurrency": 4, "correctness": 4, "latency": 4, "recall": 3,
+        "breadth": 3, "ops_burden": 5, "local_first": 5, "rust_fit": 5,
+        "queryability": 4, "survival": 3
+      },
+      "note": "Row-level MVCC is the theoretically correct answer to this exact question, and it is Rust. Not measured here because concurrent writes entered early preview six days before this was written. Correctness and survival are discounted for beta status, not for design."
+    },
+    "lmdb": {
+      "measured": [],
+      "criteria": {
+        "concurrency": 3, "correctness": 5, "latency": 5, "recall": 0,
+        "breadth": 0, "ops_burden": 5, "local_first": 4, "rust_fit": 4,
+        "queryability": 0, "survival": 5
+      },
+      "note": "Flawless at what it does and unable to answer a question. Included to show what the queryability criterion actually costs."
+    },
+    "postgres-pgvector": {
+      "measured": ["concurrency", "correctness", "latency", "recall"],
+      "criteria": {
+        "concurrency": 5, "correctness": 4, "latency": 3, "recall": 4,
+        "breadth": 4, "ops_burden": 3, "local_first": 3, "rust_fit": 5,
+        "queryability": 5, "survival": 5
+      },
+      "note": "Throughput rose monotonically with writer count where SQLite's did not (4,734 -> 10,220 -> 14,109 -> 18,184 ops/s at 1/4/8/16 writers) — it is the only engine here with headroom above the measured range. Correctness is 4, not 5: correct with SELECT ... FOR UPDATE, but the default READ COMMITTED path silently lost 757 of 1,600 updates. Recall is 4: 96.5% recall@1 at 7.8 ms once ef_search is tuned to 400, but 43% at ef_search=40 — the defaults are not safe and that is a real operational hazard."
+    },
+    "pgvectorscale": {
+      "measured": [],
+      "criteria": {
+        "concurrency": 5, "correctness": 4, "latency": 3, "recall": 5,
+        "breadth": 4, "ops_burden": 2, "local_first": 3, "rust_fit": 5,
+        "queryability": 5, "survival": 4
+      },
+      "note": "Postgres plus a disk-oriented DiskANN index. Only earns its extra ops cost once the vector index stops fitting in RAM."
+    },
+    "paradedb": {
+      "measured": [],
+      "criteria": {
+        "concurrency": 5, "correctness": 4, "latency": 3, "recall": 5,
+        "breadth": 5, "ops_burden": 2, "local_first": 3, "rust_fit": 5,
+        "queryability": 5, "survival": 4
+      },
+      "note": "Real BM25 and vector search fused in one SQL query, which is what agent recall actually wants. AGPL and an extra extension in the image."
+    },
+    "apache-age": {
+      "measured": [],
+      "criteria": {
+        "concurrency": 5, "correctness": 4, "latency": 3, "recall": 4,
+        "breadth": 5, "ops_burden": 2, "local_first": 3, "rust_fit": 5,
+        "queryability": 5, "survival": 3
+      },
+      "note": "openCypher inside Postgres. Chronically lags mainline Postgres releases, which is a real upgrade hazard."
+    },
+    "redis8": {
+      "measured": ["concurrency", "correctness", "latency", "recall"],
+      "criteria": {
+        "concurrency": 5, "correctness": 3, "latency": 4, "recall": 3,
+        "breadth": 3, "ops_burden": 3, "local_first": 3, "rust_fit": 5,
+        "queryability": 2, "survival": 4
+      },
+      "note": "Scales hardest of anything measured (8,965 -> 25,731 -> 40,982 -> 42,049 ops/s at 1/4/8/16 writers) and is correct via INCR. Correctness is 3 anyway: durability is an fsync dial rather than a guarantee, and the obvious GET/SET pattern lost 163 updates. Recall 3 — 70.5% recall@1 at default vector-set settings. Queryability is 2: an agent cannot compose an ad-hoc question against it."
+    },
+    "surrealdb": {
+      "measured": [],
+      "criteria": {
+        "concurrency": 3, "correctness": 3, "latency": 3, "recall": 3,
+        "breadth": 5, "ops_burden": 3, "local_first": 3, "rust_fit": 5,
+        "queryability": 4, "survival": 3
+      },
+      "note": "The broadest single engine here and the least battle-tested. BSL licence. Scored generously on breadth and conservatively on everything that requires a track record."
+    },
+    "dolt": {
+      "measured": [],
+      "criteria": {
+        "concurrency": 2, "correctness": 5, "latency": 2, "recall": 0,
+        "breadth": 2, "ops_burden": 3, "local_first": 4, "rust_fit": 3,
+        "queryability": 5, "survival": 3
+      },
+      "note": "Scores badly and matters anyway. Branch-per-agent is the best idea in the survey; the engine carrying it is slow and has no vector search. The idea is portable to a store that does."
+    },
+    "mysql-mariadb": {
+      "measured": [],
+      "criteria": {
+        "concurrency": 4, "correctness": 4, "latency": 3, "recall": 2,
+        "breadth": 3, "ops_burden": 3, "local_first": 2, "rust_fit": 3,
+        "queryability": 5, "survival": 5
+      },
+      "note": "Competent and pointless here — everything it does, Postgres does better for this workload."
+    },
+    "mongodb": {
+      "measured": [],
+      "criteria": {
+        "concurrency": 4, "correctness": 4, "latency": 3, "recall": 2,
+        "breadth": 3, "ops_burden": 3, "local_first": 2, "rust_fit": 4,
+        "queryability": 3, "survival": 4
+      },
+      "note": "The good vector search is Atlas-only, which fails the self-hosting requirement in spirit even where it passes it in letter."
+    },
+    "ducklake": {
+      "measured": [],
+      "criteria": {
+        "concurrency": 1, "correctness": 4, "latency": 1, "recall": 2,
+        "breadth": 2, "ops_burden": 1, "local_first": 2, "rust_fit": 1,
+        "queryability": 4, "survival": 4
+      },
+      "note": "A catalog commit per write is the wrong unit of work for per-event appends, and it needs Postgres anyway — at which point Postgres alone is strictly simpler."
+    },
+    "terminusdb": {
+      "measured": [],
+      "criteria": {
+        "concurrency": 2, "correctness": 4, "latency": 2, "recall": 1,
+        "breadth": 3, "ops_burden": 2, "local_first": 2, "rust_fit": 2,
+        "queryability": 2, "survival": 1
+      },
+      "note": "Interesting model, thin community. Listed for completeness."
+    }
+  }
+}

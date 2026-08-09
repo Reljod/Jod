@@ -1,0 +1,17 @@
+rank,id,name,score,top3_stability_pct,concurrency,correctness,latency,recall,breadth,ops_burden,local_first,rust_fit,queryability,survival
+1,sqlite-wal,SQLite (WAL) + FTS5 + sqlite-vec,4.621,100.0,4,5,5,3,4,5,5,5,5,5
+2,libsql,libSQL (Turso's C fork of SQLite),4.517,99.2,4,5,5,3,4,5,5,5,5,4
+3,graphqlite,"GraphQLite (SQLite extension, openCypher)",4.276,57.8,4,5,5,3,5,5,5,4,5,2
+4,postgres-pgvector,PostgreSQL 18 + pgvector,4.207,20.1,5,4,3,4,4,3,3,5,5,5
+5,paradedb,ParadeDB (pg_search / pg_analytics),4.172,16.1,5,4,3,5,5,2,3,5,5,4
+6,pgvectorscale,pgvectorscale (StreamingDiskANN),4.103,5.8,5,4,3,5,4,2,3,5,5,4
+7,apache-age,Apache AGE (openCypher in Postgres),4.000,0.6,5,4,3,4,5,2,3,5,5,3
+8,turso-db,"Turso Database (SQLite rewritten in Rust, ex-Limbo)",3.966,0.5,4,4,4,3,3,5,5,5,4,3
+9,redis8,Redis 8 (vector sets) / Valkey + valkey-search,3.724,0.0,5,3,4,3,3,3,3,5,2,4
+10,mysql-mariadb,MySQL 9 / MariaDB 11.8 (native VECTOR),3.586,0.0,4,4,3,2,3,3,2,3,5,5
+11,lmdb,LMDB,3.483,0.0,3,5,5,0,0,5,4,4,0,5
+12,mongodb,MongoDB / FerretDB,3.448,0.0,4,4,3,2,3,3,2,4,3,4
+13,surrealdb,SurrealDB,3.414,0.0,3,3,3,3,5,3,3,5,4,3
+14,dolt,"Dolt (Git-for-data, MySQL-compatible)",2.931,0.0,2,5,2,0,2,3,4,3,5,3
+15,terminusdb,TerminusDB,2.241,0.0,2,4,2,1,3,2,2,2,2,1
+16,ducklake,DuckLake (DuckDB + Postgres catalog),2.207,0.0,1,4,1,2,2,1,2,1,4,4
