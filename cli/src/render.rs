@@ -283,4 +283,241 @@ mod tests {
         // The test harness captures stdout, so `tty()` is false here.
         assert_eq!(paint(RED, "plain"), "plain");
     }
+
+    // --- following a run -------------------------------------------------
+
+    use jod_core::event::Usage;
+    use jod_core::harness::HarnessKind;
+    use jod_core::service::AgentStatus;
+
+    fn env(agent_id: &str, seq: u64, event: AgentEvent) -> AgentEnvelope {
+        AgentEnvelope {
+            agent_id: agent_id.into(),
+            at_ms: 0,
+            seq,
+            event,
+        }
+    }
+
+    fn finished(is_error: bool, exit_code: Option<i32>) -> AgentEvent {
+        AgentEvent::Finished {
+            text: None,
+            exit_code,
+            is_error,
+            usage: Usage::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn following_a_run_returns_once_it_finishes() {
+        let (tx, rx) = broadcast::channel(16);
+        tx.send(env("a1", 0, AgentEvent::Message { text: "hi".into() })).unwrap();
+        tx.send(env("a1", 1, finished(false, Some(0)))).unwrap();
+
+        assert_eq!(stream(rx, "a1", false, false).await, 0);
+    }
+
+    /// One process can be watching one agent while others are running.
+    #[tokio::test]
+    async fn events_belonging_to_another_agent_are_ignored() {
+        let (tx, rx) = broadcast::channel(16);
+        tx.send(env("other", 0, finished(true, Some(9)))).unwrap();
+        tx.send(env("a1", 1, finished(false, Some(0)))).unwrap();
+
+        assert_eq!(
+            stream(rx, "a1", false, false).await,
+            0,
+            "the other agent's failure must not end this watch"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_run_reports_a_non_zero_exit_even_when_the_harness_exited_zero() {
+        let (tx, rx) = broadcast::channel(16);
+        tx.send(env("a1", 0, finished(true, Some(0)))).unwrap();
+
+        assert_eq!(stream(rx, "a1", false, false).await, 1);
+    }
+
+    /// The service going away without a result is a failure, not a clean exit.
+    #[tokio::test]
+    async fn a_closed_feed_exits_non_zero() {
+        let (tx, rx) = broadcast::channel::<AgentEnvelope>(16);
+        drop(tx);
+
+        assert_eq!(stream(rx, "a1", false, false).await, 1);
+    }
+
+    /// A consumer that falls behind must be told, and must keep going rather
+    /// than treating the gap as the end of the run.
+    #[tokio::test]
+    async fn falling_behind_is_reported_and_the_watch_continues() {
+        let (tx, rx) = broadcast::channel(2);
+        for seq in 0..8 {
+            tx.send(env("a1", seq, AgentEvent::Message { text: format!("{seq}") })).unwrap();
+        }
+        tx.send(env("a1", 8, finished(false, Some(3)))).unwrap();
+
+        assert_eq!(stream(rx, "a1", false, false).await, 3);
+    }
+
+    #[tokio::test]
+    async fn json_mode_still_ends_on_the_finish_event() {
+        let (tx, rx) = broadcast::channel(16);
+        tx.send(env("a1", 0, AgentEvent::Message { text: "hi".into() })).unwrap();
+        tx.send(env("a1", 1, finished(false, Some(7)))).unwrap();
+
+        assert_eq!(stream(rx, "a1", true, false).await, 7);
+    }
+
+    /// Every event kind goes through `print_event`; none may panic, and
+    /// thinking is only shown when it was asked for.
+    #[tokio::test]
+    async fn every_event_kind_renders_without_panicking() {
+        for show_thinking in [false, true] {
+            let (tx, rx) = broadcast::channel(32);
+            for (seq, event) in [
+                AgentEvent::Started {
+                    session_id: Some("s".into()),
+                    model: Some("claude-opus-5".into()),
+                },
+                AgentEvent::Started { session_id: None, model: None },
+                AgentEvent::Thinking { text: "line one\nline two".into() },
+                AgentEvent::Message { text: "answer".into() },
+                AgentEvent::ToolCall { name: "bash".into(), input: None },
+                AgentEvent::ToolResult {
+                    name: "bash".into(),
+                    summary: Some("ok".into()),
+                    is_error: false,
+                },
+                AgentEvent::ToolResult { name: "bash".into(), summary: None, is_error: true },
+                AgentEvent::Raw { line: "noise".into() },
+                AgentEvent::Error { message: "it broke".into() },
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                tx.send(env("a1", seq as u64, event)).unwrap();
+            }
+            tx.send(env("a1", 99, AgentEvent::Finished {
+                text: None,
+                exit_code: Some(0),
+                is_error: false,
+                usage: Usage { cost_usd: Some(0.5), output_tokens: Some(12), ..Default::default() },
+            }))
+            .unwrap();
+
+            assert_eq!(stream(rx, "a1", false, show_thinking).await, 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_finish_renders_its_usage_too() {
+        let (tx, rx) = broadcast::channel(4);
+        tx.send(env("a1", 0, AgentEvent::Finished {
+            text: None,
+            exit_code: Some(2),
+            is_error: true,
+            usage: Usage { cost_usd: Some(0.25), ..Default::default() },
+        }))
+        .unwrap();
+
+        assert_eq!(stream(rx, "a1", false, false).await, 2);
+    }
+
+    // --- the list renderers ----------------------------------------------
+    //
+    // These write to stdout, which `println!` gives no hook to capture, so the
+    // assertion is that they render every shape without panicking. That is not
+    // a formality: two of them slice an id by byte offset, which panics on a
+    // short or non-ASCII id.
+
+    fn summary(id: &str, status: AgentStatus) -> AgentSummary {
+        AgentSummary {
+            id: id.into(),
+            name: "scout".into(),
+            harness: HarnessKind::ClaudeCode,
+            harness_label: "Claude Code".into(),
+            status,
+            cwd: "/work".into(),
+            model: None,
+            permission: Default::default(),
+            tmux_session: "jod-x".into(),
+            attach_command: "tmux attach -t jod-x".into(),
+            switch_command: "tmux switch-client -t jod-x".into(),
+            session_closed: false,
+            created_at_ms: 0,
+            session_id: None,
+            usage: Usage::default(),
+            event_count: 0,
+            last_message: None,
+            stream_path: "/runs/x/stream.jsonl".into(),
+        }
+    }
+
+    #[test]
+    fn an_empty_agent_list_says_so_rather_than_printing_nothing() {
+        agents(&[]);
+    }
+
+    #[test]
+    fn every_status_gets_a_label() {
+        agents(&[
+            summary("aaaaaaaaaaaa", AgentStatus::Running),
+            summary("bbbbbbbbbbbb", AgentStatus::Completed),
+            summary("cccccccccccc", AgentStatus::Failed),
+            summary("dddddddddddd", AgentStatus::Killed),
+        ]);
+    }
+
+    /// The id column truncates to 8 bytes. An id shorter than that must not
+    /// panic on the slice.
+    #[test]
+    fn a_short_id_is_not_sliced_past_its_end() {
+        agents(&[summary("ab", AgentStatus::Running)]);
+    }
+
+    #[test]
+    fn a_harness_list_renders_installed_and_missing_alike() {
+        harnesses(&[
+            HarnessInfo {
+                id: "claude_code".into(),
+                label: "Claude Code".into(),
+                available: true,
+                path: Some("/usr/local/bin/claude".into()),
+            },
+            HarnessInfo {
+                id: "open_code".into(),
+                label: "OpenCode".into(),
+                available: false,
+                path: None,
+            },
+        ]);
+        harnesses(&[]);
+    }
+
+    #[test]
+    fn a_launched_agent_is_announced_both_ways() {
+        let a = summary("abcdefgh", AgentStatus::Running);
+        launched(&a);
+        launched_waiting(&a);
+    }
+
+    /// Regression: an idle fleet printed "$-0.0000", because Rust's f64 sum
+    /// uses -0.0 as its identity.
+    #[test]
+    fn an_idle_fleet_reports_no_negative_zero_spend() {
+        let empty: Vec<AgentSummary> = vec![];
+        let total: f64 = empty.iter().filter_map(|a| a.usage.cost_usd).sum();
+        assert_eq!(format!("${:.4}", total + 0.0), "$0.0000");
+
+        report(&Report {
+            running: 0,
+            completed: 0,
+            failed: 0,
+            killed: 0,
+            total_cost_usd: total,
+            agents: empty,
+        });
+    }
 }
