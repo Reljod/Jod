@@ -24,5 +24,12 @@ Steps:
    command and its **real output**), Evidence, Decisions.
 5. Open the PR as a **draft**, honoring this repo's standing PR rules
    (template detection, draft-by-default) and the attribution footer.
-6. Report back which visual strategy you used per category, and anything the
-   substitutions scan flagged.
+6. Once CI has **finished**, close it out yourself if the gate allows it:
+   `.agents/skills/auto-merge/scripts/merge_pr.sh <pr> --ready`. That script
+   decides — it merges only on an `auto-merge` verdict with every check green
+   and the branch not behind base, and otherwise exits 1 with reasons. Report
+   those reasons verbatim and leave the PR open; never fall back to
+   `gh pr merge`. Only for work you carried end to end.
+7. Report back which visual strategy you used per category, anything the
+   substitutions scan flagged, and whether the PR merged or is waiting on a
+   human (and why).

@@ -65,6 +65,20 @@ A check that can't pass makes faking it the cheapest path.
   [`.claude/agents/reviewer.md`](.claude/agents/reviewer.md)
 - **Teammates share one checkout, so one owner per path,** and a task closes
   green or blocked in writing. → [`docs/teamwork.md`](docs/teamwork.md)
+- **A PR merges unread only when a script says so.** CI categorises every PR;
+  prose, research, charter/skill edits and small clean code changes may be
+  merged by an agent, and anything touching auth, CI, migrations or the
+  enforcement machinery waits for a human. Never `gh pr merge` by hand — run
+  `merge_pr.sh` and obey its exit
+  code. → **`/auto-merge`**, [why](docs/decisions.md#a-regex-decides-what-merges-unread)
+- **Finish your own PRs.** After opening one, wait for checks to finish and run
+  `merge_pr.sh <pr> --ready`. On a refusal, report the reasons verbatim and
+  leave it open. Only for work you carried end to end. → **`/create-pr`**
+- **Reviewing agents may veto, never approve.** The shepherd sweeps the open
+  PRs, spawns read-only agents on each `ready` one, and merges only what both
+  the gate and every agent leave alone. Anything that is not exactly
+  `VERDICT: CLEAR` — a hedge, a malformed line, a crashed agent — blocks.
+  → **`/shepherd-prs`**, [why](docs/decisions.md#judgement-may-subtract-never-add)
 
 ## Conventions
 
@@ -72,5 +86,7 @@ A check that can't pass makes faking it the cheapest path.
 - **Commits:** `<type>: <subject>`, imperative, ≤72 chars. No issue key.
   → **`/setup-git-hooks`**
 - **PRs:** draft by default.
+- **History:** linear. Squash or rebase, never a merge commit, and never
+  merge a branch that is behind its base.
 - **Attribution:** commits and PRs are Reljod's, no Claude branding.
   → [`docs/attribution.md`](docs/attribution.md)

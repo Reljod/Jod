@@ -1,0 +1,85 @@
+name: PR Shepherd
+
+# Runs the shepherd-prs routine unattended: sweep the open PRs, review the
+# ready ones with read-only agents, merge what survives.
+#
+# This workflow is only the trigger and the token. Every decision lives in
+# `.agents/skills/shepherd-prs/SKILL.md` and the scripts it calls, so the
+# unattended run and a `/shepherd-prs` run from a laptop follow the same rules.
+#
+# Nothing here can merge on its own. `merge_pr.sh` is still the only thing that
+# says yes, and the agents it spawns can only refuse — see the skill for why
+# judgement is allowed to subtract but never to add.
+#
+# Cost note: the `workflow_run` trigger fires every time Tests finishes on a
+# PR, which on an active day is a lot of model invocations. Delete that trigger
+# and keep the schedule if that matters more than closing PRs promptly.
+
+on:
+  # The literal reading of "merge it once CI passes" — CI passing is the event.
+  workflow_run:
+    workflows: ["Tests"]
+    types: [completed]
+  # Backstop, for a PR whose last CI run finished while this was failing, or
+  # that became mergeable because something else merged.
+  schedule:
+    - cron: "0 * * * *"
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: "Single PR number to shepherd (blank = sweep all open PRs)"
+        required: false
+        type: string
+      dry_run:
+        description: "Stop after the verdicts without merging anything"
+        required: false
+        type: boolean
+        default: false
+
+# One shepherd at a time. Two concurrent runs would each read a PR list that
+# the other is busy invalidating, and both would merge onto a base the other
+# just moved.
+concurrency:
+  group: pr-shepherd
+  cancel-in-progress: false
+
+jobs:
+  shepherd:
+    # A Tests run that failed has nothing to shepherd, and a Tests run on a
+    # push to main is not about a PR at all.
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'pull_request')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # merge, and delete the merged branch
+      pull-requests: write # publish a draft, merge
+      issues: read
+      actions: read # read check results on PRs
+      id-token: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          # The gate re-derives each PR's verdict from `origin/<base>...<head>`,
+          # so it needs real history to diff against — not a depth-1 stub.
+          fetch-depth: 0
+
+      - name: Run the shepherd
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          additional_permissions: |
+            actions: read
+          prompt: >-
+            /shepherd-prs
+            ${{ inputs.pr && format('--pr {0}', inputs.pr) || '' }}
+            ${{ inputs.dry_run && '--dry-run' || '--ready' }}
+          # Deliberately narrow. The routine needs `gh`, `git`, and its own two
+          # scripts; it does not need to run arbitrary commands, and a shepherd
+          # that could would be a scheduled job with a write token and no
+          # bounds on what it executes.
+          claude_args: >-
+            --allowed-tools
+            "Task,Read,Grep,Glob,Bash(gh:*),Bash(git:*),Bash(.agents/skills/shepherd-prs/scripts/pr_sweep.sh:*),Bash(.agents/skills/auto-merge/scripts/merge_pr.sh:*),Bash(.agents/skills/auto-merge/scripts/pr_triage.sh:*)"
