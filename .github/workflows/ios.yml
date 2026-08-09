@@ -105,13 +105,22 @@ jobs:
           bundle_id=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Info.plist")
           echo "bundle id: $bundle_id"
 
-          # Whatever iPhone this Xcode actually ships, rather than a hard-coded
-          # model that disappears with the next image bump.
-          device_type=$(xcrun simctl list devicetypes -j \
-            | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const t=JSON.parse(s).devicetypes.filter(d=>/iPhone/.test(d.name));console.log(t[t.length-1].identifier)})")
-          echo "device type: $device_type"
+          # Use an iPhone the runner has *already provisioned*, rather than
+          # creating one from a device type. `simctl list devicetypes` happily
+          # lists models with no installed runtime — picking one of those fails
+          # with "Could not find an available runtime for device type", which is
+          # what an iPhone 6s Plus did here.
+          xcrun simctl list devices available | sed -n '1,40p'
+          device=$(xcrun simctl list devices available -j \
+            | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{
+                const g=JSON.parse(s).devices;
+                const all=Object.values(g).flat().filter(d=>/iPhone/.test(d.name)&&d.isAvailable!==false);
+                if(!all.length){console.error('no available iPhone simulator');process.exit(1);}
+                console.log(all[all.length-1].udid);
+              })")
+          test -n "$device"
+          xcrun simctl list devices available | grep -F "$device" || true
 
-          device=$(xcrun simctl create jod-ci "$device_type")
           xcrun simctl boot "$device"
           xcrun simctl bootstatus "$device" -b
           xcrun simctl install "$device" "$app"
