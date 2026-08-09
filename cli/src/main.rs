@@ -545,4 +545,201 @@ mod tests {
         use clap::CommandFactory;
         Cli::command().debug_assert();
     }
+
+    // --- the argument surface --------------------------------------------
+    //
+    // These pin the CLI's contract: the flags, their short forms and their
+    // defaults are what people type and what scripts depend on, so a rename or
+    // a changed default should fail here rather than in someone's shell.
+
+    use clap::Parser;
+
+    fn parse(args: &[&str]) -> Cli {
+        Cli::try_parse_from(args).expect("should parse")
+    }
+
+    #[test]
+    fn run_defaults_to_claude_asking_before_it_acts_and_waiting_for_the_result() {
+        match parse(&["jod", "run", "do the thing"]).command {
+            Command::Run {
+                prompt,
+                harness,
+                permission,
+                detach,
+                json,
+                thinking,
+                continue_last,
+                session,
+                ..
+            } => {
+                assert_eq!(prompt.as_deref(), Some("do the thing"));
+                assert!(harness == HarnessArg::Claude);
+                assert!(permission == PermissionArg::Ask);
+                assert!(!detach && !json && !thinking && !continue_last);
+                assert_eq!(session, None);
+            }
+            _ => panic!("expected Run"),
+        }
+    }
+
+    /// Omitting the prompt is how `jod run` reads from stdin.
+    #[test]
+    fn run_accepts_no_prompt_at_all() {
+        match parse(&["jod", "run"]).command {
+            Command::Run { prompt, .. } => assert_eq!(prompt, None),
+            _ => panic!("expected Run"),
+        }
+    }
+
+    #[test]
+    fn run_takes_short_forms_for_what_is_typed_often() {
+        match parse(&[
+            "jod", "run", "p", "-H", "agy", "-n", "scout", "-m", "opus", "-p", "bypass",
+        ])
+        .command
+        {
+            Command::Run {
+                harness,
+                name,
+                model,
+                permission,
+                ..
+            } => {
+                assert!(harness == HarnessArg::Agy);
+                assert_eq!(name.as_deref(), Some("scout"));
+                assert_eq!(model.as_deref(), Some("opus"));
+                assert!(permission == PermissionArg::Bypass);
+            }
+            _ => panic!("expected Run"),
+        }
+    }
+
+    /// Resuming the last conversation and resuming a named one are different
+    /// intents; asking for both at once is a mistake worth refusing.
+    #[test]
+    fn continuing_and_naming_a_session_are_mutually_exclusive() {
+        assert!(Cli::try_parse_from(["jod", "run", "p", "--continue", "--session", "s1"]).is_err());
+
+        match parse(&["jod", "run", "p", "--continue"]).command {
+            Command::Run { continue_last, .. } => assert!(continue_last),
+            _ => panic!("expected Run"),
+        }
+        match parse(&["jod", "run", "p", "--session", "s1"]).command {
+            Command::Run { session, .. } => assert_eq!(session.as_deref(), Some("s1")),
+            _ => panic!("expected Run"),
+        }
+    }
+
+    #[test]
+    fn the_read_only_commands_all_offer_json() {
+        for (argv, label) in [
+            (vec!["jod", "ls", "--json"], "ls"),
+            (vec!["jod", "harnesses", "--json"], "harnesses"),
+            (vec!["jod", "report", "--json"], "report"),
+            (vec!["jod", "history", "--json"], "history"),
+        ] {
+            let json = match parse(&argv).command {
+                Command::Ls { json }
+                | Command::Harnesses { json }
+                | Command::Report { json }
+                | Command::History { json, .. } => json,
+                _ => panic!("unexpected command for {label}"),
+            };
+            assert!(json, "{label} must accept --json");
+        }
+    }
+
+    #[test]
+    fn history_shows_a_bounded_number_of_runs_by_default() {
+        match parse(&["jod", "history"]).command {
+            Command::History { limit, json } => {
+                assert_eq!(limit, 20);
+                assert!(!json);
+            }
+            _ => panic!("expected History"),
+        }
+        match parse(&["jod", "history", "-l", "5"]).command {
+            Command::History { limit, .. } => assert_eq!(limit, 5),
+            _ => panic!("expected History"),
+        }
+    }
+
+    #[test]
+    fn attach_and_kill_each_need_an_agent_id() {
+        match parse(&["jod", "attach", "a1"]).command {
+            Command::Attach { id } => assert_eq!(id, "a1"),
+            _ => panic!("expected Attach"),
+        }
+        match parse(&["jod", "kill", "a1"]).command {
+            Command::Kill { id } => assert_eq!(id, "a1"),
+            _ => panic!("expected Kill"),
+        }
+        assert!(Cli::try_parse_from(["jod", "attach"]).is_err());
+        assert!(Cli::try_parse_from(["jod", "kill"]).is_err());
+    }
+
+    /// A fact typed by hand is Reljod's own word; that is the whole point of
+    /// recording origin, so the default must not drift.
+    #[test]
+    fn remembering_by_hand_defaults_to_the_owners_own_word() {
+        match parse(&["jod", "remember", "reljod", "prefers", "linear"]).command {
+            Command::Remember {
+                subject,
+                predicate,
+                object,
+                source,
+                origin,
+                ..
+            } => {
+                assert_eq!((subject.as_str(), predicate.as_str(), object.as_str()),
+                           ("reljod", "prefers", "linear"));
+                assert_eq!(source, None);
+                assert!(Origin::from(origin) == Origin::Owner);
+            }
+            _ => panic!("expected Remember"),
+        }
+    }
+
+    #[test]
+    fn an_unknown_command_is_refused_rather_than_guessed_at() {
+        assert!(Cli::try_parse_from(["jod", "definitely-not-a-command"]).is_err());
+        assert!(Cli::try_parse_from(["jod"]).is_err());
+    }
+
+    #[test]
+    fn every_origin_arg_maps_to_a_distinct_origin() {
+        let origins: Vec<Origin> = [
+            OriginArg::Owner,
+            OriginArg::Agent,
+            OriginArg::Untrusted,
+            OriginArg::System,
+        ]
+        .into_iter()
+        .map(Origin::from)
+        .collect();
+        assert_eq!(origins.len(), 4);
+        for (i, a) in origins.iter().enumerate() {
+            for b in &origins[i + 1..] {
+                assert!(a != b, "two origin args mapped to the same origin");
+            }
+        }
+    }
+
+    #[test]
+    fn every_permission_arg_maps_to_a_distinct_policy() {
+        let policies: Vec<PermissionPolicy> = [
+            PermissionArg::Ask,
+            PermissionArg::AcceptEdits,
+            PermissionArg::Bypass,
+        ]
+        .into_iter()
+        .map(PermissionPolicy::from)
+        .collect();
+        assert_eq!(policies.len(), 3);
+        for (i, a) in policies.iter().enumerate() {
+            for b in &policies[i + 1..] {
+                assert_ne!(a, b, "two permission args mapped to the same policy");
+            }
+        }
+    }
 }
