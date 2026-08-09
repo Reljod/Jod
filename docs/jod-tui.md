@@ -9,9 +9,16 @@ already true, and what has to be built. Reasoning for the two load-bearing
 choices lives in [`decisions.md`](decisions.md); the surrounding architecture is
 [`jod-system.md`](jod-system.md).
 
-**Status: not built.** There is no TUI in this repo today. The clients are
-`apps/desktop` (Tauri) and `crates/jod-core/examples/delegate.rs`. This is a new
-component, not a retrofit.
+**Status: the spine is built and runs.** `apps/tui` is a working ratatui client
+— fleet list, live event stream with reasoning, spawn, kill, multi-turn
+follow-up, and a team view — driving all three harnesses through `jod-core`.
+Antigravity is a first-class harness, and agent teams have a working bus in
+`jod-core::team`.
+
+What is *not* done is the long tail of OpenCode's TUI: inline permission
+prompts, file attachment, `@`-references, theming, its config surface, and
+per-member tmux panes for a team. The milestones at the end of this document
+mark what landed and what remains.
 
 ---
 
@@ -184,12 +191,34 @@ below the seam. In rough dependency order:
 
 ## Milestones
 
-1. **Antigravity adapter** — `agy` behind the existing seam, one-shot, with the
-   delta accumulation and `Raw` handling above. Proves the third harness.
-2. **TUI skeleton** — fleet list plus event stream over the current one-shot
-   runs, reasoning rendered live for Claude Code and OpenCode. Delivers the
-   reasoning half of the goal on day one.
-3. **Sessions** — resume-by-id in the core; multi-turn conversation in the TUI.
+1. ~~**Antigravity adapter** — `agy` behind the existing seam, with delta
+   accumulation and `Raw` handling.~~ **done** — `harness/antigravity.rs`. The
+   "one file per harness" claim held: nothing above the seam changed.
+2. ~~**TUI skeleton** — fleet list plus event stream, reasoning rendered live.~~
+   **done** — `apps/tui`.
+3. ~~**Sessions** — resume-by-id in the core; multi-turn conversation in the
+   TUI.~~ **done** — `SpawnRequest::resume`, and `i` sends a follow-up turn.
 4. **Interaction** — inline permission prompts, interrupt, model switching.
-5. **Teams** — inbox, shared tasks, member state, auto-wake, per-member panes.
-6. **Cross-harness teams** — the lead and its teammates on different harnesses.
+   *Not started.* Permission answers need the harnesses' interactive paths,
+   which is the one capability the headless seam does not cover.
+5. ~~**Teams** — inbox, shared tasks, member state.~~ **done** —
+   `jod-core::team`. Auto-wake and per-member tmux panes remain.
+6. **Cross-harness teams** — *the mechanism is done and tested*
+   (`one_team_can_span_every_harness`); what remains is the orchestration that
+   drives a lead and its teammates through it.
+
+### What live testing changed
+
+Three things only a real run could have found, all now regression-tested:
+
+- **The launcher gave the harness the pane's TTY as stdin.** `agy` on a resumed
+  conversation asks a question there and blocks forever with no output. The
+  launcher now redirects stdin from `/dev/null`; this affected every harness,
+  not just Antigravity.
+- **The final answer rendered twice** — once as the last message, once from the
+  terminal record. The stream now drops the echo.
+- **An idle fleet reported `$-0.0000`.** Summing no costs can land on negative
+  zero.
+
+And one undocumented event: Antigravity emits a `system_message` step on every
+resumed run, normally empty. It is quiet when empty and surfaced when not.

@@ -497,6 +497,7 @@ mod tests {
                 cwd: PathBuf::from("/tmp"),
                 model: None,
                 permission: PermissionPolicy::Ask,
+                resume: None,
             })
             .await;
 

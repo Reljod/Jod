@@ -208,11 +208,13 @@ The current goal is items 3–7: **a TUI that matches OpenCode's feature for
 feature, runs agent teams, and streams reasoning live — identically across
 Claude Code, OpenCode and Antigravity.** → [`jod-tui.md`](jod-tui.md)
 
-3. Antigravity (`agy`) as the third harness, behind the existing seam
-4. TUI skeleton: fleet list, live event stream, reasoning rendered as it arrives
+3. ~~Antigravity (`agy`) as the third harness, behind the existing seam~~ **done**
+4. ~~TUI: fleet list, live event stream, reasoning rendered as it arrives~~ **done**
 5. Persist and reattach runs across app restarts (`~/.jod/runs` is already there)
-6. Sessions and interaction: resume by id, multi-turn chat, inline permissions
-7. Agent teams: inbox/outbox, shared task list, auto-wake — plus `jod-mcp`
+6. Sessions and interaction: ~~resume by id, multi-turn chat~~ **done**;
+   inline permission prompts remain
+7. Agent teams: ~~inbox/outbox, shared task list~~ **done**; auto-wake and
+   `jod-mcp` remain
 8. Brain nodes: OKF writer/reader, plus a Notion sync
 9. Brain connections: GraphQLite index and query surface
 10. Headless daemon for a VPS — the same `jod-core` behind an authenticated API

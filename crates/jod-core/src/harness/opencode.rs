@@ -38,6 +38,10 @@ impl Harness for OpenCode {
             args.push(ArgPart::lit("--model"));
             args.push(ArgPart::lit(model));
         }
+        if let Some(session) = &req.resume {
+            args.push(ArgPart::lit("--session"));
+            args.push(ArgPart::lit(session));
+        }
         // OpenCode has one auto-approve switch; Ask and AcceptEdits both leave
         // it off, since it cannot separate edits from other tool calls.
         if req.permission == PermissionPolicy::Bypass {
@@ -194,6 +198,8 @@ fn usage_from(part: &Value) -> Usage {
         output_tokens: t.and_then(|t| t.get("output")).and_then(Value::as_u64),
         cache_read_tokens: cache.and_then(|c| c.get("read")).and_then(Value::as_u64),
         cache_write_tokens: cache.and_then(|c| c.get("write")).and_then(Value::as_u64),
+        // OpenCode reports reasoning as text, not as a separate token count.
+        thinking_tokens: None,
         cost_usd: part.get("cost").and_then(Value::as_f64),
     }
 }
@@ -211,6 +217,7 @@ mod tests {
             cwd: PathBuf::from("/work"),
             model: model.map(str::to_string),
             permission,
+            resume: None,
         }
     }
 

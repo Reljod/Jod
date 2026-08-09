@@ -65,6 +65,7 @@ answers a prompt itself — and gives you one place to watch every agent at once
 |---|---|---|
 | 🦀 | [`crates/jod-core`](./crates/jod-core) | the service: harness seam, tmux runner, event stream |
 | 🖥️ | [`apps/desktop`](./apps/desktop) | Tauri v2 shell over the core |
+| ⌨️ | [`apps/tui`](./apps/tui) | terminal client: fleet, live reasoning, teams |
 | 📱 | iOS, VPS daemon | *planned — same core behind an API* |
 
 Each delegated task runs in its own `tmux` session under **Claude Code** or
@@ -82,7 +83,13 @@ notes indexed by GraphQLite) and agent-to-agent messaging — is in
 
 **The current goal** is a TUI that matches OpenCode's feature for feature, runs
 agent teams, and streams reasoning live — identically across Claude Code,
-OpenCode and Antigravity. → [`docs/jod-tui.md`](./docs/jod-tui.md)
+OpenCode and Antigravity. The spine of it runs today:
+
+```sh
+cargo run -p jod-tui
+```
+
+→ [`docs/jod-tui.md`](./docs/jod-tui.md) for what is built and what remains.
 
 ## The toolkit
 

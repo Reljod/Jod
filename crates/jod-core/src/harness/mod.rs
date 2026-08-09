@@ -10,9 +10,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::event::{AgentEvent, Usage};
 
+pub mod antigravity;
 pub mod claude;
 pub mod opencode;
 
+pub use antigravity::Antigravity;
 pub use claude::ClaudeCode;
 pub use opencode::OpenCode;
 
@@ -21,15 +23,21 @@ pub use opencode::OpenCode;
 pub enum HarnessKind {
     ClaudeCode,
     OpenCode,
+    Antigravity,
 }
 
 impl HarnessKind {
-    pub const ALL: [HarnessKind; 2] = [HarnessKind::ClaudeCode, HarnessKind::OpenCode];
+    pub const ALL: [HarnessKind; 3] = [
+        HarnessKind::ClaudeCode,
+        HarnessKind::OpenCode,
+        HarnessKind::Antigravity,
+    ];
 
     pub fn id(&self) -> &'static str {
         match self {
             HarnessKind::ClaudeCode => "claude_code",
             HarnessKind::OpenCode => "open_code",
+            HarnessKind::Antigravity => "antigravity",
         }
     }
 
@@ -37,6 +45,7 @@ impl HarnessKind {
         match self {
             HarnessKind::ClaudeCode => "Claude Code",
             HarnessKind::OpenCode => "OpenCode",
+            HarnessKind::Antigravity => "Antigravity",
         }
     }
 
@@ -64,6 +73,16 @@ impl HarnessKind {
                     "~/.bun/bin/opencode",
                 ],
             ),
+            HarnessKind::Antigravity => crate::discovery::find_binary(
+                "JOD_AGY_BIN",
+                &["agy"],
+                &[
+                    "~/.local/bin/agy",
+                    "~/.antigravity/bin/agy",
+                    "/opt/homebrew/bin/agy",
+                    "/usr/local/bin/agy",
+                ],
+            ),
         }
     }
 
@@ -71,6 +90,7 @@ impl HarnessKind {
         match self {
             HarnessKind::ClaudeCode => Box::new(ClaudeCode::default()),
             HarnessKind::OpenCode => Box::new(OpenCode::default()),
+            HarnessKind::Antigravity => Box::new(Antigravity::default()),
         }
     }
 }
@@ -100,6 +120,14 @@ pub struct SpawnRequest {
     pub model: Option<String>,
     #[serde(default)]
     pub permission: PermissionPolicy,
+    /// Continue an existing harness-side conversation instead of starting one.
+    ///
+    /// This is what makes a *conversation* out of one-shot headless runs: every
+    /// harness can resume by id (`--resume` / `--session` / `--conversation`),
+    /// so a follow-up turn is another spawn carrying the id the last one
+    /// reported in `Started`. No pseudo-terminal, no long-lived child process.
+    #[serde(default)]
+    pub resume: Option<String>,
 }
 
 /// One argv entry. `Prompt` is a placeholder the runner substitutes with a
@@ -151,6 +179,8 @@ impl Accumulator {
         sum(&mut self.usage.output_tokens, other.output_tokens);
         max(&mut self.usage.cache_read_tokens, other.cache_read_tokens);
         sum(&mut self.usage.cache_write_tokens, other.cache_write_tokens);
+        // Reasoning tokens are generated per step, like output tokens.
+        sum(&mut self.usage.thinking_tokens, other.thinking_tokens);
         if let Some(c) = other.cost_usd {
             self.usage.cost_usd = Some(self.usage.cost_usd.unwrap_or(0.0) + c);
         }

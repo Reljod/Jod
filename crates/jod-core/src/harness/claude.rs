@@ -33,6 +33,10 @@ impl Harness for ClaudeCode {
             args.push(ArgPart::lit("--model"));
             args.push(ArgPart::lit(model));
         }
+        if let Some(session) = &req.resume {
+            args.push(ArgPart::lit("--resume"));
+            args.push(ArgPart::lit(session));
+        }
         match req.permission {
             PermissionPolicy::Ask => {}
             PermissionPolicy::AcceptEdits => {
@@ -172,6 +176,8 @@ fn usage_from(v: &Value) -> Usage {
         output_tokens: u.and_then(|u| u64_at(u, "output_tokens")),
         cache_read_tokens: u.and_then(|u| u64_at(u, "cache_read_input_tokens")),
         cache_write_tokens: u.and_then(|u| u64_at(u, "cache_creation_input_tokens")),
+        // Claude folds reasoning into output_tokens and reports no separate count.
+        thinking_tokens: None,
         cost_usd: v.get("total_cost_usd").and_then(Value::as_f64),
     }
 }
@@ -208,6 +214,7 @@ mod tests {
             cwd: PathBuf::from("/tmp"),
             model: model.map(str::to_string),
             permission,
+            resume: None,
         }
     }
 

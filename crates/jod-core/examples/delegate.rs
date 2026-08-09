@@ -55,6 +55,7 @@ async fn main() {
                 Ok("bypass") => PermissionPolicy::Bypass,
                 _ => PermissionPolicy::Ask,
             },
+            resume: None,
         })
         .await
         .unwrap_or_else(|e| {

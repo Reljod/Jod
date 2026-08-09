@@ -36,6 +36,10 @@ struct SpawnArgs {
     cwd: Option<String>,
     model: Option<String>,
     permission: Option<PermissionPolicy>,
+    /// Harness session to continue, so the desktop app can hold a conversation
+    /// rather than only starting one. Absent means "start fresh".
+    #[serde(default)]
+    resume: Option<String>,
 }
 
 /// Tauri commands must return `Result<_, String>`; core errors carry their own
@@ -84,6 +88,7 @@ async fn spawn_agent(
             cwd,
             model: args.model.filter(|m| !m.trim().is_empty()),
             permission: args.permission.unwrap_or_default(),
+            resume: args.resume,
         })
         .await
         .map_err(to_msg)

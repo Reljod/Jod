@@ -18,6 +18,11 @@ pub struct Usage {
     pub cache_read_tokens: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_write_tokens: Option<u64>,
+    /// Tokens spent reasoning. Antigravity reports this while surfacing no
+    /// reasoning *text*, so a client can still show that the model thought and
+    /// how much — the honest degrade for a harness that hides the content.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_tokens: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cost_usd: Option<f64>,
 }

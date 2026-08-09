@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/jod-core", "apps/desktop/src-tauri"]
+members = ["crates/jod-core", "apps/desktop/src-tauri", "apps/tui"]
 
 [workspace.package]
 version = "0.1.0"
