@@ -16,7 +16,13 @@ use crate::error::{JodError, Result};
 pub fn session_name(agent_id: &str) -> String {
     let sanitized: String = agent_id
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect();
     format!("jod-{sanitized}")
 }
@@ -25,7 +31,11 @@ pub fn locate() -> Option<PathBuf> {
     crate::discovery::find_binary(
         "JOD_TMUX_BIN",
         &["tmux"],
-        &["/opt/homebrew/bin/tmux", "/usr/local/bin/tmux", "/usr/bin/tmux"],
+        &[
+            "/opt/homebrew/bin/tmux",
+            "/usr/local/bin/tmux",
+            "/usr/bin/tmux",
+        ],
     )
 }
 
@@ -54,17 +64,7 @@ pub async fn new_session(name: &str, cwd: &Path, script: &Path) -> Result<()> {
     }
     let cwd = cwd.to_string_lossy().to_string();
     let script = script.to_string_lossy().to_string();
-    let (ok, out) = run(&[
-        "new-session",
-        "-d",
-        "-s",
-        name,
-        "-c",
-        &cwd,
-        "bash",
-        &script,
-    ])
-    .await?;
+    let (ok, out) = run(&["new-session", "-d", "-s", name, "-c", &cwd, "bash", &script]).await?;
     if !ok {
         return Err(JodError::Tmux(out));
     }
@@ -176,7 +176,10 @@ mod tests {
     #[test]
     fn the_watch_command_picks_the_right_one_at_runtime() {
         let cmd = watch_command("jod-x");
-        assert!(cmd.contains("$TMUX"), "must branch on being inside tmux: {cmd}");
+        assert!(
+            cmd.contains("$TMUX"),
+            "must branch on being inside tmux: {cmd}"
+        );
         assert!(cmd.contains("switch-client -t jod-x"));
         assert!(cmd.contains("attach -t jod-x"));
     }

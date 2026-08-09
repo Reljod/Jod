@@ -409,7 +409,11 @@ mod tests {
             r#"{"event":"step_update","step_update":{"step_type":"tool","state":"ERROR","tool_name":"list_dir","tool_info":{"name":"list_dir","error":{"type":"TOOL_ERROR","message":"User denied permission for read_file(/home)."}}}}"#,
         );
         match &events[..] {
-            [AgentEvent::ToolResult { name, summary, is_error }] => {
+            [AgentEvent::ToolResult {
+                name,
+                summary,
+                is_error,
+            }] => {
                 assert!(is_error);
                 assert_eq!(name, "list_dir");
                 assert!(summary.as_deref().unwrap().contains("denied"));
@@ -422,7 +426,9 @@ mod tests {
     fn the_result_record_supplies_the_final_answer() {
         let mut h = Agy::default();
         assert!(h
-            .parse_line(r#"{"event":"result","result":{"status":"SUCCESS","response":"the answer"}}"#)
+            .parse_line(
+                r#"{"event":"result","result":{"status":"SUCCESS","response":"the answer"}}"#
+            )
             .is_empty());
         match h.finalize(Some(0)) {
             AgentEvent::Finished { text, is_error, .. } => {
@@ -459,7 +465,11 @@ mod tests {
         );
         match h.finalize(Some(0)) {
             AgentEvent::Finished { usage, .. } => {
-                assert_eq!(usage.output_tokens, Some(68), "step usage was double-counted");
+                assert_eq!(
+                    usage.output_tokens,
+                    Some(68),
+                    "step usage was double-counted"
+                );
                 assert_eq!(usage.input_tokens, Some(9436));
             }
             other => panic!("expected Finished, got {other:?}"),
@@ -491,7 +501,10 @@ mod tests {
         let args = lits(&Agy::default().args(&req()));
         let i = args.iter().position(|a| a == "--print-timeout").unwrap();
         assert_eq!(args[i + 1], PRINT_TIMEOUT);
-        assert_ne!(PRINT_TIMEOUT, "5m", "5 minutes is the default we are avoiding");
+        assert_ne!(
+            PRINT_TIMEOUT, "5m",
+            "5 minutes is the default we are avoiding"
+        );
     }
 
     /// Regression: AGY auto-denies tools it cannot prompt for in headless mode,
@@ -509,7 +522,10 @@ mod tests {
         );
         match h.finalize(Some(0)) {
             AgentEvent::Finished { is_error, .. } => {
-                assert!(is_error, "exit 0 must not make a denied run look successful")
+                assert!(
+                    is_error,
+                    "exit 0 must not make a denied run look successful"
+                )
             }
             other => panic!("expected Finished, got {other:?}"),
         }
@@ -578,11 +594,17 @@ mod tests {
             r#"{"event":"result","result":{"conversation_id":"other","status":"SUCCESS","response":"hi"}}"#,
         );
         assert_eq!(
-            first.iter().filter(|e| matches!(e, AgentEvent::Error { .. })).count(),
+            first
+                .iter()
+                .filter(|e| matches!(e, AgentEvent::Error { .. }))
+                .count(),
             1
         );
         assert_eq!(
-            second.iter().filter(|e| matches!(e, AgentEvent::Error { .. })).count(),
+            second
+                .iter()
+                .filter(|e| matches!(e, AgentEvent::Error { .. }))
+                .count(),
             0
         );
     }

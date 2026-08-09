@@ -358,7 +358,12 @@ impl Store {
     /// This is what lets a client that dropped its connection replay only the
     /// tail: it remembers the last `seq` it saw and asks for what followed,
     /// rather than re-fetching a transcript it already has.
-    pub fn events_since(&self, run_id: &str, after_seq: u64, limit: usize) -> Result<Vec<AgentEnvelope>> {
+    pub fn events_since(
+        &self,
+        run_id: &str,
+        after_seq: u64,
+        limit: usize,
+    ) -> Result<Vec<AgentEnvelope>> {
         let conn = self.conn.lock().expect("store lock poisoned");
         let mut stmt = conn.prepare(
             "SELECT run_id, seq, at_ms, payload FROM events
@@ -716,7 +721,8 @@ mod tests {
     fn a_reconnecting_client_replays_only_the_tail() {
         let s = store();
         for seq in 0..5 {
-            s.append_event(&envelope("r1", seq, &format!("m{seq}"))).unwrap();
+            s.append_event(&envelope("r1", seq, &format!("m{seq}")))
+                .unwrap();
         }
         let tail: Vec<u64> = s
             .events_since("r1", 2, 100)
@@ -792,8 +798,14 @@ mod tests {
         let s = store();
         s.save_run(&run("c", "claude_code", 1)).unwrap();
         s.save_run(&run("a", "agy", 2)).unwrap();
-        assert_eq!(s.last_session_for("claude_code").unwrap().as_deref(), Some("sess-c"));
-        assert_eq!(s.last_session_for("agy").unwrap().as_deref(), Some("sess-a"));
+        assert_eq!(
+            s.last_session_for("claude_code").unwrap().as_deref(),
+            Some("sess-c")
+        );
+        assert_eq!(
+            s.last_session_for("agy").unwrap().as_deref(),
+            Some("sess-a")
+        );
         assert_eq!(s.last_session_for("open_code").unwrap(), None);
     }
 
@@ -826,7 +838,8 @@ mod tests {
     #[test]
     fn recall_returns_nothing_for_an_unrelated_query() {
         let s = store();
-        s.remember(NewFact::new("reljod", "prefers", "linear")).unwrap();
+        s.remember(NewFact::new("reljod", "prefers", "linear"))
+            .unwrap();
         assert!(s.recall("kangaroo", 5).unwrap().is_empty());
     }
 
@@ -835,9 +848,17 @@ mod tests {
     #[test]
     fn punctuation_in_a_question_does_not_break_the_query() {
         let s = store();
-        s.remember(NewFact::new("reljod", "prefers", "linear")).unwrap();
-        for q in ["what's the plan?", "linear -- now", "\"linear\"", "a:b", "NEAR"] {
-            s.recall(q, 5).unwrap_or_else(|e| panic!("query {q:?} failed: {e}"));
+        s.remember(NewFact::new("reljod", "prefers", "linear"))
+            .unwrap();
+        for q in [
+            "what's the plan?",
+            "linear -- now",
+            "\"linear\"",
+            "a:b",
+            "NEAR",
+        ] {
+            s.recall(q, 5)
+                .unwrap_or_else(|e| panic!("query {q:?} failed: {e}"));
         }
         assert_eq!(s.recall("what's linear?", 5).unwrap().len(), 1);
     }
@@ -890,7 +911,10 @@ mod tests {
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .unwrap();
-        assert!(valid_to.is_some(), "the old fact must be closed, not dropped");
+        assert!(
+            valid_to.is_some(),
+            "the old fact must be closed, not dropped"
+        );
         assert_eq!(by, Some(new));
     }
 
@@ -899,7 +923,8 @@ mod tests {
         let s = store();
         let old = s.remember(NewFact::new("r", "role", "founder")).unwrap();
         s.remember(NewFact::new("r", "city", "manila")).unwrap();
-        s.supersede(old, NewFact::new("r", "role", "operator")).unwrap();
+        s.supersede(old, NewFact::new("r", "role", "operator"))
+            .unwrap();
         let mut objects: Vec<String> = s
             .facts_about("r")
             .unwrap()
@@ -931,7 +956,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
 
         let first = Store::open(&path).unwrap();
-        first.remember(NewFact::new("reljod", "prefers", "sqlite")).unwrap();
+        first
+            .remember(NewFact::new("reljod", "prefers", "sqlite"))
+            .unwrap();
         first.append_event(&envelope("r1", 0, "hi")).unwrap();
         drop(first);
 
@@ -953,7 +980,11 @@ mod tests {
         let work = s.recall_in(Some("work"), "revenue", 10).unwrap();
         assert_eq!(work.len(), 1, "a scoped recall must not see other scopes");
         assert_eq!(work[0].scope, "work");
-        assert_eq!(s.recall("revenue", 10).unwrap().len(), 2, "unscoped sees both");
+        assert_eq!(
+            s.recall("revenue", 10).unwrap().len(),
+            2,
+            "unscoped sees both"
+        );
     }
 
     #[test]
@@ -994,13 +1025,16 @@ mod tests {
     fn forgetting_destroys_every_version_not_just_the_current_one() {
         let s = store();
         let old = s.remember(NewFact::new("r", "lives in", "manila")).unwrap();
-        s.supersede(old, NewFact::new("r", "lives in", "singapore")).unwrap();
+        s.supersede(old, NewFact::new("r", "lives in", "singapore"))
+            .unwrap();
 
         assert_eq!(s.forget(DEFAULT_SCOPE, "r", "lives in").unwrap(), 2);
 
         let conn = s.conn.lock().unwrap();
         let left: i64 = conn
-            .query_row("SELECT COUNT(*) FROM facts WHERE subject = 'r'", [], |r| r.get(0))
+            .query_row("SELECT COUNT(*) FROM facts WHERE subject = 'r'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(left, 0, "a forgotten fact must leave no version behind");
         let hits: i64 = conn
@@ -1021,11 +1055,9 @@ mod tests {
 
         let conn = s.conn.lock().unwrap();
         let (subject, versions): (String, i64) = conn
-            .query_row(
-                "SELECT subject, versions FROM tombstones",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
+            .query_row("SELECT subject, versions FROM tombstones", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
             .unwrap();
         assert_eq!(subject, "r");
         assert_eq!(versions, 1);
@@ -1034,8 +1066,10 @@ mod tests {
     #[test]
     fn forgetting_only_touches_the_named_scope() {
         let s = store();
-        s.remember(NewFact::new("r", "note", "work thing").in_scope("work")).unwrap();
-        s.remember(NewFact::new("r", "note", "home thing").in_scope("personal")).unwrap();
+        s.remember(NewFact::new("r", "note", "work thing").in_scope("work"))
+            .unwrap();
+        s.remember(NewFact::new("r", "note", "home thing").in_scope("personal"))
+            .unwrap();
         assert_eq!(s.forget("work", "r", "note").unwrap(), 1);
         assert_eq!(s.recall("thing", 10).unwrap().len(), 1);
     }
@@ -1054,7 +1088,10 @@ mod tests {
     #[test]
     fn the_query_builder_quotes_every_term() {
         assert_eq!(fts_query("a b"), Some("\"a\" OR \"b\"".into()));
-        assert_eq!(fts_query("what's up?"), Some("\"what\" OR \"s\" OR \"up\"".into()));
+        assert_eq!(
+            fts_query("what's up?"),
+            Some("\"what\" OR \"s\" OR \"up\"".into())
+        );
         assert_eq!(fts_query("  "), None);
     }
 }

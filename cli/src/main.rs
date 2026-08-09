@@ -462,7 +462,10 @@ mod tests {
 
     #[test]
     fn a_name_is_derived_from_the_first_words_of_the_prompt() {
-        assert_eq!(default_name("summarise the inbox please now ok"), "summarise the inbox please now");
+        assert_eq!(
+            default_name("summarise the inbox please now ok"),
+            "summarise the inbox please now"
+        );
     }
 
     #[test]
@@ -473,7 +476,11 @@ mod tests {
     #[test]
     fn a_long_name_is_truncated_rather_than_left_unbounded() {
         let name = default_name(&"averyverylongword ".repeat(5));
-        assert!(name.chars().count() <= 48, "got {} chars", name.chars().count());
+        assert!(
+            name.chars().count() <= 48,
+            "got {} chars",
+            name.chars().count()
+        );
     }
 
     #[test]

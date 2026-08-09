@@ -62,7 +62,9 @@ impl Harness for OpenCode {
             return vec![];
         }
         let Ok(v) = serde_json::from_str::<Value>(line) else {
-            return vec![AgentEvent::Raw { line: line.to_string() }];
+            return vec![AgentEvent::Raw {
+                line: line.to_string(),
+            }];
         };
 
         let mut out = vec![];
@@ -118,7 +120,9 @@ impl Harness for OpenCode {
                         .unwrap_or_else(|| line.to_string()),
                 });
             }
-            _ => out.push(AgentEvent::Raw { line: line.to_string() }),
+            _ => out.push(AgentEvent::Raw {
+                line: line.to_string(),
+            }),
         }
         out
     }
@@ -242,7 +246,10 @@ mod tests {
     fn only_bypass_enables_auto_approval() {
         for policy in [PermissionPolicy::Ask, PermissionPolicy::AcceptEdits] {
             let a = OpenCode::default().args(&req(policy, None));
-            assert!(!a.contains(&ArgPart::lit("--auto")), "{policy:?} must not auto-approve");
+            assert!(
+                !a.contains(&ArgPart::lit("--auto")),
+                "{policy:?} must not auto-approve"
+            );
         }
         let a = OpenCode::default().args(&req(PermissionPolicy::Bypass, None));
         assert!(a.contains(&ArgPart::lit("--auto")));
@@ -254,9 +261,13 @@ mod tests {
         let first = h.parse_line(r#"{"type":"step_start","sessionID":"ses_1","part":{"id":"p0"}}"#);
         assert_eq!(
             first,
-            vec![AgentEvent::Started { session_id: Some("ses_1".into()), model: None }]
+            vec![AgentEvent::Started {
+                session_id: Some("ses_1".into()),
+                model: None
+            }]
         );
-        let second = h.parse_line(r#"{"type":"step_start","sessionID":"ses_1","part":{"id":"p1"}}"#);
+        let second =
+            h.parse_line(r#"{"type":"step_start","sessionID":"ses_1","part":{"id":"p1"}}"#);
         assert!(second.is_empty(), "session must not be announced twice");
     }
 
@@ -268,7 +279,12 @@ mod tests {
             r#"{"type":"text","sessionID":"ses_1","part":{"id":"prt_1","type":"text",
                 "text":"PONG","time":{"start":1,"end":2}}}"#,
         );
-        assert_eq!(out, vec![AgentEvent::Message { text: "PONG".into() }]);
+        assert_eq!(
+            out,
+            vec![AgentEvent::Message {
+                text: "PONG".into()
+            }]
+        );
     }
 
     #[test]
@@ -281,7 +297,12 @@ mod tests {
         let done = h.parse_line(
             r#"{"type":"text","part":{"id":"prt_1","type":"text","text":"PONG","time":{"start":1,"end":2}}}"#,
         );
-        assert_eq!(done, vec![AgentEvent::Message { text: "PONG".into() }]);
+        assert_eq!(
+            done,
+            vec![AgentEvent::Message {
+                text: "PONG".into()
+            }]
+        );
     }
 
     #[test]
@@ -334,7 +355,10 @@ mod tests {
         assert_eq!(
             out,
             vec![
-                AgentEvent::Started { session_id: Some("ses_1".into()), model: None },
+                AgentEvent::Started {
+                    session_id: Some("ses_1".into()),
+                    model: None
+                },
                 AgentEvent::ToolResult {
                     name: "bash".into(),
                     summary: Some("hello-from-tool".into()),
@@ -365,7 +389,9 @@ mod tests {
         );
         assert!(out.is_empty(), "step_finish is bookkeeping, not a UI event");
         match h.finalize(Some(0)) {
-            AgentEvent::Finished { usage, is_error, .. } => {
+            AgentEvent::Finished {
+                usage, is_error, ..
+            } => {
                 assert!(!is_error);
                 assert_eq!(usage.input_tokens, Some(7781));
                 assert_eq!(usage.output_tokens, Some(16));
@@ -378,8 +404,12 @@ mod tests {
     #[test]
     fn output_tokens_accumulate_across_steps() {
         let mut h = OpenCode::default();
-        h.parse_line(r#"{"type":"step_finish","part":{"reason":"stop","tokens":{"input":100,"output":10}}}"#);
-        h.parse_line(r#"{"type":"step_finish","part":{"reason":"stop","tokens":{"input":140,"output":7}}}"#);
+        h.parse_line(
+            r#"{"type":"step_finish","part":{"reason":"stop","tokens":{"input":100,"output":10}}}"#,
+        );
+        h.parse_line(
+            r#"{"type":"step_finish","part":{"reason":"stop","tokens":{"input":140,"output":7}}}"#,
+        );
         match h.finalize(Some(0)) {
             AgentEvent::Finished { usage, .. } => {
                 assert_eq!(usage.output_tokens, Some(17));
@@ -401,7 +431,9 @@ mod tests {
         let mut h = OpenCode::default();
         assert_eq!(
             h.parse_line("plain warning"),
-            vec![AgentEvent::Raw { line: "plain warning".into() }]
+            vec![AgentEvent::Raw {
+                line: "plain warning".into()
+            }]
         );
     }
 }

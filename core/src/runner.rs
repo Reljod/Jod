@@ -254,7 +254,10 @@ mod tests {
     fn a_hostile_literal_cannot_break_out_of_its_quotes() {
         let s = script_for(&[ArgPart::lit("'; rm -rf /tmp/x; echo '")]);
         assert!(!s.contains("; rm -rf /tmp/x; echo ;"));
-        assert!(s.contains(r"'\''"), "single quotes must be escaped, got:\n{s}");
+        assert!(
+            s.contains(r"'\''"),
+            "single quotes must be escaped, got:\n{s}"
+        );
     }
 
     #[test]

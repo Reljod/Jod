@@ -69,7 +69,13 @@ pub async fn stream(
             // A slow consumer fell behind. Say so rather than pretending the
             // missing events never happened.
             Err(broadcast::error::RecvError::Lagged(n)) => {
-                eprintln!("{}", paint(YELLOW, &format!("[jod] dropped {n} events — output fell behind")));
+                eprintln!(
+                    "{}",
+                    paint(
+                        YELLOW,
+                        &format!("[jod] dropped {n} events — output fell behind")
+                    )
+                );
                 continue;
             }
         };
@@ -83,7 +89,12 @@ pub async fn stream(
         } else {
             print_event(&envelope.event, show_thinking);
         }
-        if let AgentEvent::Finished { is_error, exit_code, .. } = &envelope.event {
+        if let AgentEvent::Finished {
+            is_error,
+            exit_code,
+            ..
+        } = &envelope.event
+        {
             return exit_status(*is_error, *exit_code);
         }
     }
@@ -125,7 +136,9 @@ fn print_event(event: &AgentEvent, show_thinking: bool) {
                 eprintln!("{} {}", paint(RED, "✗"), paint(DIM, name));
             }
         }
-        AgentEvent::Finished { is_error, usage, .. } => {
+        AgentEvent::Finished {
+            is_error, usage, ..
+        } => {
             let mut parts = vec![];
             if let Some(c) = usage.cost_usd {
                 parts.push(format!("${c:.4}"));

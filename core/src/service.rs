@@ -1,9 +1,9 @@
 //! `Jod` — the orchestrator facade.
 //!
-//! Jod never does the work. It launches harnesses, watches them, and answers
-//! questions about them. Every client (the Tauri desktop app today, an iOS app
-//! or a VPS daemon later) drives this same struct, which is why it knows
-//! nothing about windows, webviews or HTTP.
+//! Jod never does the work. It launches harnesses, watches them, remembers what
+//! they did, and answers questions about them. Every client (the `jod` command
+//! today, an HTTP API and a phone later) drives this same struct, which is why
+//! it knows nothing about terminals, sockets or HTTP.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -308,7 +308,10 @@ impl Jod {
             guard.order.push(id.clone());
             guard.agents.insert(
                 id.clone(),
-                AgentRecord { summary: summary.clone(), events: Vec::new() },
+                AgentRecord {
+                    summary: summary.clone(),
+                    events: Vec::new(),
+                },
             );
         }
 
@@ -405,10 +408,22 @@ impl Jod {
     pub async fn report(&self) -> Report {
         let agents = self.agents().await;
         Report {
-            running: agents.iter().filter(|a| a.status == AgentStatus::Running).count(),
-            completed: agents.iter().filter(|a| a.status == AgentStatus::Completed).count(),
-            failed: agents.iter().filter(|a| a.status == AgentStatus::Failed).count(),
-            killed: agents.iter().filter(|a| a.status == AgentStatus::Killed).count(),
+            running: agents
+                .iter()
+                .filter(|a| a.status == AgentStatus::Running)
+                .count(),
+            completed: agents
+                .iter()
+                .filter(|a| a.status == AgentStatus::Completed)
+                .count(),
+            failed: agents
+                .iter()
+                .filter(|a| a.status == AgentStatus::Failed)
+                .count(),
+            killed: agents
+                .iter()
+                .filter(|a| a.status == AgentStatus::Killed)
+                .count(),
             total_cost_usd: agents.iter().filter_map(|a| a.usage.cost_usd).sum(),
             agents,
         }
@@ -441,7 +456,12 @@ fn apply(record: &mut AgentRecord, envelope: &AgentEnvelope) {
         AgentEvent::Message { text } => {
             record.summary.last_message = Some(text.clone());
         }
-        AgentEvent::Finished { is_error, usage, text, .. } => {
+        AgentEvent::Finished {
+            is_error,
+            usage,
+            text,
+            ..
+        } => {
             // A kill already recorded the truthful cause; don't overwrite it.
             if record.summary.status == AgentStatus::Running {
                 record.summary.status = if *is_error {
@@ -468,7 +488,9 @@ fn apply(record: &mut AgentRecord, envelope: &AgentEnvelope) {
 
 /// Convenience: a request rooted at the user's home directory.
 pub fn default_cwd() -> PathBuf {
-    std::env::var("HOME").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("."))
+    std::env::var("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("."))
 }
 
 #[cfg(test)]
@@ -502,7 +524,12 @@ mod tests {
     }
 
     fn env(event: AgentEvent) -> AgentEnvelope {
-        AgentEnvelope { agent_id: "a".into(), at_ms: 0, seq: 0, event }
+        AgentEnvelope {
+            agent_id: "a".into(),
+            at_ms: 0,
+            seq: 0,
+            event,
+        }
     }
 
     #[test]
@@ -529,7 +556,10 @@ mod tests {
                 text: Some("done".into()),
                 exit_code: Some(0),
                 is_error: false,
-                usage: Usage { cost_usd: Some(0.01), ..Default::default() },
+                usage: Usage {
+                    cost_usd: Some(0.01),
+                    ..Default::default()
+                },
             }),
         );
         assert_eq!(r.summary.status, AgentStatus::Completed);
@@ -619,7 +649,9 @@ mod tests {
                 agent_id: "past".into(),
                 at_ms: 1,
                 seq: 0,
-                event: AgentEvent::Message { text: "hello".into() },
+                event: AgentEvent::Message {
+                    text: "hello".into(),
+                },
             })
             .unwrap();
         store
@@ -674,7 +706,10 @@ mod tests {
 
         let jod = Jod::with_store(store);
         jod.rehydrate(100).await.unwrap();
-        assert_eq!(jod.agent("orphan").await.unwrap().status, AgentStatus::Failed);
+        assert_eq!(
+            jod.agent("orphan").await.unwrap().status,
+            AgentStatus::Failed
+        );
     }
 
     #[tokio::test]
