@@ -294,8 +294,53 @@ make it load-bearing before it has to be.
    [`browser.md`](browser.md))
 6. A2A inbox/outbox + `jod-mcp` server
 7. Scheduled work: a digest, and recurring delegations
-8. HTTP API for mobile and web clients
-9. Brain nodes and connections
+8. ~~HTTP API for mobile and web clients~~ **done** — `api/`, with the
+   tactical HUD in `apps/web` as its first consumer
+9. **iOS client: `jod tui` in your pocket** — `apps/ios`, **the current goal**.
+   The behaviour is built and tested; shipping it to a device needs a Mac.
+   → [the goal](#the-goal-jod-in-your-pocket)
+10. Brain nodes and connections
+
+---
+
+## The goal: Jod in your pocket
+
+**In progress.** `apps/ios`.
+
+Jod runs on a box that stays up, which means the work continues whether or not
+Reljod is at a desk — and until now, watching it required being at one. The goal
+is the `jod tui` conversation on an iPhone, with the desktop client's feel
+rather than a terminal emulator's.
+
+Three things fall out of the hardware, and they decide the whole design:
+
+- **An iPhone cannot host an agent.** No tmux, no `claude` binary, no shell to
+  run them in. So this client does not embed `jod-core` the way `apps/desktop`
+  does; it is a *client of the daemon*, and every capability arrives over HTTP
+  from `jod-api`. That is the seam the architecture already had — the core has
+  no UI, so clients are interchangeable.
+- **The connection is not reliable.** A phone walks out of wifi and locks its
+  screen. The per-agent SSE stream replays history and then goes live on one
+  connection, so there is no gap between "read what happened" and "start
+  listening", and a resume cursor plus `seq` deduplication makes reconnecting
+  idempotent. Coming back from the background catches up over REST first.
+- **Sending is a physical risk.** The return key is under a thumb, and a
+  delegation starts a real process on the box. Enter inserts a newline; sending
+  is a deliberate tap; and every spawn carries an `Idempotency-Key` so a retry
+  on a flaky link cannot start the same agent twice in the same directory.
+
+**What "the same as the TUI" means, precisely.** The transcript vocabulary, the
+resume cursor that threads turns into one conversation, the busy guard, the
+thinking toggle, the agents panel, and the status line are the same behaviour —
+ported from `cli/src/tui/app.rs` and held there by tests that assert what the
+Rust ones assert. What is deliberately *not* ported is the machinery that only
+makes sense on a terminal: byte-cursor editing, and a line-counted scrollback.
+iOS supplies a real caret and a real scroll view; the rule worth keeping is that
+**new output never yanks a reader back down**, and that survived.
+
+**What blocks it.** Nothing about the app — the behaviour is written and tested.
+Producing an `.ipa` needs Xcode on macOS, which is the one dependency the VPS
+and this repo's CI cannot supply. → [`apps/ios/README.md`](../apps/ios/README.md)
 
 ## Design rules
 
