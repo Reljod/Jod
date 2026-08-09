@@ -1,0 +1,207 @@
+{
+ "seeds": [
+  20260809,
+  424242,
+  909090,
+  5150
+ ],
+ "per_seed": {
+  "20260809": {
+   "full_context": 0.19722222222222222,
+   "recency_window": 0.16666666666666666,
+   "bm25": 0.26335470085470086,
+   "dense": 0.18044871794871795,
+   "hybrid_openclaw": 0.15683760683760684,
+   "hybrid_tuned": 0.22713675213675213,
+   "hybrid_rrf": 0.2482905982905983,
+   "hybrid_decay": 0.1782051282051282,
+   "hybrid_mmr": 0.2673076923076923,
+   "graph_expansion": 0.32756410256410257,
+   "bounded_consolidated": 0.24529914529914532,
+   "versioned_factstore": 0.5981837606837607,
+   "earned_promotion": 0.22713675213675213,
+   "two_plane": 0.6676282051282052,
+   "two_plane_no_promo": 0.6676282051282052,
+   "two_plane_no_mmr": 0.6638888888888889,
+   "control_hop": 0.6749999999999999
+  },
+  "424242": {
+   "full_context": 0.1708333333333333,
+   "recency_window": 0.16666666666666666,
+   "bm25": 0.2947649572649573,
+   "dense": 0.25405982905982905,
+   "hybrid_openclaw": 0.2965811965811966,
+   "hybrid_tuned": 0.3201923076923077,
+   "hybrid_rrf": 0.36399572649572653,
+   "hybrid_decay": 0.26655982905982906,
+   "hybrid_mmr": 0.3211538461538462,
+   "graph_expansion": 0.4201923076923077,
+   "bounded_consolidated": 0.30790598290598287,
+   "versioned_factstore": 0.5183760683760684,
+   "earned_promotion": 0.3201923076923077,
+   "two_plane": 0.6146367521367521,
+   "two_plane_no_promo": 0.6146367521367521,
+   "two_plane_no_mmr": 0.6229700854700855,
+   "control_hop": 0.6155982905982906
+  },
+  "909090": {
+   "full_context": 0.17424242424242423,
+   "recency_window": 0.16666666666666666,
+   "bm25": 0.2506021756021756,
+   "dense": 0.188986013986014,
+   "hybrid_openclaw": 0.2253982128982129,
+   "hybrid_tuned": 0.26075174825174824,
+   "hybrid_rrf": 0.2690850815850816,
+   "hybrid_decay": 0.23243978243978244,
+   "hybrid_mmr": 0.2891608391608392,
+   "graph_expansion": 0.34825174825174826,
+   "bounded_consolidated": 0.3118492618492618,
+   "versioned_factstore": 0.5251651126651127,
+   "earned_promotion": 0.2639568764568765,
+   "two_plane": 0.6672591297591297,
+   "two_plane_no_promo": 0.6672591297591297,
+   "two_plane_no_mmr": 0.6780400155400156,
+   "control_hop": 0.6780400155400156
+  },
+  "5150": {
+   "full_context": 0.1708333333333333,
+   "recency_window": 0.16666666666666666,
+   "bm25": 0.31004273504273505,
+   "dense": 0.22713675213675213,
+   "hybrid_openclaw": 0.2900641025641026,
+   "hybrid_tuned": 0.2965811965811966,
+   "hybrid_rrf": 0.3014957264957265,
+   "hybrid_decay": 0.2705128205128205,
+   "hybrid_mmr": 0.27478632478632475,
+   "graph_expansion": 0.3701923076923077,
+   "bounded_consolidated": 0.2517094017094017,
+   "versioned_factstore": 0.5085470085470085,
+   "earned_promotion": 0.2965811965811966,
+   "two_plane": 0.5747863247863249,
+   "two_plane_no_promo": 0.5747863247863249,
+   "two_plane_no_mmr": 0.577991452991453,
+   "control_hop": 0.577991452991453
+  }
+ },
+ "aggregate": {
+  "bm25": {
+   "mean": 0.2796911421911422,
+   "min": 0.2506021756021756,
+   "max": 0.31004273504273505,
+   "best_rank": 7,
+   "worst_rank": 13
+  },
+  "bounded_consolidated": {
+   "mean": 0.2791909479409479,
+   "min": 0.24529914529914532,
+   "max": 0.3118492618492618,
+   "best_rank": 7,
+   "worst_rank": 14
+  },
+  "control_hop": {
+   "mean": 0.6366574397824398,
+   "min": 0.577991452991453,
+   "max": 0.6780400155400156,
+   "best_rank": 1,
+   "worst_rank": 2
+  },
+  "dense": {
+   "mean": 0.21265782828282828,
+   "min": 0.18044871794871795,
+   "max": 0.25405982905982905,
+   "best_rank": 14,
+   "worst_rank": 15
+  },
+  "earned_promotion": {
+   "mean": 0.27696678321678325,
+   "min": 0.22713675213675213,
+   "max": 0.3201923076923077,
+   "best_rank": 10,
+   "worst_rank": 12
+  },
+  "full_context": {
+   "mean": 0.17828282828282827,
+   "min": 0.1708333333333333,
+   "max": 0.19722222222222222,
+   "best_rank": 13,
+   "worst_rank": 16
+  },
+  "graph_expansion": {
+   "mean": 0.36655011655011654,
+   "min": 0.32756410256410257,
+   "max": 0.4201923076923077,
+   "best_rank": 6,
+   "worst_rank": 6
+  },
+  "hybrid_decay": {
+   "mean": 0.23692939005439007,
+   "min": 0.1782051282051282,
+   "max": 0.2705128205128205,
+   "best_rank": 13,
+   "worst_rank": 15
+  },
+  "hybrid_mmr": {
+   "mean": 0.2881021756021756,
+   "min": 0.2673076923076923,
+   "max": 0.3211538461538462,
+   "best_rank": 7,
+   "worst_rank": 12
+  },
+  "hybrid_openclaw": {
+   "mean": 0.24222027972027974,
+   "min": 0.15683760683760684,
+   "max": 0.2965811965811966,
+   "best_rank": 11,
+   "worst_rank": 17
+  },
+  "hybrid_rrf": {
+   "mean": 0.29571678321678324,
+   "min": 0.2482905982905983,
+   "max": 0.36399572649572653,
+   "best_rank": 7,
+   "worst_rank": 9
+  },
+  "hybrid_tuned": {
+   "mean": 0.27616550116550115,
+   "min": 0.22713675213675213,
+   "max": 0.3201923076923077,
+   "best_rank": 9,
+   "worst_rank": 11
+  },
+  "recency_window": {
+   "mean": 0.16666666666666666,
+   "min": 0.16666666666666666,
+   "max": 0.16666666666666666,
+   "best_rank": 16,
+   "worst_rank": 17
+  },
+  "two_plane": {
+   "mean": 0.631077602952603,
+   "min": 0.5747863247863249,
+   "max": 0.6676282051282052,
+   "best_rank": 2,
+   "worst_rank": 3
+  },
+  "two_plane_no_mmr": {
+   "mean": 0.6357226107226107,
+   "min": 0.577991452991453,
+   "max": 0.6780400155400156,
+   "best_rank": 1,
+   "worst_rank": 4
+  },
+  "two_plane_no_promo": {
+   "mean": 0.631077602952603,
+   "min": 0.5747863247863249,
+   "max": 0.6676282051282052,
+   "best_rank": 3,
+   "worst_rank": 4
+  },
+  "versioned_factstore": {
+   "mean": 0.5375679875679875,
+   "min": 0.5085470085470085,
+   "max": 0.5981837606837607,
+   "best_rank": 5,
+   "worst_rank": 5
+  }
+ }
+}
