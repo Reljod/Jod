@@ -286,10 +286,41 @@ Delivery is deliberately dumb: a message becomes a synthetic user turn in the
 recipient's next prompt. Because every harness resumes a session by id, that
 works on all three without any harness knowing teams exist.
 
-**Still to build:** auto-wake — a message to an idle member should resume it
-rather than waiting for something else to. Today a member picks up its inbox on
-its next turn. An `jod-mcp` server exposing `send_message` / `read_inbox` to
-agents directly is the natural next step after that.
+### Auto-wake
+
+`jod team wake <team>` delivers waiting mail by resuming every idle member that
+has some, which is what makes a team react rather than sit there.
+
+```sh
+jod team start crew scout "read the parser and report"   # first turn
+jod team msg   crew --from lead --to scout "what did you find?"
+jod team wake  crew                                      # resumes that session
+```
+
+The decision of *whether* to wake is a pure function, `team::wake_order`, kept
+separate from the spawning so the judgement in it can be tested without a tmux
+server or a harness. It declines in four cases, each on purpose:
+
+- **Nothing waiting** — waking an agent to tell it nothing burns a turn.
+- **Not idle** — a busy member reads its inbox on its next turn anyway, and
+  resuming a conversation that is mid-turn would fork it.
+- **Shutting down or failed** — waking it would undo the request.
+- **No session id** — the important one. Spawning without one starts a *fresh*
+  context, so the member would answer having forgotten everything. Staying
+  asleep holding visible unread mail is better than answering with amnesia.
+
+That last rule is why `jod team start` exists: a member has no conversation
+until it has run once. `wake` learns the session id from the finished run and
+records it, and the same pass marks a member idle again once its run has ended —
+reconciliation lives in the command rather than in a daemon, so nothing has to
+be running between turns.
+
+Mail is drained only *after* a spawn succeeds, so a failure leaves it waiting
+rather than losing it.
+
+**Still to build:** a `jod-mcp` server exposing `send_message` / `read_inbox` to
+agents directly. Today a teammate cannot message another from inside a run —
+only the human, or a script between turns, can.
 
 **Collaboration on code** uses git rather than messages: each agent gets its own
 worktree, and integration is a merge. → [`teamwork.md`](teamwork.md)

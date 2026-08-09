@@ -10,6 +10,7 @@ mod tui;
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use jod_core::store::{NewFact, Origin};
+use jod_core::team::MemberStatus;
 use jod_core::{HarnessKind, Jod, PermissionPolicy, Resume, SpawnRequest};
 use std::path::PathBuf;
 
@@ -198,6 +199,33 @@ enum TeamCommand {
         /// Look without consuming, so the next turn still sees them.
         #[arg(long)]
         peek: bool,
+    },
+    /// Deliver waiting messages: resume every idle member that has mail.
+    ///
+    /// Safe to run repeatedly — a member with nothing waiting, or one still
+    /// working, is left alone.
+    Wake {
+        team: String,
+        #[arg(short, long)]
+        cwd: Option<PathBuf>,
+        #[arg(short, long, value_enum, default_value_t = PermissionArg::Ask)]
+        permission: PermissionArg,
+        /// Say what would happen without spawning anything.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Give a member its first turn, so it has a conversation to resume.
+    ///
+    /// A member has no session until it has run once; `wake` refuses to resume
+    /// one it cannot identify, so this is how a teammate gets started.
+    Start {
+        team: String,
+        member: String,
+        prompt: Vec<String>,
+        #[arg(short, long)]
+        cwd: Option<PathBuf>,
+        #[arg(short, long, value_enum, default_value_t = PermissionArg::Ask)]
+        permission: PermissionArg,
     },
     /// Who is on the team, and what is on its board.
     Show { team: String },
@@ -516,6 +544,122 @@ async fn main() -> Result<()> {
                     if messages.is_empty() {
                         println!("nothing waiting for {member}");
                     }
+                }
+                TeamCommand::Wake {
+                    team,
+                    cwd,
+                    permission,
+                    dry_run,
+                } => {
+                    // A member marked busy whose run has since ended is idle
+                    // again. Reconciling here rather than in a daemon keeps
+                    // this command the only thing that has to run.
+                    jod.rehydrate(200).await?;
+                    let runs: std::collections::HashMap<String, (bool, Option<String>)> = jod
+                        .agents()
+                        .await
+                        .into_iter()
+                        .map(|a| {
+                            (
+                                a.id,
+                                (a.status == jod_core::AgentStatus::Running, a.session_id),
+                            )
+                        })
+                        .collect();
+                    for m in store.team_members(&team)? {
+                        let Some(run) = m.agent_id.as_deref().and_then(|id| runs.get(id)) else {
+                            continue;
+                        };
+                        let (running, session) = run;
+                        // Learn the conversation the harness assigned. This is
+                        // the only place a member gets a session id, and
+                        // without one it can never be woken — a run whose id we
+                        // never recorded would be resumed into an empty
+                        // context, which is worse than staying asleep.
+                        if session.is_some() {
+                            store.bind_member(&team, &m.name, m.agent_id.as_deref(), session.as_deref())?;
+                        }
+                        if !running && m.status == MemberStatus::Busy {
+                            store.set_member_status(&team, &m.name, MemberStatus::Ready)?;
+                        }
+                    }
+
+                    let cwd = cwd.unwrap_or_else(jod_core::service::default_cwd);
+                    let mut woken = 0usize;
+                    for m in store.team_members(&team)? {
+                        let pending = store.team_unread(&team, &m.name)?;
+                        let Some(order) = jod_core::team::wake_order(&m, &pending) else {
+                            continue;
+                        };
+                        if dry_run {
+                            println!(
+                                "would wake {} on {} with {} message(s)",
+                                order.member,
+                                order.harness.label(),
+                                order.messages
+                            );
+                            woken += 1;
+                            continue;
+                        }
+                        let agent = jod
+                            .spawn_agent(SpawnRequest {
+                                name: format!("{team}-{}", order.member),
+                                harness: order.harness,
+                                prompt: order.prompt,
+                                cwd: cwd.clone(),
+                                model: None,
+                                permission: permission.into(),
+                                resume: Resume::Session(order.session_id),
+                            })
+                            .await?;
+                        // Drain only once the spawn succeeded, so a failure
+                        // leaves the mail waiting rather than losing it.
+                        store.drain_inbox(&team, &m.name)?;
+                        store.set_member_status(&team, &m.name, MemberStatus::Busy)?;
+                        store.bind_member(&team, &m.name, Some(&agent.id), None)?;
+                        println!(
+                            "woke {} on {} ({} message(s)) as {}",
+                            order.member,
+                            order.harness.label(),
+                            order.messages,
+                            &agent.id[..agent.id.len().min(8)]
+                        );
+                        woken += 1;
+                    }
+                    if woken == 0 {
+                        println!("nobody to wake");
+                    }
+                }
+                TeamCommand::Start {
+                    team,
+                    member,
+                    prompt,
+                    cwd,
+                    permission,
+                } => {
+                    let who = store
+                        .team_members(&team)?
+                        .into_iter()
+                        .find(|m| m.name == member)
+                        .with_context(|| format!("{member} is not on {team}"))?;
+                    let agent = jod
+                        .spawn_agent(SpawnRequest {
+                            name: format!("{team}-{member}"),
+                            harness: who.harness,
+                            prompt: prompt.join(" "),
+                            cwd: cwd.unwrap_or_else(jod_core::service::default_cwd),
+                            model: None,
+                            permission: permission.into(),
+                            resume: Resume::Fresh,
+                        })
+                        .await?;
+                    store.set_member_status(&team, &member, MemberStatus::Busy)?;
+                    store.bind_member(&team, &member, Some(&agent.id), None)?;
+                    println!(
+                        "{member} started on {} as {}",
+                        who.harness.label(),
+                        &agent.id[..agent.id.len().min(8)]
+                    );
                 }
                 TeamCommand::Show { team } => {
                     render::team(&store.team_members(&team)?, &store.team_tasks(&team)?);

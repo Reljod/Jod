@@ -127,9 +127,152 @@ impl TeamTask {
     }
 }
 
+/// What waking one member would take: resume its conversation with the
+/// messages it has not seen.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WakeOrder {
+    pub member: String,
+    pub harness: HarnessKind,
+    /// The conversation to continue, so the member keeps everything it knows.
+    pub session_id: String,
+    /// The pending messages, already formatted as one turn.
+    pub prompt: String,
+    /// How many messages this covers, so the caller drains exactly these.
+    pub messages: usize,
+}
+
+/// Decide whether a member should be woken, and with what.
+///
+/// Separated from the spawning on purpose: *when to wake* is the part with all
+/// the judgement in it, and keeping it pure means it can be tested without a
+/// tmux server, a harness binary, or a running agent.
+///
+/// Returns `None` — deliberately, in each case — when:
+///
+/// - **There is nothing waiting.** Waking an agent to tell it nothing burns a
+///   turn and a context window.
+/// - **The member is not idle.** A busy member will read its inbox on its next
+///   turn anyway; resuming a conversation that is mid-turn would fork it.
+/// - **It is shutting down or has failed.** Waking it would undo the request.
+/// - **There is no session to resume.** This is the important one: spawning
+///   without a session id would silently start a *fresh* context, so the member
+///   would answer having forgotten everything. Staying asleep and visibly
+///   holding unread mail is better than answering with amnesia.
+pub fn wake_order(member: &Member, pending: &[Message]) -> Option<WakeOrder> {
+    if pending.is_empty() || member.status != MemberStatus::Ready {
+        return None;
+    }
+    let session_id = member.session_id.clone()?;
+    let prompt = pending
+        .iter()
+        .map(Message::as_prompt)
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    Some(WakeOrder {
+        member: member.name.clone(),
+        harness: member.harness,
+        session_id,
+        prompt,
+        messages: pending.len(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn member(status: MemberStatus, session: Option<&str>) -> Member {
+        Member {
+            team: "crew".into(),
+            name: "scout".into(),
+            harness: HarnessKind::OpenCode,
+            role: "research".into(),
+            status,
+            agent_id: None,
+            session_id: session.map(str::to_string),
+        }
+    }
+
+    fn message(text: &str) -> Message {
+        Message {
+            id: 1,
+            team: "crew".into(),
+            from: "lead".into(),
+            to: "scout".into(),
+            text: text.into(),
+            at_ms: 0,
+        }
+    }
+
+    #[test]
+    fn an_idle_member_with_mail_is_woken_on_its_own_conversation() {
+        let order = wake_order(
+            &member(MemberStatus::Ready, Some("ses-1")),
+            &[message("start on the parser")],
+        )
+        .expect("should wake");
+
+        assert_eq!(order.member, "scout");
+        assert_eq!(order.session_id, "ses-1");
+        assert_eq!(order.harness, HarnessKind::OpenCode);
+        assert_eq!(order.messages, 1);
+        assert!(order.prompt.contains("start on the parser"));
+        assert!(order.prompt.contains("[message from lead]"));
+    }
+
+    #[test]
+    fn several_pending_messages_become_one_turn() {
+        let order = wake_order(
+            &member(MemberStatus::Ready, Some("ses-1")),
+            &[message("first"), message("second")],
+        )
+        .expect("should wake");
+
+        assert_eq!(order.messages, 2);
+        assert!(order.prompt.contains("first"));
+        assert!(order.prompt.contains("second"));
+        assert!(
+            order.prompt.find("first") < order.prompt.find("second"),
+            "messages keep their order"
+        );
+    }
+
+    #[test]
+    fn an_empty_inbox_wakes_nobody() {
+        assert!(wake_order(&member(MemberStatus::Ready, Some("ses-1")), &[]).is_none());
+    }
+
+    /// A busy member picks its inbox up on its next turn. Resuming a
+    /// conversation that is mid-turn would fork it.
+    #[test]
+    fn a_busy_member_is_left_alone() {
+        assert!(wake_order(
+            &member(MemberStatus::Busy, Some("ses-1")),
+            &[message("hurry up")]
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn a_member_that_is_stopping_or_broken_is_not_restarted() {
+        for status in [
+            MemberStatus::ShutdownRequested,
+            MemberStatus::Shutdown,
+            MemberStatus::Error,
+        ] {
+            assert!(
+                wake_order(&member(status, Some("ses-1")), &[message("hello")]).is_none(),
+                "{status:?} must not be woken"
+            );
+        }
+    }
+
+    /// The one that matters most: without a session id, spawning would start a
+    /// *fresh* context and the member would reply having forgotten everything.
+    #[test]
+    fn a_member_with_no_session_is_never_woken_into_an_empty_context() {
+        assert!(wake_order(&member(MemberStatus::Ready, None), &[message("carry on")]).is_none());
+    }
 
     #[test]
     fn a_delivered_message_names_its_sender() {
