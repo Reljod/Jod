@@ -434,4 +434,179 @@ mod tests {
             }]
         );
     }
+
+    #[test]
+    fn the_adapter_knows_which_harness_it_is() {
+        assert_eq!(OpenCode::default().kind(), HarnessKind::OpenCode);
+    }
+
+    #[test]
+    fn a_requested_model_is_passed_through() {
+        let a = OpenCode::default().args(&req(PermissionPolicy::Ask, Some("anthropic/opus")));
+        let i = a.iter().position(|x| *x == ArgPart::lit("--model")).expect("--model is passed");
+        assert_eq!(a[i + 1], ArgPart::lit("anthropic/opus"));
+    }
+
+    #[test]
+    fn no_model_means_no_model_flag() {
+        let a = OpenCode::default().args(&req(PermissionPolicy::Ask, None));
+        assert!(!a.contains(&ArgPart::lit("--model")));
+    }
+
+    #[test]
+    fn a_blank_line_produces_nothing() {
+        let mut h = OpenCode::default();
+        assert!(h.parse_line("   ").is_empty());
+    }
+
+    #[test]
+    fn a_completed_reasoning_part_becomes_thinking() {
+        let mut h = OpenCode::default();
+        let out = h.parse_line(
+            r#"{"type":"reasoning","part":{"id":"r1","text":"weighing options","time":{"start":1,"end":2}}}"#,
+        );
+        assert_eq!(out, vec![AgentEvent::Thinking { text: "weighing options".into() }]);
+    }
+
+    #[test]
+    fn a_still_streaming_reasoning_part_is_withheld() {
+        let mut h = OpenCode::default();
+        assert!(h
+            .parse_line(r#"{"type":"reasoning","part":{"id":"r1","text":"we","time":{"start":1}}}"#)
+            .is_empty());
+    }
+
+    #[test]
+    fn whitespace_only_parts_are_not_surfaced_as_events() {
+        let mut h = OpenCode::default();
+        assert!(h
+            .parse_line(r#"{"type":"text","part":{"id":"t1","text":"   ","time":{"end":2}}}"#)
+            .is_empty());
+        assert!(h
+            .parse_line(r#"{"type":"reasoning","part":{"id":"r1","text":"  ","time":{"end":2}}}"#)
+            .is_empty());
+    }
+
+    /// A part with no `time` object at all is treated as already complete.
+    #[test]
+    fn a_part_without_timing_is_taken_as_finished() {
+        let mut h = OpenCode::default();
+        let out = h.parse_line(r#"{"type":"text","part":{"id":"t1","text":"done"}}"#);
+        assert_eq!(out, vec![AgentEvent::Message { text: "done".into() }]);
+    }
+
+    #[test]
+    fn an_untracked_part_without_an_id_is_still_surfaced() {
+        let mut h = OpenCode::default();
+        let out = h.parse_line(r#"{"type":"text","part":{"text":"anonymous"}}"#);
+        assert_eq!(out, vec![AgentEvent::Message { text: "anonymous".into() }]);
+    }
+
+    #[test]
+    fn a_typed_event_carrying_no_part_produces_nothing() {
+        let mut h = OpenCode::default();
+        assert!(h.parse_line(r#"{"type":"text"}"#).is_empty());
+        assert!(h.parse_line(r#"{"type":"reasoning"}"#).is_empty());
+        assert!(h.parse_line(r#"{"type":"tool_use"}"#).is_empty());
+    }
+
+    #[test]
+    fn an_error_event_is_summarised_and_marks_the_run_failed() {
+        let mut h = OpenCode::default();
+        let out = h.parse_line(r#"{"type":"error","error":{"message":"rate limited"}}"#);
+        match out.as_slice() {
+            [AgentEvent::Error { message }] => assert!(message.contains("rate limited"), "{message}"),
+            other => panic!("expected one Error, got {other:?}"),
+        }
+        match h.finalize(Some(0)) {
+            AgentEvent::Finished { is_error, .. } => assert!(is_error),
+            other => panic!("expected Finished, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_error_event_with_no_detail_falls_back_to_the_raw_line() {
+        let mut h = OpenCode::default();
+        let line = r#"{"type":"error"}"#;
+        assert_eq!(h.parse_line(line), vec![AgentEvent::Error { message: line.into() }]);
+    }
+
+    #[test]
+    fn a_step_that_finished_because_of_an_error_marks_the_run_failed() {
+        let mut h = OpenCode::default();
+        h.parse_line(r#"{"type":"step_finish","part":{"reason":"error","tokens":{"input":1}}}"#);
+        match h.finalize(Some(0)) {
+            AgentEvent::Finished { is_error, .. } => assert!(is_error),
+            other => panic!("expected Finished, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_step_finish_without_a_part_is_ignored() {
+        let mut h = OpenCode::default();
+        assert!(h.parse_line(r#"{"type":"step_finish"}"#).is_empty());
+    }
+
+    #[test]
+    fn the_reported_cost_reaches_the_final_usage() {
+        let mut h = OpenCode::default();
+        h.parse_line(r#"{"type":"step_finish","part":{"reason":"stop","cost":0.125}}"#);
+        match h.finalize(Some(0)) {
+            AgentEvent::Finished { usage, .. } => assert_eq!(usage.cost_usd, Some(0.125)),
+            other => panic!("expected Finished, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_tool_named_only_by_name_still_reports_that_name() {
+        let mut h = OpenCode::default();
+        let out = h.parse_line(r#"{"type":"tool","part":{"id":"p","name":"grep","state":{"status":"running"}}}"#);
+        assert_eq!(out, vec![AgentEvent::ToolCall { name: "grep".into(), input: None }]);
+    }
+
+    #[test]
+    fn an_unnamed_tool_is_reported_generically_rather_than_dropped() {
+        let mut h = OpenCode::default();
+        let out = h.parse_line(r#"{"type":"tool","part":{"id":"p","state":{"status":"running"}}}"#);
+        assert_eq!(out, vec![AgentEvent::ToolCall { name: "tool".into(), input: None }]);
+    }
+
+    #[test]
+    fn a_re_emitted_running_tool_is_not_shown_twice() {
+        let mut h = OpenCode::default();
+        let line = r#"{"type":"tool","part":{"id":"p","tool":"bash","state":{"status":"running"}}}"#;
+        assert_eq!(h.parse_line(line).len(), 1);
+        assert!(h.parse_line(line).is_empty());
+    }
+
+    #[test]
+    fn a_re_emitted_completed_tool_is_not_shown_twice() {
+        let mut h = OpenCode::default();
+        let line = r#"{"type":"tool","part":{"id":"p","tool":"bash","state":{"status":"completed","output":"ok"}}}"#;
+        assert_eq!(h.parse_line(line).len(), 1);
+        assert!(h.parse_line(line).is_empty());
+    }
+
+    #[test]
+    fn a_failed_tool_reports_its_error_text_as_the_summary() {
+        let mut h = OpenCode::default();
+        let out = h.parse_line(
+            r#"{"type":"tool","part":{"id":"p","tool":"bash","state":{"status":"error","error":"boom"}}}"#,
+        );
+        assert_eq!(
+            out,
+            vec![AgentEvent::ToolResult {
+                name: "bash".into(),
+                summary: Some("boom".into()),
+                is_error: true
+            }]
+        );
+    }
+
+    #[test]
+    fn a_tool_with_no_state_at_all_is_reported_as_a_call() {
+        let mut h = OpenCode::default();
+        let out = h.parse_line(r#"{"type":"tool","part":{"id":"p","tool":"bash"}}"#);
+        assert_eq!(out, vec![AgentEvent::ToolCall { name: "bash".into(), input: None }]);
+    }
 }

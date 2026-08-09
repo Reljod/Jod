@@ -1,0 +1,80 @@
+name: Rust
+
+# The Rust half of the repo had no gate at all: tests.yml discovers shell
+# suites (`*.test.sh`), so `cargo test` never ran on a PR and jod-core's tests
+# could rot unnoticed. This runs them, and holds the crate to a line-coverage
+# floor so a feature can't land with its behaviour untested.
+#
+# The floor is deliberately a hard failure rather than a report. A coverage
+# number nobody blocks on is a number that only ever goes down.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_call:
+
+env:
+  CARGO_TERM_COLOR: always
+  COVERAGE_FLOOR: 95
+
+jobs:
+  core:
+    name: jod-core (tests + coverage floor)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: taiki-e/install-action@cargo-llvm-cov
+
+      # tmux is not needed: the tests drive a fake tmux binary via
+      # JOD_TMUX_BIN (crates/jod-core/src/testsupport.rs) so they never depend
+      # on — or disturb — a real tmux server.
+      - name: Test with coverage
+        run: |
+          cargo llvm-cov -p jod-core \
+            --fail-under-lines "$COVERAGE_FLOOR" \
+            --summary-only
+
+      - name: Coverage summary
+        if: always()
+        run: |
+          set -euo pipefail
+          {
+            echo "## jod-core coverage (floor: ${COVERAGE_FLOOR}%)"
+            echo '```'
+            cargo llvm-cov -p jod-core --summary-only 2>/dev/null | tail -n 20 || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  desktop:
+    name: jod-desktop (tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Tauri links against the system webkit/gtk stack. Without these the
+      # crate cannot even be configured, which is why its tests are run in
+      # their own job rather than gating jod-core's.
+      - name: Install Tauri system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            pkg-config
+
+      - name: Test
+        run: cargo test -p jod-desktop

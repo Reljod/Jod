@@ -74,4 +74,43 @@ mod tests {
         }
         std::env::remove_var("JOD_HOME");
     }
+
+    use crate::testsupport::EnvGuard;
+
+    #[test]
+    fn without_an_override_state_lives_in_a_dot_directory_under_home() {
+        let mut env = EnvGuard::new();
+        env.remove("JOD_HOME");
+        env.set("HOME", "/home/someone");
+        assert_eq!(jod_home(), PathBuf::from("/home/someone/.jod"));
+    }
+
+    #[test]
+    fn a_missing_home_still_yields_a_usable_relative_path() {
+        let mut env = EnvGuard::new();
+        env.remove("JOD_HOME");
+        env.remove("HOME");
+        assert_eq!(jod_home(), PathBuf::from("./.jod"));
+    }
+
+    #[test]
+    fn every_run_lives_in_its_own_directory_under_runs() {
+        let mut env = EnvGuard::new();
+        env.set("JOD_HOME", "/tmp/jod-test-home");
+
+        assert_eq!(runs_dir(), PathBuf::from("/tmp/jod-test-home/runs"));
+        assert_eq!(run_dir("abc"), runs_dir().join("abc"));
+        assert_ne!(run_dir("abc"), run_dir("def"));
+    }
+
+    #[test]
+    fn each_run_file_has_its_own_stable_name() {
+        let mut env = EnvGuard::new();
+        env.set("JOD_HOME", "/tmp/jod-test-home");
+
+        assert_eq!(stream_path("a").file_name().unwrap(), "stream.jsonl");
+        assert_eq!(prompt_path("a").file_name().unwrap(), "prompt.txt");
+        assert_eq!(script_path("a").file_name().unwrap(), "run.sh");
+        assert_eq!(meta_path("a").file_name().unwrap(), "agent.json");
+    }
 }

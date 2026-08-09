@@ -27,6 +27,9 @@ pub mod service;
 pub mod store;
 pub mod tmux;
 
+#[cfg(test)]
+pub(crate) mod testsupport;
+
 /// Re-exported so clients can name the subscription channel's types without
 /// taking their own Tokio dependency.
 pub use tokio::sync::broadcast;

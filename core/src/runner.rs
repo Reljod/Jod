@@ -315,4 +315,312 @@ mod tests {
         assert!(s.contains("'/opt/my tools/claude'"));
         assert!(s.contains("cd '/my work'"));
     }
+
+    // --- following a live run -------------------------------------------
+
+    use crate::harness::{HarnessKind, PermissionPolicy};
+    use crate::testsupport::{EchoHarness, EnvGuard, FakeTmux, TempDir};
+    use tokio::sync::mpsc;
+
+    /// Collect everything the tailer emitted, in order.
+    fn collect(mut rx: mpsc::UnboundedReceiver<AgentEnvelope>) -> Vec<AgentEnvelope> {
+        let mut out = Vec::new();
+        while let Ok(envelope) = rx.try_recv() {
+            out.push(envelope);
+        }
+        out
+    }
+
+    fn write_stream(dir: &TempDir, body: &str) -> PathBuf {
+        let path = dir.join("stream.jsonl");
+        std::fs::write(&path, body).expect("write stream");
+        path
+    }
+
+    #[tokio::test]
+    async fn each_line_becomes_an_event_and_the_marker_ends_the_run() {
+        let dir = TempDir::new("tail");
+        let stream = write_stream(&dir, &format!("first\nsecond\n{EXIT_MARKER}0\n"));
+        let (tx, rx) = mpsc::unbounded_channel();
+
+        tail_stream("a1".into(), stream, "jod-a1".into(), Box::new(EchoHarness), tx).await;
+
+        let events = collect(rx);
+        assert_eq!(events.len(), 3, "two messages then a finish: {events:?}");
+        assert!(matches!(&events[0].event, AgentEvent::Message { text } if text == "first"));
+        assert!(matches!(&events[1].event, AgentEvent::Message { text } if text == "second"));
+        assert!(matches!(
+            events[2].event,
+            AgentEvent::Finished { exit_code: Some(0), is_error: false, .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn every_event_carries_the_agent_id_and_a_rising_sequence() {
+        let dir = TempDir::new("tail-seq");
+        let stream = write_stream(&dir, &format!("one\ntwo\n{EXIT_MARKER}0\n"));
+        let (tx, rx) = mpsc::unbounded_channel();
+
+        tail_stream("agent-7".into(), stream, "jod-agent-7".into(), Box::new(EchoHarness), tx)
+            .await;
+
+        let events = collect(rx);
+        assert!(events.iter().all(|e| e.agent_id == "agent-7"));
+        assert_eq!(events.iter().map(|e| e.seq).collect::<Vec<_>>(), vec![0, 1, 2]);
+    }
+
+    #[tokio::test]
+    async fn a_failing_exit_code_is_carried_through_to_the_finish_event() {
+        let dir = TempDir::new("tail-fail");
+        let stream = write_stream(&dir, &format!("{EXIT_MARKER}3\n"));
+        let (tx, rx) = mpsc::unbounded_channel();
+
+        tail_stream("a".into(), stream, "jod-a".into(), Box::new(EchoHarness), tx).await;
+
+        let events = collect(rx);
+        assert!(matches!(
+            events[0].event,
+            AgentEvent::Finished { exit_code: Some(3), is_error: true, .. }
+        ));
+    }
+
+    /// The launcher writes the marker with `printf`, so a mangled code should
+    /// still end the run — just without a number attached.
+    #[tokio::test]
+    async fn an_unparseable_exit_code_still_ends_the_run() {
+        let dir = TempDir::new("tail-garbled");
+        let stream = write_stream(&dir, &format!("{EXIT_MARKER}not-a-number\n"));
+        let (tx, rx) = mpsc::unbounded_channel();
+
+        tail_stream("a".into(), stream, "jod-a".into(), Box::new(EchoHarness), tx).await;
+
+        let events = collect(rx);
+        assert_eq!(events.len(), 1);
+        assert!(matches!(events[0].event, AgentEvent::Finished { exit_code: None, .. }));
+    }
+
+    #[tokio::test]
+    async fn anything_after_the_exit_marker_is_ignored() {
+        let dir = TempDir::new("tail-after");
+        let stream = write_stream(&dir, &format!("before\n{EXIT_MARKER}0\nafter\n"));
+        let (tx, rx) = mpsc::unbounded_channel();
+
+        tail_stream("a".into(), stream, "jod-a".into(), Box::new(EchoHarness), tx).await;
+
+        let texts: Vec<String> = collect(rx)
+            .into_iter()
+            .filter_map(|e| match e.event {
+                AgentEvent::Message { text } => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(texts, vec!["before".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn windows_line_endings_do_not_end_up_inside_the_text() {
+        let dir = TempDir::new("tail-crlf");
+        let stream = write_stream(&dir, &format!("hello\r\n{EXIT_MARKER}0\r\n"));
+        let (tx, rx) = mpsc::unbounded_channel();
+
+        tail_stream("a".into(), stream, "jod-a".into(), Box::new(EchoHarness), tx).await;
+
+        let events = collect(rx);
+        assert!(matches!(&events[0].event, AgentEvent::Message { text } if text == "hello"));
+    }
+
+    #[tokio::test]
+    async fn a_stream_that_cannot_be_opened_is_reported_as_an_error_event() {
+        let dir = TempDir::new("tail-missing");
+        let (tx, rx) = mpsc::unbounded_channel();
+
+        tail_stream(
+            "a".into(),
+            dir.join("never-created.jsonl"),
+            "jod-a".into(),
+            Box::new(EchoHarness),
+            tx,
+        )
+        .await;
+
+        let events = collect(rx);
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            &events[0].event,
+            AgentEvent::Error { message } if message.contains("could not read agent stream")
+        ));
+    }
+
+    /// If every client has gone away the tailer should stop, not spin forever
+    /// on a file nobody is reading.
+    #[tokio::test]
+    async fn the_tailer_gives_up_once_nobody_is_listening() {
+        let dir = TempDir::new("tail-dropped");
+        let stream = write_stream(&dir, "one\ntwo\n");
+        let (tx, rx) = mpsc::unbounded_channel();
+        drop(rx);
+
+        // Returns rather than hanging: no exit marker, but the send fails.
+        tail_stream("a".into(), stream, "jod-a".into(), Box::new(EchoHarness), tx).await;
+    }
+
+    /// A killed agent never writes the exit marker, so the run has to be closed
+    /// out from the session's disappearance instead.
+    #[tokio::test]
+    async fn a_vanished_session_finishes_the_run_without_a_marker() {
+        let fake = FakeTmux::new();
+        let mut env = EnvGuard::new();
+        env.isolate_discovery();
+        env.set("JOD_TMUX_BIN", fake.bin());
+
+        let dir = TempDir::new("tail-killed");
+        let stream = write_stream(&dir, "partial output\n");
+        let (tx, rx) = mpsc::unbounded_channel();
+
+        tail_stream("a".into(), stream, "jod-gone".into(), Box::new(EchoHarness), tx).await;
+
+        let events = collect(rx);
+        assert!(
+            matches!(&events[0].event, AgentEvent::Message { text } if text == "partial output"),
+            "the tail of a killed run must not be lost: {events:?}"
+        );
+        assert!(
+            matches!(events.last().map(|e| &e.event), Some(AgentEvent::Finished { exit_code: None, .. })),
+            "a killed run still finishes: {events:?}"
+        );
+    }
+
+    // --- launching -------------------------------------------------------
+
+    fn request(cwd: &Path) -> SpawnRequest {
+        SpawnRequest {
+            name: "demo".into(),
+            harness: HarnessKind::ClaudeCode,
+            prompt: "do the thing".into(),
+            cwd: cwd.to_path_buf(),
+            model: None,
+            permission: PermissionPolicy::Ask,
+        }
+    }
+
+    #[tokio::test]
+    async fn launching_writes_the_run_files_and_starts_a_session() {
+        let fake = FakeTmux::new();
+        let home = TempDir::new("launch-home");
+        let work = TempDir::new("launch-cwd");
+        let mut env = EnvGuard::new();
+        env.isolate_discovery();
+        env.set("JOD_TMUX_BIN", fake.bin());
+        env.set("JOD_HOME", home.path());
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let run = launch(
+            "run-1",
+            &request(work.path()),
+            Path::new("/bin/claude"),
+            Box::new(EchoHarness),
+            tx,
+        )
+        .await
+        .expect("launch succeeds");
+
+        assert_eq!(run.agent_id, "run-1");
+        assert_eq!(run.tmux_session, "jod-run-1");
+        assert_eq!(run.stream_path, paths::stream_path("run-1"));
+
+        assert_eq!(
+            std::fs::read_to_string(paths::prompt_path("run-1")).unwrap(),
+            "do the thing",
+            "the prompt goes to a file so it never meets the shell"
+        );
+        assert!(
+            paths::stream_path("run-1").exists(),
+            "the stream must exist before the harness writes, or the tailer races it"
+        );
+        let script = std::fs::read_to_string(paths::script_path("run-1")).unwrap();
+        assert!(script.contains("--echo"), "the harness's own argv must be used: {script}");
+
+        assert_eq!(fake.live_sessions(), vec!["jod-run-1".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn a_session_that_will_not_start_fails_the_launch() {
+        let fake = FakeTmux::broken();
+        let home = TempDir::new("launch-broken-home");
+        let work = TempDir::new("launch-broken-cwd");
+        let mut env = EnvGuard::new();
+        env.isolate_discovery();
+        env.set("JOD_TMUX_BIN", fake.bin());
+        env.set("JOD_HOME", home.path());
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let err = launch(
+            "run-2",
+            &request(work.path()),
+            Path::new("/bin/claude"),
+            Box::new(EchoHarness),
+            tx,
+        )
+        .await
+        .expect_err("a tmux that refuses must fail the launch");
+
+        assert!(matches!(err, crate::error::JodError::Tmux(_)), "{err:?}");
+    }
+
+    /// End to end through the runner: launch, then let the harness's output
+    /// land in the stream file exactly as `tee` would, and check the events
+    /// come back out of the spawned tailer.
+    #[tokio::test]
+    async fn output_written_after_launch_arrives_as_events() {
+        let fake = FakeTmux::new();
+        let home = TempDir::new("e2e-home");
+        let work = TempDir::new("e2e-cwd");
+        let mut env = EnvGuard::new();
+        env.isolate_discovery();
+        env.set("JOD_TMUX_BIN", fake.bin());
+        env.set("JOD_HOME", home.path());
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let run = launch(
+            "run-3",
+            &request(work.path()),
+            Path::new("/bin/claude"),
+            Box::new(EchoHarness),
+            tx,
+        )
+        .await
+        .expect("launch succeeds");
+
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&run.stream_path)
+            .expect("append to stream");
+        write!(file, "hello from the agent\n{EXIT_MARKER}0\n").expect("write output");
+        drop(file);
+
+        let mut events = Vec::new();
+        let deadline = tokio::time::Duration::from_secs(10);
+        let _ = tokio::time::timeout(deadline, async {
+            while let Some(envelope) = rx.recv().await {
+                let done = matches!(envelope.event, AgentEvent::Finished { .. });
+                events.push(envelope);
+                if done {
+                    break;
+                }
+            }
+        })
+        .await;
+
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(&e.event, AgentEvent::Message { text } if text == "hello from the agent")),
+            "the agent's output must reach the client: {events:?}"
+        );
+        assert!(
+            matches!(events.last().map(|e| &e.event), Some(AgentEvent::Finished { exit_code: Some(0), .. })),
+            "the run must be reported finished: {events:?}"
+        );
+    }
 }

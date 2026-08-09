@@ -829,4 +829,383 @@ mod tests {
 
         assert!(matches!(result, Err(JodError::HarnessNotFound(_))));
     }
+
+    // --- driving a real spawn -------------------------------------------
+
+    use crate::event::AgentEvent;
+    use crate::testsupport::{write_executable, EnvGuard, FakeTmux, TempDir};
+
+    /// A spawnable world: a fake tmux, a fake `claude` binary, and a private
+    /// `JOD_HOME`. Nothing here touches the developer's own agents.
+    struct Sandbox {
+        tmux: FakeTmux,
+        _home: TempDir,
+        _bin: TempDir,
+        _env: EnvGuard,
+        cwd: TempDir,
+    }
+
+    impl Sandbox {
+        fn new(tmux: FakeTmux) -> Self {
+            let home = TempDir::new("svc-home");
+            let bin = TempDir::new("svc-bin");
+            let cwd = TempDir::new("svc-cwd");
+            let claude = bin.join("claude");
+            write_executable(&claude, "#!/bin/bash\nexit 0\n");
+
+            let mut env = EnvGuard::new();
+            env.isolate_discovery();
+            env.set("JOD_TMUX_BIN", tmux.bin());
+            env.set("JOD_CLAUDE_BIN", &claude);
+            env.set("JOD_HOME", home.path());
+
+            Self { tmux, _home: home, _bin: bin, _env: env, cwd }
+        }
+
+        fn request(&self) -> SpawnRequest {
+            SpawnRequest {
+                name: "demo".into(),
+                harness: HarnessKind::ClaudeCode,
+                prompt: "hi".into(),
+                cwd: self.cwd.path().to_path_buf(),
+                model: Some("claude-opus-5".into()),
+                permission: PermissionPolicy::Bypass,
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_spawned_agent_is_listed_with_the_commands_to_watch_it() {
+        let sandbox = Sandbox::new(FakeTmux::new());
+        let jod = Jod::new();
+
+        let summary = jod.spawn_agent(sandbox.request()).await.expect("spawn succeeds");
+
+        assert_eq!(summary.status, AgentStatus::Running);
+        assert_eq!(summary.name, "demo");
+        assert_eq!(summary.model.as_deref(), Some("claude-opus-5"));
+        assert_eq!(summary.tmux_session, format!("jod-{}", summary.id));
+        assert_eq!(summary.attach_command, format!("tmux attach -t jod-{}", summary.id));
+        assert_eq!(
+            summary.switch_command,
+            format!("tmux switch-client -t jod-{}", summary.id)
+        );
+        assert!(!summary.session_closed);
+
+        let listed = jod.agents().await;
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, summary.id);
+        assert_eq!(sandbox.tmux.live_sessions(), vec![summary.tmux_session]);
+    }
+
+    /// A run must stay inspectable with `cat` after the app closes.
+    #[tokio::test]
+    async fn a_spawned_agent_leaves_its_metadata_on_disk() {
+        let sandbox = Sandbox::new(FakeTmux::new());
+        let jod = Jod::new();
+
+        let summary = jod.spawn_agent(sandbox.request()).await.expect("spawn succeeds");
+
+        let meta = std::fs::read_to_string(paths::meta_path(&summary.id)).expect("metadata written");
+        let parsed: AgentSummary = serde_json::from_str(&meta).expect("metadata is valid JSON");
+        assert_eq!(parsed.id, summary.id);
+        assert_eq!(parsed.name, "demo");
+    }
+
+    #[tokio::test]
+    async fn an_agent_whose_session_will_not_start_is_recorded_as_failed() {
+        let sandbox = Sandbox::new(FakeTmux::broken());
+        let jod = Jod::new();
+
+        let err = jod.spawn_agent(sandbox.request()).await.expect_err("spawn must fail");
+        assert!(matches!(err, JodError::Tmux(_)), "{err:?}");
+
+        let agents = jod.agents().await;
+        assert_eq!(agents.len(), 1, "the attempt is still visible to the client");
+        assert_eq!(agents[0].status, AgentStatus::Failed);
+    }
+
+    #[tokio::test]
+    async fn killing_a_running_agent_closes_its_session_and_records_why() {
+        let sandbox = Sandbox::new(FakeTmux::new());
+        let jod = Jod::new();
+        let summary = jod.spawn_agent(sandbox.request()).await.expect("spawn succeeds");
+
+        jod.kill_agent(&summary.id).await.expect("kill succeeds");
+
+        let after = jod.agent(&summary.id).await.expect("still listed");
+        assert_eq!(after.status, AgentStatus::Killed);
+        assert!(after.session_closed);
+        assert!(sandbox.tmux.live_sessions().is_empty());
+    }
+
+    /// The session outlives the agent, so a finished run still has one to
+    /// reclaim — and reclaiming it must not rewrite how the run ended.
+    #[tokio::test]
+    async fn reclaiming_a_finished_agents_session_keeps_its_outcome() {
+        let sandbox = Sandbox::new(FakeTmux::new());
+        let jod = Jod::new();
+        let summary = jod.spawn_agent(sandbox.request()).await.expect("spawn succeeds");
+
+        let mut rx = jod.subscribe();
+        std::fs::write(
+            paths::stream_path(&summary.id),
+            format!("{}0\n", crate::runner::EXIT_MARKER),
+        )
+        .expect("write stream");
+        wait_for_finish(&mut rx).await;
+
+        jod.kill_agent(&summary.id).await.expect("session is reclaimable");
+
+        let after = jod.agent(&summary.id).await.expect("still listed");
+        assert_eq!(after.status, AgentStatus::Completed, "a kill must not rewrite history");
+        assert!(after.session_closed);
+    }
+
+    /// Wait until the run reports finished, so state has settled.
+    async fn wait_for_finish(rx: &mut broadcast::Receiver<AgentEnvelope>) {
+        let _ = tokio::time::timeout(tokio::time::Duration::from_secs(10), async {
+            while let Ok(envelope) = rx.recv().await {
+                if matches!(envelope.event, AgentEvent::Finished { .. }) {
+                    return;
+                }
+            }
+        })
+        .await;
+    }
+
+    /// End to end: spawn, let the harness's JSONL land in the stream file, and
+    /// check the service folds it into the agent a client would see.
+    #[tokio::test]
+    async fn harness_output_becomes_agent_state_a_client_can_read() {
+        let sandbox = Sandbox::new(FakeTmux::new());
+        let jod = Jod::new();
+        let summary = jod.spawn_agent(sandbox.request()).await.expect("spawn succeeds");
+
+        let mut rx = jod.subscribe();
+        let stream = concat!(
+            r#"{"type":"system","subtype":"init","session_id":"sess-9","model":"claude-opus-5"}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"the answer"}]}}"#,
+            "\n",
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"the answer","total_cost_usd":0.25}"#,
+            "\n",
+        );
+        std::fs::write(
+            paths::stream_path(&summary.id),
+            format!("{stream}{}0\n", crate::runner::EXIT_MARKER),
+        )
+        .expect("write stream");
+
+        wait_for_finish(&mut rx).await;
+
+        let after = jod.agent(&summary.id).await.expect("still listed");
+        assert_eq!(after.status, AgentStatus::Completed);
+        assert_eq!(after.session_id.as_deref(), Some("sess-9"));
+        assert_eq!(after.last_message.as_deref(), Some("the answer"));
+        assert_eq!(after.usage.cost_usd, Some(0.25));
+        assert!(after.event_count >= 3, "every event is retained: {}", after.event_count);
+
+        let history = jod.events(&summary.id).await.expect("history is replayable");
+        assert_eq!(history.len(), after.event_count);
+
+        let report = jod.report().await;
+        assert_eq!(report.completed, 1);
+        assert_eq!(report.running, 0);
+        assert_eq!(report.total_cost_usd, 0.25);
+    }
+
+    #[tokio::test]
+    async fn a_subscriber_sees_events_as_they_happen() {
+        let sandbox = Sandbox::new(FakeTmux::new());
+        let jod = Jod::new();
+        let summary = jod.spawn_agent(sandbox.request()).await.expect("spawn succeeds");
+
+        let mut rx = jod.subscribe();
+        std::fs::write(
+            paths::stream_path(&summary.id),
+            format!(
+                "{}\n{}0\n",
+                r#"{"type":"assistant","message":{"content":[{"type":"text","text":"live"}]}}"#,
+                crate::runner::EXIT_MARKER
+            ),
+        )
+        .expect("write stream");
+
+        let mut seen = Vec::new();
+        let _ = tokio::time::timeout(tokio::time::Duration::from_secs(10), async {
+            while let Ok(envelope) = rx.recv().await {
+                let done = matches!(envelope.event, AgentEvent::Finished { .. });
+                seen.push(envelope);
+                if done {
+                    return;
+                }
+            }
+        })
+        .await;
+
+        assert!(
+            seen.iter().any(|e| matches!(&e.event, AgentEvent::Message { text } if text == "live")),
+            "the subscriber must see the agent's message: {seen:?}"
+        );
+        assert!(seen.iter().all(|e| e.agent_id == summary.id));
+    }
+
+    #[tokio::test]
+    async fn a_report_counts_every_outcome_and_totals_the_spend() {
+        let jod = Jod::new();
+        {
+            let mut guard = jod.state.write().await;
+            for (id, status, cost) in [
+                ("r", AgentStatus::Running, None),
+                ("c", AgentStatus::Completed, Some(1.5)),
+                ("f", AgentStatus::Failed, Some(0.5)),
+                ("k", AgentStatus::Killed, None),
+            ] {
+                let mut summary = record().summary;
+                summary.id = id.into();
+                summary.status = status;
+                summary.usage = Usage { cost_usd: cost, ..Default::default() };
+                guard.order.push(id.into());
+                guard.agents.insert(id.into(), AgentRecord { summary, events: vec![] });
+            }
+        }
+
+        let report = jod.report().await;
+
+        assert_eq!(report.running, 1);
+        assert_eq!(report.completed, 1);
+        assert_eq!(report.failed, 1);
+        assert_eq!(report.killed, 1);
+        assert_eq!(report.total_cost_usd, 2.0);
+        assert_eq!(report.agents.len(), 4);
+    }
+
+    #[tokio::test]
+    async fn agents_are_listed_in_the_order_they_were_spawned() {
+        let sandbox = Sandbox::new(FakeTmux::new());
+        let jod = Jod::new();
+
+        let mut ids = Vec::new();
+        for name in ["first", "second", "third"] {
+            let mut req = sandbox.request();
+            req.name = name.into();
+            ids.push(jod.spawn_agent(req).await.expect("spawn succeeds").id);
+        }
+
+        let listed: Vec<String> = jod.agents().await.into_iter().map(|a| a.id).collect();
+        assert_eq!(listed, ids);
+    }
+
+    #[tokio::test]
+    async fn an_event_for_an_unknown_agent_is_dropped_rather_than_crashing() {
+        let jod = Jod::new();
+        let mut rx = jod.subscribe();
+
+        jod.events_tx
+            .send(AgentEnvelope {
+                agent_id: "never-registered".into(),
+                at_ms: 0,
+                seq: 0,
+                event: AgentEvent::Message { text: "orphan".into() },
+            })
+            .expect("channel is open");
+
+        // It still reaches subscribers; it simply updates no state.
+        let got = tokio::time::timeout(tokio::time::Duration::from_secs(5), rx.recv())
+            .await
+            .expect("broadcast arrives")
+            .expect("channel open");
+        assert_eq!(got.agent_id, "never-registered");
+        assert!(jod.agents().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn tmux_availability_follows_discovery() {
+        let fake = FakeTmux::new();
+        let mut env = EnvGuard::new();
+        env.set("JOD_TMUX_BIN", fake.bin());
+        let jod = Jod::new();
+        assert!(jod.tmux_available());
+    }
+
+    #[tokio::test]
+    async fn an_installed_harness_reports_where_it_was_found() {
+        let bin = TempDir::new("harness-bin");
+        let claude = bin.join("claude");
+        write_executable(&claude, "#!/bin/bash\nexit 0\n");
+        let mut env = EnvGuard::new();
+        env.set("JOD_CLAUDE_BIN", &claude);
+
+        let jod = Jod::new();
+        let info = jod
+            .harnesses()
+            .into_iter()
+            .find(|h| h.id == "claude_code")
+            .expect("claude is a known harness");
+
+        assert!(info.available);
+        assert_eq!(info.path.as_deref(), Some(claude.to_string_lossy().as_ref()));
+        assert_eq!(info.label, "Claude Code");
+    }
+
+    #[test]
+    fn the_default_working_directory_is_the_users_home() {
+        let mut env = EnvGuard::new();
+        env.set("HOME", "/home/someone");
+        assert_eq!(default_cwd(), PathBuf::from("/home/someone"));
+    }
+
+    #[test]
+    fn a_missing_home_falls_back_to_the_current_directory() {
+        let mut env = EnvGuard::new();
+        env.remove("HOME");
+        assert_eq!(default_cwd(), PathBuf::from("."));
+    }
+
+    #[test]
+    fn a_thinking_event_is_retained_without_becoming_the_headline_message() {
+        let mut r = record();
+        apply(&mut r, &env(AgentEvent::Thinking { text: "pondering".into() }));
+        assert_eq!(r.summary.last_message, None);
+        assert_eq!(r.summary.event_count, 1);
+    }
+
+    #[test]
+    fn an_error_event_becomes_the_visible_status_line() {
+        let mut r = record();
+        apply(&mut r, &env(AgentEvent::Error { message: "it broke".into() }));
+        assert_eq!(r.summary.last_message.as_deref(), Some("it broke"));
+    }
+
+    #[test]
+    fn a_later_start_never_overwrites_the_session_already_recorded() {
+        let mut r = record();
+        for session in ["first", "second"] {
+            apply(
+                &mut r,
+                &env(AgentEvent::Started {
+                    session_id: Some(session.into()),
+                    model: None,
+                }),
+            );
+        }
+        assert_eq!(r.summary.session_id.as_deref(), Some("first"));
+    }
+
+    #[test]
+    fn a_finish_without_usage_keeps_what_was_already_tallied() {
+        let mut r = record();
+        r.summary.usage = Usage { cost_usd: Some(0.75), ..Default::default() };
+        apply(
+            &mut r,
+            &env(AgentEvent::Finished {
+                text: None,
+                exit_code: Some(0),
+                is_error: false,
+                usage: Usage::default(),
+            }),
+        );
+        assert_eq!(r.summary.usage.cost_usd, Some(0.75));
+    }
 }

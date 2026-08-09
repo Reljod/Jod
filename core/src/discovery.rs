@@ -129,4 +129,140 @@ mod tests {
         )
         .is_none());
     }
+
+    use crate::testsupport::{write_executable, EnvGuard, TempDir};
+
+    #[test]
+    fn home_expansion_leaves_the_tilde_alone_when_there_is_no_home() {
+        let mut env = EnvGuard::new();
+        env.remove("HOME");
+        assert_eq!(shellexpand_home("~/a/b"), "~/a/b");
+    }
+
+    #[test]
+    fn an_override_is_taken_literally_after_expanding_its_tilde() {
+        let dir = TempDir::new("disc-home");
+        let bin = dir.join("mytool");
+        write_executable(&bin, "#!/bin/bash\nexit 0\n");
+
+        let mut env = EnvGuard::new();
+        env.set("HOME", dir.path());
+        env.set("JOD_TEST_OVERRIDE", "~/mytool");
+
+        assert_eq!(find_binary("JOD_TEST_OVERRIDE", &[], &[]), Some(bin));
+    }
+
+    #[test]
+    fn a_directory_is_never_mistaken_for_a_binary() {
+        let dir = TempDir::new("disc-dir");
+        let mut env = EnvGuard::new();
+        // A directory is executable-bit-set but must not be returned.
+        env.set("JOD_TEST_OVERRIDE", dir.path());
+        env.set("PATH", "/definitely/not/a/dir");
+        env.set("HOME", "/definitely/not/a/home");
+
+        assert_eq!(find_binary("JOD_TEST_OVERRIDE", &["nope"], &[]), None);
+    }
+
+    #[test]
+    fn an_unusable_override_falls_through_to_the_path() {
+        let dir = TempDir::new("disc-path");
+        let bin = dir.join("mytool");
+        write_executable(&bin, "#!/bin/bash\nexit 0\n");
+
+        let mut env = EnvGuard::new();
+        env.set("JOD_TEST_OVERRIDE", "/definitely/not/a/binary");
+        env.set("PATH", dir.path());
+
+        assert_eq!(find_binary("JOD_TEST_OVERRIDE", &["mytool"], &[]), Some(bin));
+    }
+
+    #[test]
+    fn the_path_is_searched_in_order_and_the_first_hit_wins() {
+        let first = TempDir::new("disc-first");
+        let second = TempDir::new("disc-second");
+        let wanted = first.join("mytool");
+        write_executable(&wanted, "#!/bin/bash\nexit 0\n");
+        write_executable(&second.join("mytool"), "#!/bin/bash\nexit 1\n");
+
+        let mut env = EnvGuard::new();
+        env.remove("JOD_TEST_OVERRIDE");
+        env.set(
+            "PATH",
+            format!("{}:{}", first.path().display(), second.path().display()),
+        );
+
+        assert_eq!(find_binary("JOD_TEST_OVERRIDE", &["mytool"], &[]), Some(wanted));
+    }
+
+    #[test]
+    fn several_names_are_tried_within_each_path_entry() {
+        let dir = TempDir::new("disc-names");
+        let bin = dir.join("second-name");
+        write_executable(&bin, "#!/bin/bash\nexit 0\n");
+
+        let mut env = EnvGuard::new();
+        env.remove("JOD_TEST_OVERRIDE");
+        env.set("PATH", dir.path());
+
+        assert_eq!(
+            find_binary("JOD_TEST_OVERRIDE", &["first-name", "second-name"], &[]),
+            Some(bin)
+        );
+    }
+
+    /// nvm buries binaries under a version directory, so the well-known list
+    /// needs a `*` — and a machine with several Node versions must land on the
+    /// newest rather than an arbitrary one.
+    #[test]
+    fn a_starred_pattern_picks_the_highest_sorting_match() {
+        let root = TempDir::new("disc-star");
+        for version in ["v18.0.0", "v20.0.0", "v22.0.0"] {
+            let bin_dir = root.path().join(version).join("bin");
+            std::fs::create_dir_all(&bin_dir).expect("create version dir");
+            write_executable(&bin_dir.join("mytool"), "#!/bin/bash\nexit 0\n");
+        }
+
+        let found = expand_single_star(&format!("{}/*/bin/mytool", root.path().display()));
+
+        assert_eq!(found, Some(root.path().join("v22.0.0/bin/mytool")));
+    }
+
+    #[test]
+    fn a_starred_pattern_skips_versions_that_lack_the_binary() {
+        let root = TempDir::new("disc-star-gap");
+        std::fs::create_dir_all(root.path().join("v22.0.0/bin")).expect("create empty newest");
+        let older = root.path().join("v20.0.0/bin");
+        std::fs::create_dir_all(&older).expect("create older");
+        write_executable(&older.join("mytool"), "#!/bin/bash\nexit 0\n");
+
+        let found = expand_single_star(&format!("{}/*/bin/mytool", root.path().display()));
+
+        assert_eq!(found, Some(older.join("mytool")));
+    }
+
+    #[test]
+    fn a_starred_pattern_over_a_missing_directory_is_simply_not_found() {
+        assert_eq!(expand_single_star("/definitely/not/here/*/bin/mytool"), None);
+    }
+
+    #[test]
+    fn the_well_known_list_is_the_last_resort() {
+        let dir = TempDir::new("disc-wellknown");
+        let bin = dir.join("mytool");
+        write_executable(&bin, "#!/bin/bash\nexit 0\n");
+
+        let mut env = EnvGuard::new();
+        env.remove("JOD_TEST_OVERRIDE");
+        env.set("PATH", "/definitely/not/a/dir");
+
+        assert_eq!(
+            find_binary(
+                "JOD_TEST_OVERRIDE",
+                &["mytool"],
+                &["/definitely/not/here/mytool", &bin.to_string_lossy()],
+            ),
+            Some(bin)
+        );
+    }
 }
