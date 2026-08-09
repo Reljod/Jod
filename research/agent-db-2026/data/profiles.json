@@ -1,0 +1,86 @@
+{
+  "_meta": {
+    "note": "Hard filters run before scoring. A candidate that fails one is not a low-scoring option, it is not an option — weighted averages otherwise let a great vector index paper over 'a second process cannot open the file'.",
+    "scale": "every criterion is scored 0-5; see schema.md for what each score means"
+  },
+
+  "hard_filters": [
+    {
+      "id": "multi_process_write",
+      "test": "two or more independent OS processes can write concurrently without data loss",
+      "why": "the literal question being asked — several agents share one VPS"
+    },
+    {
+      "id": "maintained",
+      "test": "upstream is neither archived nor dormant as of 2026-08",
+      "why": "an agent's memory outlives a hype cycle; an archived engine is a migration already scheduled"
+    },
+    {
+      "id": "self_hostable",
+      "test": "runs on the VPS with no mandatory cloud dependency for writes",
+      "why": "Jod's charter: every dependency is a local process or a local file"
+    },
+    {
+      "id": "fits_small_vps",
+      "test": "idle resident footprint under ~400 MB on a 4 vCPU / 8 GB box",
+      "why": "the database is a supporting cast member; the agents need the RAM"
+    },
+    {
+      "id": "store_of_record",
+      "test": "can be the authoritative home for agent state, not only an index or a policy layer over one",
+      "why": "failing this is not a criticism — it means the thing is a complement to the answer rather than the answer. Sync layers, ANN libraries and memory frameworks all land here."
+    }
+  ],
+
+  "criteria": {
+    "concurrency":  "measured multi-writer throughput and error rate under contention",
+    "correctness":  "measured: zero lost updates on contended read-modify-write, and a safe default",
+    "latency":      "measured p50/p99 on the hot path an agent actually waits on",
+    "recall":       "measured vector search quality and speed at Jod's scale",
+    "breadth":      "how much of {events, state, vectors, full-text, graph} one engine covers",
+    "ops_burden":   "inverse of daemons to run, back up, upgrade and monitor",
+    "local_first":  "keeps working, and stays inspectable, with no network and no daemon",
+    "rust_fit":     "quality of the Rust client story for jod-core",
+    "queryability": "can an agent compose an ad-hoc query at runtime it did not plan for",
+    "survival":     "likelihood the project is still maintained in three years"
+  },
+
+  "profiles": {
+    "charter": {
+      "label": "Jod's charter as written",
+      "description": "Local-first, low ops burden, correctness over speed. The weighting implied by docs/jod-system.md.",
+      "weights": {
+        "concurrency": 3, "correctness": 5, "latency": 2, "recall": 2,
+        "breadth": 3, "ops_burden": 4, "local_first": 5, "rust_fit": 3,
+        "queryability": 4, "survival": 4
+      }
+    },
+    "throughput": {
+      "label": "Many agents, write-heavy",
+      "description": "Assume 20+ concurrent agents streaming events. Concurrency and latency dominate.",
+      "weights": {
+        "concurrency": 5, "correctness": 5, "latency": 4, "recall": 2,
+        "breadth": 2, "ops_burden": 2, "local_first": 1, "rust_fit": 3,
+        "queryability": 2, "survival": 3
+      }
+    },
+    "simplicity": {
+      "label": "Fewest moving parts",
+      "description": "One artefact to back up, nothing to run. Optimises for a system one person maintains.",
+      "weights": {
+        "concurrency": 2, "correctness": 5, "latency": 2, "recall": 2,
+        "breadth": 3, "ops_burden": 5, "local_first": 5, "rust_fit": 3,
+        "queryability": 3, "survival": 4
+      }
+    },
+    "recall-first": {
+      "label": "Memory quality above all",
+      "description": "Assume the brain grows to millions of notes and retrieval quality is the product.",
+      "weights": {
+        "concurrency": 3, "correctness": 4, "latency": 3, "recall": 5,
+        "breadth": 4, "ops_burden": 2, "local_first": 2, "rust_fit": 2,
+        "queryability": 4, "survival": 3
+      }
+    }
+  }
+}
