@@ -19,7 +19,9 @@ const conversation = new Conversation({
   harness: "claude_code",
 });
 
-conversation.greet("Claude Code · delegate something · AGENTS for the fleet");
+conversation.greet(
+  "/help for commands · THINK reasoning · TOOLS output · AGENTS fleet · TEAM board",
+);
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>

@@ -15,7 +15,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { App } from "../src/App";
 import { JodClient } from "../src/client";
 import { Conversation } from "../src/conversation";
-import { EventSourceSpy, FakeFetch, agent, settle } from "./fakes";
+import { EventSourceSpy, FakeFetch, agent, member, settle, teamTask } from "./fakes";
 
 let http: FakeFetch;
 let spy: EventSourceSpy;
@@ -219,30 +219,63 @@ describe("the shell", () => {
 
     await act(async () => {
       spy.last.send({ kind: "message", text: "on it", agent_id: "a1", at_ms: 1, seq: 0 });
-      spy.last.send({ kind: "tool_call", name: "Bash", agent_id: "a1", at_ms: 2, seq: 1 });
+      spy.last.send({
+        kind: "tool_call",
+        name: "Bash",
+        input: { command: "cargo test" },
+        agent_id: "a1",
+        at_ms: 2,
+        seq: 1,
+      });
       spy.last.send({
         kind: "tool_result",
         name: "Bash",
-        is_error: true,
+        summary: "362 passed",
+        is_error: false,
         agent_id: "a1",
         at_ms: 3,
         seq: 2,
       });
-      spy.last.send({ kind: "raw", line: "odd line", agent_id: "a1", at_ms: 4, seq: 3 });
+      spy.last.send({
+        kind: "tool_call",
+        name: "Read",
+        input: { file_path: "/tmp/gone" },
+        agent_id: "a1",
+        at_ms: 4,
+        seq: 3,
+      });
+      spy.last.send({
+        kind: "tool_result",
+        name: "Read",
+        summary: "no such file",
+        is_error: true,
+        agent_id: "a1",
+        at_ms: 5,
+        seq: 4,
+      });
+      spy.last.send({ kind: "raw", line: "odd line", agent_id: "a1", at_ms: 6, seq: 5 });
       spy.last.send({
         kind: "finished",
         is_error: false,
         usage: { output_tokens: 12, cost_usd: 0.02 },
         agent_id: "a1",
-        at_ms: 5,
-        seq: 4,
+        at_ms: 7,
+        seq: 6,
       });
       await settle();
     });
 
     await screen.findByText("on it");
-    expect(screen.getByText("Bash")).toBeDefined();
-    expect(screen.getByText("Bash failed")).toBeDefined();
+    // A call carries its most useful argument, and what the tool gave back is
+    // on screen underneath it — the whole point of watching a harness work
+    // rather than waiting for its conclusion.
+    expect(screen.getByText("Bash · cargo test")).toBeDefined();
+    expect(screen.getByText("362 passed")).toBeDefined();
+    // A failure is shown as the call line plus its output, both marked failed.
+    expect(screen.getByText("Read · /tmp/gone")).toBeDefined();
+    expect(screen.getByText("no such file").closest(".entry")?.className).toContain(
+      "failed",
+    );
     // `raw` is surfaced, never swallowed — it is the harness-upgrade seam.
     expect(screen.getByText("odd line")).toBeDefined();
     expect(screen.getByText("done · 12 out · $0.0200")).toBeDefined();
@@ -345,5 +378,225 @@ describe("reading back through a run", () => {
 
     fireEvent.click(screen.getByText("↓ LATEST"));
     await waitFor(() => expect(conversation.getSnapshot().session.following).toBe(true));
+  });
+});
+
+// ─── slash commands, on the glass ───────────────────────────────────────────
+
+describe("the completion list", () => {
+  it("stays out of the way for a plain prompt", async () => {
+    await mounted();
+    fireEvent.change(screen.getByPlaceholderText("Delegate something"), {
+      target: { value: "ship it" },
+    });
+    expect(screen.queryByRole("listbox")).toBeNull();
+  });
+
+  it("opens on a slash and narrows as you type", async () => {
+    await mounted();
+    const box = screen.getByPlaceholderText("Delegate something");
+
+    fireEvent.change(box, { target: { value: "/" } });
+    expect(screen.getAllByRole("option").length).toBeGreaterThan(5);
+
+    fireEvent.change(box, { target: { value: "/th" } });
+    const only = screen.getAllByRole("option");
+    expect(only).toHaveLength(1);
+    expect(only[0]!.textContent).toContain("/thinking");
+  });
+
+  /** The whole reason arguments are completed: three spellings, soft keyboard. */
+  it("offers the harnesses by name", async () => {
+    await mounted();
+    fireEvent.change(screen.getByPlaceholderText("Delegate something"), {
+      target: { value: "/harness " },
+    });
+    const shown = screen.getAllByRole("option").map((o) => o.textContent);
+    expect(shown.join(" ")).toContain("/harness claude");
+    expect(shown.join(" ")).toContain("/harness agy");
+    expect(shown.join(" ")).toContain("AGY");
+  });
+
+  /** Tap replaces `Tab`; the row goes straight into the composer. */
+  it("puts the tapped line in the composer", async () => {
+    const conversation = await mounted();
+    const box = screen.getByPlaceholderText("Delegate something") as HTMLTextAreaElement;
+    fireEvent.change(box, { target: { value: "/harn" } });
+    fireEvent.mouseDown(screen.getAllByRole("option")[0]!);
+
+    await waitFor(() =>
+      expect(conversation.getSnapshot().session.input).toBe("/harness "),
+    );
+  });
+});
+
+describe("running a command from the composer", () => {
+  it("keeps SEND live for a command while a turn is running", async () => {
+    const conversation = await mounted();
+    http.on("POST /v1/agents", { body: agent({ id: "a1" }) });
+    http.on("GET /v1/agents", { body: [] });
+
+    const box = screen.getByPlaceholderText("Delegate something");
+    fireEvent.change(box, { target: { value: "ship it" } });
+    fireEvent.click(screen.getByText("SEND"));
+    await waitFor(() => expect(conversation.getSnapshot().session.busy).toBe(true));
+
+    // A prompt is refused while busy; a command is not.
+    fireEvent.change(box, { target: { value: "/model haiku" } });
+    await waitFor(() =>
+      expect((screen.getByText("SEND") as HTMLButtonElement).disabled).toBe(false),
+    );
+    fireEvent.click(screen.getByText("SEND"));
+    await waitFor(() =>
+      expect(conversation.getSnapshot().session.model).toBe("haiku"),
+    );
+  });
+
+  it("shows the help list in the transcript", async () => {
+    await mounted();
+    fireEvent.change(screen.getByPlaceholderText("Delegate something"), {
+      target: { value: "/help" },
+    });
+    fireEvent.click(screen.getByText("SEND"));
+    await screen.findByText(/\/harness <name>/);
+  });
+});
+
+describe("the tool-output toggle", () => {
+  it("hides what tools returned, and keeps the call", async () => {
+    const conversation = await mounted();
+    http.on("POST /v1/agents", { body: agent({ id: "a1" }) });
+    http.on("GET /v1/agents", { body: [] });
+
+    fireEvent.click(screen.getByText("TOOLS")); // details off
+    fireEvent.change(screen.getByPlaceholderText("Delegate something"), {
+      target: { value: "ship it" },
+    });
+    fireEvent.click(screen.getByText("SEND"));
+    await waitFor(() => expect(spy.created).toHaveLength(1));
+
+    await act(async () => {
+      spy.last.send({
+        kind: "tool_call",
+        name: "Bash",
+        input: { command: "cargo test" },
+        agent_id: "a1",
+        at_ms: 1,
+        seq: 0,
+      });
+      spy.last.send({
+        kind: "tool_result",
+        name: "Bash",
+        summary: "362 passed",
+        is_error: false,
+        agent_id: "a1",
+        at_ms: 2,
+        seq: 1,
+      });
+      await settle();
+    });
+
+    expect(screen.getByText("Bash · cargo test")).toBeDefined();
+    expect(screen.queryByText("362 passed")).toBeNull();
+    expect(conversation.getSnapshot().session.showDetails).toBe(false);
+  });
+});
+
+// ─── the team sheet ─────────────────────────────────────────────────────────
+
+/** Render with a live session watching a team the daemon knows about. */
+async function watching(): Promise<Conversation> {
+  http.on("GET /v1/harnesses", {
+    body: [{ id: "claude_code", label: "Claude Code", available: true, path: "/bin/claude" }],
+  });
+  http.on("GET /v1/agents", { body: [] });
+  http.on("GET /v1/teams/crew", {
+    body: {
+      team: "crew",
+      members: [member(), member({ name: "lead", harness: "claude_code", status: "busy" })],
+      tasks: [teamTask(), teamTask({ id: "t2", title: "ship it", owner: "lead", status: "done" })],
+    },
+  });
+  const conversation = new Conversation({
+    client: new JodClient({
+      fetch: http.fetch,
+      eventSource: spy.factory,
+      newKey: () => "key-1",
+    }),
+    team: "crew",
+    scopeMemory: { read: () => "write", write: () => {} },
+  });
+  render(<App conversation={conversation} />);
+  await waitFor(() => expect(conversation.getSnapshot().link.phase).toBe("live"));
+  return conversation;
+}
+
+describe("the team sheet", () => {
+  it("lists a cross-harness team with what each member is doing", async () => {
+    await watching();
+    http.on("GET /v1/teams/crew", {
+      body: {
+        team: "crew",
+        members: [member(), member({ name: "lead", harness: "claude_code", status: "busy" })],
+        tasks: [],
+      },
+    });
+    fireEvent.click(screen.getByText("TEAM"));
+
+    await screen.findByText("scout");
+    // The thing no single harness can do: one team, two harnesses.
+    expect(screen.getByText("AGY")).toBeDefined();
+    expect(screen.getByText("Claude Code")).toBeDefined();
+    expect(screen.getByText("READY")).toBeDefined();
+    expect(screen.getByText("BUSY")).toBeDefined();
+  });
+
+  it("shows the board with progress and who owns what", async () => {
+    await watching();
+    fireEvent.click(screen.getByText("TEAM"));
+
+    await screen.findByText("read the docs");
+    expect(screen.getByText("ship it")).toBeDefined();
+    expect(screen.getByText("(lead)")).toBeDefined();
+    expect(screen.getByText("BOARD · 1/2")).toBeDefined();
+  });
+
+  it("says there is no team rather than showing an empty board", async () => {
+    await mounted();
+    fireEvent.click(screen.getByText("TEAM"));
+    await screen.findByText(/No team/);
+  });
+
+  it("closes again", async () => {
+    await watching();
+    fireEvent.click(screen.getByText("TEAM"));
+    await screen.findByText("scout");
+    fireEvent.click(screen.getByText("CLOSE"));
+    await waitFor(() => expect(screen.queryByText("scout")).toBeNull());
+  });
+});
+
+describe("resuming from the agents sheet", () => {
+  it("threads the next turn through the conversation that row reported", async () => {
+    http.on("GET /v1/harnesses", {
+      body: [{ id: "claude_code", label: "Claude Code", available: true, path: "/bin/claude" }],
+    });
+    http.on("GET /v1/agents", {
+      body: [agent({ id: "older", name: "yesterday", status: "completed", session_id: "ses-7" })],
+    });
+    const conversation = build();
+    render(<App conversation={conversation} />);
+    await waitFor(() => expect(conversation.getSnapshot().link.phase).toBe("live"));
+
+    http.on("GET /v1/agents", {
+      body: [agent({ id: "older", name: "yesterday", status: "completed", session_id: "ses-7" })],
+    });
+    fireEvent.click(screen.getByText("AGENTS"));
+    await screen.findByText("yesterday");
+    fireEvent.click(screen.getByText("RESUME"));
+
+    await waitFor(() =>
+      expect(conversation.getSnapshot().session.resume).toEqual({ session: "ses-7" }),
+    );
   });
 });

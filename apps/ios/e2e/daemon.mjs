@@ -34,10 +34,10 @@ const SCRIPT = [
   { kind: "started", session_id: "sess-4f1c", model: "claude-opus-5" },
   { kind: "thinking", text: "The failure is in the resume cursor, not the parser." },
   { kind: "message", text: "Looking at the harness adapter first." },
-  { kind: "tool_call", name: "Grep" },
-  { kind: "tool_result", name: "Grep", is_error: false },
-  { kind: "tool_call", name: "Bash" },
-  { kind: "tool_result", name: "Bash", is_error: true },
+  { kind: "tool_call", name: "Grep", input: { pattern: "resume_cursor" } },
+  { kind: "tool_result", name: "Grep", summary: "3 matches", is_error: false },
+  { kind: "tool_call", name: "Bash", input: { command: "cargo test -p jod-core" } },
+  { kind: "tool_result", name: "Bash", summary: "thread panicked", is_error: true },
   { kind: "raw", line: "warning: unclassified harness line" },
   {
     kind: "message",
@@ -45,6 +45,48 @@ const SCRIPT = [
   },
   { kind: "finished", is_error: false, usage: { output_tokens: 1483, cost_usd: 0.0212 } },
 ];
+
+/**
+ * A team no single harness could hold: a lead on Claude Code, teammates on AGY
+ * and OpenCode, one board between them.
+ */
+const TEAM = {
+  team: "crew",
+  members: [
+    {
+      team: "crew",
+      name: "lead",
+      harness: "claude_code",
+      role: "plan and review",
+      status: "busy",
+      agent_id: "a-live",
+      session_id: "sess-4f1c",
+    },
+    {
+      team: "crew",
+      name: "scout",
+      harness: "agy",
+      role: "research",
+      status: "ready",
+      agent_id: null,
+      session_id: "sess-scout",
+    },
+    {
+      team: "crew",
+      name: "hand",
+      harness: "open_code",
+      role: "mechanical edits",
+      status: "ready",
+      agent_id: null,
+      session_id: "sess-hand",
+    },
+  ],
+  tasks: [
+    { id: "t1", title: "reproduce the resume failure", owner: "lead", status: "done" },
+    { id: "t2", title: "audit the harness adapters", owner: "scout", status: "claimed" },
+    { id: "t3", title: "backfill the regression tests", owner: null, status: "open" },
+  ],
+};
 
 function summary({ id, name, status, cost = 0 }) {
   return {
@@ -120,6 +162,11 @@ export async function startDaemon({ dist, stepMs = 60 }) {
       }
 
       if (path === "/v1/agents" && req.method === "GET") return json(res, agents);
+
+      // Read-only, exactly as the daemon serves them: the phone watches a
+      // cross-harness board it cannot play on.
+      if (path === "/v1/teams") return json(res, ["crew"]);
+      if (path === "/v1/teams/crew") return json(res, TEAM);
 
       if (path === "/v1/agents" && req.method === "POST") {
         const body = JSON.parse(await read(req));

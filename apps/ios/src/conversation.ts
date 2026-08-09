@@ -15,6 +15,7 @@
 
 import type { AgentEnvelope, AgentSummary, HarnessKind, PermissionPolicy } from "./contract";
 import { JodClient, UnauthorizedError, type Scope, type SpawnBody } from "./client";
+import { HELP, parse as parseSlash, type Slash } from "./commands";
 import {
   browserOriginMemory,
   normaliseOrigin,
@@ -28,14 +29,22 @@ import {
   beginTurn,
   clearTranscript,
   defaultName,
+  newConversation,
   newSession,
   push,
+  resumeSession,
+  resolveSession,
   setAgents,
   setFollowing,
+  setHarness,
   setInput,
+  setModel,
   setPane,
+  setTeam,
+  setTeams,
   takeInput,
   toAgentLines,
+  toggleDetails,
   toggleThinking,
   togglePane,
   type Pane,
@@ -102,6 +111,11 @@ export interface ConversationOptions {
   /** Left undefined so the daemon picks its first allowed root. */
   cwd?: string;
   permission?: PermissionPolicy;
+  /**
+   * The team to watch, if any. `null` leaves the sheet saying so rather than
+   * showing an empty board — the same rule as `jod tui --team`.
+   */
+  team?: string | null;
   /** Injected so tests are not at the mercy of a global. */
   scopeMemory?: ScopeMemory;
   originMemory?: OriginMemory;
@@ -120,7 +134,6 @@ type Listener = () => void;
 
 export class Conversation {
   private readonly client: JodClient;
-  private readonly harness: HarnessKind;
   private readonly cwd: string | undefined;
   private readonly permission: PermissionPolicy | undefined;
   private readonly scopeMemory: ScopeMemory;
@@ -147,7 +160,6 @@ export class Conversation {
 
   constructor(options: ConversationOptions) {
     this.client = options.client;
-    this.harness = options.harness ?? "claude_code";
     this.cwd = options.cwd;
     this.permission = options.permission;
     this.scopeMemory = options.scopeMemory ?? browserScopeMemory();
@@ -156,7 +168,11 @@ export class Conversation {
     // What this device was last told it could do. The daemon re-checks it on
     // every request, so a stale value costs a refusal, not an escalation.
     this.scope = this.scopeMemory.read() ?? "read";
-    this.state = newSession(this.harness, options.model ?? null);
+    // The harness lives in the session, not here: `/harness` changes it
+    // mid-conversation and a spawn must use what is current, exactly as the
+    // TUI reads it off `app` rather than off its start-up options.
+    this.state = newSession(options.harness ?? "claude_code", options.model ?? null);
+    this.state = { ...this.state, team: options.team ?? null };
     this.view = this.snapshot();
   }
 
@@ -236,6 +252,7 @@ export class Conversation {
         this.notice("no harness is installed on the daemon — nothing can start");
       }
       await this.refreshRoster();
+      await this.refreshTeam();
     } catch (e) {
       if (e instanceof UnauthorizedError) {
         this.setLink({ phase: "auth", reason: "this device needs a token" });
@@ -264,6 +281,7 @@ export class Conversation {
         this.notice("this token is read-only — you can watch, but not delegate");
       }
       await this.refreshRoster();
+      await this.refreshTeam();
     } catch (e) {
       if (e instanceof UnauthorizedError) {
         this.setLink({ phase: "auth", reason: "that token was refused" });
@@ -303,11 +321,22 @@ export class Conversation {
   /**
    * Send whatever is in the composer.
    *
-   * Three refusals, in the order the TUI applies them: nothing typed, a turn
-   * already running, and — new here, because a phone can hold a read-only
-   * token — no authority to write.
+   * The order is the TUI's, and the first step is the one that matters most: a
+   * **slash line is an instruction to Jod, not to the agent**, so it is parsed
+   * and run before any of the refusals below. Switching the model for the next
+   * turn is exactly the sort of thing you do while waiting for this one, and a
+   * read-only session can still clear its own transcript.
+   *
+   * Then three refusals: nothing typed, a turn already running, and — new here,
+   * because a phone can hold a read-only token — no authority to write.
    */
   async send(): Promise<void> {
+    const slash = parseSlash(this.state.input.trim());
+    if (slash !== null) {
+      this.update(setInput(this.state, ""));
+      await this.applySlash(slash);
+      return;
+    }
     if (this.state.busy) {
       this.notice("still working — wait for this turn to finish");
       return;
@@ -329,10 +358,121 @@ export class Conversation {
     await this.delegate(prompt);
   }
 
+  /**
+   * Carry out a slash command. Mirrors `apply_slash` in `cli/src/tui/mod.rs`.
+   *
+   * Almost everything here is a pure transformation of session state, which is
+   * why the reducer owns it and this only chooses. The two exceptions need the
+   * daemon: `/team` has to read a board written by other processes, and
+   * `/sessions` is worth nothing without a fresh roster.
+   */
+  async applySlash(slash: Slash): Promise<void> {
+    switch (slash.kind) {
+      case "help":
+        for (const [usage, what] of HELP) {
+          this.notice(`${usage.padEnd(18)} ${what}`);
+        }
+        return;
+
+      case "harness":
+        this.update(setHarness(this.state, slash.harness));
+        return;
+
+      case "model":
+        this.update(setModel(this.state, slash.model));
+        return;
+
+      case "thinking":
+        this.update(toggleThinking(this.state));
+        return;
+
+      case "details":
+        this.update(toggleDetails(this.state));
+        return;
+
+      case "new":
+        this.update(newConversation(this.state));
+        return;
+
+      case "sessions":
+        // The sheet is the list, so open it — and refresh first, because the
+        // ids it is about to be read off have to be current.
+        await this.refreshRoster();
+        this.update(setPane(this.state, "agents"));
+        this.notice(
+          "pick an id from the sheet, then /resume <id> — the shown prefix is enough",
+        );
+        return;
+
+      case "resume": {
+        const resolved = resolveSession(this.state, slash.id);
+        switch (resolved.kind) {
+          case "session":
+            this.update(resumeSession(this.state, resolved.session));
+            this.notice(`continuing ${resolved.session}`);
+            return;
+          case "verbatim":
+            this.update(resumeSession(this.state, resolved.typed));
+            // Say when it matched nothing on screen. A typo is otherwise
+            // indistinguishable from a real resume until the harness rejects
+            // it several seconds later.
+            this.notice(
+              this.state.agents.length === 0
+                ? `continuing ${resolved.typed}`
+                : `continuing ${resolved.typed} — not one of the agents listed, passing it on as typed`,
+            );
+            return;
+          case "no_session":
+            this.notice(
+              `${resolved.agent} has not reported a conversation yet — resuming it would start a fresh one`,
+            );
+            return;
+          case "ambiguous":
+            this.notice(`${slash.id} matches ${resolved.count} agents — type more of it`);
+            return;
+        }
+        return;
+      }
+
+      case "agents":
+        this.update(togglePane(this.state, "agents"));
+        if (this.state.pane === "agents") await this.refreshRoster();
+        return;
+
+      case "team":
+        this.update(togglePane(this.state, "team"));
+        if (this.state.pane === "team") await this.refreshTeam();
+        return;
+
+      case "clear":
+        this.update(clearTranscript(this.state));
+        return;
+
+      case "exit":
+        // An app cannot quit itself on iOS, and the TUI's `/exit` is not really
+        // about quitting: it is about leaving while the work carries on. That
+        // is exactly what this does — stop following the stream, keep the
+        // agent running on the box.
+        this.stop();
+        this.notice("stopped watching — the agent keeps running on the box");
+        return;
+
+      case "needs_argument":
+        this.notice(`usage: ${slash.usage}`);
+        return;
+
+      case "unknown":
+        this.notice(`${slash.what} is not a command — /help lists them`);
+        return;
+    }
+  }
+
   private async delegate(prompt: string): Promise<void> {
     const body: SpawnBody = {
       prompt,
-      harness: this.harness,
+      // From the session, not from the options: `/harness` and `/model` change
+      // these mid-conversation and a spawn must use what is current.
+      harness: this.state.harness,
       name: defaultName(prompt),
       // The resume cursor is the whole reason this is a conversation and not a
       // series of unrelated one-shots. It advances to the exact session the
@@ -485,6 +625,66 @@ export class Conversation {
     }
   }
 
+  /**
+   * Re-read the team from the daemon.
+   *
+   * Members and tasks are written by the teammates themselves, in their own
+   * processes on the box, so the only way to know the current state is to ask —
+   * there is no local copy that could be authoritative. This is the TUI's
+   * `refresh_team`, with an HTTP hop where it had a SQLite handle.
+   *
+   * With no team named, the sheet says so; there is nothing to fetch. A failed
+   * read leaves the last known board on screen rather than emptying it, for the
+   * same reason the roster does: stale beats blank.
+   */
+  async refreshTeam(): Promise<void> {
+    await this.discoverTeams();
+    const team = this.state.team;
+    if (team === null) return;
+    try {
+      const view = await this.client.team(team);
+      this.update(setTeam(this.state, team, view.members, view.tasks));
+    } catch (e) {
+      // A team the daemon has never heard of is worth saying once: it means the
+      // name is wrong, and an empty sheet would read as "nobody has joined yet".
+      if (this.state.members.length === 0 && this.state.tasks.length === 0) {
+        this.notice(`could not read team ${team}: ${describe(e)}`);
+      }
+    }
+  }
+
+  /**
+   * Learn which teams exist, and adopt one if the answer is unambiguous.
+   *
+   * `jod tui` takes its team from `--team <name>`; a phone has no command line,
+   * so the names are asked for. Exactly one team is adopted without asking —
+   * there is nothing to choose. Several are left for the sheet to offer, because
+   * guessing which board someone wants to watch is worse than showing the list.
+   *
+   * A configured team always wins: it was named deliberately.
+   */
+  private async discoverTeams(): Promise<void> {
+    if (this.state.teams.length > 0) return;
+    let names: string[];
+    try {
+      names = await this.client.teams();
+    } catch {
+      // Not knowing which teams exist is a worse sheet, not a broken app —
+      // and an older daemon without the route is exactly this case.
+      return;
+    }
+    this.update(setTeams(this.state, names));
+    if (this.state.team === null && names.length === 1) {
+      this.update(setTeam(this.state, names[0]!, [], []));
+    }
+  }
+
+  /** Watch a different team, or none. */
+  async watchTeam(team: string | null): Promise<void> {
+    this.update(setTeam(this.state, team, [], []));
+    if (team !== null) await this.refreshTeam();
+  }
+
   async kill(agentId: string): Promise<void> {
     try {
       await this.client.kill(agentId);
@@ -513,8 +713,20 @@ export class Conversation {
     this.update(toggleThinking(this.state));
   }
 
-  togglePane(): void {
-    this.update(togglePane(this.state));
+  toggleDetails(): void {
+    this.update(toggleDetails(this.state));
+  }
+
+  /**
+   * Open a sheet, or close it if it is already open — the TUI's `Ctrl-A` and
+   * `Ctrl-G`. Opening one refreshes what it is about to show, because both are
+   * views of state other processes are writing.
+   */
+  async togglePane(pane: Exclude<Pane, "chat">): Promise<void> {
+    this.update(togglePane(this.state, pane));
+    if (this.state.pane !== pane) return;
+    if (pane === "agents") await this.refreshRoster();
+    else await this.refreshTeam();
   }
 
   setPane(pane: Pane): void {

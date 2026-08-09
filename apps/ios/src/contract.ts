@@ -26,11 +26,15 @@ export type {
   AgentSummary,
   HarnessInfo,
   HarnessKind,
+  Member,
+  MemberStatus,
   PermissionPolicy,
   Report,
   Resume,
   SpawnRequest,
   StoredRun,
+  TeamTask,
+  TeamView,
   Usage,
   Fact,
 } from "../../web/src/types";
@@ -40,5 +44,7 @@ export {
   harnessCode,
   isLive,
   resumeLabel,
+  taskIsClaimed,
+  taskIsDone,
   totalTokens,
 } from "../../web/src/types";

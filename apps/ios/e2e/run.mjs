@@ -137,12 +137,23 @@ try {
   );
 
   // A real EventSource handshake, carrying the cookie WebKit just stored.
-  await page.waitForSelector("text=Bash failed", { timeout: 25_000 });
+  await page.waitForSelector("text=thread panicked", { timeout: 25_000 });
   await shot("03-running");
   console.log(`\n[stream]`);
   check("SSE reaches the page over a real EventSource handshake", true);
-  check("a tool call is shown", await page.locator("text=Grep").first().isVisible());
-  check("a failed tool call is shown", await page.locator("text=Bash failed").isVisible());
+  check(
+    "a tool call carries its most useful argument",
+    await page.locator("text=Grep · resume_cursor").first().isVisible(),
+  );
+  check(
+    "what a tool gave back is on screen, not just its conclusion",
+    await page.locator("text=3 matches").isVisible(),
+  );
+  check(
+    "a failed tool is marked failed, call and output both",
+    (await page.locator(".entry.tool.failed").count()) > 0 &&
+      (await page.locator(".entry.tool_out.failed").count()) > 0,
+  );
   check(
     "an unclassified harness line is surfaced, not swallowed",
     await page.locator("text=warning: unclassified harness line").isVisible(),
@@ -180,6 +191,19 @@ try {
   );
   await shot("05-thinking-toggle");
 
+  // `/details` gates output as it *arrives*, exactly as `show_details` does in
+  // `App::apply` — it does not rewrite the scrollback. Asserting the button
+  // flips and the transcript is left alone is the honest form of this check;
+  // suppression of the next result is covered in `app.test.tsx`, which can
+  // script a second run.
+  await page.click("text=TOOLS");
+  check(
+    "TOOLS flips without rewriting what is already on screen",
+    (await page.locator("button.iconbtn.on", { hasText: "TOOLS" }).count()) === 0 &&
+      (await page.locator("text=3 matches").count()) > 0,
+  );
+  await page.click("text=TOOLS"); // back on
+
   await page.click("text=AGENTS");
   await page.waitForSelector("text=audit the api auth layer", { timeout: 20_000 });
   check("AGENTS is the Ctrl-A equivalent, and lists runs this phone never started", true);
@@ -188,6 +212,62 @@ try {
     (await page.locator("text=FAILED").count()) > 0,
   );
   await shot("06-agents");
+  await page.click("text=CLOSE");
+
+  // ─── slash commands ─────────────────────────────────────────────────────
+  console.log(`\n[commands]`);
+  await page.fill(".composer textarea", "/");
+  await page.waitForSelector('[role="listbox"]', { timeout: 10_000 });
+  check(
+    "typing a slash opens the completion list",
+    (await page.locator('[role="option"]').count()) >= 10,
+  );
+  await page.fill(".composer textarea", "/harness ");
+  check(
+    "arguments are completed too, so three spellings need not be remembered",
+    await page.locator("text=/harness opencode").isVisible(),
+  );
+  await shot("08-completions");
+  await page.locator('[role="option"]', { hasText: "/harness agy" }).click();
+  check(
+    "tapping a suggestion fills the composer",
+    (await page.inputValue(".composer textarea")) === "/harness agy",
+  );
+  await page.click("text=SEND");
+  await page.waitForSelector("text=AGY from the next turn", { timeout: 10_000 });
+  check("a command runs against Jod, and is never sent to the agent", true);
+  check(
+    "switching harness moves the status bar with it",
+    await page.locator("text=/^AGY · ready$/").isVisible(),
+  );
+  await page.fill(".composer textarea", "/harness claude");
+  await page.click("text=SEND");
+
+  await page.fill(".composer textarea", "/wibble");
+  await page.click("text=SEND");
+  check(
+    "an unknown command is named back rather than swallowed",
+    await page.locator("text=/wibble is not a command").isVisible(),
+  );
+  await page.fill(".composer textarea", "");
+
+  // ─── the team board ─────────────────────────────────────────────────────
+  console.log(`\n[team]`);
+  await page.click("text=TEAM");
+  await page.waitForSelector("text=scout", { timeout: 20_000 });
+  check("TEAM is the Ctrl-G equivalent", true);
+  check(
+    "one team, three harnesses — the thing no single harness can do",
+    (await page.locator("text=Claude Code").count()) > 0 &&
+      (await page.locator("text=AGY").count()) > 0 &&
+      (await page.locator("text=OpenCode").count()) > 0,
+  );
+  check(
+    "the board shows progress and who owns what",
+    (await page.locator("text=BOARD · 1/3").isVisible()) &&
+      (await page.locator("text=(scout)").isVisible()),
+  );
+  await shot("09-team");
   await page.click("text=CLOSE");
 
   // ─── the things only a phone gets wrong ─────────────────────────────────

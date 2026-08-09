@@ -43,6 +43,7 @@ import type {
   HarnessInfo,
   Report,
   Resume,
+  TeamView,
 } from "./contract";
 import type { HarnessKind, PermissionPolicy } from "./contract";
 
@@ -187,6 +188,22 @@ export class JodClient {
 
   async report(): Promise<Report> {
     return this.json<Report>("/v1/report");
+  }
+
+  /** Every team that has a member. Read scope is enough. */
+  async teams(): Promise<string[]> {
+    return this.json<string[]>("/v1/teams");
+  }
+
+  /**
+   * One team's roster and board, in one answer.
+   *
+   * Deliberately one request rather than two: the sheet draws both together,
+   * and a board from one moment against a roster from another is a screen that
+   * was never true.
+   */
+  async team(name: string): Promise<TeamView> {
+    return this.json<TeamView>(`/v1/teams/${encodeURIComponent(name)}`);
   }
 
   /**

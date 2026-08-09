@@ -275,3 +275,39 @@ describe("frame parsing", () => {
     expect(parseMissed(7)).toBe(0);
   });
 });
+
+describe("teams", () => {
+  it("lists them", async () => {
+    const http = new FakeFetch().on("GET /v1/teams", { body: ["crew", "ops"] });
+    expect(await client(http).client.teams()).toEqual(["crew", "ops"]);
+  });
+
+  it("fetches a roster and a board in one request, not two", async () => {
+    const http = new FakeFetch().on("GET /v1/teams/crew", {
+      body: { team: "crew", members: [], tasks: [] },
+    });
+    const view = await client(http).client.team("crew");
+    expect(view.team).toBe("crew");
+    // One request: a board from one moment against a roster from another is a
+    // screen that was never true.
+    expect(http.callsTo("GET /v1/teams/crew")).toHaveLength(1);
+  });
+
+  it("escapes a name that would otherwise change the path", async () => {
+    const http = new FakeFetch().on("GET /v1/teams/a%2Fb", {
+      body: { team: "a/b", members: [], tasks: [] },
+    });
+    await client(http).client.team("a/b");
+    expect(http.calls.at(-1)!.url).toBe("/v1/teams/a%2Fb");
+  });
+
+  it("surfaces a 404 as an error rather than an empty team", async () => {
+    const http = new FakeFetch().on("GET /v1/teams/ghost", {
+      status: 404,
+      body: { detail: "no team named ghost" },
+    });
+    await expect(client(http).client.team("ghost")).rejects.toThrow(
+      "no team named ghost",
+    );
+  });
+});

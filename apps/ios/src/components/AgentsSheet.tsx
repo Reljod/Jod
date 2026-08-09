@@ -5,6 +5,8 @@ export interface AgentsSheetProps {
   currentAgentId: string | null;
   canWrite: boolean;
   onKill(id: string): void;
+  /** Continue this delegation's conversation — the tap form of `/resume`. */
+  onResume(id: string): void;
   onClose(): void;
 }
 
@@ -25,6 +27,7 @@ export function AgentsSheet({
   currentAgentId,
   canWrite,
   onKill,
+  onResume,
   onClose,
 }: AgentsSheetProps) {
   return (
@@ -59,6 +62,15 @@ export function AgentsSheet({
                 <span className={`badge ${agent.status}`}>
                   {String(agent.status).toUpperCase()}
                 </span>
+                {/* The id `/resume` actually needs. The TUI makes you read it
+                    off the panel and type it back; here it is a tap. An agent
+                    that never reported a conversation offers nothing, because
+                    resuming it would silently start a fresh one. */}
+                {agent.session && agent.id !== currentAgentId ? (
+                  <button className="resume" onClick={() => onResume(agent.session!)}>
+                    RESUME
+                  </button>
+                ) : null}
                 {canWrite && agent.status === "running" ? (
                   <button className="stop" onClick={() => onKill(agent.id)}>
                     STOP

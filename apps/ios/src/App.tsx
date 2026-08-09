@@ -1,12 +1,15 @@
-import { useEffect, useSyncExternalStore } from "react";
+import { useEffect, useMemo, useSyncExternalStore } from "react";
 
+import { completions } from "./commands";
 import type { Conversation } from "./conversation";
 import { statusLine } from "./session";
 import { AddressGate } from "./components/AddressGate";
 import { AgentsSheet } from "./components/AgentsSheet";
 import { AuthGate } from "./components/AuthGate";
+import { Completions } from "./components/Completions";
 import { Composer } from "./components/Composer";
 import { StatusBar } from "./components/StatusBar";
+import { TeamSheet } from "./components/TeamSheet";
 import { Transcript } from "./components/Transcript";
 
 /**
@@ -29,6 +32,10 @@ export function App({ conversation }: { conversation: Conversation }) {
 
   useKeyboardInset();
   useResumeOnForeground(conversation);
+
+  // Recomputed only when the composer changes: this runs on every keystroke and
+  // the result feeds a list that must not flicker.
+  const suggestions = useMemo(() => completions(session.input), [session.input]);
 
   // Address before token: there is no point asking for a credential until we
   // know which daemon it is for.
@@ -66,6 +73,9 @@ export function App({ conversation }: { conversation: Conversation }) {
         <span className={`linkdot ${link.phase}`} aria-label={link.phase} />
         <span className="spacer" />
 
+        {/* `Ctrl-T`, `/details`, `Ctrl-A` and `Ctrl-G`, as things a thumb can
+            reach. Every one of them is also a slash command, so the terminal
+            muscle memory works too. */}
         <button
           className={`iconbtn${session.showThinking ? " on" : ""}`}
           onClick={() => conversation.toggleThinking()}
@@ -74,10 +84,25 @@ export function App({ conversation }: { conversation: Conversation }) {
           THINK
         </button>
         <button
+          className={`iconbtn${session.showDetails ? " on" : ""}`}
+          onClick={() => conversation.toggleDetails()}
+          aria-pressed={session.showDetails}
+        >
+          TOOLS
+        </button>
+        <button
           className={`iconbtn${session.pane === "agents" ? " on" : ""}`}
-          onClick={() => conversation.togglePane()}
+          onClick={() => void conversation.togglePane("agents")}
+          aria-pressed={session.pane === "agents"}
         >
           AGENTS
+        </button>
+        <button
+          className={`iconbtn${session.pane === "team" ? " on" : ""}`}
+          onClick={() => void conversation.togglePane("team")}
+          aria-pressed={session.pane === "team"}
+        >
+          TEAM
         </button>
       </div>
 
@@ -87,10 +112,19 @@ export function App({ conversation }: { conversation: Conversation }) {
         onFollowingChange={(f) => conversation.setFollowing(f)}
       />
 
+      <Completions
+        items={suggestions}
+        onAccept={(line) => conversation.setInput(line)}
+      />
+
       <Composer
         value={session.input}
-        disabled={!canSend}
-        busy={session.busy}
+        // A slash line is an instruction to Jod, not to the agent, so it stays
+        // sendable while a turn is in flight and while the session is
+        // read-only — switching the model for the next turn is exactly what
+        // you do while waiting for this one.
+        disabled={!canSend && !isCommand(session.input)}
+        busy={session.busy && !isCommand(session.input)}
         onChange={(v) => conversation.setInput(v)}
         onSend={() => void conversation.send()}
       />
@@ -103,11 +137,34 @@ export function App({ conversation }: { conversation: Conversation }) {
           currentAgentId={session.currentAgentId}
           canWrite={canSend}
           onKill={(id) => void conversation.kill(id)}
+          onResume={(id) => void conversation.applySlash({ kind: "resume", id })}
+          onClose={() => conversation.setPane("chat")}
+        />
+      ) : null}
+
+      {session.pane === "team" ? (
+        <TeamSheet
+          team={session.team}
+          teams={session.teams}
+          members={session.members}
+          tasks={session.tasks}
+          onWatch={(name) => void conversation.watchTeam(name)}
           onClose={() => conversation.setPane("chat")}
         />
       ) : null}
     </div>
   );
+}
+
+/**
+ * Whether the composer holds a slash command rather than a prompt.
+ *
+ * Only used to decide whether SEND stays live; the authoritative parse happens
+ * in `Conversation.send`, where a bare `/` is not a command either.
+ */
+function isCommand(input: string): boolean {
+  const trimmed = input.trim();
+  return trimmed.startsWith("/") && trimmed.length > 1;
 }
 
 /**

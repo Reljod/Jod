@@ -6,7 +6,7 @@
  * the daemon, and tests would start passing against a fiction.
  */
 
-import type { AgentEnvelope, AgentSummary } from "../src/contract";
+import type { AgentEnvelope, AgentSummary, Member, TeamTask } from "../src/contract";
 import type { EventSourceLike } from "../src/client";
 
 export interface Call {
@@ -188,6 +188,25 @@ export function agent(over: Partial<AgentSummary> = {}): AgentSummary {
     stream_path: "/root/.jod/runs/agent-1/stream.jsonl",
     ...over,
   };
+}
+
+/** A plausible team member; override whatever a test cares about. */
+export function member(over: Partial<Member> = {}): Member {
+  return {
+    team: "crew",
+    name: "scout",
+    harness: "agy",
+    role: "research",
+    status: "ready",
+    agent_id: null,
+    session_id: "ses-scout",
+    ...over,
+  };
+}
+
+/** A plausible board item. */
+export function teamTask(over: Partial<TeamTask> = {}): TeamTask {
+  return { id: "t1", title: "read the docs", owner: null, status: "open", ...over };
 }
 
 /** Let queued promises settle — the store's fire-and-forget work. */

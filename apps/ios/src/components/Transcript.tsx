@@ -13,6 +13,10 @@ function glyph(entry: Entry): string {
       return "·";
     case "tool":
       return entry.failed ? "✗" : "⚙";
+    // The TUI indents tool output under its call with `└`, so output reads as
+    // belonging to the tool above it rather than as the agent speaking.
+    case "tool_out":
+      return "└";
     case "done":
       return entry.failed ? "✗" : "✓";
     case "notice":
@@ -24,8 +28,12 @@ function glyph(entry: Entry): string {
 
 function text(entry: Entry): string {
   switch (entry.kind) {
+    // `Bash · cargo test`, not a bare `Bash` — the argument is most of what
+    // makes watching a harness work worth doing.
     case "tool":
-      return entry.failed ? `${entry.name} failed` : entry.name;
+      return entry.detail ? `${entry.name} · ${entry.detail}` : entry.name;
+    case "tool_out":
+      return entry.text;
     case "done":
       return entry.text === ""
         ? entry.failed
@@ -38,7 +46,9 @@ function text(entry: Entry): string {
 }
 
 function className(entry: Entry): string {
-  const failed = (entry.kind === "tool" || entry.kind === "done") && entry.failed;
+  const failed =
+    (entry.kind === "tool" || entry.kind === "tool_out" || entry.kind === "done") &&
+    entry.failed;
   return `entry ${entry.kind}${failed ? " failed" : ""}`;
 }
 
@@ -86,7 +96,7 @@ export function Transcript({ entries, following, onFollowingChange }: Transcript
           <div className="placeholder">
             <strong>Jod delegates. It does not do the work.</strong>
             Ask for something. It runs on the box, in its own tmux session, and
-            streams back here.
+            streams back here. <code>/help</code> lists the commands.
           </div>
         ) : (
           entries.map((entry, i) => (

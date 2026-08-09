@@ -12,7 +12,7 @@ import { JodClient, type Scope } from "../src/client";
 import { Conversation, type ScopeMemory } from "../src/conversation";
 import type { OriginMemory } from "../src/origin";
 import type { Entry } from "../src/session";
-import { EventSourceSpy, FakeFetch, agent, settle } from "./fakes";
+import { EventSourceSpy, FakeFetch, agent, member, settle, teamTask } from "./fakes";
 
 let http: FakeFetch;
 let spy: EventSourceSpy;
@@ -503,10 +503,13 @@ describe("threading the conversation", () => {
     expect(http.callsTo("POST /v1/agents")[1].body).toMatchObject({
       resume: { session: "sess-9" },
     });
-    // The model the harness reported is carried forward too.
-    expect(http.callsTo("POST /v1/agents")[1].body).toMatchObject({
-      model: "claude-opus-5",
-    });
+    // The model the harness *reported* must not come back as a request. A name
+    // one harness reports is not a name another accepts, and the terminal
+    // client learned this the hard way: sending it back made a later
+    // `/harness` switch look like it had simply not worked.
+    expect(http.callsTo("POST /v1/agents")[1].body).not.toHaveProperty("model");
+    // It is still shown, though — that is what the status bar is for.
+    expect(conversation.getSnapshot().session.reportedModel).toBe("claude-opus-5");
   });
 
   it("ends the turn and refreshes the roster when the run finishes", async () => {
@@ -780,5 +783,394 @@ describe("the store contract", () => {
 
     await conversation.refreshRoster();
     expect(notices(conversation)).not.toContain("boom");
+  });
+});
+
+// ─── slash commands ─────────────────────────────────────────────────────────
+//
+// The parser is proved in `commands.test.ts`; these are about what each command
+// *does* to a live conversation, and they mirror `apply_slash` in
+// `cli/src/tui/mod.rs` case for case.
+
+/** Type a line and press SEND, which is how every command arrives here. */
+async function run(conversation: Conversation, line: string): Promise<void> {
+  conversation.setInput(line);
+  await conversation.send();
+  await settle();
+}
+
+describe("running a slash command", () => {
+  it("never reaches the daemon as a prompt", async () => {
+    const conversation = await connected();
+    await run(conversation, "/thinking");
+    expect(http.callsTo("POST /v1/agents")).toHaveLength(0);
+    expect(conversation.getSnapshot().session.input).toBe("");
+  });
+
+  /**
+   * The load-bearing one: switching the model for the *next* turn is exactly
+   * what you do while waiting for this one, so a command must not be refused
+   * by the busy guard the way a prompt is.
+   */
+  it("works while a turn is in flight", async () => {
+    const conversation = await connected();
+    http.on("POST /v1/agents", { body: agent({ id: "a1" }) });
+    http.on("GET /v1/agents", { body: [] });
+    await run(conversation, "ship it");
+    expect(conversation.getSnapshot().session.busy).toBe(true);
+
+    await run(conversation, "/model haiku");
+    expect(conversation.getSnapshot().session.model).toBe("haiku");
+    expect(notices(conversation)).toContain("model: haiku");
+    expect(notices(conversation)).not.toContain(
+      "still working — wait for this turn to finish",
+    );
+  });
+
+  /** A read-only session can still change what it is looking at. */
+  it("works without write authority", async () => {
+    const conversation = await connected("read");
+    await run(conversation, "/details");
+    expect(conversation.getSnapshot().session.showDetails).toBe(false);
+    expect(notices(conversation)).not.toContain("this session is read-only");
+  });
+
+  it("lists every command it accepts", async () => {
+    const conversation = await connected();
+    await run(conversation, "/help");
+    const shown = notices(conversation).join("\n");
+    for (const name of ["/harness", "/model", "/resume", "/team", "/exit"]) {
+      expect(shown, name).toContain(name);
+    }
+  });
+
+  it("names an unknown command back rather than delegating it", async () => {
+    const conversation = await connected();
+    await run(conversation, "/compact");
+    expect(notices(conversation).at(-1)).toBe(
+      "/compact is not a command — /help lists them",
+    );
+    expect(http.callsTo("POST /v1/agents")).toHaveLength(0);
+  });
+
+  it("says what a command wants when the argument is missing", async () => {
+    const conversation = await connected();
+    await run(conversation, "/resume");
+    expect(notices(conversation).at(-1)).toBe("usage: /resume <session-id>");
+  });
+
+  it("sends the next turn to the harness /harness named", async () => {
+    const conversation = await connected();
+    await run(conversation, "/harness agy");
+    http.on("POST /v1/agents", { body: agent({ id: "a1", harness: "agy" }) });
+    http.on("GET /v1/agents", { body: [] });
+    await run(conversation, "ship it");
+
+    expect(http.callsTo("POST /v1/agents")[0].body).toMatchObject({
+      harness: "agy",
+      resume: "fresh",
+    });
+  });
+
+  /** A conversation belongs to the harness that issued it. */
+  it("drops the session cursor when the harness changes", async () => {
+    const conversation = await connected();
+    http.on("POST /v1/agents", { body: agent({ id: "a1" }) });
+    http.on("GET /v1/agents", { body: [] });
+    await run(conversation, "first");
+    spy.last.send({
+      kind: "started",
+      session_id: "sess-9",
+      model: "claude-opus-5",
+      agent_id: "a1",
+      at_ms: 1,
+      seq: 0,
+    });
+    spy.last.send({
+      kind: "finished",
+      is_error: false,
+      usage: {},
+      agent_id: "a1",
+      at_ms: 2,
+      seq: 1,
+    });
+    await settle();
+
+    await run(conversation, "/harness opencode");
+    const state = conversation.getSnapshot().session;
+    expect(state.resume).toBe("fresh");
+    expect(state.reportedModel).toBeNull();
+  });
+
+  it("clears the screen without touching the conversation", async () => {
+    const conversation = await connected();
+    http.on("POST /v1/agents", { body: agent({ id: "a1" }) });
+    http.on("GET /v1/agents", { body: [] });
+    await run(conversation, "first");
+    spy.last.send({
+      kind: "started",
+      session_id: "sess-9",
+      model: null,
+      agent_id: "a1",
+      at_ms: 1,
+      seq: 0,
+    });
+    await settle();
+
+    await run(conversation, "/clear");
+    const state = conversation.getSnapshot().session;
+    expect(state.transcript).toEqual([]);
+    // The cursor survives: the harness still remembers the conversation.
+    expect(state.resume).toEqual({ session: "sess-9" });
+  });
+
+  it("forgets the conversation on /new", async () => {
+    const conversation = await connected();
+    http.on("POST /v1/agents", { body: agent({ id: "a1" }) });
+    http.on("GET /v1/agents", { body: [] });
+    await run(conversation, "first");
+    spy.last.send({
+      kind: "started",
+      session_id: "sess-9",
+      model: null,
+      agent_id: "a1",
+      at_ms: 1,
+      seq: 0,
+    });
+    spy.last.send({
+      kind: "finished",
+      is_error: false,
+      usage: { cost_usd: 0.5 },
+      agent_id: "a1",
+      at_ms: 2,
+      seq: 1,
+    });
+    await settle();
+
+    await run(conversation, "/new");
+    http.on("POST /v1/agents", { body: agent({ id: "a2" }) });
+    http.on("GET /v1/agents", { body: [] });
+    await run(conversation, "second");
+
+    expect(http.callsTo("POST /v1/agents")[1].body).toMatchObject({
+      resume: "fresh",
+    });
+    expect(conversation.getSnapshot().session.costUsd).toBe(0);
+  });
+
+  it("opens the agents sheet with a fresh roster for /sessions", async () => {
+    const conversation = await connected();
+    http.on("GET /v1/agents", { body: [agent({ id: "older", session_id: "ses-1" })] });
+    await run(conversation, "/sessions");
+
+    const state = conversation.getSnapshot().session;
+    expect(state.pane).toBe("agents");
+    expect(state.agents[0]!.session).toBe("ses-1");
+    expect(notices(conversation).at(-1)).toContain("/resume <id>");
+  });
+
+  it("continues a conversation named by an agent-id prefix", async () => {
+    const conversation = await connected();
+    http.on("GET /v1/agents", { body: [agent({ id: "abcdef1234", session_id: "ses-1" })] });
+    await conversation.refreshRoster();
+    await run(conversation, "/resume abcdef12");
+
+    expect(notices(conversation).at(-1)).toBe("continuing ses-1");
+    http.on("POST /v1/agents", { body: agent({ id: "a9" }) });
+    http.on("GET /v1/agents", { body: [] });
+    await run(conversation, "carry on");
+    expect(http.callsTo("POST /v1/agents")[0].body).toMatchObject({
+      resume: { session: "ses-1" },
+    });
+  });
+
+  it("warns when the id matches nothing on screen but still passes it on", async () => {
+    const conversation = await connected();
+    http.on("GET /v1/agents", { body: [agent({ id: "abcdef1234", session_id: "ses-1" })] });
+    await conversation.refreshRoster();
+    await run(conversation, "/resume from-elsewhere");
+    expect(notices(conversation).at(-1)).toContain("passing it on as typed");
+    expect(conversation.getSnapshot().session.resume).toEqual({
+      session: "from-elsewhere",
+    });
+  });
+
+  /**
+   * Stopping the stream is what the TUI's `/exit` actually achieves; an app
+   * cannot quit itself on iOS, and the agent keeps running either way.
+   */
+  it("stops watching on /exit and leaves the agent running", async () => {
+    const conversation = await connected();
+    http.on("POST /v1/agents", { body: agent({ id: "a1" }) });
+    http.on("GET /v1/agents", { body: [] });
+    await run(conversation, "ship it");
+    expect(spy.last.closed).toBe(false);
+
+    await run(conversation, "/exit");
+    expect(spy.last.closed).toBe(true);
+    expect(notices(conversation).at(-1)).toContain("keeps running on the box");
+    // No kill was sent: leaving is not stopping.
+    expect(http.callsTo("DELETE /v1/agents/a1")).toHaveLength(0);
+  });
+});
+
+// ─── the team ───────────────────────────────────────────────────────────────
+
+/** A conversation watching a named team. */
+async function watching(team: string): Promise<Conversation> {
+  http.on("POST /v1/session", { status: 201, body: { scope: "write", expires_at_ms: 1 } });
+  http.on("GET /v1/agents", { body: [] });
+  const conversation = new Conversation({
+    client: new JodClient({
+      fetch: http.fetch,
+      eventSource: spy.factory,
+      newKey: () => "key-1",
+    }),
+    team,
+    scopeMemory: memory,
+    originMemory: origins,
+    protocol: "https:",
+  });
+  http.on("GET /v1/teams/crew", {
+    body: { team: "crew", members: [member()], tasks: [teamTask()] },
+  });
+  await conversation.connect("tok");
+  await settle();
+  return conversation;
+}
+
+describe("watching a team", () => {
+  it("loads the roster and board as soon as the link goes live", async () => {
+    const conversation = await watching("crew");
+    const state = conversation.getSnapshot().session;
+    expect(state.team).toBe("crew");
+    expect(state.members[0]!.name).toBe("scout");
+    expect(state.tasks[0]!.title).toBe("read the docs");
+  });
+
+  it("re-reads the board when the sheet is opened, because teammates write it", async () => {
+    const conversation = await watching("crew");
+    http.on("GET /v1/teams/crew", {
+      body: {
+        team: "crew",
+        members: [member({ status: "busy" })],
+        tasks: [teamTask({ owner: "scout", status: "claimed" })],
+      },
+    });
+    await run(conversation, "/team");
+
+    const state = conversation.getSnapshot().session;
+    expect(state.pane).toBe("team");
+    expect(state.members[0]!.status).toBe("busy");
+    expect(state.tasks[0]!.owner).toBe("scout");
+  });
+
+  it("closes again when /team is repeated", async () => {
+    const conversation = await watching("crew");
+    http.on("GET /v1/teams/crew", {
+      body: { team: "crew", members: [member()], tasks: [] },
+    });
+    await run(conversation, "/team");
+    await run(conversation, "/team");
+    expect(conversation.getSnapshot().session.pane).toBe("chat");
+  });
+
+  /**
+   * `jod tui` takes its team from `--team <name>`. A phone has no command line,
+   * so the names are asked for instead — and one team is not a choice.
+   */
+  it("adopts the only team when none was named", async () => {
+    http.on("POST /v1/session", { status: 201, body: { scope: "write", expires_at_ms: 1 } });
+    http.on("GET /v1/agents", { body: [] });
+    http.on("GET /v1/teams", { body: ["crew"] });
+    http.on("GET /v1/teams/crew", {
+      body: { team: "crew", members: [member()], tasks: [] },
+    });
+    const conversation = build();
+    await conversation.connect("tok");
+    await settle();
+
+    expect(conversation.getSnapshot().session.team).toBe("crew");
+    expect(conversation.getSnapshot().session.members[0]!.name).toBe("scout");
+  });
+
+  /** Several boards and no name is a choice, and guessing is worse than asking. */
+  it("offers the list rather than picking when there are several", async () => {
+    http.on("POST /v1/session", { status: 201, body: { scope: "write", expires_at_ms: 1 } });
+    http.on("GET /v1/agents", { body: [] });
+    http.on("GET /v1/teams", { body: ["crew", "ops"] });
+    const conversation = build();
+    await conversation.connect("tok");
+    await settle();
+
+    expect(conversation.getSnapshot().session.team).toBeNull();
+    expect(conversation.getSnapshot().session.teams).toEqual(["crew", "ops"]);
+    // Nothing was fetched for either board: none was chosen.
+    expect(http.calls.filter((c) => c.url.startsWith("/v1/teams/"))).toHaveLength(0);
+  });
+
+  it("watches the one that was tapped", async () => {
+    http.on("POST /v1/session", { status: 201, body: { scope: "write", expires_at_ms: 1 } });
+    http.on("GET /v1/agents", { body: [] });
+    http.on("GET /v1/teams", { body: ["crew", "ops"] });
+    const conversation = build();
+    await conversation.connect("tok");
+    await settle();
+
+    http.on("GET /v1/teams/ops", {
+      body: { team: "ops", members: [member({ team: "ops", name: "oncall" })], tasks: [] },
+    });
+    await conversation.watchTeam("ops");
+    expect(conversation.getSnapshot().session.team).toBe("ops");
+    expect(conversation.getSnapshot().session.members[0]!.name).toBe("oncall");
+  });
+
+  it("shows an empty sheet, not an error, when the box has no teams at all", async () => {
+    http.on("POST /v1/session", { status: 201, body: { scope: "write", expires_at_ms: 1 } });
+    http.on("GET /v1/agents", { body: [] });
+    http.on("GET /v1/teams", { body: [] });
+    const conversation = build();
+    await conversation.connect("tok");
+    await settle();
+
+    await run(conversation, "/team");
+    const state = conversation.getSnapshot().session;
+    expect(state.pane).toBe("team");
+    expect(state.team).toBeNull();
+    expect(state.teams).toEqual([]);
+  });
+
+  /** An older daemon has no such route; that must not break the sheet. */
+  it("carries on when the daemon cannot list teams", async () => {
+    const conversation = await connected();
+    await run(conversation, "/team");
+    expect(conversation.getSnapshot().session.pane).toBe("team");
+    expect(conversation.getSnapshot().session.team).toBeNull();
+  });
+
+  /** A wrong name must not look like a team nobody has joined. */
+  it("says so when the daemon has never heard of the team", async () => {
+    http.on("POST /v1/session", { status: 201, body: { scope: "write", expires_at_ms: 1 } });
+    http.on("GET /v1/agents", { body: [] });
+    http.on("GET /v1/teams/ghost", { status: 404, body: { detail: "no team named ghost" } });
+    const conversation = new Conversation({
+      client: new JodClient({ fetch: http.fetch, eventSource: spy.factory }),
+      team: "ghost",
+      scopeMemory: memory,
+      originMemory: origins,
+      protocol: "https:",
+    });
+    await conversation.connect("tok");
+    await settle();
+
+    expect(notices(conversation).at(-1)).toContain("could not read team ghost");
+  });
+
+  /** Stale beats blank: a dropped read must not empty a board that was true. */
+  it("keeps the last known board when a refresh fails", async () => {
+    const conversation = await watching("crew");
+    http.on("GET /v1/teams/crew", { status: 500, body: { detail: "boom" } });
+    await conversation.refreshTeam();
+    expect(conversation.getSnapshot().session.members[0]!.name).toBe("scout");
   });
 });

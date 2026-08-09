@@ -1,8 +1,8 @@
 # Jod for iPhone
 
 `jod tui` in your pocket: one conversation, threaded across turns, with the
-agents panel behind it — wearing the desktop client's face instead of a
-terminal's.
+slash commands, the live tool output, and the agents and team panels behind it —
+wearing the desktop client's face instead of a terminal's.
 
 ---
 
@@ -87,8 +87,8 @@ Then type. The turn runs on the box in its own tmux session and streams back.
 ```
 npm install
 npm run dev            # http://localhost:5174, proxying /v1 to the daemon
-npm run check          # tsc --noEmit && vitest run   (146 tests)
-npm run test:e2e       # 27 more, in WebKit at an iPhone viewport
+npm run check          # tsc --noEmit && vitest run   (240 tests)
+npm run test:e2e       # 38 more, in WebKit at an iPhone viewport
 ```
 
 Point dev at a real orchestrator with `JOD_API_ORIGIN=http://127.0.0.1:8787`, or
@@ -112,28 +112,80 @@ has no UI, so clients are interchangeable, and this one is the third:
 
 ## Parity with the TUI
 
-The transcript vocabulary, the resume cursor, the busy guard, the thinking
-toggle, the agents panel and the status line are ported from
-[`cli/src/tui/app.rs`](../../cli/src/tui/app.rs) — and held there by tests that
-assert what the Rust suite asserts, so the two cannot drift quietly.
+The transcript vocabulary, the resume cursor, the busy guard, the slash
+commands, the tool output, the panes and the status line are ported from
+[`cli/src/tui/`](../../cli/src/tui/) — `app.rs` for the state, `command.rs` for
+the commands, `mod.rs` for what each one does — and held there by tests that
+assert what the Rust suite asserts, case for case, so the two cannot drift
+quietly.
 
 | TUI | Here | Same? |
 |---|---|---|
-| transcript: you · agent · thinking · tool · done · notice · raw | identical seven | yes |
+| transcript: you · agent · thinking · tool · tool output · done · notice · raw | identical eight | yes |
+| `Bash · cargo test`, not a bare `Bash` | identical, same key order | yes |
+| tool output shown, failures always shown | identical rule | yes |
+| a result with no call announced invents the call line | identical | yes |
 | resume advances to the session the harness reported | identical | yes |
+| the reported model is shown but never re-requested | identical | yes |
 | refuses a second prompt while one is in flight | identical | yes |
-| `Ctrl-T` thinking toggle | THINK button | yes |
-| `Ctrl-A` agents panel | AGENTS bottom sheet | yes |
-| `Ctrl-L` clear | clear | yes |
+| a slash command runs while an agent is busy | identical | yes |
+| `/help` `/harness` `/model` `/thinking` `/details` `/new` `/sessions` `/resume` `/agents` `/team` `/clear` `/exit` | identical twelve | yes |
+| completion popup, arguments completed too | identical list, tap to accept | yes |
+| switching harness starts a fresh conversation, drops model and spend | identical | yes |
+| `/resume` accepts a prefix of an agent id or a session id | identical | yes |
+| `Ctrl-T` thinking toggle | THINK button, or `/thinking` | yes |
+| `Ctrl-A` agents panel | AGENTS bottom sheet, or `/agents` | yes |
+| `Ctrl-G` team panel | TEAM bottom sheet, or `/team` | yes |
+| `Ctrl-L` clear | clear, or `/clear` | yes |
 | status: harness · model · cost · working/ready | identical string | yes |
 | scrolling up is not undone by new output | identical rule | yes |
 | `Ctrl-W` / `Ctrl-U` / byte cursor | — | no, iOS has a caret |
+| `Tab` / `↑↓` drive the popup | tap the row | no, same list |
 | line-counted scrollback | native scroll view | no, same rule |
+| `/exit` leaves the TUI | stops watching; the agent keeps running | no, same outcome |
 | Enter sends | Enter newlines; SEND sends | **deliberately not** |
 
 That last row is the one considered change. On a terminal the return key is a
 deliberate act; under a thumb it is an accident, and the accident starts a real
 process on the box.
+
+Three rows say "no", and each is the same reason: the TUI's *mechanism* has no
+meaning here, so the *rule* was ported instead of the keystroke. There is no
+`Ctrl-W` because iOS gives a real caret and reimplementing readline on top of it
+would be worse, not more faithful. There is no highlighted suggestion to move
+with arrows because the finger goes straight to the row. And an app cannot quit
+itself on iOS — but `/exit` was never really about quitting, it was about
+leaving while the work carries on, which is exactly what it does.
+
+### Teams, and why the sheet is read-only
+
+`Ctrl-G` shows a cross-harness team: a lead on Claude Code with teammates on AGY
+and OpenCode, coordinating through one inbox. The TUI reads that straight out of
+SQLite, which a phone cannot do, so this branch adds two read-only routes to
+`jod-api`:
+
+```
+GET /v1/teams            → ["crew"]
+GET /v1/teams/{team}     → { team, members, tasks }
+```
+
+Both need only `read` scope. Nothing else was added, and deliberately: joining,
+claiming and messaging are how a *teammate* participates, and a teammate is an
+agent on the box with a tmux session. A phone watches the board; it does not
+play on it.
+
+Roster and board come back in **one** request, because the sheet draws them
+together and a board from one moment against a roster from another is a screen
+that was never true.
+
+Point the app at a team by passing `team` when the conversation is built:
+
+```ts
+new Conversation({ client, team: "crew" });
+```
+
+With no team named, the sheet says so rather than showing an empty board — the
+same rule as `jod tui --team`.
 
 ## Three things a phone breaks, and what handles them
 
@@ -176,7 +228,7 @@ that was already correct.
 
 ## Tests
 
-146 tests, no device and no Mac required.
+240 tests, no device and no Mac required.
 
 ```
 npm run check
@@ -184,11 +236,12 @@ npm run check
 
 | Suite | Covers |
 |---|---|
-| `session.test.ts` (45) | the reducer, against `cli/src/tui/app.rs`'s behaviour |
-| `client.test.ts` (27) | the wire contract: cursors, framing, problem docs |
-| `conversation.test.ts` (46) | the rules — sending, threading, recovery, auth |
+| `session.test.ts` (79) | the reducer, against `cli/src/tui/app.rs`'s behaviour |
+| `conversation.test.ts` (66) | the rules — sending, threading, commands, teams, recovery, auth |
+| `client.test.ts` (31) | the wire contract: cursors, framing, problem docs |
+| `app.test.tsx` (28) | the screen, rendered in jsdom |
+| `commands.test.ts` (24) | the parser and the completion list, case for case with `command.rs` |
 | `origin.test.ts` (12) | where the daemon is, and what is not a usable address |
-| `app.test.tsx` (16) | the screen, rendered in jsdom |
 
 Everything that can be got wrong lives in three platform-free modules —
 `session.ts` (a pure reducer), `client.ts` (transport, with `fetch` and
@@ -200,7 +253,7 @@ the glass.
 `tests/test.sh` is the CI-discoverable entry point, so this suite runs on every
 push rather than on whoever remembered to type `npm test`.
 
-### And 27 more in WebKit, the engine iOS actually uses
+### And 38 more in WebKit, the engine iOS actually uses
 
 ```
 npx playwright install --with-deps webkit    # once

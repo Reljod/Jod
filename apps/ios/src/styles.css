@@ -198,6 +198,17 @@ button {
 .entry.tool.failed {
   color: var(--red);
 }
+/* Tool output sits under its call, dimmer than the call itself and in a
+   slightly smaller face, so a six-line `cargo test` tail reads as evidence
+   rather than as the agent talking. */
+.entry.tool_out {
+  color: var(--steel);
+  font-size: 12.5px;
+  padding-left: 10px;
+}
+.entry.tool_out.failed {
+  color: var(--red);
+}
 .entry.done {
   color: var(--steel);
   border-top: 1px dashed var(--line);
@@ -251,6 +262,49 @@ button {
   min-height: 0;
   display: flex;
   flex-direction: column;
+}
+
+/* ─── completions ─────────────────────────────────────────────────────────── */
+
+/* Above the composer, not over the transcript: the keyboard owns the bottom
+   third of the screen and a popup drawn anywhere else would be under it. */
+.completions {
+  display: flex;
+  flex-direction: column;
+  max-height: 34vh;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  border-top: 1px solid var(--line);
+  background: #060c14;
+}
+
+.completion {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  /* 44px, Apple's minimum, for the same reason every other control here is. */
+  min-height: 44px;
+  padding: 0 14px;
+  text-align: left;
+  border-bottom: 1px solid #0d1521;
+}
+.completion:active {
+  background: #0e1622;
+}
+
+.completion .cmd {
+  color: var(--cyan);
+  font-size: 14px;
+  flex: none;
+}
+
+.completion .hint {
+  color: var(--steel);
+  font-size: 12px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* ─── composer ────────────────────────────────────────────────────────────── */
@@ -418,6 +472,69 @@ button {
   color: var(--red);
   font-size: 11px;
   letter-spacing: 0.1em;
+}
+
+.resume {
+  min-height: 44px;
+  min-width: 44px;
+  color: var(--cyan);
+  font-size: 11px;
+  letter-spacing: 0.1em;
+}
+
+/* ─── team sheet ──────────────────────────────────────────────────────────── */
+
+/* A second header inside the same panel, dividing roster from board. */
+.sheet header.subhead {
+  border-top: 1px solid var(--line);
+}
+
+.sheet .role {
+  color: var(--steel);
+  font-size: 11px;
+  flex: none;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* A member's lifecycle reuses the agent badges, plus the two states only a
+   teammate has. */
+.badge.ready {
+  color: var(--mint);
+  border-color: #14503c;
+}
+.badge.busy {
+  color: var(--amber);
+  border-color: #4a3a12;
+}
+.badge.shutdown,
+.badge.shutdown_requested {
+  color: #5a7189;
+}
+.badge.error {
+  color: var(--red);
+  border-color: #4d1620;
+}
+
+.sheet .board li {
+  min-height: 44px;
+}
+
+.sheet .mark {
+  flex: none;
+  width: 16px;
+  text-align: center;
+}
+.sheet .mark.done {
+  color: var(--mint);
+}
+.sheet .mark.claimed {
+  color: var(--amber);
+}
+.sheet .mark.open {
+  color: var(--steel);
 }
 
 /* ─── auth gate ───────────────────────────────────────────────────────────── */
