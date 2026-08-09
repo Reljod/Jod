@@ -47,5 +47,19 @@ export default defineConfig({
     // suite opts into jsdom with a `@vitest-environment` docblock.
     environment: "node",
     include: ["test/**/*.test.ts", "test/**/*.test.tsx"],
+    coverage: {
+      provider: "v8",
+      // A hard failure, matching core and the desktop client. A coverage
+      // number nobody blocks on is a number that only ever goes down.
+      thresholds: { lines: 95, functions: 95, statements: 95, branches: 90 },
+      include: ["src/**/*.{ts,tsx}"],
+      exclude: [
+        // The Vite entrypoint: mounts React into the DOM and nothing else.
+        "src/main.tsx",
+        // Type-only re-exports of apps/web's API contract; erased at compile
+        // time, so there is nothing to execute.
+        "src/contract.ts",
+      ],
+    },
   },
 });
