@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/mobile-schema.json",
+  "identifier": "default",
+  "description": "The iOS shell registers no commands — every capability comes from jod-api over HTTP — so it needs nothing beyond Tauri's core defaults.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

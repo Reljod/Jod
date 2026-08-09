@@ -1,0 +1,30 @@
+[package]
+name = "jod-ios"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Jod for iPhone — a shell around the web client, talking to jod-api."
+
+# Its own workspace root, deliberately.
+#
+# The root `Cargo.toml` lists `core`, `cli` and `api` — the things that build on
+# the VPS. This crate only ever builds on a Mac with Xcode, and pulling it into
+# that workspace would put an iOS-only dependency tree in front of every
+# `cargo test` on Linux. Declaring `[workspace]` here detaches it, so `cargo
+# test` at the repo root is unaffected by this directory existing.
+#
+# The cost is that versions are spelled out rather than inherited. That is the
+# right trade for a crate the VPS never compiles.
+[workspace]
+
+[lib]
+# `staticlib` is what the iOS build links against; the others keep `cargo check`
+# and desktop debugging working.
+name = "jod_ios_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
