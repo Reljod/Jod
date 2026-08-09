@@ -23,6 +23,13 @@ on:
 env:
   CARGO_TERM_COLOR: always
   COVERAGE_FLOOR: 95
+  # Terminal lifecycle only: raw mode, the alternate screen and the panic hook.
+  # It acts on the real controlling TTY, so a test that succeeded there would
+  # put the developer's own shell into raw mode with no echo — the very failure
+  # the module exists to prevent — and a faked one would assert nothing. Kept to
+  # ~20 lines and verified by running `jod tui`. Everything it wraps lives in
+  # `event_loop`, which is generic over the backend so it can be driven headless.
+  UNTESTABLE: 'tui/terminal\.rs'
 
 jobs:
   test:
@@ -50,6 +57,33 @@ jobs:
           cargo llvm-cov -p jod-core \
             --fail-under-lines "$COVERAGE_FLOOR" \
             --summary-only
+
+      # The TUI is gated as its own unit: cli as a whole cannot hold 95 yet
+      # (main.rs's async dispatch is at 29%), but cli/src/tui is at 97-99% and
+      # would silently rot if nothing held it there.
+      - name: Hold the TUI to the coverage floor
+        run: |
+          cargo llvm-cov -p jod-cli \
+            --ignore-filename-regex "$UNTESTABLE" \
+            --summary-only --json --output-path /tmp/cli-cov.json
+          python3 - <<'PY'
+          import json, sys
+          floor = 95.0
+          data = json.load(open("/tmp/cli-cov.json"))
+          files = data["data"][0]["files"]
+          tui = [f for f in files if "/tui/" in f["filename"]]
+          if not tui:
+              sys.exit("no cli/src/tui files were measured — did the path move?")
+          covered = sum(f["summary"]["lines"]["covered"] for f in tui)
+          total = sum(f["summary"]["lines"]["count"] for f in tui)
+          pct = 100.0 * covered / total
+          for f in sorted(tui, key=lambda f: f["filename"]):
+              s = f["summary"]["lines"]
+              print(f"  {f['filename'].split('/')[-1]:<10} {s['percent']:.2f}%")
+          print(f"  {'TUI':<10} {pct:.2f}% (floor {floor}%)")
+          if pct < floor:
+              sys.exit(f"TUI coverage {pct:.2f}% is below the {floor}% floor")
+          PY
 
       - name: Report coverage for every crate
         if: always()

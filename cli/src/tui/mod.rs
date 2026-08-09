@@ -11,25 +11,21 @@
 //! as well as run on the normal path.
 
 mod app;
+mod terminal;
 mod ui;
 
 pub use app::{AgentLine, App, Entry, Pane};
+pub use terminal::run;
 
 use std::io;
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use crossterm::event::{
-    DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyCode, KeyEvent, KeyEventKind,
-    KeyModifiers, MouseEventKind,
-};
-use crossterm::execute;
-use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind,
 };
 use futures::StreamExt;
 use jod_core::{AgentEvent, HarnessKind, Jod, PermissionPolicy, Resume, SpawnRequest};
-use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use std::path::PathBuf;
 
@@ -39,37 +35,6 @@ pub struct Options {
     pub model: Option<String>,
     pub permission: PermissionPolicy,
     pub resume: Resume,
-}
-
-pub async fn run(jod: Arc<Jod>, opts: Options) -> Result<()> {
-    let mut terminal = enter().context("taking over the terminal")?;
-    let mut keys = EventStream::new();
-    let result = event_loop(&mut terminal, &mut keys, jod, opts).await;
-    // Restore before surfacing any error, or the message prints into a raw-mode
-    // terminal that mangles it.
-    restore();
-    result
-}
-
-fn enter() -> Result<Terminal<CrosstermBackend<io::Stdout>>> {
-    enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
-
-    // A panic past this point would otherwise leave the shell in raw mode with
-    // no echo — effectively broken until the user blindly types `reset`.
-    let hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        restore();
-        hook(info);
-    }));
-
-    Ok(Terminal::new(CrosstermBackend::new(stdout))?)
-}
-
-fn restore() {
-    let _ = disable_raw_mode();
-    let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture);
 }
 
 /// The loop itself, over *any* backend and *any* source of key events.
