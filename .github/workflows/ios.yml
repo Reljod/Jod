@@ -80,47 +80,26 @@ jobs:
           fi
 
       - name: Build the app for the simulator
-        # Unsigned, for the simulator: this is the step that proves the Rust
-        # staticlib links against UIKit/WebKit and yields a real .app.
-        run: |
-          set -euxo pipefail
-          cd src-tauri/gen/apple
-
-          if compgen -G "*.xcworkspace" > /dev/null; then
-            container=(-workspace "$(ls -d *.xcworkspace | head -1)")
-            key=workspace
-          else
-            container=(-project "$(ls -d *.xcodeproj | head -1)")
-            key=project
-          fi
-
-          xcodebuild -list "${container[@]}"
-          scheme=$(xcodebuild -list "${container[@]}" -json \
-            | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const j=JSON.parse(s);const c=j['$key']||{};console.log((c.schemes||[])[0]||'')})")
-          test -n "$scheme"
-          echo "building scheme '$scheme'"
-
-          # `release`, not `debug`, and not as a preference: the generated
-          # "Build Rust Code" phase shells out to `tauri ios xcode-script`,
-          # which in debug expects the dev-server address file that `tauri ios
-          # dev` writes. Building standalone there panics with
-          # "failed to read missing addr file …-server-addr". Release resolves
-          # the frontend from `frontendDist` instead, which is what shipping
-          # actually does.
-          xcodebuild \
-            "${container[@]}" \
-            -scheme "$scheme" \
-            -configuration release \
-            -sdk iphonesimulator \
-            -derivedDataPath "$GITHUB_WORKSPACE/apps/ios/build" \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
-            build
+        # Driven through `tauri ios build`, not `xcodebuild` directly, and that
+        # is not a stylistic choice. The generated project's "Build Rust Code"
+        # phase shells back out to `tauri ios xcode-script`, which reads a state
+        # file the *parent* Tauri command writes. Invoking xcodebuild on its own
+        # skips the parent, so the script phase panics with
+        # "failed to read missing addr file …-server-addr" — in debug *and*
+        # release. The CLI owns this handshake; let it.
+        #
+        # `--target aarch64-sim` keeps it unsigned and simulator-bound: a device
+        # build needs an Apple developer certificate this repo does not hold.
+        run: npx tauri ios build --target aarch64-sim -v
 
       - name: Boot a simulator, install the app, and launch it
         run: |
           set -euxo pipefail
-          app=$(find build/Build/Products -maxdepth 3 -name '*.app' | head -1)
+          # Tauri puts the simulator bundle under gen/apple's own build dir;
+          # search broadly rather than pinning a layout that moves between CLI
+          # versions.
+          find src-tauri/gen/apple -name '*.app' -maxdepth 6 -print || true
+          app=$(find src-tauri/gen/apple -name '*.app' -maxdepth 6 | head -1)
           test -n "$app"
           echo "built: $app"
           bundle_id=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Info.plist")
@@ -159,5 +138,5 @@ jobs:
           name: ios-simulator
           path: |
             apps/ios/simulator.png
-            apps/ios/build/Build/Products/**/*.app
+            apps/ios/src-tauri/gen/apple/build/**/*.app
           if-no-files-found: warn
