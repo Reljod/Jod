@@ -58,22 +58,28 @@ glue.
 
 ## The application
 
-Jod is also a program you run. It delegates work to agent harnesses — it never
-answers a prompt itself — and gives you one place to watch every agent at once.
+Jod is also a program you run. It lives on a VPS and stays up. It delegates work
+to agent harnesses — it never answers a prompt itself — and gives you one place
+to watch every agent at once.
 
 | | | |
 |---|---|---|
-| 🦀 | [`crates/jod-core`](./crates/jod-core) | the service: harness seam, tmux runner, event stream |
-| 🖥️ | [`apps/desktop`](./apps/desktop) | Tauri v2 shell over the core |
-| 📱 | iOS, VPS daemon | *planned — same core behind an API* |
+| 🦀 | [`core/`](./core) | the service: harness seam, tmux runner, event stream, memory |
+| ⌨️ | [`cli/`](./cli) | the `jod` command — delegate, watch, remember, chat |
+| 📱 | HTTP API, mobile | *planned — same core behind an API* |
 
-Each delegated task runs in its own `tmux` session under **Claude Code** or
-**OpenCode**, so you can attach to any agent, kill it, or close the app without
-stopping the work. Output from both harnesses is normalised into one event
-vocabulary, and runs stay readable as plain files under `~/.jod`.
+Each delegated task runs in its own `tmux` session under **Claude Code**,
+**OpenCode** or **AGY**, so you can attach to any agent, kill it, or log out
+without stopping the work. Output from all three is normalised into one event
+vocabulary; runs stay readable as plain files under `~/.jod`, and everything Jod
+learns lands in one SQLite file beside them.
 
 ```sh
-cd apps/desktop && pnpm install && pnpm tauri dev
+cargo build --release
+./target/release/jod harnesses            # what's installed
+./target/release/jod run "summarise my inbox"
+./target/release/jod chat                 # a conversation, not a one-shot
+./target/release/jod recall "what do I prefer for tasks"
 ```
 
 The full design — including the planned knowledge graph (Open Knowledge Format
@@ -250,8 +256,9 @@ agents/            the four subagents, where a plugin reads them from
 .claude/agents/    the same four, so they work here without the plugin
 .agents/skills/    the portable toolkit — reusable Claude Code skills
 domains/           personal operating notes, one per area of Reljod's life
-crates/jod-core    the orchestrator service — harnesses, tmux, event stream
-apps/desktop/      the Tauri desktop app, a thin shell over jod-core
+core/              the orchestrator service — harnesses, tmux, events, memory
+cli/               the `jod` command, the way you talk to it
+research/          the measured groundwork the design rests on
 ```
 
 Start with [`AGENTS.md`](./AGENTS.md) — it's the whole point.

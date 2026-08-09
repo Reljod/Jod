@@ -10,10 +10,11 @@ skill that owns it.
 **Jod** is Reljod's autonomous agent — a duplicate of how he plans, decides, and
 executes, to be delegated to like a competent chief of staff. Three parts:
 
-- **`crates/` + `apps/`** — Jod the program. `jod-core` delegates tasks to agent
-  harnesses (Claude Code, OpenCode), one tmux session each, and normalises their
-  output into one event stream; `apps/desktop` is a thin Tauri shell over it.
-  Jod never does the work itself. → [design](docs/jod-system.md)
+- **`core/` + `cli/`** — Jod the program, resident on a VPS. `jod-core` delegates
+  tasks to agent harnesses (Claude Code, OpenCode, AGY), one tmux session each,
+  normalises their output into one event stream, and keeps runs and memory in
+  one SQLite file; `cli/` is the `jod` command over it. Jod never does the work
+  itself. → [design](docs/jod-system.md)
 - **`.agents/`** — the portable toolkit. Skills that depend on nothing below
   them, so the directory drops into any repo unchanged. Skills reach their own
   bundled scripts through `${CLAUDE_SKILL_DIR}`, never a repo-relative path —
