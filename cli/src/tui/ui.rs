@@ -304,12 +304,19 @@ pub fn wrap(text: &str, width: usize, indent: usize) -> Vec<String> {
     let width = width.saturating_sub(indent).max(1);
     let mut out = Vec::new();
     for raw in text.split('\n') {
-        if raw.is_empty() {
+        if raw.trim().is_empty() {
             out.push(String::new());
             continue;
         }
+        // Leading spaces are content, not separators. Splitting on ' ' throws
+        // them away, which silently reflowed every code block the agent
+        // printed — `def f():` and its body ended up in the same column.
+        let lead: String = raw.chars().take_while(|c| *c == ' ').collect();
+        let body = raw[lead.len()..].to_string();
+        let width = width.saturating_sub(lead.chars().count()).max(1);
+        let before = out.len();
         let mut line = String::new();
-        for word in raw.split(' ') {
+        for word in body.split(' ') {
             // A word longer than the line gets hard-split rather than
             // overflowing the pane.
             if word.chars().count() > width {
@@ -342,6 +349,12 @@ pub fn wrap(text: &str, width: usize, indent: usize) -> Vec<String> {
             }
         }
         out.push(line);
+        // Re-apply the indent to every line this source line produced.
+        for produced in out.iter_mut().skip(before) {
+            if !produced.is_empty() {
+                produced.insert_str(0, &lead);
+            }
+        }
     }
     out
 }
@@ -642,6 +655,36 @@ mod tests {
             .collect();
         let _ = rendered(&a, 30, 8);
         let _ = rendered(&a, 12, 5);
+    }
+
+    /// Regression: agents print code, and splitting on spaces threw the
+    /// leading ones away — `def f():` and its body came out in one column.
+    #[test]
+    fn code_indentation_survives_wrapping() {
+        let code = "def greet(name):\n    return f\"Hello, {name}!\"";
+        let lines = wrap(code, 60, 0);
+        assert_eq!(lines[0], "def greet(name):");
+        assert_eq!(lines[1], "    return f\"Hello, {name}!\"");
+    }
+
+    #[test]
+    fn a_wrapped_indented_line_keeps_its_indent_on_every_row() {
+        let lines = wrap("    alpha beta gamma delta", 14, 0);
+        assert!(lines.len() > 1, "should have wrapped: {lines:?}");
+        for line in &lines {
+            assert!(line.starts_with("    "), "lost the indent: {line:?}");
+        }
+    }
+
+    #[test]
+    fn deeper_indentation_is_preserved_too() {
+        let lines = wrap("        deeply nested", 40, 0);
+        assert_eq!(lines[0], "        deeply nested");
+    }
+
+    #[test]
+    fn a_whitespace_only_line_stays_blank() {
+        assert_eq!(wrap("a\n   \nb", 20, 0), vec!["a", "", "b"]);
     }
 
     #[test]
