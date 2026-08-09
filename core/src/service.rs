@@ -224,24 +224,30 @@ impl Jod {
         Ok(loaded)
     }
 
-    /// Events after `after_seq` for one agent, oldest first.
+    /// Events after `after` for one agent, oldest first. `None` means "I have
+    /// seen nothing", and returns the run from its very first event.
     ///
     /// Serves a reconnecting client the tail it missed rather than the whole
     /// transcript. Falls back to the database when this process did not launch
-    /// the agent itself.
-    pub async fn events_since(&self, id: &str, after_seq: u64) -> Result<Vec<AgentEnvelope>> {
+    /// the agent itself, so a client can reattach to a run started by an
+    /// earlier process.
+    ///
+    /// The cursor is an `Option` because sequences start at 0: no integer can
+    /// mean "nothing yet", and taking `0` for it would silently drop the
+    /// `Started` event that carries the session id and model.
+    pub async fn events_since(&self, id: &str, after: Option<u64>) -> Result<Vec<AgentEnvelope>> {
         let guard = self.state.read().await;
         if let Some(record) = guard.agents.get(id) {
             return Ok(record
                 .events
                 .iter()
-                .filter(|e| e.seq > after_seq)
+                .filter(|e| after.is_none_or(|a| e.seq > a))
                 .cloned()
                 .collect());
         }
         drop(guard);
         match &self.store {
-            Some(store) => store.events_since(id, after_seq, 10_000),
+            Some(store) => store.events_since(id, after, 10_000),
             None => Err(JodError::UnknownAgent(id.to_string())),
         }
     }
@@ -424,7 +430,11 @@ impl Jod {
                 .iter()
                 .filter(|a| a.status == AgentStatus::Killed)
                 .count(),
-            total_cost_usd: agents.iter().filter_map(|a| a.usage.cost_usd).sum(),
+            // Rust's f64 `Sum` folds from -0.0, so a run with no reported cost
+            // serialises as `-0.0`. It parses back as zero, but it reads like a
+            // bug in any UI that shows it. Adding 0.0 normalises the sign and
+            // leaves every real total untouched.
+            total_cost_usd: agents.iter().filter_map(|a| a.usage.cost_usd).sum::<f64>() + 0.0,
             agents,
         }
     }
@@ -729,23 +739,47 @@ mod tests {
     async fn a_reconnecting_client_is_served_only_the_events_it_missed() {
         let jod = Jod::with_store(store_with_one_finished_run());
         jod.rehydrate(100).await.unwrap();
-        let tail = jod.events_since("past", 0).await.unwrap();
+        let tail = jod.events_since("past", Some(0)).await.unwrap();
         assert_eq!(tail.len(), 1);
         assert_eq!(tail[0].seq, 1);
+    }
+
+    /// Regression: a client with no cursor must be served the run from its
+    /// first event. Reading "no cursor" as `0` dropped `seq` 0 — the `Started`
+    /// event carrying the session id and model — so a run appeared to have no
+    /// beginning.
+    #[tokio::test]
+    async fn a_client_with_no_cursor_is_served_the_start_of_the_run() {
+        let jod = Jod::with_store(store_with_one_finished_run());
+        jod.rehydrate(100).await.unwrap();
+        let all = jod.events_since("past", None).await.unwrap();
+        assert_eq!(all.len(), 2, "the whole run, including seq 0");
+        assert_eq!(all[0].seq, 0);
+        assert!(matches!(all[0].event, AgentEvent::Message { .. }));
+    }
+
+    /// The same must hold when the run is served from the database rather than
+    /// from this process's memory.
+    #[tokio::test]
+    async fn a_run_this_process_never_launched_is_also_served_from_its_start() {
+        let jod = Jod::with_store(store_with_one_finished_run());
+        let all = jod.events_since("past", None).await.unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].seq, 0);
     }
 
     /// An agent this process never launched still has a transcript on disk.
     #[tokio::test]
     async fn the_tail_of_an_unknown_agent_comes_from_the_database() {
         let jod = Jod::with_store(store_with_one_finished_run());
-        let tail = jod.events_since("past", 0).await.unwrap();
+        let tail = jod.events_since("past", Some(0)).await.unwrap();
         assert_eq!(tail.len(), 1);
         assert_eq!(tail[0].seq, 1);
     }
 
     #[tokio::test]
     async fn asking_for_the_tail_of_a_truly_unknown_agent_without_a_store_errors() {
-        assert!(Jod::new().events_since("nope", 0).await.is_err());
+        assert!(Jod::new().events_since("nope", None).await.is_err());
     }
 
     #[tokio::test]

@@ -353,30 +353,39 @@ impl Store {
         Ok(out)
     }
 
-    /// Events after `after_seq`, oldest first.
+    /// Events after `after`, oldest first. `None` means "I have seen nothing",
+    /// and returns the run from its very first event.
     ///
     /// This is what lets a client that dropped its connection replay only the
     /// tail: it remembers the last `seq` it saw and asks for what followed,
     /// rather than re-fetching a transcript it already has.
+    ///
+    /// The cursor is an `Option` rather than a plain number because sequences
+    /// start at 0, so no integer can mean "nothing yet". Taking `0` for that
+    /// would skip `seq` 0 — the `Started` event, the one carrying the session
+    /// id and the model — and a client would render a run that never began.
     pub fn events_since(
         &self,
         run_id: &str,
-        after_seq: u64,
+        after: Option<u64>,
         limit: usize,
     ) -> Result<Vec<AgentEnvelope>> {
         let conn = self.conn.lock().expect("store lock poisoned");
         let mut stmt = conn.prepare(
             "SELECT run_id, seq, at_ms, payload FROM events
-             WHERE run_id = ?1 AND seq > ?2 ORDER BY seq LIMIT ?3",
+             WHERE run_id = ?1 AND (?2 IS NULL OR seq > ?2) ORDER BY seq LIMIT ?3",
         )?;
-        let rows = stmt.query_map(params![run_id, after_seq as i64, limit as i64], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, i64>(1)?,
-                r.get::<_, i64>(2)?,
-                r.get::<_, String>(3)?,
-            ))
-        })?;
+        let rows = stmt.query_map(
+            params![run_id, after.map(|s| s as i64), limit as i64],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, String>(3)?,
+                ))
+            },
+        )?;
         let mut out = Vec::new();
         for row in rows {
             let (agent_id, seq, at_ms, payload) = row?;
@@ -725,7 +734,7 @@ mod tests {
                 .unwrap();
         }
         let tail: Vec<u64> = s
-            .events_since("r1", 2, 100)
+            .events_since("r1", Some(2), 100)
             .unwrap()
             .iter()
             .map(|e| e.seq)
@@ -733,11 +742,46 @@ mod tests {
         assert_eq!(tail, vec![3, 4]);
     }
 
+    /// Regression: sequences start at 0, so a cursor of `0` cannot mean "I have
+    /// seen nothing" — reading it that way skipped `seq` 0, which is the
+    /// `Started` event carrying the session id and the model. A client would
+    /// render a run that never began.
+    #[test]
+    fn a_fresh_connection_is_served_the_very_first_event() {
+        let s = store();
+        for seq in 0..3 {
+            s.append_event(&envelope("r1", seq, &format!("m{seq}")))
+                .unwrap();
+        }
+        let all: Vec<u64> = s
+            .events_since("r1", None, 100)
+            .unwrap()
+            .iter()
+            .map(|e| e.seq)
+            .collect();
+        assert_eq!(all, vec![0, 1, 2], "seq 0 must not be suppressed");
+    }
+
+    #[test]
+    fn a_cursor_of_zero_still_means_after_the_first_event() {
+        let s = store();
+        for seq in 0..3 {
+            s.append_event(&envelope("r1", seq, "m")).unwrap();
+        }
+        let tail: Vec<u64> = s
+            .events_since("r1", Some(0), 100)
+            .unwrap()
+            .iter()
+            .map(|e| e.seq)
+            .collect();
+        assert_eq!(tail, vec![1, 2]);
+    }
+
     #[test]
     fn replaying_from_the_end_returns_nothing_rather_than_erroring() {
         let s = store();
         s.append_event(&envelope("r1", 0, "only")).unwrap();
-        assert!(s.events_since("r1", 0, 100).unwrap().is_empty());
+        assert!(s.events_since("r1", Some(0), 100).unwrap().is_empty());
     }
 
     #[test]
@@ -746,7 +790,7 @@ mod tests {
         for seq in 0..10 {
             s.append_event(&envelope("r1", seq, "m")).unwrap();
         }
-        assert_eq!(s.events_since("r1", 0, 3).unwrap().len(), 3);
+        assert_eq!(s.events_since("r1", None, 3).unwrap().len(), 3);
     }
 
     #[test]

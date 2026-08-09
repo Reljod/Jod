@@ -138,9 +138,7 @@ impl OpenCode {
         let part = part?;
         // A part with a `time` object but no `end` is still streaming.
         if let Some(time) = part.get("time") {
-            if time.get("end").is_none() {
-                return None;
-            }
+            time.get("end")?;
         }
         if let Some(id) = str_at(part, "id") {
             if !self.seen_parts.insert(id) {
