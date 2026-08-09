@@ -80,6 +80,10 @@ The full design — including the planned knowledge graph (Open Knowledge Format
 notes indexed by GraphQLite) and agent-to-agent messaging — is in
 [`docs/jod-system.md`](./docs/jod-system.md).
 
+**The current goal** is a TUI that matches OpenCode's feature for feature, runs
+agent teams, and streams reasoning live — identically across Claude Code,
+OpenCode and Antigravity. → [`docs/jod-tui.md`](./docs/jod-tui.md)
+
 ## The toolkit
 
 The reusable, project-agnostic layer — a set of Claude Code

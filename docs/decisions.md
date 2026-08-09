@@ -482,3 +482,56 @@ hostname` instead of a working command, which is why the domain note calls that
 failure out and says to ask for the entry rather than hard-code an address.
 
 The general rule: a public repo may name a host, never locate one.
+
+## Agent teams belong to Jod, not to a harness
+
+All three harnesses grow their own team feature. Antigravity ships
+`define_subagent`, `invoke_subagent`, `send_message`, `manage_inbox` and
+`manage_task` as built-in tools. OpenCode has agent teams behind
+`OPENCODE_EXPERIMENTAL_AGENT_TEAMS`. Claude Code shipped the original. Adopting
+whichever one is best would be far less code than building the mechanism.
+
+It would also be a trap. A harness's team feature can only ever contain that
+harness: OpenCode's teammates are OpenCode sessions, Antigravity's subagents are
+Antigravity's. Delegating teams to a harness makes Jod's team exactly as good as
+whichever harness it picked, re-picks that bet every time one of them ships a
+better version, and inherits an experimental flag as a load-bearing dependency.
+
+The team primitives are also small, and Jod already needs most of them. An inbox
+is an append-only JSONL file, which is the one thing Jod's tailer is already
+built to follow. Delivery is a synthetic user turn injected into the next
+prompt — which works on any harness that can resume a session by id, and all
+three can. The shared task list and member state are files beside the runs that
+are already there.
+
+So Jod owns the bus, and the harnesses stay interchangeable parts on it. That
+buys the capability none of the three has alone: one team whose lead runs on
+Claude Code and whose teammates run on Antigravity and OpenCode, coordinating
+through the same inbox. Cross-harness teams are only possible for something that
+sits above all the harnesses, which is the only thing Jod has ever been.
+
+The cost is that Jod's teams start behind whatever the harnesses ship, and a
+harness's own subagent tools remain available to agents inside a run — Jod
+neither blocks nor uses them. → [the goal](jod-tui.md)
+
+## Jod's own client is a TUI
+
+The desktop app came first because a prototype needs a window. The primary
+client is a terminal UI anyway, and the reason is that the transport already
+decided it.
+
+Agents run in tmux, over SSH, on a box that is reached by SSH
+([`domains/infra/`](../domains/infra/README.md)). A GUI is the one client that
+cannot follow work onto the machine the work runs on. Everything tmux was chosen
+for — attach to a live pane, kill from anywhere, survive the app closing, one
+transport on a laptop and a VPS alike — is worth less when the thing rendering
+it must run locally with a display.
+
+A TUI also costs almost nothing extra to keep honest: it renders `AgentEvent`
+and nothing else, the same stream the desktop app consumes. Two clients over one
+core is the seam working as designed, not duplicated work — which is why this
+does not replace `apps/desktop`.
+
+The bar is OpenCode's TUI rather than something smaller because the comparison
+is unavoidable: Jod runs OpenCode, so any Jod surface that is worse than
+OpenCode's own is a reason to bypass Jod. → [the goal](jod-tui.md)

@@ -33,9 +33,10 @@ management, tool use and permissions.
 
 ```
                     ┌──────────────────────────────┐
-   desktop (Tauri) ─┤                              │
-   iOS (planned)   ─┤          jod-core            │
-   VPS daemon      ─┤   service::Jod  (registry)   │
+   TUI (planned)   ─┤                              │
+   desktop (Tauri) ─┤          jod-core            │
+   iOS (planned)   ─┤   service::Jod  (registry)   │
+   VPS daemon      ─┤                              │
    CLI example     ─┤                              │
                     └───────────────┬──────────────┘
                                     │ spawn
@@ -89,8 +90,9 @@ pub trait Harness: Send {
 }
 ```
 
-Adding a third harness (Codex, Aider, Cursor CLI…) means one file. Nothing above
-the seam changes, because every harness is normalised into one vocabulary:
+Adding a third harness means one file — Antigravity (`agy`) is the next one, and
+is the test of that claim. Nothing above the seam changes, because every harness
+is normalised into one vocabulary:
 
 `Started · Thinking · Message · ToolCall · ToolResult · Finished · Raw · Error`
 
@@ -117,8 +119,11 @@ caller turns it into a digest without any new machinery.
 **Built:** agents run under Claude Code and OpenCode, each in its own tmux
 session, each managing its own context (the harness's job, not Jod's).
 
-**Planned:** agent-to-agent communication. The design follows the same
-local-files principle, so it needs no broker:
+**Planned:** agent-to-agent communication — the mechanism underneath **agent
+teams**, which Jod owns rather than borrowing from a harness, so a single team
+can span all three. → [the goal](jod-tui.md), [why](decisions.md)
+
+The design follows the same local-files principle, so it needs no broker:
 
 ```
 ~/.jod/
@@ -198,12 +203,20 @@ behind a small trait so the driver choice remains reversible.
 
 1. ~~Core service: harness seam, tmux runner, event normalisation~~ **done**
 2. ~~Desktop prototype (Tauri) driving Claude Code and OpenCode~~ **done**
-3. Persist and reattach runs across app restarts (`~/.jod/runs` is already there)
-4. A2A inbox/outbox + `jod-mcp` server
-5. Brain nodes: OKF writer/reader, plus a Notion sync
-6. Brain connections: GraphQLite index and query surface
-7. Headless daemon for a VPS — the same `jod-core` behind an authenticated API
-8. iOS client against that API
+
+The current goal is items 3–7: **a TUI that matches OpenCode's feature for
+feature, runs agent teams, and streams reasoning live — identically across
+Claude Code, OpenCode and Antigravity.** → [`jod-tui.md`](jod-tui.md)
+
+3. Antigravity (`agy`) as the third harness, behind the existing seam
+4. TUI skeleton: fleet list, live event stream, reasoning rendered as it arrives
+5. Persist and reattach runs across app restarts (`~/.jod/runs` is already there)
+6. Sessions and interaction: resume by id, multi-turn chat, inline permissions
+7. Agent teams: inbox/outbox, shared task list, auto-wake — plus `jod-mcp`
+8. Brain nodes: OKF writer/reader, plus a Notion sync
+9. Brain connections: GraphQLite index and query surface
+10. Headless daemon for a VPS — the same `jod-core` behind an authenticated API
+11. iOS client against that API
 
 ## Design rules
 
