@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <!--
+      `viewport-fit=cover` lets the layout reach under the notch and the home
+      indicator; `env(safe-area-inset-*)` in the stylesheet puts the content
+      back. `user-scalable=no` because a pinch-zoom on a chat transcript is
+      always an accident, and `maximum-scale=1` stops iOS auto-zooming when the
+      composer takes focus — which otherwise leaves the view scrolled sideways
+      with no way back.
+    -->
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"
+    />
+    <meta name="color-scheme" content="dark" />
+    <meta name="theme-color" content="#04070d" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Jod" />
+    <title>Jod</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

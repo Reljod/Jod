@@ -1,0 +1,487 @@
+/*
+ * The desktop client's visual language, at arm's length instead of at a desk.
+ *
+ * Same palette as `apps/web/src/render/palette.ts` — near-black ground, cyan
+ * for Claude Code, mint for OpenCode, violet for AGY, amber and red reserved
+ * for things a human should look at. Same monospace chrome, because the thing
+ * being displayed is a machine's output and a proportional face makes tool
+ * names and costs harder to scan.
+ *
+ * What changes for the phone is size, not style: 44px minimum touch targets,
+ * 16px minimum font in the composer (anything smaller and iOS zooms the page
+ * on focus), and a layout pinned to the safe areas.
+ */
+
+:root {
+  --bg: #04070d;
+  --bg-deep: #010307;
+  --panel: #080d16;
+  --line: #16202e;
+
+  --cyan: #35e0ff;
+  --mint: #4dffc3;
+  --violet: #b47cff;
+  --amber: #ffb547;
+  --red: #ff4d5e;
+  --steel: #7a94ad;
+  --white: #e2f4ff;
+
+  --mono: "JetBrains Mono", "SFMono-Regular", "SF Mono", Menlo, Consolas, monospace;
+
+  /* The keyboard's height, published by the visual-viewport listener in App. */
+  --keyboard: 0px;
+
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--white);
+  font-family: var(--mono);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  /* The transcript scrolls; the page must not, or the composer drifts away. */
+  overflow: hidden;
+  /* A long-press on a chat bubble should select text, not offer to copy the app. */
+  -webkit-touch-callout: none;
+  overscroll-behavior: none;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* ─── shell ───────────────────────────────────────────────────────────────── */
+
+.app {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto auto;
+  height: 100%;
+  padding-left: var(--safe-left);
+  padding-right: var(--safe-right);
+  /*
+   * iOS does not resize the layout viewport when the keyboard opens, so the
+   * composer would sit underneath it. `--keyboard` is measured from
+   * `visualViewport` and shifts the whole shell up by exactly that much.
+   */
+  padding-bottom: var(--keyboard);
+  transition: padding-bottom 120ms ease-out;
+}
+
+/* ─── top bar ─────────────────────────────────────────────────────────────── */
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: calc(var(--safe-top) + 8px) 12px 8px;
+  background: linear-gradient(180deg, var(--bg-deep), var(--bg));
+  border-bottom: 1px solid var(--line);
+}
+
+.brand {
+  font-weight: 700;
+  letter-spacing: 0.22em;
+  font-size: 13px;
+  color: var(--cyan);
+}
+
+.topbar .spacer {
+  flex: 1;
+}
+
+.linkdot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--steel);
+  flex: none;
+}
+.linkdot.live {
+  background: var(--mint);
+  box-shadow: 0 0 8px var(--mint);
+}
+.linkdot.probing {
+  background: var(--amber);
+}
+.linkdot.auth,
+.linkdot.offline {
+  background: var(--red);
+}
+
+/* 44px is Apple's minimum touch target, and the reason these look overlarge
+   next to the desktop client's 24px icon buttons. */
+.iconbtn {
+  min-width: 44px;
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 10px;
+  color: var(--steel);
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  border: 1px solid transparent;
+}
+.iconbtn:active {
+  background: #0e1622;
+}
+.iconbtn.on {
+  color: var(--cyan);
+  border-color: #123041;
+  background: #071722;
+}
+
+/* ─── transcript ──────────────────────────────────────────────────────────── */
+
+.transcript {
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  padding: 12px 12px 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.entry {
+  display: flex;
+  gap: 8px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+.entry .glyph {
+  flex: none;
+  width: 14px;
+  color: var(--steel);
+  user-select: none;
+}
+
+/* The user's own turn, cyan and right-weighted so the eye can find where a
+   question started when scrolling back through a long run. */
+.entry.you {
+  color: var(--cyan);
+  font-weight: 600;
+}
+.entry.agent {
+  color: var(--white);
+}
+.entry.thinking {
+  color: var(--steel);
+  font-style: italic;
+}
+.entry.tool {
+  color: var(--mint);
+}
+.entry.tool.failed {
+  color: var(--red);
+}
+.entry.done {
+  color: var(--steel);
+  border-top: 1px dashed var(--line);
+  padding-top: 8px;
+}
+.entry.done.failed {
+  color: var(--red);
+}
+.entry.notice {
+  color: var(--amber);
+}
+.entry.raw {
+  color: #55708a;
+  font-size: 12.5px;
+}
+
+.placeholder {
+  margin: auto;
+  padding: 32px 24px;
+  text-align: center;
+  color: var(--steel);
+  max-width: 30ch;
+}
+.placeholder strong {
+  display: block;
+  color: var(--white);
+  margin-bottom: 8px;
+  font-weight: 600;
+}
+
+/* Shown only while scrolled up — the mobile form of the TUI's
+   "scrolled up N · Esc to follow" title. */
+.jump {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: 8px;
+  padding: 8px 14px;
+  min-height: 36px;
+  border-radius: 999px;
+  background: #0d1826;
+  border: 1px solid var(--line);
+  color: var(--cyan);
+  font-size: 12px;
+  letter-spacing: 0.1em;
+  box-shadow: 0 6px 20px rgb(0 0 0 / 55%);
+}
+
+.scrollwrap {
+  position: relative;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ─── composer ────────────────────────────────────────────────────────────── */
+
+.composer {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--line);
+  background: var(--panel);
+}
+
+.composer textarea {
+  flex: 1;
+  resize: none;
+  background: #060b13;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  color: var(--white);
+  padding: 11px 12px;
+  /* 16px exactly: below this iOS zooms the page when the field takes focus. */
+  font-size: 16px;
+  font-family: inherit;
+  line-height: 1.35;
+  max-height: 33vh;
+  min-height: 44px;
+}
+.composer textarea:focus {
+  outline: none;
+  border-color: #1d4c63;
+}
+.composer textarea::placeholder {
+  color: #46607a;
+}
+
+.send {
+  min-width: 56px;
+  min-height: 44px;
+  border-radius: 12px;
+  background: #0b2a38;
+  color: var(--cyan);
+  border: 1px solid #17455c;
+  font-size: 12px;
+  letter-spacing: 0.14em;
+  font-weight: 600;
+}
+.send:disabled {
+  opacity: 0.4;
+  color: var(--steel);
+  border-color: var(--line);
+  background: #0a1019;
+}
+
+/* ─── status bar ──────────────────────────────────────────────────────────── */
+
+.status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px calc(var(--safe-bottom) + 6px);
+  background: var(--bg-deep);
+  border-top: 1px solid var(--line);
+  color: var(--steel);
+  font-size: 11.5px;
+  letter-spacing: 0.06em;
+}
+.status .working {
+  color: var(--amber);
+}
+.status .ready {
+  color: var(--mint);
+}
+
+/* ─── agents sheet ────────────────────────────────────────────────────────── */
+
+.sheet {
+  position: fixed;
+  inset: 0;
+  background: rgb(2 4 8 / 72%);
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  z-index: 10;
+}
+
+.sheet .panel {
+  background: var(--panel);
+  border-top: 1px solid var(--line);
+  border-radius: 16px 16px 0 0;
+  max-height: 72%;
+  display: flex;
+  flex-direction: column;
+  padding-bottom: var(--safe-bottom);
+}
+
+.sheet header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--line);
+  letter-spacing: 0.18em;
+  font-size: 12px;
+  color: var(--steel);
+}
+
+.sheet ul {
+  list-style: none;
+  margin: 0;
+  padding: 4px 0;
+  overflow-y: auto;
+}
+
+.sheet li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px;
+  min-height: 56px;
+  border-bottom: 1px solid #0d1521;
+}
+
+.sheet .name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sheet .meta {
+  color: var(--steel);
+  font-size: 11px;
+  letter-spacing: 0.1em;
+}
+
+.badge {
+  padding: 3px 8px;
+  border-radius: 6px;
+  font-size: 10.5px;
+  letter-spacing: 0.12em;
+  border: 1px solid var(--line);
+  color: var(--steel);
+  flex: none;
+}
+.badge.running {
+  color: var(--mint);
+  border-color: #14503c;
+}
+.badge.failed {
+  color: var(--red);
+  border-color: #4d1620;
+}
+.badge.completed {
+  color: var(--steel);
+}
+.badge.killed {
+  color: #5a7189;
+}
+
+.stop {
+  min-height: 44px;
+  min-width: 44px;
+  color: var(--red);
+  font-size: 11px;
+  letter-spacing: 0.1em;
+}
+
+/* ─── auth gate ───────────────────────────────────────────────────────────── */
+
+.gate {
+  position: fixed;
+  inset: 0;
+  background: var(--bg);
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 14px;
+  padding: calc(var(--safe-top) + 24px) 24px calc(var(--safe-bottom) + 24px);
+  z-index: 20;
+}
+
+.gate h1 {
+  margin: 0;
+  font-size: 15px;
+  letter-spacing: 0.24em;
+  color: var(--cyan);
+}
+
+.gate p {
+  margin: 0;
+  color: var(--steel);
+  font-size: 13px;
+}
+
+.gate input {
+  background: #060b13;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  color: var(--white);
+  padding: 13px 12px;
+  font-size: 16px;
+  font-family: inherit;
+  min-height: 48px;
+}
+.gate input:focus {
+  outline: none;
+  border-color: #1d4c63;
+}
+
+.gate button {
+  min-height: 48px;
+  border-radius: 12px;
+  background: #0b2a38;
+  color: var(--cyan);
+  border: 1px solid #17455c;
+  letter-spacing: 0.16em;
+  font-weight: 600;
+}
+.gate button:disabled {
+  opacity: 0.45;
+}
+
+.gate .why {
+  font-size: 12px;
+  color: #4a6580;
+  line-height: 1.6;
+}
+
+.gate .error {
+  color: var(--red);
+  font-size: 12.5px;
+}
