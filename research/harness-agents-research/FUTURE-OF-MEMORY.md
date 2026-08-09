@@ -2,6 +2,7 @@
 
 **Date:** 2026-08-09 · **Analyst:** Jod · **Companions:**
 [`HERMES.md`](HERMES.md) · [`OPENCLAW-MEMORY.md`](OPENCLAW-MEMORY.md) ·
+[`BIG-LAB-MEMORY.md`](BIG-LAB-MEMORY.md) (what the labs ship) ·
 **Experiment:** [`experiments/FINDINGS.md`](experiments/FINDINGS.md)
 
 > **Question, as asked:** where is LLM memory going, which studies and
