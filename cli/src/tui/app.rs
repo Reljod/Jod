@@ -54,7 +54,13 @@ pub struct App {
     /// How many lines the view is scrolled up from the bottom. 0 = following.
     pub scroll: usize,
     pub harness: HarnessKind,
+    /// The model to *ask* for, or `None` for whatever the harness picks itself.
+    /// Only `/model` and the `-m` flag set this.
     pub model: Option<String>,
+    /// The model the harness said it was using. Display only — it must never
+    /// feed back into a spawn, because a name one harness reports (say
+    /// `claude-sonnet-4-5`) is not a name another harness accepts.
+    pub reported_model: Option<String>,
     pub session: Option<String>,
     pub resume: Resume,
     pub cost_usd: f64,
@@ -154,6 +160,7 @@ impl App {
             scroll: 0,
             harness,
             model,
+            reported_model: None,
             session: None,
             resume,
             cost_usd: 0.0,
@@ -344,7 +351,7 @@ impl App {
                     self.resume = Resume::Session(s.clone());
                 }
                 if let Some(m) = model {
-                    self.model = Some(m.clone());
+                    self.reported_model = Some(m.clone());
                 }
             }
             AgentEvent::Thinking { text } => {
@@ -412,7 +419,9 @@ impl App {
     /// The one-line summary shown in the status bar.
     pub fn status(&self) -> String {
         let mut parts = vec![self.harness.label().to_string()];
-        if let Some(m) = &self.model {
+        // What the harness actually ran beats what was asked for; before the
+        // first turn there is nothing to report, so the request stands in.
+        if let Some(m) = self.reported_model.as_ref().or(self.model.as_ref()) {
             parts.push(m.clone());
         }
         if self.cost_usd > 0.0 {
@@ -802,7 +811,8 @@ mod tests {
         });
         assert_eq!(a.resume, Resume::Session("sess-1".into()));
         assert_eq!(a.session.as_deref(), Some("sess-1"));
-        assert_eq!(a.model.as_deref(), Some("some-model"));
+        // Reported for display, never folded into the request.
+        assert_eq!(a.reported_model.as_deref(), Some("some-model"));
     }
 
     #[test]

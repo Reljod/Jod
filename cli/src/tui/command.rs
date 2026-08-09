@@ -185,20 +185,6 @@ fn short_name(kind: HarnessKind) -> &'static str {
     }
 }
 
-/// Whether pressing Enter should *run* the line rather than complete it.
-///
-/// True once what is typed is already a whole command, so `/help` + Enter runs
-/// instead of demanding a second Enter — which is the difference between a
-/// palette that helps and one that gets in the way.
-pub fn is_complete(input: &str) -> bool {
-    match parse(input) {
-        None => true,
-        Some(Slash::Unknown(_)) => false,
-        Some(Slash::NeedsArgument(_)) => false,
-        Some(_) => true,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -278,24 +264,18 @@ mod tests {
         }
     }
 
+    /// A command needing an argument completes to itself plus a space, which is
+    /// how Enter used to be swallowed instead of running the command.
     #[test]
-    fn commands_that_take_an_argument_are_not_complete_until_it_is_given() {
-        assert!(!is_complete("/harness"));
-        assert!(is_complete("/harness claude"));
-        assert!(!is_complete("/resume"));
-        assert!(is_complete("/resume ses-1"));
-    }
-
-    #[test]
-    fn a_finished_command_and_a_plain_prompt_are_both_complete() {
-        assert!(is_complete("/help"));
-        assert!(is_complete("/new"));
-        assert!(is_complete("just a prompt"));
-    }
-
-    #[test]
-    fn an_unknown_command_is_never_treated_as_complete() {
-        assert!(!is_complete("/wibb"));
+    fn a_command_needing_an_argument_completes_to_itself() {
+        assert_eq!(lines("/resume"), vec!["/resume "]);
+        assert_eq!(lines("/harness"), vec!["/harness "]);
+        // Trimmed, the only suggestion is what is already typed — so there is
+        // nothing to accept and Enter must run it.
+        for input in ["/resume", "/harness"] {
+            let only = &completions(input)[0].line;
+            assert_eq!(only.trim_end(), input.trim_end());
+        }
     }
 
     #[test]

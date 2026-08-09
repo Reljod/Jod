@@ -83,10 +83,13 @@ async fn event_loop(
     let mut app = App::new(opts.harness, opts.model.clone(), opts.resume.clone());
     app.team = opts.team.clone();
     refresh_team(&jod, &mut app);
-    app.push(Entry::Notice(format!(
-        "{} · Enter send · Ctrl-A agents · Ctrl-G team · Ctrl-T thinking · Ctrl-C quit",
-        opts.harness.label()
-    )));
+    // No harness name here: this line is frozen into the scrollback, so naming
+    // the harness would leave a stale claim on screen the moment `/harness`
+    // switches. The status bar is the one place that tracks it.
+    app.push(Entry::Notice(
+        "/help for commands · Enter send · Ctrl-A agents · Ctrl-G team · Ctrl-T thinking · Ctrl-C quit"
+            .to_string(),
+    ));
 
     let mut keys = EventStream::new();
     let mut events = jod.subscribe();
@@ -243,7 +246,15 @@ fn on_key(app: &mut App, key: KeyEvent, viewport: usize) -> Option<String> {
                 app.next_suggestion(suggestions.len());
                 return None;
             }
-            KeyCode::Enter if !command::is_complete(app.input.trim()) => {
+            // Enter picks the highlighted suggestion only when that would
+            // actually change the line. Otherwise the command is already fully
+            // typed and Enter must run it: a command needing an argument
+            // completes to *itself* plus a space, so accepting here appended an
+            // invisible space, swallowed the keypress, and left the text in the
+            // box to corrupt whatever was typed next.
+            KeyCode::Enter
+                if suggestions[app.suggestion].line.trim_end() != app.input.trim_end() =>
+            {
                 let line = suggestions[app.suggestion].line.clone();
                 app.accept_completion(&line);
                 return None;
@@ -300,14 +311,28 @@ fn apply_slash(app: &mut App, slash: command::Slash) {
             }
         }
         Slash::Harness(kind) => {
+            let changed = app.harness != kind;
             app.harness = kind;
             // Conversations belong to a harness, so carrying the old session
             // cursor across would try to resume a conversation the new harness
             // has never heard of.
             app.resume = Resume::Fresh;
             app.session = None;
+            if changed {
+                // Model names do not survive the crossing. `claude-sonnet-4-5`
+                // means nothing to OpenCode or AGY, so keeping either the
+                // requested or the reported name would hand the new harness a
+                // model it rejects — and the switch would look like it simply
+                // did not work. Dropping to `None` lets each harness choose its
+                // own default, which is what switching harness should mean.
+                app.model = None;
+                app.reported_model = None;
+                // Spend belongs to the conversation being abandoned. Carrying
+                // it over showed `$0.11` next to AGY, which had charged nothing.
+                app.cost_usd = 0.0;
+            }
             app.push(Entry::Notice(format!(
-                "{} from the next turn — starting a fresh conversation",
+                "{} from the next turn — fresh conversation, its own default model",
                 kind.label()
             )));
         }
@@ -421,4 +446,110 @@ async fn list_agents(jod: &Arc<Jod>) -> Vec<AgentLine> {
             status: format!("{:?}", a.status).to_lowercase(),
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn app_on(harness: HarnessKind) -> App {
+        App::new(harness, None, Resume::Fresh)
+    }
+
+    #[test]
+    fn switching_harness_drops_the_old_model() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        // A turn ran, so the harness reported what it used.
+        app.reported_model = Some("claude-opus-5".into());
+        app.model = Some("opus".into());
+        app.cost_usd = 0.11;
+
+        apply_slash(&mut app, command::Slash::Harness(HarnessKind::OpenCode));
+
+        // Neither name may survive: OpenCode rejects both, and passing either
+        // made the switch look like it had not happened at all.
+        assert_eq!(app.model, None);
+        assert_eq!(app.reported_model, None);
+        assert_eq!(app.cost_usd, 0.0);
+        assert_eq!(app.harness, HarnessKind::OpenCode);
+    }
+
+    #[test]
+    fn a_reported_model_never_becomes_the_next_request() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.apply(&AgentEvent::Started {
+            session_id: Some("s1".into()),
+            model: Some("claude-opus-5".into()),
+        });
+        // Reported, so it shows; requested, so it does not.
+        assert_eq!(app.reported_model.as_deref(), Some("claude-opus-5"));
+        assert_eq!(app.model, None);
+        assert!(app.status().contains("claude-opus-5"));
+    }
+
+    #[test]
+    fn re_selecting_the_same_harness_keeps_the_chosen_model() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.model = Some("haiku".into());
+        apply_slash(&mut app, command::Slash::Harness(HarnessKind::ClaudeCode));
+        // Nothing crossed a harness boundary, so the choice stands.
+        assert_eq!(app.model.as_deref(), Some("haiku"));
+    }
+
+    fn press(app: &mut App, code: KeyCode) -> Option<String> {
+        on_key(app, KeyEvent::new(code, KeyModifiers::NONE), 20)
+    }
+
+    fn type_line(app: &mut App, text: &str) {
+        for c in text.chars() {
+            press(app, KeyCode::Char(c));
+        }
+    }
+
+    /// Enter on a command that still needs an argument must say so, not
+    /// silently append a space and leave the text sitting in the box.
+    #[test]
+    fn enter_on_an_argumentless_command_reports_the_usage() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        type_line(&mut app, "/resume");
+        assert!(press(&mut app, KeyCode::Enter).is_none());
+
+        assert_eq!(app.input, "", "the line must be consumed");
+        let last = format!("{:?}", app.transcript.last().unwrap());
+        assert!(last.contains("usage"), "expected a usage notice, got {last}");
+    }
+
+    /// The next command typed must not inherit the previous one's text.
+    #[test]
+    fn a_command_needing_an_argument_does_not_corrupt_the_next_one() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        type_line(&mut app, "/resume");
+        press(&mut app, KeyCode::Enter);
+        type_line(&mut app, "/model haiku");
+        press(&mut app, KeyCode::Enter);
+
+        // Not `Resume("/model haiku")`, which is what the leftover text caused.
+        assert_eq!(app.model.as_deref(), Some("haiku"));
+        assert_eq!(app.session, None);
+    }
+
+    /// Enter still completes when completing would actually change the line.
+    #[test]
+    fn enter_completes_a_half_typed_command() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        type_line(&mut app, "/thi");
+        assert!(press(&mut app, KeyCode::Enter).is_none());
+        assert_eq!(app.input, "/thinking");
+        // A second Enter runs it.
+        press(&mut app, KeyCode::Enter);
+        assert!(app.show_thinking);
+    }
+
+    #[test]
+    fn an_explicit_model_still_reaches_the_harness() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        apply_slash(&mut app, command::Slash::Model(Some("haiku".into())));
+        assert_eq!(app.model.as_deref(), Some("haiku"));
+        assert!(app.status().contains("haiku"));
+    }
 }
