@@ -480,18 +480,21 @@ makes sense on a terminal: byte-cursor editing, and a line-counted scrollback.
 iOS supplies a real caret and a real scroll view; the rule worth keeping is that
 **new output never yanks a reader back down**, and that survived.
 
-**What blocks it, exactly.** Nothing about the app: the behaviour is written and
-tested, and the built bundle is exercised in WebKit — the engine WKWebView uses
-— at an iPhone viewport, so the cookie exchange, the SSE handshake and the
-touch-target and no-zoom rules are all verified rather than asserted.
+**How it is verified, and what is left.** The behaviour is unit-tested, and the
+built bundle is exercised in WebKit — the engine WKWebView uses — at an iPhone
+viewport, so the cookie exchange, the SSE handshake, the touch targets and the
+no-zoom rule are verified rather than asserted.
 
-The wall is one crate. `cargo check --target aarch64-apple-ios` resolves a clean
-iOS graph (796 crates, no gtk/glib) and then stops at
-`objc2-exception-helper`, whose build script compiles an Objective-C shim and so
-needs the iOS SDK via `xcrun`. That SDK ships only inside Xcode. It is a
-licensing boundary, not a configuration problem, and the honest position is that
-the shim, the link step and the simulator stay unexercised until a Mac runs
-them. → [`apps/ios/README.md`](../apps/ios/README.md)
+The parts no Linux machine can reach happen on a macOS runner instead of being
+left as a promise: `.github/workflows/ios.yml` compiles the shell for
+`aarch64-apple-ios`, generates the Xcode project, builds an unsigned simulator
+app, and launches it. On Linux that compile stops at `objc2-exception-helper`,
+whose build script needs the iOS SDK via `xcrun` — a licensing boundary, since
+the SDK ships only inside Xcode.
+
+What remains genuinely uncovered is a **device** build, which needs an Apple
+developer certificate this repo does not hold. CI is simulator-bound and
+unsigned by design. → [`apps/ios/README.md`](../apps/ios/README.md)
 
 ## Design rules
 
