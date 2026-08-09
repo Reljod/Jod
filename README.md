@@ -76,11 +76,16 @@ learns lands in one SQLite file beside them.
 
 ```sh
 cargo build --release
+./target/release/jod tui                  # the full-screen interface
 ./target/release/jod harnesses            # what's installed
 ./target/release/jod run "summarise my inbox"
-./target/release/jod chat                 # a conversation, not a one-shot
+./target/release/jod chat                 # a conversation on a plain terminal
 ./target/release/jod recall "what do I prefer for tasks"
 ```
+
+`jod tui` is the one to start with: a scrolling conversation, an input box, and
+`Ctrl-A` for a panel listing every agent Jod has running — which is the part
+that makes it an orchestrator's interface rather than a chat window.
 
 The full design — including the planned knowledge graph (Open Knowledge Format
 notes indexed by GraphQLite) and agent-to-agent messaging — is in

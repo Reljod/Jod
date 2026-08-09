@@ -5,6 +5,7 @@
 //! harness's output into one event stream that every command here renders.
 
 mod render;
+mod tui;
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
@@ -119,7 +120,21 @@ enum Command {
         #[arg(long, default_value = jod_core::store::DEFAULT_SCOPE)]
         scope: String,
     },
-    /// Hold a conversation. Each turn continues the same harness session.
+    /// The full-screen interface: conversation, live agents, status.
+    Tui {
+        #[arg(short = 'H', long, value_enum, default_value_t = HarnessArg::Claude)]
+        harness: HarnessArg,
+        #[arg(short, long)]
+        cwd: Option<PathBuf>,
+        #[arg(short, long)]
+        model: Option<String>,
+        #[arg(short, long, value_enum, default_value_t = PermissionArg::Ask)]
+        permission: PermissionArg,
+        /// Pick up the last conversation instead of starting a new one.
+        #[arg(short = 'C', long = "continue")]
+        continue_last: bool,
+    },
+    /// Hold a conversation on a plain terminal, without the full-screen UI.
     Chat {
         #[arg(short = 'H', long, value_enum, default_value_t = HarnessArg::Claude)]
         harness: HarnessArg,
@@ -353,6 +368,34 @@ async fn main() -> Result<()> {
             } else {
                 render::facts(&facts);
             }
+        }
+
+        Command::Tui {
+            harness,
+            cwd,
+            model,
+            permission,
+            continue_last,
+        } => {
+            if !jod.tmux_available() {
+                bail!("tmux is not installed, and every agent runs inside a tmux session");
+            }
+            jod.rehydrate(200).await?;
+            tui::run(
+                jod,
+                tui::Options {
+                    harness: harness.into(),
+                    cwd: cwd.unwrap_or_else(jod_core::service::default_cwd),
+                    model,
+                    permission: permission.into(),
+                    resume: if continue_last {
+                        Resume::Last
+                    } else {
+                        Resume::Fresh
+                    },
+                },
+            )
+            .await?;
         }
 
         Command::Chat {

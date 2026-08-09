@@ -10,8 +10,9 @@ local file on one box, which is what makes a 24/7 assistant affordable.
 ## The shape
 
 ```
-        ssh / tmux ──┐
-        cron ────────┤        jod  (CLI + chat)
+        jod tui ─────┐
+        jod run ─────┤
+        cron ────────┤        the `jod` command
         HTTP API ────┤              │
         (planned)    │              ▼
                      └────►  jod-core :: service::Jod
@@ -135,6 +136,28 @@ documented here because each one makes a *failed* run look successful:
    reports.
 3. `--print-timeout` defaults to five minutes and kills the run when it expires,
    which looks like a truncated answer. It is raised explicitly.
+
+---
+
+### The interface
+
+`jod tui` is a full-screen interface built on ratatui: a scrolling transcript,
+an input box with line editing, a status bar, and `Ctrl-A` for a panel listing
+every delegation. That panel is the reason it is not just a chat window — Jod's
+job is watching several agents, and it shows runs from earlier processes too,
+because `rehydrate` puts them back.
+
+Two behaviours it takes care over, both easy to get wrong:
+
+- **Scrolling up does not get yanked back down.** New output only follows the
+  view if the view was already at the bottom. Reading something while an agent
+  keeps talking has to work.
+- **The terminal is always restored.** Raw mode and the alternate screen are
+  undone on the normal path *and* from a panic hook, because a panic that skips
+  the restore leaves a shell that echoes nothing and needs a blind `reset`.
+
+`jod chat` is the same conversation on a plain terminal, for when a full-screen
+UI is in the way — over a flaky SSH link, or piped from a script.
 
 ---
 
@@ -265,6 +288,7 @@ make it load-bearing before it has to be.
 2. ~~Third harness (AGY) and normalised session resume~~ **done**
 3. ~~Durable runs, transcripts and memory in SQLite~~ **done**
 4. ~~CLI: delegate, watch, list, report, remember, recall, chat~~ **done**
+   ~~plus `jod tui`, the full-screen interface~~ **done**
 5. ~~Browser access for agents — Camoufox, headless, verified~~ **done**
    (awaiting Webshare ISP credentials to fix the egress IP →
    [`browser.md`](browser.md))
