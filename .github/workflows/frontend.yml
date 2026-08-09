@@ -1,0 +1,45 @@
+name: Frontend
+
+# apps/desktop had no tests and no test runner at all — App.tsx, api.ts and
+# every component were entirely unexercised. This runs the vitest suite and
+# holds it to the same 95% floor as the Rust side (thresholds live in
+# apps/desktop/vitest.config.ts, so `pnpm test:coverage` fails identically on a
+# developer's machine and here).
+on:
+  pull_request:
+    paths:
+      - "apps/desktop/**"
+      - ".github/workflows/frontend.yml"
+  push:
+    branches: [main]
+  workflow_call:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/desktop
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: apps/desktop/pnpm-lock.yaml
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      # Types are part of the contract with jod-core's serde output, so a drift
+      # here should fail as loudly as a broken test.
+      - name: Typecheck
+        run: pnpm exec tsc --noEmit
+
+      - name: Test with coverage
+        run: pnpm test:coverage
