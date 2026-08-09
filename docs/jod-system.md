@@ -152,6 +152,41 @@ statuses, and the task board. It is read from the store on every refresh rather
 than kept in memory, because teammates run in their own processes and no
 in-memory copy could be authoritative.
 
+### Slash commands
+
+Typing `/` opens a completion popup — `Tab` completes, `↑↓` choose — and
+arguments are completed too, so `/harness ` offers the three spellings rather
+than expecting them to be remembered.
+
+| | |
+|---|---|
+| `/harness <name>` | switch harness mid-session |
+| `/model <name>` | set the model; no argument restores the default |
+| `/thinking` · `/details` | show or hide reasoning, and what tools returned |
+| `/new` · `/resume <id>` · `/sessions` | move between conversations |
+| `/agents` · `/team` | the panels, same as `Ctrl-A` and `Ctrl-G` |
+| `/help` · `/clear` · `/exit` | |
+
+Two rules keep the set honest. **A command exists only if Jod can do it**: there
+is no `/compact` or `/undo`, because a command that silently does nothing is
+worse than one that is absent — an unknown `/word` is named back rather than
+sent to the agent as a prompt. And **switching harness starts a fresh
+conversation**, because a session id belongs to the harness that issued it;
+carrying it across would try to resume a conversation the new harness has never
+heard of.
+
+Parsing and completion are pure functions over a string, so the whole of "what
+did the user ask for" is tested without a terminal.
+
+### Watching the work
+
+The transcript shows what the harness is *doing*, not just what it concluded:
+a tool call carries the most useful field of its arguments — `Bash · cargo
+test`, not a bare `Bash` — and what the tool gave back is shown underneath it,
+trimmed to a few lines. `/details` turns the output off for a quieter view; a
+*failed* tool is shown either way, because it is the reason the answer is about
+to be wrong.
+
 Two behaviours it takes care over, both easy to get wrong:
 
 - **Scrolling up does not get yanked back down.** New output only follows the
