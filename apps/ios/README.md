@@ -7,7 +7,7 @@ terminal's.
 ```
 npm install
 npm run dev            # http://localhost:5174, proxying /v1 to the daemon
-npm run check          # tsc --noEmit && vitest run   (126 tests)
+npm run check          # tsc --noEmit && vitest run   (127 tests)
 ```
 
 Point it at a real orchestrator with `JOD_API_ORIGIN=http://127.0.0.1:8787`, or
@@ -85,9 +85,17 @@ Scope is obeyed rather than discovered: anything that is not explicitly
 `"write"` is treated as read, so a read token disables the composer instead of
 firing a request that 403s.
 
+The cookie outlives the app, but nothing in JavaScript can read it — so the
+*scope alone* is remembered across launches, otherwise every relaunch would be
+read-only until you pasted a token again. A scope is not a credential: it grants
+nothing, and the daemon re-checks it on every request. If the remembered value
+is wrong the spawn comes back 403, and the app corrects the scope in place and
+shows the daemon's reason rather than sending you back to the gate for a token
+that was already correct.
+
 ## Tests
 
-126 tests, no device and no Mac required.
+127 tests, no device and no Mac required.
 
 ```
 npm run check
@@ -97,7 +105,7 @@ npm run check
 |---|---|
 | `session.test.ts` (45) | the reducer, against `cli/src/tui/app.rs`'s behaviour |
 | `client.test.ts` (27) | the wire contract: cursors, framing, problem docs |
-| `conversation.test.ts` (40) | the rules — sending, threading, recovery, auth |
+| `conversation.test.ts` (41) | the rules — sending, threading, recovery, auth |
 | `app.test.tsx` (14) | the screen, rendered in jsdom |
 
 Everything that can be got wrong lives in three platform-free modules —
