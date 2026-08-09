@@ -779,6 +779,114 @@ mod tests {
     }
 
     #[test]
+    fn started_records_the_session_and_model_and_announces_them() {
+        let mut app = app_with_one();
+        app.ingest(env(
+            "a",
+            AgentEvent::Started {
+                session_id: Some("ses-1".into()),
+                model: Some("claude-opus-5".into()),
+            },
+        ));
+        assert_eq!(app.agents[0].session_id.as_deref(), Some("ses-1"));
+        assert_eq!(app.agents[0].model.as_deref(), Some("claude-opus-5"));
+
+        let line = &app.stream_lines()[0];
+        assert_eq!(line.kind, LineKind::System);
+        assert!(line.text.contains("claude-opus-5"));
+        assert!(line.text.contains("ses-1"));
+    }
+
+    /// A second Started must not overwrite the session already reported, or a
+    /// resumed run would lose the id the follow-up needs.
+    #[test]
+    fn a_later_started_does_not_replace_the_first_session() {
+        let mut app = app_with_one();
+        for id in ["first", "second"] {
+            app.ingest(env(
+                "a",
+                AgentEvent::Started { session_id: Some(id.into()), model: None },
+            ));
+        }
+        assert_eq!(app.agents[0].session_id.as_deref(), Some("first"));
+    }
+
+    #[test]
+    fn a_started_without_details_still_renders() {
+        let mut app = app_with_one();
+        app.ingest(env("a", AgentEvent::Started { session_id: None, model: None }));
+        let text = &app.stream_lines()[0].text;
+        assert!(text.contains("default model"));
+        assert!(text.contains("no session id"));
+    }
+
+    #[test]
+    fn an_error_event_is_shown_as_an_error() {
+        let mut app = app_with_one();
+        app.ingest(env("a", AgentEvent::Error { message: "spawn failed".into() }));
+        let lines = app.stream_lines();
+        assert_eq!(lines[0].kind, LineKind::Error);
+        assert_eq!(lines[0].text, "spawn failed");
+    }
+
+    #[test]
+    fn an_agent_with_no_events_yet_says_it_is_waiting() {
+        let app = app_with_one();
+        let lines = app.stream_lines();
+        assert_eq!(lines[0].kind, LineKind::System);
+        assert!(lines[0].text.contains("Waiting"));
+    }
+
+    #[test]
+    fn scrolling_down_moves_the_offset() {
+        let mut app = app_with_one();
+        app.focus = Focus::Stream;
+        app.on_key(Key::Down);
+        app.on_key(Key::Down);
+        assert_eq!(app.scroll, 2);
+        app.on_key(Key::Up);
+        assert_eq!(app.scroll, 1);
+    }
+
+    #[test]
+    fn scrolling_up_from_the_top_stops_rather_than_wrapping() {
+        let mut app = app_with_one();
+        app.focus = Focus::Stream;
+        app.scroll_up(10);
+        assert_eq!(app.scroll, 0);
+    }
+
+    #[test]
+    fn enter_also_opens_the_follow_up_box() {
+        let mut app = app_with_one();
+        app.on_key(Key::Enter);
+        assert_eq!(app.mode, Mode::Compose);
+    }
+
+    #[test]
+    fn there_is_nothing_to_follow_up_with_an_empty_fleet() {
+        let mut app = App::default();
+        app.on_key(Key::Enter);
+        assert_eq!(app.mode, Mode::Normal);
+    }
+
+    #[test]
+    fn help_toggles_back_to_the_stream() {
+        let mut app = app_with_one();
+        app.on_key(Key::Char('?'));
+        assert_eq!(app.view, View::Help);
+        app.on_key(Key::Char('?'));
+        assert_eq!(app.view, View::Stream);
+    }
+
+    #[test]
+    fn an_unbound_key_does_nothing() {
+        let mut app = app_with_one();
+        assert_eq!(app.on_key(Key::Char('z')), Action::None);
+        assert_eq!(app.on_key(Key::Backspace), Action::None);
+    }
+
+    #[test]
     fn selection_wraps_in_both_directions() {
         let mut app = App {
             agents: vec![

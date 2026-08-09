@@ -275,7 +275,9 @@ mod tests {
                 .map(|c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
                 .chain([
                     KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
-                    KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
+                    // Ctrl-C rather than `q`: any normal keypress clears the
+                    // status bar first, which would hide what we are asserting.
+                    KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
                 ])
                 .collect(),
         );
