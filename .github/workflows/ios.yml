@@ -100,10 +100,17 @@ jobs:
           test -n "$scheme"
           echo "building scheme '$scheme'"
 
+          # `release`, not `debug`, and not as a preference: the generated
+          # "Build Rust Code" phase shells out to `tauri ios xcode-script`,
+          # which in debug expects the dev-server address file that `tauri ios
+          # dev` writes. Building standalone there panics with
+          # "failed to read missing addr file …-server-addr". Release resolves
+          # the frontend from `frontendDist` instead, which is what shipping
+          # actually does.
           xcodebuild \
             "${container[@]}" \
             -scheme "$scheme" \
-            -configuration debug \
+            -configuration release \
             -sdk iphonesimulator \
             -derivedDataPath "$GITHUB_WORKSPACE/apps/ios/build" \
             CODE_SIGNING_ALLOWED=NO \
