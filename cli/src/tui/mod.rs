@@ -229,7 +229,10 @@ fn on_key(app: &mut App, key: KeyEvent, viewport: usize) -> Option<String> {
         KeyCode::PageUp => app.scroll_up(viewport.max(1), max_scroll),
         KeyCode::PageDown => app.scroll_down(viewport.max(1)),
         KeyCode::Esc => app.scroll_to_bottom(),
-        KeyCode::Char(c) => app.insert(c),
+        // `!ctrl` matters: an unbound chord falls through the block above, and
+        // without this guard Ctrl-Z would type a bare "z" into the prompt. The
+        // bindings that *are* wanted with Control all returned already.
+        KeyCode::Char(c) if !ctrl => app.insert(c),
         _ => {}
     }
     None
@@ -263,4 +266,344 @@ async fn list_agents(jod: &Arc<Jod>) -> Vec<AgentLine> {
             status: format!("{:?}", a.status).to_lowercase(),
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `on_key` is the whole keybinding contract, and it is pure: an `App`, a
+    /// keypress and a viewport height in, a prompt or nothing out. The event
+    /// loop around it needs a real terminal; this does not.
+    fn app() -> App {
+        App::new(HarnessKind::ClaudeCode, None, Resume::Fresh)
+    }
+
+    fn press(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn ctrl(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
+    }
+
+    fn type_in(app: &mut App, text: &str) {
+        for c in text.chars() {
+            on_key(app, press(KeyCode::Char(c)), 20);
+        }
+    }
+
+    fn last_notice(app: &App) -> Option<&str> {
+        app.transcript.iter().rev().find_map(|e| match e {
+            Entry::Notice(text) => Some(text.as_str()),
+            _ => None,
+        })
+    }
+
+    // --- leaving ---------------------------------------------------------
+
+    #[test]
+    fn ctrl_c_quits_when_nothing_is_running() {
+        let mut a = app();
+        assert_eq!(on_key(&mut a, ctrl('c'), 20), None);
+        assert!(a.should_quit);
+    }
+
+    /// Walking away from a running agent by accident is the expensive mistake
+    /// here, so the first press only warns.
+    #[test]
+    fn quitting_while_an_agent_is_running_asks_once_first() {
+        let mut a = app();
+        a.busy = true;
+
+        on_key(&mut a, ctrl('c'), 20);
+        assert!(!a.should_quit, "the first press must not leave");
+        assert!(a.confirm_quit);
+        assert!(last_notice(&a).unwrap().contains("still running"));
+
+        on_key(&mut a, ctrl('c'), 20);
+        assert!(a.should_quit, "the second press goes anyway");
+    }
+
+    #[test]
+    fn ctrl_d_leaves_the_same_way_as_ctrl_c() {
+        let mut a = app();
+        a.busy = true;
+        on_key(&mut a, ctrl('d'), 20);
+        assert!(a.confirm_quit && !a.should_quit);
+        on_key(&mut a, ctrl('d'), 20);
+        assert!(a.should_quit);
+    }
+
+    /// Having second thoughts is the common case: any other key stands the
+    /// warning down, so a later stray Ctrl-C does not leave immediately.
+    #[test]
+    fn typing_anything_else_cancels_a_pending_quit() {
+        let mut a = app();
+        a.busy = true;
+        on_key(&mut a, ctrl('c'), 20);
+        assert!(a.confirm_quit);
+
+        on_key(&mut a, press(KeyCode::Char('x')), 20);
+        assert!(!a.confirm_quit);
+
+        on_key(&mut a, ctrl('c'), 20);
+        assert!(!a.should_quit, "the warning must start over");
+    }
+
+    // --- the control bindings --------------------------------------------
+
+    #[test]
+    fn ctrl_a_toggles_the_agents_panel() {
+        let mut a = app();
+        let start = a.pane;
+
+        on_key(&mut a, ctrl('a'), 20);
+        assert_eq!(a.pane, Pane::Agents);
+        on_key(&mut a, ctrl('a'), 20);
+        assert_eq!(a.pane, start);
+    }
+
+    #[test]
+    fn ctrl_t_toggles_thinking_and_says_which_way_it_went() {
+        let mut a = app();
+        let before = a.show_thinking;
+
+        on_key(&mut a, ctrl('t'), 20);
+        assert_ne!(a.show_thinking, before);
+        assert!(last_notice(&a).unwrap().contains("thinking"));
+
+        on_key(&mut a, ctrl('t'), 20);
+        assert_eq!(a.show_thinking, before);
+    }
+
+    #[test]
+    fn ctrl_l_clears_the_transcript_and_returns_to_the_bottom() {
+        let mut a = app();
+        a.push(Entry::Notice("one".into()));
+        a.push(Entry::Notice("two".into()));
+        a.scroll_up(1, a.transcript.len());
+
+        on_key(&mut a, ctrl('l'), 20);
+
+        assert!(a.transcript.is_empty());
+        assert!(a.following(), "clearing must not leave the view detached");
+    }
+
+    #[test]
+    fn ctrl_u_clears_the_line_being_typed() {
+        let mut a = app();
+        type_in(&mut a, "half a thought");
+
+        on_key(&mut a, ctrl('u'), 20);
+
+        assert_eq!(a.input, "");
+        assert_eq!(a.cursor, 0);
+    }
+
+    #[test]
+    fn ctrl_w_deletes_only_the_last_word() {
+        let mut a = app();
+        type_in(&mut a, "two words");
+
+        on_key(&mut a, ctrl('w'), 20);
+
+        assert_eq!(a.input, "two ");
+    }
+
+    /// Ctrl-A is taken by the agents panel, so start-of-line is Ctrl-Home.
+    #[test]
+    fn ctrl_home_and_ctrl_end_move_to_the_ends_of_the_line() {
+        let mut a = app();
+        type_in(&mut a, "abc");
+
+        on_key(&mut a, KeyEvent::new(KeyCode::Home, KeyModifiers::CONTROL), 20);
+        assert_eq!(a.cursor, 0);
+
+        on_key(&mut a, KeyEvent::new(KeyCode::End, KeyModifiers::CONTROL), 20);
+        assert_eq!(a.cursor, 3);
+
+        on_key(&mut a, KeyEvent::new(KeyCode::Home, KeyModifiers::CONTROL), 20);
+        on_key(&mut a, ctrl('e'), 20);
+        assert_eq!(a.cursor, 3, "ctrl-e is the readline spelling of End");
+    }
+
+    /// Regression: unbound chords fell through the Control block into the
+    /// plain-key match, so Ctrl-Z typed a "z", Ctrl-S an "s", and so on — a
+    /// stray suspend attempt silently corrupted the prompt.
+    #[test]
+    fn an_unbound_control_key_is_ignored_rather_than_typed() {
+        for c in ['z', 's', 'r', 'b', 'k'] {
+            let mut a = app();
+            assert_eq!(on_key(&mut a, ctrl(c), 20), None);
+            assert_eq!(a.input, "", "ctrl-{c} must not insert a '{c}'");
+        }
+    }
+
+    /// The chords that are bound must still work after that guard.
+    #[test]
+    fn the_bound_control_keys_still_do_their_jobs() {
+        let mut a = app();
+        type_in(&mut a, "text");
+        on_key(&mut a, ctrl('u'), 20);
+        assert_eq!(a.input, "");
+
+        on_key(&mut a, ctrl('a'), 20);
+        assert_eq!(a.pane, Pane::Agents);
+    }
+
+    // --- sending ---------------------------------------------------------
+
+    #[test]
+    fn enter_sends_what_was_typed_and_empties_the_line() {
+        let mut a = app();
+        type_in(&mut a, "do the thing");
+
+        assert_eq!(
+            on_key(&mut a, press(KeyCode::Enter), 20),
+            Some("do the thing".into())
+        );
+        assert_eq!(a.input, "");
+    }
+
+    #[test]
+    fn enter_on_an_empty_line_sends_nothing() {
+        let mut a = app();
+        assert_eq!(on_key(&mut a, press(KeyCode::Enter), 20), None);
+    }
+
+    /// One turn at a time: a second prompt would race the first agent's output.
+    #[test]
+    fn enter_is_refused_while_an_agent_is_still_working() {
+        let mut a = app();
+        a.busy = true;
+        type_in(&mut a, "impatient");
+
+        assert_eq!(on_key(&mut a, press(KeyCode::Enter), 20), None);
+        assert!(last_notice(&a).unwrap().contains("still working"));
+        assert_eq!(a.input, "impatient", "the typed line must survive");
+    }
+
+    // --- editing ---------------------------------------------------------
+
+    #[test]
+    fn typing_inserts_at_the_cursor() {
+        let mut a = app();
+        type_in(&mut a, "ac");
+        on_key(&mut a, press(KeyCode::Left), 20);
+        on_key(&mut a, press(KeyCode::Char('b')), 20);
+        assert_eq!(a.input, "abc");
+    }
+
+    #[test]
+    fn backspace_and_delete_remove_on_either_side_of_the_cursor() {
+        let mut a = app();
+        type_in(&mut a, "abc");
+
+        on_key(&mut a, press(KeyCode::Backspace), 20);
+        assert_eq!(a.input, "ab");
+
+        on_key(&mut a, press(KeyCode::Home), 20);
+        on_key(&mut a, press(KeyCode::Delete), 20);
+        assert_eq!(a.input, "b");
+    }
+
+    #[test]
+    fn home_and_end_reach_both_ends_without_a_modifier_too() {
+        let mut a = app();
+        type_in(&mut a, "abcd");
+
+        on_key(&mut a, press(KeyCode::Home), 20);
+        assert_eq!(a.cursor, 0);
+        on_key(&mut a, press(KeyCode::End), 20);
+        assert_eq!(a.cursor, 4);
+    }
+
+    #[test]
+    fn the_arrows_move_the_cursor_and_stop_at_the_ends() {
+        let mut a = app();
+        type_in(&mut a, "ab");
+
+        on_key(&mut a, press(KeyCode::Right), 20);
+        assert_eq!(a.cursor, 2, "right at the end must not run off");
+
+        for _ in 0..5 {
+            on_key(&mut a, press(KeyCode::Left), 20);
+        }
+        assert_eq!(a.cursor, 0, "left at the start must not underflow");
+    }
+
+    // --- scrolling -------------------------------------------------------
+
+    fn with_transcript(lines: usize) -> App {
+        let mut a = app();
+        for i in 0..lines {
+            a.push(Entry::Notice(format!("line {i}")));
+        }
+        a
+    }
+
+    #[test]
+    fn up_and_down_scroll_one_line_at_a_time() {
+        let mut a = with_transcript(50);
+
+        on_key(&mut a, press(KeyCode::Up), 20);
+        assert!(!a.following());
+        let scrolled = a.scroll;
+
+        on_key(&mut a, press(KeyCode::Down), 20);
+        assert_ne!(a.scroll, scrolled);
+    }
+
+    #[test]
+    fn page_up_and_page_down_move_by_the_visible_height() {
+        let mut a = with_transcript(200);
+
+        on_key(&mut a, press(KeyCode::PageUp), 30);
+        let by_page = a.scroll;
+
+        let mut b = with_transcript(200);
+        on_key(&mut b, press(KeyCode::Up), 30);
+        assert_ne!(
+            by_page, b.scroll,
+            "a page must move further than a single line"
+        );
+    }
+
+    /// The viewport is whatever the last draw measured, and a zero-height
+    /// terminal would otherwise make PageUp a no-op.
+    #[test]
+    fn paging_still_moves_when_the_viewport_measures_zero() {
+        let mut a = with_transcript(50);
+        on_key(&mut a, press(KeyCode::PageUp), 0);
+        assert!(!a.following(), "page up must move by at least one line");
+    }
+
+    #[test]
+    fn escape_jumps_back_to_the_newest_output() {
+        let mut a = with_transcript(50);
+        on_key(&mut a, press(KeyCode::PageUp), 20);
+        assert!(!a.following());
+
+        on_key(&mut a, press(KeyCode::Esc), 20);
+        assert!(a.following());
+    }
+
+    #[test]
+    fn a_key_with_no_binding_changes_nothing() {
+        let mut a = app();
+        type_in(&mut a, "abc");
+        let before = (a.input.clone(), a.cursor, a.scroll);
+
+        assert_eq!(on_key(&mut a, press(KeyCode::F(5)), 20), None);
+        assert_eq!((a.input.clone(), a.cursor, a.scroll), before);
+    }
+
+    // --- the agents panel ------------------------------------------------
+
+    #[tokio::test]
+    async fn a_service_with_no_delegations_lists_none() {
+        let jod = Jod::new();
+        assert!(list_agents(&jod).await.is_empty());
+    }
 }
