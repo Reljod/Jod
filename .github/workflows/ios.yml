@@ -25,6 +25,13 @@ on:
       - "apps/ios/**"
       - ".github/workflows/ios.yml"
 
+# macOS runners are the scarce resource here, and a branch that gets pushed
+# several times in a row would otherwise leave superseded builds sitting in the
+# queue ahead of the one that matters.
+concurrency:
+  group: ios-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: macos-latest
@@ -121,7 +128,10 @@ jobs:
           test -n "$device"
           xcrun simctl list devices available | grep -F "$device" || true
 
-          xcrun simctl boot "$device"
+          # Already-booted is a success, not a failure: `boot` exits non-zero
+          # with "Unable to boot device in current state: Booted", and under
+          # `set -e` that would fail the step for the one state we want.
+          xcrun simctl boot "$device" || true
           xcrun simctl bootstatus "$device" -b
           xcrun simctl install "$device" "$app"
           xcrun simctl launch "$device" "$bundle_id"
