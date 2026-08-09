@@ -470,6 +470,11 @@ Three things fall out of the hardware, and they decide the whole design:
   delegation starts a real process on the box. Enter inserts a newline; sending
   is a deliberate tap; and every spawn carries an `Idempotency-Key` so a retry
   on a flaky link cannot start the same agent twice in the same directory.
+- **A packaged app has no origin to fall back on.** The web client is *served
+  by* the daemon, so every route can be relative. The iOS bundle loads from
+  `tauri://localhost`, where a relative route is not even a valid URL — so the
+  daemon's address is a real setting the app asks for once and remembers. This
+  was found by running the built app in a simulator, and by nothing before it.
 
 **What "the same as the TUI" means, precisely.** The transcript vocabulary, the
 resume cursor that threads turns into one conversation, the busy guard, the
