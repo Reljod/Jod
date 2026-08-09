@@ -16,6 +16,12 @@
 import type { AgentEnvelope, AgentSummary, HarnessKind, PermissionPolicy } from "./contract";
 import { JodClient, UnauthorizedError, type Scope, type SpawnBody } from "./client";
 import {
+  browserOriginMemory,
+  normaliseOrigin,
+  resolveBase,
+  type OriginMemory,
+} from "./origin";
+import {
   abandonTurn,
   applyEvent,
   attachAgent,
@@ -39,6 +45,11 @@ import {
 /** Where the app is with respect to the daemon. */
 export type Link =
   | { phase: "probing" }
+  /**
+   * We do not know where the daemon *is*. Only the packaged app reaches this:
+   * served from `tauri://localhost`, it has no same-origin API to fall back on.
+   */
+  | { phase: "address"; reason: string }
   /** Reachable, but this device has no valid session. Show the token gate. */
   | { phase: "auth"; reason: string }
   | { phase: "live"; scope: Scope }
@@ -93,6 +104,9 @@ export interface ConversationOptions {
   permission?: PermissionPolicy;
   /** Injected so tests are not at the mercy of a global. */
   scopeMemory?: ScopeMemory;
+  originMemory?: OriginMemory;
+  /** `location.protocol`. Injected for the same reason. */
+  protocol?: string;
 }
 
 export interface ConversationView {
@@ -110,6 +124,8 @@ export class Conversation {
   private readonly cwd: string | undefined;
   private readonly permission: PermissionPolicy | undefined;
   private readonly scopeMemory: ScopeMemory;
+  private readonly originMemory: OriginMemory;
+  private readonly protocol: string | undefined;
 
   private state: SessionState;
   private link: Link = { phase: "probing" };
@@ -135,6 +151,8 @@ export class Conversation {
     this.cwd = options.cwd;
     this.permission = options.permission;
     this.scopeMemory = options.scopeMemory ?? browserScopeMemory();
+    this.originMemory = options.originMemory ?? browserOriginMemory();
+    this.protocol = options.protocol ?? globalThis.location?.protocol;
     // What this device was last told it could do. The daemon re-checks it on
     // every request, so a stale value costs a refusal, not an escalation.
     this.scope = this.scopeMemory.read() ?? "read";
@@ -191,6 +209,20 @@ export class Conversation {
    * harness they are about to delegate to is even installed on the box.
    */
   async probe(): Promise<void> {
+    // Before anything can be asked, we have to know where to ask. In the
+    // browser that is the current origin; in the packaged app there is no such
+    // thing, and firing a relative fetch there throws a URL SyntaxError that
+    // reads like nonsense ("The string did not match the expected pattern").
+    const base = resolveBase(this.originMemory, this.protocol);
+    if (base === null) {
+      this.setLink({
+        phase: "address",
+        reason: "where is the daemon?",
+      });
+      return;
+    }
+    this.client.setBase(base);
+
     this.setLink({ phase: "probing" });
     try {
       const harnesses = await this.client.harnesses();
@@ -244,6 +276,26 @@ export class Conversation {
   private setLink(link: Link): void {
     this.link = link;
     this.emit();
+  }
+
+  /**
+   * Record where the daemon lives, then carry on as if we had always known.
+   *
+   * Rejects anything that is not an http(s) origin rather than storing it and
+   * failing later with a URL error the user cannot interpret.
+   */
+  async setOrigin(input: string): Promise<void> {
+    const origin = normaliseOrigin(input);
+    if (origin === null) {
+      this.setLink({
+        phase: "address",
+        reason: "that is not an address — try jod-cloud:8787",
+      });
+      return;
+    }
+    this.originMemory.write(origin);
+    this.client.setBase(origin);
+    await this.probe();
   }
 
   // ─── the turn ────────────────────────────────────────────────────────────

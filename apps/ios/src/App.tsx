@@ -2,6 +2,7 @@ import { useEffect, useSyncExternalStore } from "react";
 
 import type { Conversation } from "./conversation";
 import { statusLine } from "./session";
+import { AddressGate } from "./components/AddressGate";
 import { AgentsSheet } from "./components/AgentsSheet";
 import { AuthGate } from "./components/AuthGate";
 import { Composer } from "./components/Composer";
@@ -28,6 +29,17 @@ export function App({ conversation }: { conversation: Conversation }) {
 
   useKeyboardInset();
   useResumeOnForeground(conversation);
+
+  // Address before token: there is no point asking for a credential until we
+  // know which daemon it is for.
+  if (link.phase === "address") {
+    return (
+      <AddressGate
+        reason={link.reason}
+        onSubmit={(address) => conversation.setOrigin(address)}
+      />
+    );
+  }
 
   if (link.phase === "auth") {
     return (

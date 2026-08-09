@@ -4,13 +4,94 @@
 agents panel behind it — wearing the desktop client's face instead of a
 terminal's.
 
+---
+
+## Setting it up
+
+Three things have to be true: the daemon is running, the phone can reach it, and
+the app is on the phone. In that order.
+
+### 1. Run the daemon on the box
+
+`jod-api` is the only thing the phone talks to. On `jod-cloud`:
+
+```sh
+ssh jod-cloud
+sudo systemctl enable --now jod-api      # deploy/jod-api.service
+systemctl status jod-api                 # confirm it is up
+curl -s localhost:8787/v1/health         # {"status":"ok"} — needs no token
+```
+
+Issue yourself a token. `write` if you want to delegate from the phone; `read`
+if you only want to watch. **Keep it somewhere you can paste from** — you enter
+it on the phone once.
+
+### 2. Make the phone able to reach it
+
+The daemon binds loopback on purpose, so it is not on the internet. Put the
+phone on the same tailnet:
+
+```sh
+# on the box, if it isn't already
+tailscale status
+```
+
+Install Tailscale from the App Store, sign in with the same account, and confirm
+the phone can see the box. The address you will type into the app is the
+tailnet name plus the port — `jod-cloud:8787`.
+
+> Plain `http://` over the tailnet is fine and is what the app assumes. If you
+> put TLS in front of the daemon instead, type the `https://…` URL and iOS will
+> be happier — see App Transport Security below.
+
+### 3. Get the app onto the phone
+
+This needs a Mac with Xcode once; after that the app stays installed.
+
+```sh
+git clone git@github.com:Reljod/Jod.git && cd Jod/apps/ios
+rustup target add aarch64-apple-ios aarch64-apple-ios-sim
+npm install
+npm run ios:init                 # generates src-tauri/gen/apple
+npm run ios:dev                  # runs it on a simulator, or a plugged-in phone
+```
+
+To put it on your own phone rather than a simulator, open
+`src-tauri/gen/apple/jod-ios.xcodeproj` in Xcode once, set a development team
+under **Signing & Capabilities**, then `npm run ios:build`. A free Apple ID
+works; the app expires after seven days and needs a rebuild, which a paid
+developer account avoids.
+
+**If the daemon is plain `http://`**, add an App Transport Security exception
+for that host to `src-tauri/gen/apple/…/Info.plist` — iOS blocks cleartext by
+default. Putting TLS in front of the daemon is the better fix and the reason
+this is not pre-baked.
+
+### 4. First launch
+
+The app asks two things, once each:
+
+1. **Where is the daemon?** — `jod-cloud:8787`. Remembered between launches.
+   (The browser build never asks: it is served *by* the daemon, so it already
+   knows.)
+2. **A bearer token.** Exchanged immediately for a session cookie; **the token
+   itself is never stored on the device**. Only its scope is remembered, so a
+   relaunch is not read-only.
+
+Then type. The turn runs on the box in its own tmux session and streams back.
+
+---
+
+## Working on it
+
 ```
 npm install
 npm run dev            # http://localhost:5174, proxying /v1 to the daemon
-npm run check          # tsc --noEmit && vitest run   (127 tests)
+npm run check          # tsc --noEmit && vitest run   (146 tests)
+npm run test:e2e       # 27 more, in WebKit at an iPhone viewport
 ```
 
-Point it at a real orchestrator with `JOD_API_ORIGIN=http://127.0.0.1:8787`, or
+Point dev at a real orchestrator with `JOD_API_ORIGIN=http://127.0.0.1:8787`, or
 at the box over the tailnet.
 
 ## What it is
@@ -95,7 +176,7 @@ that was already correct.
 
 ## Tests
 
-127 tests, no device and no Mac required.
+146 tests, no device and no Mac required.
 
 ```
 npm run check
@@ -105,8 +186,9 @@ npm run check
 |---|---|
 | `session.test.ts` (45) | the reducer, against `cli/src/tui/app.rs`'s behaviour |
 | `client.test.ts` (27) | the wire contract: cursors, framing, problem docs |
-| `conversation.test.ts` (41) | the rules — sending, threading, recovery, auth |
-| `app.test.tsx` (14) | the screen, rendered in jsdom |
+| `conversation.test.ts` (46) | the rules — sending, threading, recovery, auth |
+| `origin.test.ts` (12) | where the daemon is, and what is not a usable address |
+| `app.test.tsx` (16) | the screen, rendered in jsdom |
 
 Everything that can be got wrong lives in three platform-free modules —
 `session.ts` (a pure reducer), `client.ts` (transport, with `fetch` and
@@ -161,28 +243,64 @@ recent".
 
 ## Building for the device
 
-**This is the one step that cannot happen on the VPS or in CI, and has not been
-run.** An `.ipa` needs Xcode, which exists only on macOS.
+This is the one step no Linux machine can do — which is why it happens on a
+macOS runner instead of being left as a promise.
+[`.github/workflows/ios.yml`](../../.github/workflows/ios.yml) compiles the
+shell for iOS, generates the Xcode project, builds an unsigned simulator app,
+and boots a simulator to launch it. It is scoped to `apps/ios/**` so unrelated
+changes never pay for a macOS runner.
 
-The boundary is exact rather than vague, so nobody has to rediscover it:
+| Where | Check | Result |
+|---|---|---|
+| Linux | `tauri info` parses `tauri.conf.json` | ✓ |
+| Linux | `cargo tree --target aarch64-apple-ios` | ✓ 796 crates, **zero** gtk/glib/soup |
+| Linux | `cargo check --target aarch64-apple-ios` | ✗ blocked at one crate |
+| **macOS CI** | `cargo check --target aarch64-apple-ios` | ✓ |
+| **macOS CI** | `tauri ios init` | ✓ generates `jod-ios.xcodeproj` |
+| **macOS CI** | `tauri ios build --target aarch64-sim` | ✓ produces `Jod.app` |
 
-| Checked on Linux | Result |
-|---|---|
-| `tauri info` parses `tauri.conf.json` | ✓ resolves dist, dev URL, CSP, React |
-| iOS dependency graph (`cargo tree --target aarch64-apple-ios`) | ✓ 796 crates, **zero** gtk/glib/soup, the Apple `objc2-*`/UIKit family present |
-| `cargo check --target aarch64-apple-ios` | ✗ stops at **one** crate |
+The crate that blocks Linux is `objc2-exception-helper`, whose build script
+compiles an Objective-C shim and so needs `clang` plus the iOS SDK via `xcrun`.
+That SDK ships only inside Xcode: a licensing boundary, not a fixable
+configuration problem. On the runner it builds without complaint.
 
-The one crate is `objc2-exception-helper`, whose build script compiles a small
-Objective-C shim and therefore needs `clang` plus the iOS SDK, located through
-`xcrun`. That SDK ships only inside Xcode, so this is a licensing boundary and
-not a fixable configuration problem — it cannot be worked around, and pretending
-otherwise would be exactly the kind of faked check the charter forbids.
+**What is still not covered:** a *device* build. That needs an Apple developer
+certificate this repo does not hold, so CI stays simulator-bound and unsigned.
+Signing is the step below that needs a human.
 
-What that leaves: the graph is provably right for iOS (no Linux desktop stack
-leaked in), the pure-Rust tree compiles for `aarch64-apple-ios`, and the shim,
-the link step and the simulator are unexercised. Treat `src-tauri/` as a first
-draft until a Mac has run it; expect the two manual steps below to be where the
-time goes.
+### What the simulator run caught immediately
+
+The first successful launch produced a red link light and this in the status bar:
+
+> The string did not match the expected pattern.
+
+That is WebKit's `SyntaxError` from the URL parser, and it was the app doing
+something that is correct everywhere except in a package: fetching `/v1/…`
+**relative to the current origin**. In `apps/web` that is right — the daemon
+serves the page. In the packaged app the page comes from `tauri://localhost`, so
+a relative route is not a valid URL and nothing can ever reach the daemon.
+
+No amount of Linux testing could have found this: the unit suites inject a fake
+`fetch`, and the WebKit e2e run serves the app over `http://`, so both are in the
+one deployment where the assumption holds. It took a real bundle on a real
+simulator. That is the argument for keeping [`ios.yml`](../../.github/workflows/ios.yml).
+
+The fix is [`src/origin.ts`](src/origin.ts): the app resolves a base URL before
+it talks to anything, uses the current origin when served over http(s), and asks
+for an address when it is not. Covered by `origin.test.ts`.
+
+### Two things the CI cannot guess, learned the hard way
+
+Both cost a failed run each, and are worth knowing before editing that workflow:
+
+- **Build through `tauri ios build`, never `xcodebuild` directly.** The generated
+  project's "Build Rust Code" phase shells back out to `tauri ios xcode-script`,
+  which reads a state file only the *parent* Tauri command writes. Driving
+  `xcodebuild` yourself panics with `failed to read missing addr file
+  …-server-addr` — in `debug` *and* `release`.
+- **Boot a simulator the runner already has.** `simctl list devicetypes` lists
+  models with no installed runtime; creating one of those fails with
+  `Could not find an available runtime for device type`.
 
 On a Mac with Xcode and the iOS Rust targets:
 

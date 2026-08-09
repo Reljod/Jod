@@ -10,6 +10,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 
 import { JodClient, type Scope } from "../src/client";
 import { Conversation, type ScopeMemory } from "../src/conversation";
+import type { OriginMemory } from "../src/origin";
 import type { Entry } from "../src/session";
 import { EventSourceSpy, FakeFetch, agent, settle } from "./fakes";
 
@@ -30,7 +31,22 @@ function fakeMemory(initial: Scope | null = null) {
   };
 }
 
-function build(): Conversation {
+let origins: OriginMemory & { value: string | null };
+
+function fakeOrigins(initial: string | null = null) {
+  return {
+    value: initial,
+    read() {
+      return this.value;
+    },
+    write(origin: string) {
+      this.value = origin;
+    },
+  };
+}
+
+/** A browser deployment by default: served over https, daemon on the origin. */
+function build(protocol = "https:"): Conversation {
   return new Conversation({
     client: new JodClient({
       fetch: http.fetch,
@@ -38,6 +54,8 @@ function build(): Conversation {
       newKey: () => "key-1",
     }),
     scopeMemory: memory,
+    originMemory: origins,
+    protocol,
   });
 }
 
@@ -65,6 +83,75 @@ beforeEach(() => {
   http = new FakeFetch();
   spy = new EventSourceSpy();
   memory = fakeMemory();
+  origins = fakeOrigins();
+});
+
+describe("finding the daemon (the packaged app)", () => {
+  it("asks for an address instead of firing a doomed relative request", async () => {
+    // The bug the simulator caught: served from tauri://localhost, a relative
+    // `/v1/harnesses` is not a valid URL and WebKit throws
+    // "The string did not match the expected pattern." The app must not get
+    // that far.
+    const conversation = build("tauri:");
+    await conversation.probe();
+
+    expect(conversation.getSnapshot().link).toEqual({
+      phase: "address",
+      reason: "where is the daemon?",
+    });
+    expect(http.calls).toHaveLength(0);
+  });
+
+  it("uses the address once given, and remembers it", async () => {
+    http.on("GET http://jod-cloud:8787/v1/harnesses", { body: [] });
+    http.on("GET http://jod-cloud:8787/v1/agents", { body: [] });
+
+    const conversation = build("tauri:");
+    await conversation.probe();
+    await conversation.setOrigin("jod-cloud:8787");
+    await settle();
+
+    expect(conversation.getSnapshot().link.phase).toBe("live");
+    expect(origins.value).toBe("http://jod-cloud:8787");
+    // Every route is absolute now, not relative to the app bundle.
+    expect(http.calls[0].url).toBe("http://jod-cloud:8787/v1/harnesses");
+  });
+
+  it("goes straight through on a relaunch, without asking again", async () => {
+    origins = fakeOrigins("http://jod-cloud:8787");
+    http.on("GET http://jod-cloud:8787/v1/harnesses", { body: [] });
+    http.on("GET http://jod-cloud:8787/v1/agents", { body: [] });
+
+    const conversation = build("tauri:");
+    await conversation.probe();
+    await settle();
+
+    expect(conversation.getSnapshot().link.phase).toBe("live");
+  });
+
+  it("rejects an address it cannot use, rather than failing later", async () => {
+    const conversation = build("tauri:");
+    await conversation.setOrigin("not a url at all //");
+
+    expect(conversation.getSnapshot().link).toEqual({
+      phase: "address",
+      reason: "that is not an address — try jod-cloud:8787",
+    });
+    expect(origins.value).toBeNull();
+    expect(http.calls).toHaveLength(0);
+  });
+
+  it("never asks in a browser, where the daemon is the origin", async () => {
+    http.on("GET /v1/harnesses", { body: [] });
+    http.on("GET /v1/agents", { body: [] });
+
+    const conversation = build("https:");
+    await conversation.probe();
+    await settle();
+
+    expect(conversation.getSnapshot().link.phase).toBe("live");
+    expect(http.calls[0].url).toBe("/v1/harnesses");
+  });
 });
 
 describe("finding out where we stand", () => {

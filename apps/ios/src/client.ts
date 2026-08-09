@@ -112,7 +112,14 @@ export interface ClientOptions {
 const CLOSED = 2;
 
 export class JodClient {
-  private readonly base: string;
+  /**
+   * Prefix for every route. Empty means same-origin.
+   *
+   * Mutable because the packaged app cannot know it at construction: the shell
+   * serves its assets from `tauri://localhost`, so the daemon's address is a
+   * setting the user supplies. See `origin.ts`.
+   */
+  private base: string;
   private readonly doFetch: typeof fetch;
   private readonly makeEventSource: EventSourceFactory;
   private readonly newKey: () => string;
@@ -124,6 +131,11 @@ export class JodClient {
       options.eventSource ??
       ((url: string) => new EventSource(url, { withCredentials: true }));
     this.newKey = options.newKey ?? defaultKey;
+  }
+
+  /** Point this client at a daemon. `""` means same-origin. */
+  setBase(base: string): void {
+    this.base = base;
   }
 
   // ─── REST ────────────────────────────────────────────────────────────────

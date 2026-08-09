@@ -51,6 +51,45 @@ beforeEach(() => {
 
 afterEach(cleanup);
 
+describe("the address gate (packaged app only)", () => {
+  it("asks where the daemon is before asking for a token", async () => {
+    // Served from tauri://localhost there is no same-origin API, so a token
+    // would be a credential for nowhere.
+    const conversation = new Conversation({
+      client: new JodClient({ fetch: http.fetch, eventSource: spy.factory }),
+      scopeMemory: { read: () => null, write: () => {} },
+      originMemory: { read: () => null, write: () => {} },
+      protocol: "tauri:",
+    });
+    render(<App conversation={conversation} />);
+
+    await screen.findByText("where is the daemon?");
+    expect(screen.getByPlaceholderText("jod-cloud:8787")).toBeDefined();
+    expect(screen.queryByPlaceholderText("Bearer token")).toBeNull();
+  });
+
+  it("moves on to the token gate once an address is accepted", async () => {
+    http.on("GET http://jod-cloud:8787/v1/harnesses", { status: 401, body: { detail: "no" } });
+    let stored: string | null = null;
+    const conversation = new Conversation({
+      client: new JodClient({ fetch: http.fetch, eventSource: spy.factory }),
+      scopeMemory: { read: () => null, write: () => {} },
+      originMemory: { read: () => stored, write: (o) => (stored = o) },
+      protocol: "tauri:",
+    });
+    render(<App conversation={conversation} />);
+
+    await screen.findByPlaceholderText("jod-cloud:8787");
+    fireEvent.change(screen.getByPlaceholderText("jod-cloud:8787"), {
+      target: { value: "jod-cloud:8787" },
+    });
+    fireEvent.click(screen.getByText("CONNECT"));
+
+    await screen.findByPlaceholderText("Bearer token");
+    expect(stored).toBe("http://jod-cloud:8787");
+  });
+});
+
 describe("the gate", () => {
   it("stands in front of the app when this device has no session", async () => {
     http.on("GET /v1/harnesses", { status: 401, body: { detail: "no" } });
