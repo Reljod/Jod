@@ -28,9 +28,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
 use crate::event::AgentEnvelope;
+use crate::harness::HarnessKind;
+use crate::team::{Member, MemberStatus, Message, TeamTask};
 
 /// Applied in order; each is recorded so it runs exactly once.
-const MIGRATIONS: &[(&str, &str)] = &[(
+const MIGRATIONS: &[(&str, &str)] = &[
+    (
     "0001_initial",
     r#"
     -- Agent event streams: append-only, many writers, tail-follow.
@@ -125,7 +128,50 @@ const MIGRATIONS: &[(&str, &str)] = &[(
       VALUES (new.id, new.subject, new.predicate, new.object);
     END;
     "#,
-)];
+    ),
+    (
+        "0002_teams",
+        r#"
+    -- Who is on a team. One row per member; the team is part of the key so a
+    -- name can mean different agents on different teams.
+    CREATE TABLE team_members (
+      team         TEXT NOT NULL,
+      name         TEXT NOT NULL,
+      harness      TEXT NOT NULL,
+      role         TEXT NOT NULL DEFAULT '',
+      status       TEXT NOT NULL DEFAULT 'ready',
+      -- The run currently embodying this member, and the harness-side
+      -- conversation to resume for its next turn. Both change every turn.
+      agent_id     TEXT,
+      session_id   TEXT,
+      joined_at_ms INTEGER NOT NULL,
+      PRIMARY KEY (team, name)
+    );
+
+    -- The message bus. Already addressed to one recipient: a broadcast is
+    -- fanned out on send, so reading an inbox is one query over one table.
+    CREATE TABLE team_messages (
+      id        INTEGER PRIMARY KEY,
+      team      TEXT NOT NULL,
+      sender    TEXT NOT NULL,
+      recipient TEXT NOT NULL,
+      body      TEXT NOT NULL,
+      at_ms     INTEGER NOT NULL,
+      -- Set when the message has been handed to the agent, so the same
+      -- instruction is never injected into two turns.
+      delivered INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE INDEX ix_team_messages_inbox
+      ON team_messages(team, recipient, delivered, id);
+
+    -- The shared board reuses the existing `tasks` table, so claiming stays the
+    -- single atomic statement it already was.
+    ALTER TABLE tasks ADD COLUMN team TEXT;
+    ALTER TABLE tasks ADD COLUMN title TEXT;
+    CREATE INDEX ix_tasks_team ON tasks(team);
+    "#,
+    ),
+];
 
 /// Who asserted a fact. Kept out of the fact's text so that content Jod
 /// ingested cannot claim a trust level it was not given.
@@ -489,6 +535,231 @@ impl Store {
         })
     }
 
+    // ---- teams ----------------------------------------------------------
+
+    /// Add a member, or update the role and harness of one already there.
+    pub fn join_team(
+        &self,
+        team: &str,
+        name: &str,
+        harness: HarnessKind,
+        role: &str,
+    ) -> Result<()> {
+        self.write(|tx| {
+            tx.execute(
+                "INSERT INTO team_members (team, name, harness, role, status, joined_at_ms)
+                 VALUES (?1, ?2, ?3, ?4, 'ready', ?5)
+                 ON CONFLICT(team, name) DO UPDATE SET harness = ?3, role = ?4",
+                params![team, name, harness.id(), role, now_ms()],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn set_member_status(&self, team: &str, name: &str, status: MemberStatus) -> Result<()> {
+        self.write(|tx| {
+            tx.execute(
+                "UPDATE team_members SET status = ?3 WHERE team = ?1 AND name = ?2",
+                params![team, name, status.as_str()],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Record which run embodies a member now, and which conversation to resume.
+    ///
+    /// A `None` session is ignored rather than written: a later turn that does
+    /// not report an id must not erase the one the member needs to keep its
+    /// context.
+    pub fn bind_member(
+        &self,
+        team: &str,
+        name: &str,
+        agent_id: Option<&str>,
+        session_id: Option<&str>,
+    ) -> Result<()> {
+        self.write(|tx| {
+            tx.execute(
+                "UPDATE team_members
+                    SET agent_id = ?3,
+                        session_id = COALESCE(?4, session_id)
+                  WHERE team = ?1 AND name = ?2",
+                params![team, name, agent_id, session_id],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn team_members(&self, team: &str) -> Result<Vec<Member>> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT team, name, harness, role, status, agent_id, session_id
+               FROM team_members WHERE team = ?1 ORDER BY joined_at_ms, name",
+        )?;
+        let rows = stmt.query_map(params![team], |r| {
+            let harness: String = r.get(2)?;
+            let status: String = r.get(4)?;
+            Ok(Member {
+                team: r.get(0)?,
+                name: r.get(1)?,
+                // A row naming a harness this build does not know still lists,
+                // as the harness Jod would have to be told about.
+                harness: HarnessKind::from_id(&harness).unwrap_or(HarnessKind::ClaudeCode),
+                role: r.get(3)?,
+                status: MemberStatus::parse(&status),
+                agent_id: r.get(5)?,
+                session_id: r.get(6)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// Every team that has a member.
+    pub fn teams(&self) -> Result<Vec<String>> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        let mut stmt =
+            conn.prepare("SELECT DISTINCT team FROM team_members ORDER BY team")?;
+        let rows = stmt.query_map([], |r| r.get(0))?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// Put a message on the bus. `to` of `None` is a broadcast to every member
+    /// except the sender. Returns who it was addressed to.
+    pub fn send_team_message(
+        &self,
+        team: &str,
+        from: &str,
+        to: Option<&str>,
+        text: &str,
+    ) -> Result<Vec<String>> {
+        let recipients: Vec<String> = match to {
+            Some(one) => vec![one.to_string()],
+            None => self
+                .team_members(team)?
+                .into_iter()
+                .map(|m| m.name)
+                .filter(|n| n != from)
+                .collect(),
+        };
+        let at = now_ms();
+        self.write(|tx| {
+            for name in &recipients {
+                tx.execute(
+                    "INSERT INTO team_messages (team, sender, recipient, body, at_ms)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![team, from, name, text, at],
+                )?;
+            }
+            Ok(())
+        })?;
+        Ok(recipients)
+    }
+
+    /// Everything ever addressed to a member, delivered or not.
+    pub fn team_inbox(&self, team: &str, member: &str) -> Result<Vec<Message>> {
+        self.messages(team, member, false)
+    }
+
+    /// Messages waiting to be shown, without consuming them.
+    pub fn team_unread(&self, team: &str, member: &str) -> Result<Vec<Message>> {
+        self.messages(team, member, true)
+    }
+
+    fn messages(&self, team: &str, member: &str, only_pending: bool) -> Result<Vec<Message>> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        let sql = if only_pending {
+            "SELECT id, team, sender, recipient, body, at_ms FROM team_messages
+              WHERE team = ?1 AND recipient = ?2 AND delivered = 0 ORDER BY id"
+        } else {
+            "SELECT id, team, sender, recipient, body, at_ms FROM team_messages
+              WHERE team = ?1 AND recipient = ?2 ORDER BY id"
+        };
+        let mut stmt = conn.prepare(sql)?;
+        let rows = stmt.query_map(params![team, member], |r| {
+            Ok(Message {
+                id: r.get(0)?,
+                team: r.get(1)?,
+                from: r.get(2)?,
+                to: r.get(3)?,
+                text: r.get(4)?,
+                at_ms: r.get(5)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// Take every pending message and mark it delivered, in one transaction.
+    ///
+    /// Read-then-write would let two turns of the same agent pick up the same
+    /// instruction and act on it twice.
+    pub fn drain_inbox(&self, team: &str, member: &str) -> Result<Vec<Message>> {
+        self.write(|tx| {
+            let mut stmt = tx.prepare(
+                "SELECT id, team, sender, recipient, body, at_ms FROM team_messages
+                  WHERE team = ?1 AND recipient = ?2 AND delivered = 0 ORDER BY id",
+            )?;
+            let pending: Vec<Message> = stmt
+                .query_map(params![team, member], |r| {
+                    Ok(Message {
+                        id: r.get(0)?,
+                        team: r.get(1)?,
+                        from: r.get(2)?,
+                        to: r.get(3)?,
+                        text: r.get(4)?,
+                        at_ms: r.get(5)?,
+                    })
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            drop(stmt);
+            tx.execute(
+                "UPDATE team_messages SET delivered = 1
+                  WHERE team = ?1 AND recipient = ?2 AND delivered = 0",
+                params![team, member],
+            )?;
+            Ok(pending)
+        })
+    }
+
+    /// Put a task on a team's board. Re-adding an id leaves the original alone,
+    /// so a retry cannot orphan work someone already claimed.
+    pub fn add_team_task(&self, team: &str, id: &str, title: &str) -> Result<()> {
+        self.write(|tx| {
+            tx.execute(
+                "INSERT INTO tasks (id, status, team, title) VALUES (?1, 'open', ?2, ?3)
+                 ON CONFLICT(id) DO NOTHING",
+                params![id, team, title],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn team_tasks(&self, team: &str) -> Result<Vec<TeamTask>> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT id, COALESCE(title, id), owner, status FROM tasks
+              WHERE team = ?1 ORDER BY rowid",
+        )?;
+        let rows = stmt.query_map(params![team], |r| {
+            Ok(TeamTask {
+                id: r.get(0)?,
+                title: r.get(1)?,
+                owner: r.get(2)?,
+                status: r.get(3)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    pub fn complete_task(&self, id: &str) -> Result<()> {
+        self.write(|tx| {
+            tx.execute(
+                "UPDATE tasks SET status = 'done' WHERE id = ?1",
+                params![id],
+            )?;
+            Ok(())
+        })
+    }
+
     // ---- memory ---------------------------------------------------------
 
     pub fn remember(&self, fact: NewFact) -> Result<i64> {
@@ -679,6 +950,304 @@ mod tests {
             seq,
             event: AgentEvent::Message { text: text.into() },
         }
+    }
+
+    #[test]
+    fn a_fresh_store_has_no_teams() {
+        let s = store();
+        assert!(s.teams().unwrap().is_empty());
+        assert!(s.team_members("crew").unwrap().is_empty());
+        assert!(s.team_tasks("crew").unwrap().is_empty());
+        assert!(s.team_inbox("crew", "nobody").unwrap().is_empty());
+        assert!(s.drain_inbox("crew", "nobody").unwrap().is_empty());
+    }
+
+    /// The capability the whole design exists for: one team, three harnesses.
+    /// No harness can put a teammate from another harness on its own team.
+    #[test]
+    fn one_team_can_span_every_harness() {
+        let s = store();
+        for (name, harness) in [
+            ("lead", HarnessKind::ClaudeCode),
+            ("builder", HarnessKind::OpenCode),
+            ("scout", HarnessKind::Agy),
+        ] {
+            s.join_team("crew", name, harness, "r").unwrap();
+        }
+        let kinds: Vec<HarnessKind> = s
+            .team_members("crew")
+            .unwrap()
+            .iter()
+            .map(|m| m.harness)
+            .collect();
+        assert_eq!(kinds.len(), HarnessKind::ALL.len());
+        for kind in HarnessKind::ALL {
+            assert!(kinds.contains(&kind), "{kind:?} must be able to join a team");
+        }
+    }
+
+    #[test]
+    fn members_are_listed_in_the_order_they_joined() {
+        let s = store();
+        s.join_team("crew", "lead", HarnessKind::ClaudeCode, "coordinator")
+            .unwrap();
+        s.join_team("crew", "scout", HarnessKind::Agy, "research")
+            .unwrap();
+
+        let members = s.team_members("crew").unwrap();
+        assert_eq!(members.len(), 2);
+        assert_eq!(members[0].name, "lead");
+        assert_eq!(members[0].role, "coordinator");
+        assert_eq!(members[0].status, MemberStatus::Ready);
+        assert_eq!(members[1].harness, HarnessKind::Agy);
+    }
+
+    #[test]
+    fn rejoining_updates_rather_than_duplicating() {
+        let s = store();
+        s.join_team("crew", "scout", HarnessKind::OpenCode, "old")
+            .unwrap();
+        s.join_team("crew", "scout", HarnessKind::Agy, "new").unwrap();
+
+        let members = s.team_members("crew").unwrap();
+        assert_eq!(members.len(), 1);
+        assert_eq!(members[0].role, "new");
+        assert_eq!(members[0].harness, HarnessKind::Agy);
+    }
+
+    #[test]
+    fn teams_are_separate_namespaces() {
+        let s = store();
+        s.join_team("alpha", "scout", HarnessKind::OpenCode, "r")
+            .unwrap();
+        s.join_team("beta", "scout", HarnessKind::ClaudeCode, "r")
+            .unwrap();
+
+        assert_eq!(s.teams().unwrap(), vec!["alpha", "beta"]);
+        assert_eq!(
+            s.team_members("alpha").unwrap()[0].harness,
+            HarnessKind::OpenCode
+        );
+        assert_eq!(
+            s.team_members("beta").unwrap()[0].harness,
+            HarnessKind::ClaudeCode
+        );
+    }
+
+    #[test]
+    fn status_and_binding_land_on_the_member() {
+        let s = store();
+        s.join_team("crew", "scout", HarnessKind::OpenCode, "r")
+            .unwrap();
+        s.set_member_status("crew", "scout", MemberStatus::Busy)
+            .unwrap();
+        s.bind_member("crew", "scout", Some("run-1"), Some("ses-1"))
+            .unwrap();
+
+        let m = &s.team_members("crew").unwrap()[0];
+        assert_eq!(m.status, MemberStatus::Busy);
+        assert_eq!(m.agent_id.as_deref(), Some("run-1"));
+        assert_eq!(m.session_id.as_deref(), Some("ses-1"));
+    }
+
+    /// A later turn that reports no session must not erase the one the member
+    /// needs, or it silently loses its context on the next resume.
+    #[test]
+    fn rebinding_without_a_session_keeps_the_known_one() {
+        let s = store();
+        s.join_team("crew", "scout", HarnessKind::OpenCode, "r")
+            .unwrap();
+        s.bind_member("crew", "scout", Some("run-1"), Some("ses-1"))
+            .unwrap();
+        s.bind_member("crew", "scout", Some("run-2"), None).unwrap();
+
+        let m = &s.team_members("crew").unwrap()[0];
+        assert_eq!(m.agent_id.as_deref(), Some("run-2"));
+        assert_eq!(m.session_id.as_deref(), Some("ses-1"));
+    }
+
+    #[test]
+    fn a_direct_message_reaches_only_its_recipient() {
+        let s = store();
+        s.join_team("crew", "lead", HarnessKind::ClaudeCode, "r")
+            .unwrap();
+        s.join_team("crew", "scout", HarnessKind::OpenCode, "r")
+            .unwrap();
+
+        let to = s
+            .send_team_message("crew", "lead", Some("scout"), "look at the parser")
+            .unwrap();
+
+        assert_eq!(to, vec!["scout".to_string()]);
+        assert_eq!(s.team_inbox("crew", "scout").unwrap().len(), 1);
+        assert!(s.team_inbox("crew", "lead").unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_broadcast_reaches_everyone_but_the_sender() {
+        let s = store();
+        for name in ["lead", "a", "b"] {
+            s.join_team("crew", name, HarnessKind::ClaudeCode, "r")
+                .unwrap();
+        }
+        let to = s.send_team_message("crew", "lead", None, "ship it").unwrap();
+
+        assert_eq!(to.len(), 2);
+        assert!(s.team_inbox("crew", "lead").unwrap().is_empty());
+        assert_eq!(s.team_inbox("crew", "a").unwrap().len(), 1);
+        assert_eq!(s.team_inbox("crew", "b").unwrap().len(), 1);
+    }
+
+    /// Draining twice must not replay a message, or a teammate acts on the same
+    /// instruction on every turn.
+    #[test]
+    fn draining_yields_each_message_exactly_once() {
+        let s = store();
+        s.join_team("crew", "scout", HarnessKind::OpenCode, "r")
+            .unwrap();
+        for i in 0..3 {
+            s.send_team_message("crew", "lead", Some("scout"), &format!("m{i}"))
+                .unwrap();
+        }
+
+        let first = s.drain_inbox("crew", "scout").unwrap();
+        assert_eq!(first.len(), 3);
+        assert_eq!(first[0].text, "m0", "delivered in order");
+        assert!(s.drain_inbox("crew", "scout").unwrap().is_empty());
+
+        s.send_team_message("crew", "lead", Some("scout"), "m3")
+            .unwrap();
+        let second = s.drain_inbox("crew", "scout").unwrap();
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].text, "m3");
+    }
+
+    #[test]
+    fn unread_peeks_without_consuming_but_the_inbox_keeps_everything() {
+        let s = store();
+        s.join_team("crew", "scout", HarnessKind::OpenCode, "r")
+            .unwrap();
+        s.send_team_message("crew", "lead", Some("scout"), "peek")
+            .unwrap();
+
+        assert_eq!(s.team_unread("crew", "scout").unwrap().len(), 1);
+        assert_eq!(s.team_unread("crew", "scout").unwrap().len(), 1);
+
+        s.drain_inbox("crew", "scout").unwrap();
+        assert!(s.team_unread("crew", "scout").unwrap().is_empty());
+        assert_eq!(
+            s.team_inbox("crew", "scout").unwrap().len(),
+            1,
+            "the transcript survives delivery"
+        );
+    }
+
+    #[test]
+    fn a_delivered_message_carries_who_sent_it() {
+        let s = store();
+        s.join_team("crew", "scout", HarnessKind::OpenCode, "r")
+            .unwrap();
+        s.send_team_message("crew", "lead", Some("scout"), "status?")
+            .unwrap();
+
+        let m = &s.drain_inbox("crew", "scout").unwrap()[0];
+        assert_eq!(m.from, "lead");
+        assert_eq!(m.to, "scout");
+        assert_eq!(m.as_prompt(), "[message from lead]\nstatus?");
+    }
+
+    #[test]
+    fn a_broadcast_to_an_empty_team_addresses_nobody() {
+        let s = store();
+        assert!(s
+            .send_team_message("ghost", "lead", None, "anyone?")
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn the_task_board_tracks_claiming_and_completion() {
+        let s = store();
+        s.add_team_task("crew", "t1", "port the parser").unwrap();
+        s.add_team_task("crew", "t2", "write the docs").unwrap();
+
+        assert!(s.claim_task("t1", "scout").unwrap());
+        s.complete_task("t1").unwrap();
+
+        let tasks = s.team_tasks("crew").unwrap();
+        assert_eq!(tasks.len(), 2);
+        assert_eq!(tasks[0].title, "port the parser");
+        assert_eq!(tasks[0].owner.as_deref(), Some("scout"));
+        assert!(tasks[0].is_done());
+        assert!(!tasks[1].is_claimed());
+    }
+
+    /// The race the atomic claim exists for: two teammates going for the same
+    /// task must produce exactly one winner.
+    #[test]
+    fn a_contested_task_has_exactly_one_winner() {
+        let s = store();
+        s.add_team_task("crew", "t1", "the only job").unwrap();
+
+        let winners = ["a", "b", "c", "d"]
+            .iter()
+            .filter(|who| s.claim_task("t1", who).unwrap())
+            .count();
+
+        assert_eq!(winners, 1, "exactly one member may own a task");
+        assert!(s.team_tasks("crew").unwrap()[0].is_claimed());
+    }
+
+    /// Re-adding an id must not orphan work someone already claimed.
+    #[test]
+    fn re_adding_a_task_leaves_the_claim_alone() {
+        let s = store();
+        s.add_team_task("crew", "t1", "original").unwrap();
+        s.claim_task("t1", "scout").unwrap();
+        s.add_team_task("crew", "t1", "different title").unwrap();
+
+        let tasks = s.team_tasks("crew").unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].title, "original");
+        assert_eq!(tasks[0].owner.as_deref(), Some("scout"));
+    }
+
+    #[test]
+    fn tasks_belong_to_their_own_team() {
+        let s = store();
+        s.add_team_task("alpha", "t1", "alpha work").unwrap();
+        s.add_team_task("beta", "t2", "beta work").unwrap();
+        assert_eq!(s.team_tasks("alpha").unwrap().len(), 1);
+        assert_eq!(s.team_tasks("beta").unwrap()[0].id, "t2");
+    }
+
+    /// A task claimed through the pre-existing API, with no team, must not
+    /// appear on any team's board.
+    #[test]
+    fn a_teamless_task_stays_off_every_board() {
+        let s = store();
+        assert!(s.claim_task("loose", "someone").unwrap());
+        assert!(s.team_tasks("crew").unwrap().is_empty());
+    }
+
+    #[test]
+    fn teams_survive_reopening_the_database() {
+        let dir = std::env::temp_dir().join(format!("jod-team-store-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("jod.db");
+
+        {
+            let s = Store::open(&path).unwrap();
+            s.join_team("crew", "scout", HarnessKind::Agy, "research")
+                .unwrap();
+            s.send_team_message("crew", "lead", Some("scout"), "still here?")
+                .unwrap();
+        }
+
+        let s = Store::open(&path).unwrap();
+        assert_eq!(s.team_members("crew").unwrap()[0].role, "research");
+        assert_eq!(s.team_unread("crew", "scout").unwrap().len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
