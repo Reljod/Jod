@@ -18,8 +18,16 @@ pub enum Entry {
     Agent(String),
     /// The agent's reasoning, shown only when thinking is toggled on.
     Thinking(String),
-    /// A tool the agent called.
-    Tool { name: String, failed: bool },
+    /// A tool the agent called, with a one-line summary of its argument —
+    /// `Bash · cargo test`, not a bare `Bash`.
+    Tool {
+        name: String,
+        detail: Option<String>,
+        failed: bool,
+    },
+    /// What a tool gave back. Shown when details are on, which is the point of
+    /// watching a harness work rather than waiting for its conclusion.
+    ToolOut { text: String, failed: bool },
     /// A run finished: the summary line.
     Done { text: String, failed: bool },
     /// Something Jod itself wants to say.
@@ -51,6 +59,9 @@ pub struct App {
     pub resume: Resume,
     pub cost_usd: f64,
     pub show_thinking: bool,
+    /// Whether tool output is shown. On by default: the reason to watch a
+    /// harness work is to see what it is doing.
+    pub show_details: bool,
     pub pane: Pane,
     /// True while an agent is working, so the UI can refuse a second prompt.
     pub busy: bool,
@@ -76,6 +87,64 @@ pub struct AgentLine {
     pub status: String,
 }
 
+/// The most useful single field of a tool's arguments.
+///
+/// Harnesses name things differently, so the common keys are tried in order of
+/// how much they tell a reader, and anything unrecognised falls back to compact
+/// JSON rather than being dropped.
+fn tool_detail(input: &serde_json::Value) -> Option<String> {
+    const KEYS: [&str; 10] = [
+        "command",
+        "cmd",
+        "file_path",
+        "path",
+        "filePath",
+        "pattern",
+        "query",
+        "url",
+        "description",
+        "prompt",
+    ];
+    for key in KEYS {
+        if let Some(v) = input.get(key).and_then(|v| v.as_str()) {
+            if !v.trim().is_empty() {
+                return Some(one_line(v, 90));
+            }
+        }
+    }
+    match input {
+        serde_json::Value::Null => None,
+        serde_json::Value::String(s) if s.trim().is_empty() => None,
+        serde_json::Value::String(s) => Some(one_line(s, 90)),
+        other => {
+            let text = other.to_string();
+            (text != "{}").then(|| one_line(&text, 90))
+        }
+    }
+}
+
+/// Collapse to one line and truncate, so a payload cannot own the transcript.
+fn one_line(s: &str, max: usize) -> String {
+    let flat = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() <= max {
+        return flat;
+    }
+    format!("{}…", flat.chars().take(max).collect::<String>())
+}
+
+/// Keep the first `n` lines of tool output, saying how much was left.
+fn first_lines(s: &str, n: usize) -> String {
+    let lines: Vec<&str> = s.lines().collect();
+    if lines.len() <= n {
+        return s.trim_end().to_string();
+    }
+    format!(
+        "{}\n… (+{} more lines)",
+        lines[..n].join("\n"),
+        lines.len() - n
+    )
+}
+
 impl App {
     pub fn new(harness: HarnessKind, model: Option<String>, resume: Resume) -> App {
         App {
@@ -89,6 +158,7 @@ impl App {
             resume,
             cost_usd: 0.0,
             show_thinking: false,
+            show_details: true,
             pane: Pane::Chat,
             busy: false,
             agents: Vec::new(),
@@ -283,18 +353,32 @@ impl App {
                 }
             }
             AgentEvent::Message { text } => self.push(Entry::Agent(text.clone())),
-            AgentEvent::ToolCall { name, .. } => self.push(Entry::Tool {
+            AgentEvent::ToolCall { name, input } => self.push(Entry::Tool {
                 name: name.clone(),
+                detail: input.as_ref().and_then(tool_detail),
                 failed: false,
             }),
-            AgentEvent::ToolResult { name, is_error, .. } => {
-                // A tool that worked is noise; one that failed is the reason
-                // the answer is about to be wrong.
+            AgentEvent::ToolResult {
+                name,
+                summary,
+                is_error,
+            } => {
+                // A failure is always shown: it is the reason the answer is
+                // about to be wrong. Success is shown when details are on.
                 if *is_error {
                     self.push(Entry::Tool {
                         name: name.clone(),
+                        detail: None,
                         failed: true,
                     });
+                }
+                if let Some(text) = summary.as_ref().filter(|s| !s.trim().is_empty()) {
+                    if *is_error || self.show_details {
+                        self.push(Entry::ToolOut {
+                            text: first_lines(text, 6),
+                            failed: *is_error,
+                        });
+                    }
                 }
             }
             AgentEvent::Finished {
@@ -567,9 +651,144 @@ mod tests {
             a.transcript,
             vec![Entry::Tool {
                 name: "write".into(),
+                detail: None,
                 failed: true
             }]
         );
+    }
+
+    /// The point of watching a harness work: the transcript must say what the
+    /// tool was actually asked to do, not just its name.
+    #[test]
+    fn a_tool_call_shows_its_most_useful_argument() {
+        let mut a = app();
+        a.apply(&AgentEvent::ToolCall {
+            name: "Bash".into(),
+            input: Some(serde_json::json!({"command": "cargo test --workspace"})),
+        });
+        assert_eq!(
+            a.transcript,
+            vec![Entry::Tool {
+                name: "Bash".into(),
+                detail: Some("cargo test --workspace".into()),
+                failed: false
+            }]
+        );
+    }
+
+    #[test]
+    fn a_file_tool_shows_its_path() {
+        let mut a = app();
+        a.apply(&AgentEvent::ToolCall {
+            name: "Read".into(),
+            input: Some(serde_json::json!({"file_path": "/src/main.rs"})),
+        });
+        match &a.transcript[0] {
+            Entry::Tool { detail, .. } => assert_eq!(detail.as_deref(), Some("/src/main.rs")),
+            other => panic!("expected a tool, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_unrecognised_argument_shape_is_still_shown() {
+        let mut a = app();
+        a.apply(&AgentEvent::ToolCall {
+            name: "Odd".into(),
+            input: Some(serde_json::json!({"wibble": 3})),
+        });
+        match &a.transcript[0] {
+            Entry::Tool { detail, .. } => {
+                assert!(detail.as_deref().unwrap().contains("wibble"))
+            }
+            other => panic!("expected a tool, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_tool_with_no_arguments_shows_just_its_name() {
+        let mut a = app();
+        a.apply(&AgentEvent::ToolCall {
+            name: "Ls".into(),
+            input: Some(serde_json::json!({})),
+        });
+        match &a.transcript[0] {
+            Entry::Tool { detail, .. } => assert!(detail.is_none()),
+            other => panic!("expected a tool, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tool_output_is_shown_by_default() {
+        let mut a = app();
+        a.apply(&AgentEvent::ToolResult {
+            name: "Bash".into(),
+            summary: Some("test result: ok. 93 passed".into()),
+            is_error: false,
+        });
+        assert_eq!(
+            a.transcript,
+            vec![Entry::ToolOut {
+                text: "test result: ok. 93 passed".into(),
+                failed: false
+            }]
+        );
+    }
+
+    #[test]
+    fn tool_output_can_be_turned_off() {
+        let mut a = app();
+        a.show_details = false;
+        a.apply(&AgentEvent::ToolResult {
+            name: "Bash".into(),
+            summary: Some("chatter".into()),
+            is_error: false,
+        });
+        assert!(a.transcript.is_empty());
+    }
+
+    /// A failure is shown whether or not details are on: it is the reason the
+    /// answer is about to be wrong.
+    #[test]
+    fn a_failure_is_shown_even_with_details_off() {
+        let mut a = app();
+        a.show_details = false;
+        a.apply(&AgentEvent::ToolResult {
+            name: "Bash".into(),
+            summary: Some("command not found".into()),
+            is_error: true,
+        });
+        assert_eq!(a.transcript.len(), 2, "the failed tool and its output");
+        assert!(matches!(a.transcript[1], Entry::ToolOut { failed: true, .. }));
+    }
+
+    #[test]
+    fn long_tool_output_is_cut_down_with_a_count() {
+        let mut a = app();
+        let long = (0..40).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        a.apply(&AgentEvent::ToolResult {
+            name: "Bash".into(),
+            summary: Some(long),
+            is_error: false,
+        });
+        match &a.transcript[0] {
+            Entry::ToolOut { text, .. } => {
+                assert!(text.contains("line 0"));
+                assert!(text.contains("more lines"), "got {text}");
+                assert!(text.lines().count() <= 8);
+            }
+            other => panic!("expected output, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn empty_tool_output_is_not_shown() {
+        let mut a = app();
+        a.apply(&AgentEvent::ToolResult {
+            name: "Bash".into(),
+            summary: Some("   ".into()),
+            is_error: false,
+        });
+        assert!(a.transcript.is_empty());
     }
 
     /// The next turn must continue *this* conversation, not "the most recent",

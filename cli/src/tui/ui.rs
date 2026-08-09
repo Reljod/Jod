@@ -247,11 +247,26 @@ fn render(entry: &Entry, width: u16) -> Vec<Line<'static>> {
             Style::default().fg(MUTED).add_modifier(Modifier::ITALIC),
             t.clone(),
         ),
-        Entry::Tool { name, failed } => {
+        Entry::Tool {
+            name,
+            detail,
+            failed,
+        } => {
             let mark = if *failed { "✗ " } else { "⚙ " };
             let style = Style::default().fg(if *failed { BAD } else { MUTED });
-            (mark, style, name.clone())
+            let body = match detail {
+                Some(d) => format!("{name} · {d}"),
+                None => name.clone(),
+            };
+            (mark, style, body)
         }
+        // Indented under its call, so output reads as belonging to the tool
+        // above it rather than as the agent speaking.
+        Entry::ToolOut { text, failed } => (
+            "  └ ",
+            Style::default().fg(if *failed { BAD } else { MUTED }),
+            text.clone(),
+        ),
         Entry::Done { text, failed } => {
             let mark = if *failed { "✗ failed" } else { "✓ done" };
             let style = Style::default().fg(if *failed { BAD } else { GOOD });

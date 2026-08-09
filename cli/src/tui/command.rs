@@ -21,6 +21,8 @@ pub enum Slash {
     /// Set the model, or clear it back to the harness default.
     Model(Option<String>),
     Thinking,
+    /// Show or hide what tools gave back.
+    Details,
     /// Start a fresh conversation, forgetting the session cursor.
     New,
     /// List conversations that can be resumed.
@@ -66,6 +68,7 @@ pub fn parse(line: &str) -> Option<Slash> {
             }
         }
         "thinking" | "reasoning" => Slash::Thinking,
+        "details" | "output" => Slash::Details,
         "new" => Slash::New,
         "sessions" => Slash::Sessions,
         "resume" | "continue" => {
@@ -99,6 +102,7 @@ pub const HELP: &[(&str, &str)] = &[
     ("/harness <name>", "claude, opencode or agy — takes effect next turn"),
     ("/model <name>", "set the model; no argument restores the default"),
     ("/thinking", "show or hide reasoning"),
+    ("/details", "show or hide what tools returned"),
     ("/new", "start a fresh conversation"),
     ("/sessions", "conversations you can pick up"),
     ("/resume <id>", "continue one of them"),
@@ -382,6 +386,8 @@ mod tests {
     #[test]
     fn the_simple_commands_all_parse() {
         assert_eq!(parse("/thinking"), Some(Slash::Thinking));
+        assert_eq!(parse("/details"), Some(Slash::Details));
+        assert_eq!(parse("/output"), Some(Slash::Details));
         assert_eq!(parse("/reasoning"), Some(Slash::Thinking));
         assert_eq!(parse("/new"), Some(Slash::New));
         assert_eq!(parse("/sessions"), Some(Slash::Sessions));

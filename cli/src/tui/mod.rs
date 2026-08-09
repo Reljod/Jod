@@ -326,6 +326,13 @@ fn apply_slash(app: &mut App, slash: command::Slash) {
                 if app.show_thinking { "shown" } else { "hidden" }
             )));
         }
+        Slash::Details => {
+            app.show_details = !app.show_details;
+            app.push(Entry::Notice(format!(
+                "tool output {}",
+                if app.show_details { "shown" } else { "hidden" }
+            )));
+        }
         Slash::New => {
             app.resume = Resume::Fresh;
             app.session = None;
