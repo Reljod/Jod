@@ -7,10 +7,15 @@ import type {
   StoredRun,
 } from "../types";
 
+/** A token's authority. Absent scope is treated as `read` — fail safe. */
+export type Scope = "read" | "write";
+
 /** Whether the HUD is talking to a real orchestrator or running on simulation. */
 export type LinkState =
   | { phase: "probing" }
-  | { phase: "live"; origin: string }
+  | { phase: "live"; origin: string; scope: Scope }
+  /** The orchestrator is reachable but this browser has no valid session. */
+  | { phase: "auth"; reason: string }
   | { phase: "simulated"; reason: string }
   | { phase: "lost"; reason: string; retryInMs: number };
 
@@ -36,8 +41,14 @@ export interface Transport {
   stop(): void;
   spawn(request: SpawnRequest): Promise<AgentSummary | null>;
   kill(agentId: string): Promise<void>;
-  /** Backfill for a late-joining view. */
+  /**
+   * Backfill. `sinceSeq` is an *exclusive* cursor, and `seq` starts at 0 —
+   * so passing 0 skips the `started` event, which is the one carrying
+   * `session_id` and `model`. Omit it entirely for a first load.
+   */
   events(agentId: string, sinceSeq?: number): Promise<AgentEnvelope[]>;
+  /** Exchange a bearer token for a session cookie. Returns its scope. */
+  authenticate(token: string): Promise<Scope>;
   harnesses(): Promise<HarnessInfo[]>;
   history(limit: number): Promise<StoredRun[]>;
 }

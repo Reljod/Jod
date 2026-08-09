@@ -135,6 +135,59 @@ button { cursor: pointer; background: none; border: none; }
 .link-simulated .dot { background: var(--amber); }
 .link-lost { color: var(--red); border-color: rgba(255, 77, 94, 0.35); }
 .link-lost .dot { background: var(--red); animation: blip 0.7s infinite; }
+.link-auth { color: var(--amber); border-color: rgba(255, 181, 71, 0.4); }
+.link-auth .dot { background: var(--amber); animation: blip 1.1s infinite; }
+
+.scope { font-size: 8px; padding: 1px 5px; border: 1px solid currentColor; letter-spacing: 0.1em; }
+.scope-read { color: var(--amber); }
+.scope-write { color: var(--mint); }
+
+/* ── auth gate ──────────────────────────────────────────────────────────── */
+
+.authgate-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(2, 5, 10, 0.86);
+  backdrop-filter: blur(6px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 80;
+}
+.authgate {
+  width: min(440px, 92vw);
+  padding: 22px 24px 24px;
+  background: var(--bg-raise);
+  border: 1px solid rgba(255, 181, 71, 0.35);
+  box-shadow: 0 0 60px rgba(255, 181, 71, 0.08), 0 24px 70px rgba(0, 0, 0, 0.6);
+}
+.authgate h2 { margin: 0 0 10px; font-size: 11px; letter-spacing: 0.2em; color: var(--amber); }
+.authgate .why { margin: 0 0 16px; font-size: 11px; line-height: 1.6; color: var(--text-dim); }
+.authgate label { display: flex; flex-direction: column; gap: 5px; font-size: 8.5px; letter-spacing: 0.16em; color: var(--text-dim); }
+.authgate input {
+  background: rgba(4, 10, 18, 0.85);
+  border: 1px solid var(--line);
+  padding: 9px 11px;
+  font-size: 13px;
+  outline: none;
+  letter-spacing: normal;
+}
+.authgate input:focus { border-color: var(--amber); }
+.authgate .note { margin: 9px 0 0; font-size: 9.5px; line-height: 1.6; color: rgba(127, 155, 179, 0.72); }
+.authgate .note code { color: var(--cyan); }
+.authgate .err { margin: 9px 0 0; font-size: 10px; color: var(--red); line-height: 1.5; }
+.authgate .go {
+  width: 100%;
+  margin-top: 16px;
+  padding: 10px;
+  border: 1px solid var(--amber);
+  color: var(--amber);
+  letter-spacing: 0.2em;
+  font-size: 10px;
+  transition: all 0.15s;
+}
+.authgate .go:not(:disabled):hover { background: rgba(255, 181, 71, 0.12); }
+.authgate .go:disabled { opacity: 0.3; cursor: not-allowed; border-color: var(--line); color: var(--text-dim); }
 
 @keyframes blip { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }
 

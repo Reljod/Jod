@@ -116,23 +116,48 @@ happened"*.
 **This client does not poll.** The roster is refreshed only on `started` /
 `finished` / `error` and after spawn/kill, debounced ~400 ms.
 
-### Two things this client defends against
+### `seq` starts at 0, and the cursor is exclusive
 
-1. **Duplicate replays.** `/v1/events` tags frames with a *per-agent* `seq`, which
-   is not globally monotonic, so `Last-Event-ID` resume on the all-agents stream
-   is ambiguous. Every envelope is deduped on `(agent_id, seq)`, making replay
-   idempotent however the server resolves that. Raised with the API session.
-2. **Rehydration floods.** A restarted daemon comes back with its whole run
-   history, so the graph plots a ranked budget of 48 (live first, then faults,
-   then recency) and states `+N not plotted` rather than truncating silently.
+`after_seq` is exclusive, so `?after_seq=0` means *"everything after event 0"* and
+**skips `started`** — the event carrying `session_id` and `model`. Two consequences
+this client gets right, both covered by tests:
 
-### Open with the API session
+- a first load **omits** `after_seq` entirely rather than passing `0`;
+- the dedupe map defaults to `-1`, not `0`, or every agent's `started` would be
+  silently swallowed.
 
-- **Auth**: cookie session (`POST /v1/session`) was requested over bearer-in-
-  browser, because `EventSource` cannot set an `Authorization` header and
-  hand-rolling SSE would discard the automatic reconnect/resume that motivated
-  SSE in the first place. Until it exists, the HUD **assumes read-only** against a
-  live orchestrator and disables spawn/kill — failing safe beats a form that 403s.
+The simulation driver numbers from 0 for the same reason: seeding from 1 would
+mean never exercising the off-by-one.
+
+### Three things this client defends against
+
+1. **Duplicate replays.** `/v1/events` is documented **live-only and issues no
+   `id:`** — deliberately, so the browser cannot send a meaningless
+   `Last-Event-ID`. Client-side dedupe on `(agent_id, seq)` is therefore the
+   contract, not a workaround, and per-agent backfill is the recovery path.
+2. **Dropped broadcasts.** The server emits `event: lagged` with `{"missed": N}`
+   when its channel overflows. That is handled by re-reading every agent from its
+   last rendered `seq` — the difference between a HUD that knows it is stale and
+   one that confidently shows wrong state.
+3. **Rehydration floods.** A restarted daemon comes back with its whole run
+   history, so the graph plots a ranked budget of 48 (live → faults → recency) and
+   states `+N not plotted` rather than truncating silently.
+
+### Auth
+
+Cookie session, chosen over bearer-in-browser because `EventSource` cannot set an
+`Authorization` header and hand-rolling SSE would discard the automatic
+reconnect that motivated SSE in the first place.
+
+`POST /v1/session` with `Authorization: Bearer <token>` returns `{"scope":…}` and
+sets an `HttpOnly; Secure; SameSite=Strict` cookie. **The token is never stored by
+this page** — the cookie is the credential from then on. A 401 is a real HTTP 401
+on the SSE route, so `EventSource` goes to `CLOSED` without retrying and the HUD
+shows a re-auth gate instead of looking connected while frozen.
+
+Write actions follow the returned scope: a `read` session disables spawn, kill and
+delegate rather than firing a request that 403s. Anything other than an explicit
+`"write"` — absent field, lost link, pending probe — is treated as read.
 
 ## Tests
 

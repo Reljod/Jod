@@ -302,7 +302,7 @@ export class SimTransport implements Transport {
     const agent = summaryFor(bp, id, now);
     this.agents.set(id, agent);
     this.streams.set(id, []);
-    this.seq.set(id, 0);
+    this.seq.set(id, -1);
 
     this.emit(id, {
       kind: "started",
@@ -337,7 +337,11 @@ export class SimTransport implements Transport {
     const agent = this.agents.get(agentId);
     if (!agent) return;
 
-    const seq = (this.seq.get(agentId) ?? 0) + 1;
+    // `seq` starts at 0, matching the API — so the very first event an agent
+    // emits (`started`) is seq 0. Seeding from 1 here would mean the simulation
+    // never exercised the off-by-one that an exclusive `after_seq` cursor and a
+    // `?? 0` dedupe default both get wrong.
+    const seq = (this.seq.get(agentId) ?? -1) + 1;
     this.seq.set(agentId, seq);
     const envelope: AgentEnvelope = {
       ...event,
@@ -348,7 +352,7 @@ export class SimTransport implements Transport {
 
     // Mirror core/src/service.rs::apply so the roster stays consistent with
     // what the real orchestrator would have computed from the same stream.
-    agent.event_count = seq;
+    agent.event_count = seq + 1;
     if (event.kind === "message") agent.last_message = event.text;
     if (event.kind === "started" && event.model) agent.model = event.model;
     if (event.kind === "finished") {
@@ -427,8 +431,15 @@ export class SimTransport implements Transport {
     this.pushReport();
   }
 
-  async events(agentId: string, sinceSeq = 0): Promise<AgentEnvelope[]> {
-    return (this.streams.get(agentId) ?? []).filter((e) => e.seq > sinceSeq);
+  /** Mirrors the API: an omitted cursor returns seq 0 onward, exclusive otherwise. */
+  async events(agentId: string, sinceSeq?: number): Promise<AgentEnvelope[]> {
+    const stream = this.streams.get(agentId) ?? [];
+    return sinceSeq === undefined ? [...stream] : stream.filter((e) => e.seq > sinceSeq);
+  }
+
+  /** No auth in simulation — nothing real can happen, so it is always writable. */
+  async authenticate(): Promise<"write"> {
+    return "write";
   }
 
   async harnesses(): Promise<HarnessInfo[]> {

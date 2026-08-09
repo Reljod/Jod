@@ -15,6 +15,8 @@ export interface JodApi {
   harnesses: HarnessInfo[];
   spawn(request: SpawnRequest): Promise<AgentSummary | null>;
   kill(agentId: string): Promise<void>;
+  /** Exchange a bearer token for a session cookie. Throws on rejection. */
+  authenticate(token: string): Promise<void>;
   /** Last action error, for the console line. */
   lastError: string | null;
   clearError(): void;
@@ -92,6 +94,17 @@ export function useJod(): JodApi {
     [],
   );
 
+  const authenticate = useCallback(async (token: string) => {
+    const transport = transportRef.current;
+    if (!transport) throw new Error("No transport connected");
+    await transport.authenticate(token);
+    try {
+      setHarnesses(await transport.harnesses());
+    } catch {
+      /* harness list is chrome, not load-bearing */
+    }
+  }, []);
+
   const kill = useCallback(async (agentId: string) => {
     try {
       setLastError(null);
@@ -108,6 +121,7 @@ export function useJod(): JodApi {
     harnesses,
     spawn,
     kill,
+    authenticate,
     lastError,
     clearError: useCallback(() => setLastError(null), []),
   };

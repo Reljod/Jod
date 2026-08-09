@@ -43,7 +43,9 @@ export function TopBar({
         ? "SIMULATED FEED"
         : link.phase === "probing"
           ? "PROBING…"
-          : `LINK LOST — RETRY ${Math.round(link.retryInMs / 100) / 10}s`;
+          : link.phase === "auth"
+            ? "NO SESSION"
+            : `LINK LOST — RETRY ${Math.round(link.retryInMs / 100) / 10}s`;
 
   return (
     <header className="topbar">
@@ -56,10 +58,15 @@ export function TopBar({
       <div className={`link link-${link.phase}`} title={
         link.phase === "simulated" ? link.reason
         : link.phase === "lost" ? link.reason
+        : link.phase === "auth" ? link.reason
         : undefined
       }>
         <i className="dot" />
         {linkText}
+        {/* A read-only session must be obvious before someone fills in a form. */}
+        {link.phase === "live" && (
+          <span className={`scope scope-${link.scope}`}>{link.scope.toUpperCase()}</span>
+        )}
         <span className="via">{transportLabel}</span>
       </div>
 

@@ -6,7 +6,7 @@ import type {
   SpawnRequest,
   StoredRun,
 } from "../types";
-import type { Transport, TransportHandlers } from "./index";
+import type { Scope, Transport, TransportHandlers } from "./index";
 
 /**
  * Talks to `jod-api` over REST + SSE.
@@ -39,8 +39,15 @@ export class HttpTransport implements Transport {
   private reconcileTimer: ReturnType<typeof setTimeout> | null = null;
   private stopped = false;
   private attempt = 0;
-  /** Highest seq already rendered per agent — the dedupe key. */
+  /**
+   * Highest seq already rendered per agent — the dedupe key.
+   *
+   * `seq` starts at **0**, so "nothing seen yet" must be -1. Defaulting to 0
+   * would silently swallow every agent's `started` event, and with it the
+   * `session_id` and `model` it carries.
+   */
   private lastSeq = new Map<string, number>();
+  private scope: Scope = "read";
 
   constructor(private readonly base = "") {}
 
@@ -74,6 +81,9 @@ export class HttpTransport implements Transport {
       headers: { "content-type": "application/json" },
       ...init,
     });
+    if (res.status === 401 || res.status === 403) {
+      throw new UnauthorizedError(await problemDetail(res, path), res.status);
+    }
     if (!res.ok) throw new Error(await problemDetail(res, path));
     if (res.status === 204) return undefined as T;
     return (await res.json()) as T;
@@ -117,10 +127,37 @@ export class HttpTransport implements Transport {
     }
   }
 
-  async events(agentId: string, sinceSeq = 0): Promise<AgentEnvelope[]> {
-    return this.json<AgentEnvelope[]>(
-      `/v1/agents/${encodeURIComponent(agentId)}/events?after_seq=${sinceSeq}&limit=500`,
-    );
+  /**
+   * `after_seq` is an *exclusive* cursor over a sequence that starts at 0, so
+   * `?after_seq=0` means "everything after event 0" and skips `started`.
+   * Omitting the parameter entirely is what returns seq 0 onward.
+   */
+  async events(agentId: string, sinceSeq?: number): Promise<AgentEnvelope[]> {
+    const path = `/v1/agents/${encodeURIComponent(agentId)}/events`;
+    const query = sinceSeq === undefined ? "?limit=500" : `?after_seq=${sinceSeq}&limit=500`;
+    return this.json<AgentEnvelope[]>(path + query);
+  }
+
+  /**
+   * Exchange a bearer token for an `HttpOnly` session cookie.
+   *
+   * `EventSource` cannot set an `Authorization` header, which is the whole
+   * reason this endpoint exists. The token is never stored client-side — the
+   * cookie is the credential from here on.
+   */
+  async authenticate(token: string): Promise<Scope> {
+    const res = await fetch(this.url("/v1/session"), {
+      method: "POST",
+      credentials: "include",
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!res.ok) throw new Error(await problemDetail(res, "/v1/session"));
+    const body = (await res.json().catch(() => ({}))) as { scope?: Scope };
+    // An absent scope is treated as read — fail safe, never fail open.
+    this.scope = body.scope === "write" ? "write" : "read";
+    this.attempt = 0;
+    void this.bootstrap();
+    return this.scope;
   }
 
   async spawn(request: SpawnRequest): Promise<AgentSummary | null> {
@@ -160,9 +197,16 @@ export class HttpTransport implements Transport {
       this.handlers?.onLink({
         phase: "live",
         origin: this.base || location.origin,
+        scope: this.scope,
       });
       this.openStream();
     } catch (err) {
+      // A 401 is not a transport failure to retry into — it needs a human to
+      // present a token, so surface it instead of reconnecting forever.
+      if (err instanceof UnauthorizedError) {
+        this.handlers?.onLink({ phase: "auth", reason: err.message });
+        return;
+      }
       this.scheduleRetry(err instanceof Error ? err.message : String(err));
     }
   }
@@ -200,6 +244,23 @@ export class HttpTransport implements Transport {
       // The server tags frames `event: agent`, so a bare `onmessage` would
       // never fire. Listen for both, and treat any unnamed frame as an event.
       sse.addEventListener("agent", (ev) => this.ingest((ev as MessageEvent).data));
+      // The server dropped broadcast messages: this HUD now has a hole, and
+      // showing stale state confidently is worse than admitting it. Backfill.
+      sse.addEventListener("lagged", (ev) => {
+        const data = (ev as MessageEvent).data;
+        let missed = 0;
+        try {
+          missed = Number(JSON.parse(String(data))?.missed ?? 0);
+        } catch {
+          /* the count is advisory; the backfill is the point */
+        }
+        this.handlers?.onLink({
+          phase: "lost",
+          reason: `stream lagged — ${missed} event(s) missed, backfilling`,
+          retryInMs: 0,
+        });
+        void this.backfillAll();
+      });
       sse.onmessage = (ev) => this.ingest(ev.data);
       sse.onerror = () => {
         // EventSource reconnects itself while readyState is CONNECTING; only
@@ -220,10 +281,45 @@ export class HttpTransport implements Transport {
         this.handlers?.onLink({
           phase: "live",
           origin: this.base || location.origin,
+          scope: this.scope,
         });
       };
     } catch (err) {
       this.scheduleRetry(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  /**
+   * Re-read every known agent from its last rendered seq.
+   *
+   * `/v1/events` is documented live-only and issues no `id:`, so there is no
+   * cursor to resume the aggregate stream with. Per-agent backfill is the
+   * documented recovery path, and the `(agent_id, seq)` dedupe makes replaying
+   * an overlap harmless.
+   */
+  private async backfillAll(): Promise<void> {
+    try {
+      const report = await this.report();
+      this.handlers?.onReport(report);
+
+      await Promise.all(
+        report.agents.map(async (agent) => {
+          const seen = this.lastSeq.get(agent.id);
+          try {
+            for (const env of await this.events(agent.id, seen)) this.dispatch(env);
+          } catch {
+            /* one agent failing to backfill must not abort the rest */
+          }
+        }),
+      );
+
+      this.handlers?.onLink({
+        phase: "live",
+        origin: this.base || location.origin,
+        scope: this.scope,
+      });
+    } catch {
+      /* the retry loop will pick this up */
     }
   }
 
@@ -247,8 +343,9 @@ export class HttpTransport implements Transport {
     // The contract shape: a flattened AgentEnvelope.
     if (typeof rec.kind === "string" && typeof rec.agent_id === "string") {
       const env = msg as AgentEnvelope;
-      const seen = this.lastSeq.get(env.agent_id) ?? 0;
-      if (env.seq <= seen) return; // replayed after reconnect — already drawn
+      // -1, not 0: seq starts at 0, so `?? 0` would drop every `started`.
+      const seen = this.lastSeq.get(env.agent_id) ?? -1;
+      if (env.seq <= seen) return; // replayed or backfilled — already drawn
       this.lastSeq.set(env.agent_id, env.seq);
 
       this.handlers?.onEnvelope(env);
@@ -272,6 +369,17 @@ export class HttpTransport implements Transport {
     const retryInMs = Math.min(15000, 750 * 2 ** Math.min(this.attempt, 5));
     this.handlers?.onLink({ phase: "lost", reason, retryInMs });
     this.retryTimer = setTimeout(() => void this.bootstrap(), retryInMs);
+  }
+}
+
+/** No valid session, or one without the authority for this call. */
+export class UnauthorizedError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+    this.name = "UnauthorizedError";
   }
 }
 

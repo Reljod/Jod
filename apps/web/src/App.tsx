@@ -7,6 +7,7 @@ import { Roster } from "./components/Roster";
 import { Dossier } from "./components/Dossier";
 import { SigintFeed } from "./components/SigintFeed";
 import { CommandPalette } from "./components/CommandPalette";
+import { AuthGate } from "./components/AuthGate";
 import type { AgentNode } from "./state/world";
 import type { HarnessKind, Resume, SpawnRequest } from "./types";
 
@@ -22,10 +23,13 @@ export default function App() {
   const [recentreNonce, setRecentreNonce] = useState(0);
   const [view, setView] = useState<ViewMode>("tactical");
 
-  // Until `POST /v1/session` exists and reports a scope, assume read-only when
-  // talking to a real orchestrator — failing safe beats a form that 403s. The
-  // simulation is always writable, since nothing real can happen there.
-  const canWrite = world.link.phase === "simulated";
+  // Write actions follow the session's scope, which `POST /v1/session` returns.
+  // A read token cannot spawn or kill, so the controls are disabled rather than
+  // firing a request that 403s. Anything other than an explicit "write" — an
+  // absent field, a lost link, a pending probe — is treated as read.
+  const canWrite =
+    world.link.phase === "simulated" ||
+    (world.link.phase === "live" && world.link.scope === "write");
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -112,6 +116,10 @@ export default function App() {
         <div className="sim-banner" title={world.link.reason}>
           SIMULATED FLEET — no orchestrator on /v1/health
         </div>
+      )}
+
+      {world.link.phase === "auth" && (
+        <AuthGate reason={world.link.reason} onSubmit={jod.authenticate} />
       )}
 
       <CommandPalette
