@@ -9,8 +9,11 @@
 # something to track in version control.
 tests/e2e/gaps-report.md
 
-# Rust build output.
+# Rust build output. The leading slash pins the first to the workspace root,
+# so every crate outside it needs naming — `apps/ios/src-tauri` is its own
+# cargo workspace and drops a `target/` of its own.
 /target
+apps/ios/src-tauri/target/
 
 # Web/desktop app build output and dependencies.
 node_modules/
