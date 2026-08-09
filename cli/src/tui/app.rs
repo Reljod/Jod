@@ -116,22 +116,41 @@ pub enum Resolved {
 /// how much they tell a reader, and anything unrecognised falls back to compact
 /// JSON rather than being dropped.
 fn tool_detail(input: &serde_json::Value) -> Option<String> {
-    const KEYS: [&str; 10] = [
+    // Compared with case and underscores ignored, so `file_path`, `filePath`
+    // and `FilePath` all match one entry. The harnesses genuinely disagree
+    // here: AGY names its parameters `TargetFile` and `DirectoryPath`, and
+    // without them its calls rendered as raw JSON.
+    const KEYS: [&str; 12] = [
         "command",
         "cmd",
-        "file_path",
+        "filepath",
         "path",
-        "filePath",
+        "targetfile",
+        "directorypath",
         "pattern",
         "query",
         "url",
         "description",
         "prompt",
+        "searchterm",
     ];
-    for key in KEYS {
-        if let Some(v) = input.get(key).and_then(|v| v.as_str()) {
-            if !v.trim().is_empty() {
-                return Some(one_line(v, 90));
+    fn normalise(key: &str) -> String {
+        key.chars()
+            .filter(|c| *c != '_')
+            .flat_map(char::to_lowercase)
+            .collect()
+    }
+    if let Some(map) = input.as_object() {
+        for key in KEYS {
+            for (found, value) in map {
+                if normalise(found) != key {
+                    continue;
+                }
+                if let Some(v) = value.as_str() {
+                    if !v.trim().is_empty() {
+                        return Some(one_line(v, 90));
+                    }
+                }
             }
         }
     }
@@ -389,11 +408,21 @@ impl App {
             } => {
                 // A failure is always shown: it is the reason the answer is
                 // about to be wrong. Success is shown when details are on.
-                if *is_error {
+                //
+                // A result also needs a call line above it when none was
+                // announced. OpenCode reports a fast tool as already
+                // `completed`, so no ToolCall ever arrives and the output was
+                // rendered as a bare `└ Wrote file successfully.` — an answer
+                // with its question missing.
+                let announced = matches!(
+                    self.transcript.last(),
+                    Some(Entry::Tool { name: n, .. }) if n == name
+                );
+                if *is_error || !announced {
                     self.push(Entry::Tool {
                         name: name.clone(),
                         detail: None,
-                        failed: true,
+                        failed: *is_error,
                     });
                 }
                 if let Some(text) = summary.as_ref().filter(|s| !s.trim().is_empty()) {
@@ -696,28 +725,83 @@ mod tests {
         assert_eq!(a.transcript, vec![Entry::Thinking("hmm".into())]);
     }
 
-    /// A tool that worked is noise. A tool that failed explains the answer.
+    /// A tool already announced adds nothing when it merely worked; a failure
+    /// always earns its line, because it explains the answer.
     #[test]
-    fn only_failing_tool_results_reach_the_transcript() {
+    fn an_announced_tool_that_worked_adds_no_second_line() {
         let mut a = app();
+        a.apply(&AgentEvent::ToolCall {
+            name: "read".into(),
+            input: None,
+        });
         a.apply(&AgentEvent::ToolResult {
             name: "read".into(),
             summary: None,
             is_error: false,
         });
-        assert!(a.transcript.is_empty());
+        assert_eq!(
+            a.transcript,
+            vec![Entry::Tool {
+                name: "read".into(),
+                detail: None,
+                failed: false
+            }],
+            "the result must not repeat the call line"
+        );
+
         a.apply(&AgentEvent::ToolResult {
             name: "write".into(),
             summary: None,
             is_error: true,
         });
+        assert_eq!(a.transcript.len(), 2);
+        assert!(matches!(
+            a.transcript[1],
+            Entry::Tool { failed: true, .. }
+        ));
+    }
+
+    /// OpenCode reports a fast tool as already `completed`, so no call is ever
+    /// announced. Without a line of its own the output rendered as a bare
+    /// `└ …` — an answer with its question missing.
+    #[test]
+    fn a_result_with_no_announced_call_still_names_its_tool() {
+        let mut a = app();
+        a.apply(&AgentEvent::ToolResult {
+            name: "write".into(),
+            summary: Some("Wrote file successfully.".into()),
+            is_error: false,
+        });
         assert_eq!(
             a.transcript,
-            vec![Entry::Tool {
-                name: "write".into(),
-                detail: None,
-                failed: true
-            }]
+            vec![
+                Entry::Tool {
+                    name: "write".into(),
+                    detail: None,
+                    failed: false
+                },
+                Entry::ToolOut {
+                    text: "Wrote file successfully.".into(),
+                    failed: false
+                },
+            ]
+        );
+    }
+
+    /// The harnesses disagree on how a parameter is spelled. AGY's PascalCase
+    /// names fell through and its calls rendered as raw JSON.
+    #[test]
+    fn a_parameter_is_found_however_the_harness_spells_it() {
+        for input in [
+            serde_json::json!({"file_path": "/tmp/sq.py"}),
+            serde_json::json!({"filePath": "/tmp/sq.py"}),
+            serde_json::json!({"TargetFile": "/tmp/sq.py"}),
+        ] {
+            assert_eq!(tool_detail(&input).as_deref(), Some("/tmp/sq.py"));
+        }
+        assert_eq!(
+            tool_detail(&serde_json::json!({"DirectoryPath": "/home"})).as_deref(),
+            Some("/home")
         );
     }
 
@@ -784,17 +868,21 @@ mod tests {
     #[test]
     fn tool_output_is_shown_by_default() {
         let mut a = app();
+        a.apply(&AgentEvent::ToolCall {
+            name: "Bash".into(),
+            input: None,
+        });
         a.apply(&AgentEvent::ToolResult {
             name: "Bash".into(),
             summary: Some("test result: ok. 93 passed".into()),
             is_error: false,
         });
         assert_eq!(
-            a.transcript,
-            vec![Entry::ToolOut {
+            a.transcript[1],
+            Entry::ToolOut {
                 text: "test result: ok. 93 passed".into(),
                 failed: false
-            }]
+            }
         );
     }
 
@@ -802,12 +890,16 @@ mod tests {
     fn tool_output_can_be_turned_off() {
         let mut a = app();
         a.show_details = false;
+        a.apply(&AgentEvent::ToolCall {
+            name: "Bash".into(),
+            input: None,
+        });
         a.apply(&AgentEvent::ToolResult {
             name: "Bash".into(),
             summary: Some("chatter".into()),
             is_error: false,
         });
-        assert!(a.transcript.is_empty());
+        assert_eq!(a.transcript.len(), 1, "the call, but not its output");
     }
 
     /// A failure is shown whether or not details are on: it is the reason the
@@ -829,12 +921,16 @@ mod tests {
     fn long_tool_output_is_cut_down_with_a_count() {
         let mut a = app();
         let long = (0..40).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        a.apply(&AgentEvent::ToolCall {
+            name: "Bash".into(),
+            input: None,
+        });
         a.apply(&AgentEvent::ToolResult {
             name: "Bash".into(),
             summary: Some(long),
             is_error: false,
         });
-        match &a.transcript[0] {
+        match &a.transcript[1] {
             Entry::ToolOut { text, .. } => {
                 assert!(text.contains("line 0"));
                 assert!(text.contains("more lines"), "got {text}");
@@ -847,12 +943,16 @@ mod tests {
     #[test]
     fn empty_tool_output_is_not_shown() {
         let mut a = app();
+        a.apply(&AgentEvent::ToolCall {
+            name: "Bash".into(),
+            input: None,
+        });
         a.apply(&AgentEvent::ToolResult {
             name: "Bash".into(),
             summary: Some("   ".into()),
             is_error: false,
         });
-        assert!(a.transcript.is_empty());
+        assert_eq!(a.transcript.len(), 1, "the call, and no empty output line");
     }
 
     /// The next turn must continue *this* conversation, not "the most recent",
