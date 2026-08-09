@@ -310,10 +310,16 @@ server or a harness. It declines in four cases, each on purpose:
   asleep holding visible unread mail is better than answering with amnesia.
 
 That last rule is why `jod team start` exists: a member has no conversation
-until it has run once. `wake` learns the session id from the finished run and
-records it, and the same pass marks a member idle again once its run has ended —
-reconciliation lives in the command rather than in a daemon, so nothing has to
-be running between turns.
+until it has run once, and `start` is the first turn that creates one.
+
+**Both commands wait for their runs by default**, and that is not a UI
+preference — it is forced by where the tailer lives. The task that follows a
+run's output and records its events belongs to the process that spawned it, so
+a command that returned early would take the tailer with it: no `Finished`
+event would ever be written, and the member would stay marked busy for ever,
+never eligible to be woken again. Waiting is what lets the command record the
+session id and mark the member idle before it exits. `--detach` is available and
+honest about the consequence — the state is reconciled on the next `wake`.
 
 Mail is drained only *after* a spawn succeeds, so a failure leaves it waiting
 rather than losing it.

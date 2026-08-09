@@ -213,6 +213,9 @@ enum TeamCommand {
         /// Say what would happen without spawning anything.
         #[arg(long)]
         dry_run: bool,
+        /// Return as soon as the agents are launched, instead of waiting.
+        #[arg(short, long)]
+        detach: bool,
     },
     /// Give a member its first turn, so it has a conversation to resume.
     ///
@@ -226,6 +229,9 @@ enum TeamCommand {
         cwd: Option<PathBuf>,
         #[arg(short, long, value_enum, default_value_t = PermissionArg::Ask)]
         permission: PermissionArg,
+        /// Return as soon as the agent is launched, instead of waiting for it.
+        #[arg(short, long)]
+        detach: bool,
     },
     /// Who is on the team, and what is on its board.
     Show { team: String },
@@ -550,6 +556,7 @@ async fn main() -> Result<()> {
                     cwd,
                     permission,
                     dry_run,
+                    detach,
                 } => {
                     // A member marked busy whose run has since ended is idle
                     // again. Reconciling here rather than in a daemon keeps
@@ -586,6 +593,9 @@ async fn main() -> Result<()> {
 
                     let cwd = cwd.unwrap_or_else(jod_core::service::default_cwd);
                     let mut woken = 0usize;
+                    // Subscribe before any spawn, so no early event is missed.
+                    let events = jod.subscribe();
+                    let mut spawned: Vec<(String, String)> = Vec::new();
                     for m in store.team_members(&team)? {
                         let pending = store.team_unread(&team, &m.name)?;
                         let Some(order) = jod_core::team::wake_order(&m, &pending) else {
@@ -624,10 +634,23 @@ async fn main() -> Result<()> {
                             order.messages,
                             &agent.id[..agent.id.len().min(8)]
                         );
+                        spawned.push((m.name.clone(), agent.id));
                         woken += 1;
                     }
                     if woken == 0 {
                         println!("nobody to wake");
+                    } else if detach {
+                        println!("detached — run `jod team wake {team}` again once they finish");
+                    } else {
+                        // Wait, then record what each run taught us. Without
+                        // this the members stay busy for ever: the tailer lives
+                        // in this process and dies with it.
+                        wait_for_all(events, spawned.iter().map(|(_, id)| id.clone()).collect())
+                            .await;
+                        for (member, id) in &spawned {
+                            settle_member(&jod, store, &team, member, id).await?;
+                        }
+                        println!("{woken} member(s) idle again");
                     }
                 }
                 TeamCommand::Start {
@@ -636,12 +659,15 @@ async fn main() -> Result<()> {
                     prompt,
                     cwd,
                     permission,
+                    detach,
                 } => {
                     let who = store
                         .team_members(&team)?
                         .into_iter()
                         .find(|m| m.name == member)
                         .with_context(|| format!("{member} is not on {team}"))?;
+                    // Subscribe before spawning, so no early event is missed.
+                    let events = jod.subscribe();
                     let agent = jod
                         .spawn_agent(SpawnRequest {
                             name: format!("{team}-{member}"),
@@ -660,6 +686,13 @@ async fn main() -> Result<()> {
                         who.harness.label(),
                         &agent.id[..agent.id.len().min(8)]
                     );
+                    if detach {
+                        println!("detached — run `jod team wake {team}` once it finishes");
+                    } else {
+                        wait_for_all(events, [agent.id.clone()].into_iter().collect()).await;
+                        settle_member(&jod, store, &team, &member, &agent.id).await?;
+                        println!("{member} is idle again, ready to be woken");
+                    }
                 }
                 TeamCommand::Show { team } => {
                     render::team(&store.team_members(&team)?, &store.team_tasks(&team)?);
@@ -765,6 +798,45 @@ fn read_stdin() -> std::io::Result<String> {
 }
 
 /// A short, human-recognisable name derived from the prompt's first words.
+/// Wait until every one of `pending` has finished.
+///
+/// A team command that returned before its runs ended would leave the members
+/// marked busy for ever: the tailer lives in *this* process, so nothing would
+/// ever record that they stopped.
+async fn wait_for_all(
+    mut events: jod_core::broadcast::Receiver<jod_core::AgentEnvelope>,
+    mut pending: std::collections::HashSet<String>,
+) {
+    use jod_core::broadcast::error::RecvError;
+    while !pending.is_empty() {
+        match events.recv().await {
+            Ok(env) => {
+                if matches!(env.event, jod_core::AgentEvent::Finished { .. }) {
+                    pending.remove(&env.agent_id);
+                }
+            }
+            // Nothing more is coming; stop rather than hang.
+            Err(RecvError::Closed) => return,
+            Err(RecvError::Lagged(_)) => continue,
+        }
+    }
+}
+
+/// Record what a finished run taught us: the conversation to resume next time,
+/// and that the member is idle again.
+async fn settle_member(
+    jod: &std::sync::Arc<Jod>,
+    store: &jod_core::store::Store,
+    team: &str,
+    member: &str,
+    agent_id: &str,
+) -> Result<()> {
+    let session = jod.agent(agent_id).await.ok().and_then(|a| a.session_id);
+    store.bind_member(team, member, Some(agent_id), session.as_deref())?;
+    store.set_member_status(team, member, MemberStatus::Ready)?;
+    Ok(())
+}
+
 fn default_name(prompt: &str) -> String {
     let words: Vec<&str> = prompt.split_whitespace().take(5).collect();
     let name = words.join(" ");
