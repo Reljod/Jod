@@ -1,0 +1,39 @@
+[package]
+name = "jod-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The authenticated HTTP API over jod-core, for mobile and web clients."
+
+[[bin]]
+name = "jod-api"
+path = "src/main.rs"
+
+[dependencies]
+jod-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+# `signal` is additive on top of the workspace features: the daemon shuts down
+# cleanly on SIGTERM so systemd restarts don't cut a response in half.
+tokio = { workspace = true, features = ["signal"] }
+uuid.workspace = true
+chrono.workspace = true
+
+axum = "0.8"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["limit", "cors", "trace"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+futures-core = "0.3"
+async-stream = "0.3"
+sha2 = "0.10"
+subtle = "2"
+rand = "0.9"
+toml = "0.9"
+clap = { version = "4", features = ["derive", "env"] }
+anyhow = "1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
+http-body-util = "0.1"
+tower = { version = "0.5", features = ["util"] }

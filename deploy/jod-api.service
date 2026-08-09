@@ -1,0 +1,66 @@
+# jod-api — the authenticated HTTP API over Jod.
+#
+# This daemon spawns agent harnesses, which run shell commands. The hardening
+# below assumes the daemon itself may one day be the thing that is compromised,
+# and bounds what it can reach. → deploy/README.md
+#
+#   sudo cp deploy/jod-api.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now jod-api
+
+[Unit]
+Description=Jod API — authenticated HTTP surface over jod-core
+Documentation=https://github.com/Reljod/Jod
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=jod
+Group=jod
+ExecStart=/usr/local/bin/jod-api serve
+Restart=on-failure
+RestartSec=2s
+
+# Agents live in tmux, not as children of this unit. Killing only the main
+# process on stop is what lets a restart leave running work alone.
+KillMode=process
+
+Environment=HOME=/home/jod
+Environment=JOD_HOME=/home/jod/.jod
+# Harnesses are usually installed per-user; without this the daemon reports
+# every harness as unavailable.
+Environment=PATH=/home/jod/.local/bin:/usr/local/bin:/usr/bin:/bin
+
+# Config lives in /home/jod/.jod/api.toml. To configure without a file, set
+# JOD_API_BIND / JOD_API_ALLOWED_CWD / JOD_API_MAX_PERMISSION here instead.
+
+# --- Hardening -------------------------------------------------------------
+# Deliberately *not* set: ProtectHome, PrivateUsers, ProtectKernelTunables and
+# a SystemCallFilter. This daemon's job is to launch arbitrary developer
+# tooling — compilers, package managers, git — and those options break it in
+# ways that surface as confusing agent failures rather than as clean errors.
+# The isolation that matters here is the unprivileged user, the working
+# directory allowlist and the permission ceiling, not syscall filtering.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectControlGroups=yes
+ProtectKernelModules=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+
+# The only paths the daemon may write. /home/jod/work is where agents run;
+# narrow it to the specific project directories if you can.
+ReadWritePaths=/home/jod/.jod /home/jod/work /tmp
+
+# Loopback plus the tailnet. No reason for this service to reach the internet
+# directly — though note the *harnesses* it spawns do need to, so drop this
+# line if agents start failing to reach their model API.
+# IPAddressAllow=localhost 100.64.0.0/10
+# IPAddressDeny=any
+
+LimitNOFILE=8192
+
+[Install]
+WantedBy=multi-user.target
