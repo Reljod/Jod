@@ -197,7 +197,11 @@ back rather than quietly accepted.
 | `/themes` | Colours are constants in `ui.rs`. |
 
 **Half-built:** `/sessions` opens the agents panel and tells you to
-`/resume <id>`; it is not yet a picker you can arrow through.
+`/resume <id>`; it is not yet a picker you can arrow through. The id it shows
+does now work — `/resume` takes a prefix of either the agent id on screen or
+the harness's own conversation id and resolves it. It refuses an ambiguous
+prefix, and refuses an agent that has never reported a conversation, because
+resuming that would silently start a fresh one instead of continuing anything.
 
 **Blocked on something Jod does not have:**
 
