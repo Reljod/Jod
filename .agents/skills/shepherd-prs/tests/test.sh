@@ -283,11 +283,33 @@ scenario shape
 sha="$(branch feat-1 hello)"
 mkpr 1 "$sha"
 list 1
-assert_eq "$(sweep | awk -F'\t' '{print NF}')" "3" "tsv rows are number/status/detail"
+assert_eq "$(sweep | awk -F'\t' '{print NF}')" "4" \
+  "tsv rows are number/status/title/detail"
+assert_eq "$(sweep | cut -f3)" "PR 1" "the row carries the PR title"
 md_has '^| #1 |' "markdown renders a table row per PR"
+md_has 'PR 1' "the markdown table shows the title, not just the number"
 md_has 'ready, .* blocked, .* skipped' "the report carries a tally"
 md_has 'not\*\* that the PR should merge' \
   "a ready row disclaims that it is an approval"
+
+# A title is free text. An unescaped `|` would shear the markdown table into
+# the wrong columns, so a row's status would render under Title and the reader
+# would see a verdict that was never issued.
+scenario piped-title
+sha="$(branch feat-1 hello)"
+mkpr 1 "$sha"
+sed -i.bak 's/"title": "PR 1"/"title": "fix: a || b"/' "$STUB/pr_1.json"
+list 1
+# Matched with a glob rather than a regex: the expected text is itself made of
+# backslashes and pipes, and spelling that as a regex tests the escaping of the
+# assertion more than the escaping of the script.
+row="$("$SWEEP" 2>/dev/null | grep '^| #1 |')"
+case "$row" in
+  *'a \|\| b'*) pass "a pipe in a PR title is escaped for the table" ;;
+  *) fail "a pipe in a PR title is escaped for the table (got: $row)" ;;
+esac
+assert_eq "$("$SWEEP" 2>/dev/null | grep -c '^| #1 |')" "1" \
+  "the row is still exactly one table row"
 
 section "the routine is documented where an agent will read it"
 

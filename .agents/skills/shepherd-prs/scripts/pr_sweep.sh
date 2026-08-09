@@ -97,7 +97,10 @@ n_blocked=0
 n_skipped=0
 report=""
 
-emit() { report="$report$1
+# emit <num> <status> <title> <detail> — one tab-separated row. The title is
+# carried for the reader, not for the decision: a job summary listing bare
+# numbers and verdicts is unreadable when you are scanning it at a glance.
+emit() { report="$report$1	$2	$3	$4
 "; }
 
 while IFS=$'\t' read -r num author head_owner title; do
@@ -107,14 +110,14 @@ while IFS=$'\t' read -r num author head_owner title; do
   # has no business touching at all, so they never reach merge_pr.sh.
   if [ "$head_owner" != "$owner" ]; then
     n_skipped=$((n_skipped + 1))
-    emit "$num	skipped	from a fork ($head_owner) — never swept"
+    emit "$num" skipped "$title" "from a fork ($head_owner) — never swept"
     continue
   fi
   case "$allowed" in
     *" $author "*) ;;
     *)
       n_skipped=$((n_skipped + 1))
-      emit "$num	skipped	authored by $author, not in the allowlist"
+      emit "$num" skipped "$title" "authored by $author, not in the allowlist"
       continue ;;
   esac
 
@@ -126,13 +129,13 @@ while IFS=$'\t' read -r num author head_owner title; do
   if out="$("$MERGE" "${gate_args[@]}" 2>&1)"; then
     n_ready=$((n_ready + 1))
     cats="$(printf '%s\n' "$out" | sed -n 's/.*(categories: \(.*\))$/\1/p' | tail -1)"
-    emit "$num	ready	gate clear${cats:+ (categories: $cats)}"
+    emit "$num" ready "$title" "gate clear${cats:+ (categories: $cats)}"
   else
     n_blocked=$((n_blocked + 1))
     reasons="$(printf '%s\n' "$out" \
       | sed -n 's/^ - //p' \
       | awk '{ printf "%s%s", (NR > 1 ? "; " : ""), $0 } END { if (NR) print "" }')"
-    emit "$num	blocked	${reasons:-refused without a stated reason}"
+    emit "$num" blocked "$title" "${reasons:-refused without a stated reason}"
   fi
 done <<EOF
 $rows
@@ -152,11 +155,13 @@ if [ -z "$report" ]; then
   exit 0
 fi
 
-echo "| PR | Status | Detail |"
-echo "|---|---|---|"
-printf '%s' "$report" | while IFS=$'\t' read -r num status detail; do
+echo "| PR | Status | Title | Detail |"
+echo "|---|---|---|---|"
+printf '%s' "$report" | while IFS=$'\t' read -r num status title detail; do
   [ -z "$num" ] && continue
-  echo "| #$num | \`$status\` | $detail |"
+  # A PR title is free text and a bare `|` in one would silently shear the
+  # table into the wrong columns, which reads as a different verdict.
+  echo "| #$num | \`$status\` | ${title//|/\\|} | $detail |"
 done
 echo
 echo "$n_ready ready, $n_blocked blocked, $n_skipped skipped."
