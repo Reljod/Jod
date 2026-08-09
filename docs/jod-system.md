@@ -478,12 +478,26 @@ Three things fall out of the hardware, and they decide the whole design:
 
 **What "the same as the TUI" means, precisely.** The transcript vocabulary, the
 resume cursor that threads turns into one conversation, the busy guard, the
-thinking toggle, the agents panel, and the status line are the same behaviour —
-ported from `cli/src/tui/app.rs` and held there by tests that assert what the
-Rust ones assert. What is deliberately *not* ported is the machinery that only
-makes sense on a terminal: byte-cursor editing, and a line-counted scrollback.
-iOS supplies a real caret and a real scroll view; the rule worth keeping is that
-**new output never yanks a reader back down**, and that survived.
+twelve slash commands and their completion list, the live tool output, the
+agents and team panels, and the status line are the same behaviour — ported from
+`cli/src/tui/{app,command,mod}.rs` and held there by tests that assert what the
+Rust ones assert, case for case.
+
+What is deliberately *not* ported is the machinery that only makes sense on a
+terminal, and in each case the *rule* crossed over while the *mechanism* did
+not: byte-cursor editing (iOS has a real caret), a line-counted scrollback (a
+real scroll view, but **new output still never yanks a reader back down**), and
+a highlighted suggestion moved with `Tab` and the arrows (the finger goes
+straight to the row). `/exit` cannot quit an iOS app, so it does what the TUI's
+`/exit` actually achieves: stop watching, leave the agent running.
+
+**Teams needed the daemon to grow two routes.** `Ctrl-G` shows a cross-harness
+team, which the TUI reads straight out of SQLite — impossible from a phone. So
+`jod-api` now serves `GET /v1/teams` and `GET /v1/teams/{team}`, both read-scope,
+returning the roster and the board in one answer. Nothing else was added:
+joining, claiming and messaging are how a *teammate* participates, and a
+teammate is an agent on the box with a tmux session. A phone watches the board;
+it does not play on it.
 
 **How it is verified, and what is left.** The behaviour is unit-tested, and the
 built bundle is exercised in WebKit — the engine WKWebView uses — at an iPhone

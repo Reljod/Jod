@@ -621,3 +621,43 @@ earned by a number rather than by taste:
 The decision expires against measured triggers, not feelings: above ~5,000
 events/s, or past ~150,000 vectors, or the moment a second machine needs to
 write, this is the wrong answer and Postgres or libSQL is the right one.
+
+## A remote client watches a team; it does not join one
+
+The TUI's `Ctrl-G` panel reads a team's roster and board straight out of SQLite.
+A phone cannot do that, so `jod-api` grew two routes for it — `GET /v1/teams`
+and `GET /v1/teams/{team}`, both `read` scope, the second returning members and
+tasks in one answer because the sheet draws them together and a board from one
+moment against a roster from another is a screen that was never true.
+
+Two routes, and deliberately no more. The obvious next ask is `POST` for join,
+claim and message, and it is the wrong ask: a *teammate* is an agent on the box
+with a tmux session and a conversation to resume, and the bus exists so those
+agents can coordinate. A phone has none of that. Letting it claim a task would
+put an owner on the board that no run is behind, which is worse than not being
+able to claim — the board's whole value is that every claim names something
+actually working.
+
+So the read/write line here is not about danger, it is about what the client
+*is*. Watching is the whole of what a phone can honestly do, and the API says so.
+
+## Port the rule, not the keystroke
+
+Three things in the TUI have no meaning on a phone: byte-cursor editing with
+`Ctrl-W`, a line-counted scrollback, and a highlighted completion moved with
+`Tab` and the arrows. The temptation each time is to reimplement the mechanism
+so the parity table can say "yes" — a fake caret, a computed scroll offset, a
+selection index driven by nothing.
+
+Every one of those would be worse than the platform's own answer. iOS has a real
+caret, a real scroll view, and a finger that goes straight to the row it wants.
+What is worth carrying across is the *rule* the mechanism existed to serve —
+**new output never yanks a reader back down** — and that survives without a
+single line of scroll arithmetic.
+
+The same reading resolves `/exit`, which cannot quit an iOS app. It was never
+about quitting; it was about leaving while the work carries on. Stopping the
+stream and saying the agent keeps running is not a compromise, it is the command.
+
+A parity table that says "no, same rule" three times is more honest than one
+that says "yes" by reimplementing a terminal inside a WebView.
