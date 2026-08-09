@@ -55,7 +55,13 @@ cd {cwd} || exit 127
 JOD_PROMPT="$(cat {prompt})"
 export JOD_PROMPT
 
-{program} {argv} 2>&1 | tee -a {stream}
+# stdin is /dev/null on purpose. The pane is a TTY, so without this a harness
+# that decides to ask a question blocks for an answer that Jod cannot give.
+# `agy --conversation` does exactly that on a resumed run: the process sleeps on
+# the pane's terminal forever, having emitted no output and no exit marker, so
+# the run neither finishes nor fails. It also stops a human who attached to
+# watch from typing into the agent's stdin by accident.
+{program} {argv} < /dev/null 2>&1 | tee -a {stream}
 code=${{PIPESTATUS[0]}}
 
 printf '{marker}%s\n' "$code" >> {stream}
@@ -264,6 +270,26 @@ mod tests {
     fn output_is_teed_so_the_pane_and_the_log_see_the_same_bytes() {
         let s = script_for(&[ArgPart::lit("-p")]);
         assert!(s.contains("2>&1 | tee -a '/runs/a/stream.jsonl'"));
+    }
+
+    /// Regression, found by running a resumed agent for real: the tmux pane is
+    /// a TTY, so a harness that asks a question blocks forever waiting for an
+    /// answer nobody can type. `agy --conversation` does this on every resume —
+    /// the process slept on `/dev/pts/N` with no output and no exit marker, so
+    /// the run neither completed nor failed.
+    #[test]
+    fn the_harness_cannot_block_reading_the_panes_terminal() {
+        let s = script_for(&[ArgPart::lit("-p"), ArgPart::Prompt]);
+        assert!(
+            s.contains("< /dev/null"),
+            "the harness must not inherit the pane's stdin:\n{s}"
+        );
+        let stdin_at = s.find("< /dev/null").expect("stdin must be redirected");
+        let tee_at = s.find("| tee -a").expect("output must still be teed");
+        assert!(
+            stdin_at < tee_at,
+            "the redirect belongs to the harness, not to tee"
+        );
     }
 
     #[test]
