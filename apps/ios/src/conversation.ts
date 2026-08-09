@@ -299,6 +299,18 @@ export class Conversation {
       // spawn wedges the app until it is restarted.
       this.update(abandonTurn(this.state));
       if (e instanceof UnauthorizedError) {
+        // 401 and 403 are different failures and must not be treated alike.
+        // 401 means the session is gone and only a new token fixes it. 403
+        // means the session is fine but lacks the authority — bouncing to the
+        // gate there would ask for a token that is already correct, and the
+        // remembered scope was simply wrong. Correct it and say why.
+        if (e.status === 403) {
+          this.scope = "read";
+          this.scopeMemory.write("read");
+          this.setLink({ phase: "live", scope: "read" });
+          this.notice(`could not start: ${e.message}`);
+          return;
+        }
         this.setLink({ phase: "auth", reason: "the session expired" });
         this.notice("could not start: the session expired");
         return;

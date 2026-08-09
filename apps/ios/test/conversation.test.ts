@@ -339,6 +339,33 @@ describe("sending a turn", () => {
     expect(conversation.getSnapshot().session.busy).toBe(false);
   });
 
+  it("corrects a wrong remembered scope instead of demanding a new token", async () => {
+    // 403 says the session is valid but lacks the authority. Bouncing to the
+    // gate would ask for a token that is already correct; the remembered scope
+    // was simply wrong, so fix that and say why.
+    memory = fakeMemory("write");
+    http.on("GET /v1/harnesses", { body: [] });
+    http.on("GET /v1/agents", { body: [] });
+    const conversation = build();
+    await conversation.probe();
+    await settle();
+    expect(conversation.getSnapshot().canSend).toBe(true);
+
+    http.on("POST /v1/agents", {
+      status: 403,
+      body: { detail: "this token is read-only; a write-scoped token is required" },
+    });
+    conversation.setInput("ship it");
+    await conversation.send();
+
+    expect(conversation.getSnapshot().link).toEqual({ phase: "live", scope: "read" });
+    expect(conversation.getSnapshot().canSend).toBe(false);
+    expect(memory.value).toBe("read");
+    expect(notices(conversation)).toContain(
+      "could not start: this token is read-only; a write-scoped token is required",
+    );
+  });
+
   it("sends the reader back to the gate when the session expired mid-send", async () => {
     const conversation = await connected();
     http.on("POST /v1/agents", { status: 401, body: { detail: "no" } });
