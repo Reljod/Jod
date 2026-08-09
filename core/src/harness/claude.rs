@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use serde_json::Value;
 
-use super::{Accumulator, ArgPart, Harness, HarnessKind, PermissionPolicy, SpawnRequest};
+use super::{Accumulator, ArgPart, Harness, HarnessKind, PermissionPolicy, Resume, SpawnRequest};
 use crate::event::{summarize, AgentEvent, Usage};
 
 #[derive(Default)]
@@ -32,6 +32,14 @@ impl Harness for ClaudeCode {
         if let Some(model) = &req.model {
             args.push(ArgPart::lit("--model"));
             args.push(ArgPart::lit(model));
+        }
+        match &req.resume {
+            Resume::Fresh => {}
+            Resume::Last => args.push(ArgPart::lit("--continue")),
+            Resume::Session(id) => {
+                args.push(ArgPart::lit("--resume"));
+                args.push(ArgPart::lit(id));
+            }
         }
         match req.permission {
             PermissionPolicy::Ask => {}
@@ -208,6 +216,7 @@ mod tests {
             cwd: PathBuf::from("/tmp"),
             model: model.map(str::to_string),
             permission,
+            resume: Resume::Fresh,
         }
     }
 

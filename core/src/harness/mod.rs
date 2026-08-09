@@ -10,9 +10,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::event::{AgentEvent, Usage};
 
+pub mod agy;
 pub mod claude;
 pub mod opencode;
 
+pub use agy::Agy;
 pub use claude::ClaudeCode;
 pub use opencode::OpenCode;
 
@@ -21,15 +23,21 @@ pub use opencode::OpenCode;
 pub enum HarnessKind {
     ClaudeCode,
     OpenCode,
+    Agy,
 }
 
 impl HarnessKind {
-    pub const ALL: [HarnessKind; 2] = [HarnessKind::ClaudeCode, HarnessKind::OpenCode];
+    pub const ALL: [HarnessKind; 3] = [
+        HarnessKind::ClaudeCode,
+        HarnessKind::OpenCode,
+        HarnessKind::Agy,
+    ];
 
     pub fn id(&self) -> &'static str {
         match self {
             HarnessKind::ClaudeCode => "claude_code",
             HarnessKind::OpenCode => "open_code",
+            HarnessKind::Agy => "agy",
         }
     }
 
@@ -37,6 +45,7 @@ impl HarnessKind {
         match self {
             HarnessKind::ClaudeCode => "Claude Code",
             HarnessKind::OpenCode => "OpenCode",
+            HarnessKind::Agy => "AGY",
         }
     }
 
@@ -64,6 +73,15 @@ impl HarnessKind {
                     "~/.bun/bin/opencode",
                 ],
             ),
+            HarnessKind::Agy => crate::discovery::find_binary(
+                "JOD_AGY_BIN",
+                &["agy"],
+                &[
+                    "~/.local/bin/agy",
+                    "/opt/homebrew/bin/agy",
+                    "/usr/local/bin/agy",
+                ],
+            ),
         }
     }
 
@@ -71,8 +89,27 @@ impl HarnessKind {
         match self {
             HarnessKind::ClaudeCode => Box::new(ClaudeCode::default()),
             HarnessKind::OpenCode => Box::new(OpenCode::default()),
+            HarnessKind::Agy => Box::new(Agy::default()),
         }
     }
+}
+
+/// Whether this delegation starts a new conversation or continues one.
+///
+/// Every harness supports both, spelled differently: Claude Code takes
+/// `--continue` / `--resume <id>`, OpenCode `--continue` / `--session <id>`,
+/// AGY `--continue` / `--conversation <id>`. Normalising it here is what lets
+/// Jod hold a conversation rather than fire one-shot tasks.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Resume {
+    /// Start a new conversation.
+    #[default]
+    Fresh,
+    /// Continue the most recent conversation in this working directory.
+    Last,
+    /// Continue one specific conversation by its harness-assigned id.
+    Session(String),
 }
 
 /// How much the agent may do without asking.
@@ -100,6 +137,9 @@ pub struct SpawnRequest {
     pub model: Option<String>,
     #[serde(default)]
     pub permission: PermissionPolicy,
+    /// Whether to continue an existing conversation instead of starting one.
+    #[serde(default)]
+    pub resume: Resume,
 }
 
 /// One argv entry. `Prompt` is a placeholder the runner substitutes with a

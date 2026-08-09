@@ -8,7 +8,7 @@ use std::collections::HashSet;
 
 use serde_json::Value;
 
-use super::{Accumulator, ArgPart, Harness, HarnessKind, PermissionPolicy, SpawnRequest};
+use super::{Accumulator, ArgPart, Harness, HarnessKind, PermissionPolicy, Resume, SpawnRequest};
 use crate::event::{summarize, AgentEvent, Usage};
 
 #[derive(Default)]
@@ -37,6 +37,14 @@ impl Harness for OpenCode {
         if let Some(model) = &req.model {
             args.push(ArgPart::lit("--model"));
             args.push(ArgPart::lit(model));
+        }
+        match &req.resume {
+            Resume::Fresh => {}
+            Resume::Last => args.push(ArgPart::lit("--continue")),
+            Resume::Session(id) => {
+                args.push(ArgPart::lit("--session"));
+                args.push(ArgPart::lit(id));
+            }
         }
         // OpenCode has one auto-approve switch; Ask and AcceptEdits both leave
         // it off, since it cannot separate edits from other tool calls.
@@ -211,6 +219,7 @@ mod tests {
             cwd: PathBuf::from("/work"),
             model: model.map(str::to_string),
             permission,
+            resume: Resume::Fresh,
         }
     }
 

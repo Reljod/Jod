@@ -55,6 +55,7 @@ async fn main() {
                 Ok("bypass") => PermissionPolicy::Bypass,
                 _ => PermissionPolicy::Ask,
             },
+            resume: jod_core::Resume::Fresh,
         })
         .await
         .unwrap_or_else(|e| {
