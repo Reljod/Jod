@@ -338,9 +338,18 @@ makes sense on a terminal: byte-cursor editing, and a line-counted scrollback.
 iOS supplies a real caret and a real scroll view; the rule worth keeping is that
 **new output never yanks a reader back down**, and that survived.
 
-**What blocks it.** Nothing about the app — the behaviour is written and tested.
-Producing an `.ipa` needs Xcode on macOS, which is the one dependency the VPS
-and this repo's CI cannot supply. → [`apps/ios/README.md`](../apps/ios/README.md)
+**What blocks it, exactly.** Nothing about the app: the behaviour is written and
+tested, and the built bundle is exercised in WebKit — the engine WKWebView uses
+— at an iPhone viewport, so the cookie exchange, the SSE handshake and the
+touch-target and no-zoom rules are all verified rather than asserted.
+
+The wall is one crate. `cargo check --target aarch64-apple-ios` resolves a clean
+iOS graph (796 crates, no gtk/glib) and then stops at
+`objc2-exception-helper`, whose build script compiles an Objective-C shim and so
+needs the iOS SDK via `xcrun`. That SDK ships only inside Xcode. It is a
+licensing boundary, not a configuration problem, and the honest position is that
+the shim, the link step and the simulator stay unexercised until a Mac runs
+them. → [`apps/ios/README.md`](../apps/ios/README.md)
 
 ## Design rules
 
