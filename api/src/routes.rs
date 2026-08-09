@@ -7,6 +7,7 @@ use axum::extract::{Extension, Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::Json;
+use jod_core::team::{Member, TeamTask};
 use jod_core::{
     AgentEnvelope, AgentStatus, AgentSummary, HarnessKind, PermissionPolicy, Resume, SpawnRequest,
 };
@@ -136,6 +137,74 @@ pub async fn report(
 ) -> ApiResult<impl IntoResponse> {
     identity.require(Scope::Read)?;
     Ok(Json(state.jod.report().await))
+}
+
+/// A team, as a client sees it.
+///
+/// Members and tasks together, in one answer, because they are one screen: the
+/// TUI's `Ctrl-G` panel draws both and two round trips would let it render a
+/// board from one moment against a roster from another.
+#[derive(Debug, Serialize)]
+pub struct TeamView {
+    pub team: String,
+    pub members: Vec<Member>,
+    pub tasks: Vec<TeamTask>,
+}
+
+/// Every team that has a member.
+///
+/// Read-only, and deliberately so: joining, claiming and messaging are how a
+/// *teammate* participates, and a teammate is an agent on the box with a tmux
+/// session — not a phone. A remote client watches the board; it does not play
+/// on it.
+pub async fn list_teams(
+    State(state): State<AppState>,
+    Extension(identity): Extension<Identity>,
+) -> ApiResult<impl IntoResponse> {
+    identity.require(Scope::Read)?;
+    // No store means no persistence, so there is nowhere a team could exist.
+    // An empty list is the honest answer, not an error: the question was
+    // "which teams are there", and the answer is "none".
+    let Some(store) = state.jod.store() else {
+        return Ok(Json(Vec::<String>::new()));
+    };
+    store
+        .teams()
+        .map(Json)
+        .map_err(|e| ApiError::Internal(e.to_string()))
+}
+
+/// One team's roster and board.
+///
+/// A team nobody has joined is a 404 rather than an empty view, so a mistyped
+/// name is distinguishable from a team that exists and is idle — the panel
+/// shows very different things for the two.
+pub async fn get_team(
+    State(state): State<AppState>,
+    Extension(identity): Extension<Identity>,
+    Path(team): Path<String>,
+) -> ApiResult<impl IntoResponse> {
+    identity.require(Scope::Read)?;
+    let store = state
+        .jod
+        .store()
+        .ok_or_else(|| ApiError::NotFound(format!("no team named {team}")))?;
+    let members = store
+        .team_members(&team)
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let tasks = store
+        .team_tasks(&team)
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    // A board can legitimately be empty while a roster is not, but neither
+    // being present means nobody has ever joined under this name.
+    if members.is_empty() && tasks.is_empty() {
+        return Err(ApiError::NotFound(format!("no team named {team}")));
+    }
+    Ok(Json(TeamView {
+        team,
+        members,
+        tasks,
+    }))
 }
 
 #[derive(Debug, Deserialize)]

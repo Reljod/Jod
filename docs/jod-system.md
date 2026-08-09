@@ -436,8 +436,84 @@ make it load-bearing before it has to be.
    [`browser.md`](browser.md))
 6. A2A inbox/outbox + `jod-mcp` server
 7. Scheduled work: a digest, and recurring delegations
-8. HTTP API for mobile and web clients
-9. Brain nodes and connections
+8. ~~HTTP API for mobile and web clients~~ **done** — `api/`, with the
+   tactical HUD in `apps/web` as its first consumer
+9. **iOS client: `jod tui` in your pocket** — `apps/ios`, **the current goal**.
+   The behaviour is built and tested; shipping it to a device needs a Mac.
+   → [the goal](#the-goal-jod-in-your-pocket)
+10. Brain nodes and connections
+
+---
+
+## The goal: Jod in your pocket
+
+**In progress.** `apps/ios`.
+
+Jod runs on a box that stays up, which means the work continues whether or not
+Reljod is at a desk — and until now, watching it required being at one. The goal
+is the `jod tui` conversation on an iPhone, with the desktop client's feel
+rather than a terminal emulator's.
+
+Three things fall out of the hardware, and they decide the whole design:
+
+- **An iPhone cannot host an agent.** No tmux, no `claude` binary, no shell to
+  run them in. So this client does not embed `jod-core` the way `apps/desktop`
+  does; it is a *client of the daemon*, and every capability arrives over HTTP
+  from `jod-api`. That is the seam the architecture already had — the core has
+  no UI, so clients are interchangeable.
+- **The connection is not reliable.** A phone walks out of wifi and locks its
+  screen. The per-agent SSE stream replays history and then goes live on one
+  connection, so there is no gap between "read what happened" and "start
+  listening", and a resume cursor plus `seq` deduplication makes reconnecting
+  idempotent. Coming back from the background catches up over REST first.
+- **Sending is a physical risk.** The return key is under a thumb, and a
+  delegation starts a real process on the box. Enter inserts a newline; sending
+  is a deliberate tap; and every spawn carries an `Idempotency-Key` so a retry
+  on a flaky link cannot start the same agent twice in the same directory.
+- **A packaged app has no origin to fall back on.** The web client is *served
+  by* the daemon, so every route can be relative. The iOS bundle loads from
+  `tauri://localhost`, where a relative route is not even a valid URL — so the
+  daemon's address is a real setting the app asks for once and remembers. This
+  was found by running the built app in a simulator, and by nothing before it.
+
+**What "the same as the TUI" means, precisely.** The transcript vocabulary, the
+resume cursor that threads turns into one conversation, the busy guard, the
+twelve slash commands and their completion list, the live tool output, the
+agents and team panels, and the status line are the same behaviour — ported from
+`cli/src/tui/{app,command,mod}.rs` and held there by tests that assert what the
+Rust ones assert, case for case.
+
+What is deliberately *not* ported is the machinery that only makes sense on a
+terminal, and in each case the *rule* crossed over while the *mechanism* did
+not: byte-cursor editing (iOS has a real caret), a line-counted scrollback (a
+real scroll view, but **new output still never yanks a reader back down**), and
+a highlighted suggestion moved with `Tab` and the arrows (the finger goes
+straight to the row). `/exit` cannot quit an iOS app, so it does what the TUI's
+`/exit` actually achieves: stop watching, leave the agent running.
+
+**Teams needed the daemon to grow two routes.** `Ctrl-G` shows a cross-harness
+team, which the TUI reads straight out of SQLite — impossible from a phone. So
+`jod-api` now serves `GET /v1/teams` and `GET /v1/teams/{team}`, both read-scope,
+returning the roster and the board in one answer. Nothing else was added:
+joining, claiming and messaging are how a *teammate* participates, and a
+teammate is an agent on the box with a tmux session. A phone watches the board;
+it does not play on it.
+
+**How it is verified, and what is left.** The behaviour is unit-tested, and the
+built bundle is exercised in WebKit — the engine WKWebView uses — at an iPhone
+viewport, so the cookie exchange, the SSE handshake, the touch targets and the
+no-zoom rule are verified rather than asserted.
+
+The parts no Linux machine can reach happen on a macOS runner instead of being
+left as a promise: `.github/workflows/ios.yml` compiles the shell for
+`aarch64-apple-ios`, generates the Xcode project, builds an unsigned simulator
+app, and launches it. On Linux that compile stops at `objc2-exception-helper`,
+whose build script needs the iOS SDK via `xcrun` — a licensing boundary, since
+the SDK ships only inside Xcode.
+
+What remains genuinely uncovered is a **device** build, which needs an Apple
+developer certificate this repo does not hold. CI is simulator-bound and
+unsigned by design. → [`apps/ios/README.md`](../apps/ios/README.md)
 
 ## Design rules
 

@@ -1,5 +1,5 @@
 // Mirrors the serde representation of jod's `core/` crate.
-// Source of truth: core/src/{event,service,store}.rs and core/src/harness/mod.rs.
+// Source of truth: core/src/{event,service,store,team}.rs and core/src/harness/mod.rs.
 //
 // Verified against that crate directly — NOT against apps/desktop/src/types.ts,
 // which is an unmaintained mirror since the desktop app left the workspace.
@@ -117,6 +117,48 @@ export interface Report {
   agents: AgentSummary[];
 }
 
+// ─── core/src/team.rs ───────────────────────────────────────────────────────
+
+/**
+ * A teammate's coarse lifecycle. Unknown text becomes `error` on the Rust side
+ * rather than failing the read, so this union is exhaustive on the wire.
+ */
+export type MemberStatus =
+  | "ready"
+  | "busy"
+  | "shutdown_requested"
+  | "shutdown"
+  | "error";
+
+/** One teammate on a cross-harness team. */
+export interface Member {
+  team: string;
+  name: string;
+  harness: HarnessKind;
+  role: string;
+  status: MemberStatus;
+  /** The run currently embodying it, if any. */
+  agent_id: string | null;
+  /** The harness-side conversation to resume. */
+  session_id: string | null;
+}
+
+/** One item on a team's shared board. */
+export interface TeamTask {
+  id: string;
+  title: string;
+  owner: string | null;
+  /** `open` | `claimed` | `done`, plus whatever a future Jod writes. */
+  status: string;
+}
+
+/** `GET /v1/teams/{team}` — roster and board in one answer. */
+export interface TeamView {
+  team: string;
+  members: Member[];
+  tasks: TeamTask[];
+}
+
 // ─── core/src/store.rs ──────────────────────────────────────────────────────
 
 /** One persisted delegation — run history that survives a restart. */
@@ -179,4 +221,14 @@ export function resumeLabel(r: Resume | undefined): string {
   if (!r || r === "fresh") return "FRESH";
   if (r === "last") return "CONTINUE";
   return `SESSION ${r.session.slice(0, 8)}`;
+}
+
+/** Mirrors `TeamTask::is_done` in `core/src/team.rs`. */
+export function taskIsDone(task: TeamTask): boolean {
+  return task.status === "done";
+}
+
+/** Mirrors `TeamTask::is_claimed`. */
+export function taskIsClaimed(task: TeamTask): boolean {
+  return task.owner !== null && task.owner !== undefined;
 }

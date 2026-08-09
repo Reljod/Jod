@@ -1,0 +1,1176 @@
+/**
+ * The app's actual behaviour, driven headless.
+ *
+ * These are the rules that decide whether the thing works on a phone at the far
+ * end of a tailnet: not sending twice, not losing the thread, not double-drawing
+ * a replayed event, not going quiet after the screen locks.
+ */
+
+import { beforeEach, describe, expect, it } from "vitest";
+
+import { JodClient, type Scope } from "../src/client";
+import { Conversation, type ScopeMemory } from "../src/conversation";
+import type { OriginMemory } from "../src/origin";
+import type { Entry } from "../src/session";
+import { EventSourceSpy, FakeFetch, agent, member, settle, teamTask } from "./fakes";
+
+let http: FakeFetch;
+let spy: EventSourceSpy;
+let memory: ScopeMemory & { value: Scope | null };
+
+/** An in-memory stand-in for `localStorage`, which Node does not have. */
+function fakeMemory(initial: Scope | null = null) {
+  return {
+    value: initial,
+    read() {
+      return this.value;
+    },
+    write(scope: Scope) {
+      this.value = scope;
+    },
+  };
+}
+
+let origins: OriginMemory & { value: string | null };
+
+function fakeOrigins(initial: string | null = null) {
+  return {
+    value: initial,
+    read() {
+      return this.value;
+    },
+    write(origin: string) {
+      this.value = origin;
+    },
+  };
+}
+
+/** A browser deployment by default: served over https, daemon on the origin. */
+function build(protocol = "https:"): Conversation {
+  return new Conversation({
+    client: new JodClient({
+      fetch: http.fetch,
+      eventSource: spy.factory,
+      newKey: () => "key-1",
+    }),
+    scopeMemory: memory,
+    originMemory: origins,
+    protocol,
+  });
+}
+
+/** A conversation already holding a write session. */
+async function connected(scope: "read" | "write" = "write"): Promise<Conversation> {
+  http.on("POST /v1/session", { status: 201, body: { scope, expires_at_ms: 1 } });
+  http.on("GET /v1/agents", { body: [] });
+  const conversation = build();
+  await conversation.connect("tok");
+  await settle();
+  return conversation;
+}
+
+function transcript(conversation: Conversation): Entry[] {
+  return conversation.getSnapshot().session.transcript;
+}
+
+function notices(conversation: Conversation): string[] {
+  return transcript(conversation)
+    .filter((e) => e.kind === "notice")
+    .map((e) => (e.kind === "notice" ? e.text : ""));
+}
+
+beforeEach(() => {
+  http = new FakeFetch();
+  spy = new EventSourceSpy();
+  memory = fakeMemory();
+  origins = fakeOrigins();
+});
+
+describe("finding the daemon (the packaged app)", () => {
+  it("asks for an address instead of firing a doomed relative request", async () => {
+    // The bug the simulator caught: served from tauri://localhost, a relative
+    // `/v1/harnesses` is not a valid URL and WebKit throws
+    // "The string did not match the expected pattern." The app must not get
+    // that far.
+    const conversation = build("tauri:");
+    await conversation.probe();
+
+    expect(conversation.getSnapshot().link).toEqual({
+      phase: "address",
+      reason: "where is the daemon?",
+    });
+    expect(http.calls).toHaveLength(0);
+  });
+
+  it("uses the address once given, and remembers it", async () => {
+    http.on("GET http://jod-cloud:8787/v1/harnesses", { body: [] });
+    http.on("GET http://jod-cloud:8787/v1/agents", { body: [] });
+
+    const conversation = build("tauri:");
+    await conversation.probe();
+    await conversation.setOrigin("jod-cloud:8787");
+    await settle();
+
+    expect(conversation.getSnapshot().link.phase).toBe("live");
+    expect(origins.value).toBe("http://jod-cloud:8787");
+    // Every route is absolute now, not relative to the app bundle.
+    expect(http.calls[0].url).toBe("http://jod-cloud:8787/v1/harnesses");
+  });
+
+  it("goes straight through on a relaunch, without asking again", async () => {
+    origins = fakeOrigins("http://jod-cloud:8787");
+    http.on("GET http://jod-cloud:8787/v1/harnesses", { body: [] });
+    http.on("GET http://jod-cloud:8787/v1/agents", { body: [] });
+
+    const conversation = build("tauri:");
+    await conversation.probe();
+    await settle();
+
+    expect(conversation.getSnapshot().link.phase).toBe("live");
+  });
+
+  it("rejects an address it cannot use, rather than failing later", async () => {
+    const conversation = build("tauri:");
+    await conversation.setOrigin("not a url at all //");
+
+    expect(conversation.getSnapshot().link).toEqual({
+      phase: "address",
+      reason: "that is not an address — try jod-cloud:8787",
+    });
+    expect(origins.value).toBeNull();
+    expect(http.calls).toHaveLength(0);
+  });
+
+  it("never asks in a browser, where the daemon is the origin", async () => {
+    http.on("GET /v1/harnesses", { body: [] });
+    http.on("GET /v1/agents", { body: [] });
+
+    const conversation = build("https:");
+    await conversation.probe();
+    await settle();
+
+    expect(conversation.getSnapshot().link.phase).toBe("live");
+    expect(http.calls[0].url).toBe("/v1/harnesses");
+  });
+});
+
+describe("finding out where we stand", () => {
+  it("asks for the token when the device has no session", async () => {
+    http.on("GET /v1/harnesses", { status: 401, body: { detail: "no" } });
+    const conversation = build();
+    await conversation.probe();
+
+    expect(conversation.getSnapshot().link).toEqual({
+      phase: "auth",
+      reason: "this device needs a token",
+    });
+  });
+
+  it("goes live and loads the roster when the cookie is still good", async () => {
+    http.on("GET /v1/harnesses", { body: [{ id: "claude_code", label: "Claude Code", available: true, path: "/bin/claude" }] });
+    http.on("GET /v1/agents", { body: [agent({ name: "earlier run" })] });
+
+    const conversation = build();
+    await conversation.probe();
+    await settle();
+
+    expect(conversation.getSnapshot().link.phase).toBe("live");
+    // Runs started from the terminal, before this phone ever connected, are
+    // exactly what the agents sheet is for.
+    expect(conversation.getSnapshot().session.agents[0].name).toBe("earlier run");
+  });
+
+  it("says so when the daemon is unreachable, rather than asking for a token", async () => {
+    http.on("GET /v1/harnesses", { status: 502, body: { detail: "bad gateway" } });
+    const conversation = build();
+    await conversation.probe();
+
+    expect(conversation.getSnapshot().link).toEqual({
+      phase: "offline",
+      reason: "bad gateway",
+    });
+  });
+
+  it("warns when the box has no harness installed at all", async () => {
+    http.on("GET /v1/harnesses", {
+      body: [{ id: "claude_code", label: "Claude Code", available: false, path: null }],
+    });
+    http.on("GET /v1/agents", { body: [] });
+
+    const conversation = build();
+    await conversation.probe();
+    await settle();
+
+    expect(notices(conversation)).toContain(
+      "no harness is installed on the daemon — nothing can start",
+    );
+  });
+});
+
+describe("connecting", () => {
+  it("takes a write token and enables sending", async () => {
+    const conversation = await connected("write");
+    expect(conversation.getSnapshot().canSend).toBe(true);
+    expect(conversation.getSnapshot().link).toEqual({ phase: "live", scope: "write" });
+  });
+
+  it("says out loud that a read token cannot delegate", async () => {
+    const conversation = await connected("read");
+    expect(conversation.getSnapshot().canSend).toBe(false);
+    expect(notices(conversation)).toContain(
+      "this token is read-only — you can watch, but not delegate",
+    );
+  });
+
+  it("refuses an empty token without calling the daemon", async () => {
+    const conversation = build();
+    await conversation.connect("   ");
+    expect(conversation.getSnapshot().link).toEqual({
+      phase: "auth",
+      reason: "a token is required",
+    });
+    expect(http.calls).toHaveLength(0);
+  });
+
+  it("remembers the scope, so a relaunch is not read-only until you re-paste", async () => {
+    // The session cookie is HttpOnly and survives a restart, but no script can
+    // read it — so without remembering the scope the composer would be dead on
+    // every launch despite the session being perfectly valid.
+    await connected("write");
+    expect(memory.value).toBe("write");
+
+    http.on("GET /v1/harnesses", { body: [] });
+    http.on("GET /v1/agents", { body: [] });
+    const relaunched = build();
+    await relaunched.probe();
+    await settle();
+
+    expect(relaunched.getSnapshot().canSend).toBe(true);
+  });
+
+  it("remembers a read scope as read", async () => {
+    await connected("read");
+    expect(memory.value).toBe("read");
+  });
+
+  it("starts read-only when nothing was remembered", async () => {
+    http.on("GET /v1/harnesses", { body: [] });
+    http.on("GET /v1/agents", { body: [] });
+    const conversation = build();
+    await conversation.probe();
+    await settle();
+
+    expect(conversation.getSnapshot().canSend).toBe(false);
+  });
+
+  it("stays on the gate when the token is refused", async () => {
+    http.on("POST /v1/session", { status: 401, body: { detail: "no" } });
+    const conversation = build();
+    await conversation.connect("bad");
+    expect(conversation.getSnapshot().link).toEqual({
+      phase: "auth",
+      reason: "that token was refused",
+    });
+  });
+});
+
+describe("sending a turn", () => {
+  it("delegates, echoes the prompt, and goes busy", async () => {
+    const conversation = await connected();
+    http.on("POST /v1/agents", { status: 201, body: agent({ id: "a1" }) });
+    http.on("GET /v1/agents", { body: [agent({ id: "a1" })] });
+
+    conversation.setInput("ship it");
+    await conversation.send();
+    await settle();
+
+    expect(http.callsTo("POST /v1/agents")[0].body).toMatchObject({
+      prompt: "ship it",
+      name: "ship it",
+      harness: "claude_code",
+      resume: "fresh",
+    });
+    expect(transcript(conversation)).toContainEqual({ kind: "you", text: "ship it" });
+    expect(conversation.getSnapshot().session.busy).toBe(true);
+    expect(conversation.getSnapshot().session.input).toBe("");
+  });
+
+  it("follows the new agent's stream", async () => {
+    const conversation = await connected();
+    http.on("POST /v1/agents", { body: agent({ id: "a1" }) });
+    http.on("GET /v1/agents", { body: [] });
+
+    conversation.setInput("ship it");
+    await conversation.send();
+
+    expect(spy.last.url).toBe("/v1/agents/a1/stream");
+  });
+
+  it("refuses a second prompt while one is in flight", async () => {
+    const conversation = await connected();
+    http.on("POST /v1/agents", { body: agent({ id: "a1" }) });
+    http.on("GET /v1/agents", { body: [] });
+
+    conversation.setInput("first");
+    await conversation.send();
+    await settle();
+
+    conversation.setInput("second");
+    await conversation.send();
+
+    expect(notices(conversation)).toContain("still working — wait for this turn to finish");
+    expect(http.callsTo("POST /v1/agents")).toHaveLength(1);
+  });
+
+  it("sends nothing when nothing was typed", async () => {
+    const conversation = await connected();
+    conversation.setInput("   ");
+    await conversation.send();
+    expect(http.callsTo("POST /v1/agents")).toHaveLength(0);
+  });
+
+  it("keeps the typed text when a read-only session refuses it", async () => {
+    // Losing what you typed because the token was the wrong scope would be a
+    // second insult; the text is still there to copy or re-send after re-auth.
+    const conversation = await connected("read");
+    conversation.setInput("ship it");
+    await conversation.send();
+
+    expect(notices(conversation)).toContain("this session is read-only");
+    expect(conversation.getSnapshot().session.input).toBe("ship it");
+    expect(http.callsTo("POST /v1/agents")).toHaveLength(0);
+  });
+
+  it("cannot be made to start two agents by a double tap", async () => {
+    // The composer is disabled by `busy`, and `busy` has to be true across the
+    // spawn round trip — not only once the daemon has answered. Over a tailnet
+    // that round trip is long enough to tap twice, and two agents in the same
+    // working directory is the collision one-owner-per-path exists to prevent.
+    const conversation = await connected();
+    http.on("POST /v1/agents", { body: agent({ id: "a1" }) });
+    http.on("GET /v1/agents", { body: [] });
+
+    conversation.setInput("ship it");
+    const first = conversation.send();
+    // No await: this is the second tap, landing while the first is in flight.
+    const second = conversation.send();
+    await Promise.all([first, second]);
+    await settle();
+
+    expect(http.callsTo("POST /v1/agents")).toHaveLength(1);
+    expect(notices(conversation)).toContain("still working — wait for this turn to finish");
+  });
+
+  it("refuses a prompt typed while the first spawn is still in flight", async () => {
+    // The realistic version of the race: send, then immediately type the next
+    // thought and send again before the daemon has answered. The composer is
+    // non-empty by then, so an emptied input is not what protects this —
+    // `busy` being true across the round trip is.
+    const conversation = await connected();
+    http.on("POST /v1/agents", { body: agent({ id: "a1" }) });
+    http.on("GET /v1/agents", { body: [] });
+
+    conversation.setInput("first");
+    const inFlight = conversation.send();
+
+    conversation.setInput("second");
+    await conversation.send();
+    await inFlight;
+    await settle();
+
+    expect(http.callsTo("POST /v1/agents")).toHaveLength(1);
+    expect(http.callsTo("POST /v1/agents")[0].body).toMatchObject({ prompt: "first" });
+    // And the second thought is still in the box, not silently discarded.
+    expect(conversation.getSnapshot().session.input).toBe("second");
+  });
+
+  it("shows the prompt immediately, not after the daemon answers", async () => {
+    const conversation = await connected();
+    http.on("POST /v1/agents", { body: agent({ id: "a1" }) });
+    http.on("GET /v1/agents", { body: [] });
+
+    conversation.setInput("ship it");
+    const inFlight = conversation.send();
+    expect(transcript(conversation)).toContainEqual({ kind: "you", text: "ship it" });
+    expect(conversation.getSnapshot().session.busy).toBe(true);
+
+    await inFlight;
+    await settle();
+  });
+
+  it("releases the composer when the spawn was refused", async () => {
+    // A refused spawn that left `busy` set would wedge the app until restart.
+    const conversation = await connected();
+    http.on("POST /v1/agents", { status: 400, body: { detail: "no" } });
+
+    conversation.setInput("ship it");
+    await conversation.send();
+
+    expect(conversation.getSnapshot().session.busy).toBe(false);
+    expect(conversation.getSnapshot().canSend).toBe(true);
+  });
+
+  it("reports a refusal from the daemon in the transcript", async () => {
+    const conversation = await connected();
+    http.on("POST /v1/agents", {
+      status: 400,
+      body: { detail: "cwd is outside the allowlist" },
+    });
+
+    conversation.setInput("ship it");
+    await conversation.send();
+
+    expect(notices(conversation)).toContain(
+      "could not start: cwd is outside the allowlist",
+    );
+    expect(conversation.getSnapshot().session.busy).toBe(false);
+  });
+
+  it("corrects a wrong remembered scope instead of demanding a new token", async () => {
+    // 403 says the session is valid but lacks the authority. Bouncing to the
+    // gate would ask for a token that is already correct; the remembered scope
+    // was simply wrong, so fix that and say why.
+    memory = fakeMemory("write");
+    http.on("GET /v1/harnesses", { body: [] });
+    http.on("GET /v1/agents", { body: [] });
+    const conversation = build();
+    await conversation.probe();
+    await settle();
+    expect(conversation.getSnapshot().canSend).toBe(true);
+
+    http.on("POST /v1/agents", {
+      status: 403,
+      body: { detail: "this token is read-only; a write-scoped token is required" },
+    });
+    conversation.setInput("ship it");
+    await conversation.send();
+
+    expect(conversation.getSnapshot().link).toEqual({ phase: "live", scope: "read" });
+    expect(conversation.getSnapshot().canSend).toBe(false);
+    expect(memory.value).toBe("read");
+    expect(notices(conversation)).toContain(
+      "could not start: this token is read-only; a write-scoped token is required",
+    );
+  });
+
+  it("sends the reader back to the gate when the session expired mid-send", async () => {
+    const conversation = await connected();
+    http.on("POST /v1/agents", { status: 401, body: { detail: "no" } });
+
+    conversation.setInput("ship it");
+    await conversation.send();
+
+    expect(conversation.getSnapshot().link).toEqual({
+      phase: "auth",
+      reason: "the session expired",
+    });
+  });
+});
+
+describe("threading the conversation", () => {
+  it("continues the exact session the harness reported, not the most recent", async () => {
+    const conversation = await connected();
+    http.on("POST /v1/agents", { body: agent({ id: "a1" }) });
+    http.on("GET /v1/agents", { body: [] });
+
+    conversation.setInput("first");
+    await conversation.send();
+    await settle();
+
+    spy.last.send({
+      kind: "started",
+      session_id: "sess-9",
+      model: "claude-opus-5",
+      agent_id: "a1",
+      at_ms: 1,
+      seq: 0,
+    });
+    spy.last.send({
+      kind: "finished",
+      is_error: false,
+      usage: { cost_usd: 0.01 },
+      agent_id: "a1",
+      at_ms: 2,
+      seq: 1,
+    });
+    await settle();
+
+    http.on("POST /v1/agents", { body: agent({ id: "a2" }) });
+    http.on("GET /v1/agents", { body: [] });
+    conversation.setInput("and again");
+    await conversation.send();
+
+    expect(http.callsTo("POST /v1/agents")[1].body).toMatchObject({
+      resume: { session: "sess-9" },
+    });
+    // The model the harness *reported* must not come back as a request. A name
+    // one harness reports is not a name another accepts, and the terminal
+    // client learned this the hard way: sending it back made a later
+    // `/harness` switch look like it had simply not worked.
+    expect(http.callsTo("POST /v1/agents")[1].body).not.toHaveProperty("model");
+    // It is still shown, though — that is what the status bar is for.
+    expect(conversation.getSnapshot().session.reportedModel).toBe("claude-opus-5");
+  });
+
+  it("ends the turn and refreshes the roster when the run finishes", async () => {
+    const conversation = await connected();
+    http.on("POST /v1/agents", { body: agent({ id: "a1" }) });
+    http.on("GET /v1/agents", { body: [] });
+
+    conversation.setInput("ship it");
+    await conversation.send();
+    await settle();
+
+    http.on("GET /v1/agents", { body: [agent({ id: "a1", status: "completed" })] });
+    spy.last.send({
+      kind: "finished",
+      is_error: false,
+      usage: { output_tokens: 5, cost_usd: 0.02 },
+      agent_id: "a1",
+      at_ms: 2,
+      seq: 0,
+    });
+    await settle();
+
+    const view = conversation.getSnapshot();
+    expect(view.session.busy).toBe(false);
+    expect(view.session.costUsd).toBeCloseTo(0.02);
+    expect(view.session.agents[0].status).toBe("completed");
+  });
+});
+
+describe("the live stream", () => {
+  async function running(): Promise<Conversation> {
+    const conversation = await connected();
+    http.on("POST /v1/agents", { body: agent({ id: "a1" }) });
+    http.on("GET /v1/agents", { body: [] });
+    conversation.setInput("ship it");
+    await conversation.send();
+    await settle();
+    return conversation;
+  }
+
+  it("draws a replayed event exactly once", async () => {
+    // The per-agent stream is resumable, so the server may legally re-send
+    // something already drawn. Deduping on seq is the contract, not a patch.
+    const conversation = await running();
+    const message = {
+      kind: "message" as const,
+      text: "hello",
+      agent_id: "a1",
+      at_ms: 1,
+      seq: 0,
+    };
+    spy.last.send(message);
+    spy.last.send(message);
+    await settle();
+
+    expect(transcript(conversation).filter((e) => e.kind === "agent")).toHaveLength(1);
+  });
+
+  it("ignores an event belonging to some other delegation", async () => {
+    // Another agent's output belongs in the sheet, never in this transcript.
+    const conversation = await running();
+    spy.last.send({
+      kind: "message",
+      text: "not yours",
+      agent_id: "someone-else",
+      at_ms: 1,
+      seq: 0,
+    });
+    await settle();
+
+    expect(transcript(conversation).filter((e) => e.kind === "agent")).toHaveLength(0);
+  });
+
+  it("re-reads what the daemon dropped, and says that it did", async () => {
+    const conversation = await running();
+    spy.last.send({ kind: "message", text: "one", agent_id: "a1", at_ms: 1, seq: 0 });
+    await settle();
+
+    http.on("GET /v1/agents/a1/events", {
+      body: {
+        events: [
+          { kind: "message", text: "two", agent_id: "a1", at_ms: 2, seq: 1 },
+          { kind: "message", text: "three", agent_id: "a1", at_ms: 3, seq: 2 },
+        ],
+        last_seq: 2,
+      },
+    });
+    spy.last.emit("lagged", '{"missed":2}');
+    await settle(6);
+
+    expect(notices(conversation)).toContain("the daemon dropped 2 events — re-reading");
+    // Recovery reads from the last event actually rendered, exclusive.
+    expect(http.callsTo("GET /v1/agents/a1/events")[0].url).toContain("after_seq=0");
+    expect(transcript(conversation).filter((e) => e.kind === "agent")).toHaveLength(3);
+  });
+
+  it("shows the gate when the stream closes on an expired session", async () => {
+    const conversation = await running();
+    spy.last.fail(true);
+
+    expect(conversation.getSnapshot().link).toEqual({
+      phase: "auth",
+      reason: "the session expired",
+    });
+    expect(spy.last.closed).toBe(true);
+  });
+
+  it("rides out a transient drop, because EventSource reconnects itself", async () => {
+    const conversation = await running();
+    spy.last.fail(false);
+
+    expect(conversation.getSnapshot().link.phase).toBe("live");
+    expect(spy.last.closed).toBe(false);
+  });
+
+  it("never runs two streams at once", async () => {
+    // Two live streams would double-apply every event.
+    const conversation = await running();
+    const first = spy.last;
+    conversation.follow("a2");
+
+    expect(first.closed).toBe(true);
+    expect(spy.created).toHaveLength(2);
+  });
+});
+
+describe("coming back from the background", () => {
+  it("catches up over REST, then re-opens the stream from there", async () => {
+    const conversation = await connected();
+    http.on("POST /v1/agents", { body: agent({ id: "a1" }) });
+    http.on("GET /v1/agents", { body: [] });
+    conversation.setInput("ship it");
+    await conversation.send();
+    await settle();
+
+    spy.last.send({ kind: "message", text: "one", agent_id: "a1", at_ms: 1, seq: 0 });
+    await settle();
+
+    // The phone slept here: the socket died and a run finished unseen.
+    http.on("GET /v1/agents/a1/events", {
+      body: {
+        events: [
+          {
+            kind: "finished",
+            is_error: false,
+            usage: { cost_usd: 0.03 },
+            agent_id: "a1",
+            at_ms: 9,
+            seq: 1,
+          },
+        ],
+        last_seq: 1,
+      },
+    });
+    http.on("GET /v1/agents", { body: [agent({ id: "a1", status: "completed" })] });
+
+    await conversation.resumeAfterBackground();
+    await settle();
+
+    expect(conversation.getSnapshot().session.busy).toBe(false);
+    expect(conversation.getSnapshot().session.costUsd).toBeCloseTo(0.03);
+    // Re-followed from the last event rendered, not from the beginning.
+    expect(spy.last.url).toContain("after_seq=1");
+  });
+
+  it("just refreshes the roster when no conversation is in flight", async () => {
+    const conversation = await connected();
+    http.on("GET /v1/agents", { body: [agent({ id: "z" })] });
+
+    await conversation.resumeAfterBackground();
+    await settle();
+
+    expect(conversation.getSnapshot().session.agents[0].id).toBe("z");
+    expect(spy.created).toHaveLength(0);
+  });
+
+  it("shows the gate when the session died while the phone slept", async () => {
+    const conversation = await connected();
+    http.on("POST /v1/agents", { body: agent({ id: "a1" }) });
+    http.on("GET /v1/agents", { body: [] });
+    conversation.setInput("ship it");
+    await conversation.send();
+    await settle();
+
+    http.on("GET /v1/agents/a1/events", { status: 401, body: { detail: "no" } });
+    await conversation.resumeAfterBackground();
+
+    expect(conversation.getSnapshot().link.phase).toBe("auth");
+  });
+});
+
+describe("stopping an agent", () => {
+  it("kills it and refreshes the roster", async () => {
+    const conversation = await connected();
+    http.on("DELETE /v1/agents/a1", { status: 204 });
+    http.on("GET /v1/agents", { body: [agent({ id: "a1", status: "killed" })] });
+
+    await conversation.kill("a1");
+    await settle();
+
+    expect(http.calledOnce("DELETE /v1/agents/a1")).toBe(true);
+    expect(conversation.getSnapshot().session.agents[0].status).toBe("killed");
+  });
+
+  it("releases the composer when the killed agent was the one being watched", async () => {
+    const conversation = await connected();
+    http.on("POST /v1/agents", { body: agent({ id: "a1" }) });
+    http.on("GET /v1/agents", { body: [] });
+    conversation.setInput("ship it");
+    await conversation.send();
+    await settle();
+
+    http.on("DELETE /v1/agents/a1", { status: 204 });
+    http.on("GET /v1/agents", { body: [] });
+    await conversation.kill("a1");
+    await settle();
+
+    expect(conversation.getSnapshot().session.busy).toBe(false);
+  });
+
+  it("says why when the kill was refused", async () => {
+    const conversation = await connected();
+    http.on("DELETE /v1/agents/a1", { status: 403, body: { detail: "read-only" } });
+
+    await conversation.kill("a1");
+    expect(notices(conversation)).toContain("could not stop: read-only");
+  });
+});
+
+describe("the store contract", () => {
+  it("hands out a stable snapshot until something changes", async () => {
+    // `useSyncExternalStore` compares by identity: a new object every call is
+    // an infinite render loop.
+    const conversation = await connected();
+    expect(conversation.getSnapshot()).toBe(conversation.getSnapshot());
+
+    conversation.setInput("x");
+    expect(conversation.getSnapshot().session.input).toBe("x");
+  });
+
+  it("notifies subscribers, and stops when unsubscribed", async () => {
+    const conversation = await connected();
+    let count = 0;
+    const off = conversation.subscribe(() => count++);
+
+    conversation.setInput("a");
+    expect(count).toBe(1);
+
+    off();
+    conversation.setInput("b");
+    expect(count).toBe(1);
+  });
+
+  it("does not churn when following is set to what it already is", async () => {
+    const conversation = await connected();
+    let count = 0;
+    conversation.subscribe(() => count++);
+
+    conversation.setFollowing(true);
+    expect(count).toBe(0);
+
+    conversation.setFollowing(false);
+    expect(count).toBe(1);
+  });
+
+  it("keeps a roster failure out of the transcript", async () => {
+    // The transcript is the app; a roster that failed to load is not worth
+    // interrupting someone over.
+    const conversation = await connected();
+    http.on("GET /v1/agents", { status: 500, body: { detail: "boom" } });
+
+    await conversation.refreshRoster();
+    expect(notices(conversation)).not.toContain("boom");
+  });
+});
+
+// ─── slash commands ─────────────────────────────────────────────────────────
+//
+// The parser is proved in `commands.test.ts`; these are about what each command
+// *does* to a live conversation, and they mirror `apply_slash` in
+// `cli/src/tui/mod.rs` case for case.
+
+/** Type a line and press SEND, which is how every command arrives here. */
+async function run(conversation: Conversation, line: string): Promise<void> {
+  conversation.setInput(line);
+  await conversation.send();
+  await settle();
+}
+
+describe("running a slash command", () => {
+  it("never reaches the daemon as a prompt", async () => {
+    const conversation = await connected();
+    await run(conversation, "/thinking");
+    expect(http.callsTo("POST /v1/agents")).toHaveLength(0);
+    expect(conversation.getSnapshot().session.input).toBe("");
+  });
+
+  /**
+   * The load-bearing one: switching the model for the *next* turn is exactly
+   * what you do while waiting for this one, so a command must not be refused
+   * by the busy guard the way a prompt is.
+   */
+  it("works while a turn is in flight", async () => {
+    const conversation = await connected();
+    http.on("POST /v1/agents", { body: agent({ id: "a1" }) });
+    http.on("GET /v1/agents", { body: [] });
+    await run(conversation, "ship it");
+    expect(conversation.getSnapshot().session.busy).toBe(true);
+
+    await run(conversation, "/model haiku");
+    expect(conversation.getSnapshot().session.model).toBe("haiku");
+    expect(notices(conversation)).toContain("model: haiku");
+    expect(notices(conversation)).not.toContain(
+      "still working — wait for this turn to finish",
+    );
+  });
+
+  /** A read-only session can still change what it is looking at. */
+  it("works without write authority", async () => {
+    const conversation = await connected("read");
+    await run(conversation, "/details");
+    expect(conversation.getSnapshot().session.showDetails).toBe(false);
+    expect(notices(conversation)).not.toContain("this session is read-only");
+  });
+
+  it("lists every command it accepts", async () => {
+    const conversation = await connected();
+    await run(conversation, "/help");
+    const shown = notices(conversation).join("\n");
+    for (const name of ["/harness", "/model", "/resume", "/team", "/exit"]) {
+      expect(shown, name).toContain(name);
+    }
+  });
+
+  it("names an unknown command back rather than delegating it", async () => {
+    const conversation = await connected();
+    await run(conversation, "/compact");
+    expect(notices(conversation).at(-1)).toBe(
+      "/compact is not a command — /help lists them",
+    );
+    expect(http.callsTo("POST /v1/agents")).toHaveLength(0);
+  });
+
+  it("says what a command wants when the argument is missing", async () => {
+    const conversation = await connected();
+    await run(conversation, "/resume");
+    expect(notices(conversation).at(-1)).toBe("usage: /resume <session-id>");
+  });
+
+  it("sends the next turn to the harness /harness named", async () => {
+    const conversation = await connected();
+    await run(conversation, "/harness agy");
+    http.on("POST /v1/agents", { body: agent({ id: "a1", harness: "agy" }) });
+    http.on("GET /v1/agents", { body: [] });
+    await run(conversation, "ship it");
+
+    expect(http.callsTo("POST /v1/agents")[0].body).toMatchObject({
+      harness: "agy",
+      resume: "fresh",
+    });
+  });
+
+  /** A conversation belongs to the harness that issued it. */
+  it("drops the session cursor when the harness changes", async () => {
+    const conversation = await connected();
+    http.on("POST /v1/agents", { body: agent({ id: "a1" }) });
+    http.on("GET /v1/agents", { body: [] });
+    await run(conversation, "first");
+    spy.last.send({
+      kind: "started",
+      session_id: "sess-9",
+      model: "claude-opus-5",
+      agent_id: "a1",
+      at_ms: 1,
+      seq: 0,
+    });
+    spy.last.send({
+      kind: "finished",
+      is_error: false,
+      usage: {},
+      agent_id: "a1",
+      at_ms: 2,
+      seq: 1,
+    });
+    await settle();
+
+    await run(conversation, "/harness opencode");
+    const state = conversation.getSnapshot().session;
+    expect(state.resume).toBe("fresh");
+    expect(state.reportedModel).toBeNull();
+  });
+
+  it("clears the screen without touching the conversation", async () => {
+    const conversation = await connected();
+    http.on("POST /v1/agents", { body: agent({ id: "a1" }) });
+    http.on("GET /v1/agents", { body: [] });
+    await run(conversation, "first");
+    spy.last.send({
+      kind: "started",
+      session_id: "sess-9",
+      model: null,
+      agent_id: "a1",
+      at_ms: 1,
+      seq: 0,
+    });
+    await settle();
+
+    await run(conversation, "/clear");
+    const state = conversation.getSnapshot().session;
+    expect(state.transcript).toEqual([]);
+    // The cursor survives: the harness still remembers the conversation.
+    expect(state.resume).toEqual({ session: "sess-9" });
+  });
+
+  it("forgets the conversation on /new", async () => {
+    const conversation = await connected();
+    http.on("POST /v1/agents", { body: agent({ id: "a1" }) });
+    http.on("GET /v1/agents", { body: [] });
+    await run(conversation, "first");
+    spy.last.send({
+      kind: "started",
+      session_id: "sess-9",
+      model: null,
+      agent_id: "a1",
+      at_ms: 1,
+      seq: 0,
+    });
+    spy.last.send({
+      kind: "finished",
+      is_error: false,
+      usage: { cost_usd: 0.5 },
+      agent_id: "a1",
+      at_ms: 2,
+      seq: 1,
+    });
+    await settle();
+
+    await run(conversation, "/new");
+    http.on("POST /v1/agents", { body: agent({ id: "a2" }) });
+    http.on("GET /v1/agents", { body: [] });
+    await run(conversation, "second");
+
+    expect(http.callsTo("POST /v1/agents")[1].body).toMatchObject({
+      resume: "fresh",
+    });
+    expect(conversation.getSnapshot().session.costUsd).toBe(0);
+  });
+
+  it("opens the agents sheet with a fresh roster for /sessions", async () => {
+    const conversation = await connected();
+    http.on("GET /v1/agents", { body: [agent({ id: "older", session_id: "ses-1" })] });
+    await run(conversation, "/sessions");
+
+    const state = conversation.getSnapshot().session;
+    expect(state.pane).toBe("agents");
+    expect(state.agents[0]!.session).toBe("ses-1");
+    expect(notices(conversation).at(-1)).toContain("/resume <id>");
+  });
+
+  it("continues a conversation named by an agent-id prefix", async () => {
+    const conversation = await connected();
+    http.on("GET /v1/agents", { body: [agent({ id: "abcdef1234", session_id: "ses-1" })] });
+    await conversation.refreshRoster();
+    await run(conversation, "/resume abcdef12");
+
+    expect(notices(conversation).at(-1)).toBe("continuing ses-1");
+    http.on("POST /v1/agents", { body: agent({ id: "a9" }) });
+    http.on("GET /v1/agents", { body: [] });
+    await run(conversation, "carry on");
+    expect(http.callsTo("POST /v1/agents")[0].body).toMatchObject({
+      resume: { session: "ses-1" },
+    });
+  });
+
+  it("warns when the id matches nothing on screen but still passes it on", async () => {
+    const conversation = await connected();
+    http.on("GET /v1/agents", { body: [agent({ id: "abcdef1234", session_id: "ses-1" })] });
+    await conversation.refreshRoster();
+    await run(conversation, "/resume from-elsewhere");
+    expect(notices(conversation).at(-1)).toContain("passing it on as typed");
+    expect(conversation.getSnapshot().session.resume).toEqual({
+      session: "from-elsewhere",
+    });
+  });
+
+  /**
+   * Stopping the stream is what the TUI's `/exit` actually achieves; an app
+   * cannot quit itself on iOS, and the agent keeps running either way.
+   */
+  it("stops watching on /exit and leaves the agent running", async () => {
+    const conversation = await connected();
+    http.on("POST /v1/agents", { body: agent({ id: "a1" }) });
+    http.on("GET /v1/agents", { body: [] });
+    await run(conversation, "ship it");
+    expect(spy.last.closed).toBe(false);
+
+    await run(conversation, "/exit");
+    expect(spy.last.closed).toBe(true);
+    expect(notices(conversation).at(-1)).toContain("keeps running on the box");
+    // No kill was sent: leaving is not stopping.
+    expect(http.callsTo("DELETE /v1/agents/a1")).toHaveLength(0);
+  });
+});
+
+// ─── the team ───────────────────────────────────────────────────────────────
+
+/** A conversation watching a named team. */
+async function watching(team: string): Promise<Conversation> {
+  http.on("POST /v1/session", { status: 201, body: { scope: "write", expires_at_ms: 1 } });
+  http.on("GET /v1/agents", { body: [] });
+  const conversation = new Conversation({
+    client: new JodClient({
+      fetch: http.fetch,
+      eventSource: spy.factory,
+      newKey: () => "key-1",
+    }),
+    team,
+    scopeMemory: memory,
+    originMemory: origins,
+    protocol: "https:",
+  });
+  http.on("GET /v1/teams/crew", {
+    body: { team: "crew", members: [member()], tasks: [teamTask()] },
+  });
+  await conversation.connect("tok");
+  await settle();
+  return conversation;
+}
+
+describe("watching a team", () => {
+  it("loads the roster and board as soon as the link goes live", async () => {
+    const conversation = await watching("crew");
+    const state = conversation.getSnapshot().session;
+    expect(state.team).toBe("crew");
+    expect(state.members[0]!.name).toBe("scout");
+    expect(state.tasks[0]!.title).toBe("read the docs");
+  });
+
+  it("re-reads the board when the sheet is opened, because teammates write it", async () => {
+    const conversation = await watching("crew");
+    http.on("GET /v1/teams/crew", {
+      body: {
+        team: "crew",
+        members: [member({ status: "busy" })],
+        tasks: [teamTask({ owner: "scout", status: "claimed" })],
+      },
+    });
+    await run(conversation, "/team");
+
+    const state = conversation.getSnapshot().session;
+    expect(state.pane).toBe("team");
+    expect(state.members[0]!.status).toBe("busy");
+    expect(state.tasks[0]!.owner).toBe("scout");
+  });
+
+  it("closes again when /team is repeated", async () => {
+    const conversation = await watching("crew");
+    http.on("GET /v1/teams/crew", {
+      body: { team: "crew", members: [member()], tasks: [] },
+    });
+    await run(conversation, "/team");
+    await run(conversation, "/team");
+    expect(conversation.getSnapshot().session.pane).toBe("chat");
+  });
+
+  /**
+   * `jod tui` takes its team from `--team <name>`. A phone has no command line,
+   * so the names are asked for instead — and one team is not a choice.
+   */
+  it("adopts the only team when none was named", async () => {
+    http.on("POST /v1/session", { status: 201, body: { scope: "write", expires_at_ms: 1 } });
+    http.on("GET /v1/agents", { body: [] });
+    http.on("GET /v1/teams", { body: ["crew"] });
+    http.on("GET /v1/teams/crew", {
+      body: { team: "crew", members: [member()], tasks: [] },
+    });
+    const conversation = build();
+    await conversation.connect("tok");
+    await settle();
+
+    expect(conversation.getSnapshot().session.team).toBe("crew");
+    expect(conversation.getSnapshot().session.members[0]!.name).toBe("scout");
+  });
+
+  /** Several boards and no name is a choice, and guessing is worse than asking. */
+  it("offers the list rather than picking when there are several", async () => {
+    http.on("POST /v1/session", { status: 201, body: { scope: "write", expires_at_ms: 1 } });
+    http.on("GET /v1/agents", { body: [] });
+    http.on("GET /v1/teams", { body: ["crew", "ops"] });
+    const conversation = build();
+    await conversation.connect("tok");
+    await settle();
+
+    expect(conversation.getSnapshot().session.team).toBeNull();
+    expect(conversation.getSnapshot().session.teams).toEqual(["crew", "ops"]);
+    // Nothing was fetched for either board: none was chosen.
+    expect(http.calls.filter((c) => c.url.startsWith("/v1/teams/"))).toHaveLength(0);
+  });
+
+  it("watches the one that was tapped", async () => {
+    http.on("POST /v1/session", { status: 201, body: { scope: "write", expires_at_ms: 1 } });
+    http.on("GET /v1/agents", { body: [] });
+    http.on("GET /v1/teams", { body: ["crew", "ops"] });
+    const conversation = build();
+    await conversation.connect("tok");
+    await settle();
+
+    http.on("GET /v1/teams/ops", {
+      body: { team: "ops", members: [member({ team: "ops", name: "oncall" })], tasks: [] },
+    });
+    await conversation.watchTeam("ops");
+    expect(conversation.getSnapshot().session.team).toBe("ops");
+    expect(conversation.getSnapshot().session.members[0]!.name).toBe("oncall");
+  });
+
+  it("shows an empty sheet, not an error, when the box has no teams at all", async () => {
+    http.on("POST /v1/session", { status: 201, body: { scope: "write", expires_at_ms: 1 } });
+    http.on("GET /v1/agents", { body: [] });
+    http.on("GET /v1/teams", { body: [] });
+    const conversation = build();
+    await conversation.connect("tok");
+    await settle();
+
+    await run(conversation, "/team");
+    const state = conversation.getSnapshot().session;
+    expect(state.pane).toBe("team");
+    expect(state.team).toBeNull();
+    expect(state.teams).toEqual([]);
+  });
+
+  /** An older daemon has no such route; that must not break the sheet. */
+  it("carries on when the daemon cannot list teams", async () => {
+    const conversation = await connected();
+    await run(conversation, "/team");
+    expect(conversation.getSnapshot().session.pane).toBe("team");
+    expect(conversation.getSnapshot().session.team).toBeNull();
+  });
+
+  /** A wrong name must not look like a team nobody has joined. */
+  it("says so when the daemon has never heard of the team", async () => {
+    http.on("POST /v1/session", { status: 201, body: { scope: "write", expires_at_ms: 1 } });
+    http.on("GET /v1/agents", { body: [] });
+    http.on("GET /v1/teams/ghost", { status: 404, body: { detail: "no team named ghost" } });
+    const conversation = new Conversation({
+      client: new JodClient({ fetch: http.fetch, eventSource: spy.factory }),
+      team: "ghost",
+      scopeMemory: memory,
+      originMemory: origins,
+      protocol: "https:",
+    });
+    await conversation.connect("tok");
+    await settle();
+
+    expect(notices(conversation).at(-1)).toContain("could not read team ghost");
+  });
+
+  /** Stale beats blank: a dropped read must not empty a board that was true. */
+  it("keeps the last known board when a refresh fails", async () => {
+    const conversation = await watching("crew");
+    http.on("GET /v1/teams/crew", { status: 500, body: { detail: "boom" } });
+    await conversation.refreshTeam();
+    expect(conversation.getSnapshot().session.members[0]!.name).toBe("scout");
+  });
+});
