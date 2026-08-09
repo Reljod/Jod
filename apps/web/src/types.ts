@@ -1,0 +1,182 @@
+// Mirrors the serde representation of jod's `core/` crate.
+// Source of truth: core/src/{event,service,store}.rs and core/src/harness/mod.rs.
+//
+// Verified against that crate directly — NOT against apps/desktop/src/types.ts,
+// which is an unmaintained mirror since the desktop app left the workspace.
+
+// ─── core/src/harness/mod.rs ────────────────────────────────────────────────
+
+/** Three harnesses now. Anything switching exhaustively must handle `agy`. */
+export type HarnessKind = "claude_code" | "open_code" | "agy";
+
+export const HARNESS_KINDS: readonly HarnessKind[] = [
+  "claude_code",
+  "open_code",
+  "agy",
+] as const;
+
+export type PermissionPolicy = "ask" | "accept_edits" | "bypass";
+
+/**
+ * Externally-tagged: `"fresh"` | `"last"` | `{ session: "<id>" }`.
+ * This is what lets Jod hold a conversation rather than fire one-shot tasks.
+ */
+export type Resume = "fresh" | "last" | { session: string };
+
+/** What the caller asked for. Harness-neutral on purpose. */
+export interface SpawnRequest {
+  name: string;
+  harness: HarnessKind;
+  prompt: string;
+  /** Required by the Rust struct — it has no serde default. */
+  cwd: string;
+  model?: string | null;
+  permission?: PermissionPolicy;
+  resume?: Resume;
+}
+
+// ─── core/src/event.rs ──────────────────────────────────────────────────────
+
+export interface Usage {
+  input_tokens?: number;
+  output_tokens?: number;
+  cache_read_tokens?: number;
+  cache_write_tokens?: number;
+  cost_usd?: number;
+}
+
+/** `AgentEvent` is an internally-tagged enum; `kind` discriminates it. */
+export type AgentEvent =
+  | { kind: "started"; session_id: string | null; model: string | null }
+  | { kind: "thinking"; text: string }
+  | { kind: "message"; text: string }
+  | { kind: "tool_call"; name: string; input?: unknown }
+  | { kind: "tool_result"; name: string; summary?: string; is_error: boolean }
+  | {
+      kind: "finished";
+      text?: string;
+      exit_code?: number;
+      is_error: boolean;
+      usage: Usage;
+    }
+  | { kind: "raw"; line: string }
+  | { kind: "error"; message: string };
+
+export type AgentEventKind = AgentEvent["kind"];
+
+/** The event, flattened together with its envelope fields. */
+export type AgentEnvelope = AgentEvent & {
+  agent_id: string;
+  at_ms: number;
+  /** Monotonic per-agent sequence number, so a late-joining UI can resume. */
+  seq: number;
+};
+
+// ─── core/src/service.rs ────────────────────────────────────────────────────
+
+export type AgentStatus = "running" | "completed" | "failed" | "killed";
+
+/** Whether a harness can actually be used on this machine. */
+export interface HarnessInfo {
+  id: string;
+  label: string;
+  available: boolean;
+  path: string | null;
+}
+
+/** The client-facing view of one agent. */
+export interface AgentSummary {
+  id: string;
+  name: string;
+  harness: HarnessKind;
+  harness_label: string;
+  status: AgentStatus;
+  cwd: string;
+  model: string | null;
+  permission: PermissionPolicy;
+  tmux_session: string;
+  attach_command: string;
+  /** Use this instead of attach_command from inside an existing tmux session. */
+  switch_command: string;
+  /** Sessions outlive the agent, so this is a different question to `status`. */
+  session_closed: boolean;
+  created_at_ms: number;
+  session_id: string | null;
+  usage: Usage;
+  event_count: number;
+  last_message: string | null;
+  stream_path: string;
+}
+
+export interface Report {
+  running: number;
+  completed: number;
+  failed: number;
+  killed: number;
+  total_cost_usd: number;
+  agents: AgentSummary[];
+}
+
+// ─── core/src/store.rs ──────────────────────────────────────────────────────
+
+/** One persisted delegation — run history that survives a restart. */
+export interface StoredRun {
+  id: string;
+  name: string;
+  harness: string;
+  status: string;
+  cwd: string;
+  session_id: string | null;
+  tmux_session: string;
+  created_at_ms: number;
+  /** The full client-facing summary, kept verbatim. Shape of `AgentSummary`. */
+  summary: Partial<AgentSummary> & Record<string, unknown>;
+}
+
+/** Jod's memory. Bitemporal, FTS-searchable. */
+export interface Fact {
+  id: number;
+  subject: string;
+  predicate: string;
+  object: string;
+  source: string | null;
+  valid_from: string | null;
+  valid_to: string | null;
+  recorded_at_ms: number;
+  state: string;
+}
+
+// ─── derived helpers ────────────────────────────────────────────────────────
+
+/** Total tokens across every bucket the harness reported. */
+export function totalTokens(usage: Usage | undefined): number {
+  if (!usage) return 0;
+  return (
+    (usage.input_tokens ?? 0) +
+    (usage.output_tokens ?? 0) +
+    (usage.cache_read_tokens ?? 0) +
+    (usage.cache_write_tokens ?? 0)
+  );
+}
+
+export function isLive(agent: AgentSummary): boolean {
+  return agent.status === "running";
+}
+
+/** Short display code per harness, for dense HUD chrome. */
+export function harnessCode(h: HarnessKind): string {
+  switch (h) {
+    case "claude_code":
+      return "CLDE";
+    case "open_code":
+      return "OPNC";
+    case "agy":
+      return "AGY";
+  }
+}
+
+export function resumeLabel(r: Resume | undefined): string {
+  if (!r || r === "fresh") return "FRESH";
+  if (r === "last") return "CONTINUE";
+  return `SESSION ${r.session.slice(0, 8)}`;
+}
