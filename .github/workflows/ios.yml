@@ -142,11 +142,31 @@ jobs:
 
           # Still resident is the evidence it did not crash on launch: an app
           # that fell over is gone from the device's process list by now.
-          if xcrun simctl spawn "$device" launchctl list | grep -q "$bundle_id"; then
+          #
+          # The listing is captured into a variable rather than piped into
+          # `grep -q`. Piping is what made this flaky: `grep -q` exits on the
+          # first match, which SIGPIPEs `simctl spawn` — "Child process
+          # terminated with signal 13: Broken pipe" — and the listing can be
+          # cut short before the line we want is ever written. Capturing reads
+          # it to completion, and the retry absorbs a device that is simply
+          # slow to publish the process.
+          running=""
+          for attempt in 1 2 3 4 5; do
+            listing=$(xcrun simctl spawn "$device" launchctl list 2>/dev/null || true)
+            if printf '%s' "$listing" | grep -q "$bundle_id"; then
+              running=yes
+              break
+            fi
+            echo "not listed yet (attempt $attempt) — waiting"
+            sleep 5
+          done
+
+          if [ -n "$running" ]; then
             echo "PASS: the app is running in the simulator"
           else
             echo "FAIL: the app is not running — it launched and then exited"
-            xcrun simctl diagnose -b -X --no-archive --output=. || true
+            # `diagnose` prompts for ENTER on a tty and would hang a runner.
+            xcrun simctl diagnose -b -X --no-archive --output=. < /dev/null || true
             exit 1
           fi
 
