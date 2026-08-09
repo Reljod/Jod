@@ -463,3 +463,22 @@ mistake there widens what gets *considered* and never what gets *merged*.
 Merging stays serial for a duller reason — every merge puts the remaining
 branches one commit behind base, and behind-base is itself a refusal, so a batch
 merge would be merging PRs against a tree they were never tested on.
+
+## The VPS address lives in SSH config, not in the repo
+
+Reljod calls one machine four things — VPS, Jod Cloud, Jarvis, cloud — so
+[`domains/infra/`](../domains/infra/README.md) has to write the vocabulary down
+or every session re-asks which host is meant. The obvious way to write it down
+is `ssh reljod@<ip>`, and that is the one thing this repo can't do: it is
+public, and a real username beside a real address is a free target list for SSH
+brute-forcers. Git history makes the mistake permanent — rotating an address is
+work, un-publishing one is not possible.
+
+So the repo names an *alias*, `jod-cloud`, and `~/.ssh/config` resolves it. The
+docs stay literally correct and copy-pasteable, the address stays off GitHub,
+and moving the box to a new IP is a one-line local edit that no document has to
+follow. The cost is a machine without the alias gets `Could not resolve
+hostname` instead of a working command, which is why the domain note calls that
+failure out and says to ask for the entry rather than hard-code an address.
+
+The general rule: a public repo may name a host, never locate one.

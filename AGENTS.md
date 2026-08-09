@@ -21,7 +21,7 @@ executes, to be delegated to like a competent chief of staff. Three parts:
   `.agents/` doesn't exist. → [why](docs/decisions.md)
 - **`domains/`** — Reljod's private operating data, one directory per
   life-domain. Read the relevant one before acting there. Tasks → Linear,
-  notes → Notion, finance → TBD.
+  notes → Notion, finance → TBD, infra → the `jod-cloud` box.
 
 ## Never work around a blocked check
 
