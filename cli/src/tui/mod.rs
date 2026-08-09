@@ -369,14 +369,40 @@ fn apply_slash(app: &mut App, slash: command::Slash) {
         Slash::Sessions => {
             app.pane = Pane::Agents;
             app.push(Entry::Notice(
-                "pick an id from the panel, then /resume <id>".into(),
+                "pick an id from the panel, then /resume <id> — the shown prefix is enough".into(),
             ));
         }
-        Slash::Resume(id) => {
-            app.resume = Resume::Session(id.clone());
-            app.session = Some(id.clone());
-            app.push(Entry::Notice(format!("continuing {id}")));
-        }
+        Slash::Resume(id) => match app.resolve_session(&id) {
+            app::Resolved::Session(session) => {
+                app.resume = Resume::Session(session.clone());
+                app.session = Some(session.clone());
+                app.push(Entry::Notice(format!("continuing {session}")));
+            }
+            app::Resolved::Verbatim(raw) => {
+                app.resume = Resume::Session(raw.clone());
+                app.session = Some(raw.clone());
+                // Say when it matched nothing on screen. A typo is otherwise
+                // indistinguishable from a real resume until the harness
+                // rejects it several seconds later.
+                if app.agents.is_empty() {
+                    app.push(Entry::Notice(format!("continuing {raw}")));
+                } else {
+                    app.push(Entry::Notice(format!(
+                        "continuing {raw} — not one of the agents listed, passing it on as typed"
+                    )));
+                }
+            }
+            app::Resolved::NoSession(agent) => {
+                app.push(Entry::Notice(format!(
+                    "{agent} has not reported a conversation yet — resuming it would start a fresh one"
+                )));
+            }
+            app::Resolved::Ambiguous(n) => {
+                app.push(Entry::Notice(format!(
+                    "{id} matches {n} agents — type more of it"
+                )));
+            }
+        },
         Slash::Agents => {
             app.pane = if app.pane == Pane::Agents { Pane::Chat } else { Pane::Agents };
         }
@@ -444,6 +470,7 @@ async fn list_agents(jod: &Arc<Jod>) -> Vec<AgentLine> {
             name: a.name,
             harness: a.harness_label,
             status: format!("{:?}", a.status).to_lowercase(),
+            session: a.session_id,
         })
         .collect()
 }
@@ -543,6 +570,71 @@ mod tests {
         // A second Enter runs it.
         press(&mut app, KeyCode::Enter);
         assert!(app.show_thinking);
+    }
+
+    fn agent_line(id: &str, session: Option<&str>) -> AgentLine {
+        AgentLine {
+            id: id.into(),
+            name: "work".into(),
+            harness: "Claude Code".into(),
+            status: "completed".into(),
+            session: session.map(str::to_string),
+        }
+    }
+
+    /// The panel shows a shortened *agent* id and tells you to `/resume` it,
+    /// but the harness needs its own conversation id. The prefix must resolve.
+    #[test]
+    fn resume_accepts_the_shortened_id_the_panel_shows() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.agents = vec![agent_line("abcdef12-3456-7890", Some("sess-xyz"))];
+
+        apply_slash(&mut app, command::Slash::Resume("abcdef12".into()));
+
+        assert_eq!(app.resume, Resume::Session("sess-xyz".into()));
+        assert_eq!(app.session.as_deref(), Some("sess-xyz"));
+    }
+
+    #[test]
+    fn resume_still_takes_a_session_id_typed_in_full() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.agents = vec![agent_line("abcdef12-3456", Some("sess-xyz"))];
+        apply_slash(&mut app, command::Slash::Resume("sess-xyz".into()));
+        assert_eq!(app.resume, Resume::Session("sess-xyz".into()));
+    }
+
+    /// An id from another machine or a log is still legitimate to type.
+    #[test]
+    fn an_unrecognised_id_is_passed_through_untouched() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        apply_slash(&mut app, command::Slash::Resume("from-elsewhere".into()));
+        assert_eq!(app.resume, Resume::Session("from-elsewhere".into()));
+    }
+
+    #[test]
+    fn an_ambiguous_prefix_changes_nothing() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.agents = vec![
+            agent_line("ab111111", Some("s1")),
+            agent_line("ab222222", Some("s2")),
+        ];
+        apply_slash(&mut app, command::Slash::Resume("ab".into()));
+
+        assert_eq!(app.resume, Resume::Fresh, "must not guess");
+        assert!(format!("{:?}", app.transcript.last().unwrap()).contains("matches 2"));
+    }
+
+    /// Resuming an agent that never reported a conversation would quietly start
+    /// a fresh one — the amnesia case.
+    #[test]
+    fn an_agent_with_no_conversation_is_refused() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.agents = vec![agent_line("abcdef12", None)];
+        apply_slash(&mut app, command::Slash::Resume("abcdef12".into()));
+
+        assert_eq!(app.resume, Resume::Fresh);
+        assert!(format!("{:?}", app.transcript.last().unwrap())
+            .contains("has not reported a conversation"));
     }
 
     #[test]

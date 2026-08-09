@@ -750,13 +750,31 @@ impl Store {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
-    pub fn complete_task(&self, id: &str) -> Result<()> {
+    /// Whether this id names a task on some team's board.
+    ///
+    /// `claim_task` is a lease primitive and will claim an id that names
+    /// nothing, creating it — right for a lease, wrong for a team command,
+    /// where a mistyped id would otherwise report success and leave behind a
+    /// task no board ever shows.
+    pub fn is_team_task(&self, id: &str) -> Result<bool> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        let n: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM tasks WHERE id = ?1 AND team IS NOT NULL",
+            params![id],
+            |r| r.get(0),
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Mark a task done. Returns whether it actually changed anything, so a
+    /// caller can tell "finished it" from "there was no such task".
+    pub fn complete_task(&self, id: &str) -> Result<bool> {
         self.write(|tx| {
-            tx.execute(
+            let changed = tx.execute(
                 "UPDATE tasks SET status = 'done' WHERE id = ?1",
                 params![id],
             )?;
-            Ok(())
+            Ok(changed > 0)
         })
     }
 
@@ -1180,6 +1198,32 @@ mod tests {
         assert_eq!(tasks[0].owner.as_deref(), Some("scout"));
         assert!(tasks[0].is_done());
         assert!(!tasks[1].is_claimed());
+    }
+
+    /// `jod team claim` uses this to refuse an id that names nothing, rather
+    /// than letting the lease primitive invent it and report success.
+    #[test]
+    fn only_a_task_on_a_board_counts_as_a_team_task() {
+        let s = store();
+        s.add_team_task("crew", "t1", "port the parser").unwrap();
+        assert!(s.is_team_task("t1").unwrap());
+
+        // A team *name* is not a task id — the mistake that reported success.
+        assert!(!s.is_team_task("crew").unwrap());
+        assert!(!s.is_team_task("typo").unwrap());
+
+        // A lease claimed outside any team stays off the boards, so it is not
+        // a team task either.
+        s.claim_task("loose", "someone").unwrap();
+        assert!(!s.is_team_task("loose").unwrap());
+    }
+
+    #[test]
+    fn completing_says_whether_there_was_anything_to_complete() {
+        let s = store();
+        s.add_team_task("crew", "t1", "port the parser").unwrap();
+        assert!(s.complete_task("t1").unwrap());
+        assert!(!s.complete_task("no-such-task").unwrap());
     }
 
     /// The race the atomic claim exists for: two teammates going for the same

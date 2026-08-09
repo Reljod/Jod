@@ -4,6 +4,14 @@ use jod_core::service::{AgentStatus, AgentSummary, HarnessInfo, Report};
 use jod_core::store::Origin;
 use jod_core::{broadcast, AgentEnvelope, AgentEvent};
 
+/// The first `n` *characters* of an id.
+///
+/// Slicing bytes here panics the moment an id is not pure ASCII, and task ids
+/// are whatever the user typed.
+fn short(id: &str, n: usize) -> String {
+    id.chars().take(n).collect()
+}
+
 const DIM: &str = "\x1b[2m";
 const BOLD: &str = "\x1b[1m";
 const RED: &str = "\x1b[31m";
@@ -184,7 +192,7 @@ pub fn agents(list: &[AgentSummary]) {
         };
         println!(
             "{:<10} {:<9} {:<12} {}",
-            &a.id[..a.id.len().min(8)],
+            short(&a.id, 8),
             status,
             a.harness_label,
             a.name
@@ -228,9 +236,12 @@ pub fn team(members: &[jod_core::team::Member], tasks: &[jod_core::team::TeamTas
         } else {
             paint(DIM, "open")
         };
+        // The id in full, not a prefix: this board is the only place to learn
+        // it, and `jod team claim` needs it exactly. A truncated id looked
+        // copyable and was not.
         println!(
             "{:<10} {:<8} {}{}",
-            &t.id[..t.id.len().min(8)],
+            t.id,
             mark,
             t.title,
             t.owner
@@ -252,7 +263,7 @@ pub fn history(runs: &[jod_core::store::StoredRun]) {
             .unwrap_or_default();
         println!(
             "{:<8} {} {:<10} {}",
-            &r.id[..r.id.len().min(8)],
+            short(&r.id, 8),
             paint(DIM, &when),
             r.status,
             r.name

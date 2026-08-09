@@ -91,6 +91,23 @@ pub struct AgentLine {
     pub name: String,
     pub harness: String,
     pub status: String,
+    /// The harness's own conversation id, once it has reported one. This is
+    /// what `/resume` actually needs — the panel shows Jod's agent id, which is
+    /// a different thing entirely.
+    pub session: Option<String>,
+}
+
+/// What `/resume <id>` turned out to mean.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Resolved {
+    /// A conversation the harness can continue.
+    Session(String),
+    /// Not recognised here; hand it to the harness as typed.
+    Verbatim(String),
+    /// Matches a known agent that has no conversation id yet.
+    NoSession(String),
+    /// Matches this many agents, so it names none of them.
+    Ambiguous(usize),
 }
 
 /// The most useful single field of a tool's arguments.
@@ -413,6 +430,44 @@ impl App {
                     self.push(Entry::Raw(line.clone()));
                 }
             }
+        }
+    }
+
+    /// Turn what the user typed at `/resume` into a harness session id.
+    ///
+    /// The agents panel shows a *shortened Jod agent id*, and `/sessions` tells
+    /// you to feed it to `/resume` — but `/resume` hands its argument to the
+    /// harness as a conversation id, which an agent id never is. So a prefix of
+    /// either is accepted and translated, and anything unrecognised is passed
+    /// through untouched, because a session id copied from elsewhere is still a
+    /// legitimate thing to type.
+    pub fn resolve_session(&self, typed: &str) -> Resolved {
+        let exact_session = self
+            .agents
+            .iter()
+            .find(|a| a.session.as_deref() == Some(typed));
+        if let Some(a) = exact_session {
+            return Resolved::Session(a.session.clone().unwrap());
+        }
+
+        let matches: Vec<&AgentLine> = self
+            .agents
+            .iter()
+            .filter(|a| {
+                a.id.starts_with(typed)
+                    || a.session.as_deref().is_some_and(|s| s.starts_with(typed))
+            })
+            .collect();
+
+        match matches.as_slice() {
+            [] => Resolved::Verbatim(typed.to_string()),
+            [only] => match &only.session {
+                Some(s) => Resolved::Session(s.clone()),
+                // Known agent, but it never reported a conversation — resuming
+                // it would silently start a fresh one instead.
+                None => Resolved::NoSession(only.id.clone()),
+            },
+            many => Resolved::Ambiguous(many.len()),
         }
     }
 

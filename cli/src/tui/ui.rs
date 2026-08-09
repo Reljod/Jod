@@ -765,6 +765,7 @@ mod tests {
             name: "do the thing".into(),
             harness: "AGY".into(),
             status: "running".into(),
+            session: None,
         }];
         let out = rendered(&a, 80, 16);
         assert!(out.contains("agents"), "{out}");
@@ -801,6 +802,7 @@ mod tests {
                 name: format!("agent {i}"),
                 harness: "AGY".into(),
                 status: "running".into(),
+                session: None,
             })
             .collect();
         for (w, h) in [(10, 4), (12, 5), (18, 6), (21, 7), (40, 8)] {

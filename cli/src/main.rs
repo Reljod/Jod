@@ -508,6 +508,12 @@ async fn main() -> Result<()> {
                     println!("{id} on {team}'s board");
                 }
                 TeamCommand::Claim { id, member } => {
+                    // Refuse an id that is on no board. `claim_task` would
+                    // otherwise invent it and report success, so a typo looked
+                    // like a win and left a task nobody could see.
+                    if !store.is_team_task(&id)? {
+                        bail!("no task {id} on any team's board — `jod team show <team>` lists them");
+                    }
                     // The exit code matters: a teammate scripting this needs to
                     // branch on whether it actually won.
                     if store.claim_task(&id, &member)? {
@@ -517,7 +523,9 @@ async fn main() -> Result<()> {
                     }
                 }
                 TeamCommand::Done { id } => {
-                    store.complete_task(&id)?;
+                    if !store.complete_task(&id)? {
+                        bail!("no task {id} — `jod team show <team>` lists them");
+                    }
                     println!("{id} done");
                 }
                 TeamCommand::Msg {
