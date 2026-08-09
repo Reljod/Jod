@@ -8,7 +8,7 @@ mod render;
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
-use jod_core::store::NewFact;
+use jod_core::store::{NewFact, Origin};
 use jod_core::{HarnessKind, Jod, PermissionPolicy, Resume, SpawnRequest};
 use std::path::PathBuf;
 
@@ -94,14 +94,30 @@ enum Command {
         /// Where this came from — a note path, a URL, a person.
         #[arg(long)]
         source: Option<String>,
+        /// Which domain this belongs to. Scopes are hard partitions.
+        #[arg(long, default_value = jod_core::store::DEFAULT_SCOPE)]
+        scope: String,
+        /// Who asserted it. Never inferred from the text itself.
+        #[arg(long, value_enum, default_value_t = OriginArg::Owner)]
+        origin: OriginArg,
     },
     /// Search what Jod remembers.
     Recall {
         query: Vec<String>,
         #[arg(short, long, default_value_t = 10)]
         limit: usize,
+        /// Restrict to one domain. Omit to search every scope.
+        #[arg(long)]
+        scope: Option<String>,
         #[arg(long)]
         json: bool,
+    },
+    /// Permanently destroy a fact — every version of it, not just the current.
+    Forget {
+        subject: String,
+        predicate: String,
+        #[arg(long, default_value = jod_core::store::DEFAULT_SCOPE)]
+        scope: String,
     },
     /// Hold a conversation. Each turn continues the same harness session.
     Chat {
@@ -132,6 +148,29 @@ impl From<HarnessArg> for HarnessKind {
             HarnessArg::Claude => HarnessKind::ClaudeCode,
             HarnessArg::Opencode => HarnessKind::OpenCode,
             HarnessArg::Agy => HarnessKind::Agy,
+        }
+    }
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, ValueEnum)]
+enum OriginArg {
+    /// Reljod said so. The default when a human types `jod remember`.
+    Owner,
+    /// An agent concluded it.
+    Agent,
+    /// Read from outside — a page, an email, a document.
+    Untrusted,
+    /// Jod itself recorded it.
+    System,
+}
+
+impl From<OriginArg> for Origin {
+    fn from(a: OriginArg) -> Self {
+        match a {
+            OriginArg::Owner => Origin::Owner,
+            OriginArg::Agent => Origin::Agent,
+            OriginArg::Untrusted => Origin::Untrusted,
+            OriginArg::System => Origin::System,
         }
     }
 }
@@ -271,21 +310,44 @@ async fn main() -> Result<()> {
             predicate,
             object,
             source,
+            scope,
+            origin,
         } => {
             let store = jod.store().context("this command needs the database")?;
             let id = store.remember(NewFact {
+                scope,
                 subject,
                 predicate,
                 object,
+                origin: origin.into(),
                 source,
                 valid_from: None,
             })?;
             println!("remembered #{id}");
         }
 
-        Command::Recall { query, limit, json } => {
+        Command::Forget {
+            subject,
+            predicate,
+            scope,
+        } => {
             let store = jod.store().context("this command needs the database")?;
-            let facts = store.recall(&query.join(" "), limit)?;
+            let n = store.forget(&scope, &subject, &predicate)?;
+            match n {
+                0 => println!("nothing to forget"),
+                1 => println!("forgot 1 version, permanently"),
+                n => println!("forgot {n} versions, permanently"),
+            }
+        }
+
+        Command::Recall {
+            query,
+            limit,
+            scope,
+            json,
+        } => {
+            let store = jod.store().context("this command needs the database")?;
+            let facts = store.recall_in(scope.as_deref(), &query.join(" "), limit)?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&facts)?);
             } else {

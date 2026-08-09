@@ -17,9 +17,20 @@ use serde_json::Value;
 use super::{Accumulator, ArgPart, Harness, HarnessKind, PermissionPolicy, Resume, SpawnRequest};
 use crate::event::{summarize, AgentEvent, Usage};
 
+/// AGY's own default print timeout is 5 minutes, and it kills the run when it
+/// expires. That is far too short for delegated work, and the failure looks
+/// like a truncated answer rather than a timeout, so it is raised explicitly.
+const PRINT_TIMEOUT: &str = "6h";
+
 #[derive(Default)]
 pub struct Agy {
     acc: Accumulator,
+    /// The conversation we asked to resume, if any.
+    ///
+    /// AGY does not fail on an unknown conversation id — it silently starts a
+    /// brand new conversation and reports success. Without this the caller
+    /// would believe it was continuing a thread that had actually been lost.
+    expected_session: std::cell::RefCell<Option<String>>,
 }
 
 impl Harness for Agy {
@@ -33,6 +44,8 @@ impl Harness for Agy {
             ArgPart::Prompt,
             ArgPart::lit("--output-format"),
             ArgPart::lit("stream-json"),
+            ArgPart::lit("--print-timeout"),
+            ArgPart::lit(PRINT_TIMEOUT),
         ];
         if let Some(model) = &req.model {
             args.push(ArgPart::lit("--model"));
@@ -42,6 +55,7 @@ impl Harness for Agy {
             Resume::Fresh => {}
             Resume::Last => args.push(ArgPart::lit("--continue")),
             Resume::Session(id) => {
+                *self.expected_session.borrow_mut() = Some(id.clone());
                 args.push(ArgPart::lit("--conversation"));
                 args.push(ArgPart::lit(id));
             }
@@ -71,26 +85,52 @@ impl Harness for Agy {
         };
 
         match v.get("event").and_then(Value::as_str) {
-            Some("init") => vec![AgentEvent::Started {
-                session_id: str_at(&v, "conversation_id")
-                    .or_else(|| v.get("init").and_then(|i| str_at(i, "conversation_id"))),
-                model: v.get("init").and_then(|i| str_at(i, "model")),
-            }],
+            Some("init") => {
+                let got = str_at(&v, "conversation_id")
+                    .or_else(|| v.get("init").and_then(|i| str_at(i, "conversation_id")));
+                let mut out = self.check_session(got.as_deref());
+                out.push(AgentEvent::Started {
+                    session_id: got,
+                    model: v.get("init").and_then(|i| str_at(i, "model")),
+                });
+                out
+            }
             Some("step_update") => match v.get("step_update") {
                 Some(step) => self.parse_step(step),
                 None => vec![],
             },
             Some("result") => {
+                let mut out = vec![];
                 if let Some(r) = v.get("result") {
-                    if let Some(text) = str_at(r, "response") {
-                        self.acc.note_text(&text);
+                    let response = str_at(r, "response");
+                    if let Some(text) = &response {
+                        self.acc.note_text(text);
                     }
                     // Anything but SUCCESS is a failed run.
-                    if let Some(status) = str_at(r, "status") {
-                        if status != "SUCCESS" {
-                            self.acc.errored = true;
+                    let status = str_at(r, "status").unwrap_or_default();
+                    if !status.is_empty() && status != "SUCCESS" {
+                        self.acc.errored = true;
+                        if let Some(msg) = str_at(r, "error") {
+                            out.push(AgentEvent::Error { message: msg });
                         }
                     }
+                    // A successful run that produced nothing is AGY's headless
+                    // permission denial: a tool needed approval, nothing could
+                    // prompt for it, so it was auto-denied — and it still
+                    // reports SUCCESS and exits 0. The only other signal is a
+                    // human-readable line on stderr. Treating this as success
+                    // would report "done" for work that never happened.
+                    if status == "SUCCESS" && response.is_none() {
+                        self.acc.errored = true;
+                        out.push(AgentEvent::Error {
+                            message: "AGY produced no output — a tool most likely needed a \
+                                      permission that headless mode cannot prompt for and was \
+                                      auto-denied. Re-run with a more permissive policy, or add \
+                                      an allow-rule in ~/.gemini/antigravity-cli/settings.json."
+                                .into(),
+                        });
+                    }
+                    out.extend(self.check_session(str_at(r, "conversation_id").as_deref()));
                     // The result's usage is the authoritative total — the
                     // per-step figures sum to it, so replace rather than add,
                     // which would double-count every step.
@@ -101,7 +141,7 @@ impl Harness for Agy {
                     }
                 }
                 // The run is over when the process exits; see `finalize`.
-                vec![]
+                out
             }
             _ => vec![AgentEvent::Raw {
                 line: strip_ansi(line),
@@ -115,6 +155,32 @@ impl Harness for Agy {
 }
 
 impl Agy {
+    /// Verify AGY resumed the conversation we asked for.
+    ///
+    /// An unknown id is not an error to AGY: it starts a fresh conversation,
+    /// reports SUCCESS and exits 0. Comparing the id it reports against the one
+    /// we requested is the only way to notice that the thread was lost — and a
+    /// lost thread means the agent has silently forgotten everything.
+    fn check_session(&mut self, got: Option<&str>) -> Vec<AgentEvent> {
+        let expected = self.expected_session.borrow().clone();
+        let (Some(want), Some(got)) = (expected, got) else {
+            return vec![];
+        };
+        if want == got {
+            return vec![];
+        }
+        // Only report it once, however many records carry the id.
+        *self.expected_session.borrow_mut() = None;
+        self.acc.errored = true;
+        vec![AgentEvent::Error {
+            message: format!(
+                "AGY did not resume conversation {want} — it started {got} instead, \
+                 so the earlier context is gone. AGY reports success for an unknown \
+                 conversation id rather than failing."
+            ),
+        }]
+    }
+
     fn parse_step(&mut self, step: &Value) -> Vec<AgentEvent> {
         let state = str_at(step, "state").unwrap_or_default();
         let step_type = str_at(step, "step_type").unwrap_or_default();
@@ -416,6 +482,134 @@ mod tests {
         let mut h = Agy::default();
         let events = h.parse_line(r#"{"event":"brand_new_thing","payload":1}"#);
         assert!(matches!(events[..], [AgentEvent::Raw { .. }]));
+    }
+
+    /// AGY's own default is 5 minutes and it kills the run when it expires,
+    /// which looks like a truncated answer rather than a timeout.
+    #[test]
+    fn the_print_timeout_is_raised_off_agys_five_minute_default() {
+        let args = lits(&Agy::default().args(&req()));
+        let i = args.iter().position(|a| a == "--print-timeout").unwrap();
+        assert_eq!(args[i + 1], PRINT_TIMEOUT);
+        assert_ne!(PRINT_TIMEOUT, "5m", "5 minutes is the default we are avoiding");
+    }
+
+    /// Regression: AGY auto-denies tools it cannot prompt for in headless mode,
+    /// then reports SUCCESS with an empty response and exit code 0. Believing
+    /// it means reporting "done" for work that never ran.
+    #[test]
+    fn a_successful_run_that_produced_nothing_is_treated_as_a_failure() {
+        let mut h = Agy::default();
+        let events = h.parse_line(
+            r#"{"event":"result","result":{"conversation_id":"c1","status":"SUCCESS","response":"","duration_seconds":2.5}}"#,
+        );
+        assert!(
+            events.iter().any(|e| matches!(e, AgentEvent::Error { .. })),
+            "the denial must be surfaced, got {events:?}"
+        );
+        match h.finalize(Some(0)) {
+            AgentEvent::Finished { is_error, .. } => {
+                assert!(is_error, "exit 0 must not make a denied run look successful")
+            }
+            other => panic!("expected Finished, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_successful_run_with_real_output_is_not_flagged() {
+        let mut h = Agy::default();
+        let events = h.parse_line(
+            r#"{"event":"result","result":{"conversation_id":"c1","status":"SUCCESS","response":"the answer"}}"#,
+        );
+        assert!(!events.iter().any(|e| matches!(e, AgentEvent::Error { .. })));
+        match h.finalize(Some(0)) {
+            AgentEvent::Finished { is_error, .. } => assert!(!is_error),
+            other => panic!("expected Finished, got {other:?}"),
+        }
+    }
+
+    /// Regression: an unknown conversation id makes AGY start a *new*
+    /// conversation and report success, so the agent silently loses all prior
+    /// context. Comparing ids is the only available signal.
+    #[test]
+    fn a_lost_conversation_is_detected_by_comparing_ids() {
+        let mut h = Agy::default();
+        let mut r = req();
+        r.resume = Resume::Session("wanted-id".into());
+        let _ = h.args(&r);
+
+        let events =
+            h.parse_line(r#"{"event":"init","conversation_id":"a-different-id","init":{}}"#);
+        let message = events
+            .iter()
+            .find_map(|e| match e {
+                AgentEvent::Error { message } => Some(message.clone()),
+                _ => None,
+            })
+            .expect("a lost conversation must be reported");
+        assert!(message.contains("wanted-id"), "got: {message}");
+        match h.finalize(Some(0)) {
+            AgentEvent::Finished { is_error, .. } => assert!(is_error),
+            other => panic!("expected Finished, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resuming_the_conversation_we_asked_for_reports_nothing_unusual() {
+        let mut h = Agy::default();
+        let mut r = req();
+        r.resume = Resume::Session("wanted-id".into());
+        let _ = h.args(&r);
+
+        let events = h.parse_line(r#"{"event":"init","conversation_id":"wanted-id","init":{}}"#);
+        assert!(!events.iter().any(|e| matches!(e, AgentEvent::Error { .. })));
+        assert!(matches!(events[0], AgentEvent::Started { .. }));
+    }
+
+    #[test]
+    fn a_lost_conversation_is_reported_once_not_on_every_record() {
+        let mut h = Agy::default();
+        let mut r = req();
+        r.resume = Resume::Session("wanted".into());
+        let _ = h.args(&r);
+
+        let first = h.parse_line(r#"{"event":"init","conversation_id":"other","init":{}}"#);
+        let second = h.parse_line(
+            r#"{"event":"result","result":{"conversation_id":"other","status":"SUCCESS","response":"hi"}}"#,
+        );
+        assert_eq!(
+            first.iter().filter(|e| matches!(e, AgentEvent::Error { .. })).count(),
+            1
+        );
+        assert_eq!(
+            second.iter().filter(|e| matches!(e, AgentEvent::Error { .. })).count(),
+            0
+        );
+    }
+
+    /// A fresh conversation has nothing to compare against.
+    #[test]
+    fn a_fresh_run_never_reports_a_lost_conversation() {
+        let mut h = Agy::default();
+        let _ = h.args(&req());
+        let events = h.parse_line(r#"{"event":"init","conversation_id":"brand-new","init":{}}"#);
+        assert!(!events.iter().any(|e| matches!(e, AgentEvent::Error { .. })));
+    }
+
+    #[test]
+    fn an_explicit_error_status_surfaces_agys_own_message() {
+        let mut h = Agy::default();
+        let events = h.parse_line(
+            r#"{"event":"result","result":{"conversation_id":"","status":"ERROR","response":"","error":"Error: empty prompt."}}"#,
+        );
+        let message = events
+            .iter()
+            .find_map(|e| match e {
+                AgentEvent::Error { message } => Some(message.clone()),
+                _ => None,
+            })
+            .expect("the error must be surfaced");
+        assert!(message.contains("empty prompt"), "got: {message}");
     }
 
     #[test]

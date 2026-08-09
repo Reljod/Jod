@@ -1,6 +1,7 @@
 //! Turning the event stream into something readable in a terminal.
 
 use jod_core::service::{AgentStatus, AgentSummary, HarnessInfo, Report};
+use jod_core::store::Origin;
 use jod_core::{broadcast, AgentEnvelope, AgentEvent};
 
 const DIM: &str = "\x1b[2m";
@@ -83,8 +84,23 @@ pub async fn stream(
             print_event(&envelope.event, show_thinking);
         }
         if let AgentEvent::Finished { is_error, exit_code, .. } = &envelope.event {
-            return exit_code.unwrap_or(if *is_error { 1 } else { 0 });
+            return exit_status(*is_error, *exit_code);
         }
+    }
+}
+
+/// What `jod run` should exit with.
+///
+/// A harness can fail while still exiting 0 — AGY does exactly that when a tool
+/// is auto-denied in headless mode. Trusting its exit code alone would report
+/// success for work that never happened, so a run flagged as an error always
+/// exits non-zero.
+fn exit_status(is_error: bool, exit_code: Option<i32>) -> i32 {
+    match (is_error, exit_code) {
+        (true, Some(code)) if code != 0 => code,
+        (true, _) => 1,
+        (false, Some(code)) => code,
+        (false, None) => 0,
     }
 }
 
@@ -188,11 +204,21 @@ pub fn facts(list: &[jod_core::store::Fact]) {
         return;
     }
     for f in list {
+        // Anything Reljod did not assert himself is labelled. A fact read off a
+        // web page reads exactly like one he stated, and storing the difference
+        // is worthless if it is invisible at the point of use.
+        let origin = match f.origin {
+            Origin::Owner => String::new(),
+            Origin::Untrusted => format!(" {}", paint(YELLOW, "[untrusted]")),
+            Origin::Agent => format!(" {}", paint(DIM, "[agent]")),
+            Origin::System => format!(" {}", paint(DIM, "[system]")),
+        };
         println!(
-            "{} {} {}",
+            "{} {} {}{}",
             paint(BOLD, &f.subject),
             paint(DIM, &f.predicate),
-            f.object
+            f.object,
+            origin
         );
         if let Some(src) = &f.source {
             println!("  {}", paint(DIM, &format!("← {src}")));
@@ -218,6 +244,25 @@ mod tests {
     #[test]
     fn indenting_prefixes_every_line_not_just_the_first() {
         assert_eq!(indent("a\nb", "> "), "> a\n> b");
+    }
+
+    /// Regression: AGY exits 0 when it auto-denies a tool, so an errored run
+    /// was reporting success to the shell.
+    #[test]
+    fn a_failed_run_never_exits_zero_even_when_the_harness_did() {
+        assert_eq!(exit_status(true, Some(0)), 1);
+        assert_eq!(exit_status(true, None), 1);
+    }
+
+    #[test]
+    fn a_failing_harness_keeps_its_own_exit_code() {
+        assert_eq!(exit_status(true, Some(42)), 42);
+    }
+
+    #[test]
+    fn a_clean_run_exits_zero() {
+        assert_eq!(exit_status(false, Some(0)), 0);
+        assert_eq!(exit_status(false, None), 0);
     }
 
     #[test]
