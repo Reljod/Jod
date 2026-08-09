@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use serde_json::Value;
 
-use super::{Accumulator, ArgPart, Harness, HarnessKind, PermissionPolicy, SpawnRequest};
+use super::{Accumulator, ArgPart, Harness, HarnessKind, PermissionPolicy, Resume, SpawnRequest};
 use crate::event::{summarize, AgentEvent, Usage};
 
 #[derive(Default)]
@@ -32,6 +32,14 @@ impl Harness for ClaudeCode {
         if let Some(model) = &req.model {
             args.push(ArgPart::lit("--model"));
             args.push(ArgPart::lit(model));
+        }
+        match &req.resume {
+            Resume::Fresh => {}
+            Resume::Last => args.push(ArgPart::lit("--continue")),
+            Resume::Session(id) => {
+                args.push(ArgPart::lit("--resume"));
+                args.push(ArgPart::lit(id));
+            }
         }
         match req.permission {
             PermissionPolicy::Ask => {}
@@ -134,7 +142,10 @@ impl ClaudeCode {
             let name = str_at(block, "tool_use_id")
                 .and_then(|id| self.tool_names.get(&id).cloned())
                 .unwrap_or_else(|| "tool".into());
-            let is_error = block.get("is_error").and_then(Value::as_bool).unwrap_or(false);
+            let is_error = block
+                .get("is_error")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
             if is_error {
                 self.acc.errored = true;
             }
@@ -208,6 +219,7 @@ mod tests {
             cwd: PathBuf::from("/tmp"),
             model: model.map(str::to_string),
             permission,
+            resume: Resume::Fresh,
         }
     }
 
@@ -277,8 +289,12 @@ mod tests {
         assert_eq!(
             out,
             vec![
-                AgentEvent::Thinking { text: "pondering".into() },
-                AgentEvent::Message { text: "PONG".into() },
+                AgentEvent::Thinking {
+                    text: "pondering".into()
+                },
+                AgentEvent::Message {
+                    text: "PONG".into()
+                },
             ]
         );
     }
@@ -286,7 +302,9 @@ mod tests {
     #[test]
     fn empty_text_blocks_are_dropped() {
         let mut h = ClaudeCode::default();
-        let out = h.parse_line(r#"{"type":"assistant","message":{"content":[{"type":"text","text":"  "}]}}"#);
+        let out = h.parse_line(
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"  "}]}}"#,
+        );
         assert!(out.is_empty());
     }
 
@@ -340,7 +358,12 @@ mod tests {
         assert!(streamed.is_empty(), "result must not emit its own event");
 
         match h.finalize(Some(0)) {
-            AgentEvent::Finished { text, is_error, usage, exit_code } => {
+            AgentEvent::Finished {
+                text,
+                is_error,
+                usage,
+                exit_code,
+            } => {
                 assert_eq!(text.as_deref(), Some("PONG"));
                 assert!(!is_error);
                 assert_eq!(exit_code, Some(0));

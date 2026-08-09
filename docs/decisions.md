@@ -482,3 +482,123 @@ hostname` instead of a working command, which is why the domain note calls that
 failure out and says to ask for the entry rather than hard-code an address.
 
 The general rule: a public repo may name a host, never locate one.
+
+## Jod is a CLI on top of other CLIs
+
+The obvious way to build an assistant is to hold an API key and call a model.
+Jod does the opposite: it shells out to `claude`, `opencode` and `agy`, and
+parses what they print. That looks like a layer of indirection bought for
+nothing, and it is worth writing down why it is not.
+
+An agent harness is not a thin wrapper around a model. It is context management,
+tool definitions, permission prompts, retry behaviour, MCP support and a
+transcript store — years of work each, maintained by teams whose full-time job
+that is. A model client in `jod-core` would be a commitment to rebuild all of it
+and to keep rebuilding it every time one of them ships something. Piping text to
+a program that already works costs one adapter file and stays correct while
+those teams improve underneath.
+
+It also makes the choice reversible in the direction that matters. Jod is not
+betting on which harness wins. Adding a fourth is one file, and dropping one is
+deleting a file, because everything above the seam speaks `AgentEvent` and has
+never heard of any harness. When AGY renamed nothing and simply behaved
+differently from Claude Code, the cost was a single adapter, not a refactor.
+
+The price is real: Jod can only do what a harness exposes on its command line,
+and it inherits every quirk of three separate programs. That price is paid in
+the adapters — see below — and it is much smaller than the one it avoids.
+
+## A failed run must never look like a successful one
+
+Each of the three harnesses has at least one way of failing quietly, and all
+three were found by running the real binaries rather than reading their docs.
+
+AGY is the worst of them. In headless mode it auto-denies any tool that would
+need approval — nothing can prompt — and then reports `status: SUCCESS`, an
+empty response, and exit code 0. The only honest signal is a line of English
+prose on stderr. Separately, an unknown `--conversation` id does not fail: AGY
+starts a brand new conversation and reports success, so an agent that believed
+it was resuming a thread has silently lost every prior turn. And its
+`--print-timeout` defaults to five minutes, killing long work in a way that
+looks like a short answer.
+
+None of these is an error condition the program admits to, so none of them can
+be handled by checking for errors. Each needs a positive test for the *absence*
+of success: a run that produced no output did not succeed; a run whose reported
+conversation id is not the one we asked for did not resume; an exit code of 0
+from a run we have already flagged as errored is not a zero exit.
+
+The general rule this leaves behind: **trust a harness's output, never its
+self-assessment.** Exit codes, status fields and error arrays are all claims by
+the program about itself, and a program that has just misbehaved is exactly the
+one least able to report it.
+
+## Memory is governance first and retrieval last
+
+The instinct with agent memory is to reach for embeddings, and the measured
+answer is that retrieval quality is the least valuable part of the system.
+Across two rounds of experiments
+([`research/harness-agents-research`](../research/harness-agents-research/RECOMMENDATION.md)),
+better retrieval was worth 0.02–0.07 of composite score; deciding what is
+currently true, what may be seen, and what has really been deleted was worth
+0.2–0.5.
+
+The reason is structural rather than incidental. A superseded fact is a
+near-perfect lexical *and* semantic match for a question about the fact that
+replaced it, so flat retrievers rank the outdated version above the current one
+35–54% of the time. No ranker fixes that, because the ranker is answering the
+question it was asked; "what is true now" is not a similarity question. It has
+to be answered by the schema — `valid_to IS NULL` — before ranking happens.
+
+Three consequences, each measured, each cheap to build now and a migration
+later:
+
+- **Scope is a partition, not a signal.** Used to boost ranking it leaked facts
+  across domains 79% of the time; used as a filter, 0%.
+- **Origin is a column, not text.** If trust level lives inside the fact's
+  content, then content Jod ingested can assert its own trust — a page that says
+  "origin: owner" would be believed. It also has to be visible when the fact is
+  read, or the distinction may as well not exist.
+- **Deletion purges every version.** Closing only the current one leaves the
+  withdrawn fact fully readable to any question phrased about the past, which
+  leaked on 56% of historical queries. "Jod forgot that" and "Jod says it forgot
+  that" have to be the same thing.
+
+So `~/.jod/jod.db` ships with FTS5 and no embeddings. If they are ever needed,
+`sqlite-vec` brute force measured 100% recall at 19 ms over 30,000 vectors and
+holds to roughly 150,000 memories — which is far past where anything else here
+breaks first.
+
+## One SQLite file, and every write is `BEGIN IMMEDIATE`
+
+[`research/agent-db-2026`](../research/agent-db-2026/REPORT.md) benchmarked nine
+engines with real concurrent OS processes, and the discriminator was not speed.
+Under contended read-modify-write, Postgres on its obvious path silently
+discarded 757 of 1,600 updates, LanceDB 822, Qdrant 737 — and **every one of
+them reported a 0% error rate**. Meanwhile SQLite misconfigured threw
+`database is locked` at 58% of calls and lost nothing at all.
+
+That inverts how the results have to be read. A high error rate next to a
+correct result means the engine refused work it could not do safely, which is
+the good failure. A clean error rate next to lost data means it accepted every
+write and discarded some. Safety is not a property of the engine; it is a
+property of the primitive you reach for, and engines differ enormously in
+whether the *obvious* primitive is the safe one.
+
+SQLite in WAL mode also measured fastest on this workload — ~44,000 appends/s at
+8 writer processes against a need of roughly 1,000 — so the usual trade of
+correctness against throughput never arose. Three rules come with it, each
+earned by a number rather than by taste:
+
+1. **Every write transaction is `BEGIN IMMEDIATE`.** Deferred transactions take
+   their write lock late and collide on upgrade: 98% errors versus 0%.
+2. **Never hold a write transaction across a model call.** The entire argument
+   rests on write transactions costing microseconds; one held open across a
+   30-second model call turns SQLite's single writer into an outage for every
+   other agent.
+3. **Claim contended rows with one guarded `UPDATE`,** never a read then a
+   write. Zero rows changed means you lost the race.
+
+The decision expires against measured triggers, not feelings: above ~5,000
+events/s, or past ~150,000 vectors, or the moment a second machine needs to
+write, this is the wrong answer and Postgres or libSQL is the right one.

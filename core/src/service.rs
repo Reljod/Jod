@@ -1,9 +1,9 @@
 //! `Jod` — the orchestrator facade.
 //!
-//! Jod never does the work. It launches harnesses, watches them, and answers
-//! questions about them. Every client (the Tauri desktop app today, an iOS app
-//! or a VPS daemon later) drives this same struct, which is why it knows
-//! nothing about windows, webviews or HTTP.
+//! Jod never does the work. It launches harnesses, watches them, remembers what
+//! they did, and answers questions about them. Every client (the `jod` command
+//! today, an HTTP API and a phone later) drives this same struct, which is why
+//! it knows nothing about terminals, sockets or HTTP.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -15,7 +15,27 @@ use tokio::sync::{broadcast, mpsc, RwLock};
 use crate::error::{JodError, Result};
 use crate::event::{AgentEnvelope, AgentEvent, Usage};
 use crate::harness::{HarnessKind, PermissionPolicy, SpawnRequest};
+use crate::store::{Store, StoredRun};
 use crate::{paths, runner, tmux};
+
+/// The persisted view of one agent. The whole summary is kept verbatim so
+/// adding a field to `AgentSummary` never needs a schema migration.
+fn stored_run(s: &AgentSummary) -> StoredRun {
+    StoredRun {
+        id: s.id.clone(),
+        name: s.name.clone(),
+        harness: s.harness.id().to_string(),
+        status: serde_json::to_value(s.status)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_string))
+            .unwrap_or_else(|| "running".into()),
+        cwd: s.cwd.clone(),
+        session_id: s.session_id.clone(),
+        tmux_session: s.tmux_session.clone(),
+        created_at_ms: s.created_at_ms,
+        summary: serde_json::to_value(s).unwrap_or(serde_json::Value::Null),
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -77,28 +97,59 @@ pub struct Jod {
     state: Arc<RwLock<State>>,
     events_tx: mpsc::UnboundedSender<AgentEnvelope>,
     broadcast_tx: broadcast::Sender<AgentEnvelope>,
+    store: Option<Arc<Store>>,
 }
 
 impl Jod {
-    /// Build the service and start the task that folds agent events into state.
+    /// Build the service with no durable state. Everything is forgotten when
+    /// the process exits — fine for a one-shot command, not for a daemon.
     ///
     /// Must be called from inside a Tokio runtime.
     pub fn new() -> Arc<Self> {
+        Jod::build(None)
+    }
+
+    /// Build the service backed by `~/.jod/jod.db`, so runs, their transcripts
+    /// and everything Jod has learned outlive the process.
+    pub fn persistent() -> Result<Arc<Self>> {
+        Ok(Jod::build(Some(Arc::new(Store::open(&paths::db_path())?))))
+    }
+
+    pub fn with_store(store: Arc<Store>) -> Arc<Self> {
+        Jod::build(Some(store))
+    }
+
+    fn build(store: Option<Arc<Store>>) -> Arc<Self> {
         let (events_tx, mut events_rx) = mpsc::unbounded_channel::<AgentEnvelope>();
         let (broadcast_tx, _) = broadcast::channel(1024);
         let jod = Arc::new(Self {
             state: Arc::new(RwLock::new(State::default())),
             events_tx,
             broadcast_tx: broadcast_tx.clone(),
+            store: store.clone(),
         });
 
         let state = jod.state.clone();
         tokio::spawn(async move {
             while let Some(envelope) = events_rx.recv().await {
+                let mut updated = None;
                 {
                     let mut guard = state.write().await;
                     if let Some(record) = guard.agents.get_mut(&envelope.agent_id) {
                         apply(record, &envelope);
+                        updated = Some(record.summary.clone());
+                    }
+                }
+                if let Some(store) = &store {
+                    // Persistence must never take the run down with it: a
+                    // failed write is reported, and the agent keeps going.
+                    if let Err(e) = store.append_event(&envelope) {
+                        eprintln!("[jod] could not persist event: {e}");
+                    }
+                    if let Some(summary) = &updated {
+                        if let Err(e) = store.save_run(&stored_run(summary)) {
+                            eprintln!("[jod] could not persist run: {e}");
+                        }
                     }
                 }
                 // A closed broadcast channel just means no client is attached.
@@ -107,6 +158,98 @@ impl Jod {
         });
 
         jod
+    }
+
+    /// The durable store, when this service has one.
+    pub fn store(&self) -> Option<&Arc<Store>> {
+        self.store.as_ref()
+    }
+
+    /// Runs from previous processes as well as this one, newest first.
+    pub fn history(&self, limit: usize) -> Result<Vec<StoredRun>> {
+        match &self.store {
+            Some(store) => store.runs(limit),
+            None => Ok(vec![]),
+        }
+    }
+
+    /// Load prior runs from the database back into memory. Returns how many.
+    ///
+    /// A daemon that restarts has no idea what it launched before; without this
+    /// every earlier agent vanishes from `agents()` even though its tmux session
+    /// may still be running. Call it once at boot.
+    ///
+    /// Each run's status is recomputed by replaying its stored events rather
+    /// than trusting the last status written — a process killed mid-run never
+    /// got to record how it ended. A run still marked running whose tmux
+    /// session is gone did not report a result, and is reported as failed
+    /// rather than left running forever.
+    pub async fn rehydrate(&self, limit: usize) -> Result<usize> {
+        let Some(store) = &self.store else {
+            return Ok(0);
+        };
+        let stored = store.runs(limit)?;
+        let mut loaded = 0;
+
+        // Oldest first, so `order` ends up in the same sequence a live process
+        // would have produced.
+        for run in stored.into_iter().rev() {
+            let Ok(summary) = serde_json::from_value::<AgentSummary>(run.summary.clone()) else {
+                // A summary written by an older, incompatible build. Skipping it
+                // loses one row; failing here would lose the whole history.
+                continue;
+            };
+            let mut record = AgentRecord {
+                summary,
+                events: Vec::new(),
+            };
+            for envelope in store.events(&run.id)? {
+                apply(&mut record, &envelope);
+            }
+
+            let alive = tmux::has_session(&record.summary.tmux_session).await;
+            record.summary.session_closed = !alive;
+            if record.summary.status == AgentStatus::Running && !alive {
+                record.summary.status = AgentStatus::Failed;
+            }
+
+            let mut guard = self.state.write().await;
+            if guard.agents.contains_key(&run.id) {
+                continue; // this process already owns a live copy
+            }
+            guard.order.push(run.id.clone());
+            guard.agents.insert(run.id.clone(), record);
+            loaded += 1;
+        }
+        Ok(loaded)
+    }
+
+    /// Events after `after` for one agent, oldest first. `None` means "I have
+    /// seen nothing", and returns the run from its very first event.
+    ///
+    /// Serves a reconnecting client the tail it missed rather than the whole
+    /// transcript. Falls back to the database when this process did not launch
+    /// the agent itself, so a client can reattach to a run started by an
+    /// earlier process.
+    ///
+    /// The cursor is an `Option` because sequences start at 0: no integer can
+    /// mean "nothing yet", and taking `0` for it would silently drop the
+    /// `Started` event that carries the session id and model.
+    pub async fn events_since(&self, id: &str, after: Option<u64>) -> Result<Vec<AgentEnvelope>> {
+        let guard = self.state.read().await;
+        if let Some(record) = guard.agents.get(id) {
+            return Ok(record
+                .events
+                .iter()
+                .filter(|e| after.is_none_or(|a| e.seq > a))
+                .cloned()
+                .collect());
+        }
+        drop(guard);
+        match &self.store {
+            Some(store) => store.events_since(id, after, 10_000),
+            None => Err(JodError::UnknownAgent(id.to_string())),
+        }
     }
 
     /// Live event feed. Late subscribers should call `events` first to backfill.
@@ -171,8 +314,19 @@ impl Jod {
             guard.order.push(id.clone());
             guard.agents.insert(
                 id.clone(),
-                AgentRecord { summary: summary.clone(), events: Vec::new() },
+                AgentRecord {
+                    summary: summary.clone(),
+                    events: Vec::new(),
+                },
             );
+        }
+
+        // Record the run before it starts, so a crash mid-launch still leaves a
+        // trace of what was attempted.
+        if let Some(store) = &self.store {
+            if let Err(e) = store.save_run(&stored_run(&summary)) {
+                eprintln!("[jod] could not persist run: {e}");
+            }
         }
 
         let launch = runner::launch(
@@ -260,11 +414,27 @@ impl Jod {
     pub async fn report(&self) -> Report {
         let agents = self.agents().await;
         Report {
-            running: agents.iter().filter(|a| a.status == AgentStatus::Running).count(),
-            completed: agents.iter().filter(|a| a.status == AgentStatus::Completed).count(),
-            failed: agents.iter().filter(|a| a.status == AgentStatus::Failed).count(),
-            killed: agents.iter().filter(|a| a.status == AgentStatus::Killed).count(),
-            total_cost_usd: agents.iter().filter_map(|a| a.usage.cost_usd).sum(),
+            running: agents
+                .iter()
+                .filter(|a| a.status == AgentStatus::Running)
+                .count(),
+            completed: agents
+                .iter()
+                .filter(|a| a.status == AgentStatus::Completed)
+                .count(),
+            failed: agents
+                .iter()
+                .filter(|a| a.status == AgentStatus::Failed)
+                .count(),
+            killed: agents
+                .iter()
+                .filter(|a| a.status == AgentStatus::Killed)
+                .count(),
+            // Rust's f64 `Sum` folds from -0.0, so a run with no reported cost
+            // serialises as `-0.0`. It parses back as zero, but it reads like a
+            // bug in any UI that shows it. Adding 0.0 normalises the sign and
+            // leaves every real total untouched.
+            total_cost_usd: agents.iter().filter_map(|a| a.usage.cost_usd).sum::<f64>() + 0.0,
             agents,
         }
     }
@@ -296,7 +466,12 @@ fn apply(record: &mut AgentRecord, envelope: &AgentEnvelope) {
         AgentEvent::Message { text } => {
             record.summary.last_message = Some(text.clone());
         }
-        AgentEvent::Finished { is_error, usage, text, .. } => {
+        AgentEvent::Finished {
+            is_error,
+            usage,
+            text,
+            ..
+        } => {
             // A kill already recorded the truthful cause; don't overwrite it.
             if record.summary.status == AgentStatus::Running {
                 record.summary.status = if *is_error {
@@ -323,7 +498,9 @@ fn apply(record: &mut AgentRecord, envelope: &AgentEnvelope) {
 
 /// Convenience: a request rooted at the user's home directory.
 pub fn default_cwd() -> PathBuf {
-    std::env::var("HOME").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("."))
+    std::env::var("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("."))
 }
 
 #[cfg(test)]
@@ -357,7 +534,12 @@ mod tests {
     }
 
     fn env(event: AgentEvent) -> AgentEnvelope {
-        AgentEnvelope { agent_id: "a".into(), at_ms: 0, seq: 0, event }
+        AgentEnvelope {
+            agent_id: "a".into(),
+            at_ms: 0,
+            seq: 0,
+            event,
+        }
     }
 
     #[test]
@@ -384,7 +566,10 @@ mod tests {
                 text: Some("done".into()),
                 exit_code: Some(0),
                 is_error: false,
-                usage: Usage { cost_usd: Some(0.01), ..Default::default() },
+                usage: Usage {
+                    cost_usd: Some(0.01),
+                    ..Default::default()
+                },
             }),
         );
         assert_eq!(r.summary.status, AgentStatus::Completed);
@@ -460,6 +645,143 @@ mod tests {
         assert_eq!(report.total_cost_usd, 0.0);
     }
 
+    /// Build a store holding one finished run, as a previous process would
+    /// have left behind.
+    fn store_with_one_finished_run() -> std::sync::Arc<Store> {
+        let store = std::sync::Arc::new(Store::in_memory().unwrap());
+        let mut summary = record().summary;
+        summary.id = "past".into();
+        summary.name = "yesterday's work".into();
+        summary.tmux_session = "jod-past-session-that-does-not-exist".into();
+        store.save_run(&stored_run(&summary)).unwrap();
+        store
+            .append_event(&AgentEnvelope {
+                agent_id: "past".into(),
+                at_ms: 1,
+                seq: 0,
+                event: AgentEvent::Message {
+                    text: "hello".into(),
+                },
+            })
+            .unwrap();
+        store
+            .append_event(&AgentEnvelope {
+                agent_id: "past".into(),
+                at_ms: 2,
+                seq: 1,
+                event: AgentEvent::Finished {
+                    text: Some("all done".into()),
+                    exit_code: Some(0),
+                    is_error: false,
+                    usage: Usage::default(),
+                },
+            })
+            .unwrap();
+        store
+    }
+
+    #[tokio::test]
+    async fn a_restarted_service_sees_nothing_until_it_rehydrates() {
+        let jod = Jod::with_store(store_with_one_finished_run());
+        assert!(jod.agents().await.is_empty());
+        assert_eq!(jod.rehydrate(100).await.unwrap(), 1);
+        let agents = jod.agents().await;
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0].id, "past");
+    }
+
+    /// The status is recomputed from the events, so a run that finished after
+    /// the last status write is still reported as finished.
+    #[tokio::test]
+    async fn rehydrating_replays_events_to_recover_the_real_outcome() {
+        let jod = Jod::with_store(store_with_one_finished_run());
+        jod.rehydrate(100).await.unwrap();
+        let agent = jod.agent("past").await.unwrap();
+        assert_eq!(agent.status, AgentStatus::Completed);
+        assert_eq!(agent.last_message.as_deref(), Some("all done"));
+        assert_eq!(agent.event_count, 2);
+        assert!(agent.session_closed, "its tmux session is long gone");
+    }
+
+    /// A process killed mid-run never records how it ended. Leaving such a run
+    /// "running" forever would make the report permanently wrong.
+    #[tokio::test]
+    async fn a_run_still_marked_running_with_no_session_is_reported_failed() {
+        let store = std::sync::Arc::new(Store::in_memory().unwrap());
+        let mut summary = record().summary;
+        summary.id = "orphan".into();
+        summary.status = AgentStatus::Running;
+        summary.tmux_session = "jod-orphan-no-such-session".into();
+        store.save_run(&stored_run(&summary)).unwrap();
+
+        let jod = Jod::with_store(store);
+        jod.rehydrate(100).await.unwrap();
+        assert_eq!(
+            jod.agent("orphan").await.unwrap().status,
+            AgentStatus::Failed
+        );
+    }
+
+    #[tokio::test]
+    async fn rehydrating_twice_does_not_duplicate_agents() {
+        let jod = Jod::with_store(store_with_one_finished_run());
+        assert_eq!(jod.rehydrate(100).await.unwrap(), 1);
+        assert_eq!(jod.rehydrate(100).await.unwrap(), 0, "already loaded");
+        assert_eq!(jod.agents().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn rehydrating_without_a_store_is_a_no_op_not_an_error() {
+        assert_eq!(Jod::new().rehydrate(100).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_reconnecting_client_is_served_only_the_events_it_missed() {
+        let jod = Jod::with_store(store_with_one_finished_run());
+        jod.rehydrate(100).await.unwrap();
+        let tail = jod.events_since("past", Some(0)).await.unwrap();
+        assert_eq!(tail.len(), 1);
+        assert_eq!(tail[0].seq, 1);
+    }
+
+    /// Regression: a client with no cursor must be served the run from its
+    /// first event. Reading "no cursor" as `0` dropped `seq` 0 — the `Started`
+    /// event carrying the session id and model — so a run appeared to have no
+    /// beginning.
+    #[tokio::test]
+    async fn a_client_with_no_cursor_is_served_the_start_of_the_run() {
+        let jod = Jod::with_store(store_with_one_finished_run());
+        jod.rehydrate(100).await.unwrap();
+        let all = jod.events_since("past", None).await.unwrap();
+        assert_eq!(all.len(), 2, "the whole run, including seq 0");
+        assert_eq!(all[0].seq, 0);
+        assert!(matches!(all[0].event, AgentEvent::Message { .. }));
+    }
+
+    /// The same must hold when the run is served from the database rather than
+    /// from this process's memory.
+    #[tokio::test]
+    async fn a_run_this_process_never_launched_is_also_served_from_its_start() {
+        let jod = Jod::with_store(store_with_one_finished_run());
+        let all = jod.events_since("past", None).await.unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].seq, 0);
+    }
+
+    /// An agent this process never launched still has a transcript on disk.
+    #[tokio::test]
+    async fn the_tail_of_an_unknown_agent_comes_from_the_database() {
+        let jod = Jod::with_store(store_with_one_finished_run());
+        let tail = jod.events_since("past", Some(0)).await.unwrap();
+        assert_eq!(tail.len(), 1);
+        assert_eq!(tail[0].seq, 1);
+    }
+
+    #[tokio::test]
+    async fn asking_for_the_tail_of_a_truly_unknown_agent_without_a_store_errors() {
+        assert!(Jod::new().events_since("nope", None).await.is_err());
+    }
+
     #[tokio::test]
     async fn asking_about_an_unknown_agent_is_an_error_not_a_panic() {
         let jod = Jod::new();
@@ -497,6 +819,7 @@ mod tests {
                 cwd: PathBuf::from("/tmp"),
                 model: None,
                 permission: PermissionPolicy::Ask,
+                resume: crate::harness::Resume::Fresh,
             })
             .await;
 

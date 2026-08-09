@@ -14,6 +14,11 @@ pub fn jod_home() -> PathBuf {
     PathBuf::from(home).join(".jod")
 }
 
+/// The one SQLite file that holds events, run history and memory.
+pub fn db_path() -> PathBuf {
+    jod_home().join("jod.db")
+}
+
 pub fn runs_dir() -> PathBuf {
     jod_home().join("runs")
 }

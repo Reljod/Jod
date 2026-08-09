@@ -1,0 +1,24 @@
+[package]
+name = "jod-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The jod command — delegate to an agent harness, watch it, report on it."
+
+[[bin]]
+name = "jod"
+path = "src/main.rs"
+
+[dependencies]
+jod-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+chrono.workspace = true
+clap = { version = "4", features = ["derive", "env"] }
+anyhow = "1"
+ratatui = "0.30"
+# `event-stream` gives an async key reader, so the UI can wait on the keyboard
+# and on agent events at once instead of polling either.
+crossterm = { version = "0.29", features = ["event-stream"] }
+futures = "0.3"

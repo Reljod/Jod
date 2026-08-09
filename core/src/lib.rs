@@ -24,6 +24,7 @@ pub mod harness;
 pub mod paths;
 pub mod runner;
 pub mod service;
+pub mod store;
 pub mod tmux;
 
 /// Re-exported so clients can name the subscription channel's types without
@@ -32,7 +33,7 @@ pub use tokio::sync::broadcast;
 
 pub use error::{JodError, Result};
 pub use event::{AgentEnvelope, AgentEvent, Usage};
-pub use harness::{Harness, HarnessKind, PermissionPolicy, SpawnRequest};
+pub use harness::{Harness, HarnessKind, PermissionPolicy, Resume, SpawnRequest};
 pub use service::{AgentStatus, AgentSummary, HarnessInfo, Jod, Report};
 
 /// Tests that mutate process-wide environment variables must hold this, or they

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/jod-core", "apps/desktop/src-tauri"]
+members = ["core", "cli"]
 
 [workspace.package]
 version = "0.1.0"
@@ -8,7 +8,7 @@ edition = "2021"
 license = "MIT"
 
 [workspace.dependencies]
-jod-core = { path = "crates/jod-core" }
+jod-core = { path = "core" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
@@ -23,3 +23,6 @@ tokio = { version = "1", features = [
 ] }
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
+# `bundled` compiles SQLite in, so a VPS needs no system libsqlite3, and the
+# FTS5 recall index is always available rather than depending on the host build.
+rusqlite = { version = "0.37", features = ["bundled"] }

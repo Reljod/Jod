@@ -12,6 +12,7 @@ thiserror.workspace = true
 tokio.workspace = true
 uuid.workspace = true
 chrono.workspace = true
+rusqlite.workspace = true
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
