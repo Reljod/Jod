@@ -384,6 +384,99 @@ mod tests {
         assert!(out.contains("abcdef12"), "the id is shortened:\n{out}");
     }
 
+    /// Every status the panel can show needs its own colour branch; a status
+    /// string the panel has never seen must still render rather than fall off.
+    #[test]
+    fn the_agents_panel_shows_every_status_including_one_it_does_not_know() {
+        let mut a = app();
+        a.pane = Pane::Agents;
+        a.agents = ["running", "completed", "failed", "killed", "something-new"]
+            .iter()
+            .enumerate()
+            .map(|(i, status)| super::super::AgentLine {
+                id: format!("id{i}00000000"),
+                name: format!("agent-{status}"),
+                harness: "Claude Code".into(),
+                status: (*status).into(),
+            })
+            .collect();
+
+        let out = rendered(&a, 100, 20);
+        for status in ["running", "completed", "failed", "killed", "something-new"] {
+            assert!(out.contains(&format!("agent-{status}")), "missing {status}:\n{out}");
+        }
+    }
+
+    // --- one line per entry kind ----------------------------------------
+
+    fn first_line(entry: &Entry) -> String {
+        render(entry, 60)
+            .first()
+            .expect("an entry always renders at least one line")
+            .spans
+            .iter()
+            .map(|s| s.content.to_string())
+            .collect()
+    }
+
+    #[test]
+    fn the_users_own_line_is_marked_as_theirs() {
+        assert!(first_line(&Entry::You("ask".into())).starts_with("› "));
+    }
+
+    #[test]
+    fn thinking_is_indented_rather_than_prefixed() {
+        assert_eq!(first_line(&Entry::Thinking("weighing".into())), "  weighing");
+    }
+
+    #[test]
+    fn a_tool_call_and_a_failed_tool_call_are_told_apart() {
+        assert!(first_line(&Entry::Tool { name: "bash".into(), failed: false }).starts_with("⚙ "));
+        assert!(first_line(&Entry::Tool { name: "bash".into(), failed: true }).starts_with("✗ "));
+    }
+
+    #[test]
+    fn a_finished_turn_reports_how_it_went() {
+        assert_eq!(
+            first_line(&Entry::Done { text: String::new(), failed: false }),
+            "✓ done"
+        );
+        assert_eq!(
+            first_line(&Entry::Done { text: String::new(), failed: true }),
+            "✗ failed"
+        );
+        assert_eq!(
+            first_line(&Entry::Done { text: "12 files".into(), failed: false }),
+            "✓ done · 12 files"
+        );
+    }
+
+    #[test]
+    fn a_notice_is_bulleted_and_raw_output_is_left_alone() {
+        assert!(first_line(&Entry::Notice("heads up".into())).starts_with("• "));
+        assert_eq!(first_line(&Entry::Raw("warning: x".into())), "warning: x");
+    }
+
+    /// A wrapped entry keeps its prefix on the first line only, and indents the
+    /// rest to line up under it.
+    #[test]
+    fn a_wrapped_entry_indents_its_continuation_lines() {
+        let lines = render(&Entry::You("aaaa bbbb cccc dddd eeee".into()), 12);
+        assert!(lines.len() > 1, "this should have wrapped");
+        let text = |i: usize| -> String {
+            lines[i].spans.iter().map(|s| s.content.to_string()).collect()
+        };
+        assert!(text(0).starts_with("› "));
+        assert!(text(1).starts_with("  "), "got {:?}", text(1));
+    }
+
+    /// A blank line inside a message is part of the message — dropping it runs
+    /// paragraphs together.
+    #[test]
+    fn a_blank_line_inside_a_message_is_kept() {
+        assert_eq!(wrap("a\n\nb", 40, 0), vec!["a", "", "b"]);
+    }
+
     #[test]
     fn an_empty_agents_panel_says_so_rather_than_showing_a_blank_box() {
         let mut a = app();
