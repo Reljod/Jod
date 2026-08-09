@@ -149,28 +149,6 @@ pub struct EventsQuery {
     pub limit: Option<usize>,
 }
 
-/// History for one agent, honouring the "no cursor means everything" rule.
-///
-/// With a cursor, `events_since` is exactly right and also falls back to the
-/// store for runs this process did not launch. Without one, `events` is used
-/// because it is the only call that can return `seq` 0.
-pub async fn history(
-    state: &AppState,
-    id: &str,
-    after_seq: Option<u64>,
-) -> Result<Vec<AgentEnvelope>, jod_core::JodError> {
-    match after_seq {
-        Some(after) => state.jod.events_since(id, Some(after)).await,
-        None => match state.jod.events(id).await {
-            Ok(events) => Ok(events),
-            // Not in memory: fall back to the store. This path cannot return
-            // `seq` 0 until core's cursor becomes exclusive-or-nothing.
-            Err(jod_core::JodError::UnknownAgent(_)) => state.jod.events_since(id, Some(0)).await,
-            Err(e) => Err(e),
-        },
-    }
-}
-
 #[derive(Debug, Serialize)]
 pub struct EventsPage {
     pub events: Vec<AgentEnvelope>,
@@ -185,7 +163,7 @@ pub async fn agent_events(
     Query(q): Query<EventsQuery>,
 ) -> ApiResult<impl IntoResponse> {
     identity.require(Scope::Read)?;
-    let mut events = history(&state, &id, q.after_seq).await?;
+    let mut events = state.jod.events_since(&id, q.after_seq).await?;
     if let Some(limit) = q.limit {
         events.truncate(limit);
     }

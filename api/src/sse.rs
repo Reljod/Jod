@@ -75,7 +75,7 @@ pub async fn agent_stream(
 
     // Subscribe *before* reading history. See the module note.
     let mut live = state.jod.subscribe();
-    let history = crate::routes::history(&state, &id, after_seq).await?;
+    let history = state.jod.events_since(&id, after_seq).await?;
 
     let stream = async_stream::stream! {
         // `None` means nothing has been sent yet — which is why this is an
@@ -99,7 +99,7 @@ pub async fn agent_stream(
                 // Rather than silently lose them, re-read and carry on — this
                 // is why `high` is tracked rather than assumed.
                 Err(RecvError::Lagged(_)) => {
-                    if let Ok(missed) = crate::routes::history(&state, &id, high).await {
+                    if let Ok(missed) = state.jod.events_since(&id, high).await {
                         for envelope in missed {
                             if already_sent(high, envelope.seq) {
                                 continue;
