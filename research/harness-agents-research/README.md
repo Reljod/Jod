@@ -19,6 +19,7 @@ bearing for us. → [`docs/jod-system.md`](../../docs/jod-system.md)
 | [`OPENCLAW-MEMORY.md`](OPENCLAW-MEMORY.md) | **Focus.** OpenClaw's remembering only — database, schema, embeddings, ranking algorithm, consolidation. |
 | [`FUTURE-OF-MEMORY.md`](FUTURE-OF-MEMORY.md) | Where LLM memory is going — 2026 papers and repos, the benchmark credibility problem, and a per-situation verdict on whether any of it is worth adopting. |
 | [`BIG-LAB-MEMORY.md`](BIG-LAB-MEMORY.md) | How Anthropic, OpenAI, Google and the IDEs actually ship memory — Claude's three surfaces, ChatGPT "dreaming", Codex CLI's on-disk memories, Gemini Memory Bank, Cursor. |
+| [`RECOMMENDATION.md`](RECOMMENDATION.md) | **The decision.** What Jod should build for memory, component by component, with the measured evidence and a five-phase build order. |
 | [`experiments/`](experiments/) | A runnable comparison of 31 memory architectures across two rounds — the open-source designs, then the mechanisms the big labs ship. Pre-registered predictions, measured results, scorecards, combined conclusion. |
 
 Read `HARNESS-ENGINEERING.md` first if you want the frame; go straight to the
