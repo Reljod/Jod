@@ -130,9 +130,13 @@ recent".
 
 **This is the one step that cannot happen on the VPS or in CI, and has not been
 run.** An `.ipa` needs Xcode, which exists only on macOS. Everything above —
-typecheck, tests, production bundle — is verified on Linux; everything below is
-written but unexercised, and should be treated as a first draft until a Mac has
-run it.
+typecheck, tests, production bundle — is verified on Linux.
+
+What *is* known about the shell: `tauri info` parses `tauri.conf.json` and
+resolves it correctly (frontend dist, dev URL, CSP, React). What is **not**
+known: whether the crate compiles and links, because that needs the iOS SDK.
+Treat `src-tauri/` as a first draft until a Mac has run it, and expect the two
+manual steps below to be where the time goes.
 
 On a Mac with Xcode and the iOS Rust targets:
 
