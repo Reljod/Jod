@@ -425,3 +425,41 @@ The general lesson is that "is this file dangerous" is the wrong question, and
 "will anything run this" is the right one — the same question that already
 decided the size limits, and the reason a `.sh` under `research/` is code no
 matter what sits beside it.
+
+## Judgement may subtract, never add
+
+The merge gate refuses to let a model decide whether a PR is safe, and the PR
+shepherd spawns two models per PR. Both are right, because they are answering
+different questions.
+
+`merge_pr.sh` is the only thing in the system that says **yes**. The sweep that
+finds candidate PRs runs it in `--dry-run` and reports; the `merge-checker` and
+`reviewer` agents read the PR and return `VERDICT: CLEAR` or
+`VERDICT: BLOCK — <reason>`. A `CLEAR` grants nothing — it withholds a veto. So
+the diff-written-by-the-author problem that killed "ask a model if this is safe"
+does not arise: a diff that talks a reviewer into `CLEAR` has bought exactly the
+outcome it would have had if no reviewer existed, and one that talks a reviewer
+into `BLOCK` costs a human glance. There is no input that makes the routine
+merge something the gate would have refused.
+
+That is also the failure mode worth designing for, because it is the likely one.
+If the agent layer is unavailable, hallucinating, or wrong in every direction at
+once, what remains is `/auto-merge` running unattended — the behaviour already
+shipped and already tested. The routine degrades into the thing it is built on
+rather than into something new.
+
+Two filters sit above the gate and no flag relaxes them, because they are
+questions of standing rather than of safety:
+
+- **Fork PRs are never swept.** The scheduled job holds a write token, and
+  treating a fork head as a candidate hands that token's reach to anyone who can
+  open a PR. The author field is not a defence here — the fork's owner writes it.
+- **Only the repo owner's PRs are candidates**, plus whoever `--author` names
+  explicitly. A teammate's branch closes when they say it does, which is the
+  charter's rule, not a security control.
+
+The sweep itself cannot merge, which is what keeps a bug in enumeration cheap: a
+mistake there widens what gets *considered* and never what gets *merged*.
+Merging stays serial for a duller reason — every merge puts the remaining
+branches one commit behind base, and behind-base is itself a refusal, so a batch
+merge would be merging PRs against a tree they were never tested on.

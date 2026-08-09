@@ -144,9 +144,13 @@ fi
 # anything, so "green" and "behind" together is exactly how a broken main
 # happens. Refuse, rebase, let CI run again on the real thing.
 
-git fetch --quiet origin "$base" "$head_sha" 2>/dev/null \
-  || git fetch --quiet origin "$base" 2>/dev/null \
-  || true
+# Fetch what the rest of this script needs to exist locally: the base branch,
+# and the PR head. Asking for a bare SHA only works on servers configured to
+# allow it, but `refs/pull/<n>/head` is always fetchable — which is what lets
+# this run against a PR that was never checked out here, as the sweep does.
+git fetch --quiet origin "$base" 2>/dev/null || true
+git fetch --quiet origin "pull/$pr/head" 2>/dev/null || true
+git fetch --quiet origin "$head_sha" 2>/dev/null || true
 
 behind=""
 case "$(field .mergeStateStatus)" in

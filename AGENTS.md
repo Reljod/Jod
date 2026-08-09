@@ -74,6 +74,11 @@ A check that can't pass makes faking it the cheapest path.
 - **Finish your own PRs.** After opening one, wait for checks to finish and run
   `merge_pr.sh <pr> --ready`. On a refusal, report the reasons verbatim and
   leave it open. Only for work you carried end to end. → **`/create-pr`**
+- **Reviewing agents may veto, never approve.** The shepherd sweeps the open
+  PRs, spawns read-only agents on each `ready` one, and merges only what both
+  the gate and every agent leave alone. Anything that is not exactly
+  `VERDICT: CLEAR` — a hedge, a malformed line, a crashed agent — blocks.
+  → **`/shepherd-prs`**, [why](docs/decisions.md#judgement-may-subtract-never-add)
 
 ## Conventions
 
