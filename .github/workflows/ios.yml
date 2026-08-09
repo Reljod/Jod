@@ -1,0 +1,126 @@
+name: iOS build
+
+# The one thing neither a Linux laptop nor the VPS can do.
+#
+# `apps/ios` is a Tauri shell, and producing an app bundle needs the iOS SDK,
+# which ships only inside Xcode and therefore only on macOS. Everything else
+# about the client is checked on Linux by `apps/ios/tests/test.sh` (unit) and
+# `apps/ios/e2e/run.mjs` (WebKit, the engine WKWebView uses); this workflow
+# covers the remainder: that the Rust shell **compiles and links for iOS**, and
+# that the resulting app **launches in a simulator**.
+#
+# Scoped to `apps/ios/**` so a docs or core change never pays for a macOS
+# runner, and exposed via workflow_dispatch/workflow_call so it can be demanded
+# or chained.
+#
+# Simulator only, and deliberately unsigned: a device build needs an Apple
+# developer certificate this repo does not hold, and CODE_SIGNING_ALLOWED=NO is
+# the honest way to build without inventing one.
+
+on:
+  workflow_dispatch:
+  workflow_call:
+  pull_request:
+    paths:
+      - "apps/ios/**"
+      - ".github/workflows/ios.yml"
+
+jobs:
+  build:
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: apps/ios
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Add the iOS Rust targets
+        run: rustup target add aarch64-apple-ios aarch64-apple-ios-sim
+
+      - name: Show the toolchain actually in use
+        run: |
+          rustc -V
+          xcodebuild -version
+          xcrun --sdk iphonesimulator --show-sdk-version
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      # The check that fails on Linux for want of the SDK. On macOS it is the
+      # real thing: the whole iOS dependency tree, compiled for the device
+      # target, including the Objective-C shim that needs `xcrun`.
+      - name: Compile the shell for iOS (device target)
+        working-directory: apps/ios/src-tauri
+        run: cargo check --target aarch64-apple-ios --verbose
+
+      - name: Build the frontend
+        run: npm run build
+
+      - name: Generate the Xcode project
+        run: npx tauri ios init --ci
+
+      - name: List what was generated
+        run: |
+          ls -la src-tauri/gen/apple
+          xcodebuild -list -workspace src-tauri/gen/apple/*.xcworkspace || true
+
+      # Unsigned, for the simulator. This is the step that proves the Rust
+      # staticlib links against UIKit/WebKit and produces a real .app.
+      - name: Build the app for the simulator
+        run: |
+          set -euxo pipefail
+          workspace=$(ls -d src-tauri/gen/apple/*.xcworkspace | head -1)
+          scheme=$(xcodebuild -list -workspace "$workspace" -json \
+            | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const j=JSON.parse(s);console.log((j.workspace?.schemes??[])[0]??"")})')
+          echo "workspace=$workspace scheme=$scheme"
+          xcodebuild \
+            -workspace "$workspace" \
+            -scheme "$scheme" \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            build
+
+      - name: Boot a simulator, install the app, and launch it
+        run: |
+          set -euxo pipefail
+          app=$(find build/Build/Products -name '*.app' -maxdepth 3 | head -1)
+          test -n "$app"
+          echo "built: $app"
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Info.plist"
+          bundle_id=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Info.plist")
+
+          device=$(xcrun simctl create jod-ci com.apple.CoreSimulator.SimDeviceType.iPhone-16)
+          xcrun simctl boot "$device"
+          xcrun simctl bootstatus "$device" -b
+          xcrun simctl install "$device" "$app"
+          xcrun simctl launch --console-pty "$device" "$bundle_id" &
+          launch_pid=$!
+
+          # Give the webview time to load its assets before judging it.
+          sleep 20
+          xcrun simctl io "$device" screenshot simulator.png
+          kill "$launch_pid" 2>/dev/null || true
+
+          # A process still present is the evidence that it did not crash on
+          # launch — an app that fell over would be gone by now.
+          xcrun simctl spawn "$device" launchctl list | grep -c "$bundle_id" \
+            && echo "the app is still running in the simulator"
+
+      - name: Upload the simulator screenshot and the app bundle
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-simulator
+          path: |
+            apps/ios/simulator.png
+            apps/ios/build/Build/Products/**/*.app
+          if-no-files-found: warn
