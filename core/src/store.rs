@@ -651,7 +651,13 @@ impl NewFact {
 pub struct Store {
     /// Write transactions cost microseconds, so one lock over one connection is
     /// cheaper than a pool and makes "one writer" explicit.
-    conn: Mutex<Connection>,
+    ///
+    /// Visible to the rest of the crate because the store's surface is split
+    /// across modules — conversations, webhooks and schedules each keep their
+    /// own `impl Store` beside the feature they serve rather than growing one
+    /// file without end. Still private to the crate: nothing outside gets a
+    /// connection.
+    pub(crate) conn: Mutex<Connection>,
     /// Where this database lives, when it lives anywhere. A run's supervisor is
     /// a separate process and has to be told which file to write into, so the
     /// store has to be able to say. `None` for an in-memory store — which is
@@ -734,7 +740,7 @@ impl Store {
     /// Immediate, not deferred: a deferred transaction takes its write lock only
     /// when it first writes, and two of them that both started by reading will
     /// collide on upgrade. That is the failure the benchmark measured at 98%.
-    fn write<T>(&self, f: impl FnOnce(&rusqlite::Transaction) -> Result<T>) -> Result<T> {
+    pub(crate) fn write<T>(&self, f: impl FnOnce(&rusqlite::Transaction) -> Result<T>) -> Result<T> {
         let mut conn = self.conn.lock().expect("store lock poisoned");
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let out = f(&tx)?;
