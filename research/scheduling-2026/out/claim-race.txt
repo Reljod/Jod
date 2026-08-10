@@ -1,0 +1,15 @@
+python 3.14.4  sqlite 3.46.1
+16 OS processes, 6.0s per arm, 4 schedules
+
+arm           claims  distinct   dupes    dup%   busy   claims/s
+cas             7436      7436       0   0.00%      3       1201
+immediate      11950     11950       0   0.00%      3       1889
+naive           7621      3986    3635  47.70%      3       1227
+
+lease takeover — a dead claimant's schedule, contested at a barrier
+  500 rounds x 16 processes: winners per round min=1 max=1, rounds != 1 winner: 0, duplicate claims: 0
+
+VERDICT
+  cas       must show 0 duplicates
+  immediate must show 0 duplicates (correct, but serialises the poll)
+  naive     duplicates are the point of the control arm

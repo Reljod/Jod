@@ -1,0 +1,18 @@
+# Standalone: this must not join the Jod workspace, because it pulls four
+# competing cron crates in only to compare them.
+[workspace]
+
+[package]
+name = "cron-dst"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+chrono = "0.4"
+chrono-tz = "0.10"
+croner = "3"
+cron = "0.17"
+saffron = "0.1"
+cronexpr = "1"
+jiff = "0.2"
