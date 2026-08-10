@@ -647,6 +647,11 @@ async fn main() -> Result<()> {
                     None if continue_last => Resume::Last,
                     None => Resume::Fresh,
                 },
+                // `jod run` is one task, not an orchestrator. Handing it Jod's
+                // own verbs would let a one-liner create schedules that spend
+                // money nightly, which is a decision that should be made on
+                // purpose rather than inherited from a default.
+                tools: None,
             };
 
             // Subscribe *before* spawning, so no early event is missed.

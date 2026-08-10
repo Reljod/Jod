@@ -1580,7 +1580,6 @@ async fn spawn(
     opts: &Options,
     prompt: String,
     resume: Resume,
-    tools: None,
 ) -> Result<String> {
     let agent = jod
         .spawn_agent(SpawnRequest {
@@ -1597,6 +1596,13 @@ async fn spawn(
             // delegation passes its own, because it is not part of this
             // conversation at all.
             resume,
+            // No tools, deliberately. An agent started from the chat box is
+            // doing a task, not orchestrating: giving it Jod's own verbs would
+            // let a prompt typed in a hurry create schedules and spend money
+            // every night. The orchestrator is the thing that gets those, and
+            // granting them anywhere else should be a decision somebody made
+            // rather than a default they inherited.
+            tools: None,
         })
         .await?;
     Ok(agent.id)
