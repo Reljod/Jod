@@ -568,7 +568,17 @@ fn draw_fleet(f: &mut Frame, app: &App, area: Rect) {
                 Line::from(Span::styled(a.id.clone(), fg(MUTED))),
                 Line::from(""),
                 field("harness", &a.harness),
-                field("status", &a.status),
+                field(
+                    "status",
+                    // The master column is 48 cells at the design width, so the
+                    // inline `← on screen` marker is the first thing truncated.
+                    // The detail pane always has room to say it.
+                    &if app.watching.as_deref() == Some(a.id.as_str()) {
+                        format!("{} · on screen", a.status)
+                    } else {
+                        a.status.clone()
+                    },
+                ),
                 field(
                     "started",
                     &super::app::short_duration(app.now_ms.saturating_sub(a.created_at_ms)),
@@ -1830,3 +1840,1466 @@ fn short(id: &str) -> String {
 /// removing it silently changes how long lines behave if re-enabled.
 #[allow(dead_code)]
 fn _wrap_marker(_: Wrap) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::data::{
+        ActivityItem, Check, Delivery, GoalRow, GoalState, HookRow, HookState, Iteration,
+        MemoryEdge, MemoryKind, MemoryNode, PastRun, ScheduleRow, ScheduleState,
+    };
+    use crate::tui::graph::GraphView;
+    use crate::tui::PromptIntent;
+    use jod_core::team::{Member, TeamTask};
+    use jod_core::{HarnessKind, Resume};
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    fn app() -> App {
+        App::new(HarnessKind::ClaudeCode, None, Resume::Fresh)
+    }
+
+    fn rendered(app: &App, w: u16, h: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+        terminal
+            .draw(|f| {
+                draw(f, app);
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn member(name: &str, harness: HarnessKind, status: MemberStatus) -> Member {
+        Member {
+            team: "crew".into(),
+            name: name.into(),
+            harness,
+            role: "research".into(),
+            status,
+            agent_id: None,
+            session_id: None,
+        }
+    }
+
+    fn task(id: &str, title: &str, owner: Option<&str>, status: &str) -> TeamTask {
+        TeamTask {
+            id: id.into(),
+            title: title.into(),
+            owner: owner.map(str::to_string),
+            status: status.into(),
+        }
+    }
+
+    fn agent_line(id: &str, name: &str, status: &str) -> super::super::AgentLine {
+        super::super::AgentLine {
+            id: id.into(),
+            name: name.into(),
+            harness: "Claude Code".into(),
+            status: status.into(),
+            session: None,
+            created_at_ms: 0,
+            cost_usd: None,
+            last: None,
+        }
+    }
+
+    // ---- fixtures for the workspaces whose loaders are still empty ----
+
+    fn node(name: &str, kind: MemoryKind, degree: usize) -> MemoryNode {
+        MemoryNode {
+            id: name.into(),
+            name: name.into(),
+            kind,
+            confidence: 0.86,
+            degree,
+            age_ms: 0,
+            seen: 23,
+            body: "Non-trivial work starts with a spec, not a plan.".into(),
+            contradicted: false,
+            in_edges: vec![],
+            out_edges: vec![],
+            provenance: vec!["AGENTS.md §How work runs".into()],
+        }
+    }
+
+    fn edge(kind: &str, other: &str) -> MemoryEdge {
+        MemoryEdge {
+            kind: kind.into(),
+            other: other.into(),
+            other_name: other.into(),
+            other_kind: MemoryKind::Belief,
+            warn: kind == "contradicts",
+        }
+    }
+
+    fn memory_app() -> App {
+        let mut a = app();
+        let mut focus = node("prefers-spec-first", MemoryKind::Belief, 17);
+        focus.in_edges = vec![edge("supports", "linear-is-truth")];
+        focus.out_edges = vec![edge("contradicts", "ship-fast-iterate")];
+        a.memory = vec![
+            focus,
+            node("linear-is-truth", MemoryKind::Belief, 9),
+            node("ship-fast-iterate", MemoryKind::Fact, 2),
+        ];
+        a.go(Workspace::Memory);
+        a
+    }
+
+    fn schedule(name: &str, state: ScheduleState) -> ScheduleRow {
+        ScheduleRow {
+            name: name.into(),
+            gloss: "02:00 every day".into(),
+            cron: "0 2 * * *".into(),
+            timezone: "Asia/Manila".into(),
+            next_ms: Some(9_000_000),
+            last_ms: Some(-3_000_000),
+            state,
+            history: vec![
+                Outcome::Ok,
+                Outcome::Ok,
+                Outcome::Failed,
+                Outcome::Ok,
+                Outcome::Ok,
+                Outcome::Ok,
+                Outcome::Ok,
+            ],
+            prompt: "Triage the Linear inbox.".into(),
+            runs_as: "Claude Code · ~/repo/Jod".into(),
+            policy: "overlap: skip · timeout 20m".into(),
+            recent: vec![PastRun {
+                at_ms: -3_000_000,
+                outcome: Outcome::Ok,
+                duration_ms: 258_000,
+                cost_usd: 0.44,
+                note: "3 items triaged".into(),
+            }],
+        }
+    }
+
+    fn schedules_app() -> App {
+        let mut a = app();
+        a.schedules = vec![
+            schedule("nightly-inbox", ScheduleState::Armed),
+            schedule("deps-audit", ScheduleState::Paused),
+        ];
+        a.schedules[1].next_ms = None;
+        a.go(Workspace::Schedules);
+        a
+    }
+
+    fn goals_app() -> App {
+        let mut a = app();
+        a.goals = vec![GoalRow {
+            name: "inbox-to-zero".into(),
+            cadence: "hourly".into(),
+            last_ms: Some(-2_000_000),
+            next_ms: Some(1_080_000),
+            state: GoalState::Running,
+            iteration: 118,
+            objective: "Keep the Linear inbox at zero.".into(),
+            checks: vec![
+                Check {
+                    done: true,
+                    text: "no item older than 48h".into(),
+                    note: None,
+                },
+                Check {
+                    done: false,
+                    text: "no item blocked without a reason".into(),
+                    note: Some("3 items fail this".into()),
+                },
+            ],
+            stop_if: "budget $25/week spent".into(),
+            spent_usd: 11.40,
+            budget_usd: 25.0,
+            iterations: vec![Iteration {
+                n: 118,
+                at_ms: -2_000_000,
+                note: "+4 items closed".into(),
+                duration_ms: 311_000,
+                cost_usd: 0.38,
+                outcome: Outcome::Ok,
+            }],
+            escalation: Some("ENG-441 needs a decision from you".into()),
+        }];
+        a.go(Workspace::Goals);
+        a
+    }
+
+    fn hooks_app() -> App {
+        let mut a = app();
+        a.hooks = vec![HookRow {
+            name: "pr-opened".into(),
+            repo: "Reljod/Jod".into(),
+            event: "pull_request.opened".into(),
+            runs: "review-pr".into(),
+            deliveries_24h: 18,
+            last_ms: Some(-120_000),
+            last_outcome: Outcome::Ok,
+            state: HookState::Armed,
+            endpoint: "https://jod.reljod.dev/hooks/gh/pr-opened".into(),
+            secret: "✓ verified 2m ago".into(),
+            match_rule: "event = pull_request · action = opened".into(),
+            runs_as: "review-pr   Claude Code".into(),
+            prompt: "Review PR #{{number}} against REVIEW.md.".into(),
+            policy: "dedupe by delivery id · retry 3×".into(),
+            created: "2026-07-14".into(),
+            total: 214,
+            deliveries: vec![Delivery {
+                at_ms: -120_000,
+                id: "8f2a1c".into(),
+                what: "PR #212 port the parser".into(),
+                accepted: true,
+                run: Some("a3f91c22".into()),
+                verdict: "running".into(),
+            }],
+        }];
+        a.go(Workspace::Hooks);
+        a
+    }
+
+    fn activity_app() -> App {
+        let mut a = app();
+        a.activity = vec![
+            ActivityItem {
+                id: "e1".into(),
+                at_ms: 0,
+                source: Source::Hook,
+                text: "pr-opened fired (PR #212)".into(),
+                unread: true,
+                needs_you: false,
+                jump_to: Some((Workspace::Hooks, "pr-opened".into())),
+            },
+            ActivityItem {
+                id: "e2".into(),
+                at_ms: -60_000,
+                source: Source::Cron,
+                text: "pr-shepherd ran · 3 PRs swept".into(),
+                unread: false,
+                needs_you: false,
+                jump_to: None,
+            },
+            ActivityItem {
+                id: "e3".into(),
+                at_ms: -120_000,
+                source: Source::Goal,
+                text: "inbox-to-zero iteration 118".into(),
+                unread: true,
+                needs_you: true,
+                jump_to: None,
+            },
+        ];
+        a.go(Workspace::Activity);
+        a
+    }
+
+    // ---- the completion popup ----
+
+    #[test]
+    fn typing_a_slash_opens_the_completion_popup() {
+        let mut a = app();
+        assert!(!rendered(&a, 100, 20).contains("Tab completes"));
+
+        a.input = "/".into();
+        let screen = rendered(&a, 100, 20);
+        assert!(screen.contains("Tab completes"));
+        assert!(screen.contains("/help"));
+        assert!(screen.contains("/harness"));
+    }
+
+    #[test]
+    fn the_popup_narrows_as_you_type_and_shows_the_hint() {
+        let mut a = app();
+        a.input = "/th".into();
+        let screen = rendered(&a, 100, 20);
+        assert!(screen.contains("/thinking"));
+        assert!(screen.contains("show or hide reasoning"), "the hint is shown");
+        assert!(!screen.contains("/help"));
+    }
+
+    #[test]
+    fn the_highlighted_suggestion_is_marked() {
+        let mut a = app();
+        a.input = "/".into();
+        a.suggestion = 1;
+        assert!(rendered(&a, 100, 20).contains("▸"));
+    }
+
+    #[test]
+    fn harness_arguments_are_offered_in_the_popup() {
+        let mut a = app();
+        a.input = "/harness ".into();
+        let screen = rendered(&a, 100, 20);
+        assert!(screen.contains("claude"));
+        assert!(screen.contains("agy"));
+    }
+
+    #[test]
+    fn a_plain_prompt_shows_no_popup() {
+        let mut a = app();
+        a.input = "what is in this repo".into();
+        assert!(!rendered(&a, 100, 20).contains("Tab completes"));
+    }
+
+    /// The popup sits above the input, so it must not be drawn outside the
+    /// buffer on a short terminal.
+    #[test]
+    fn the_popup_fits_a_short_terminal() {
+        let mut a = app();
+        a.input = "/".into();
+        let _ = rendered(&a, 60, 8);
+        let _ = rendered(&a, 30, 6);
+        let _ = rendered(&a, 24, 5);
+    }
+
+    /// With thirty-odd commands the list outgrows the space above the input, so
+    /// it has to scroll — otherwise ↓ past the fold moves a cursor nobody can
+    /// see.
+    #[test]
+    fn the_popup_scrolls_to_keep_the_highlighted_row_visible() {
+        let mut a = app();
+        a.input = "/".into();
+        a.suggestion = crate::tui::command::HELP.len() - 1;
+        let screen = rendered(&a, 100, 16);
+        let last = crate::tui::command::HELP.last().unwrap().0;
+        assert!(screen.contains(last), "expected {last}:\n{screen}");
+    }
+
+    /// Eighteen ragged rows read as noise; the eye needs an edge to run down.
+    /// Rendered tall, because the command list has since grown past what a
+    /// short terminal's popup can hold.
+    #[test]
+    fn the_completion_hints_line_up_in_a_column() {
+        let mut a = app();
+        a.input = "/".into();
+        let screen = rendered(&a, 100, 40);
+        // Counted in characters, not bytes: the selection marker is three bytes
+        // wide and one column wide, and a byte index would call the two rows
+        // misaligned when they are not.
+        let column =
+            |line: &str, hint: &str| line.find(hint).map(|byte| line[..byte].chars().count());
+        let starts: Vec<usize> = screen
+            .lines()
+            .filter_map(|l| column(l, "this list").or_else(|| column(l, "the team panel")))
+            .collect();
+        assert_eq!(starts.len(), 2, "expected both rows:\n{screen}");
+        assert_eq!(starts[0], starts[1], "hints must share a column:\n{screen}");
+    }
+
+    // ---- chat ----
+
+    #[test]
+    fn the_frame_draws_without_panicking_and_shows_the_input_box() {
+        let out = rendered(&app(), 60, 12);
+        assert!(out.contains("you"), "input box must be labelled:\n{out}");
+        assert!(out.contains("jod"), "transcript must be titled:\n{out}");
+    }
+
+    #[test]
+    fn what_the_user_typed_appears_in_the_transcript() {
+        let mut a = app();
+        a.push(Entry::You("summarise my inbox".into()));
+        let out = rendered(&a, 60, 12);
+        assert!(out.contains("summarise my inbox"), "{out}");
+    }
+
+    #[test]
+    fn the_agent_reply_appears() {
+        let mut a = app();
+        a.push(Entry::Agent("here is the summary".into()));
+        assert!(rendered(&a, 60, 12).contains("here is the summary"));
+    }
+
+    #[test]
+    fn the_status_bar_names_the_harness() {
+        assert!(rendered(&app(), 80, 12).contains("Claude Code"));
+    }
+
+    #[test]
+    fn scrolling_up_says_so_in_the_title_so_the_view_is_not_silently_stale() {
+        let mut a = app();
+        for i in 0..40 {
+            a.push(Entry::Agent(format!("line {i}")));
+        }
+        a.scroll_up(5, 40);
+        assert!(rendered(&a, 60, 12).contains("scrolled up"));
+    }
+
+    #[test]
+    fn a_very_long_line_is_wrapped_into_the_pane_not_truncated() {
+        let mut a = app();
+        a.push(Entry::Agent("word ".repeat(60).trim().to_string()));
+        let out = rendered(&a, 40, 20);
+        assert!(out.lines().all(|l| l.chars().count() <= 40));
+        assert!(out.matches("word").count() > 10, "text must survive:\n{out}");
+    }
+
+    #[test]
+    fn multibyte_text_renders_without_panicking() {
+        let mut a = app();
+        a.push(Entry::Agent("café ☕ — naïve".into()));
+        assert!(rendered(&a, 40, 10).contains("café"));
+    }
+
+    #[test]
+    fn the_input_box_says_a_prompt_is_waiting_rather_than_looking_broken() {
+        let mut a = app();
+        a.busy = true;
+        a.queue("next thing".into());
+        assert!(rendered(&a, 80, 12).contains("1 queued"));
+    }
+
+    #[test]
+    fn a_busy_input_box_says_when_the_line_will_be_sent() {
+        let mut a = app();
+        a.busy = true;
+        assert!(rendered(&a, 80, 12).contains("sends after this turn"));
+    }
+
+    /// A transcript that could belong to any of several agents is one you
+    /// cannot trust.
+    #[test]
+    fn the_transcript_names_the_agent_it_is_showing() {
+        let mut a = app();
+        a.agents = vec![agent_line("aaa11111", "port the parser", "running")];
+        a.watching = Some("aaa11111".into());
+        assert!(rendered(&a, 80, 12).contains("port the parser"));
+    }
+
+    /// The whole point of delegating is that the work continues off screen.
+    #[test]
+    fn the_status_bar_reports_agents_working_off_screen() {
+        let mut a = app();
+        a.agents = vec![agent_line("bbb22222", "audit the deps", "running")];
+        assert!(rendered(&a, 100, 12).contains("1 in background"));
+    }
+
+    // ---- the keybar and the status bar ----
+
+    /// Nielsen #6: the four keys you need right now are on screen, so you never
+    /// guess. This is the always-on half of the discoverability pair.
+    #[test]
+    fn every_screen_prints_its_own_keys_above_the_status_bar() {
+        for (ws, expected) in [
+            (Workspace::Chat, "Ctrl-K menu"),
+            (Workspace::Fleet, "s stop"),
+            (Workspace::Memory, "g graph"),
+            (Workspace::Schedules, "r run now"),
+            (Workspace::Goals, "a answer escalation"),
+            (Workspace::Hooks, "t test payload"),
+            (Workspace::Tasks, "d delegate"),
+            (Workspace::Activity, "m mark read"),
+            (Workspace::Team, "⏎ mark done"),
+        ] {
+            let mut a = app();
+            a.go(ws);
+            let screen = rendered(&a, 150, 20);
+            let rows: Vec<&str> = screen.lines().collect();
+            let keybar = rows[rows.len() - 2];
+            assert!(
+                keybar.contains(expected),
+                "{ws:?} keybar should carry {expected}, got: {keybar}"
+            );
+        }
+    }
+
+    /// One back key, one meaning, and every screen has to say so.
+    #[test]
+    fn every_workspace_says_esc_goes_back() {
+        for ws in [Workspace::Fleet, Workspace::Schedules, Workspace::Activity] {
+            let mut a = app();
+            a.go(ws);
+            let screen = rendered(&a, 150, 20);
+            assert!(screen.contains("Esc back"), "{ws:?}:\n{screen}");
+        }
+    }
+
+    /// Regression: the status and the hints were run together on a narrow
+    /// terminal — `1 queuedCtrl-X stop`, which reads as neither. The hints now
+    /// live on their own row, so the rule is tested on both.
+    #[test]
+    fn the_bars_drop_their_right_hand_side_rather_than_colliding_with_it() {
+        let mut a = app();
+        a.busy = true;
+        a.turn_started_ms = Some(0);
+        a.advance(5_000);
+        a.queue("next".into());
+        let screen = rendered(&a, 60, 12);
+        let bar = screen.lines().last().unwrap();
+        assert!(bar.contains("1 queued"), "the status wins: {bar}");
+        assert!(!bar.contains("queuedCtrl"), "they must not run together: {bar}");
+
+        // With room for both, the keybar carries the exits again.
+        let wide = rendered(&a, 150, 12);
+        let rows: Vec<&str> = wide.lines().collect();
+        assert!(rows[rows.len() - 2].contains("Ctrl-X stop"), "{wide}");
+    }
+
+    /// Endings that arrive while you are away have to survive until you look.
+    #[test]
+    fn unread_activity_raises_a_badge_on_every_screen() {
+        let source = activity_app();
+        for ws in [Workspace::Chat, Workspace::Fleet, Workspace::Schedules] {
+            let mut a = app();
+            a.activity = source.activity.clone();
+            a.go(ws);
+            let screen = rendered(&a, 120, 20);
+            assert!(screen.contains("⚑ 2 unread"), "{ws:?}:\n{screen}");
+        }
+    }
+
+    #[test]
+    fn nothing_unread_raises_no_badge() {
+        assert!(!rendered(&app(), 120, 20).contains("⚑"));
+    }
+
+    // ---- the which-key overlay ----
+
+    /// The discoverability spine: one chord, every screen, one letter each, and
+    /// a live count beside it — so the menu is also a dashboard.
+    #[test]
+    fn the_which_key_menu_lists_every_workspace_with_a_letter() {
+        let mut a = app();
+        a.overlay = Overlay::WhichKey;
+        let screen = rendered(&a, 100, 30);
+        for ws in Workspace::MENU {
+            assert!(
+                screen.contains(ws.menu_name()),
+                "{ws:?} missing from the menu:\n{screen}"
+            );
+        }
+        assert!(screen.contains("Ctrl-K"));
+        assert!(screen.contains("Esc cancels"));
+    }
+
+    #[test]
+    fn the_which_key_menu_carries_a_live_count_beside_each_row() {
+        let mut a = app();
+        a.agents = vec![
+            agent_line("a", "one", "running"),
+            agent_line("b", "two", "failed"),
+        ];
+        a.overlay = Overlay::WhichKey;
+        let screen = rendered(&a, 100, 30);
+        assert!(
+            screen.contains("2 runs · 1 running · 1 failed"),
+            "the menu doubles as a dashboard:\n{screen}"
+        );
+    }
+
+    /// The digit and the letter are the same destination, so the menu prints
+    /// both rather than leaving the digits to be found by accident.
+    #[test]
+    fn the_which_key_menu_prints_the_digit_beside_the_letter() {
+        let mut a = app();
+        a.overlay = Overlay::WhichKey;
+        let screen = rendered(&a, 100, 30);
+        assert!(screen.contains("or 2"), "fleet's digit:\n{screen}");
+        assert!(screen.contains("or 9"), "team's digit:\n{screen}");
+    }
+
+    #[test]
+    fn the_new_submenu_names_what_it_can_make() {
+        let mut a = app();
+        a.overlay = Overlay::WhichKeyNew;
+        let screen = rendered(&a, 100, 30);
+        for kind in ["schedule", "goal", "hook", "memory", "task"] {
+            assert!(screen.contains(kind), "{kind} missing:\n{screen}");
+        }
+    }
+
+    #[test]
+    fn the_which_key_overlay_fits_a_small_terminal() {
+        let mut a = app();
+        a.overlay = Overlay::WhichKey;
+        for (w, h) in [(80, 24), (40, 10), (20, 6), (10, 4)] {
+            let _ = rendered(&a, w, h);
+        }
+    }
+
+    // ---- the keymap overlay ----
+
+    /// Help that omits the focused screen's verbs sends you to the source.
+    #[test]
+    fn the_keymap_overlay_shows_the_screen_you_are_on_first() {
+        let mut a = schedules_app();
+        a.overlay = Overlay::Keymap;
+        let screen = rendered(&a, 100, 45);
+        assert!(screen.contains("schedules — this screen"), "{screen}");
+        assert!(screen.contains("run now"));
+        assert!(screen.contains("anywhere"), "the global chords are there too");
+    }
+
+    #[test]
+    fn the_keymap_overlay_is_different_on_a_different_screen() {
+        let mut a = memory_app();
+        a.overlay = Overlay::Keymap;
+        let screen = rendered(&a, 100, 45);
+        assert!(screen.contains("memory · list — this screen"), "{screen}");
+        assert!(screen.contains("graph"));
+    }
+
+    #[test]
+    fn the_keymap_overlay_fits_a_small_terminal() {
+        let mut a = app();
+        a.overlay = Overlay::Keymap;
+        for (w, h) in [(80, 24), (40, 10), (10, 4)] {
+            let _ = rendered(&a, w, h);
+        }
+    }
+
+    // ---- confirmation and prompts ----
+
+    /// `x` deleting a webhook silently is one fat-fingered `Ctrl-K h x` away
+    /// from losing a secret, so the confirmation names the thing.
+    #[test]
+    fn a_destructive_confirmation_names_what_it_is_about_to_destroy() {
+        let mut a = hooks_app();
+        a.overlay = Overlay::Confirm {
+            verb: "delete".into(),
+            what: "pr-opened".into(),
+            id: "pr-opened".into(),
+        };
+        let screen = rendered(&a, 100, 24);
+        assert!(screen.contains("delete pr-opened?"), "{screen}");
+        assert!(screen.contains("cannot be undone"));
+        assert!(screen.contains("y confirms"));
+    }
+
+    #[test]
+    fn a_one_value_prompt_shows_the_field_and_the_way_out() {
+        let mut a = app();
+        a.overlay = Overlay::Prompt {
+            label: "task".into(),
+            value: "port the parser".into(),
+            intent: PromptIntent::New(Workspace::Tasks),
+        };
+        let screen = rendered(&a, 100, 24);
+        assert!(screen.contains("task ▸ port the parser"), "{screen}");
+        assert!(screen.contains("Esc cancels"));
+    }
+
+    // ---- the fleet ----
+
+    #[test]
+    fn the_fleet_screen_lists_the_runs_it_knows_about() {
+        let mut a = app();
+        a.agents = vec![super::super::AgentLine {
+            id: "abcdef1234".into(),
+            name: "do the thing".into(),
+            harness: "AGY".into(),
+            status: "running".into(),
+            session: None,
+            created_at_ms: 0,
+            cost_usd: None,
+            last: None,
+        }];
+        a.go(Workspace::Fleet);
+        let out = rendered(&a, 100, 16);
+        assert!(out.contains("fleet"), "{out}");
+        assert!(out.contains("do the thing"), "{out}");
+        assert!(out.contains("abcdef12"), "the id is shortened:\n{out}");
+    }
+
+    #[test]
+    fn an_empty_fleet_says_so_rather_than_showing_a_blank_box() {
+        let mut a = app();
+        a.go(Workspace::Fleet);
+        assert!(rendered(&a, 80, 16).contains("no agents yet"));
+    }
+
+    /// The screen is a control surface, not a list of names: it has to say what
+    /// the selected row is and which keys act on it.
+    #[test]
+    fn the_fleet_marks_its_selection_and_offers_its_keys() {
+        let mut a = app();
+        a.agents = vec![
+            agent_line("aaa11111", "port the parser", "running"),
+            agent_line("bbb22222", "write the docs", "completed"),
+        ];
+        a.go(Workspace::Fleet);
+        let ids = a.row_ids(Workspace::Fleet);
+        a.list_mut(Workspace::Fleet).step(1, &ids);
+        let screen = rendered(&a, 100, 20);
+        assert!(screen.contains("▸"), "the selection must be visible:\n{screen}");
+        assert!(screen.contains("⏎ watch"), "the keys must be stated:\n{screen}");
+        assert!(screen.contains("s stop"));
+        assert!(screen.contains("1 running"), "{screen}");
+    }
+
+    /// How long a run has been going is the number that decides whether to look
+    /// at it, and a list of names cannot tell you.
+    #[test]
+    fn the_fleet_shows_how_long_each_run_has_been_going() {
+        let mut a = app();
+        a.agents = vec![agent_line("aaa11111", "port the parser", "running")];
+        a.go(Workspace::Fleet);
+        a.advance(125_000);
+        let screen = rendered(&a, 100, 20);
+        assert!(screen.contains("2m05s"), "expected an age:\n{screen}");
+    }
+
+    /// Regression: the harness column was exactly as wide as "Claude Code", so
+    /// it ran straight into the name — `Claude CodeHow are you running?`. The
+    /// harness is now a short code, and the property being tested is unchanged:
+    /// two columns must never touch.
+    #[test]
+    fn the_fleet_columns_do_not_run_into_each_other() {
+        let mut a = app();
+        a.agents = vec![agent_line("aaa11111", "How are you running?", "completed")];
+        a.go(Workspace::Fleet);
+        let screen = rendered(&a, 160, 20);
+        assert!(
+            screen.contains("cc  How are you running?"),
+            "columns must be separated:\n{screen}"
+        );
+    }
+
+    #[test]
+    fn the_fleet_says_which_run_is_on_screen() {
+        let mut a = app();
+        a.agents = vec![agent_line("aaa11111", "port the parser", "running")];
+        a.watching = Some("aaa11111".into());
+        a.go(Workspace::Fleet);
+        assert!(rendered(&a, 100, 20).contains("on screen"));
+    }
+
+    /// A fleet longer than the pane must scroll to keep the cursor visible, not
+    /// silently hide the row being acted on.
+    #[test]
+    fn a_long_fleet_scrolls_to_keep_the_selection_in_view() {
+        let mut a = app();
+        a.agents = (0..40)
+            .map(|i| agent_line(&format!("id{i:06}"), &format!("job {i}"), "running"))
+            .collect();
+        a.go(Workspace::Fleet);
+        a.list_mut(Workspace::Fleet).selected = Some("id000039".into());
+        let screen = rendered(&a, 100, 16);
+        assert!(screen.contains("job 39"), "the selected row must show:\n{screen}");
+        assert!(!screen.contains("job 0 "), "the top must have scrolled off");
+    }
+
+    /// The detail pane is the first thing dropped at 80 columns: a 40-column
+    /// detail pane holds nothing worth reading, and clipping the master to make
+    /// room for it is the anti-pattern.
+    #[test]
+    fn the_fleet_drops_its_detail_pane_before_it_clips_the_list() {
+        let mut a = app();
+        let mut line = agent_line("aaa11111", "port the parser", "running");
+        line.last = Some("rebased cleanly, all tests pass".into());
+        a.agents = vec![line];
+        a.go(Workspace::Fleet);
+
+        let wide = rendered(&a, 120, 24);
+        assert!(wide.contains("rebased cleanly"), "the detail shows when it fits");
+
+        let narrow = rendered(&a, 80, 24);
+        assert!(narrow.contains("port the parser"), "the list survives:\n{narrow}");
+        assert!(!narrow.contains("rebased cleanly"), "the detail went:\n{narrow}");
+        assert!(narrow.lines().all(|l| l.chars().count() <= 80));
+    }
+
+    // ---- memory ----
+
+    #[test]
+    fn the_memory_list_shows_a_tag_and_a_glyph_for_every_node() {
+        let a = memory_app();
+        let screen = rendered(&a, 120, 24);
+        assert!(screen.contains("prefers-spec-first"), "{screen}");
+        assert!(screen.contains("blf"), "the three-letter tag:\n{screen}");
+        assert!(screen.contains("◆"), "and the glyph:\n{screen}");
+    }
+
+    #[test]
+    fn the_memory_detail_shows_both_directions_of_every_edge() {
+        let a = memory_app();
+        let screen = rendered(&a, 120, 26);
+        assert!(screen.contains("linked from"), "{screen}");
+        assert!(screen.contains("links to"), "{screen}");
+        assert!(screen.contains("linear-is-truth"));
+        assert!(screen.contains("ship-fast-iterate"));
+    }
+
+    /// A node in an unresolved contradiction is marked with a glyph as well as
+    /// a colour, so the state survives `NO_COLOR` and a monochrome terminal.
+    #[test]
+    fn a_contradicted_memory_is_marked_without_relying_on_colour() {
+        let mut a = memory_app();
+        a.memory[0].contradicted = true;
+        let screen = rendered(&a, 120, 24);
+        let row = screen
+            .lines()
+            .find(|l| l.contains("prefers-spec-first") && l.contains("blf"))
+            .unwrap();
+        assert!(row.contains('!'), "expected the contradiction mark: {row}");
+    }
+
+    #[test]
+    fn an_empty_memory_says_how_to_write_one() {
+        let mut a = app();
+        a.go(Workspace::Memory);
+        assert!(rendered(&a, 100, 20).contains("/remember"));
+    }
+
+    #[test]
+    fn filtering_the_memory_list_by_type_says_so_on_screen() {
+        let mut a = memory_app();
+        a.memory_type = Some(MemoryKind::Fact);
+        a.reconcile();
+        let screen = rendered(&a, 120, 24);
+        assert!(screen.contains("showing fact only"), "{screen}");
+        assert!(screen.contains("ship-fast-iterate"));
+        assert!(
+            !screen.contains("linear-is-truth"),
+            "beliefs are hidden:\n{screen}"
+        );
+    }
+
+    // ---- the local graph ----
+
+    /// One node, in-edges above, out-edges below. No layout algorithm, no edge
+    /// crossings, and it still reads at 80 columns.
+    #[test]
+    fn the_local_graph_puts_incoming_edges_above_and_outgoing_below() {
+        let mut a = memory_app();
+        a.graph = GraphView::new("prefers-spec-first");
+        a.drill(Workspace::MemoryGraph);
+        let screen = rendered(&a, 100, 30);
+        let line_of = |needle: &str| {
+            screen
+                .lines()
+                .position(|l| l.contains(needle))
+                .unwrap_or_else(|| panic!("{needle} missing:\n{screen}"))
+        };
+        assert!(line_of("linked from") < line_of("linear-is-truth"));
+        assert!(line_of("linear-is-truth") < line_of("links to"));
+        assert!(line_of("links to") < line_of("ship-fast-iterate"));
+    }
+
+    /// A pane that silently truncates leaves you believing you have seen a
+    /// node's whole neighbourhood — the wrong belief to hold about a graph.
+    #[test]
+    fn the_local_graph_says_how_much_of_the_neighbourhood_it_is_showing() {
+        let mut a = memory_app();
+        a.graph = GraphView::new("prefers-spec-first");
+        a.drill(Workspace::MemoryGraph);
+        let screen = rendered(&a, 100, 30);
+        assert!(screen.contains("hop 1 shows 2 of 17 edges"), "{screen}");
+    }
+
+    /// The trail along the bottom is where you have been, which is what makes
+    /// `Backspace` believable.
+    #[test]
+    fn the_local_graph_draws_the_trail_of_where_you_have_been() {
+        let mut a = memory_app();
+        a.graph = GraphView::new("linear-is-truth");
+        a.graph.recentre("prefers-spec-first");
+        a.drill(Workspace::MemoryGraph);
+        let screen = rendered(&a, 100, 30);
+        assert!(screen.contains("⟨ linear-is-truth ⟩"), "{screen}");
+        assert!(screen.contains("where you have been"));
+    }
+
+    #[test]
+    fn a_graph_focused_on_a_node_that_is_gone_says_so_rather_than_drawing_nothing() {
+        let mut a = memory_app();
+        a.graph = GraphView::new("vanished");
+        a.drill(Workspace::MemoryGraph);
+        assert!(rendered(&a, 100, 30).contains("that node is gone"));
+    }
+
+    #[test]
+    fn the_local_graph_still_reads_at_eighty_columns() {
+        let mut a = memory_app();
+        a.graph = GraphView::new("prefers-spec-first");
+        a.drill(Workspace::MemoryGraph);
+        let screen = rendered(&a, 80, 24);
+        assert!(screen.contains("prefers-spec-first"), "{screen}");
+        assert!(screen.lines().all(|l| l.chars().count() <= 80));
+    }
+
+    // ---- schedules ----
+
+    /// `systemctl list-timers` verbatim: absolute answers "when", relative
+    /// answers "soon?", and the LAST/AGO pair is how you spot a dead timer.
+    #[test]
+    fn the_schedules_table_shows_next_in_last_and_ago() {
+        let a = schedules_app();
+        let screen = rendered(&a, 100, 30);
+        for column in ["name", "when", "next", "in", "last", "ago", "7d"] {
+            assert!(screen.contains(column), "{column} missing:\n{screen}");
+        }
+        assert!(screen.contains("nightly-inbox"));
+        assert!(
+            screen.contains("02:00 every day"),
+            "the gloss, not the cron:\n{screen}"
+        );
+    }
+
+    /// A cron expression in a table is a puzzle, so it lives in the detail
+    /// block where there is room to read it.
+    #[test]
+    fn the_raw_cron_expression_is_in_the_detail_not_the_table() {
+        let a = schedules_app();
+        let screen = rendered(&a, 100, 30);
+        assert!(screen.contains("0 2 * * *"), "{screen}");
+        assert!(screen.contains("Asia/Manila"));
+        assert!(screen.contains("Triage the Linear inbox"));
+    }
+
+    /// Seven glyphs say "healthy / flaky / dead" faster than seven timestamps,
+    /// and a failure is a cross rather than a red block.
+    #[test]
+    fn a_schedule_carries_a_seven_cell_run_history_strip() {
+        let a = schedules_app();
+        let screen = rendered(&a, 100, 30);
+        // The title bar names the next schedule too, so the row is the one
+        // that also carries the gloss.
+        let row = screen
+            .lines()
+            .find(|l| l.contains("nightly-inbox") && l.contains("every day"))
+            .unwrap();
+        assert!(row.contains('▇'), "the strip:\n{row}");
+        assert!(
+            row.contains('✗'),
+            "a failure is a glyph, not just a colour:\n{row}"
+        );
+    }
+
+    /// `‖`, not `⏸` — U+23F8 is East-Asian Wide and would shear every column to
+    /// its right.
+    #[test]
+    fn a_paused_schedule_says_so_with_a_narrow_glyph() {
+        let a = schedules_app();
+        let screen = rendered(&a, 100, 30);
+        let row = screen.lines().find(|l| l.contains("deps-audit")).unwrap();
+        assert!(row.contains('‖'), "{row}");
+        assert!(!row.contains('⏸'));
+        assert!(row.contains("— paused"), "and in words too: {row}");
+    }
+
+    /// Declared drop order: the 7-day strip goes first, then the LAST/AGO pair,
+    /// then the gloss. Nothing clips and nothing scrolls sideways.
+    #[test]
+    fn the_schedules_table_drops_columns_in_order_at_eighty_columns() {
+        let a = schedules_app();
+        let wide = rendered(&a, 100, 30);
+        assert!(wide.contains("7d"), "the strip fits at 100:\n{wide}");
+
+        let narrow = rendered(&a, 80, 24);
+        assert!(
+            narrow.contains("nightly-inbox"),
+            "the name always stays:\n{narrow}"
+        );
+        assert!(!narrow.contains("7d"), "the strip is the first to go:\n{narrow}");
+        assert!(narrow.lines().all(|l| l.chars().count() <= 80));
+    }
+
+    #[test]
+    fn an_empty_schedules_screen_says_how_to_make_one() {
+        let mut a = app();
+        a.go(Workspace::Schedules);
+        assert!(rendered(&a, 100, 20).contains("/new schedule"));
+    }
+
+    // ---- goals ----
+
+    /// A goal is a schedule with a denominator: "done when" is a checklist, so
+    /// there is a real percent-done. That is why goals get a bar.
+    #[test]
+    fn a_goal_shows_a_progress_bar_because_its_checklist_is_a_denominator() {
+        let a = goals_app();
+        let screen = rendered(&a, 110, 30);
+        assert!(screen.contains("inbox-to-zero"), "{screen}");
+        assert!(screen.contains('▓'), "the bar:\n{screen}");
+        assert!(
+            screen.contains(" 50%"),
+            "the percent stays even if the bar goes:\n{screen}"
+        );
+        assert!(screen.contains('☑'), "a done check:\n{screen}");
+        assert!(screen.contains('☐'), "and one still open:\n{screen}");
+    }
+
+    /// A looping objective that quietly needs you and never says so is worse
+    /// than no goal at all.
+    #[test]
+    fn a_goal_waiting_on_you_says_so_on_the_screen() {
+        let a = goals_app();
+        let screen = rendered(&a, 110, 30);
+        assert!(screen.contains("needs you"), "{screen}");
+        assert!(screen.contains("ENG-441"));
+    }
+
+    /// Drop order: iteration number → cadence → the bar. The percent stays.
+    #[test]
+    fn the_goals_table_keeps_the_percent_when_the_bar_will_not_fit() {
+        let a = goals_app();
+        let narrow = rendered(&a, 56, 24);
+        let row = narrow
+            .lines()
+            .find(|l| l.contains("inbox-to-zero") && l.contains('%'))
+            .unwrap_or_else(|| panic!("no table row:\n{narrow}"));
+        assert!(row.contains("50%"), "the percent survives: {row}");
+        assert!(!row.contains('▓'), "the bar went: {row}");
+        assert!(narrow.lines().all(|l| l.chars().count() <= 56));
+    }
+
+    // ---- webhooks ----
+
+    /// Three questions without a drill-down: is it armed, is the secret still
+    /// verifying, and what did the last delivery actually start.
+    #[test]
+    fn a_webhook_answers_armed_secret_and_last_delivery_on_one_screen() {
+        let a = hooks_app();
+        let screen = rendered(&a, 110, 30);
+        assert!(screen.contains("pr-opened"), "{screen}");
+        assert!(screen.contains("pull_request.opened"));
+        assert!(screen.contains("verified"), "the secret's state:\n{screen}");
+        assert!(
+            screen.contains("a3f91c22"),
+            "the run a delivery started:\n{screen}"
+        );
+    }
+
+    #[test]
+    fn an_empty_webhooks_screen_says_how_to_make_one() {
+        let mut a = app();
+        a.go(Workspace::Hooks);
+        assert!(rendered(&a, 100, 20).contains("/new hook"));
+    }
+
+    // ---- tasks ----
+
+    /// The board, promoted out of the team panel. Promoting it must not lose
+    /// it: the screen reads the same board the team panel does.
+    #[test]
+    fn the_tasks_screen_shows_the_board_that_already_exists() {
+        let mut a = app();
+        a.tasks = vec![
+            task("port-the-parser", "Port the parser to the new AST", None, "open"),
+            task("write-the-docs", "Write the docs", Some("scout"), "open"),
+        ];
+        a.go(Workspace::Tasks);
+        let screen = rendered(&a, 110, 24);
+        assert!(
+            screen.contains("Port the parser to the new AST"),
+            "{screen}"
+        );
+        assert!(screen.contains("scout"), "the owner:\n{screen}");
+        assert!(
+            screen.contains("claimed"),
+            "a claimed task reads as claimed:\n{screen}"
+        );
+    }
+
+    /// The verb that makes the board worth a screen of its own.
+    #[test]
+    fn the_tasks_screen_says_what_d_does() {
+        let mut a = app();
+        a.tasks = vec![task("port-the-parser", "Port the parser", None, "open")];
+        a.go(Workspace::Tasks);
+        let screen = rendered(&a, 110, 24);
+        assert!(screen.contains("d delegates this to an agent"), "{screen}");
+    }
+
+    /// Without a runnable check, "looks done" is the only stop signal — so the
+    /// screen says when there is not one rather than leaving the field blank.
+    #[test]
+    fn a_task_with_no_runnable_check_says_so() {
+        let mut a = app();
+        a.tasks = vec![task("port-the-parser", "Port the parser", None, "open")];
+        a.go(Workspace::Tasks);
+        assert!(rendered(&a, 110, 24).contains("no stop signal"));
+    }
+
+    #[test]
+    fn an_empty_board_screen_says_how_to_add_to_it() {
+        let mut a = app();
+        a.go(Workspace::Tasks);
+        assert!(rendered(&a, 100, 20).contains("/todo"));
+    }
+
+    // ---- activity ----
+
+    /// An ending that scrolled off the transcript while you were away did not
+    /// happen. This is the durable record.
+    #[test]
+    fn the_activity_feed_marks_what_is_unread_in_the_gutter() {
+        let a = activity_app();
+        let screen = rendered(&a, 100, 24);
+        let unread = screen
+            .lines()
+            .find(|l| l.contains("pr-opened fired"))
+            .unwrap();
+        let read = screen
+            .lines()
+            .find(|l| l.contains("pr-shepherd ran"))
+            .unwrap();
+        assert!(unread.contains('●'), "an unread dot in the gutter: {unread}");
+        assert!(!read.contains('●'), "and none once read: {read}");
+    }
+
+    #[test]
+    fn an_activity_item_that_needs_a_human_says_so() {
+        let a = activity_app();
+        assert!(rendered(&a, 100, 24).contains("needs you"));
+    }
+
+    #[test]
+    fn the_activity_feed_says_which_filters_are_on() {
+        let mut a = activity_app();
+        a.unread_only = true;
+        a.activity_source = Some(Source::Cron);
+        a.reconcile();
+        let screen = rendered(&a, 100, 24);
+        assert!(screen.contains("only unread: on"), "{screen}");
+        assert!(screen.contains("cron"), "{screen}");
+    }
+
+    #[test]
+    fn an_empty_activity_feed_says_what_writes_to_it() {
+        let mut a = app();
+        a.go(Workspace::Activity);
+        assert!(rendered(&a, 100, 20).contains("cron, hooks and goals write here"));
+    }
+
+    // ---- the filter ----
+
+    /// `/` on every list, and an active filter is never invisible.
+    #[test]
+    fn an_open_filter_is_drawn_under_the_list_it_filters() {
+        let mut a = app();
+        a.agents = vec![
+            agent_line("aaa11111", "port the parser", "running"),
+            agent_line("bbb22222", "write the docs", "running"),
+        ];
+        a.go(Workspace::Fleet);
+        let list = a.list_mut(Workspace::Fleet);
+        list.filter = Some("port".into());
+        list.editing_filter = true;
+        a.reconcile();
+
+        let screen = rendered(&a, 110, 24);
+        assert!(screen.contains("/port"), "{screen}");
+        assert!(screen.contains("1 match"), "{screen}");
+        assert!(
+            !screen.contains("write the docs"),
+            "the filter really filters:\n{screen}"
+        );
+    }
+
+    #[test]
+    fn an_open_but_empty_filter_says_to_type_rather_than_claiming_a_count() {
+        let mut a = app();
+        a.agents = vec![agent_line("aaa11111", "port the parser", "running")];
+        a.go(Workspace::Fleet);
+        let list = a.list_mut(Workspace::Fleet);
+        list.filter = Some(String::new());
+        list.editing_filter = true;
+        assert!(rendered(&a, 110, 24).contains("type to filter"));
+    }
+
+    // ---- team ----
+
+    #[test]
+    fn the_team_screen_lists_members_with_their_harness_and_status() {
+        let mut a = app();
+        a.team = Some("crew".into());
+        a.members = vec![
+            member("lead", HarnessKind::ClaudeCode, MemberStatus::Busy),
+            member("scout", HarnessKind::Agy, MemberStatus::Ready),
+        ];
+        a.go(Workspace::Team);
+        let screen = rendered(&a, 100, 20);
+        assert!(screen.contains("team crew"));
+        assert!(screen.contains("lead"));
+        assert!(screen.contains("scout"));
+        assert!(screen.contains("busy"));
+        assert!(screen.contains("Antigravity") || screen.contains("AGY"));
+    }
+
+    /// The board has to distinguish open, claimed and done at a glance, or it
+    /// is just a list of strings.
+    #[test]
+    fn the_task_board_shows_progress_and_who_owns_what() {
+        let mut a = app();
+        a.team = Some("crew".into());
+        a.members = vec![member("scout", HarnessKind::OpenCode, MemberStatus::Busy)];
+        a.tasks = vec![
+            task("t1", "port the parser", Some("scout"), "open"),
+            task("t2", "write the docs", None, "open"),
+            task("t3", "ship it", Some("lead"), "done"),
+        ];
+        a.go(Workspace::Team);
+        let screen = rendered(&a, 100, 24);
+        assert!(screen.contains("board"));
+        assert!(screen.contains("port the parser"));
+        assert!(screen.contains("(scout)"), "a claimed task names its owner");
+        assert!(screen.contains("write the docs"));
+        assert!(screen.contains('✓'), "a done task is marked");
+        assert!(screen.contains('○'), "an unclaimed task is marked");
+    }
+
+    /// Without a team the screen must explain itself rather than show an empty
+    /// box that reads as a bug.
+    #[test]
+    fn the_team_screen_says_so_when_there_is_no_team() {
+        let mut a = app();
+        a.go(Workspace::Team);
+        let screen = rendered(&a, 100, 20);
+        assert!(screen.contains("no team"), "got:\n{screen}");
+    }
+
+    #[test]
+    fn a_team_with_no_members_yet_says_so() {
+        let mut a = app();
+        a.team = Some("crew".into());
+        a.go(Workspace::Team);
+        assert!(rendered(&a, 100, 20).contains("no members yet"));
+    }
+
+    #[test]
+    fn the_team_screen_is_hidden_unless_you_are_on_it() {
+        let mut a = app();
+        a.team = Some("crew".into());
+        a.members = vec![member("scout", HarnessKind::OpenCode, MemberStatus::Ready)];
+        assert!(!rendered(&a, 100, 20).contains("scout"));
+
+        a.go(Workspace::Team);
+        assert!(rendered(&a, 100, 20).contains("scout"));
+    }
+
+    #[test]
+    fn the_team_screen_offers_its_keys_too() {
+        let mut a = app();
+        a.team = Some("crew".into());
+        a.tasks = vec![task("t1", "port the parser", None, "open")];
+        a.go(Workspace::Team);
+        let screen = rendered(&a, 100, 20);
+        assert!(screen.contains("mark done"), "{screen}");
+        assert!(screen.contains('▸'), "the selection must be visible:\n{screen}");
+    }
+
+    #[test]
+    fn an_empty_board_says_how_to_add_to_it() {
+        let mut a = app();
+        a.team = Some("crew".into());
+        a.go(Workspace::Team);
+        assert!(rendered(&a, 100, 20).contains("/todo"));
+    }
+
+    // ---- sizes ----
+
+    /// A terminal can be dragged to almost nothing; the layout must survive it,
+    /// on every screen.
+    #[test]
+    fn no_screen_panics_at_an_absurd_size() {
+        for ws in Workspace::ALL {
+            let mut a = memory_app();
+            a.graph = GraphView::new("prefers-spec-first");
+            a.go(ws);
+            for (w, h) in [(20, 5), (10, 4), (12, 5), (80, 6), (80, 24), (200, 60)] {
+                let _ = rendered(&a, w, h);
+            }
+        }
+    }
+
+    #[test]
+    fn no_overlay_panics_at_an_absurd_size() {
+        for overlay in [
+            Overlay::WhichKey,
+            Overlay::WhichKeyNew,
+            Overlay::Keymap,
+            Overlay::Confirm {
+                verb: "delete".into(),
+                what: "a-very-long-name-indeed".into(),
+                id: "x".into(),
+            },
+            Overlay::Prompt {
+                label: "schedule".into(),
+                value: "0 2 * * *".into(),
+                intent: PromptIntent::New(Workspace::Schedules),
+            },
+        ] {
+            let mut a = schedules_app();
+            a.overlay = overlay;
+            for (w, h) in [(10, 4), (20, 5), (80, 24), (200, 60)] {
+                let _ = rendered(&a, w, h);
+            }
+        }
+    }
+
+    /// 100×30 is the design target; 80×24 is the contract. Nothing may clip and
+    /// nothing may scroll sideways.
+    #[test]
+    fn nothing_overflows_eighty_columns_on_any_screen() {
+        for ws in Workspace::ALL {
+            let mut a = memory_app();
+            a.agents = vec![agent_line("aaa11111", "port the parser", "running")];
+            a.schedules = schedules_app().schedules;
+            a.goals = goals_app().goals;
+            a.hooks = hooks_app().hooks;
+            a.activity = activity_app().activity;
+            a.tasks = vec![task("t1", "port the parser", Some("scout"), "open")];
+            a.team = Some("crew".into());
+            a.graph = GraphView::new("prefers-spec-first");
+            a.go(ws);
+            let screen = rendered(&a, 80, 24);
+            for line in screen.lines() {
+                assert!(
+                    line.chars().count() <= 80,
+                    "{ws:?} overflowed 80 columns: {line}"
+                );
+            }
+        }
+    }
+
+    /// Regression: the panel sized itself to a comfortable minimum width
+    /// regardless of the terminal, so a narrow window produced a rect wider
+    /// than the buffer it was drawn into.
+    #[test]
+    fn a_long_fleet_never_outgrows_a_narrow_terminal() {
+        let mut a = app();
+        a.agents = (0..30)
+            .map(|i| agent_line(&format!("id{i}"), &format!("agent {i}"), "running"))
+            .collect();
+        a.go(Workspace::Fleet);
+        for (w, h) in [(10, 4), (12, 5), (18, 6), (21, 7), (40, 8)] {
+            let _ = rendered(&a, w, h);
+        }
+    }
+
+    #[test]
+    fn the_team_screen_fits_a_small_terminal() {
+        let mut a = app();
+        a.team = Some("crew".into());
+        a.members = (0..40)
+            .map(|i| member(&format!("m{i}"), HarnessKind::ClaudeCode, MemberStatus::Ready))
+            .collect();
+        a.go(Workspace::Team);
+        let _ = rendered(&a, 30, 8);
+        let _ = rendered(&a, 12, 5);
+    }
+
+    // ---- wrapping and small helpers ----
+
+    /// Regression: agents print code, and splitting on spaces threw the leading
+    /// ones away — `def f():` and its body came out in one column.
+    #[test]
+    fn code_indentation_survives_wrapping() {
+        let code = "def greet(name):\n    return f\"Hello, {name}!\"";
+        let lines = wrap(code, 60, 0);
+        assert_eq!(lines[0], "def greet(name):");
+        assert_eq!(lines[1], "    return f\"Hello, {name}!\"");
+    }
+
+    #[test]
+    fn a_wrapped_indented_line_keeps_its_indent_on_every_row() {
+        let lines = wrap("    alpha beta gamma delta", 14, 0);
+        assert!(lines.len() > 1, "should have wrapped: {lines:?}");
+        for line in &lines {
+            assert!(line.starts_with("    "), "lost the indent: {line:?}");
+        }
+    }
+
+    #[test]
+    fn deeper_indentation_is_preserved_too() {
+        let lines = wrap("        deeply nested", 40, 0);
+        assert_eq!(lines[0], "        deeply nested");
+    }
+
+    #[test]
+    fn a_whitespace_only_line_stays_blank() {
+        assert_eq!(wrap("a\n   \nb", 20, 0), vec!["a", "", "b"]);
+    }
+
+    #[test]
+    fn wrapping_breaks_on_spaces_and_fits_the_width() {
+        let lines = wrap("the quick brown fox jumps", 11, 0);
+        assert!(lines.iter().all(|l| l.chars().count() <= 11), "{lines:?}");
+        assert_eq!(lines[0], "the quick");
+    }
+
+    /// A pasted URL or a base64 blob has no spaces and must not overflow.
+    #[test]
+    fn a_word_longer_than_the_line_is_split_rather_than_overflowing() {
+        let lines = wrap(&"x".repeat(25), 10, 0);
+        assert!(lines.iter().all(|l| l.chars().count() <= 10), "{lines:?}");
+        assert_eq!(lines.concat(), "x".repeat(25));
+    }
+
+    #[test]
+    fn wrapping_accounts_for_the_prefix_indent() {
+        let lines = wrap("aaa bbb ccc", 10, 4);
+        assert!(lines.iter().all(|l| l.chars().count() <= 6), "{lines:?}");
+    }
+
+    #[test]
+    fn explicit_newlines_are_preserved() {
+        assert_eq!(wrap("a\nb", 40, 0), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn a_zero_width_pane_does_not_panic_or_loop_forever() {
+        let lines = wrap("hello world", 0, 0);
+        assert!(!lines.is_empty());
+    }
+
+    #[test]
+    fn the_visible_window_keeps_the_cursor_inside_it() {
+        assert_eq!(window_start(0, 10, 5), 0, "a short list never scrolls");
+        assert_eq!(window_start(0, 10, 40), 0);
+        assert_eq!(window_start(20, 10, 40), 15, "centred on the cursor");
+        assert_eq!(window_start(39, 10, 40), 30, "clamped to the last page");
+    }
+
+    /// A run-history strip is read left to right in time, so it always ends on
+    /// the most recent run.
+    #[test]
+    fn a_run_history_strip_shows_the_last_seven_ending_on_the_newest() {
+        let history: Vec<Outcome> = (0..10)
+            .map(|i| if i == 9 { Outcome::Failed } else { Outcome::Ok })
+            .collect();
+        let span = strip_span(&history);
+        assert_eq!(span.content.chars().count(), 7);
+        assert!(span.content.ends_with('✗'), "{}", span.content);
+    }
+
+    #[test]
+    fn a_progress_bar_reads_without_colour() {
+        assert_eq!(bar(0, 10), "░░░░░░░░░░");
+        assert_eq!(bar(50, 10), "▓▓▓▓▓░░░░░");
+        assert_eq!(bar(100, 10), "▓▓▓▓▓▓▓▓▓▓");
+        assert_eq!(bar(250, 10), "▓▓▓▓▓▓▓▓▓▓", "a runaway percent still fits");
+    }
+
+    #[test]
+    fn a_harness_code_is_short_enough_for_a_column() {
+        assert_eq!(code("Claude Code"), "cc");
+        assert_eq!(code("OpenCode"), "oc");
+        assert_eq!(code("Antigravity"), "agy");
+        assert_eq!(code("something new"), "?");
+    }
+
+    #[test]
+    fn a_state_glyph_exists_for_every_run_status() {
+        for status in ["running", "completed", "failed", "killed", "queued"] {
+            assert_eq!(run_glyph(status).chars().count(), 1, "{status}");
+        }
+    }
+
+    #[test]
+    fn cutting_a_long_string_says_it_was_cut() {
+        assert_eq!(cut("short", 10), "short");
+        assert_eq!(cut("a-very-long-name", 8), "a-very-…");
+    }
+}
