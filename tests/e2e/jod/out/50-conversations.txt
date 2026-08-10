@@ -1,0 +1,203 @@
+==============================================================
+== 1. three real turns, so there is a transcript to work on
+==============================================================
+$ jod run say APPLE and nothing else -n t1
+▸ t1 (Claude Code) · jod watch ee466b0b-d33c-4152-880a-5ea11a1a5b37
+  model claude-opus-5[1m]
+APPLE
+✓ done · $0.1120 · 6 out
+
+$ jod run say BANANA and nothing else -C -n t2
+▸ t2 (Claude Code) · jod watch c7669520-b549-473a-ba85-c0c35b9b3e65
+  model claude-opus-5
+BANANA
+✓ done · $0.1115 · 6 out
+
+$ jod run say CHERRY and nothing else -C -n t3
+▸ t3 (Claude Code) · jod watch 337aeb96-4718-4d25-89b1-07a2febe7916
+  model claude-opus-5
+CHERRY
+✓ done · $0.0144 · 7 out
+
+==============================================================
+== 2. what got recorded
+==============================================================
+$ q "SELECT id, title, head_id, harness, session_id FROM conversations"
+id | title | head_id | harness | session_id
+---+-------+---------+---------+-----------
+(0 rows)
+
+$ q "SELECT id, conversation_id, parent_id, role, substr(text,1,80) FROM messages ORDER BY id"
+id | conversation_id | parent_id | role | substr(text,1,80)
+---+-----------------+-----------+------+------------------
+(0 rows)
+
+==============================================================
+== 3. conv ls
+==============================================================
+$ jod conv ls
+no conversations yet
+
+$ jod conv ls --json
+[]
+
+conversation under test: (0 rows)
+==============================================================
+== 4. conv show
+==============================================================
+$ '/tmp/jod-e2e/bin/jod' conv show '(0 rows)'
+Error: no conversation starts with (0 rows)
+[exit 1]
+
+$ '/tmp/jod-e2e/bin/jod' conv show '(0 rows)' --live
+Error: no conversation starts with (0 rows)
+[exit 1]
+
+$ jod conv show does-not-exist
+Error: no conversation starts with does-not-exist
+[exit 1]
+
+==============================================================
+== 5. conv search
+==============================================================
+$ jod conv search BANANA
+nothing matched
+
+$ jod conv search CHERRY
+nothing matched
+
+$ jod conv search nothing at all like this
+nothing matched
+
+$ jod conv search
+nothing matched
+
+==============================================================
+== 6. conv fork — the original must be untouched
+==============================================================
+$ '/tmp/jod-e2e/bin/jod' conv fork '(0 rows)' --title 'a fork of the whole thing'
+Error: no conversation starts with (0 rows)
+[exit 1]
+
+$ jod conv ls
+no conversations yet
+
+$ q "SELECT id, title, head_id, forked_from, forked_at_id FROM conversations"
+id | title | head_id | forked_from | forked_at_id
+---+-------+---------+-------------+-------------
+(0 rows)
+
+==============================================================
+== 7. conv revert — non-destructive
+==============================================================
+-- messages in the original, so a revert target can be named --
+$ q "SELECT id, conversation_id, role, substr(text,1,50) FROM messages WHERE conversation_id='(0 rows)' ORDER BY id"
+id | conversation_id | role | substr(text,1,50)
+---+-----------------+------+------------------
+(0 rows)
+
+reverting to message (0 rows)
+$ '/tmp/jod-e2e/bin/jod' conv revert '(0 rows)' '(0 rows)'
+error: invalid value '(0 rows)' for '<MESSAGE>': invalid digit found in string
+
+For more information, try '--help'.
+[exit 2]
+
+$ '/tmp/jod-e2e/bin/jod' conv show '(0 rows)'
+Error: no conversation starts with (0 rows)
+[exit 1]
+
+-- the abandoned tail must still be on disk --
+$ q "SELECT count(*) AS messages_still_stored FROM messages WHERE conversation_id='(0 rows)'"
+messages_still_stored
+---------------------
+0
+(1 rows)
+
+==============================================================
+== 8. conv goto — reach the abandoned branch again
+==============================================================
+going to message (0 rows)
+$ '/tmp/jod-e2e/bin/jod' conv goto '(0 rows)' '(0 rows)'
+error: invalid value '(0 rows)' for '<MESSAGE>': invalid digit found in string
+
+For more information, try '--help'.
+[exit 2]
+
+$ '/tmp/jod-e2e/bin/jod' conv show '(0 rows)'
+Error: no conversation starts with (0 rows)
+[exit 1]
+
+==============================================================
+== 9. bad arguments
+==============================================================
+$ '/tmp/jod-e2e/bin/jod' conv revert '(0 rows)' 999999
+Error: no conversation starts with (0 rows)
+[exit 1]
+
+$ '/tmp/jod-e2e/bin/jod' conv goto '(0 rows)' 999999
+Error: no conversation starts with (0 rows)
+[exit 1]
+
+$ '/tmp/jod-e2e/bin/jod' conv revert '(0 rows)' notanumber
+error: invalid value 'notanumber' for '<MESSAGE>': invalid digit found in string
+
+For more information, try '--help'.
+[exit 2]
+
+$ jod conv fork does-not-exist
+Error: no conversation starts with does-not-exist
+[exit 1]
+
+==============================================================
+== 10. conv compact
+==============================================================
+$ '/tmp/jod-e2e/bin/jod' conv compact '(0 rows)' 'The user asked for three fruits and got them.'
+Error: no conversation starts with (0 rows)
+[exit 1]
+
+$ '/tmp/jod-e2e/bin/jod' conv show '(0 rows)'
+Error: no conversation starts with (0 rows)
+[exit 1]
+
+-- --live is what a harness would still be sent --
+$ '/tmp/jod-e2e/bin/jod' conv show '(0 rows)' --live
+Error: no conversation starts with (0 rows)
+[exit 1]
+
+-- but nothing was deleted --
+$ q "SELECT count(*) AS messages FROM messages WHERE conversation_id='(0 rows)'"
+messages
+--------
+0
+(1 rows)
+
+$ q "SELECT id, conversation_id, from_id, to_id, substr(summary,1,60) FROM compactions"
+id | conversation_id | from_id | to_id | substr(summary,1,60)
+---+-----------------+---------+-------+---------------------
+(0 rows)
+
+==============================================================
+== 11. conv handoff to each harness
+==============================================================
+$ '/tmp/jod-e2e/bin/jod' conv handoff '(0 rows)' --to claude
+Error: no conversation starts with (0 rows)
+[exit 1]
+
+$ '/tmp/jod-e2e/bin/jod' conv handoff '(0 rows)' --to opencode
+Error: no conversation starts with (0 rows)
+[exit 1]
+
+$ '/tmp/jod-e2e/bin/jod' conv handoff '(0 rows)' --to agy
+Error: no conversation starts with (0 rows)
+[exit 1]
+
+==============================================================
+== 12. search still finds compacted-out text
+==============================================================
+$ jod conv search APPLE
+nothing matched
+
+$ jod conv search fruits
+nothing matched
+

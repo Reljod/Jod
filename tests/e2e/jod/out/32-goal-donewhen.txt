@@ -1,0 +1,152 @@
+==============================================================
+== 1. a goal that is already done, by its own deterministic check
+==============================================================
+$ jod goal add alreadydone say OK and stop --done-when true --stall-after 2
+alreadydone is running
+
+$ q "SELECT name, state, done_when, stall_after FROM goals"
+name | state | done_when | stall_after
+-----+-------+-----------+------------
+alreadydone | running | true | 2
+(1 rows)
+
+==============================================================
+== 2. four iterations. Each completes; the check passes every time.
+==============================================================
+########## iteration 1 ##########
+$ jod daemon --once
+claimed 1 · started 1 · held 0 · failed 0
+
+$ (waiting for every run to reach a terminal status)
+settled after 10s
+
+$ q "SELECT name, state, iteration, spent_usd, no_progress FROM goals"
+name | state | iteration | spent_usd | no_progress
+-----+-------+-----------+-----------+------------
+alreadydone | running | 0 | 0.0 | 0
+(1 rows)
+
+########## iteration 2 ##########
+$ jod daemon --once
+[jod/daemon] reloaded 1 prior run(s)
+claimed 1 · started 1 · held 0 · failed 0
+
+$ (waiting for every run to reach a terminal status)
+settled after 10s
+
+$ q "SELECT name, state, iteration, spent_usd, no_progress FROM goals"
+name | state | iteration | spent_usd | no_progress
+-----+-------+-----------+-----------+------------
+alreadydone | running | 1 | 0.14838600000000002 | 0
+(1 rows)
+
+########## iteration 3 ##########
+$ jod daemon --once
+[jod/daemon] reloaded 2 prior run(s)
+claimed 1 · started 1 · held 0 · failed 0
+
+$ (waiting for every run to reach a terminal status)
+settled after 10s
+
+$ q "SELECT name, state, iteration, spent_usd, no_progress FROM goals"
+name | state | iteration | spent_usd | no_progress
+-----+-------+-----------+-----------+------------
+alreadydone | running | 2 | 0.29569900000000005 | 0
+(1 rows)
+
+########## iteration 4 ##########
+$ jod daemon --once
+[jod/daemon] reloaded 3 prior run(s)
+claimed 1 · started 1 · held 0 · failed 0
+
+$ (waiting for every run to reach a terminal status)
+settled after 10s
+
+$ q "SELECT name, state, iteration, spent_usd, no_progress FROM goals"
+name | state | iteration | spent_usd | no_progress
+-----+-------+-----------+-----------+------------
+alreadydone | running | 3 | 0.4393965 | 0
+(1 rows)
+
+==============================================================
+== 3. where did it end up?
+==============================================================
+$ jod goal ls
+[32m◎[0m [1malreadydone         [0m [2miter 3    [0m $0.44
+  [2msay OK and stop[0m
+  [2mnext Aug 11 00:00 (in 48m33s)[0m
+
+$ jod goal log alreadydone
+pursuing  say OK and stop
+  3: OK. Ran `true` — it passed (exit 0). Nothing changed this iteration; no files touched.
+  2: OK. Ran `true` — it passed (exit 0). Nothing changed this iteration; no files touched.
+  1: OK. Ran `true` — it passed (exit 0). Nothing changed this iteration; the standing objective is to say OK and stop, so no files were touched.
+
+$ q "SELECT name, state, iteration, spent_usd, no_progress, stall_after FROM goals"
+name | state | iteration | spent_usd | no_progress | stall_after
+-----+-------+-----------+-----------+-------------+------------
+alreadydone | running | 3 | 0.4393965 | 0 | 2
+(1 rows)
+
+$ jod report
+running   0
+completed 4
+failed    0
+killed    0
+spend     $0.5876
+
+==============================================================
+== 4. what each iteration recorded
+==============================================================
+$ q "SELECT id, subject, predicate, object FROM facts ORDER BY id"
+id | subject | predicate | object
+---+---------+-----------+-------
+1 | goal/alreadydone | pursuing | say OK and stop
+2 | goal/alreadydone | current-run | fa8b8109-a4fb-4996-aa69-26c09ec7ce95
+3 | goal/alreadydone | iteration | 1: OK. Ran `true` — it passed (exit 0). Nothing changed this iteration; the standing objective is to say OK and stop, so no files were touched.
+4 | goal/alreadydone | pursuing | say OK and stop
+5 | goal/alreadydone | current-run | ec96b511-c295-44c1-a776-9825b7dc7f11
+6 | goal/alreadydone | iteration | 2: OK. Ran `true` — it passed (exit 0). Nothing changed this iteration; no files touched.
+7 | goal/alreadydone | pursuing | say OK and stop
+8 | goal/alreadydone | current-run | b8756822-2050-4edf-8110-94bd55ea3e70
+9 | goal/alreadydone | iteration | 3: OK. Ran `true` — it passed (exit 0). Nothing changed this iteration; no files touched.
+10 | goal/alreadydone | pursuing | say OK and stop
+11 | goal/alreadydone | current-run | 64197db8-26c3-42c9-a4f8-966a801fd23a
+(11 rows)
+
+==============================================================
+== 5. did Jod ever run the done-when command itself?
+==============================================================
+-- a done-when with an observable side effect: if Jod runs it, the file appears --
+$ jod goal add sideeffect say OK and stop --done-when touch /tmp/jod-e2e/donewhen/RAN_BY_JOD
+sideeffect is running
+
+$ rm -f /tmp/jod-e2e/donewhen/RAN_BY_JOD
+
+$ jod daemon --once
+[jod/daemon] reloaded 4 prior run(s)
+claimed 2 · started 2 · held 0 · failed 0
+
+$ (waiting for every run to reach a terminal status)
+settled after 20s
+
+$ ls -la /tmp/jod-e2e/donewhen/RAN_BY_JOD 2>&1 || echo 'the file does not exist: Jod never executed the check'
+-rw-rw-r-- 1 reljod reljod 0 Aug 10 23:11 /tmp/jod-e2e/donewhen/RAN_BY_JOD
+
+$ q "SELECT name, state, iteration FROM goals ORDER BY name"
+name | state | iteration
+-----+-------+----------
+alreadydone | running | 4
+sideeffect | running | 0
+(2 rows)
+
+==============================================================
+== 6. is GoalState::Satisfied reachable at all?
+==============================================================
+$ q "SELECT DISTINCT state FROM goals"
+state
+-----
+running
+(1 rows)
+
+-- every state any goal in this suite has ever held --

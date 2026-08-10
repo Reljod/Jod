@@ -1,0 +1,357 @@
+==============================================================
+== 1. set a standing objective
+==============================================================
+$ jod goal add tidy keep the scratch directory tidy
+tidy is running
+
+$ jod goal ls
+[32m◎[0m [1mtidy                [0m [2miter 0    [0m $0.00
+  [2mkeep the scratch directory tidy[0m
+  [2mnext Aug 11 00:00 (in 55m46s)[0m
+
+$ jod goal ls --json
+[
+  {
+    "id": "a3a2b9da-6702-462b-90c5-3f08e3b33062",
+    "name": "tidy",
+    "objective": "keep the scratch directory tidy",
+    "done_when": null,
+    "harness": "claude_code",
+    "cwd": "/home/reljod/repo/Jod/.claude/worktrees/feat+memory-graph-scheduler-webhooks",
+    "model": null,
+    "cron": "0 * * * *",
+    "timezone": "UTC",
+    "state": "running",
+    "iteration": 0,
+    "max_iterations": null,
+    "budget_usd": null,
+    "spent_usd": 0.0,
+    "stall_after": 6,
+    "no_progress": 0,
+    "next_fire_at_ms": 1786406400000,
+    "created_at_ms": 1786403053723
+  }
+]
+
+==============================================================
+== 2. all the knobs
+==============================================================
+$ jod goal add capped a capped goal --max-iterations 2 --budget 0.50 --stall-after 3 -c */5 * * * * -z Asia/Manila --done-when test -f /tmp/jod-e2e/goals/DONE
+capped is running
+
+$ q "SELECT name, cron, timezone, state, iteration, max_iterations, budget_usd, spent_usd, stall_after, no_progress, done_when FROM goals ORDER BY name"
+name | cron | timezone | state | iteration | max_iterations | budget_usd | spent_usd | stall_after | no_progress | done_when
+-----+------+----------+-------+-----------+----------------+------------+-----------+-------------+-------------+----------
+capped | */5 * * * * | Asia/Manila | running | 0 | 2 | 0.5 | 0.0 | 3 | 0 | test -f /tmp/jod-e2e/goals/DONE
+tidy | 0 * * * * | UTC | running | 0 |  |  | 0.0 | 6 | 0 | 
+(2 rows)
+
+==============================================================
+== 3. bad input at the boundary
+==============================================================
+$ jod goal add badcron x -c not a cron
+Error: not a cron is not a cron expression: Invalid pattern: Pattern must have between 5 and 7 fields.
+[exit 1]
+
+$ jod goal add badzone x -z Mars/Olympus
+Error: unknown timezone Mars/Olympus
+[exit 1]
+
+$ jod goal add tidy a duplicate name
+Error: database: UNIQUE constraint failed: goals.name
+
+Caused by:
+    0: UNIQUE constraint failed: goals.name
+    1: Error code 2067: A UNIQUE constraint failed
+[exit 1]
+
+$ jod goal ls
+[32m◎[0m [1mcapped              [0m [2miter 0    [0m $0.00 of $0.50
+  [2ma capped goal[0m
+  [2mnext Aug 10 23:05 (in 46s)[0m
+[32m◎[0m [1mtidy                [0m [2miter 0    [0m $0.00
+  [2mkeep the scratch directory tidy[0m
+  [2mnext Aug 11 00:00 (in 55m46s)[0m
+
+==============================================================
+== 4. log before anything has happened
+==============================================================
+$ jod goal log tidy
+tidy has not iterated yet
+
+$ jod goal log ghost
+Error: no goal ghost
+[exit 1]
+
+==============================================================
+== 5. pause, and what pause means for run
+==============================================================
+$ jod goal pause tidy
+tidy paused
+
+$ jod goal ls
+[32m◎[0m [1mcapped              [0m [2miter 0    [0m $0.00 of $0.50
+  [2ma capped goal[0m
+  [2mnext Aug 10 23:05 (in 46s)[0m
+[2m‖[0m [1mtidy                [0m [2miter 0    [0m $0.00
+  [2mkeep the scratch directory tidy[0m
+
+$ jod goal run tidy
+tidy is not running, so it was not brought forward
+
+$ q "SELECT name, state FROM goals ORDER BY name"
+name | state
+-----+------
+capped | running
+tidy | paused
+(2 rows)
+
+-- the daemon must not advance a paused goal --
+$ jod daemon --once
+claimed 0 · started 0 · held 0 · failed 0
+
+$ q "SELECT name, state, iteration FROM goals ORDER BY name"
+name | state | iteration
+-----+-------+----------
+capped | running | 0
+tidy | paused | 0
+(2 rows)
+
+==============================================================
+== 6. resume
+==============================================================
+$ jod goal resume tidy
+tidy running
+
+$ q "SELECT name, state, iteration FROM goals ORDER BY name"
+name | state | iteration
+-----+-------+----------
+capped | running | 0
+tidy | running | 0
+(2 rows)
+
+==============================================================
+== 7. a REAL iteration
+==============================================================
+$ jod goal add tiny say OK and stop --max-iterations 1
+tiny is running
+
+$ jod goal run tiny
+tiny will iterate on the next tick
+
+$ q "SELECT name, state, iteration, spent_usd, no_progress FROM goals WHERE name='tiny'"
+name | state | iteration | spent_usd | no_progress
+-----+-------+-----------+-----------+------------
+tiny | running | 0 | 0.0 | 0
+(1 rows)
+
+$ jod ls
+no agents
+
+==============================================================
+== 8. wait for the iteration to settle
+==============================================================
+$ python3 - <<'PY'
+import sqlite3, time, os
+db = os.environ['JOD_HOME'] + '/jod.db'
+for i in range(48):
+    con = sqlite3.connect(f'file:{db}?mode=ro', uri=True)
+    runs = con.execute('SELECT id, status FROM runs').fetchall()
+    goals = con.execute("SELECT name, state, iteration, spent_usd FROM goals WHERE name='tiny'").fetchall()
+    con.close()
+    print(f'[{i*5:3d}s] runs=' + ','.join(f'{r[0][:8]}={r[1]}' for r in runs) + f' goal={goals}')
+    if runs and all(r[1] not in ('running','starting','queued') for r in runs):
+        print('settled'); break
+    time.sleep(5)
+PY
+[  0s] runs= goal=[('tiny', 'running', 0, 0.0)]
+[  5s] runs= goal=[('tiny', 'running', 0, 0.0)]
+[ 10s] runs= goal=[('tiny', 'running', 0, 0.0)]
+[ 15s] runs= goal=[('tiny', 'running', 0, 0.0)]
+[ 20s] runs= goal=[('tiny', 'running', 0, 0.0)]
+[ 25s] runs= goal=[('tiny', 'running', 0, 0.0)]
+[ 30s] runs= goal=[('tiny', 'running', 0, 0.0)]
+[ 35s] runs= goal=[('tiny', 'running', 0, 0.0)]
+[ 40s] runs= goal=[('tiny', 'running', 0, 0.0)]
+[ 45s] runs= goal=[('tiny', 'running', 0, 0.0)]
+[ 50s] runs= goal=[('tiny', 'running', 0, 0.0)]
+[ 55s] runs= goal=[('tiny', 'running', 0, 0.0)]
+[ 60s] runs= goal=[('tiny', 'running', 0, 0.0)]
+[ 65s] runs= goal=[('tiny', 'running', 0, 0.0)]
+[ 70s] runs= goal=[('tiny', 'running', 0, 0.0)]
+[ 75s] runs= goal=[('tiny', 'running', 0, 0.0)]
+[ 80s] runs= goal=[('tiny', 'running', 0, 0.0)]
+[ 85s] runs= goal=[('tiny', 'running', 0, 0.0)]
+[ 90s] runs= goal=[('tiny', 'running', 0, 0.0)]
+[ 95s] runs= goal=[('tiny', 'running', 0, 0.0)]
+[100s] runs= goal=[('tiny', 'running', 0, 0.0)]
+[105s] runs= goal=[('tiny', 'running', 0, 0.0)]
+[110s] runs= goal=[('tiny', 'running', 0, 0.0)]
+[115s] runs= goal=[('tiny', 'running', 0, 0.0)]
+[120s] runs= goal=[('tiny', 'running', 0, 0.0)]
+[125s] runs= goal=[('tiny', 'running', 0, 0.0)]
+[130s] runs= goal=[('tiny', 'running', 0, 0.0)]
+[135s] runs= goal=[('tiny', 'running', 0, 0.0)]
+[140s] runs= goal=[('tiny', 'running', 0, 0.0)]
+[145s] runs= goal=[('tiny', 'running', 0, 0.0)]
+[150s] runs= goal=[('tiny', 'running', 0, 0.0)]
+[155s] runs= goal=[('tiny', 'running', 0, 0.0)]
+[160s] runs= goal=[('tiny', 'running', 0, 0.0)]
+[165s] runs= goal=[('tiny', 'running', 0, 0.0)]
+[170s] runs= goal=[('tiny', 'running', 0, 0.0)]
+[175s] runs= goal=[('tiny', 'running', 0, 0.0)]
+[180s] runs= goal=[('tiny', 'running', 0, 0.0)]
+[185s] runs= goal=[('tiny', 'running', 0, 0.0)]
+[190s] runs= goal=[('tiny', 'running', 0, 0.0)]
+[195s] runs= goal=[('tiny', 'running', 0, 0.0)]
+[200s] runs= goal=[('tiny', 'running', 0, 0.0)]
+[205s] runs= goal=[('tiny', 'running', 0, 0.0)]
+[210s] runs= goal=[('tiny', 'running', 0, 0.0)]
+[215s] runs= goal=[('tiny', 'running', 0, 0.0)]
+[220s] runs= goal=[('tiny', 'running', 0, 0.0)]
+[225s] runs= goal=[('tiny', 'running', 0, 0.0)]
+[230s] runs= goal=[('tiny', 'running', 0, 0.0)]
+[235s] runs= goal=[('tiny', 'running', 0, 0.0)]
+
+$ jod ls
+no agents
+
+$ jod goal ls
+[32m◎[0m [1mcapped              [0m [2miter 0    [0m $0.00 of $0.50
+  [2ma capped goal[0m
+  [2mnext Aug 10 23:05 (3m14s ago)[0m
+[32m◎[0m [1mtidy                [0m [2miter 0    [0m $0.00
+  [2mkeep the scratch directory tidy[0m
+  [2mnext Aug 11 00:00 (in 51m45s)[0m
+[32m◎[0m [1mtiny                [0m [2miter 0    [0m $0.00
+  [2msay OK and stop[0m
+  [2mnext Aug 10 23:04 (4m00s ago)[0m
+
+==============================================================
+== 9. what the goal recorded about its own iteration
+==============================================================
+-- the PR states plainly: 'Goal iterations do not yet write their episodic record.' --
+$ jod goal log tiny
+tiny has not iterated yet
+
+$ q "SELECT id, scope, subject, predicate, object, origin FROM facts ORDER BY id"
+id | scope | subject | predicate | object | origin
+---+-------+---------+-----------+--------+-------
+(0 rows)
+
+$ q "SELECT name, state, iteration, spent_usd, no_progress FROM goals ORDER BY name"
+name | state | iteration | spent_usd | no_progress
+-----+-------+-----------+-----------+------------
+capped | running | 0 | 0.0 | 0
+tidy | running | 0 | 0.0 | 0
+tiny | running | 0 | 0.0 | 0
+(3 rows)
+
+==============================================================
+== 10. does the goal's spend get attributed back to it?
+==============================================================
+$ jod report
+running   0
+completed 0
+failed    0
+killed    0
+spend     $0.0000
+
+$ q "SELECT name, spent_usd, budget_usd FROM goals ORDER BY name"
+name | spent_usd | budget_usd
+-----+-----------+-----------
+capped | 0.0 | 0.5
+tidy | 0.0 | 
+tiny | 0.0 | 
+(3 rows)
+
+==============================================================
+== 11. max-iterations must stop it
+==============================================================
+$ jod goal ls --json
+[
+  {
+    "id": "fc642c70-f803-4c01-9f71-f64bbafd230b",
+    "name": "capped",
+    "objective": "a capped goal",
+    "done_when": "test -f /tmp/jod-e2e/goals/DONE",
+    "harness": "claude_code",
+    "cwd": "/home/reljod/repo/Jod/.claude/worktrees/feat+memory-graph-scheduler-webhooks",
+    "model": null,
+    "cron": "*/5 * * * *",
+    "timezone": "Asia/Manila",
+    "state": "running",
+    "iteration": 0,
+    "max_iterations": 2,
+    "budget_usd": 0.5,
+    "spent_usd": 0.0,
+    "stall_after": 3,
+    "no_progress": 0,
+    "next_fire_at_ms": 1786403100000,
+    "created_at_ms": 1786403053790
+  },
+  {
+    "id": "a3a2b9da-6702-462b-90c5-3f08e3b33062",
+    "name": "tidy",
+    "objective": "keep the scratch directory tidy",
+    "done_when": null,
+    "harness": "claude_code",
+    "cwd": "/home/reljod/repo/Jod/.claude/worktrees/feat+memory-graph-scheduler-webhooks",
+    "model": null,
+    "cron": "0 * * * *",
+    "timezone": "UTC",
+    "state": "running",
+    "iteration": 0,
+    "max_iterations": null,
+    "budget_usd": null,
+    "spent_usd": 0.0,
+    "stall_after": 6,
+    "no_progress": 0,
+    "next_fire_at_ms": 1786406400000,
+    "created_at_ms": 1786403053723
+  },
+  {
+    "id": "e738ab6f-3c03-41c7-9d3b-e9395b2e49bf",
+    "name": "tiny",
+    "objective": "say OK and stop",
+    "done_when": null,
+    "harness": "claude_code",
+    "cwd": "/home/reljod/repo/Jod/.claude/worktrees/feat+memory-graph-scheduler-webhooks",
+    "model": null,
+    "cron": "0 * * * *",
+    "timezone": "UTC",
+    "state": "running",
+    "iteration": 0,
+    "max_iterations": 1,
+    "budget_usd": null,
+    "spent_usd": 0.0,
+    "stall_after": 6,
+    "no_progress": 0,
+    "next_fire_at_ms": 1786403054195,
+    "created_at_ms": 1786403054174
+  }
+]
+
+$ q "SELECT name, state, iteration, max_iterations FROM goals WHERE name='tiny'"
+name | state | iteration | max_iterations
+-----+-------+-----------+---------------
+tiny | running | 0 | 1
+(1 rows)
+
+==============================================================
+== 12. rm
+==============================================================
+$ jod goal rm capped
+capped forgotten
+
+$ jod goal rm ghost
+no goal ghost
+
+$ jod goal ls
+[32m◎[0m [1mtidy                [0m [2miter 0    [0m $0.00
+  [2mkeep the scratch directory tidy[0m
+  [2mnext Aug 11 00:00 (in 51m45s)[0m
+[32m◎[0m [1mtiny                [0m [2miter 0    [0m $0.00
+  [2msay OK and stop[0m
+  [2mnext Aug 10 23:04 (4m00s ago)[0m
+
