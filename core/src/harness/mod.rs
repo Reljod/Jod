@@ -239,6 +239,26 @@ impl ToolAccess {
     pub fn unattended() -> ToolAccess {
         ToolAccess::ReadOnly
     }
+
+    /// Clamp to what material from outside may ever reach.
+    ///
+    /// A capability has to be bounded by the *least* trusted thing in the
+    /// chain, not the most. Without this, raising a schedule's level would
+    /// quietly create a path: a webhook rule names a high-privilege schedule, a
+    /// stranger opens a pull request that matches the rule, and their text is
+    /// now steering an agent that can create schedules. Every step is
+    /// individually reasonable, which is what makes it the dangerous shape.
+    ///
+    /// So the cap is applied at the point of use rather than trusted to the
+    /// row, and it is the same rule `webhook.rs` already applies to a payload:
+    /// [`crate::store::Origin::Untrusted`] means read-only, whatever anything
+    /// else says.
+    pub fn capped_for(self, origin: crate::store::Origin) -> ToolAccess {
+        match origin {
+            crate::store::Origin::Untrusted => ToolAccess::ReadOnly,
+            _ => self,
+        }
+    }
 }
 
 /// One argv entry. `Prompt` is a placeholder the runner substitutes with a
@@ -326,6 +346,56 @@ pub trait Harness: Send {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::Origin;
+
+    /// The escalation this exists to close: a webhook rule names a
+    /// high-privilege schedule, a stranger opens a pull request that matches
+    /// it, and their text is steering an agent that can create schedules.
+    /// Every step is individually reasonable, which is what makes it dangerous.
+    #[test]
+    fn untrusted_material_can_never_reach_more_than_reading() {
+        for granted in [
+            ToolAccess::ReadOnly,
+            ToolAccess::Delegate,
+            ToolAccess::Orchestrate,
+        ] {
+            let capped = granted.capped_for(Origin::Untrusted);
+            assert_eq!(capped, ToolAccess::ReadOnly, "{granted:?} escaped the cap");
+            assert!(!capped.may_delegate());
+            assert!(!capped.may_orchestrate());
+        }
+    }
+
+    /// The cap bounds outside material, not Jod's own work. Capping everything
+    /// would make the level pointless.
+    #[test]
+    fn what_jod_itself_started_keeps_the_level_it_was_given() {
+        for origin in [Origin::Owner, Origin::Agent, Origin::System] {
+            assert_eq!(
+                ToolAccess::Orchestrate.capped_for(origin),
+                ToolAccess::Orchestrate,
+                "{origin:?}"
+            );
+        }
+    }
+
+    /// Unattended work reads and does not act. A goal that could set goals is
+    /// bounded by nothing — the stall detector counts iterations of one goal.
+    #[test]
+    fn an_unattended_run_may_look_but_not_spawn() {
+        let level = ToolAccess::unattended();
+        assert!(!level.may_delegate());
+        assert!(!level.may_orchestrate());
+    }
+
+    #[test]
+    fn each_level_grants_strictly_more_than_the_one_below() {
+        assert!(!ToolAccess::ReadOnly.may_delegate());
+        assert!(ToolAccess::Delegate.may_delegate());
+        assert!(!ToolAccess::Delegate.may_orchestrate());
+        assert!(ToolAccess::Orchestrate.may_delegate());
+        assert!(ToolAccess::Orchestrate.may_orchestrate());
+    }
 
     #[test]
     fn input_tokens_take_the_max_and_output_tokens_sum() {

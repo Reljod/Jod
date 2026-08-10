@@ -4,6 +4,7 @@
 //! OpenCode, AGY), runs that harness inside its own tmux session, and turns the
 //! harness's output into one event stream that every command here renders.
 
+mod mcp_cmd;
 mod render;
 mod render_time;
 mod tui;
@@ -270,6 +271,27 @@ enum Command {
         /// Pick up the last conversation instead of starting a new one.
         #[arg(short = 'C', long = "continue")]
         continue_last: bool,
+    },
+    /// Serve Jod's own tools to a harness, as an MCP server over stdio.
+    ///
+    /// This is the seam the system turns on. Jod has no model client and never
+    /// will; what it has is effects — delegating, scheduling, remembering,
+    /// saying what is running. Both Claude Code (`--mcp-config`) and OpenCode
+    /// (`opencode mcp add`) already speak MCP, so a run wired to this thinks
+    /// *and* acts in one loop, with the harness supplying every judgement.
+    ///
+    /// Not a command to type: stdin and stdout carry the protocol. A harness is
+    /// pointed at it by config, and `--access` says how much of Jod that
+    /// particular agent gets.
+    Mcp {
+        /// How much of Jod the agent on the other end may reach. Fail-closed:
+        /// an unset flag gets the read-only set, never the full one.
+        #[arg(long, value_enum, default_value_t = AccessArg::ReadOnly)]
+        access: AccessArg,
+        /// The most permissive policy `delegate` may ask for — the same ceiling
+        /// `jod-api` applies to a remote caller, and the same default.
+        #[arg(long, value_enum, default_value_t = PermissionArg::AcceptEdits)]
+        max_permission: PermissionArg,
     },
 }
 
@@ -584,6 +606,32 @@ enum PermissionArg {
     AcceptEdits,
     /// Auto-approve everything. Only sane in a throwaway directory.
     Bypass,
+}
+
+/// How much of Jod itself an agent may reach over MCP.
+///
+/// A separate axis from `PermissionArg`, which bounds what the agent may do to
+/// the *machine*. An agent can be trusted to edit files and still have no
+/// business arming a schedule that spends money every night at 2am.
+#[derive(Copy, Clone, PartialEq, Eq, ValueEnum)]
+enum AccessArg {
+    /// Read Jod: what is running, what is scheduled, what it remembers.
+    ReadOnly,
+    /// The above, plus starting, continuing and stopping agents.
+    Delegate,
+    /// The full set, including schedules, goals and writing memory.
+    Orchestrate,
+}
+
+impl From<AccessArg> for jod_core::harness::ToolAccess {
+    fn from(a: AccessArg) -> Self {
+        use jod_core::harness::ToolAccess;
+        match a {
+            AccessArg::ReadOnly => ToolAccess::ReadOnly,
+            AccessArg::Delegate => ToolAccess::Delegate,
+            AccessArg::Orchestrate => ToolAccess::Orchestrate,
+        }
+    }
 }
 
 impl From<PermissionArg> for PermissionPolicy {
@@ -1115,6 +1163,13 @@ async fn main() -> Result<()> {
         } => {
             require_supervisor(&jod)?;
             chat(jod, harness, cwd, model, permission, continue_last).await?;
+        }
+
+        Command::Mcp {
+            access,
+            max_permission,
+        } => {
+            mcp_cmd::run(jod, access.into(), max_permission.into()).await?;
         }
     }
 
