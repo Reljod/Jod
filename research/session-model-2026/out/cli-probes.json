@@ -71,6 +71,22 @@
       "observed": "agy --help lists --continue and --conversation only. No fork, no system-prompt flag. An AGY fork must go through the briefing path even though the harness is not changing."
     },
     {
+      "id": "P11",
+      "claim": "Jod can tell when a harness compacts underneath it",
+      "verdict": "FALSE -- and it is a one-line adapter fix",
+      "how": "read core/src/harness/claude.rs:85-93",
+      "observed": "the `system` arm matches only subtype 'init'; every other subtype falls into `_ => vec![]`. Claude Code's compaction announces itself as system/subtype='compact_boundary' carrying preTokens, postTokens and cumulativeDroppedTokens (peer observed 516172 -> 11046 in a real transcript), and Jod drops it.",
+      "why_it_matters": "Jod's own transcript is unaffected -- capture happens as the stream arrives, so every message is already stored. But after a harness-side compaction a Resume::Session gives the agent LESS context than Jod holds, and nothing records that the agent's view narrowed. Surface it as a role='system', origin='jod' note.",
+      "also": "claude --autocompact <auto|tokens> (100k-1M) exists; OpenCode and AGY expose no compaction flag, so harness-native compaction is neither portable nor controllable -- which is part of why Jod owns compaction."
+    },
+    {
+      "id": "P12",
+      "claim": "a Jod conversation id could simply BE the harness session id",
+      "verdict": "REJECT the identity, USE the flag",
+      "against": "only Claude Code accepts an assigned id (--session-id, verified in P4). OpenCode mints ses_... and AGY mints its own, so the mapping column exists regardless and the saving is zero. It is also wrong on Claude: a conversation spans many sessions once it forks or switches harness, so 1:1 identity misdescribes the thing.",
+      "for": "assign a deterministic uuidv5(turn_id) as the Claude session id. That makes a crashed run's session findable without having parsed the Started event -- precisely the case where that event may never have been written. A recovery win, not a modelling one."
+    },
+    {
       "id": "P8",
       "claim": "the harnesses store their transcripts in incompatible shapes",
       "verdict": "TRUE",
