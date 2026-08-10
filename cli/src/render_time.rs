@@ -170,4 +170,93 @@ mod tests {
         let distinct: std::collections::HashSet<_> = marks.iter().collect();
         assert_eq!(distinct.len(), marks.len(), "two states share a glyph");
     }
+
+    #[test]
+    fn a_long_line_is_cut_rather_than_wrapping_the_terminal() {
+        let cut = first_line(&"word ".repeat(100));
+        assert!(cut.chars().count() <= 91);
+        assert!(cut.ends_with('…'));
+    }
+}
+
+// ---- conversations ------------------------------------------------------
+
+const CYAN: &str = "\x1b[36m";
+
+/// A conversation list, newest first.
+///
+/// The fork marker is the column that earns its place: a branch and its parent
+/// are otherwise two rows with similar titles and nothing saying which came
+/// from which.
+pub fn conversations(list: &[jod_core::conversation::ConversationSummary], now_ms: i64) {
+    for c in list {
+        let fork = if c.forked_from.is_some() { "⑂" } else { " " };
+        println!(
+            "{fork} {DIM}{}{RESET}  {BOLD}{}{RESET}",
+            &c.id[..8.min(c.id.len())],
+            c.title
+        );
+        println!(
+            "    {DIM}{} · {} msg · {}{RESET}",
+            c.harness,
+            c.message_count,
+            when(c.updated_at_ms, now_ms)
+        );
+    }
+}
+
+/// One conversation, root to head.
+pub fn thread(messages: &[jod_core::conversation::Message]) {
+    use jod_core::conversation::Role;
+    for m in messages {
+        let (mark, colour) = match m.role {
+            Role::User => ("›", CYAN),
+            Role::Assistant => (" ", RESET),
+            Role::Thinking => ("·", DIM),
+            Role::ToolCall => ("⚙", DIM),
+            Role::ToolResult => ("└", DIM),
+            Role::System => ("•", YELLOW),
+        };
+        // The message id is shown because every other verb takes one: reverting
+        // or forking means naming a message, and hunting for it in the database
+        // is not a user interface.
+        println!(
+            "{DIM}{:>5}{RESET} {colour}{mark} {}{RESET}",
+            m.id,
+            first_line(&m.text)
+        );
+    }
+}
+
+/// Search hits, each with the conversation's opening around it.
+///
+/// The window plus the opening is the shape the Hermes audit measured: it lets
+/// you reconstruct what the conversation was for and where the match sits in it
+/// without paying for the whole transcript, and with no model call anywhere.
+pub fn search(hits: &[jod_core::conversation::SearchHit]) {
+    for h in hits {
+        println!(
+            "{BOLD}{}{RESET} {DIM}{}{RESET}",
+            h.title,
+            &h.conversation_id[..8.min(h.conversation_id.len())]
+        );
+        if let Some(opening) = h.bookend_start.first() {
+            println!("  {DIM}opened: {}{RESET}", first_line(&opening.text));
+        }
+        for m in &h.window {
+            // Marked, so the hit is findable inside the context around it.
+            let marker = if m.id == h.message.id { "▸" } else { " " };
+            println!("  {marker} {}", first_line(&m.text));
+        }
+        println!();
+    }
+}
+
+/// One line, bounded. A transcript pasted into a list view is not a list.
+fn first_line(text: &str) -> String {
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() <= 90 {
+        return flat;
+    }
+    format!("{}…", flat.chars().take(90).collect::<String>())
 }

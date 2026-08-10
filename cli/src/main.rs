@@ -170,6 +170,15 @@ enum Command {
         #[arg(long)]
         once: bool,
     },
+    /// Conversations Jod owns: list them, fork one, take one back.
+    ///
+    /// A conversation here is a tree, not a line. Two of the three harnesses
+    /// can fork themselves and none can hand a thread to another, so the
+    /// transcript that survives a harness switch has to be Jod's.
+    Conv {
+        #[command(subcommand)]
+        what: ConvCommand,
+    },
     /// Work that fires on the clock.
     ///
     /// A schedule is a prompt, a cron expression and a timezone. Everything
@@ -228,6 +237,67 @@ enum Command {
         /// Pick up the last conversation instead of starting a new one.
         #[arg(short = 'C', long = "continue")]
         continue_last: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum ConvCommand {
+    /// Every conversation, newest first.
+    Ls {
+        #[arg(short, long, default_value_t = 20)]
+        limit: usize,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Read one, from its root to wherever its head currently points.
+    Show {
+        id: String,
+        /// Only what a harness would still be sent, after compaction.
+        #[arg(long)]
+        live: bool,
+    },
+    /// Copy a conversation from a point, leaving the original untouched.
+    ///
+    /// Without `--at`, forks from the current head.
+    Fork {
+        id: String,
+        #[arg(long)]
+        at: Option<i64>,
+        #[arg(long)]
+        title: Option<String>,
+    },
+    /// Move the head back to an earlier message.
+    ///
+    /// Non-destructive: the abandoned tail stays on disk and stays reachable,
+    /// which is what makes this recoverable rather than a deletion.
+    Revert { id: String, message: i64 },
+    /// Point the head at any message sharing this conversation's root —
+    /// including a branch abandoned earlier, which revert cannot reach because
+    /// it is a cousin of the head rather than an ancestor.
+    Goto { id: String, message: i64 },
+    /// Search every conversation. Returns the match with the conversation's
+    /// opening and closing around it, so a hit reads without the transcript.
+    Search {
+        query: Vec<String>,
+        #[arg(short, long, default_value_t = 5)]
+        limit: usize,
+    },
+    /// Summarise a span out of the live window, keeping it on disk.
+    Compact {
+        id: String,
+        /// The summary. Jod has no model client, so the text comes from
+        /// whoever ran the summarising agent.
+        summary: String,
+    },
+    /// What this conversation would be handed to another harness as.
+    ///
+    /// Prints the carrier rather than moving anything, because seeing what
+    /// survives is the point — and for AGY the honest answer is that it
+    /// becomes prompt text.
+    Handoff {
+        id: String,
+        #[arg(short = 'H', long, value_enum)]
+        to: HarnessArg,
     },
 }
 
@@ -672,6 +742,7 @@ async fn main() -> Result<()> {
             }
         }
 
+        Command::Conv { what } => conv_command(&jod, what)?,
         Command::Schedule { what } => schedule_command(&jod, what)?,
         Command::Goal { what } => goal_command(&jod, what)?,
 
@@ -979,6 +1050,123 @@ async fn main() -> Result<()> {
 ///
 /// `jod-run` is what holds a run's output once the caller walks away; without
 /// it a spawn would fail later and less clearly, after the run had a name.
+/// Carry out a `jod conv …` subcommand.
+///
+/// An id prefix is enough everywhere one is taken, because retyping a UUID is
+/// not a user interface — and an ambiguous prefix is refused rather than
+/// guessed, since reverting the wrong conversation is not undoable by the
+/// person who did it.
+fn conv_command(jod: &Jod, what: ConvCommand) -> Result<()> {
+    let store = jod.store().context("this command needs the database")?;
+
+    // Resolve a prefix against the conversations that exist.
+    let resolve = |typed: &str| -> Result<String> {
+        let all = store.conversations(500)?;
+        let hits: Vec<_> = all.iter().filter(|c| c.id.starts_with(typed)).collect();
+        match hits.as_slice() {
+            [only] => Ok(only.id.clone()),
+            [] => bail!("no conversation starts with {typed}"),
+            many => bail!("{typed} matches {} conversations — type more of it", many.len()),
+        }
+    };
+
+    match what {
+        ConvCommand::Ls { limit, json } => {
+            let all = store.conversations(limit)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&all)?);
+            } else if all.is_empty() {
+                println!("no conversations yet");
+            } else {
+                render_time::conversations(&all, chrono::Utc::now().timestamp_millis());
+            }
+        }
+        ConvCommand::Show { id, live } => {
+            let id = resolve(&id)?;
+            let thread = if live {
+                store.live_window(&id)?
+            } else {
+                store.thread(&id)?
+            };
+            render_time::thread(&thread);
+        }
+        ConvCommand::Fork { id, at, title } => {
+            let id = resolve(&id)?;
+            let at = match at {
+                Some(m) => m,
+                None => store
+                    .conversation(&id)?
+                    .and_then(|c| c.head_id)
+                    .context("that conversation has no messages to fork from")?,
+            };
+            let forked = store.fork_conversation(&id, at, title.as_deref())?;
+            println!("forked to {}", forked.id);
+            println!("the original is untouched — `jod conv ls` shows both");
+        }
+        ConvCommand::Revert { id, message } => {
+            let id = resolve(&id)?;
+            store.revert_to(&id, message)?;
+            println!("head is back at message {message}");
+            println!("nothing was deleted; `jod conv goto` returns to what was abandoned");
+        }
+        ConvCommand::Goto { id, message } => {
+            let id = resolve(&id)?;
+            store.move_head(&id, message)?;
+            println!("head is now at message {message}");
+        }
+        ConvCommand::Search { query, limit } => {
+            let hits = store.search_messages(&query.join(" "), limit)?;
+            if hits.is_empty() {
+                println!("nothing matched");
+            } else {
+                render_time::search(&hits);
+            }
+        }
+        ConvCommand::Compact { id, summary } => {
+            let id = resolve(&id)?;
+            let live = store.live_window(&id)?;
+            let (Some(first), Some(last)) = (live.first(), live.last()) else {
+                bail!("nothing to compact");
+            };
+            let done = store.compact(&id, first.id, last.id, &summary, "manual")?;
+            // Both numbers, because a compaction that freed nothing is a real
+            // outcome and should be visible rather than repeated forever.
+            println!(
+                "compacted {} chars to {} — the originals stay on disk and stay searchable",
+                done.before_chars, done.after_chars
+            );
+        }
+        ConvCommand::Handoff { id, to } => {
+            let id = resolve(&id)?;
+            let carrier = store.handoff(&id, HarnessKind::from(to))?;
+            if carrier.is_lossy() {
+                // Said before the move, because that is when the loss is still
+                // a decision rather than a discovery.
+                eprintln!(
+                    "note: this harness accepts no transcript, so the prior \
+                     conversation travels as prompt text — structure is lost"
+                );
+            }
+            // Printed in exactly the form the receiving harness takes, so this
+            // is pipeable rather than merely informative: stream-json lines go
+            // to `claude --input-format stream-json`, the document to
+            // `opencode import`, the prefix into a prompt.
+            match carrier {
+                jod_core::conversation::Handoff::StreamJson { lines } => {
+                    for line in lines {
+                        println!("{line}");
+                    }
+                }
+                jod_core::conversation::Handoff::Import { document } => {
+                    println!("{}", serde_json::to_string_pretty(&document)?);
+                }
+                jod_core::conversation::Handoff::PromptPrefix { text } => println!("{text}"),
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Carry out a `jod schedule …` subcommand.
 ///
 /// Every path here goes through the store rather than spawning anything: a
