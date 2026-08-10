@@ -1595,6 +1595,40 @@ impl Store {
         })
     }
 
+    /// Bring a schedule's next instant forward to now.
+    ///
+    /// What "run now" means: the schedule becomes due and the ordinary tick
+    /// picks it up, rather than a second code path that spawns directly. One
+    /// firing path means the overlap policy, the failure count and the fire
+    /// record all apply to a hand-started run exactly as they do to a
+    /// timed one — a "run now" that skipped them would be the one run whose
+    /// behaviour nobody could predict.
+    ///
+    /// Refuses a schedule that is not armed. Firing something paused or broken
+    /// silently would defeat the reason it was stopped.
+    pub fn run_schedule_now(&self, name: &str, at_ms: i64) -> Result<bool> {
+        self.write(|tx| {
+            let changed = tx.execute(
+                "UPDATE schedules SET next_fire_at_ms = ?2
+                  WHERE name = ?1 AND state = 'armed'",
+                params![name, at_ms],
+            )?;
+            Ok(changed > 0)
+        })
+    }
+
+    /// The same, for a goal's next iteration.
+    pub fn run_goal_now(&self, name: &str, at_ms: i64) -> Result<bool> {
+        self.write(|tx| {
+            let changed = tx.execute(
+                "UPDATE goals SET next_fire_at_ms = ?2
+                  WHERE name = ?1 AND state = 'running'",
+                params![name, at_ms],
+            )?;
+            Ok(changed > 0)
+        })
+    }
+
     pub fn delete_schedule(&self, name: &str) -> Result<bool> {
         self.write(|tx| {
             let gone = tx.execute("DELETE FROM schedules WHERE name = ?1", params![name])?;
