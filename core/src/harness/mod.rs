@@ -158,11 +158,18 @@ pub struct SpawnRequest {
     /// them. The harness supplies the judgement, Jod supplies the verbs, and
     /// neither has to become the other.
     ///
-    /// Because it lives here rather than in the orchestrator, a scheduled run,
-    /// a goal iteration, a webhook-triggered agent and a teammate all get the
-    /// same tools as the main chat. An agent that can see what else is running
-    /// can hand work sideways instead of duplicating it, which is the whole of
+    /// Because it lives here rather than in the orchestrator, the same seam is
+    /// available to a scheduled run, a goal iteration, a webhook-triggered
+    /// agent and a teammate. An agent that can see what else is running can
+    /// hand work sideways instead of duplicating it, which is the whole of
     /// agent-to-agent as far as Jod needs to care.
+    ///
+    /// **The seam is universal; the level is not.** An earlier draft of this
+    /// comment said every spawn got "the same tools as the main chat", which
+    /// was wrong and would have been dangerous: the main chat is you, present,
+    /// watching. A schedule at 2am is nobody watching, and the thing you least
+    /// want unattended is an agent that can create more unattended agents.
+    /// See [`ToolAccess::unattended`].
     ///
     /// `None` means a plain agent with no access to Jod — the right default for
     /// anything untrusted, and the reason this is opt-in rather than automatic.
@@ -212,6 +219,25 @@ impl ToolAccess {
     /// is watching, and a goal spends it until something stops it.
     pub fn may_orchestrate(&self) -> bool {
         matches!(self, ToolAccess::Orchestrate)
+    }
+
+    /// What an agent nobody is watching gets.
+    ///
+    /// Read-only, and the reason is compounding rather than caution. A
+    /// scheduled run that could schedule is a schedule that can multiply
+    /// while you sleep; a goal that could set goals has no bound at all, and
+    /// the stall detector counts iterations of *one* goal, so it would not
+    /// even notice. The failure is not one expensive night — it is that
+    /// nothing in the design says when it stops.
+    ///
+    /// Reading is the half that pays for itself anyway: the point of tools on
+    /// an unattended run is that it can see what else is going on and decline
+    /// to duplicate it, which needs `list_agents` and nothing more.
+    ///
+    /// Raising this for a specific schedule is a per-schedule setting worth
+    /// having, and deliberately not a default worth inheriting.
+    pub fn unattended() -> ToolAccess {
+        ToolAccess::ReadOnly
     }
 }
 

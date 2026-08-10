@@ -724,7 +724,10 @@ impl Ticker {
                 // harness conversation without its context growing without
                 // bound; the memory layer is what carries continuity instead.
                 resume: Resume::Fresh,
-                tools: None,
+                // Read-only, not nothing: an unattended run should be able
+                // to see what else is going on and decline to duplicate it.
+                // Not more than that — see `ToolAccess::unattended`.
+                tools: Some(crate::harness::ToolAccess::unattended()),
             })
             .await?;
 
@@ -771,7 +774,10 @@ impl Ticker {
                 // continued last night's thread would inherit context nobody
                 // chose for it, and the context would grow without bound.
                 resume: Resume::Fresh,
-                tools: None,
+                // Read-only, not nothing: an unattended run should be able
+                // to see what else is going on and decline to duplicate it.
+                // Not more than that — see `ToolAccess::unattended`.
+                tools: Some(crate::harness::ToolAccess::unattended()),
             })
             .await?;
         let _ = due_at_ms;
