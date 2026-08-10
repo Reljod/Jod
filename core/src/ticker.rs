@@ -25,6 +25,16 @@ use crate::schedule::{self, Fire, FireOutcome, Goal, Misfire, Overlap, Schedule}
 use crate::service::{AgentStatus, Jod};
 use crate::store::{NewFact, Origin, Store};
 
+/// What a goal's done-when command said.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DoneCheck {
+    /// Exit zero. The goal is finished.
+    satisfied: bool,
+    /// A hash of what the check *saw*. Two iterations with the same
+    /// fingerprint moved nothing, however much the agent reported doing.
+    fingerprint: String,
+}
+
 /// Collapse a run's last message to one line, so an episodic record stays a
 /// record rather than becoming a second copy of the transcript.
 fn one_line(text: &str) -> String {
@@ -597,12 +607,51 @@ impl Ticker {
                         continue;
                     }
                     Ok(agent) => {
-                        // Completion is the only progress signal Jod can read
-                        // without a model. It is a proxy: an iteration that ran
-                        // cleanly and achieved nothing counts as progress here,
-                        // which is why the stall threshold is several
-                        // iterations rather than one.
-                        let progressed = agent.status == AgentStatus::Completed;
+                        // What the done-when check says, run by Jod rather than
+                        // described to the agent. Both of the goal's own
+                        // guarantees hang off this.
+                        let verdict = self.check_done(&goal).await;
+
+                        // A goal whose check passes is finished. Without this
+                        // there was no path by which a goal could ever succeed:
+                        // `should_stop` only ever returned exhausted or
+                        // stalled, so every goal ran until it ran out.
+                        if verdict.as_ref().is_some_and(|v| v.satisfied) {
+                            store.remember(
+                                NewFact::new(subject.clone(), "ended", "satisfied")
+                                    .in_scope(&scope)
+                                    .from(Origin::System),
+                            )?;
+                            store.set_goal_state(&goal.name, crate::schedule::GoalState::Satisfied)?;
+                            store.release_goal(&goal.id)?;
+                            continue;
+                        }
+
+                        // Progress used to mean "the run exited cleanly", which
+                        // inverted the whole point: a loop completing
+                        // iterations while nothing changes is *exactly* the
+                        // failure stall detection exists to catch, and that
+                        // reading reset the counter on every one of them. The
+                        // counter only rose when a run failed — the one case
+                        // that is already visible.
+                        //
+                        // So progress is a change in what the check *sees*,
+                        // fingerprinted the way a monitor fingerprints a page.
+                        // With no check there is nothing to observe, and the
+                        // honest answer is no: a goal nobody can measure should
+                        // stall and ask rather than run for ever.
+                        let progressed = match (&verdict, self.last_fingerprint(&store, &subject)?) {
+                            (Some(v), Some(previous)) => v.fingerprint != previous,
+                            (Some(_), None) => true,
+                            (None, _) => false,
+                        };
+                        if let Some(v) = &verdict {
+                            store.remember(
+                                NewFact::new(subject.clone(), "done-when", v.fingerprint.clone())
+                                    .in_scope(&scope)
+                                    .from(Origin::System),
+                            )?;
+                        }
                         let cost = agent.usage.cost_usd.unwrap_or(0.0);
                         let outcome = agent
                             .last_message
@@ -659,6 +708,42 @@ impl Ticker {
         Ok(report)
     }
 
+    /// What a goal's done-when check says right now.
+    ///
+    /// Run by Jod, deterministically, rather than described to the agent and
+    /// taken on its word. The help text and the schema comment both promised
+    /// this and neither delivered it: the command was interpolated into the
+    /// prompt and the model asked to self-report — the opinion the design says
+    /// it avoids. Gates before judges, as Hermes' own `/goal` puts it.
+    async fn check_done(&self, goal: &Goal) -> Option<DoneCheck> {
+        let command = goal.done_when.clone()?;
+        let cwd = goal.cwd.clone();
+        let probes = self.probes.clone();
+        // Off the async thread: this is somebody's shell one-liner and it may
+        // block for as long as it likes.
+        let seen = tokio::task::spawn_blocking(move || probes.run(&command, &cwd))
+            .await
+            .ok()?
+            .ok()?;
+        Some(DoneCheck {
+            satisfied: seen.status == 0,
+            // The output, not the exit code. A check that keeps failing while
+            // its output changes is a goal making progress towards passing,
+            // and one whose output is identical run after run is a goal going
+            // nowhere however busy the agent looks.
+            fingerprint: seen.digest(),
+        })
+    }
+
+    /// The fingerprint the previous iteration recorded, if any.
+    fn last_fingerprint(&self, store: &Store, subject: &str) -> Result<Option<String>> {
+        Ok(store
+            .facts_about(subject)?
+            .into_iter()
+            .find(|f| f.predicate == "done-when")
+            .map(|f| f.object))
+    }
+
     /// The run this goal has in flight, if any.
     fn current_run(&self, store: &Store, subject: &str) -> Result<Option<String>> {
         Ok(store
@@ -694,9 +779,15 @@ impl Ticker {
             goal.iteration + 1
         );
         if let Some(check) = &goal.done_when {
+            // Told, not asked. Jod runs this itself the moment the iteration
+            // ends and decides from the exit code, so the agent is given it as
+            // the definition of finished rather than as a question it answers
+            // about its own work. Saying "report whether it passed" invited
+            // exactly the self-assessment the design exists to avoid.
             prompt.push_str(&format!(
-                "\n\nIt is done when this command succeeds: {check}\nRun it before you \
-                 conclude anything, and say plainly whether it passed."
+                "\n\nThis goal is finished when `{check}` exits zero. Jod runs that \
+                 itself when you stop, so do not report on it — just make it \
+                 truer than you found it."
             ));
         }
         if !recent.is_empty() {
@@ -968,6 +1059,80 @@ mod tests {
 
     /// Without a supervisor the spawn fails, which is fine — what is under test
     /// is that the tick reaches the spawn at all rather than skipping the goal.
+    #[tokio::test]
+    /// A goal whose check passes is finished. Before this there was no path by
+    /// which a goal could ever succeed: `should_stop` returned only exhausted
+    /// or stalled, so every goal ran until it ran out of budget.
+    async fn a_goal_whose_check_passes_is_satisfied_rather_than_run_again() {
+        let store = std::sync::Arc::new(crate::store::Store::in_memory().unwrap());
+        let mut g = a_goal("done");
+        g.done_when = Some("true".into());
+        store.add_goal(&g).unwrap();
+
+        let jod = Jod::with_store(store.clone());
+        let ticker = Ticker::new(jod).as_owner("t");
+        // Pretend an iteration just finished, which is when the check runs.
+        let verdict = ticker.check_done(&g).await.expect("a check was configured");
+        assert!(verdict.satisfied, "`true` exits zero");
+    }
+
+    #[tokio::test]
+    async fn a_goal_whose_check_fails_is_not_satisfied() {
+        let store = std::sync::Arc::new(crate::store::Store::in_memory().unwrap());
+        let mut g = a_goal("notdone");
+        g.done_when = Some("false".into());
+        store.add_goal(&g).unwrap();
+
+        let ticker = Ticker::new(Jod::with_store(store)).as_owner("t");
+        let verdict = ticker.check_done(&g).await.expect("a check was configured");
+        assert!(!verdict.satisfied);
+    }
+
+    /// The inversion this replaced: progress used to mean "the run exited
+    /// cleanly", so a loop completing iterations while nothing changed — the
+    /// exact failure stall detection exists for — reset the counter every time,
+    /// and the counter only rose when a run *failed*.
+    #[tokio::test]
+    async fn a_check_seeing_the_same_thing_twice_is_not_progress() {
+        let store = std::sync::Arc::new(crate::store::Store::in_memory().unwrap());
+        let mut g = a_goal("stuck");
+        g.done_when = Some("echo unchanged".into());
+        store.add_goal(&g).unwrap();
+
+        let ticker = Ticker::new(Jod::with_store(store)).as_owner("t");
+        let first = ticker.check_done(&g).await.unwrap();
+        let second = ticker.check_done(&g).await.unwrap();
+        assert_eq!(
+            first.fingerprint, second.fingerprint,
+            "identical output must fingerprint identically, or nothing ever stalls"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_check_seeing_something_new_is_progress() {
+        let store = std::sync::Arc::new(crate::store::Store::in_memory().unwrap());
+        let mut g = a_goal("moving");
+        g.done_when = Some("echo one".into());
+        store.add_goal(&g).unwrap();
+        let ticker = Ticker::new(Jod::with_store(store)).as_owner("t");
+        let first = ticker.check_done(&g).await.unwrap();
+
+        g.done_when = Some("echo two".into());
+        let second = ticker.check_done(&g).await.unwrap();
+        assert_ne!(first.fingerprint, second.fingerprint);
+    }
+
+    /// A goal nobody can measure should stall and ask rather than run for ever,
+    /// so the absence of a check is not treated as progress.
+    #[tokio::test]
+    async fn a_goal_with_no_check_reports_no_verdict_at_all() {
+        let store = std::sync::Arc::new(crate::store::Store::in_memory().unwrap());
+        let g = a_goal("unmeasured");
+        store.add_goal(&g).unwrap();
+        let ticker = Ticker::new(Jod::with_store(store)).as_owner("t");
+        assert!(ticker.check_done(&g).await.is_none());
+    }
+
     #[tokio::test]
     async fn a_due_goal_is_claimed_and_an_iteration_is_attempted() {
         let store = std::sync::Arc::new(crate::store::Store::in_memory().unwrap());
