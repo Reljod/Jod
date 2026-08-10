@@ -16,6 +16,26 @@ rusqlite.workspace = true
 libc.workspace = true
 croner.workspace = true
 chrono-tz.workspace = true
+# Webhook signatures. GitHub signs with HMAC-SHA256 and there is no negotiation
+# to do, so these three are the whole dependency: a MAC, a hash, and a
+# constant-time compare. `subtle` is already what `jod-api` uses for tokens.
+hmac = "0.12"
+sha2 = "0.10"
+subtle = "2"
+# The only HTTP client in the tree, and it exists for Telegram. The Bot API is
+# three JSON endpoints for our purposes (`getUpdates`, `sendMessage`,
+# `editMessageText`); `teloxide` adds a dispatcher, a dialogue state machine and
+# derive macros over the same `reqwest` call, and `frankenstein` adds ~900
+# generated types for methods we never send. Both cost more than they save when
+# the payload structs fit on one screen. `rustls` rather than the system
+# OpenSSL, because Jod ships as one static binary onto a VPS — see the
+# transport note in `telegram.rs`.
+reqwest = { version = "0.13", default-features = false, features = [
+  "json",
+  "rustls",
+] }
 
 [dev-dependencies]
-tokio = { version = "1", features = ["full"] }
+# `test-util` on top of `full`: the Telegram rate-limit tests run on a paused
+# clock, so a 30-second flood wait is asserted rather than waited out.
+tokio = { version = "1", features = ["full", "test-util"] }
