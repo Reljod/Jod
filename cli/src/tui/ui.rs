@@ -482,12 +482,17 @@ fn titled(ws: Workspace, app: &App) -> String {
     format!(" {} · {} ", ws.title(), app.count_for(ws))
 }
 
-fn body<'a>(ws: Workspace, app: &App, items: Vec<ListItem<'a>>) -> List<'a> {
+/// The master half of a split screen.
+///
+/// Its title is the screen's name alone: the master pane is 48 cells at the
+/// design width, so a counted title would be truncated mid-word — and the
+/// status bar already carries the count on every screen.
+fn body<'a>(ws: Workspace, items: Vec<ListItem<'a>>) -> List<'a> {
     List::new(items).block(
         Block::default()
             .borders(Borders::ALL)
             .border_style(fg(USER))
-            .title(titled(ws, app))
+            .title(format!(" {} ", ws.title()))
             .title_bottom(keys::footer(ws)),
     )
 }
@@ -557,15 +562,15 @@ fn draw_fleet(f: &mut Frame, app: &App, area: Rect) {
         items.push(ListItem::new(Line::from("")));
         items.push(ListItem::new(line));
     }
-    f.render_widget(body(Workspace::Fleet, app, items), left);
+    f.render_widget(body(Workspace::Fleet, items), left);
 
     let Some(right) = right else { return };
     let lines = match app.selected_agent() {
-        None => vec![Line::from(Span::styled("nothing selected", fg(MUTED)))],
+        None => vec![Line::from(Span::styled(" nothing selected", fg(MUTED)))],
         Some(a) => {
             let mut lines = vec![
-                Line::from(Span::styled(a.name.clone(), bold(AGENT))),
-                Line::from(Span::styled(a.id.clone(), fg(MUTED))),
+                Line::from(Span::styled(format!(" {}", a.name), bold(AGENT))),
+                Line::from(Span::styled(format!(" {}", a.id), fg(MUTED))),
                 Line::from(""),
                 field("harness", &a.harness),
                 field(
@@ -597,9 +602,9 @@ fn draw_fleet(f: &mut Frame, app: &App, area: Rect) {
             ];
             match &a.last {
                 Some(text) => {
-                    lines.push(Line::from(Span::styled("last", fg(MUTED))));
+                    lines.push(Line::from(Span::styled(" last", fg(MUTED))));
                     for chunk in wrap(text, right.width.saturating_sub(4) as usize, 2) {
-                        lines.push(Line::from(Span::styled(format!("  {chunk}"), fg(AGENT))));
+                        lines.push(Line::from(Span::styled(format!("   {chunk}"), fg(AGENT))));
                     }
                 }
                 None => lines.push(Line::from(Span::styled(
@@ -622,9 +627,11 @@ fn draw_fleet(f: &mut Frame, app: &App, area: Rect) {
     );
 }
 
+/// One `name  value` row of a detail pane, indented off the border — text
+/// flush against a box edge reads as a rendering bug even when it is not.
 fn field(name: &str, value: &str) -> Line<'static> {
     Line::from(vec![
-        Span::styled(format!("{name:<9}"), fg(MUTED)),
+        Span::styled(format!(" {name:<9}"), fg(MUTED)),
         Span::styled(value.to_string(), fg(AGENT)),
     ])
 }
@@ -688,20 +695,20 @@ fn draw_memory(f: &mut Frame, app: &App, area: Rect) {
             fg(WARN),
         )));
     }
-    f.render_widget(body(Workspace::Memory, app, items), left);
+    f.render_widget(body(Workspace::Memory, items), left);
 
     let Some(right) = right else { return };
     let lines = match app.selected_memory() {
-        None => vec![Line::from(Span::styled("nothing selected", fg(MUTED)))],
+        None => vec![Line::from(Span::styled(" nothing selected", fg(MUTED)))],
         Some(n) => {
             let mut lines = vec![
                 Line::from(vec![
-                    Span::styled(n.name.clone(), bold(AGENT)),
+                    Span::styled(format!(" {}", n.name), bold(AGENT)),
                     Span::styled(format!("   {}", n.kind.label()), fg(MUTED)),
                 ]),
                 Line::from(Span::styled(
                     format!(
-                        "conf {:.2} · {} edges · seen {}×",
+                        " conf {:.2} · {} edges · seen {}×",
                         n.confidence,
                         n.degree,
                         n.seen
@@ -711,11 +718,11 @@ fn draw_memory(f: &mut Frame, app: &App, area: Rect) {
                 Line::from(""),
             ];
             for chunk in wrap(&n.body, right.width.saturating_sub(4) as usize, 0) {
-                lines.push(Line::from(Span::styled(chunk, fg(AGENT))));
+                lines.push(Line::from(Span::styled(format!(" {chunk}"), fg(AGENT))));
             }
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
-                format!("▲ linked from ({})", n.in_edges.len()),
+                format!(" ▲ linked from ({})", n.in_edges.len()),
                 fg(MUTED),
             )));
             for edge in &n.in_edges {
@@ -723,7 +730,7 @@ fn draw_memory(f: &mut Frame, app: &App, area: Rect) {
             }
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
-                format!("▼ links to ({})", n.out_edges.len()),
+                format!(" ▼ links to ({})", n.out_edges.len()),
                 fg(MUTED),
             )));
             for edge in &n.out_edges {
@@ -731,9 +738,9 @@ fn draw_memory(f: &mut Frame, app: &App, area: Rect) {
             }
             if !n.provenance.is_empty() {
                 lines.push(Line::from(""));
-                lines.push(Line::from(Span::styled("provenance", fg(MUTED))));
+                lines.push(Line::from(Span::styled(" provenance", fg(MUTED))));
                 for source in &n.provenance {
-                    lines.push(Line::from(Span::styled(format!("  {source}"), fg(MUTED))));
+                    lines.push(Line::from(Span::styled(format!("   {source}"), fg(MUTED))));
                 }
             }
             lines
@@ -753,7 +760,7 @@ fn draw_memory(f: &mut Frame, app: &App, area: Rect) {
 
 fn edge_line(edge: &super::data::MemoryEdge) -> Line<'static> {
     Line::from(vec![
-        Span::styled(format!("  {:<14}", edge.kind), fg(MUTED)),
+        Span::styled(format!("   {:<14}", edge.kind), fg(MUTED)),
         Span::styled(format!("{} ", edge.other_kind.glyph()), fg(AGENT)),
         Span::styled(edge.other_name.clone(), fg(AGENT)),
         Span::styled(if edge.warn { "  ⚠" } else { "" }, fg(BAD)),
@@ -2467,7 +2474,6 @@ mod tests {
         a.overlay = Overlay::Confirm {
             verb: "delete".into(),
             what: "pr-opened".into(),
-            id: "pr-opened".into(),
         };
         let screen = rendered(&a, 100, 24);
         assert!(screen.contains("delete pr-opened?"), "{screen}");
@@ -3122,7 +3128,6 @@ mod tests {
             Overlay::Confirm {
                 verb: "delete".into(),
                 what: "a-very-long-name-indeed".into(),
-                id: "x".into(),
             },
             Overlay::Prompt {
                 label: "schedule".into(),

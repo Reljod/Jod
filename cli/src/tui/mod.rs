@@ -769,7 +769,6 @@ fn on_workspace_key(app: &mut App, key: KeyEvent, viewport: usize) -> Option<Act
                 app.overlay = Overlay::Confirm {
                     verb: delete_verb(ws).to_string(),
                     what: what.clone(),
-                    id: what,
                 };
             }
             return None;

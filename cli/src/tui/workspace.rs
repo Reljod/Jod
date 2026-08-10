@@ -323,8 +323,10 @@ mod tests {
 
     #[test]
     fn a_selection_that_disappeared_falls_back_to_the_top() {
-        let mut list = ListState::default();
-        list.selected = Some("gone".into());
+        let mut list = ListState {
+            selected: Some("gone".into()),
+            ..Default::default()
+        };
         list.reconcile(&ids(&["a", "b"]));
         assert_eq!(list.selected.as_deref(), Some("a"));
     }
@@ -363,8 +365,10 @@ mod tests {
     /// pressing `/` never makes the list appear to empty itself.
     #[test]
     fn an_open_but_empty_filter_hides_nothing() {
-        let mut list = ListState::default();
-        list.filter = Some(String::new());
+        let mut list = ListState {
+            filter: Some(String::new()),
+            ..Default::default()
+        };
         assert!(!list.filtering());
         list.filter = Some("port".into());
         assert!(list.filtering());

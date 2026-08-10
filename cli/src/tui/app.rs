@@ -5,6 +5,8 @@
 //! cursor movement, scrollback, which turn a message belongs to — is testable
 //! without a terminal.
 
+use std::cmp::Reverse;
+
 use jod_core::team::{Member, TeamTask};
 use jod_core::{AgentEvent, HarnessKind, Resume};
 
@@ -57,7 +59,7 @@ pub enum Overlay {
     /// `?` — the keymap, showing the current screen's verbs first.
     Keymap,
     /// `x` — deleting something that cannot be undone, so the prompt names it.
-    Confirm { verb: String, what: String, id: String },
+    Confirm { verb: String, what: String },
     /// Tier 1 of the form ladder: one value, typed on a line where the keybar
     /// was, with no screen change and no context lost.
     Prompt {
@@ -323,6 +325,16 @@ fn task_row_from(task: &TeamTask) -> TaskRow {
         blocks: Vec::new(),
         spec: None,
         history: Vec::new(),
+    }
+}
+
+/// A count and its noun, agreeing. A title bar reading `1 runs` is a small
+/// thing that makes the whole screen look unfinished.
+pub fn plural(n: usize, noun: &str) -> String {
+    if n == 1 {
+        format!("1 {noun}")
+    } else {
+        format!("{n} {noun}s")
     }
 }
 
@@ -648,8 +660,8 @@ impl App {
             .filter(|a| self.keep(Workspace::Fleet, &format!("{} {} {}", a.name, a.id, a.status)))
             .collect();
         match self.list(Workspace::Fleet).sort % 4 {
-            1 => rows.sort_by(|a, b| b.created_at_ms.cmp(&a.created_at_ms)),
-            2 => rows.sort_by(|a, b| a.name.cmp(&b.name)),
+            1 => rows.sort_by_key(|a| Reverse(a.created_at_ms)),
+            2 => rows.sort_by_key(|a| a.name.clone()),
             3 => rows.sort_by(|a, b| {
                 b.cost_usd
                     .unwrap_or(0.0)
@@ -675,9 +687,9 @@ impl App {
             .collect();
         match self.list(Workspace::Memory).sort % 4 {
             1 => rows.sort_by(|a, b| b.confidence.total_cmp(&a.confidence)),
-            2 => rows.sort_by(|a, b| a.name.cmp(&b.name)),
-            3 => rows.sort_by(|a, b| a.age_ms.cmp(&b.age_ms)),
-            _ => rows.sort_by(|a, b| b.degree.cmp(&a.degree)),
+            2 => rows.sort_by_key(|a| a.name.clone()),
+            3 => rows.sort_by_key(|a| a.age_ms),
+            _ => rows.sort_by_key(|a| Reverse(a.degree)),
         }
         rows
     }
@@ -689,15 +701,11 @@ impl App {
             .filter(|s| self.keep(Workspace::Schedules, &format!("{} {}", s.name, s.gloss)))
             .collect();
         match self.list(Workspace::Schedules).sort % 3 {
-            1 => rows.sort_by(|a, b| a.name.cmp(&b.name)),
-            2 => rows.sort_by(|a, b| b.last_ms.cmp(&a.last_ms)),
+            1 => rows.sort_by_key(|a| a.name.clone()),
+            2 => rows.sort_by_key(|a| Reverse(a.last_ms)),
             // A paused schedule has no next fire, so it sorts last rather than
             // first, which is what a bare `None` would do.
-            _ => rows.sort_by(|a, b| {
-                a.next_ms
-                    .unwrap_or(i64::MAX)
-                    .cmp(&b.next_ms.unwrap_or(i64::MAX))
-            }),
+            _ => rows.sort_by_key(|a| a.next_ms.unwrap_or(i64::MAX)),
         }
         rows
     }
@@ -709,13 +717,9 @@ impl App {
             .filter(|g| self.keep(Workspace::Goals, &format!("{} {}", g.name, g.objective)))
             .collect();
         match self.list(Workspace::Goals).sort % 3 {
-            1 => rows.sort_by(|a, b| a.name.cmp(&b.name)),
-            2 => rows.sort_by(|a, b| {
-                a.next_ms
-                    .unwrap_or(i64::MAX)
-                    .cmp(&b.next_ms.unwrap_or(i64::MAX))
-            }),
-            _ => rows.sort_by(|a, b| b.percent().cmp(&a.percent())),
+            1 => rows.sort_by_key(|a| a.name.clone()),
+            2 => rows.sort_by_key(|a| a.next_ms.unwrap_or(i64::MAX)),
+            _ => rows.sort_by_key(|a| Reverse(a.percent())),
         }
         rows
     }
@@ -732,9 +736,9 @@ impl App {
             })
             .collect();
         match self.list(Workspace::Hooks).sort % 3 {
-            1 => rows.sort_by(|a, b| a.name.cmp(&b.name)),
-            2 => rows.sort_by(|a, b| b.last_ms.cmp(&a.last_ms)),
-            _ => rows.sort_by(|a, b| b.deliveries_24h.cmp(&a.deliveries_24h)),
+            1 => rows.sort_by_key(|a| a.name.clone()),
+            2 => rows.sort_by_key(|a| Reverse(a.last_ms)),
+            _ => rows.sort_by_key(|a| Reverse(a.deliveries_24h)),
         }
         rows
     }
@@ -754,8 +758,8 @@ impl App {
             .filter(|t| self.keep(Workspace::Tasks, &format!("{} {}", t.id, t.title)))
             .collect();
         match self.list(Workspace::Tasks).sort % 3 {
-            1 => rows.sort_by(|a, b| a.id.cmp(&b.id)),
-            2 => rows.sort_by(|a, b| b.age_ms.cmp(&a.age_ms)),
+            1 => rows.sort_by_key(|a| a.id.clone()),
+            2 => rows.sort_by_key(|a| Reverse(a.age_ms)),
             // Being worked, then claimed, then open, then blocked, then done —
             // the order attention should travel in.
             _ => rows.sort_by_key(|t| match t.state {
@@ -778,9 +782,9 @@ impl App {
             .filter(|a| self.keep(Workspace::Activity, &a.text))
             .collect();
         match self.list(Workspace::Activity).sort % 3 {
-            1 => rows.sort_by(|a, b| b.unread.cmp(&a.unread).then(b.at_ms.cmp(&a.at_ms))),
-            2 => rows.sort_by(|a, b| a.source.label().cmp(b.source.label())),
-            _ => rows.sort_by(|a, b| b.at_ms.cmp(&a.at_ms)),
+            1 => rows.sort_by_key(|a| (Reverse(a.unread), Reverse(a.at_ms))),
+            2 => rows.sort_by_key(|a| a.source.label()),
+            _ => rows.sort_by_key(|a| Reverse(a.at_ms)),
         }
         rows
     }
@@ -847,8 +851,8 @@ impl App {
                 }
                 let failed = self.agents.iter().filter(|a| a.status == "failed").count();
                 format!(
-                    "{} runs · {} running · {failed} failed",
-                    self.agents.len(),
+                    "{} · {} running · {failed} failed",
+                    plural(self.agents.len(), "run"),
                     self.running()
                 )
             }
@@ -859,9 +863,10 @@ impl App {
                 let edges: usize = self.memory.iter().map(|n| n.out_edges.len()).sum();
                 let clashes = self.memory.iter().filter(|n| n.contradicted).count();
                 format!(
-                    "{} nodes · {edges} edges · {clashes} contradiction{}",
-                    self.memory.len(),
-                    if clashes == 1 { "" } else { "s" }
+                    "{} · {} · {}",
+                    plural(self.memory.len(), "node"),
+                    plural(edges, "edge"),
+                    plural(clashes, "contradiction")
                 )
             }
             Workspace::Schedules => {
@@ -906,7 +911,7 @@ impl App {
                     .iter()
                     .filter(|h| h.state == crate::tui::data::HookState::Failing)
                     .count();
-                format!("{} webhooks · {failing} failing", self.hooks.len())
+                format!("{} · {failing} failing", plural(self.hooks.len(), "webhook"))
             }
             Workspace::Tasks => {
                 let rows = self.task_rows();
@@ -936,7 +941,10 @@ impl App {
                         .iter()
                         .filter(|m| m.status == jod_core::team::MemberStatus::Busy)
                         .count();
-                    format!("{name} · {} members · {busy} busy", self.members.len())
+                    format!(
+                        "{name} · {} · {busy} busy",
+                        plural(self.members.len(), "member")
+                    )
                 }
             },
         }
