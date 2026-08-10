@@ -187,6 +187,12 @@ impl NewMessage {
     /// Project one normalised event into a message, or `None` when the event
     /// is not a turn.
     ///
+    /// **Keep this pure and cheap.** It is also used as a predicate — asked
+    /// whether an event is a turn at all, so a `Raw` line, of which there are
+    /// as many as the harness is chatty, does not cost a write transaction to
+    /// find out it was nothing. Giving this a store lookup would put that
+    /// lookup on every event of every run.
+    ///
     /// Four kinds deliberately produce nothing:
     ///
     /// - `Started` is metadata. It carries the session id and model, which
@@ -518,6 +524,46 @@ impl Store {
         })
     }
 
+    /// Record the question a run was launched to answer, once.
+    ///
+    /// No harness reports its own prompt back, so nothing in the event stream
+    /// carries it and [`NewMessage::from_event`] never produces a `User`
+    /// message. Without this a transcript reads as an agent talking to itself,
+    /// and a replay hands the next harness an answer to a question nobody
+    /// asked.
+    ///
+    /// Idempotent on the run, like everything else a run writes: the prompt
+    /// takes [`PROMPT_SEQ`], so `(run_id, run_seq)` covers a run's whole
+    /// contribution rather than all of it except the question. Returns `None`
+    /// when this run's prompt is already recorded.
+    ///
+    /// Note what this deliberately does *not* deduplicate. Every spawn mints a
+    /// fresh run id, so asking the same thing twice records two turns — which
+    /// is right, because "do it again" is a second question, not a replay of
+    /// the first.
+    pub fn append_prompt(
+        &self,
+        conversation_id: &str,
+        run_id: &str,
+        prompt: &str,
+    ) -> Result<Option<i64>> {
+        let at = now_ms();
+        self.write(|tx| {
+            if seen_at(tx, run_id, PROMPT_SEQ)?.is_some() {
+                return Ok(None);
+            }
+            let head = head_of(tx, conversation_id)?;
+            let msg = NewMessage::user(prompt).from_run(run_id);
+            let msg = NewMessage {
+                run_seq: Some(PROMPT_SEQ),
+                ..msg
+            };
+            let id = insert_message(tx, conversation_id, head, &msg, at)?;
+            set_head(tx, conversation_id, id, at)?;
+            Ok(Some(id))
+        })
+    }
+
     /// Append a run's envelopes as one transaction, skipping what is not a
     /// turn and what has already been recorded. Returns the ids of the
     /// messages actually written — empty on a pure replay.
@@ -553,7 +599,7 @@ impl Store {
                 // but the id of the message already there is needed either way
                 // to keep the head right, and one indexed probe is cheaper than
                 // a failed insert plus the lookup that would follow it.
-                if let Some(seen) = seen_at(tx, &envelope.agent_id, envelope.seq)? {
+                if let Some(seen) = seen_at(tx, &envelope.agent_id, envelope.seq as i64)? {
                     head = Some(seen);
                     continue;
                 }
@@ -1189,6 +1235,14 @@ impl Handoff {
 
 // ---- constants ---------------------------------------------------------
 
+/// The `run_seq` a run's prompt takes.
+///
+/// Below every event's, because [`AgentEnvelope::seq`] is a `u64` and the
+/// question precedes the stream it starts. A sentinel the domain guarantees
+/// cannot collide, which is what lets `(run_id, run_seq)` cover everything a
+/// run writes instead of everything except the prompt.
+pub const PROMPT_SEQ: i64 = -1;
+
 /// How much of the live thread one compaction may take.
 ///
 /// See [`Store::compact_with_limit`] for why this is not OpenClaw's 0.25.
@@ -1560,11 +1614,11 @@ fn is_error(m: &PortableMessage) -> bool {
 ///
 /// The read half of the idempotence key. Served by `ux_messages_run_seq`, so
 /// it is a covering probe rather than the scan `conversation_for_run` does.
-fn seen_at(conn: &Connection, run_id: &str, seq: u64) -> Result<Option<i64>> {
+fn seen_at(conn: &Connection, run_id: &str, seq: i64) -> Result<Option<i64>> {
     Ok(conn
         .query_row(
             "SELECT id FROM messages WHERE run_id = ?1 AND run_seq = ?2",
-            params![run_id, seq as i64],
+            params![run_id, seq],
             |r| r.get(0),
         )
         .optional()?)
@@ -2005,6 +2059,65 @@ mod tests {
         assert_eq!(first.len(), 1);
         assert!(again.is_empty(), "the second pass writes nothing");
         assert_eq!(texts(&s.thread(&id).unwrap()), ["go", "the answer"]);
+    }
+
+    #[test]
+    fn a_runs_prompt_is_recorded_once_however_often_it_is_offered() {
+        let s = store();
+        let c = s
+            .new_conversation(HarnessKind::ClaudeCode, "/tmp/work", None)
+            .unwrap();
+
+        let first = s.append_prompt(&c.id, "run-1", "list the files").unwrap();
+        let again = s.append_prompt(&c.id, "run-1", "list the files").unwrap();
+
+        assert!(first.is_some());
+        assert_eq!(again, None, "the same run's question is asked once");
+        assert_eq!(texts(&s.thread(&c.id).unwrap()), ["list the files"]);
+        assert_eq!(s.thread(&c.id).unwrap()[0].role, Role::User);
+    }
+
+    #[test]
+    fn asking_the_same_thing_in_a_second_run_is_a_second_question() {
+        let s = store();
+        let c = s
+            .new_conversation(HarnessKind::ClaudeCode, "/tmp/work", None)
+            .unwrap();
+
+        // Every spawn mints a fresh run id, so this is "do it again" rather
+        // than a replay — and two turns is the right answer.
+        s.append_prompt(&c.id, "run-1", "try again").unwrap();
+        s.append_prompt(&c.id, "run-2", "try again").unwrap();
+
+        assert_eq!(texts(&s.thread(&c.id).unwrap()), ["try again", "try again"]);
+    }
+
+    #[test]
+    fn a_prompt_sorts_before_the_events_of_the_run_it_started() {
+        let s = store();
+        let c = s
+            .new_conversation(HarnessKind::ClaudeCode, "/tmp/work", None)
+            .unwrap();
+        s.append_prompt(&c.id, "run-1", "go").unwrap();
+        s.append_envelopes(
+            &c.id,
+            &[envelope(
+                "run-1",
+                0,
+                AgentEvent::Message {
+                    text: "done".into(),
+                },
+            )],
+        )
+        .unwrap();
+
+        let thread = s.thread(&c.id).unwrap();
+        assert_eq!(thread[0].run_seq, Some(PROMPT_SEQ));
+        assert_eq!(thread[1].run_seq, Some(0));
+        // The whole of a run's contribution is keyed, question included.
+        assert!(thread
+            .iter()
+            .all(|m| m.run_id.as_deref() == Some("run-1") && m.run_seq.is_some()));
     }
 
     #[test]
