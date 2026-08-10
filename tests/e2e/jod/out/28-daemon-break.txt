@@ -1,0 +1,212 @@
+==============================================================
+== 1. THE RACE: one due schedule, sixteen daemons at once
+==============================================================
+$ jod schedule add contended say OK and stop --cron * * * * *
+contended armed — next Aug 10 23:38 (in 21s)
+
+-- launching 16 concurrent `jod daemon --once` --
+-- what each daemon reported --
+$ grep -h . '/tmp/jod-e2e/dbreak'/tick-*.log | sort | uniq -c | sort -rn
+     15 claimed 0 · started 0 · held 0 · failed 0
+     15 [jod/daemon] reloaded 1 prior run(s)
+      1 claimed 1 · started 1 · held 0 · failed 0
+
+
+-- THE TEST: exactly one fire, and exactly one run --
+$ q "SELECT count(*) AS fires FROM schedule_fires"
+fires
+-----
+1
+(1 rows)
+
+$ q "SELECT count(*) AS runs FROM runs"
+runs
+----
+1
+(1 rows)
+
+$ q "SELECT id, due_at_ms, outcome, run_id FROM schedule_fires ORDER BY id"
+id | due_at_ms | outcome | run_id
+---+-----------+---------+-------
+1 | 1786405057720 | ran | eae25a19-4ae9-4b2b-962e-c11602cfcce9
+(1 rows)
+
+$ q "SELECT id, name, status FROM runs"
+id | name | status
+---+------+-------
+eae25a19-4ae9-4b2b-962e-c11602cfcce9 | contended | running
+(1 rows)
+
+-- how many real claude processes did that start? --
+$ pgrep -fc 'claude -p say OK and stop' || echo 0
+1
+
+$ (waiting for every run to reach a terminal status)
+settled after 5s: eae25a19=completed
+
+$ jod report
+running   0
+completed 1
+failed    0
+killed    0
+spend     $0.1011
+
+==============================================================
+== 2. the same race, but the schedule is NOT due
+==============================================================
+$ python3 - '/tmp/jod-e2e/dbreak/jod.db' <<'PY'
+import sqlite3, sys, time
+con = sqlite3.connect(sys.argv[1])
+con.execute('UPDATE schedules SET next_fire_at_ms = ?', (int(time.time()*1000) + 3600_000,))
+con.commit(); print('pushed an hour out')
+PY
+pushed an hour out
+
+$ grep -h 'claimed' '/tmp/jod-e2e/dbreak'/idle-*.log | sort | uniq -c
+      8 claimed 0 · started 0 · held 0 · failed 0
+
+$ q "SELECT count(*) AS fires_total FROM schedule_fires"
+fires_total
+-----------
+1
+(1 rows)
+
+==============================================================
+== 3. MISFIRE: instants missed while Jod was down
+==============================================================
+-- fire_once must fire once for a long gap, not once per missed instant --
+$ jod schedule rm contended
+contended forgotten
+
+$ jod schedule add missed-once say OK and stop --cron * * * * * --misfire fire_once
+missed-once armed — next Aug 10 23:38 (in 15s)
+
+-- backdate the next fire by three hours: 180 missed minutes --
+$ q "SELECT name, misfire, next_fire_at_ms FROM schedules"
+name | misfire | next_fire_at_ms
+-----+---------+----------------
+missed-once | fire_once | 1786394263062
+(1 rows)
+
+$ jod daemon --once
+[jod/daemon] reloaded 1 prior run(s)
+claimed 1 · started 1 · held 0 · failed 0
+
+$ q "SELECT count(*) AS fires FROM schedule_fires"
+fires
+-----
+1
+(1 rows)
+
+$ q "SELECT id, due_at_ms, outcome FROM schedule_fires ORDER BY id"
+id | due_at_ms | outcome
+---+-----------+--------
+1 | 1786405020000 | ran
+(1 rows)
+
+-- and the next fire must be back in the future, not still three hours ago --
+$ python3 - '/tmp/jod-e2e/dbreak/jod.db' <<'PY'
+import sqlite3, sys, time, datetime
+con = sqlite3.connect(f'file:{sys.argv[1]}?mode=ro', uri=True)
+now = time.time()*1000
+for name, nf in con.execute('SELECT name, next_fire_at_ms FROM schedules'):
+    d = (nf - now)/1000
+    print(f'{name}: next fire in {d:.0f}s ({"future" if d > 0 else "STILL IN THE PAST"})')
+PY
+missed-once: next fire in 16s (future)
+
+$ (waiting for every run to reach a terminal status)
+settled after 5s: eae25a19=completed, 4d76ff9d=completed
+
+==============================================================
+== 4. a schedule whose cwd does not exist
+==============================================================
+$ jod schedule add badcwd say OK and stop --cron * * * * * --cwd /nonexistent/path/xyz
+badcwd armed — next Aug 10 23:38 (in 10s)
+
+$ q "SELECT name, cwd FROM schedules WHERE name='badcwd'"
+name | cwd
+-----+----
+badcwd | /nonexistent/path/xyz
+(1 rows)
+
+$ jod daemon --once
+[jod/daemon] reloaded 2 prior run(s)
+claimed 2 · started 2 · held 0 · failed 0
+
+$ jod schedule log badcwd
+[32m✓[0m Aug 10 23:37 (0s ago)          [2mran             [0m 
+
+$ q "SELECT s.name, f.outcome, f.detail FROM schedule_fires f JOIN schedules s ON s.id=f.schedule_id WHERE s.name='badcwd'"
+name | outcome | detail
+-----+---------+-------
+badcwd | ran | 
+(1 rows)
+
+==============================================================
+== 5. kill the supervisor mid-run: does the run stay 'running' for ever?
+==============================================================
+$ jod schedule rm badcwd
+badcwd forgotten
+
+$ jod schedule rm missed-once
+missed-once forgotten
+
+$ jod schedule add killme count slowly to fifty, one number per line --cron * * * * *
+killme armed — next Aug 10 23:38 (in 10s)
+
+$ jod daemon --once
+[jod/daemon] reloaded 4 prior run(s)
+claimed 1 · started 1 · held 0 · failed 0
+
+$ q "SELECT id, name, status, pid, pgid FROM runs ORDER BY created_at_ms DESC LIMIT 1"
+id | name | status | pid | pgid
+---+------+--------+-----+-----
+59fb93d5-21e3-49aa-bd05-d27315c50a4d | killme | running | 1985960 | 1985960
+(1 rows)
+
+-- kill the supervisor's process group --
+$ python3 - '/tmp/jod-e2e/dbreak/jod.db' <<'PY'
+import sqlite3, sys, os, signal, time
+con = sqlite3.connect(f'file:{sys.argv[1]}?mode=ro', uri=True)
+row = con.execute("SELECT id, pgid FROM runs WHERE status='running' ORDER BY created_at_ms DESC LIMIT 1").fetchone()
+if not row:
+    print('no running run to kill'); sys.exit(0)
+rid, pgid = row
+print(f'killing pgid {pgid} for run {rid[:8]}')
+os.killpg(pgid, signal.SIGKILL)
+time.sleep(2)
+PY
+killing pgid 1985960 for run 59fb93d5
+
+$ q "SELECT id, name, status FROM runs ORDER BY created_at_ms DESC LIMIT 1"
+id | name | status
+---+------+-------
+59fb93d5-21e3-49aa-bd05-d27315c50a4d | killme | running
+(1 rows)
+
+-- a later tick must notice the corpse rather than believe it is still running --
+$ jod daemon --once
+[jod/daemon] reloaded 5 prior run(s)
+claimed 0 · started 0 · held 0 · failed 0
+
+$ q "SELECT id, name, status FROM runs ORDER BY created_at_ms DESC LIMIT 1"
+id | name | status
+---+------+-------
+59fb93d5-21e3-49aa-bd05-d27315c50a4d | killme | running
+(1 rows)
+
+$ jod ls
+eae25a19   done      Claude Code  contended
+4d76ff9d   done      Claude Code  missed-once
+51875f51   running   Claude Code  missed-once
+ccb90868   failed    Claude Code  badcwd
+59fb93d5   failed    Claude Code  killme
+
+$ jod report
+running   1
+completed 2
+failed    2
+killed    0
+spend     $0.1146
+
