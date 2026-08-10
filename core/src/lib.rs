@@ -29,6 +29,7 @@ pub mod event;
 pub mod harness;
 pub mod ledger;
 pub mod mcp;
+pub mod mcp_config;
 pub mod monitor;
 pub mod orchestrator;
 pub mod paths;

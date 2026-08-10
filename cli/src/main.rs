@@ -286,8 +286,17 @@ enum Command {
     Mcp {
         /// How much of Jod the agent on the other end may reach. Fail-closed:
         /// an unset flag gets the read-only set, never the full one.
-        #[arg(long, value_enum, default_value_t = AccessArg::ReadOnly)]
-        access: AccessArg,
+        /// Parsed by `jod_core::mcp::parse_access`, not by a `value_enum`, so
+        /// there is exactly one spelling of a level in the system.
+        ///
+        /// Found the hard way. A derived enum accepts only `read-only`, while
+        /// `ToolAccess::as_str()` writes `read_only` — so the MCP config Jod
+        /// generated for a harness invoked the server with a flag the server
+        /// rejected. It exited 2, the harness reported no tools, and the agent
+        /// truthfully said Jod had none. Every layer was correct and the seam
+        /// was closed by two spellings of one word.
+        #[arg(long, default_value = "read_only", value_parser = parse_access_arg)]
+        access: jod_core::harness::ToolAccess,
         /// The most permissive policy `delegate` may ask for — the same ceiling
         /// `jod-api` applies to a remote caller, and the same default.
         #[arg(long, value_enum, default_value_t = PermissionArg::AcceptEdits)]
@@ -613,25 +622,15 @@ enum PermissionArg {
 /// A separate axis from `PermissionArg`, which bounds what the agent may do to
 /// the *machine*. An agent can be trusted to edit files and still have no
 /// business arming a schedule that spends money every night at 2am.
-#[derive(Copy, Clone, PartialEq, Eq, ValueEnum)]
-enum AccessArg {
-    /// Read Jod: what is running, what is scheduled, what it remembers.
-    ReadOnly,
-    /// The above, plus starting, continuing and stopping agents.
-    Delegate,
-    /// The full set, including schedules, goals and writing memory.
-    Orchestrate,
-}
-
-impl From<AccessArg> for jod_core::harness::ToolAccess {
-    fn from(a: AccessArg) -> Self {
-        use jod_core::harness::ToolAccess;
-        match a {
-            AccessArg::ReadOnly => ToolAccess::ReadOnly,
-            AccessArg::Delegate => ToolAccess::Delegate,
-            AccessArg::Orchestrate => ToolAccess::Orchestrate,
-        }
-    }
+///
+/// Deliberately not a `ValueEnum`. The derive would define a second spelling of
+/// every level beside `ToolAccess::as_str()`, and the two drifting apart is not
+/// hypothetical — it silently disconnected Jod from every harness it had just
+/// been wired to. One parser, in core, accepting both hyphen and underscore.
+fn parse_access_arg(s: &str) -> Result<jod_core::harness::ToolAccess, String> {
+    jod_core::mcp::parse_access(s).ok_or_else(|| {
+        format!("`{s}` is not an access level — read_only, delegate or orchestrate")
+    })
 }
 
 impl From<PermissionArg> for PermissionPolicy {
@@ -1169,7 +1168,7 @@ async fn main() -> Result<()> {
             access,
             max_permission,
         } => {
-            mcp_cmd::run(jod, access.into(), max_permission.into()).await?;
+            mcp_cmd::run(jod, access, max_permission.into()).await?;
         }
     }
 

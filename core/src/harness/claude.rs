@@ -58,13 +58,50 @@ impl Harness for ClaudeCode {
             // keep denying the rest.
             PermissionPolicy::Ask => {
                 args.push(ArgPart::lit("--allowedTools"));
-                args.push(ArgPart::lit(READ_ONLY_TOOLS.join(",")));
+                let mut allowed: Vec<String> =
+                    READ_ONLY_TOOLS.iter().map(|t| t.to_string()).collect();
+                // Jod's own tools have to be named here or they are denied,
+                // however carefully they were granted. Found the hard way: the
+                // `--mcp-config` flag reached the command line, the server
+                // started, and the agent still reported "no jod tools" —
+                // because this allowlist, one line above, did not mention them.
+                //
+                // Server-wide rather than per tool, because which tools exist
+                // is already decided by the access level the config carries.
+                // Listing them again here would be a second copy of that
+                // decision, free to drift from the first.
+                if req.tools.is_some() {
+                    allowed.push(format!("mcp__{}", crate::mcp_config::SERVER_NAME));
+                }
+                args.push(ArgPart::lit(allowed.join(",")));
             }
             PermissionPolicy::AcceptEdits => {
                 args.push(ArgPart::lit("--permission-mode"));
                 args.push(ArgPart::lit("acceptEdits"));
             }
             PermissionPolicy::Bypass => args.push(ArgPart::lit("--dangerously-skip-permissions")),
+        }
+
+        // Jod's own tools, if this run was granted any. Without these two flags
+        // `SpawnRequest::tools` is decoration — set, capped, tested, and
+        // reaching no command line, which is precisely the failure this branch
+        // keeps producing.
+        //
+        // `--strict-mcp-config` matters as much as the config itself: without
+        // it Claude Code also loads whatever MCP servers the *user's* own
+        // configuration names, so an agent Jod meant to hold read-only tools
+        // could quietly inherit a filesystem server from `~/.claude.json`. The
+        // grant has to be exactly what Jod granted.
+        if let Some(access) = req.tools {
+            if let Ok(path) = crate::mcp_config::config_for(access, &crate::paths::jod_home()) {
+                args.push(ArgPart::lit("--mcp-config"));
+                args.push(ArgPart::lit(path.to_string_lossy()));
+                args.push(ArgPart::lit("--strict-mcp-config"));
+            }
+            // A failure to write the config is deliberately not fatal. The run
+            // still does its work with no Jod tools, which is worse than
+            // intended and far better than refusing to start at all — and the
+            // agent will say it has no tools rather than pretending otherwise.
         }
         args
     }
@@ -241,6 +278,99 @@ mod tests {
             permission,
             resume: Resume::Fresh,
             tools: None,
+        }
+    }
+
+    /// The test that would have caught `tools` being decoration. It was set,
+    /// capped and unit-tested for hours while reaching no command line at all —
+    /// a component complete, tested, and wired to nothing.
+    #[test]
+    fn a_granted_tool_level_reaches_the_command_line() {
+        let mut r = req(PermissionPolicy::Ask, None);
+        r.tools = Some(super::super::ToolAccess::ReadOnly);
+        let args = ClaudeCode::default().args(&r);
+
+        assert!(
+            args.contains(&ArgPart::lit("--mcp-config")),
+            "no MCP config reached the harness: {args:?}"
+        );
+        // Without this, Claude Code also loads whatever servers the user's own
+        // configuration names, so a read-only agent could inherit a filesystem
+        // server from ~/.claude.json. The grant must be exactly Jod's.
+        assert!(
+            args.contains(&ArgPart::lit("--strict-mcp-config")),
+            "the grant was not restricted to Jod's own servers: {args:?}"
+        );
+    }
+
+    /// The bug a unit test could not have caught and a real run did: every flag
+    /// was correct, the server started, and the agent still had no tools —
+    /// because the permission allowlist one line above never mentioned them.
+    #[test]
+    fn granted_tools_are_also_allowed_by_the_permission_policy() {
+        let mut r = req(PermissionPolicy::Ask, None);
+        r.tools = Some(super::super::ToolAccess::ReadOnly);
+        let args = ClaudeCode::default().args(&r);
+
+        let allowed = args
+            .iter()
+            .filter_map(|a| match a {
+                ArgPart::Literal(s) => Some(s.clone()),
+                _ => None,
+            })
+            .find(|s| s.contains("Read,Grep"))
+            .expect("an allowlist");
+        assert!(
+            allowed.contains("mcp__jod"),
+            "granted tools are denied by the allowlist: {allowed}"
+        );
+    }
+
+    /// And the converse: an agent granted nothing must not be handed the
+    /// server name either, or the allowlist would advertise what does not exist.
+    #[test]
+    fn an_agent_granted_nothing_is_not_allowed_jods_tools() {
+        let args = ClaudeCode::default().args(&req(PermissionPolicy::Ask, None));
+        let allowed = args
+            .iter()
+            .filter_map(|a| match a {
+                ArgPart::Literal(s) => Some(s.clone()),
+                _ => None,
+            })
+            .find(|s| s.contains("Read,Grep"))
+            .expect("an allowlist");
+        assert!(!allowed.contains("mcp__jod"), "{allowed}");
+    }
+
+    #[test]
+    fn an_agent_granted_nothing_is_handed_no_mcp_config() {
+        let args = ClaudeCode::default().args(&req(PermissionPolicy::Ask, None));
+        assert!(!args.contains(&ArgPart::lit("--mcp-config")));
+        assert!(!args.contains(&ArgPart::lit("--strict-mcp-config")));
+    }
+
+    /// The level has to travel in the config the harness is handed, because the
+    /// server has nothing else to go on — there is no handshake in which an
+    /// agent could claim one.
+    #[test]
+    fn the_config_handed_over_names_the_level_that_was_granted() {
+        for access in [
+            super::super::ToolAccess::ReadOnly,
+            super::super::ToolAccess::Delegate,
+            super::super::ToolAccess::Orchestrate,
+        ] {
+            let mut r = req(PermissionPolicy::Ask, None);
+            r.tools = Some(access);
+            let args = ClaudeCode::default().args(&r);
+            let path = args
+                .iter()
+                .filter_map(|a| match a {
+                    ArgPart::Literal(s) => Some(s.clone()),
+                    _ => None,
+                })
+                .find(|s| s.ends_with(".json"))
+                .expect("a config path");
+            assert!(path.contains(access.as_str()), "{path} is not {access:?}");
         }
     }
 
