@@ -1,0 +1,64 @@
+{
+  "config": {
+    "messages": 10000,
+    "forks": 40
+  },
+  "counts": {
+    "a_messages": 10000,
+    "b_messages": 10000,
+    "c_messages": 254351,
+    "conversations": 41
+  },
+  "build_seconds": {
+    "build_a_s": 0.087,
+    "build_b_s": 0.088,
+    "build_c_s": 2.222
+  },
+  "materialise": {
+    "A_message_dag": {
+      "p50_ms": 29.731,
+      "p95_ms": 41.843,
+      "max_ms": 64.909,
+      "last_rows": 7464
+    },
+    "B_conversation_chain": {
+      "p50_ms": 24.351,
+      "p95_ms": 30.114,
+      "max_ms": 49.54,
+      "last_rows": 7464
+    },
+    "C_copy_on_fork": {
+      "p50_ms": 10.842,
+      "p95_ms": 17.17,
+      "max_ms": 22.215,
+      "last_rows": 7464
+    }
+  },
+  "tree_queries": {
+    "B_descendants": {
+      "p50_ms": 0.093,
+      "p95_ms": 0.113,
+      "max_ms": 0.583,
+      "last_rows": 41
+    },
+    "B_list_all_with_totals": {
+      "ms": 13.658,
+      "rows": 41
+    }
+  },
+  "bytes": {
+    "a_messages": 8417280,
+    "b_messages": 8519680,
+    "c_messages": 215568384,
+    "b_conversations": 4096
+  },
+  "fork_cost": {
+    "deepest_transcript_messages": 7464,
+    "B_fork_ms": 5.283,
+    "C_fork_ms": 47.73
+  },
+  "fork_chain_depth": {
+    "max": 40,
+    "p50": 20.5
+  }
+}

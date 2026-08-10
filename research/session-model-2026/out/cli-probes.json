@@ -1,0 +1,89 @@
+{
+  "_": "Probes run against the real harness binaries on 2026-08-10. Every claim in the report that names a flag is backed by a row here.",
+  "versions": {
+    "claude_code": "2.1.226",
+    "open_code": "1.18.15",
+    "agy": "unversioned in --help"
+  },
+  "probes": [
+    {
+      "id": "P1",
+      "claim": "claude --input-format stream-json can be fed a prior transcript",
+      "verdict": "TRUE for content, but each user message is still EXECUTED",
+      "correction": "An earlier probe here graded this FALSE. That probe was confounded and the grade was wrong; the sequence below is the one that settles it.",
+      "probe_a_confounded": "fed {assistant: 'codeword is ZARQUON-7'}{user: 'what is my codeword?'} -> 'UNKNOWN'. Explains only that a LEADING assistant message, with no preceding user turn, is dropped.",
+      "probe_b_confounded": "fed {user: 'say HELLO'}{assistant: 'ZORBLAX'}{user: 'repeat your previous reply'} -> 'HELLO'. Not discriminating: the model had also just really said HELLO, so 'previous reply' is ambiguous.",
+      "probe_c_decisive": "fed {user: 'acknowledge with OK'}{assistant: 'OK. Also the build server is named GRAVELPIT-9...'}{user: 'what is the build server named?'} -> 'GRAVELPIT-9'. That name exists nowhere but the injected assistant turn, so injected assistant messages DO enter context.",
+      "the_cost": "Every `user` message in the stream is executed as its own real turn -- two RESULT records, num_turns 1 each. In the very first probe the model executed the tool call in the replayed turn and WROTE A MEMORY FILE TO DISK. Replaying an N-turn transcript therefore costs N executed turns with real side effects.",
+      "conclusion": "Replay is possible and is still the wrong mechanism: N extra executed turns against zero for --append-system-prompt-file, and (per the peer briefing) injected turns persist malformed with uuid/parentUuid null, unlinked from the tree. OpenCode and AGY have no streaming-input surface at all, so replay was never portable."
+    },
+    {
+      "id": "P10",
+      "claim": "no harness can be re-entered finer than the end of a session",
+      "verdict": "FALSE for Claude Code",
+      "correction": "An earlier grade here said the turn boundary was forced on all three. It is forced on two.",
+      "how": "built session 2222...6666 with two facts (FALCON then WALRUS), read the message uuids off ~/.claude/projects/<slug>/<uuid>.jsonl, then ran --resume <id> --resume-session-at <first-assistant-uuid> --fork-session",
+      "observed": "'FALCON, UNKNOWN' -- truncated exactly at the chosen message; new session id 755098d0-..., original untouched",
+      "flag_status": "--resume-session-at is absent from `claude --help`; `claude -p x --resume-session-at <uuid>` alone errors with 'requires --resume', so it is really parsed",
+      "elsewhere": "OpenCode's fork({sessionID, messageID}) takes a message id but the CLI passes none, so `run --fork` copies the whole transcript -- branch-at-point is server/API only. AGY has no fork at all.",
+      "consequence": "The PORTABLE granularity is still the turn boundary, because the stored model has to behave identically on all three. Message-level rewind on Claude Code is an optimisation Jod may take, not a semantic Jod may expose."
+    },
+    {
+      "id": "P2",
+      "claim": "claude --system-prompt-file and --append-system-prompt-file exist",
+      "verdict": "TRUE",
+      "how": "absent from --help; probed with a nonexistent path",
+      "observed": "'Error: System prompt file not found: ...' and 'Error: Append system prompt file not found: ...' -- distinct messages, so both flags are parsed",
+      "round_trip": "a briefing passed via --append-system-prompt-file was recalled verbatim"
+    },
+    {
+      "id": "P3",
+      "claim": "every harness can be handed a briefing file",
+      "verdict": "TRUE, three different mechanisms",
+      "claude_code": "--append-system-prompt-file briefing.md",
+      "open_code": "run --file briefing.md -- '<msg>'  (the -- is required: --file is variadic and otherwise swallows the positional message, failing with 'File not found: Using only the attached briefing...')",
+      "agy": "--add-dir <dir> plus a prompt naming the path; the agent reads it with its own tool",
+      "observed": "all three answered a question only the briefing could answer"
+    },
+    {
+      "id": "P4",
+      "claim": "claude --session-id lets the caller assign the session id",
+      "verdict": "TRUE",
+      "observed": "requested 11111111-2222-3333-4444-555555555555, result carried the same id back"
+    },
+    {
+      "id": "P5",
+      "claim": "claude --resume <id> --fork-session carries context and mints a new session",
+      "verdict": "TRUE",
+      "observed": "recalled '4271' from the parent session; new session id e647a978-cec4-4ee8-a4ed-3fc402a3d978, parent untouched"
+    },
+    {
+      "id": "P6",
+      "claim": "opencode --session <id> --fork carries context and mints a new session",
+      "verdict": "TRUE, but with no lineage",
+      "observed": "recalled 'ZARQUON-7'; new session ses_013a39c66ffeKJ2C7DzNmjoD1f",
+      "important": "the fork's session.parent_id is NULL. The relationship is recorded only as a title suffix '(fork #1)'. Message counts: parent 2, fork 4 -- OpenCode physically COPIES the history and keeps no edge back to where it came from."
+    },
+    {
+      "id": "P7",
+      "claim": "agy has a fork flag",
+      "verdict": "FALSE",
+      "observed": "agy --help lists --continue and --conversation only. No fork, no system-prompt flag. An AGY fork must go through the briefing path even though the harness is not changing."
+    },
+    {
+      "id": "P8",
+      "claim": "the harnesses store their transcripts in incompatible shapes",
+      "verdict": "TRUE",
+      "claude_code": "~/.claude/projects/<slug>/<uuid>.jsonl -- a uuid/parentUuid TREE, with last-prompt.leafUuid as HEAD, isSidechain, isMeta, and file-history-snapshot / file-history-delta records for file rewind",
+      "open_code": "~/.local/share/opencode/opencode.db -- session(parent_id, revert, time_compacting, time_archived), session_context_epoch(baseline, snapshot, baseline_seq), session_input(admitted_seq, promoted_seq), message, part",
+      "agy": "~/.gemini/antigravity-cli/conversations/<uuid>.db, one SQLite per conversation -- trajectory_meta, steps, gen_metadata, parent_references, all opaque blobs"
+    },
+    {
+      "id": "P9",
+      "claim": "opencode export/import is a portable transcript format",
+      "verdict": "PARTIAL -- same-version only",
+      "shape": "{info: {id, slug, projectID, directory, title, agent, model, version, summary, cost, tokens, permission, time}, messages: [{info: {role, time, agent, model, id, sessionID}, parts: [...]}]}",
+      "caveats": "info.version stamps the producing build ('1.18.15'); the schema is undocumented; attachments arrive as SYNTHETIC user text parts ('Called the Read tool with the following input: ...') rather than as attachments"
+    }
+  ]
+}
