@@ -182,6 +182,11 @@ pub struct App {
     /// What the workspaces show. Each is refreshed on the tick, off the render
     /// path, so `draw()` stays a pure function of state.
     pub memory: Vec<MemoryNode>,
+    /// Entities and relations in the whole graph, which is not what `memory`
+    /// holds: that is capped at the most-connected few hundred. Kept beside the
+    /// list so the status bar can admit to showing a part of it, because a
+    /// memory browser that counts its own rows claims to show everything.
+    pub graph_size: (usize, usize),
     pub schedules: Vec<ScheduleRow>,
     pub goals: Vec<GoalRow>,
     pub hooks: Vec<HookRow>,
@@ -415,6 +420,7 @@ impl App {
             members: Vec::new(),
             tasks: Vec::new(),
             memory: Vec::new(),
+            graph_size: (0, 0),
             schedules: Vec::new(),
             goals: Vec::new(),
             hooks: Vec::new(),
@@ -860,11 +866,19 @@ impl App {
                 if self.memory.is_empty() {
                     return "nothing remembered yet".into();
                 }
-                let edges: usize = self.memory.iter().map(|n| n.out_edges.len()).sum();
+                let (nodes, edges) = self.graph_size;
                 let clashes = self.memory.iter().filter(|n| n.contradicted).count();
+                // The list is capped at the most-connected few hundred, so it
+                // says which part of the graph it is when it is a part. A
+                // browser that counts its own rows tells you it is showing
+                // everything, which is the one thing it must not get wrong.
+                let shown = if nodes > self.memory.len() {
+                    format!("{} of {}", self.memory.len(), plural(nodes, "node"))
+                } else {
+                    plural(self.memory.len(), "node")
+                };
                 format!(
-                    "{} · {} · {}",
-                    plural(self.memory.len(), "node"),
+                    "{shown} · {} · {}",
                     plural(edges, "edge"),
                     plural(clashes, "contradiction")
                 )
@@ -1279,6 +1293,43 @@ mod tests {
 
     fn app() -> App {
         App::new(HarnessKind::ClaudeCode, None, Resume::Fresh)
+    }
+
+    /// The memory list holds the most-connected few hundred, so the count says
+    /// which part of the graph that is. A browser that counted its own rows
+    /// would claim to be showing everything, which is the one thing it must
+    /// never get wrong.
+    #[test]
+    fn the_memory_count_admits_when_it_is_showing_part_of_the_graph() {
+        let mut a = app();
+        a.memory = vec![memory_node("reljod"), memory_node("linear")];
+
+        a.graph_size = (2, 1);
+        let whole = a.count_for(Workspace::Memory);
+        assert!(whole.starts_with("2 nodes"), "{whole}");
+        assert!(!whole.contains(" of "), "nothing is hidden, so say nothing: {whole}");
+
+        a.graph_size = (142, 96);
+        let part = a.count_for(Workspace::Memory);
+        assert!(part.starts_with("2 of 142 nodes"), "{part}");
+        assert!(part.contains("96 edges"), "the edges are the graph's too: {part}");
+    }
+
+    fn memory_node(name: &str) -> MemoryNode {
+        MemoryNode {
+            id: name.into(),
+            name: name.into(),
+            kind: MemoryKind::Belief,
+            confidence: 1.0,
+            degree: 1,
+            age_ms: 0,
+            seen: 1,
+            body: String::new(),
+            contradicted: false,
+            in_edges: vec![],
+            out_edges: vec![],
+            provenance: vec![],
+        }
     }
 
     fn typed(text: &str) -> App {

@@ -1635,12 +1635,15 @@ fn refresh_team(jod: &Arc<Jod>, app: &mut App) {
 /// swallows its own errors rather than taking the UI down over a locked
 /// database.
 ///
-/// Two of them take what the screen is showing rather than reading everything:
-/// memory has no listing query and searches the store from the filter instead,
-/// and the board is one team's when a team is joined.
+/// The board is one team's when a team is joined, and every team's otherwise —
+/// the tasks screen is *the* board, where the team panel is scoped to one team.
+///
+/// `graph_size` is read beside the memory list rather than derived from it: the
+/// list is capped at the most-connected few hundred, and a status bar that
+/// counted what it happened to load could never say so.
 fn refresh_workspaces(jod: &Arc<Jod>, app: &mut App) {
-    let needle = app.list(Workspace::Memory).filter.clone();
-    app.memory = data::memory(jod, needle.as_deref());
+    app.memory = data::memory(jod);
+    app.graph_size = data::graph_size(jod);
     app.schedules = data::schedules(jod);
     app.goals = data::goals(jod);
     app.hooks = data::hooks(jod);

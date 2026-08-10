@@ -19,14 +19,14 @@
 #![allow(dead_code)]
 
 use std::cmp::Reverse;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use jod_core::schedule::{
     Fire, FireOutcome, Goal, GoalState as StoredGoalState, Schedule,
     ScheduleState as StoredScheduleState,
 };
-use jod_core::store::{Fact, Origin, Store, StoredRun};
+use jod_core::store::{Edge, Fact, Origin, Store, StoredRun};
 use jod_core::team::TeamTask;
 use jod_core::webhook::{Delivery as StoredDelivery, DeliveryStatus, Rule};
 use jod_core::Jod;
@@ -572,178 +572,202 @@ const DELIVERY_WINDOW: usize = 400;
 /// this, older entries are the schedules and hooks screens' job.
 const ACTIVITY_LIMIT: usize = 200;
 
-/// The most facts the memory browser will hold, and the most subjects it will
-/// ask about while gathering them. Both bound a walk that is otherwise the size
-/// of the graph.
-const MEMORY_FACTS: usize = 400;
-const MEMORY_SUBJECTS: usize = 200;
+/// How many memory nodes one pass lists, and how many subjects it will read
+/// facts for. `memory_nodes` returns the most-connected first, so the cap drops
+/// the leaves rather than an arbitrary slice; the second bounds the nodes whose
+/// *asserter* is itself below the cap.
+const MEMORY_NODES: usize = 200;
+const MEMORY_SUBJECTS: usize = 400;
+
+/// The most edges any one node contributes to the detail pane and the local
+/// graph. A hub has more than a screen can hold, and the graph view already
+/// says how many of them it is showing.
+const MEMORY_EDGES: usize = 64;
 
 fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
 
-/// Every memory node the TUI can reach, with its edges already joined.
+/// Every memory node, most-connected first, with its edges already joined.
 ///
-/// `query` is the memory screen's filter. With one, this is a search —
-/// `Store::recall_from`, untrusted material included, because the question a
-/// person asks their own memory browser is "what did that page claim" as well
-/// as "what is true". Without one it is a walk out from the subjects the TUI
-/// can already name; see [`crawl`] for why that is what a listing looks like
-/// today.
-pub fn memory(jod: &Arc<Jod>, query: Option<&str>) -> Vec<MemoryNode> {
-    let Some(store) = jod.store() else {
-        return Vec::new();
-    };
-    let facts = match query.map(str::trim).filter(|q| !q.is_empty()) {
-        Some(q) => store.recall_from(None, q, MEMORY_FACTS, true).unwrap_or_default(),
-        None => crawl(store),
-    };
-    nodes(&facts)
+/// The list, and every node's degree, come from `Store::memory_nodes` — one
+/// query over `entities` counting `relations` in both directions. That is the
+/// authority on what Jod knows: an earlier draft of this walked outwards from
+/// the subjects the TUI could name, which meant anything `/remember` wrote
+/// about a subject nothing else mentioned was invisible — the common case for
+/// a person's own notes, and precisely the wrong thing for a memory browser to
+/// hide.
+///
+/// The graph says what exists and how it is connected; it cannot say *why* any
+/// of it is believed. `entities` has no origin and no source, and its `kind`
+/// column reads `thing` for every row it interns. So the facts are read too,
+/// and they supply the three things the screen shows that structure alone
+/// cannot: what kind of memory a node is, how far it is to be trusted, and
+/// where it came from.
+pub fn memory(jod: &Arc<Jod>) -> Vec<MemoryNode> {
+    match jod.store() {
+        Some(store) => memory_from(store),
+        None => Vec::new(),
+    }
 }
 
-/// Every fact reachable from a subject the TUI can already name.
-///
-/// `facts_about` is the only listing the store offers and it needs a subject,
-/// so this starts from the subjects that can be named without one — a goal's
-/// episodic record (`goal/<name>`) and the runs a webhook announced itself on —
-/// and walks outwards, because the object of a fact is itself a subject.
-///
-/// **What a dedicated query would improve.** `Store::memory_nodes(scope,
-/// limit)` — a listing over `entities` left-joined to `relations` for the
-/// degree — would fix two things this cannot. It would reach the facts no walk
-/// can: anything `/remember` wrote about a subject nothing else mentions is
-/// invisible here, and that is the common case for a person's own notes. And it
-/// would give each node's degree in one query instead of the walk's one query
-/// per subject. Until then this is a browser over the *connected* part of the
-/// graph, and `Store::graph_size()` is how a caller can tell that it is a part:
-/// it counts every entity and relation, including the ones no walk found.
-fn crawl(store: &Store) -> Vec<Fact> {
-    let mut queue: VecDeque<String> = VecDeque::new();
-    for goal in store.goals().unwrap_or_default() {
-        queue.push_back(format!("goal/{}", goal.name));
+fn memory_from(store: &Store) -> Vec<MemoryNode> {
+    let listed = store.memory_nodes(None, MEMORY_NODES).unwrap_or_default();
+    let edges: HashMap<i64, Vec<Edge>> = listed
+        .iter()
+        .map(|n| (n.id, store.edges_of(n.id, MEMORY_EDGES).unwrap_or_default()))
+        .collect();
+
+    // Facts for every listed node, and for the subjects that assert one — a
+    // node that is only ever an object has no facts of its own, and the fact
+    // that named it belongs to whatever points at it.
+    //
+    // One indexed lookup per name, which is the cost worth naming: `facts` is
+    // indexed on `(scope, subject)`, so `facts_about` — which filters on
+    // `subject` alone — cannot use it and scans. At this cap that is fine and
+    // on a large store it will not be. The fix is a bulk `facts_for(&[names])`
+    // beside `memory_nodes`, or `memory_nodes` returning the newest fact's
+    // origin as a column, at which point this loader is two queries total.
+    let mut wanted: Vec<String> = listed.iter().map(|n| n.name.clone()).collect();
+    for edge in edges.values().flatten().filter(|e| !e.outgoing) {
+        wanted.push(edge.other.clone());
     }
-    for run in store.runs(MEMORY_SUBJECTS / 4).unwrap_or_default() {
-        queue.push_back(run.id);
+    let mut asserted: HashMap<String, Vec<Fact>> = HashMap::new();
+    for name in wanted.into_iter().take(MEMORY_SUBJECTS) {
+        asserted
+            .entry(name)
+            .or_insert_with_key(|n| store.facts_about(n).unwrap_or_default());
     }
 
-    let mut asked: HashSet<String> = HashSet::new();
-    let mut facts: Vec<Fact> = Vec::new();
-    while let Some(subject) = queue.pop_front() {
-        if facts.len() >= MEMORY_FACTS || asked.len() >= MEMORY_SUBJECTS {
-            break;
-        }
-        if !asked.insert(subject.clone()) {
-            continue;
-        }
-        for fact in store.facts_about(&subject).unwrap_or_default() {
-            queue.push_back(fact.object.clone());
-            facts.push(fact);
-        }
-    }
-    facts
-}
+    // The far end of an edge has to be named with its kind, so every listed
+    // node's kind is settled before any edge is built.
+    let kinds: HashMap<i64, MemoryKind> = listed
+        .iter()
+        .map(|n| (n.id, kind_of_node(&asserted, &n.name)))
+        .collect();
+    let kind_at = |id: i64| kinds.get(&id).copied().unwrap_or(MemoryKind::Entity);
 
-/// Facts folded into nodes: one node per thing named, edges from the facts that
-/// name it.
-///
-/// This is the same fold `Store::rebuild_graph` does into `entities` and
-/// `relations` — subject and object are both nodes, the predicate is the edge —
-/// so what the screen shows is what the graph holds, rather than a second
-/// interpretation of the same rows.
-fn nodes(facts: &[Fact]) -> Vec<MemoryNode> {
     let now = now_ms();
-    let id_of = |scope: &str, name: &str| format!("{scope}/{name}");
+    listed
+        .iter()
+        .map(|n| {
+            let mine = edges.get(&n.id).map(Vec::as_slice).unwrap_or_default();
+            // What this node is, said by whichever fact says the most about
+            // it: its own newest, or — for a node only ever spoken about — the
+            // newest fact that names it.
+            let describing = asserted
+                .get(&n.name)
+                .and_then(|facts| facts.first())
+                .or_else(|| asserting(&asserted, &n.name, mine));
+            let (in_edges, out_edges): (Vec<&Edge>, Vec<&Edge>) =
+                mine.iter().partition(|e| !e.outgoing);
 
-    // Kinds first: an edge has to name the kind at its far end, which is not
-    // known until every fact has been read.
-    let mut kinds: HashMap<String, MemoryKind> = HashMap::new();
-    for f in facts {
-        // The fact a thing is the *subject* of is what says what it is; a thing
-        // only ever spoken about is an entity.
-        kinds.insert(id_of(&f.scope, &f.subject), kind_of(f));
-        kinds
-            .entry(id_of(&f.scope, &f.object))
-            .or_insert(MemoryKind::Entity);
-    }
-    let kind_at = |id: &str| kinds.get(id).copied().unwrap_or(MemoryKind::Entity);
-
-    let mut by_id: HashMap<String, MemoryNode> = HashMap::new();
-    let mut newest: HashMap<String, i64> = HashMap::new();
-    let touch = |by_id: &mut HashMap<String, MemoryNode>, scope: &str, name: &str| -> String {
-        let id = id_of(scope, name);
-        by_id.entry(id.clone()).or_insert_with(|| MemoryNode {
-            id: id.clone(),
-            name: name.to_string(),
-            kind: kind_at(&id),
-            confidence: 0.0,
-            degree: 0,
-            age_ms: 0,
-            seen: 0,
-            body: String::new(),
-            // `facts.state` is `accepted` on every row today: a contradiction
-            // is something `jod_core::consolidate` reports to its caller and
-            // nothing writes down. Until it is a column, nothing here could
-            // set this without inventing it.
-            contradicted: false,
-            in_edges: Vec::new(),
-            out_edges: Vec::new(),
-            provenance: Vec::new(),
-        });
-        id
-    };
-
-    for f in facts {
-        let subject = touch(&mut by_id, &f.scope, &f.subject);
-        let object = touch(&mut by_id, &f.scope, &f.object);
-        // `contradicts` is one of the four edge kinds the graph names, and the
-        // only one the screen marks: an unresolved contradiction is the thing a
-        // person browsing their own memory most needs to see.
-        let warn = f.predicate == "contradicts";
-
-        by_id.get_mut(&subject).expect("just inserted").out_edges.push(MemoryEdge {
-            kind: f.predicate.clone(),
-            other: object.clone(),
-            other_name: f.object.clone(),
-            other_kind: kind_at(&object),
-            warn,
-        });
-        by_id.get_mut(&object).expect("just inserted").in_edges.push(MemoryEdge {
-            kind: f.predicate.clone(),
-            other: subject.clone(),
-            other_name: f.subject.clone(),
-            other_kind: kind_at(&subject),
-            warn,
-        });
-
-        for id in [&subject, &object] {
-            let node = by_id.get_mut(id).expect("just inserted");
-            node.seen += 1;
-            // The newest fact a node takes part in is the one that describes
-            // it, so the list shows what it most recently had to do with rather
-            // than whatever was read first.
-            let latest = newest.entry(id.clone()).or_insert(i64::MIN);
-            if f.recorded_at_ms >= *latest {
-                *latest = f.recorded_at_ms;
-                node.age_ms = (now - f.recorded_at_ms).max(0);
-                node.body = format!("{} {} {}", f.subject, f.predicate, f.object);
-                node.confidence = trust(f.origin);
+            MemoryNode {
+                id: n.id.to_string(),
+                name: n.name.clone(),
+                kind: kind_at(n.id),
+                // Facts carry no confidence column, and inventing a gradient
+                // would put a number on the screen nothing could justify.
+                // Origin is the trust signal the store does keep — it is what
+                // decides whether a fact may answer a recall at all — so the
+                // column shows that, the same way every time.
+                confidence: describing.map(|f| trust(f.origin)).unwrap_or(0.0),
+                // Counted in the query, in both directions, over live edges
+                // only. The cheapest honest answer to whether this memory is
+                // load-bearing or was written once and never used again.
+                degree: n.degree.max(0) as usize,
+                age_ms: (now - n.last_seen_ms).max(0),
+                // One edge per fact, so how often a thing has been named and
+                // how connected it is are the same number until the store
+                // counts restatements separately.
+                seen: n.degree.max(0) as usize,
+                body: describing
+                    .map(|f| format!("{} {} {}", f.subject, f.predicate, f.object))
+                    .unwrap_or_else(|| n.name.clone()),
+                // Now answerable from the graph rather than guessed at: a node
+                // with a `contradicts` edge is in a contradiction, whichever
+                // end of it this is.
+                contradicted: mine.iter().any(|e| e.predicate == "contradicts"),
+                in_edges: mine.iter().filter(|e| !e.outgoing).map(|e| edge(e, kind_at)).collect(),
+                out_edges: mine.iter().filter(|e| e.outgoing).map(|e| edge(e, kind_at)).collect(),
+                provenance: provenance(describing, in_edges.len(), out_edges.len()),
             }
-            let source = f
-                .source
-                .clone()
-                .unwrap_or_else(|| format!("{} · scope {}", f.origin.as_str(), f.scope));
-            if !node.provenance.contains(&source) && node.provenance.len() < 4 {
-                node.provenance.push(source);
-            }
-        }
-    }
+        })
+        .collect()
+}
 
-    let mut rows: Vec<MemoryNode> = by_id.into_values().collect();
-    for row in &mut rows {
-        row.degree = row.in_edges.len() + row.out_edges.len();
+/// How many entities and relations the graph holds, whether or not the list
+/// above could reach them.
+///
+/// The count belongs beside the list rather than inside it. `memory()` returns
+/// the most-connected few hundred, and a status bar that counted its own rows
+/// would say "200 nodes" for a graph of twelve thousand and be wrong in the one
+/// direction that matters — a browser claiming to show everything.
+pub fn graph_size(jod: &Arc<Jod>) -> (usize, usize) {
+    jod.store()
+        .and_then(|store| store.graph_size().ok())
+        .unwrap_or((0, 0))
+}
+
+fn edge(e: &Edge, kind_at: impl Fn(i64) -> MemoryKind) -> MemoryEdge {
+    MemoryEdge {
+        kind: e.predicate.clone(),
+        other: e.other_id.to_string(),
+        other_name: e.other.clone(),
+        other_kind: kind_at(e.other_id),
+        // `contradicts` is the one edge kind the screen marks: an unresolved
+        // contradiction is what a person browsing their own memory most needs
+        // to see.
+        warn: e.predicate == "contradicts",
     }
-    rows.sort_by(|a, b| b.degree.cmp(&a.degree).then_with(|| a.name.cmp(&b.name)));
-    rows
+}
+
+/// The newest fact that names `name` without `name` being its subject.
+///
+/// Found through the in-edges rather than by another query: an edge and the
+/// fact behind it agree on the predicate and on both ends, so the fact is
+/// already in hand if its subject was read.
+fn asserting<'a>(
+    asserted: &'a HashMap<String, Vec<Fact>>,
+    name: &str,
+    edges: &[Edge],
+) -> Option<&'a Fact> {
+    edges
+        .iter()
+        .filter(|e| !e.outgoing)
+        .filter_map(|e| {
+            asserted
+                .get(&e.other)?
+                .iter()
+                .find(|f| f.predicate == e.predicate && f.object == name)
+        })
+        .max_by_key(|f| f.recorded_at_ms)
+}
+
+/// What kind of memory a node is.
+///
+/// The fact a thing is the *subject* of is what says what it is; a thing only
+/// ever spoken about is an entity. `entities.kind` is not consulted because it
+/// is `thing` on every row `intern` writes — when the memory-types work gives
+/// it a real value, this reads that instead and the origin becomes a fallback.
+fn kind_of_node(asserted: &HashMap<String, Vec<Fact>>, name: &str) -> MemoryKind {
+    asserted
+        .get(name)
+        .and_then(|facts| facts.first())
+        .map(kind_of)
+        .unwrap_or(MemoryKind::Entity)
+}
+
+fn provenance(describing: Option<&Fact>, into: usize, out: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    if let Some(f) = describing {
+        lines.push(match &f.source {
+            Some(source) => format!("{source} · {}", f.origin.as_str()),
+            None => format!("{} · scope {}", f.origin.as_str(), f.scope),
+        });
+    }
+    lines.push(format!("{out} out, {into} in"));
+    lines
 }
 
 /// What kind of memory a fact makes its subject.
@@ -1759,13 +1783,13 @@ mod tests {
     // ---- memory ----
 
     #[test]
-    fn facts_fold_into_nodes_with_their_edges_joined() {
+    fn a_node_carries_both_directions_of_every_edge_it_has() {
         let store = store();
         let g = goal("inbox-to-zero");
         store.add_goal(&g).unwrap();
         store.remember(iteration_fact(&g, "1: filed 12 messages")).unwrap();
 
-        let rows = nodes(&crawl(&store));
+        let rows = memory_from(&store);
         let subject = rows
             .iter()
             .find(|n| n.name == "goal/inbox-to-zero")
@@ -1792,6 +1816,65 @@ mod tests {
         assert_eq!(subject.degree, 1);
     }
 
+    /// The whole reason this reads `memory_nodes` rather than walking out from
+    /// the subjects the TUI can name: a fact about a subject nothing else
+    /// mentions is exactly what a person's own notes look like, and the walk
+    /// could not see one.
+    #[test]
+    fn a_fact_about_nothing_else_is_still_in_the_list() {
+        let store = store();
+        store
+            .remember(NewFact {
+                source: Some("AGENTS.md".into()),
+                ..NewFact::new("reljod", "prefers", "linear for tasks").from(Origin::Owner)
+            })
+            .unwrap();
+
+        let rows = memory_from(&store);
+        let node = rows
+            .iter()
+            .find(|n| n.name == "reljod")
+            .expect("a subject nothing else points at is still a node");
+        assert_eq!(node.kind, MemoryKind::Belief, "Reljod said so");
+        assert_eq!(node.confidence, 1.0);
+        assert_eq!(node.body, "reljod prefers linear for tasks");
+        assert_eq!(node.degree, 1);
+        assert!(node.provenance.iter().any(|p| p.contains("AGENTS.md")));
+    }
+
+    /// A node with a `contradicts` edge is in a contradiction whichever end of
+    /// it it is, and the list marks it with `!` so the state survives a
+    /// monochrome terminal.
+    #[test]
+    fn both_ends_of_a_contradiction_are_marked() {
+        let store = store();
+        store
+            .remember(NewFact::new("spec first", "contradicts", "ship fast").from(Origin::Agent))
+            .unwrap();
+        store
+            .remember(NewFact::new("reljod", "prefers", "spec first").from(Origin::Owner))
+            .unwrap();
+
+        let rows = memory_from(&store);
+        for name in ["spec first", "ship fast"] {
+            let node = rows.iter().find(|n| n.name == name).expect(name);
+            assert!(node.contradicted, "{name} is in an unresolved contradiction");
+        }
+        let untouched = rows.iter().find(|n| n.name == "reljod").unwrap();
+        assert!(!untouched.contradicted, "a node with no such edge is not");
+    }
+
+    /// The list is capped at the most-connected few hundred, so the status bar
+    /// counts the graph rather than the rows — a browser that counts its own
+    /// rows says it is showing everything.
+    #[test]
+    fn the_graph_is_counted_separately_from_what_is_listed() {
+        let store = store();
+        store.remember(NewFact::new("a", "links", "b")).unwrap();
+        store.remember(NewFact::new("b", "links", "c")).unwrap();
+        assert_eq!(store.graph_size().unwrap(), (3, 2));
+    }
+
     /// Origin is the only reason-to-believe the store records, so it is what
     /// the confidence column shows — the same number every time, rather than an
     /// invented gradient.
@@ -1808,12 +1891,19 @@ mod tests {
         store
             .remember(NewFact::new("reljod", "prefers", "linear for tasks").from(Origin::Owner))
             .unwrap();
-        let facts = store.facts_about("reljod").unwrap();
-        let rows = nodes(&facts);
-        let node = rows.iter().find(|n| n.name == "reljod").unwrap();
-        assert_eq!(node.kind, MemoryKind::Belief);
-        assert_eq!(node.body, "reljod prefers linear for tasks");
-        assert_eq!(node.confidence, 1.0);
+        store
+            .remember(NewFact::new("linear", "is a", "system of record").from(Origin::Agent))
+            .unwrap();
+        let rows = memory_from(&store);
+
+        let said = rows.iter().find(|n| n.name == "reljod").unwrap();
+        assert_eq!(said.kind, MemoryKind::Belief);
+        assert_eq!(said.body, "reljod prefers linear for tasks");
+        assert_eq!(said.confidence, 1.0);
+
+        let concluded = rows.iter().find(|n| n.name == "linear").unwrap();
+        assert_eq!(concluded.kind, MemoryKind::Fact);
+        assert!(concluded.confidence < said.confidence, "an agent is not the owner");
     }
 
     // ---- empty states ----

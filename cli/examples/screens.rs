@@ -13,11 +13,8 @@
 //! cargo run --example screens -- /tmp/seed.db prefers  # with the memory filter typed
 //! ```
 //!
-//! The second argument is the memory screen's `/` filter, which is the one
-//! thing this cannot show by rendering a fresh app: with no filter the memory
-//! list is a walk out from the subjects the TUI can name, and with one it is a
-//! search of the whole store. Those are different code paths and the search is
-//! the one that finds a person's own notes.
+//! The second argument types into the memory screen's `/` filter, which a
+//! freshly built app otherwise never has.
 //!
 //! `jod-cli` is a binary crate, so an example cannot `use` it — the TUI module
 //! is compiled in by path instead, which is why the crate root below has to
@@ -84,8 +81,9 @@ async fn main() -> anyhow::Result<()> {
     app.now_ms = chrono::Utc::now().timestamp_millis();
     app.list_mut(Workspace::Memory).filter = filter.clone();
 
-    // The same six calls `tui::refresh_workspaces` makes on the tick.
-    app.memory = tui::data::memory(&jod, filter.as_deref());
+    // The same calls `tui::refresh_workspaces` makes on the tick.
+    app.memory = tui::data::memory(&jod);
+    app.graph_size = tui::data::graph_size(&jod);
     app.schedules = tui::data::schedules(&jod);
     app.goals = tui::data::goals(&jod);
     app.hooks = tui::data::hooks(&jod);
