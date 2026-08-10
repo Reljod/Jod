@@ -167,40 +167,51 @@ pub async fn github(
     };
     let (delivery_id, event) = (delivery_id.to_string(), event.to_string());
 
+    // Authenticate before anything else is looked at, let alone reported. Every
+    // branch below this point has already earned the right to be here.
+    //
+    // An absent secret and a bad tag are the *same* refusal on purpose. They
+    // are different problems — one is the operator's, one is the caller's — but
+    // telling them apart from outside would let a stranger discover that this
+    // endpoint exists and is unconfigured, which is the single most useful fact
+    // about it. The distinction is recorded where the operator actually looks:
+    // the delivery row and the audit line, both below.
+    let why = match &secret {
+        // Deliberately not a silent accept. An operator who has not set the
+        // secret has an endpoint that spawns agents for anyone who finds it.
+        Secret(None) => Some("no secret is configured"),
+        Secret(Some(secret)) => {
+            // TODO: `JOD_GITHUB_WEBHOOK_SECRET` belongs in `crate::config::Config`
+            // alongside the other daemon settings. It is read from the
+            // environment only because nobody owned `config.rs` when this
+            // landed, not because the environment is the right home for it.
+            if jod_core::webhook::verify_signature(secret, &body, header(SIGNATURE_HEADER)) {
+                None
+            } else {
+                Some("bad or missing signature")
+            }
+        }
+    };
+
+    // Fetched after the check, so an unauthenticated caller cannot learn even
+    // this much about how the daemon is put together.
+    let store = state.jod.store().cloned();
+
+    if let Some(why) = why {
+        if let Some(store) = &store {
+            reject(&state, store, &delivery_id, &event, why);
+        }
+        // The same opaque 401 an unknown bearer token gets — no detail, no
+        // `type` a caller could branch on.
+        return Err(ApiError::Unauthorized);
+    }
+
     // Webhooks need somewhere to record what they did and somewhere to read
     // rules from. Answering 200 with no store would tell GitHub the event was
     // handled when nothing could have handled it.
-    let store = state.jod.store().cloned().ok_or_else(|| {
+    let store = store.ok_or_else(|| {
         ApiError::Internal("this daemon has no store, and a webhook rule lives in one".into())
     })?;
-
-    let Secret(Some(secret)) = &secret else {
-        // Deliberately not a silent accept. An operator who has not set the
-        // secret has an endpoint that spawns agents for anyone who finds it.
-        reject(
-            &state,
-            &store,
-            &delivery_id,
-            &event,
-            "no secret is configured",
-        );
-        return Err(ApiError::Internal(format!(
-            "no GitHub webhook secret is configured; set {SECRET_ENV}"
-        )));
-    };
-
-    if !jod_core::webhook::verify_signature(secret, &body, header(SIGNATURE_HEADER)) {
-        reject(
-            &state,
-            &store,
-            &delivery_id,
-            &event,
-            "bad or missing signature",
-        );
-        // The same opaque 401 an unknown bearer token gets: distinguishing
-        // "wrong tag" from "no tag" would help someone probe the endpoint.
-        return Err(ApiError::Unauthorized);
-    }
 
     // Only now is the body worth parsing. A delivery that GitHub signed but
     // Jod cannot read is the operator's problem — most often a hook configured

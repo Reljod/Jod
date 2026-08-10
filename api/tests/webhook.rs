@@ -116,17 +116,21 @@ fn delivery(
 }
 
 fn signed_delivery(id: &str, event: &str, body: Vec<u8>, secret: Option<&str>) -> Request<Body> {
+    let tag = secret.map(|s| jod_core::webhook::sign(s.as_bytes(), &body));
+    raw_delivery(id, event, body, tag)
+}
+
+/// A delivery carrying whatever tag the caller says, including one that is
+/// valid for a *different* body. The tampering tests need that separation.
+fn raw_delivery(id: &str, event: &str, body: Vec<u8>, tag: Option<String>) -> Request<Body> {
     let mut b = Request::builder()
         .uri(jod_api::webhook::PATH)
         .method("POST")
         .header("content-type", "application/json")
         .header("x-github-delivery", id)
         .header("x-github-event", event);
-    if let Some(secret) = secret {
-        b = b.header(
-            "x-hub-signature-256",
-            jod_core::webhook::sign(secret.as_bytes(), &body),
-        );
+    if let Some(tag) = tag {
+        b = b.header("x-hub-signature-256", tag);
     }
     b.body(Body::from(body)).unwrap()
 }
@@ -239,19 +243,106 @@ async fn a_delivery_with_no_signature_at_all_is_rejected() {
 
 /// The failure mode that would turn this route into an open remote shell: with
 /// no secret set, "verify" has nothing to verify against.
+/// The failure that would turn this route into an open remote shell: with no
+/// secret set there is nothing to verify against.
+///
+/// A future refactor that reads "no secret configured, so skip verification"
+/// looks like a simplification and is a total authentication bypass. This is
+/// the test that stops it.
 #[tokio::test]
-async fn a_daemon_with_no_secret_configured_accepts_nothing() {
+async fn an_unconfigured_endpoint_refuses_every_delivery() {
     let h = harness(None);
     h.store.add_webhook_rule(&rule("triage")).unwrap();
 
+    // Even a delivery that is correctly signed against the secret the operator
+    // *meant* to set. There is nothing to check it against.
     let (status, _) = send(
         &h.app,
         delivery("d-1", "pull_request", &pull_request("opened"), Some(SECRET)),
     )
     .await;
 
-    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert_eq!(status_of(&h, "d-1"), DeliveryStatus::Rejected);
+}
+
+/// Wrong secret, absent secret and tampered body are three different problems —
+/// one the caller's, two the operator's — and they must be indistinguishable
+/// from outside. Otherwise a stranger who finds the endpoint can discover
+/// whether it is configured, which is the most useful thing to know about it.
+///
+/// The distinction is not lost, only moved: the delivery row keeps the real
+/// reason, which is asserted below and is where the operator looks.
+#[tokio::test]
+async fn every_refusal_is_the_same_opaque_answer() {
+    let payload = pull_request("opened");
+    let honest = serde_json::to_vec(&payload).unwrap();
+    let mut tampered = honest.clone();
+    tampered[honest.len() / 2] ^= 0x01;
+
+    let cases: Vec<(&str, Harness, Request<Body>)> = vec![
+        (
+            "no secret configured",
+            harness(None),
+            delivery("d-1", "pull_request", &payload, Some(SECRET)),
+        ),
+        (
+            "wrong secret",
+            harness(Some(SECRET)),
+            delivery("d-1", "pull_request", &payload, Some("the-wrong-one")),
+        ),
+        (
+            "no signature at all",
+            harness(Some(SECRET)),
+            delivery("d-1", "pull_request", &payload, None),
+        ),
+        (
+            "tampered body",
+            harness(Some(SECRET)),
+            // The tag is valid — for the honest body, which is not the one
+            // being sent.
+            raw_delivery(
+                "d-1",
+                "pull_request",
+                tampered,
+                Some(jod_core::webhook::sign(SECRET.as_bytes(), &honest)),
+            ),
+        ),
+    ];
+
+    let mut answers = Vec::new();
+    for (name, h, req) in cases {
+        let res = h.app.clone().oneshot(req).await.unwrap();
+        let status = res.status();
+        let challenge = res
+            .headers()
+            .get("www-authenticate")
+            .map(|v| v.to_str().unwrap().to_string());
+        let content_type = res
+            .headers()
+            .get("content-type")
+            .map(|v| v.to_str().unwrap().to_string());
+        let bytes = res.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{name}");
+        assert!(
+            json.get("detail").is_none(),
+            "{name}: the refusal explained itself: {json}"
+        );
+        // The row still knows, even though the caller does not.
+        assert_eq!(status_of(&h, "d-1"), DeliveryStatus::Rejected, "{name}");
+
+        answers.push((status, challenge, content_type, json));
+    }
+
+    let first = &answers[0];
+    for (i, answer) in answers.iter().enumerate() {
+        assert_eq!(
+            answer, first,
+            "refusal {i} is distinguishable from the first — that is an oracle"
+        );
+    }
 }
 
 #[tokio::test]
