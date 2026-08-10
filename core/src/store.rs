@@ -384,6 +384,161 @@ const MIGRATIONS: &[(&str, &str)] = &[
     CREATE INDEX ix_goals_due ON goals(next_fire_at_ms) WHERE state = 'running';
     "#,
     ),
+    (
+        "0006_conversations",
+        r#"
+    -- Jod now owns the transcript.
+    --
+    -- `docs/jod-system.md` used to say the opposite — "Jod needs no memory of
+    -- the transcript: the harness owns it" — and that was right while a
+    -- conversation was a line you could only continue. It stops being right the
+    -- moment you want to fork, revert, or move a thread to a different harness,
+    -- because a session id issued by Claude Code means nothing to OpenCode, and
+    -- AGY has no fork flag at all. → docs/decisions.md
+    --
+    -- The shape is the one ChatGPT, LangGraph and git converged on and the one
+    -- the harnesses did *not*: a single DAG with a moving head pointer. Claude
+    -- Code and OpenCode both fork by copying a prefix into a new container with
+    -- no parent edge, which is cheap to read but makes branch topology
+    -- recoverable only by id intersection — you cannot render "‹ 2/3 ›" from it.
+    CREATE TABLE conversations (
+      id            TEXT PRIMARY KEY,
+      title         TEXT NOT NULL DEFAULT '',
+      harness       TEXT NOT NULL,
+      cwd           TEXT NOT NULL,
+      model         TEXT,
+      -- The harness-side conversation to resume, when there is one. Changes
+      -- whenever the thread moves to a different harness, which is exactly why
+      -- it cannot be the identity of the conversation.
+      session_id    TEXT,
+      -- The leaf currently being talked to: git's HEAD, ChatGPT's
+      -- `current_node`, Claude Code's `leafUuid`. Moving this is what
+      -- switching branches *is*.
+      head_id       INTEGER,
+      -- Set when this conversation was forked out of another.
+      forked_from   TEXT REFERENCES conversations(id) ON DELETE SET NULL,
+      forked_at_id  INTEGER,
+      created_at_ms INTEGER NOT NULL,
+      updated_at_ms INTEGER NOT NULL
+    );
+    CREATE INDEX ix_conversations_recent ON conversations(updated_at_ms DESC);
+
+    -- One node of the DAG. `parent_id` is null only at a root.
+    CREATE TABLE messages (
+      id            INTEGER PRIMARY KEY,
+      conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+      parent_id     INTEGER REFERENCES messages(id) ON DELETE CASCADE,
+      -- user | assistant | thinking | tool_call | tool_result | system
+      role          TEXT NOT NULL,
+      text          TEXT NOT NULL DEFAULT '',
+      -- Tool payloads kept whole. The event stream only ever carried a
+      -- truncated `summary`, which is enough to *watch* a run and not enough to
+      -- replay one into another harness.
+      tool_name     TEXT,
+      tool_input    TEXT,
+      -- The run that produced this message, so a message can be traced back to
+      -- the process that said it.
+      run_id        TEXT,
+      at_ms         INTEGER NOT NULL,
+      -- 0 once compaction has summarised it out of the live window. It stays
+      -- searchable and stays on disk — compaction narrows what is *sent*, never
+      -- what is kept.
+      active        INTEGER NOT NULL DEFAULT 1
+    );
+    CREATE INDEX ix_messages_conversation ON messages(conversation_id, id);
+    CREATE INDEX ix_messages_parent ON messages(parent_id);
+
+    -- Search across every conversation. The tier the prior memory research
+    -- called the one Jod entirely lacked.
+    CREATE VIRTUAL TABLE messages_fts USING fts5(
+      text, content='messages', content_rowid='id'
+    );
+    CREATE TRIGGER messages_ai AFTER INSERT ON messages BEGIN
+      INSERT INTO messages_fts(rowid, text) VALUES (new.id, new.text);
+    END;
+    CREATE TRIGGER messages_ad AFTER DELETE ON messages BEGIN
+      INSERT INTO messages_fts(messages_fts, rowid, text) VALUES ('delete', old.id, old.text);
+    END;
+    CREATE TRIGGER messages_au AFTER UPDATE ON messages BEGIN
+      INSERT INTO messages_fts(messages_fts, rowid, text) VALUES ('delete', old.id, old.text);
+      INSERT INTO messages_fts(rowid, text) VALUES (new.id, new.text);
+    END;
+
+    -- A compaction is a first-class node, not a flag — the shape Claude Code's
+    -- `compact_boundary`, OpenCode's `{type:"compaction"}` message and
+    -- Temporal's continue-as-new all independently arrived at. It records what
+    -- it replaced so the original stays recoverable.
+    CREATE TABLE compactions (
+      id              INTEGER PRIMARY KEY,
+      conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+      -- The message this summary hangs from, and the span it stands for.
+      anchor_id       INTEGER,
+      from_id         INTEGER NOT NULL,
+      to_id           INTEGER NOT NULL,
+      summary         TEXT NOT NULL,
+      -- What it cost and what it saved, so a compaction that freed nothing is
+      -- visible rather than silently repeated.
+      before_chars    INTEGER NOT NULL,
+      after_chars     INTEGER NOT NULL,
+      reason          TEXT NOT NULL,
+      at_ms           INTEGER NOT NULL
+    );
+    CREATE INDEX ix_compactions_conversation ON compactions(conversation_id, at_ms DESC);
+    "#,
+    ),
+    (
+        "0007_webhooks",
+        r#"
+    -- Rules that turn an inbound event into an agent run.
+    CREATE TABLE webhook_rules (
+      id            TEXT PRIMARY KEY,
+      name          TEXT NOT NULL UNIQUE,
+      -- github, for now. A column rather than an assumption, because the
+      -- matching is generic and only the signature check is provider-specific.
+      source        TEXT NOT NULL DEFAULT 'github',
+      repo          TEXT NOT NULL,
+      event         TEXT NOT NULL,
+      -- Optional narrowing: `opened`, `labeled`, … NULL matches every action.
+      action        TEXT,
+      -- Further conditions as JSON — label, branch, author, draft. Kept as one
+      -- column because the set is open and a column per condition would be a
+      -- migration every time GitHub adds a field.
+      conditions    TEXT NOT NULL DEFAULT '{}',
+      -- The prompt, with {{placeholders}} filled from the payload. Payload
+      -- values are attacker-controlled, so they are interpolated as quoted data
+      -- and the facts they produce are written `untrusted`.
+      prompt        TEXT NOT NULL,
+      harness       TEXT NOT NULL,
+      cwd           TEXT NOT NULL,
+      model         TEXT,
+      enabled       INTEGER NOT NULL DEFAULT 1,
+      created_at_ms INTEGER NOT NULL
+    );
+    CREATE INDEX ix_webhook_rules_match ON webhook_rules(source, repo, event) WHERE enabled = 1;
+
+    -- Every delivery, whether or not it matched anything.
+    --
+    -- `delivery_id` is unique because GitHub is explicitly at-least-once and
+    -- redelivers: without this a retried delivery starts a second agent run.
+    -- A delivery that matched no rule still gets a row, or "the hook is not
+    -- firing" and "the hook fires and nothing matches" are indistinguishable.
+    CREATE TABLE webhook_deliveries (
+      id            INTEGER PRIMARY KEY,
+      delivery_id   TEXT NOT NULL UNIQUE,
+      source        TEXT NOT NULL,
+      event         TEXT NOT NULL,
+      action        TEXT,
+      repo          TEXT,
+      rule_id       TEXT REFERENCES webhook_rules(id) ON DELETE SET NULL,
+      run_id        TEXT,
+      -- accepted | no_match | rejected | duplicate | failed
+      status        TEXT NOT NULL,
+      detail        TEXT,
+      received_at_ms INTEGER NOT NULL
+    );
+    CREATE INDEX ix_webhook_deliveries ON webhook_deliveries(received_at_ms DESC);
+    "#,
+    ),
 ];
 
 /// Who asserted a fact. Kept out of the fact's text so that content Jod
