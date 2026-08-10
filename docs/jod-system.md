@@ -169,6 +169,43 @@ statuses, and the task board. It is read from the store on every refresh rather
 than kept in memory, because teammates run in their own processes and no
 in-memory copy could be authoritative.
 
+### Running several agents at once
+
+The UI is built for unattended work, which means three things a chat window does
+not need.
+
+**Delegating.** `Ctrl-B` — or `/delegate` — sends the typed line to an agent that
+never takes over the screen. It always starts a fresh conversation: a background
+job that silently continued the conversation on screen would inherit context
+nobody gave it, and two agents writing into one session is not a conversation.
+When it ends, a notice says which one, how it went and how long it took, because
+the whole point of delegating is that you were not watching.
+
+**The panel as a control surface.** `Ctrl-A` is a cursor over the fleet, sorted
+running-first then newest, showing each run's age. From it: `⏎` puts a run on
+screen, `s` stops one, `r` points the next turn at its conversation — bringing
+its harness with it, since a session id belongs to the harness that issued it —
+and `a` gives the `tmux attach` line. The same reaches the keyboard as
+`/watch`, `/stop`, `/attach`, where an id prefix is enough and an ambiguous one
+is refused rather than guessed: stopping the wrong agent is not undoable.
+
+**Never being made to wait.** A prompt typed mid-turn is queued and sent when the
+turn ends, rather than refused — the old behaviour left it in a blocked box,
+which made sitting still the only thing to do while an agent worked. `↑`/`↓`
+recall what was sent, as every shell does, so scrolling the transcript moved to
+`PageUp`/`PageDown`, the mouse, and `Ctrl` with an arrow. `Ctrl-X` stops the run
+being watched, because `Ctrl-C` is quit and otherwise the only way to interrupt
+an agent is to leave. Quitting warns about *every* running agent, not just the
+one on screen.
+
+The panels are modal while open: their letters are commands, not text. A panel
+you can only look at makes you leave the UI to act on what you saw.
+
+A 250ms tick drives a spinner and an elapsed counter, and re-reads the fleet once
+a second. Without it a ten-minute run and a hung one look identical, and a panel
+that only refreshed when the watched agent finished showed a fleet that stopped
+moving minutes ago.
+
 ### Slash commands
 
 Typing `/` opens a completion popup — `Tab` completes, `↑↓` choose — and
@@ -181,6 +218,9 @@ than expecting them to be remembered.
 | `/model <name>` | set the model; no argument restores the default |
 | `/thinking` · `/details` | show or hide reasoning, and what tools returned |
 | `/new` · `/resume <id>` · `/sessions` | move between conversations |
+| `/delegate <prompt>` | run it in the background, same as `Ctrl-B` |
+| `/watch <id>` · `/stop <id>` · `/attach <id>` | act on one agent, by id prefix |
+| `/todo <title>` · `/done <id>` | write to the team's board |
 | `/agents` · `/team` | the panels, same as `Ctrl-A` and `Ctrl-G` |
 | `/help` · `/clear` · `/exit` | |
 

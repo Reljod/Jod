@@ -31,6 +31,18 @@ pub enum Slash {
     Resume(String),
     Agents,
     Team,
+    /// Start an agent that runs without taking over the screen.
+    Delegate(String),
+    /// Stop an agent, by an id prefix or its name.
+    Stop(String),
+    /// Put an agent's output on screen.
+    Watch(String),
+    /// Say how to attach to an agent's tmux session.
+    Attach(String),
+    /// Put a task on the watched team's board.
+    Todo(String),
+    /// Mark one of those tasks finished.
+    Done(String),
     /// Clear the transcript on screen. The conversation is untouched.
     Clear,
     Exit,
@@ -80,6 +92,48 @@ pub fn parse(line: &str) -> Option<Slash> {
         }
         "agents" => Slash::Agents,
         "team" => Slash::Team,
+        "delegate" | "bg" | "spawn" => {
+            if arg.is_empty() {
+                Slash::NeedsArgument("/delegate <prompt>")
+            } else {
+                Slash::Delegate(arg.to_string())
+            }
+        }
+        "stop" | "kill" => {
+            if arg.is_empty() {
+                Slash::NeedsArgument("/stop <id>")
+            } else {
+                Slash::Stop(arg.to_string())
+            }
+        }
+        "watch" | "focus" => {
+            if arg.is_empty() {
+                Slash::NeedsArgument("/watch <id>")
+            } else {
+                Slash::Watch(arg.to_string())
+            }
+        }
+        "attach" => {
+            if arg.is_empty() {
+                Slash::NeedsArgument("/attach <id>")
+            } else {
+                Slash::Attach(arg.to_string())
+            }
+        }
+        "todo" | "task" => {
+            if arg.is_empty() {
+                Slash::NeedsArgument("/todo <title>")
+            } else {
+                Slash::Todo(arg.to_string())
+            }
+        }
+        "done" | "finish" => {
+            if arg.is_empty() {
+                Slash::NeedsArgument("/done <task-id>")
+            } else {
+                Slash::Done(arg.to_string())
+            }
+        }
         "clear" => Slash::Clear,
         "exit" | "quit" | "q" => Slash::Exit,
         other => Slash::Unknown(format!("/{other}")),
@@ -106,8 +160,14 @@ pub const HELP: &[(&str, &str)] = &[
     ("/new", "start a fresh conversation"),
     ("/sessions", "conversations you can pick up"),
     ("/resume <id>", "continue one of them"),
+    ("/delegate <prompt>", "run it in the background (Ctrl-B)"),
     ("/agents", "the delegations panel (Ctrl-A)"),
+    ("/watch <id>", "put an agent's output on screen"),
+    ("/stop <id>", "stop an agent and close its session"),
+    ("/attach <id>", "how to attach to its tmux session"),
     ("/team", "the team panel (Ctrl-G)"),
+    ("/todo <title>", "put a task on the team's board"),
+    ("/done <task-id>", "mark one of those tasks finished"),
     ("/clear", "clear the transcript on screen"),
     ("/exit", "leave; running agents keep going"),
 ];
@@ -118,15 +178,26 @@ pub struct Completion {
     /// The whole line to put in the input if this is chosen.
     pub line: String,
     /// What is shown next to it.
-    pub hint: &'static str,
+    pub hint: String,
+}
+
+impl Completion {
+    fn new(line: impl Into<String>, hint: impl Into<String>) -> Completion {
+        Completion {
+            line: line.into(),
+            hint: hint.into(),
+        }
+    }
 }
 
 /// What could complete the line being typed.
 ///
 /// Empty means "no popup": either this is not a command, or it is already
 /// finished. Completing arguments as well as names matters more than it looks
-/// — `/harness ` is the point where a user has to remember three spellings.
-pub fn completions(input: &str) -> Vec<Completion> {
+/// — `/harness ` is the point where a user has to remember three spellings, and
+/// the commands that take an agent id are otherwise a UUID-retyping exercise,
+/// so the live fleet is offered there.
+pub fn completions(input: &str, agents: &[crate::tui::AgentLine]) -> Vec<Completion> {
     let Some(rest) = input.strip_prefix('/') else {
         return vec![];
     };
@@ -145,16 +216,14 @@ pub fn completions(input: &str) -> Vec<Completion> {
             .map(|(usage, hint)| {
                 let name = usage.split_whitespace().next().unwrap();
                 let takes_argument = usage.contains('<');
-                Completion {
-                    // A command that takes an argument gets a trailing space,
-                    // so accepting it leaves the cursor where the argument goes.
-                    line: if takes_argument {
-                        format!("{name} ")
-                    } else {
-                        name.to_string()
-                    },
-                    hint,
-                }
+                // A command that takes an argument gets a trailing space, so
+                // accepting it leaves the cursor where the argument goes.
+                let line = if takes_argument {
+                    format!("{name} ")
+                } else {
+                    name.to_string()
+                };
+                Completion::new(line, *hint)
             })
             .collect();
     }
@@ -163,17 +232,30 @@ pub fn completions(input: &str) -> Vec<Completion> {
     let mut parts = rest.splitn(2, char::is_whitespace);
     let name = parts.next().unwrap_or_default().to_ascii_lowercase();
     let typed = parts.next().unwrap_or_default().trim_start().to_ascii_lowercase();
-    if !matches!(name.as_str(), "harness" | "agent") {
-        return vec![];
+
+    match name.as_str() {
+        "harness" | "agent" => HarnessKind::ALL
+            .into_iter()
+            .filter(|k| k.id().replace('_', "").starts_with(&typed) || k.id().starts_with(&typed))
+            .map(|k| Completion::new(format!("/{name} {}", short_name(k)), k.label()))
+            .collect(),
+        // Whichever agents are still worth naming. `/stop` only offers the ones
+        // that could actually be stopped, so the list answers "what can I do"
+        // rather than merely "what exists".
+        "stop" | "kill" | "watch" | "focus" | "attach" => agents
+            .iter()
+            .filter(|a| !matches!(name.as_str(), "stop" | "kill") || a.is_running())
+            .filter(|a| a.id.starts_with(&typed))
+            .map(|a| {
+                let id: String = a.id.chars().take(8).collect();
+                Completion::new(
+                    format!("/{name} {id}"),
+                    format!("{} · {}", a.status, a.name),
+                )
+            })
+            .collect(),
+        _ => vec![],
     }
-    HarnessKind::ALL
-        .into_iter()
-        .filter(|k| k.id().replace('_', "").starts_with(&typed) || k.id().starts_with(&typed))
-        .map(|k| Completion {
-            line: format!("/{name} {}", short_name(k)),
-            hint: k.label(),
-        })
-        .collect()
 }
 
 /// The spelling offered for a harness — the shortest one `parse` accepts.
@@ -190,18 +272,31 @@ mod tests {
     use super::*;
 
     fn lines(input: &str) -> Vec<String> {
-        completions(input).into_iter().map(|c| c.line).collect()
+        completions(input, &[]).into_iter().map(|c| c.line).collect()
+    }
+
+    fn agent(id: &str, status: &str) -> crate::tui::AgentLine {
+        crate::tui::AgentLine {
+            id: id.into(),
+            name: "port the parser".into(),
+            harness: "Claude Code".into(),
+            status: status.into(),
+            session: None,
+            created_at_ms: 0,
+            cost_usd: None,
+            last: None,
+        }
     }
 
     #[test]
     fn a_plain_prompt_offers_no_completions() {
-        assert!(completions("hello").is_empty());
-        assert!(completions("").is_empty());
+        assert!(completions("hello", &[]).is_empty());
+        assert!(completions("", &[]).is_empty());
     }
 
     #[test]
     fn a_bare_slash_offers_everything() {
-        assert_eq!(completions("/").len(), HELP.len());
+        assert_eq!(completions("/", &[]).len(), HELP.len());
     }
 
     #[test]
@@ -223,7 +318,7 @@ mod tests {
 
     #[test]
     fn nonsense_completes_to_nothing() {
-        assert!(completions("/zzzz").is_empty());
+        assert!(completions("/zzzz", &[]).is_empty());
     }
 
     /// The bit that saves remembering three spellings.
@@ -241,7 +336,7 @@ mod tests {
     /// popup would suggest something that then fails.
     #[test]
     fn every_suggested_harness_parses() {
-        for c in completions("/harness ") {
+        for c in completions("/harness ", &[]) {
             assert!(
                 matches!(parse(&c.line), Some(Slash::Harness(_))),
                 "{} was suggested but does not parse",
@@ -254,7 +349,7 @@ mod tests {
     /// something the parser calls unknown.
     #[test]
     fn every_suggested_command_parses() {
-        for c in completions("/") {
+        for c in completions("/", &[]) {
             let parsed = parse(c.line.trim());
             assert!(
                 !matches!(parsed, Some(Slash::Unknown(_)) | None),
@@ -273,7 +368,7 @@ mod tests {
         // Trimmed, the only suggestion is what is already typed — so there is
         // nothing to accept and Enter must run it.
         for input in ["/resume", "/harness"] {
-            let only = &completions(input)[0].line;
+            let only = &completions(input, &[])[0].line;
             assert_eq!(only.trim_end(), input.trim_end());
         }
     }
@@ -396,6 +491,76 @@ mod tests {
         for missing in ["/compact", "/undo", "/share", "/themes"] {
             assert_eq!(parse(missing), Some(Slash::Unknown(missing.into())), "{missing}");
         }
+    }
+
+    #[test]
+    fn the_agent_management_commands_all_parse() {
+        assert_eq!(parse("/delegate audit the deps"), Some(Slash::Delegate("audit the deps".into())));
+        assert_eq!(parse("/bg audit the deps"), Some(Slash::Delegate("audit the deps".into())));
+        assert_eq!(parse("/stop abc123"), Some(Slash::Stop("abc123".into())));
+        assert_eq!(parse("/kill abc123"), Some(Slash::Stop("abc123".into())));
+        assert_eq!(parse("/watch abc123"), Some(Slash::Watch("abc123".into())));
+        assert_eq!(parse("/focus abc123"), Some(Slash::Watch("abc123".into())));
+        assert_eq!(parse("/attach abc123"), Some(Slash::Attach("abc123".into())));
+        assert_eq!(parse("/todo port the parser"), Some(Slash::Todo("port the parser".into())));
+        assert_eq!(parse("/done port-the-parser"), Some(Slash::Done("port-the-parser".into())));
+    }
+
+    /// Each of these does something irreversible or unguessable without its
+    /// argument, so a bare one must ask rather than act.
+    #[test]
+    fn the_agent_management_commands_all_want_an_argument() {
+        for (text, usage) in [
+            ("/delegate", "/delegate <prompt>"),
+            ("/stop", "/stop <id>"),
+            ("/watch", "/watch <id>"),
+            ("/attach", "/attach <id>"),
+            ("/todo", "/todo <title>"),
+            ("/done", "/done <task-id>"),
+        ] {
+            assert_eq!(parse(text), Some(Slash::NeedsArgument(usage)), "{text}");
+        }
+    }
+
+    /// Retyping a UUID is not a user interface.
+    #[test]
+    fn the_live_agents_complete_the_commands_that_name_one() {
+        let agents = [agent("abcdef1234", "running"), agent("99887766", "completed")];
+        let offered = completions("/watch ", &agents)
+            .into_iter()
+            .map(|c| c.line)
+            .collect::<Vec<_>>();
+        assert_eq!(offered, vec!["/watch abcdef12", "/watch 99887766"]);
+
+        assert_eq!(
+            completions("/watch abc", &agents)[0].line,
+            "/watch abcdef12",
+            "typing narrows it"
+        );
+    }
+
+    /// `/stop` offers what could actually be stopped, so the list answers "what
+    /// can I do" rather than merely "what exists".
+    #[test]
+    fn stopping_only_offers_the_agents_that_are_still_running() {
+        let agents = [agent("abcdef1234", "running"), agent("99887766", "completed")];
+        let offered = completions("/stop ", &agents)
+            .into_iter()
+            .map(|c| c.line)
+            .collect::<Vec<_>>();
+        assert_eq!(offered, vec!["/stop abcdef12"]);
+    }
+
+    /// The hint is what tells you which of two eight-character ids is which.
+    #[test]
+    fn an_offered_agent_is_described_by_its_status_and_name() {
+        let agents = [agent("abcdef1234", "running")];
+        assert_eq!(completions("/watch ", &agents)[0].hint, "running · port the parser");
+    }
+
+    #[test]
+    fn naming_an_agent_completes_to_nothing_when_there_are_none() {
+        assert!(completions("/stop ", &[]).is_empty());
     }
 
     /// `/help` must not list a command the parser rejects.
