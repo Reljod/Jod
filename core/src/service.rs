@@ -216,10 +216,12 @@ fn open_conversation(
     // harness reports its own prompt back. Without this a transcript reads as
     // an agent talking to itself, and `resume`-by-replay would hand the next
     // harness an answer to a question nobody asked.
-    if let Err(e) = store.append_message(
-        &conversation.id,
-        NewMessage::user(req.prompt.clone()).from_run(run_id),
-    ) {
+    //
+    // `append_prompt` rather than a plain append, so the question is keyed like
+    // everything else the run writes. It cannot double today — every spawn
+    // mints a fresh run id — and that is exactly why the guard belongs in the
+    // store rather than in this call site's good behaviour.
+    if let Err(e) = store.append_prompt(&conversation.id, run_id, &req.prompt) {
         eprintln!(
             "[jod] could not record the prompt on conversation {}: {e}",
             conversation.id
