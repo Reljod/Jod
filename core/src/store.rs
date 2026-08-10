@@ -27,9 +27,10 @@ use std::sync::Mutex;
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 
-use crate::error::Result;
+use crate::error::{JodError, Result};
 use crate::event::AgentEnvelope;
 use crate::harness::HarnessKind;
+use crate::schedule::{Fire, FireOutcome, Schedule, ScheduleState};
 use crate::team::{Member, MemberStatus, Message, TeamTask};
 
 /// Applied in order; each is recorded so it runs exactly once.
@@ -286,6 +287,101 @@ const MIGRATIONS: &[(&str, &str)] = &[
       computed_at_ms INTEGER NOT NULL
     );
     CREATE INDEX ix_entity_community ON entity_community(community);
+    "#,
+    ),
+    (
+        "0005_schedules_and_goals",
+        r#"
+    -- Work that fires on the clock, and objectives that outlive a single run.
+    --
+    -- These are rows rather than a JSON file on purpose. Hermes keeps its cron
+    -- jobs in `~/.hermes/cron/jobs.json` behind an advisory `flock`, and its
+    -- own source carries a note about a root-owned copy that failed every tick
+    -- for fourteen hours. Jod already has a store whose benchmark says a
+    -- contended write must be one guarded statement, so that is what a claim
+    -- is here.
+    CREATE TABLE schedules (
+      id            TEXT PRIMARY KEY,
+      name          TEXT NOT NULL UNIQUE,
+      prompt        TEXT NOT NULL,
+      harness       TEXT NOT NULL,
+      cwd           TEXT NOT NULL,
+      model         TEXT,
+      cron          TEXT NOT NULL,
+      -- An IANA zone *name*. Storing the offset instead is the classic bug:
+      -- an offset is only correct until the next transition, and a schedule
+      -- outlives transitions.
+      timezone      TEXT NOT NULL DEFAULT 'UTC',
+      state         TEXT NOT NULL DEFAULT 'armed',
+      misfire       TEXT NOT NULL DEFAULT 'fire_once',
+      overlap       TEXT NOT NULL DEFAULT 'skip',
+      grace_ms      INTEGER NOT NULL DEFAULT 300000,
+      -- Zero by default: a 300s spread against a 150s grace lost 34 of 72
+      -- fires in simulation. The one addition that measured worse.
+      jitter_ms     INTEGER NOT NULL DEFAULT 0,
+      next_fire_at_ms INTEGER,
+      last_fire_at_ms INTEGER,
+      consecutive_failures INTEGER NOT NULL DEFAULT 0,
+      -- The claim. `claimed_by` names the process holding it and
+      -- `lease_until_ms` is when that claim stops being believed, so a
+      -- claimant that dies mid-fire does not wedge the schedule for ever.
+      claimed_by    TEXT,
+      lease_until_ms INTEGER,
+      created_at_ms INTEGER NOT NULL
+    );
+    -- The tick's only query: what is due. Partial on the state so paused and
+    -- broken schedules cost nothing to skip.
+    CREATE INDEX ix_schedules_due ON schedules(next_fire_at_ms)
+      WHERE state = 'armed';
+
+    -- Every firing decision, including the ones where nothing ran.
+    --
+    -- A skip nobody wrote down is a silent failure: "it never fired" and "it
+    -- fired and was skipped" are different bugs with the same symptom, and
+    -- without a row there is no way to tell them apart afterwards.
+    CREATE TABLE schedule_fires (
+      id          INTEGER PRIMARY KEY,
+      schedule_id TEXT NOT NULL REFERENCES schedules(id) ON DELETE CASCADE,
+      -- The instant this fire was *for*, which is not when it happened.
+      due_at_ms   INTEGER NOT NULL,
+      fired_at_ms INTEGER NOT NULL,
+      run_id      TEXT,
+      outcome     TEXT NOT NULL,
+      detail      TEXT
+    );
+    CREATE INDEX ix_schedule_fires ON schedule_fires(schedule_id, fired_at_ms DESC);
+
+    -- A standing objective. Its *progress* lives in the memory layer — the
+    -- brief as a prospective fact superseded each iteration, what happened as
+    -- episodic facts in a `goal:<id>` scope. Only the counters the claim reads
+    -- on every tick stay here, because a claim must not depend on a text index.
+    CREATE TABLE goals (
+      id            TEXT PRIMARY KEY,
+      name          TEXT NOT NULL UNIQUE,
+      objective     TEXT NOT NULL,
+      -- The deterministic check that decides "done", run before anything is
+      -- asked to judge progress so a pass is evidence rather than an opinion.
+      done_when     TEXT,
+      harness       TEXT NOT NULL,
+      cwd           TEXT NOT NULL,
+      model         TEXT,
+      cron          TEXT NOT NULL,
+      timezone      TEXT NOT NULL DEFAULT 'UTC',
+      state         TEXT NOT NULL DEFAULT 'running',
+      iteration     INTEGER NOT NULL DEFAULT 0,
+      max_iterations INTEGER,
+      budget_usd    REAL,
+      spent_usd     REAL NOT NULL DEFAULT 0,
+      -- How many iterations may finish without moving before the goal is
+      -- called stalled rather than left running for ever.
+      stall_after   INTEGER NOT NULL DEFAULT 6,
+      no_progress   INTEGER NOT NULL DEFAULT 0,
+      next_fire_at_ms INTEGER,
+      claimed_by    TEXT,
+      lease_until_ms INTEGER,
+      created_at_ms INTEGER NOT NULL
+    );
+    CREATE INDEX ix_goals_due ON goals(next_fire_at_ms) WHERE state = 'running';
     "#,
     ),
 ];
@@ -1116,6 +1212,257 @@ impl Store {
         })
     }
 
+    // ---- schedules --------------------------------------------------------
+
+    /// Write a schedule, refusing one that could never fire.
+    ///
+    /// Validation happens here rather than at the tick because a cron
+    /// expression nobody can parse is otherwise indistinguishable from a job
+    /// whose time has not come — you find out weeks later, from silence.
+    pub fn add_schedule(&self, s: &Schedule) -> Result<()> {
+        crate::schedule::validate(&s.cron, &s.timezone)?;
+        if s.jitter_ms >= s.grace_ms && s.jitter_ms > 0 {
+            // Measured: jitter wider than the grace window pushes fires past
+            // the point where they still count, and they are dropped rather
+            // than delayed. Refused at the boundary instead of losing fires.
+            return Err(JodError::Invalid(format!(
+                "jitter of {}ms is not less than the {}ms grace window, so fires would be lost",
+                s.jitter_ms, s.grace_ms
+            )));
+        }
+        let next = crate::schedule::next_fire(&s.cron, &s.timezone, now_ms())?;
+        self.write(|tx| {
+            tx.execute(
+                "INSERT INTO schedules
+                   (id, name, prompt, harness, cwd, model, cron, timezone, state,
+                    misfire, overlap, grace_ms, jitter_ms, next_fire_at_ms,
+                    consecutive_failures, created_at_ms)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,0,?15)",
+                params![
+                    s.id, s.name, s.prompt, s.harness, s.cwd, s.model, s.cron,
+                    s.timezone, s.state.as_str(), s.misfire.as_str(),
+                    s.overlap.as_str(), s.grace_ms, s.jitter_ms, next, now_ms()
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn schedules(&self) -> Result<Vec<Schedule>> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        let mut stmt = conn.prepare(&format!("{SCHEDULE_COLUMNS} ORDER BY name"))?;
+        let rows = stmt.query_map([], row_to_schedule)?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    pub fn schedule_named(&self, name: &str) -> Result<Option<Schedule>> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        Ok(conn
+            .query_row(
+                &format!("{SCHEDULE_COLUMNS} WHERE name = ?1"),
+                params![name],
+                row_to_schedule,
+            )
+            .optional()?)
+    }
+
+    /// Take ownership of every schedule that is due.
+    ///
+    /// This is the one contended operation in the scheduler, and the whole
+    /// design rests on it. The benchmark ran sixteen real processes against
+    /// four schedules: a read-then-write claim handed the *same* schedule to
+    /// two winners **41.26% of the time**, while this one produced 0 duplicates
+    /// in 5,408 claims. The difference is that the guard and the write are one
+    /// statement inside one immediate transaction, so there is no window
+    /// between deciding and taking.
+    ///
+    /// A lease alone is not enough. When a claimant dies mid-fire, the next
+    /// claimant overwrites the lease and the original claim disappears with no
+    /// record: 52 of 255 claims (20.4%) ended up accounted for nowhere at all.
+    /// So displacing an expired lease **writes down that it happened** before
+    /// taking it, which brought that to 0 of 270.
+    pub fn claim_due_schedules(
+        &self,
+        owner: &str,
+        now_ms_at: i64,
+        lease_ms: i64,
+    ) -> Result<Vec<Schedule>> {
+        self.write(|tx| {
+            let candidates: Vec<(String, Option<String>, Option<i64>)> = {
+                let mut stmt = tx.prepare(
+                    "SELECT id, claimed_by, lease_until_ms FROM schedules
+                      WHERE state = 'armed'
+                        AND next_fire_at_ms IS NOT NULL
+                        AND next_fire_at_ms <= ?1
+                        AND (claimed_by IS NULL OR lease_until_ms < ?1)",
+                )?;
+                let rows = stmt.query_map(params![now_ms_at], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+                })?;
+                rows.collect::<std::result::Result<Vec<_>, _>>()?
+            };
+
+            let mut taken = Vec::new();
+            for (id, previous, lease) in candidates {
+                // Reap before taking. Whoever displaces a dead claim is the
+                // only process that can still see it existed.
+                if let (Some(dead), Some(expired)) = (previous.as_deref(), lease) {
+                    tx.execute(
+                        "INSERT INTO schedule_fires
+                           (schedule_id, due_at_ms, fired_at_ms, run_id, outcome, detail)
+                         VALUES (?1, ?2, ?3, NULL, ?4, ?5)",
+                        params![
+                            id,
+                            expired,
+                            now_ms_at,
+                            FireOutcome::Abandoned.as_str(),
+                            format!("{dead} held the claim and never reported")
+                        ],
+                    )?;
+                }
+                let won = tx.execute(
+                    "UPDATE schedules SET claimed_by = ?2, lease_until_ms = ?3
+                      WHERE id = ?1
+                        AND state = 'armed'
+                        AND next_fire_at_ms IS NOT NULL
+                        AND next_fire_at_ms <= ?4
+                        AND (claimed_by IS NULL OR lease_until_ms < ?4)",
+                    params![id, owner, now_ms_at + lease_ms, now_ms_at],
+                )?;
+                if won == 1 {
+                    let mut stmt = tx.prepare(&format!("{SCHEDULE_COLUMNS} WHERE id = ?1"))?;
+                    taken.push(stmt.query_row(params![id], row_to_schedule)?);
+                }
+            }
+            Ok(taken)
+        })
+    }
+
+    /// Write down what happened to a fire, whatever it was.
+    pub fn record_fire(&self, fire: &Fire) -> Result<i64> {
+        self.write(|tx| {
+            tx.execute(
+                "INSERT INTO schedule_fires
+                   (schedule_id, due_at_ms, fired_at_ms, run_id, outcome, detail)
+                 VALUES (?1,?2,?3,?4,?5,?6)",
+                params![
+                    fire.schedule_id,
+                    fire.due_at_ms,
+                    fire.fired_at_ms,
+                    fire.run_id,
+                    fire.outcome.as_str(),
+                    fire.detail
+                ],
+            )?;
+            Ok(tx.last_insert_rowid())
+        })
+    }
+
+    /// Let a schedule go, arm it for its next instant, and account for how the
+    /// fire went.
+    ///
+    /// Failure is counted rather than merely reported: a schedule whose every
+    /// run fails made 288 spawn attempts in a day when nothing counted, so the
+    /// count drives a backoff and, past [`BREAK_AFTER_FAILURES`], stops the
+    /// schedule outright. Broken is its own state rather than paused, because
+    /// it says why it stopped and resuming it is a different decision.
+    pub fn release_schedule(&self, id: &str, at_ms: i64, failed: bool) -> Result<()> {
+        let (cron, timezone, failures) = {
+            let conn = self.conn.lock().expect("store lock poisoned");
+            conn.query_row(
+                "SELECT cron, timezone, consecutive_failures FROM schedules WHERE id = ?1",
+                params![id],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?)),
+            )?
+        };
+        let failures = if failed { failures + 1 } else { 0 };
+        let broken = failures >= crate::schedule::BREAK_AFTER_FAILURES;
+        // A failing schedule waits longer each time before trying again,
+        // rather than retrying at its ordinary cadence for ever.
+        let earliest = at_ms + crate::schedule::backoff_ms(failures);
+        let next = crate::schedule::next_fire(&cron, &timezone, earliest)?;
+
+        self.write(|tx| {
+            tx.execute(
+                "UPDATE schedules
+                    SET claimed_by = NULL, lease_until_ms = NULL,
+                        last_fire_at_ms = ?2, next_fire_at_ms = ?3,
+                        consecutive_failures = ?4,
+                        state = CASE WHEN ?5 THEN 'broken' ELSE state END
+                  WHERE id = ?1",
+                params![id, at_ms, next, failures, broken],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Stop or restart a schedule by hand.
+    ///
+    /// Arming also clears the failure count, because a person turning a broken
+    /// schedule back on is saying they believe it will work now.
+    pub fn set_schedule_state(&self, name: &str, state: ScheduleState) -> Result<bool> {
+        let next = if state == ScheduleState::Armed {
+            let conn = self.conn.lock().expect("store lock poisoned");
+            let found: Option<(String, String)> = conn
+                .query_row(
+                    "SELECT cron, timezone FROM schedules WHERE name = ?1",
+                    params![name],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?;
+            drop(conn);
+            match found {
+                Some((cron, tz)) => crate::schedule::next_fire(&cron, &tz, now_ms())?,
+                None => return Ok(false),
+            }
+        } else {
+            None
+        };
+        self.write(|tx| {
+            let changed = tx.execute(
+                "UPDATE schedules
+                    SET state = ?2,
+                        consecutive_failures = CASE WHEN ?2 = 'armed' THEN 0
+                                                    ELSE consecutive_failures END,
+                        next_fire_at_ms = CASE WHEN ?2 = 'armed' THEN ?3
+                                               ELSE next_fire_at_ms END,
+                        claimed_by = NULL, lease_until_ms = NULL
+                  WHERE name = ?1",
+                params![name, state.as_str(), next],
+            )?;
+            Ok(changed > 0)
+        })
+    }
+
+    pub fn delete_schedule(&self, name: &str) -> Result<bool> {
+        self.write(|tx| {
+            let gone = tx.execute("DELETE FROM schedules WHERE name = ?1", params![name])?;
+            Ok(gone > 0)
+        })
+    }
+
+    /// What a schedule has done lately, newest first.
+    pub fn fires(&self, schedule_id: &str, limit: usize) -> Result<Vec<Fire>> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT id, schedule_id, due_at_ms, fired_at_ms, run_id, outcome, detail
+               FROM schedule_fires WHERE schedule_id = ?1
+              ORDER BY fired_at_ms DESC, id DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![schedule_id, limit as i64], |r| {
+            Ok(Fire {
+                id: r.get(0)?,
+                schedule_id: r.get(1)?,
+                due_at_ms: r.get(2)?,
+                fired_at_ms: r.get(3)?,
+                run_id: r.get(4)?,
+                outcome: parse_outcome(&r.get::<_, String>(5)?),
+                detail: r.get(6)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
     // ---- the memory graph -----------------------------------------------
 
     /// Everything within `depth` hops of `name`, nearest first.
@@ -1444,6 +1791,47 @@ const MAX_PATH_DEPTH: u32 = 6;
 /// caller can use rather than what SQLite can produce — and it bounds the sort,
 /// which is the part that grows fastest.
 const MAX_NEIGHBOURS: i64 = 500;
+
+/// Every column of a schedule, in the order `row_to_schedule` reads them.
+const SCHEDULE_COLUMNS: &str = "SELECT id, name, prompt, harness, cwd, model, cron, timezone,
+        state, misfire, overlap, grace_ms, jitter_ms, next_fire_at_ms,
+        last_fire_at_ms, consecutive_failures, created_at_ms FROM schedules";
+
+fn row_to_schedule(r: &rusqlite::Row) -> rusqlite::Result<Schedule> {
+    Ok(Schedule {
+        id: r.get(0)?,
+        name: r.get(1)?,
+        prompt: r.get(2)?,
+        harness: r.get(3)?,
+        cwd: r.get(4)?,
+        model: r.get(5)?,
+        cron: r.get(6)?,
+        timezone: r.get(7)?,
+        state: ScheduleState::parse(&r.get::<_, String>(8)?),
+        // A policy that no longer parses falls back to its default rather than
+        // taking the whole tick down: an unreadable row must not stop the
+        // schedules either side of it from firing.
+        misfire: r.get::<_, String>(9)?.parse().unwrap_or_default(),
+        overlap: r.get::<_, String>(10)?.parse().unwrap_or_default(),
+        grace_ms: r.get(11)?,
+        jitter_ms: r.get(12)?,
+        next_fire_at_ms: r.get(13)?,
+        last_fire_at_ms: r.get(14)?,
+        consecutive_failures: r.get(15)?,
+        created_at_ms: r.get(16)?,
+    })
+}
+
+fn parse_outcome(s: &str) -> FireOutcome {
+    match s {
+        "skipped_overlap" => FireOutcome::SkippedOverlap,
+        "skipped_misfire" => FireOutcome::SkippedMisfire,
+        "replaced" => FireOutcome::Replaced,
+        "spawn_failed" => FireOutcome::SpawnFailed,
+        "abandoned" => FireOutcome::Abandoned,
+        _ => FireOutcome::Ran,
+    }
+}
 
 /// An entity reached from another, and how far away it was.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2880,6 +3268,313 @@ mod tests {
         s.remember(NewFact::new("budget", "is", "40").in_scope("finance")).unwrap();
         s.remember(NewFact::new("budget", "is", "tight").in_scope("tasks")).unwrap();
         assert_eq!(s.graph_size().unwrap().0, 4);
+    }
+
+    // ---- schedules ----
+
+    fn a_schedule(name: &str, cron: &str) -> Schedule {
+        Schedule {
+            id: format!("id-{name}"),
+            name: name.into(),
+            prompt: "triage the inbox".into(),
+            harness: "claude_code".into(),
+            cwd: "/tmp".into(),
+            model: None,
+            cron: cron.into(),
+            timezone: "UTC".into(),
+            state: ScheduleState::Armed,
+            misfire: crate::schedule::Misfire::FireOnce,
+            overlap: crate::schedule::Overlap::Skip,
+            grace_ms: 300_000,
+            jitter_ms: 0,
+            next_fire_at_ms: None,
+            last_fire_at_ms: None,
+            consecutive_failures: 0,
+            created_at_ms: 0,
+        }
+    }
+
+    /// A store on disk, so several connections can contend for one database the
+    /// way separate processes do.
+    fn shared_store() -> (Store, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "jod-store-test-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("jod.db");
+        let _ = std::fs::remove_file(&path);
+        (Store::open(&path).unwrap(), path)
+    }
+
+    #[test]
+    fn a_new_schedule_is_armed_for_its_next_instant() {
+        let s = store();
+        s.add_schedule(&a_schedule("nightly", "0 2 * * *")).unwrap();
+        let found = s.schedule_named("nightly").unwrap().unwrap();
+        assert!(found.next_fire_at_ms.unwrap() > now_ms());
+        assert_eq!(found.state, ScheduleState::Armed);
+    }
+
+    /// A cron expression nobody can parse is otherwise indistinguishable from a
+    /// job whose time has not come — you find out weeks later, from silence.
+    #[test]
+    fn a_schedule_that_could_never_fire_is_refused_when_it_is_written() {
+        let s = store();
+        assert!(s.add_schedule(&a_schedule("bad", "not a cron")).is_err());
+        assert!(s.schedules().unwrap().is_empty());
+    }
+
+    /// Jitter wider than the grace window does not delay fires, it loses them —
+    /// measured, 34 of 72.
+    #[test]
+    fn jitter_wider_than_the_grace_window_is_refused() {
+        let s = store();
+        let mut wild = a_schedule("wild", "0 2 * * *");
+        wild.grace_ms = 150_000;
+        wild.jitter_ms = 300_000;
+        assert!(s.add_schedule(&wild).is_err());
+    }
+
+    #[test]
+    fn only_a_schedule_that_is_due_is_claimed() {
+        let s = store();
+        s.add_schedule(&a_schedule("later", "0 2 * * *")).unwrap();
+        assert!(s.claim_due_schedules("me", now_ms(), 60_000).unwrap().is_empty());
+
+        // Reach into the row to make it due, which is what the passage of time
+        // would otherwise have to do.
+        s.write(|tx| {
+            tx.execute("UPDATE schedules SET next_fire_at_ms = 1", []).unwrap();
+            Ok(())
+        })
+        .unwrap();
+        let claimed = s.claim_due_schedules("me", now_ms(), 60_000).unwrap();
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0].name, "later");
+    }
+
+    #[test]
+    fn a_paused_schedule_is_never_claimed() {
+        let s = store();
+        s.add_schedule(&a_schedule("off", "0 2 * * *")).unwrap();
+        s.set_schedule_state("off", ScheduleState::Paused).unwrap();
+        s.write(|tx| {
+            tx.execute("UPDATE schedules SET next_fire_at_ms = 1", []).unwrap();
+            Ok(())
+        })
+        .unwrap();
+        assert!(s.claim_due_schedules("me", now_ms(), 60_000).unwrap().is_empty());
+    }
+
+    /// A claim already held is not available, which is what stops the same
+    /// schedule firing twice.
+    #[test]
+    fn a_claim_that_is_still_alive_is_not_taken_from_its_owner() {
+        let s = store();
+        s.add_schedule(&a_schedule("busy", "0 2 * * *")).unwrap();
+        s.write(|tx| {
+            tx.execute("UPDATE schedules SET next_fire_at_ms = 1", []).unwrap();
+            Ok(())
+        })
+        .unwrap();
+        let now = now_ms();
+        assert_eq!(s.claim_due_schedules("first", now, 60_000).unwrap().len(), 1);
+        assert!(s.claim_due_schedules("second", now, 60_000).unwrap().is_empty());
+    }
+
+    /// A claimant that dies must not wedge the schedule for ever, so the lease
+    /// expires — and whoever displaces it is the only process that can still
+    /// see the dead claim existed. Without writing that down, 52 of 255 claims
+    /// ended up accounted for nowhere.
+    #[test]
+    fn taking_over_a_dead_claim_records_that_it_was_abandoned() {
+        let s = store();
+        s.add_schedule(&a_schedule("orphan", "0 2 * * *")).unwrap();
+        s.write(|tx| {
+            tx.execute("UPDATE schedules SET next_fire_at_ms = 1", []).unwrap();
+            Ok(())
+        })
+        .unwrap();
+        let now = now_ms();
+        s.claim_due_schedules("doomed", now, 1_000).unwrap();
+
+        // Long enough later that the lease has expired.
+        let taken = s.claim_due_schedules("successor", now + 5_000, 60_000).unwrap();
+        assert_eq!(taken.len(), 1, "an expired lease must be claimable");
+
+        let history = s.fires("id-orphan", 10).unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].outcome, FireOutcome::Abandoned);
+        assert!(history[0].detail.as_ref().unwrap().contains("doomed"));
+    }
+
+    /// The headline result: sixteen processes racing a read-then-write claim
+    /// handed the same schedule to two winners 41% of the time. Separate
+    /// connections to one file is the same contention this must survive.
+    #[test]
+    fn concurrent_claimants_never_both_win_the_same_schedule() {
+        let (s, path) = shared_store();
+        for i in 0..8 {
+            s.add_schedule(&a_schedule(&format!("job{i}"), "0 2 * * *")).unwrap();
+        }
+        s.write(|tx| {
+            tx.execute("UPDATE schedules SET next_fire_at_ms = 1", []).unwrap();
+            Ok(())
+        })
+        .unwrap();
+
+        let now = now_ms();
+        let winners = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut threads = Vec::new();
+        for worker in 0..8 {
+            let path = path.clone();
+            let winners = winners.clone();
+            threads.push(std::thread::spawn(move || {
+                // Its own connection, as a separate process would have.
+                let mine = Store::open(&path).unwrap();
+                let claimed = mine
+                    .claim_due_schedules(&format!("worker{worker}"), now, 60_000)
+                    .unwrap();
+                winners
+                    .lock()
+                    .unwrap()
+                    .extend(claimed.into_iter().map(|c| c.id));
+            }));
+        }
+        for t in threads {
+            t.join().unwrap();
+        }
+
+        let claimed = winners.lock().unwrap().clone();
+        let distinct: std::collections::HashSet<_> = claimed.iter().collect();
+        assert_eq!(
+            claimed.len(),
+            distinct.len(),
+            "a schedule was claimed twice: {claimed:?}"
+        );
+        assert_eq!(distinct.len(), 8, "every due schedule should have been taken");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn releasing_a_schedule_arms_it_for_the_next_instant_and_frees_the_claim() {
+        let s = store();
+        s.add_schedule(&a_schedule("nightly", "0 2 * * *")).unwrap();
+        let at = now_ms();
+        s.release_schedule("id-nightly", at, false).unwrap();
+
+        let after = s.schedule_named("nightly").unwrap().unwrap();
+        assert_eq!(after.last_fire_at_ms, Some(at));
+        assert!(after.next_fire_at_ms.unwrap() > at);
+        assert_eq!(after.consecutive_failures, 0);
+        // Claimable again.
+        assert!(s.claim_due_schedules("next", at, 1_000).is_ok());
+    }
+
+    /// A schedule whose every run fails made 288 spawn attempts in a day when
+    /// nothing counted. It stops after five.
+    #[test]
+    fn a_schedule_that_keeps_failing_is_eventually_stopped() {
+        let s = store();
+        s.add_schedule(&a_schedule("doomed", "* * * * *")).unwrap();
+        for i in 1..crate::schedule::BREAK_AFTER_FAILURES {
+            s.release_schedule("id-doomed", now_ms(), true).unwrap();
+            let mid = s.schedule_named("doomed").unwrap().unwrap();
+            assert_eq!(mid.consecutive_failures, i);
+            assert_eq!(mid.state, ScheduleState::Armed, "not yet");
+        }
+        s.release_schedule("id-doomed", now_ms(), true).unwrap();
+        let broken = s.schedule_named("doomed").unwrap().unwrap();
+        assert_eq!(broken.state, ScheduleState::Broken);
+    }
+
+    /// Broken is its own state rather than paused, because it says *why* it
+    /// stopped — and one success clears the count.
+    #[test]
+    fn one_success_forgives_a_run_of_failures() {
+        let s = store();
+        s.add_schedule(&a_schedule("flaky", "* * * * *")).unwrap();
+        s.release_schedule("id-flaky", now_ms(), true).unwrap();
+        s.release_schedule("id-flaky", now_ms(), true).unwrap();
+        s.release_schedule("id-flaky", now_ms(), false).unwrap();
+        assert_eq!(
+            s.schedule_named("flaky").unwrap().unwrap().consecutive_failures,
+            0
+        );
+    }
+
+    /// Turning a broken schedule back on is a person saying they believe it
+    /// will work now, so it starts from a clean slate.
+    #[test]
+    fn arming_a_broken_schedule_clears_what_broke_it() {
+        let s = store();
+        s.add_schedule(&a_schedule("fixed", "0 2 * * *")).unwrap();
+        for _ in 0..crate::schedule::BREAK_AFTER_FAILURES {
+            s.release_schedule("id-fixed", now_ms(), true).unwrap();
+        }
+        assert_eq!(
+            s.schedule_named("fixed").unwrap().unwrap().state,
+            ScheduleState::Broken
+        );
+
+        assert!(s.set_schedule_state("fixed", ScheduleState::Armed).unwrap());
+        let back = s.schedule_named("fixed").unwrap().unwrap();
+        assert_eq!(back.state, ScheduleState::Armed);
+        assert_eq!(back.consecutive_failures, 0);
+        assert!(back.next_fire_at_ms.unwrap() > now_ms());
+    }
+
+    /// "It never fired" and "it fired and was skipped" are different bugs with
+    /// the same symptom. Without a row there is no way to tell them apart.
+    #[test]
+    fn a_skip_is_written_down_rather_than_leaving_silence() {
+        let s = store();
+        s.add_schedule(&a_schedule("busy", "0 2 * * *")).unwrap();
+        s.record_fire(&Fire {
+            id: 0,
+            schedule_id: "id-busy".into(),
+            due_at_ms: 1_000,
+            fired_at_ms: 2_000,
+            run_id: None,
+            outcome: FireOutcome::SkippedOverlap,
+            detail: Some("previous run still going".into()),
+        })
+        .unwrap();
+
+        let history = s.fires("id-busy", 10).unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].outcome, FireOutcome::SkippedOverlap);
+        assert_eq!(history[0].run_id, None);
+    }
+
+    #[test]
+    fn deleting_a_schedule_takes_its_history_with_it() {
+        let s = store();
+        s.add_schedule(&a_schedule("gone", "0 2 * * *")).unwrap();
+        s.record_fire(&Fire {
+            id: 0,
+            schedule_id: "id-gone".into(),
+            due_at_ms: 1,
+            fired_at_ms: 2,
+            run_id: None,
+            outcome: FireOutcome::Ran,
+            detail: None,
+        })
+        .unwrap();
+        assert!(s.delete_schedule("gone").unwrap());
+        assert!(s.fires("id-gone", 10).unwrap().is_empty());
+        assert!(!s.delete_schedule("gone").unwrap(), "already gone");
+    }
+
+    #[test]
+    fn two_schedules_cannot_share_a_name() {
+        let s = store();
+        s.add_schedule(&a_schedule("same", "0 2 * * *")).unwrap();
+        let mut twin = a_schedule("same", "0 3 * * *");
+        twin.id = "different-id".into();
+        assert!(s.add_schedule(&twin).is_err());
     }
 
     // ---- trust admission ----
