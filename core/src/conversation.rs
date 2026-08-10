@@ -46,7 +46,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{JodError, Result};
-use crate::event::{summarize, AgentEvent};
+use crate::event::{summarize, AgentEnvelope, AgentEvent};
 use crate::harness::{HarnessKind, Resume};
 use crate::store::{fts_query, Store};
 
@@ -125,6 +125,13 @@ pub struct Message {
     pub tool_input: Option<serde_json::Value>,
     /// The run that produced this message, when a run did.
     pub run_id: Option<String>,
+    /// Where this message sat in its run's event stream.
+    ///
+    /// `Some` only for run-derived messages; a message a person typed has no
+    /// run and no sequence. Together with `run_id` it is the idempotence key —
+    /// `ux_messages_run_seq` is unique over the pair — which is what lets the
+    /// same run be replayed into a conversation without duplicating it.
+    pub run_seq: Option<i64>,
     pub at_ms: i64,
     /// `false` once a compaction has summarised this message out of the live
     /// window. It is still stored and still searchable.
@@ -143,6 +150,10 @@ pub struct NewMessage {
     pub tool_input: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_id: Option<String>,
+    /// Set this and `run_id` together to make the append idempotent; see
+    /// [`Message::run_seq`]. [`Store::append_envelopes`] fills both.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_seq: Option<i64>,
 }
 
 impl NewMessage {
@@ -153,6 +164,7 @@ impl NewMessage {
             tool_name: None,
             tool_input: None,
             run_id: None,
+            run_seq: None,
         }
     }
 
@@ -162,6 +174,13 @@ impl NewMessage {
 
     pub fn from_run(mut self, run_id: impl Into<String>) -> NewMessage {
         self.run_id = Some(run_id.into());
+        self
+    }
+
+    /// Where in its run's stream this message came from — the other half of
+    /// the idempotence key.
+    pub fn at_seq(mut self, seq: u64) -> NewMessage {
+        self.run_seq = Some(seq as i64);
         self
     }
 
@@ -195,6 +214,7 @@ impl NewMessage {
                 tool_name: Some(name.clone()),
                 tool_input: input.clone(),
                 run_id: None,
+                run_seq: None,
             }),
             AgentEvent::ToolResult {
                 name,
@@ -206,6 +226,7 @@ impl NewMessage {
                 tool_name: Some(name.clone()),
                 tool_input: is_error.then(|| serde_json::json!({ "is_error": true })),
                 run_id: None,
+                run_seq: None,
             }),
             // A run that died mid-way must say so in the transcript, or the
             // thread reads as though the agent simply stopped talking.
@@ -497,22 +518,63 @@ impl Store {
         })
     }
 
-    /// Append a run of events as one transaction, skipping the ones that are
-    /// not turns. Returns the ids of the messages that were actually written.
+    /// Append a run's envelopes as one transaction, skipping what is not a
+    /// turn and what has already been recorded. Returns the ids of the
+    /// messages actually written — empty on a pure replay.
     ///
-    /// **Not idempotent, unlike [`Store::append_event`].** That one dedupes on
-    /// `(run_id, seq)` so a replayed stream cannot duplicate the event log;
-    /// this one cannot, because `0006_conversations` gives a message no
-    /// sequence column to dedupe against. Feeding the same events twice
-    /// appends them twice.
+    /// **This is the one to use on the run path.** Idempotent, because each
+    /// message carries the `seq` it came from and `ux_messages_run_seq` is
+    /// unique over `(run_id, run_seq)`. Replay is *normal* there rather than
+    /// exceptional — [`crate::runner::follow`] restarts from a caller-held
+    /// cursor, and a client reconnecting with `after: None` legitimately
+    /// receives the whole run again — so the guard has to be in the write, not
+    /// in the discipline of whoever calls it. Two followers of the same run
+    /// may both append; the second one writes nothing.
     ///
-    /// That matters because replay is normal here rather than exceptional:
-    /// [`crate::runner::follow`] restarts from a caller-held cursor, and a
-    /// client that reconnects with `after: None` legitimately receives the
-    /// whole run again. Whatever drives this must therefore hold its own
-    /// durable cursor and hand each envelope over exactly once — the event log
-    /// is the replayable surface, and the conversation is written from it, not
-    /// alongside it.
+    /// An envelope already recorded still moves the local head onto the
+    /// message it produced, so a partial replay — the first half seen, the
+    /// second half new — parents the new half onto the right node instead of
+    /// grafting it wherever the head happened to be.
+    pub fn append_envelopes(
+        &self,
+        conversation_id: &str,
+        envelopes: &[AgentEnvelope],
+    ) -> Result<Vec<i64>> {
+        let at = now_ms();
+        self.write(|tx| {
+            let mut head = head_of(tx, conversation_id)?;
+            let mut written = Vec::new();
+            for envelope in envelopes {
+                let Some(msg) = NewMessage::from_event(&envelope.event) else {
+                    continue;
+                };
+                let msg = msg.from_run(&envelope.agent_id).at_seq(envelope.seq);
+                // Checked rather than caught. The unique index is the backstop,
+                // but the id of the message already there is needed either way
+                // to keep the head right, and one indexed probe is cheaper than
+                // a failed insert plus the lookup that would follow it.
+                if let Some(seen) = seen_at(tx, &envelope.agent_id, envelope.seq)? {
+                    head = Some(seen);
+                    continue;
+                }
+                let id = insert_message(tx, conversation_id, head, &msg, at)?;
+                head = Some(id);
+                written.push(id);
+            }
+            if let Some(last) = head {
+                set_head(tx, conversation_id, last, at)?;
+            }
+            Ok(written)
+        })
+    }
+
+    /// Append bare events, with no sequence and therefore no dedupe.
+    ///
+    /// For callers that genuinely have no event stream behind them — a
+    /// synthesised transcript, a test fixture. **Anything reading a real run
+    /// wants [`Store::append_envelopes`] instead:** without a `seq` there is
+    /// nothing to dedupe against, so feeding the same events twice appends
+    /// them twice, and on the run path that is not a hypothetical.
     pub fn append_events(
         &self,
         conversation_id: &str,
@@ -1154,7 +1216,7 @@ const MAX_SEARCH_HITS: usize = 50;
 /// Always aliased `m`, so the same list works inside a join with a CTE that
 /// also has an `id` column.
 const MESSAGE_COLUMNS: &str = "m.id, m.conversation_id, m.parent_id, m.role, m.text,
-     m.tool_name, m.tool_input, m.run_id, m.at_ms, m.active";
+     m.tool_name, m.tool_input, m.run_id, m.run_seq, m.at_ms, m.active";
 
 const CONVERSATION_COLUMNS: &str = "id, title, harness, cwd, model, session_id, head_id,
      forked_from, forked_at_id, created_at_ms, updated_at_ms";
@@ -1180,8 +1242,9 @@ fn row_to_message(r: &rusqlite::Row) -> rusqlite::Result<Message> {
             .get::<_, Option<String>>(6)?
             .and_then(|s| serde_json::from_str(&s).ok()),
         run_id: r.get(7)?,
-        at_ms: r.get(8)?,
-        active: r.get::<_, i64>(9)? != 0,
+        run_seq: r.get(8)?,
+        at_ms: r.get(9)?,
+        active: r.get::<_, i64>(10)? != 0,
     })
 }
 
@@ -1250,8 +1313,9 @@ fn insert_message(
         .transpose()?;
     conn.execute(
         "INSERT INTO messages
-           (conversation_id, parent_id, role, text, tool_name, tool_input, run_id, at_ms)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+           (conversation_id, parent_id, role, text, tool_name, tool_input,
+            run_id, run_seq, at_ms)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![
             conversation_id,
             parent,
@@ -1260,6 +1324,7 @@ fn insert_message(
             msg.tool_name,
             payload,
             msg.run_id,
+            msg.run_seq,
             at_ms
         ],
     )?;
@@ -1491,6 +1556,20 @@ fn is_error(m: &PortableMessage) -> bool {
         .unwrap_or(false)
 }
 
+/// The message a run's event already produced, if it produced one.
+///
+/// The read half of the idempotence key. Served by `ux_messages_run_seq`, so
+/// it is a covering probe rather than the scan `conversation_for_run` does.
+fn seen_at(conn: &Connection, run_id: &str, seq: u64) -> Result<Option<i64>> {
+    Ok(conn
+        .query_row(
+            "SELECT id FROM messages WHERE run_id = ?1 AND run_seq = ?2",
+            params![run_id, seq as i64],
+            |r| r.get(0),
+        )
+        .optional()?)
+}
+
 /// The root `id` reaches by walking parents, if `id` exists.
 fn root_of(conn: &Connection, id: i64) -> Result<Option<i64>> {
     Ok(conn
@@ -1624,6 +1703,15 @@ mod tests {
 
     fn texts(messages: &[Message]) -> Vec<String> {
         messages.iter().map(|m| m.text.clone()).collect()
+    }
+
+    fn envelope(run: &str, seq: u64, event: AgentEvent) -> AgentEnvelope {
+        AgentEnvelope {
+            agent_id: run.into(),
+            at_ms: 1_700_000_000_000,
+            seq,
+            event,
+        }
     }
 
     /// Spin until the wall clock ticks over.
@@ -1896,19 +1984,129 @@ mod tests {
     }
 
     #[test]
-    fn replaying_a_run_appends_it_again_because_a_message_has_no_sequence() {
+    fn replaying_a_run_does_not_append_it_twice() {
+        let s = store();
+        let (id, _) = conversation_with(&s, &["go"]);
+        let envelopes = [envelope(
+            "run-1",
+            0,
+            AgentEvent::Message {
+                text: "the answer".into(),
+            },
+        )];
+
+        let first = s.append_envelopes(&id, &envelopes).unwrap();
+        let again = s.append_envelopes(&id, &envelopes).unwrap();
+
+        // This test used to assert the opposite, and the reason it changed is
+        // worth keeping: a message had no sequence to dedupe against until
+        // `0009_messages_are_idempotent` gave it one, so replay — which is
+        // ordinary on the run path, not exceptional — duplicated every turn.
+        assert_eq!(first.len(), 1);
+        assert!(again.is_empty(), "the second pass writes nothing");
+        assert_eq!(texts(&s.thread(&id).unwrap()), ["go", "the answer"]);
+    }
+
+    #[test]
+    fn two_followers_of_one_run_do_not_write_it_twice_between_them() {
+        let s = store();
+        let (id, _) = conversation_with(&s, &["go"]);
+        let stream: Vec<AgentEnvelope> = ["one", "two", "three"]
+            .iter()
+            .enumerate()
+            .map(|(i, t)| envelope("run-1", i as u64, AgentEvent::Message { text: (*t).into() }))
+            .collect();
+
+        // One follower is ahead; the other reconnects with `after: None` and
+        // legitimately replays the whole run over the top of it.
+        s.append_envelopes(&id, &stream[..2]).unwrap();
+        s.append_envelopes(&id, &stream).unwrap();
+
+        assert_eq!(
+            texts(&s.thread(&id).unwrap()),
+            ["go", "one", "two", "three"]
+        );
+    }
+
+    #[test]
+    fn a_partial_replay_parents_the_new_half_onto_the_half_already_there() {
+        let s = store();
+        let (id, ids) = conversation_with(&s, &["go"]);
+        let stream: Vec<AgentEnvelope> = ["one", "two"]
+            .iter()
+            .enumerate()
+            .map(|(i, t)| envelope("run-1", i as u64, AgentEvent::Message { text: (*t).into() }))
+            .collect();
+
+        let first = s.append_envelopes(&id, &stream[..1]).unwrap();
+        // Move the head away, as a revert would, then replay the whole run.
+        s.revert_to(&id, ids[0]).unwrap();
+        let rest = s.append_envelopes(&id, &stream).unwrap();
+
+        // "two" hangs off "one", not off the message the head had been moved
+        // back to — a seen envelope still carries the head forward.
+        assert_eq!(rest.len(), 1);
+        assert_eq!(
+            s.message(rest[0]).unwrap().unwrap().parent_id,
+            Some(first[0])
+        );
+        assert_eq!(texts(&s.thread(&id).unwrap()), ["go", "one", "two"]);
+    }
+
+    #[test]
+    fn a_hand_typed_message_has_no_sequence_and_several_may_coexist() {
+        let s = store();
+        // The index is partial for exactly this reason: NULL run and NULL
+        // sequence must not collide with each other.
+        let (id, _) = conversation_with(&s, &["one", "two", "three"]);
+        let thread = s.thread(&id).unwrap();
+
+        assert_eq!(thread.len(), 3);
+        assert!(thread
+            .iter()
+            .all(|m| m.run_seq.is_none() && m.run_id.is_none()));
+    }
+
+    #[test]
+    fn a_message_from_a_run_remembers_where_in_the_stream_it_came_from() {
+        let s = store();
+        let (id, _) = conversation_with(&s, &["go"]);
+        s.append_envelopes(
+            &id,
+            &[
+                envelope("run-1", 4, AgentEvent::Thinking { text: "hm".into() }),
+                envelope(
+                    "run-1",
+                    7,
+                    AgentEvent::Message {
+                        text: "done".into(),
+                    },
+                ),
+            ],
+        )
+        .unwrap();
+
+        let thread = s.thread(&id).unwrap();
+        // The sequence is the event's own, not a running count of messages —
+        // the events between them were not turns.
+        assert_eq!(thread[1].run_seq, Some(4));
+        assert_eq!(thread[2].run_seq, Some(7));
+        assert_eq!(thread[2].run_id.as_deref(), Some("run-1"));
+    }
+
+    #[test]
+    fn the_unsequenced_append_still_cannot_dedupe_and_says_so() {
         let s = store();
         let (id, _) = conversation_with(&s, &["go"]);
         let events = [AgentEvent::Message {
             text: "the answer".into(),
         }];
 
+        // Kept for callers with no event stream behind them. Nothing on the
+        // run path should reach for it, which is what its doc comment says.
         s.append_events(&id, "run-1", &events).unwrap();
         s.append_events(&id, "run-1", &events).unwrap();
 
-        // Pinning the contract rather than the behaviour we want: unlike
-        // `append_event`, this cannot dedupe, so whoever drives it owes the
-        // cursor. A future `seq` column would make this test change.
         assert_eq!(
             texts(&s.thread(&id).unwrap()),
             ["go", "the answer", "the answer"]
