@@ -118,6 +118,14 @@ pub fn fires(list: &[Fire], now_ms: i64) {
             FireOutcome::SkippedOverlap | FireOutcome::SkippedMisfire => ("○", DIM),
             FireOutcome::SpawnFailed => ("✗", RED),
             FireOutcome::Abandoned => ("■", RED),
+            // A watchdog that found nothing is a success, and it is dimmed
+            // rather than green: a column of bright ticks for a schedule that
+            // has done nothing all week would read as activity.
+            FireOutcome::MonitorQuiet => ("·", DIM),
+            // Rendered as a question mark on purpose. A row this build cannot
+            // read must look unreadable rather than borrowing another
+            // outcome's glyph and quietly claiming to be it.
+            FireOutcome::Unknown => ("?", YELLOW),
         };
         let detail = f.detail.clone().unwrap_or_default();
         println!(
