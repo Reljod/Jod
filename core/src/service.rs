@@ -12,6 +12,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc, RwLock};
 
+use crate::conversation::NewMessage;
 use crate::error::{JodError, Result};
 use crate::event::{AgentEnvelope, AgentEvent, Usage};
 use crate::harness::{HarnessKind, PermissionPolicy, SpawnRequest};
@@ -127,6 +128,153 @@ pub fn watch_command(agent_id: &str) -> String {
     format!("jod watch {agent_id}")
 }
 
+/// Which conversation a run's turns are recorded in.
+///
+/// Stated by the caller, because only the caller knows whether this run
+/// continues something. Jod cannot infer it: two runs in the same directory on
+/// the same harness may be one thread or two, and guessing wrong welds
+/// unrelated work into a single transcript that no fork can unpick.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum RunConversation {
+    /// Mint a conversation for this run. The default, because a run nobody
+    /// placed is still a thing that was said and answered.
+    #[default]
+    New,
+    /// Extend one that already exists, appending at its head.
+    Existing(String),
+    /// Record nothing in the graph. For machinery whose prompt Jod generated
+    /// and whose output Jod parses rather than reads — `jod consolidate` above
+    /// all, whose prompt *is* a transcript and would otherwise be stored, and
+    /// indexed for search, a second time.
+    Detached,
+}
+
+/// Longest title derived from a prompt. A row in a listing, not a summary —
+/// the same width `conversations` truncates its fallback to.
+const TITLE_CHARS: usize = 60;
+
+/// A conversation's name, taken from the prompt that opened it.
+fn title_from(prompt: &str) -> String {
+    let line: String = prompt.split_whitespace().collect::<Vec<_>>().join(" ");
+    if line.chars().count() > TITLE_CHARS {
+        format!("{}…", line.chars().take(TITLE_CHARS - 1).collect::<String>())
+    } else {
+        line
+    }
+}
+
+/// Resolve the conversation a run belongs to, and open it with the prompt that
+/// started it.
+///
+/// `None` means "record nothing", which is an ordinary ending rather than a
+/// failure: a detached run, a conversation id that names nothing, or a store
+/// that would not take the write. The run happens either way — see
+/// [`record_in_conversation`] for why that direction is never reversed.
+fn open_conversation(
+    store: &Store,
+    req: &SpawnRequest,
+    run_id: &str,
+    binding: &RunConversation,
+) -> Option<String> {
+    let conversation = match binding {
+        RunConversation::Detached => return None,
+        RunConversation::Existing(id) => match store.conversation(id) {
+            Ok(Some(c)) => c,
+            Ok(None) => {
+                eprintln!("[jod] no conversation `{id}` — this run will not be recorded in one");
+                return None;
+            }
+            Err(e) => {
+                eprintln!("[jod] could not read conversation `{id}`: {e}");
+                return None;
+            }
+        },
+        RunConversation::New => match store.new_conversation(
+            req.harness,
+            &req.cwd.to_string_lossy(),
+            req.model.as_deref(),
+        ) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("[jod] could not start a conversation for this run: {e}");
+                return None;
+            }
+        },
+    };
+
+    // A conversation nobody has named takes its name from what it was first
+    // asked to do. `conversations` falls back to the opening message when the
+    // column is blank, so this is for everything that reads the row itself.
+    if conversation.title.is_empty() {
+        if let Err(e) = store.set_conversation_title(&conversation.id, &title_from(&req.prompt)) {
+            eprintln!("[jod] could not name conversation {}: {e}", conversation.id);
+        }
+    }
+
+    // The prompt is the conversation's user turn, and the only one there will
+    // ever be: `NewMessage::from_event` produces no `User` message because no
+    // harness reports its own prompt back. Without this a transcript reads as
+    // an agent talking to itself, and `resume`-by-replay would hand the next
+    // harness an answer to a question nobody asked.
+    if let Err(e) = store.append_message(
+        &conversation.id,
+        NewMessage::user(req.prompt.clone()).from_run(run_id),
+    ) {
+        eprintln!(
+            "[jod] could not record the prompt on conversation {}: {e}",
+            conversation.id
+        );
+    }
+
+    Some(conversation.id)
+}
+
+/// Fold one of a run's events into the conversation the run belongs to.
+///
+/// **Who owns this write:** any process holding a binding for the run — which
+/// in practice means the one that launched it, plus any that
+/// [`Jod::rehydrate`] handed a live run back to. It is deliberately *not* one
+/// owner, because `runner::follow` is not exclusive: a `jod watch` in another
+/// terminal and a daemon that restarted both forward the same rows out of
+/// `events`, and replay from a cursor is the normal case rather than the
+/// exceptional one. Sole ownership would therefore have to be enforced by
+/// discipline, and discipline is not a guard.
+///
+/// The guard is in the write instead. [`Store::append_envelopes`] carries each
+/// message's `(run_id, seq)` and the schema is unique over the pair, so a
+/// second writer of the same event appends nothing. That is what makes it safe
+/// for the transcript to survive the process that started it.
+///
+/// Nothing here returns an error. A conversation is a *side effect* of a run,
+/// and the Hermes audit is unambiguous about what happens when a memory side
+/// effect is allowed to fail the work it was watching: a looping write
+/// suppressed the user's own reply (`research/hermes-parity-2026/REPORT.md`
+/// §3.2). So every failure is logged and the event stream carries on.
+fn record_in_conversation(store: &Store, conversation_id: &str, envelope: &AgentEnvelope) {
+    // The session id belongs on the conversation row, not in the transcript: it
+    // is how `Store::resume_for` puts the *next* run back into this thread
+    // instead of replaying it from text.
+    if let AgentEvent::Started {
+        session_id: Some(session),
+        ..
+    } = &envelope.event
+    {
+        if let Err(e) = store.set_conversation_session(conversation_id, Some(session)) {
+            eprintln!("[jod] could not record the session on {conversation_id}: {e}");
+        }
+    }
+
+    // `append_envelopes` skips what is not a turn, but it opens a write
+    // transaction to find that out. Ask the same function first, because `Raw`
+    // lines are as frequent as the harness is chatty.
+    if NewMessage::from_event(&envelope.event).is_none() {
+        return;
+    }
+    if let Err(e) = store.append_envelopes(conversation_id, std::slice::from_ref(envelope)) {
+        eprintln!("[jod] could not record a turn on {conversation_id}: {e}");
+    }
+}
+
 /// How long a run gets to shut down cleanly before it is killed outright.
 ///
 /// Long enough for the supervisor to write the run's final events, which is the
@@ -143,6 +291,10 @@ struct AgentRecord {
 struct State {
     agents: HashMap<String, AgentRecord>,
     order: Vec<String>,
+    /// Run id → the conversation its turns are appended to. Only ever holds
+    /// runs *this* process launched, which is the whole of the no-double-write
+    /// rule — see [`record_in_conversation`].
+    conversations: HashMap<String, String>,
 }
 
 pub struct Jod {
@@ -185,12 +337,14 @@ impl Jod {
         tokio::spawn(async move {
             while let Some(envelope) = events_rx.recv().await {
                 let mut updated = None;
+                let conversation;
                 {
                     let mut guard = state.write().await;
                     if let Some(record) = guard.agents.get_mut(&envelope.agent_id) {
                         apply(record, &envelope);
                         updated = Some(record.summary.clone());
                     }
+                    conversation = guard.conversations.get(&envelope.agent_id).cloned();
                 }
                 if let Some(store) = &store {
                     // Persistence must never take the run down with it: a
@@ -202,6 +356,13 @@ impl Jod {
                         if let Err(e) = store.save_run(&stored_run(summary)) {
                             eprintln!("[jod] could not persist run: {e}");
                         }
+                    }
+                    // Ordered after the event log on purpose. `events` is the
+                    // record of what happened and `messages` is a projection of
+                    // it, so a crash between the two loses a projection that a
+                    // later pass could rebuild, never the run itself.
+                    if let Some(id) = &conversation {
+                        record_in_conversation(store, id, &envelope);
                     }
                 }
                 // A closed broadcast channel just means no client is attached.
@@ -250,6 +411,11 @@ impl Jod {
     /// so its remaining events reach this process's clients as they arrive.
     /// That is what the file tailer could never do, because it had to be
     /// started by whoever spawned the agent.
+    ///
+    /// It is also given its conversation back, so the transcript keeps growing
+    /// across the restart instead of stopping wherever the old process died.
+    /// Safe to do for a run another process may also be following, because
+    /// [`record_in_conversation`] writes through an idempotent append.
     pub async fn rehydrate(&self, limit: usize) -> Result<usize> {
         let Some(store) = &self.store else {
             return Ok(0);
@@ -305,6 +471,18 @@ impl Jod {
             let cursor = record.events.last().map(|e| e.seq);
             let follow = alive.then(|| (run.id.clone(), run.pgid.unwrap_or(0), cursor));
 
+            // Which conversation this run was writing into, read back out of
+            // the messages it already produced. Only for a run still going: a
+            // finished one has nothing left to append, and binding it would
+            // keep a map entry for every run in the history.
+            let conversation = match alive {
+                true => store.conversation_for_run(&run.id).unwrap_or_else(|e| {
+                    eprintln!("[jod] could not find the conversation for {}: {e}", run.id);
+                    None
+                }),
+                false => None,
+            };
+
             {
                 let mut guard = self.state.write().await;
                 if guard.agents.contains_key(&run.id) {
@@ -312,6 +490,9 @@ impl Jod {
                 }
                 guard.order.push(run.id.clone());
                 guard.agents.insert(run.id.clone(), record);
+                if let Some(conversation) = conversation {
+                    guard.conversations.insert(run.id.clone(), conversation);
+                }
             }
             loaded += 1;
 
@@ -385,12 +566,34 @@ impl Jod {
         runner::locate_supervisor().is_some()
     }
 
-    /// Launch an agent. Returns once its supervisor is running.
+    /// Launch an agent in a conversation of its own.
+    ///
+    /// The default binding is [`RunConversation::New`] rather than nothing,
+    /// because a run *is* a turn: something was asked and something answered,
+    /// and a graph that only fills up when a caller remembers to ask for it is
+    /// the state this had before — `jod conv ls` describing an empty table.
+    pub async fn spawn_agent(&self, req: SpawnRequest) -> Result<AgentSummary> {
+        self.spawn_agent_in(req, RunConversation::New).await
+    }
+
+    /// Launch an agent, recording its turns in the conversation the caller
+    /// names. Returns once its supervisor is running.
     ///
     /// Requires a store. A run reports itself by writing to the database, so a
     /// Jod without one would start an agent whose output goes nowhere — and
     /// would then have to pretend that was a success.
-    pub async fn spawn_agent(&self, req: SpawnRequest) -> Result<AgentSummary> {
+    ///
+    /// The binding says where the *transcript* goes; `req.resume` still says
+    /// what the harness is told, and the two are deliberately separate. A
+    /// conversation can outlive the harness session that produced it — that is
+    /// the entire reason Jod keeps its own graph — so a caller continuing a
+    /// thread on a different harness passes [`RunConversation::Existing`] with
+    /// a `resume` of its own choosing, or reads [`Store::resume_for`] first.
+    pub async fn spawn_agent_in(
+        &self,
+        req: SpawnRequest,
+        conversation: RunConversation,
+    ) -> Result<AgentSummary> {
         let store = self.store.clone().ok_or(JodError::StoreRequired)?;
         let program = req
             .harness
@@ -418,6 +621,13 @@ impl Jod {
             last_message: None,
         };
 
+        // Open the conversation before the launch for the same reason the agent
+        // is registered before it: an event that arrived first would find no
+        // binding and be dropped from the transcript. It costs a conversation
+        // holding only a prompt if the launch then fails, which is the truthful
+        // record of an attempt rather than a leak.
+        let conversation = open_conversation(&store, &req, &id, &conversation);
+
         // Register before launching, so no event can arrive before its agent.
         {
             let mut guard = self.state.write().await;
@@ -429,6 +639,9 @@ impl Jod {
                     events: Vec::new(),
                 },
             );
+            if let Some(conversation) = conversation {
+                guard.conversations.insert(id.clone(), conversation);
+            }
         }
 
         // Record the run before it starts. The supervisor updates this row from
@@ -476,6 +689,18 @@ impl Jod {
         }
 
         Ok(summary)
+    }
+
+    /// The conversation a run's turns are being recorded in, if this process is
+    /// recording them.
+    ///
+    /// How a caller holding several turns of one thread keeps them in one
+    /// conversation: launch the first with [`RunConversation::New`], ask for the
+    /// id, and pass [`RunConversation::Existing`] from then on. Without it every
+    /// turn of a chat would mint a conversation of its own and the graph would
+    /// record a hundred one-message threads instead of one.
+    pub async fn conversation_of(&self, run_id: &str) -> Option<String> {
+        self.state.read().await.conversations.get(run_id).cloned()
     }
 
     pub async fn agents(&self) -> Vec<AgentSummary> {
@@ -1074,6 +1299,272 @@ mod tests {
                 serde_json::Value::String(status.as_str().into())
             );
         }
+    }
+
+    // ---- runs populate conversations --------------------------------------
+
+    fn request(prompt: &str) -> SpawnRequest {
+        SpawnRequest {
+            name: "n".into(),
+            harness: HarnessKind::ClaudeCode,
+            prompt: prompt.into(),
+            cwd: PathBuf::from("/work"),
+            model: Some("opus".into()),
+            permission: PermissionPolicy::Ask,
+            resume: crate::harness::Resume::Fresh,
+        }
+    }
+
+    fn envelope(run: &str, seq: u64, event: AgentEvent) -> AgentEnvelope {
+        AgentEnvelope {
+            agent_id: run.into(),
+            at_ms: seq as i64,
+            seq,
+            event,
+        }
+    }
+
+    #[test]
+    fn a_run_opens_exactly_one_conversation_named_after_its_prompt() {
+        let store = Store::in_memory().unwrap();
+        let id = open_conversation(
+            &store,
+            &request("summarise the inbox"),
+            "run-1",
+            &RunConversation::New,
+        )
+        .expect("a run belongs to a conversation");
+
+        let all = store.conversations(10).unwrap();
+        assert_eq!(all.len(), 1, "one run, one conversation");
+        assert_eq!(all[0].id, id);
+        assert_eq!(all[0].title, "summarise the inbox");
+
+        let thread = store.thread(&id).unwrap();
+        assert_eq!(thread.len(), 1, "the prompt is the opening turn");
+        assert_eq!(thread[0].role, crate::conversation::Role::User);
+        assert_eq!(thread[0].run_id.as_deref(), Some("run-1"));
+    }
+
+    #[test]
+    fn a_second_run_in_the_same_conversation_extends_it_rather_than_forking() {
+        let store = Store::in_memory().unwrap();
+        let first =
+            open_conversation(&store, &request("first"), "run-1", &RunConversation::New).unwrap();
+        let second = open_conversation(
+            &store,
+            &request("second"),
+            "run-2",
+            &RunConversation::Existing(first.clone()),
+        )
+        .unwrap();
+
+        assert_eq!(second, first, "the caller's conversation is the one used");
+        assert_eq!(
+            store.conversations(10).unwrap().len(),
+            1,
+            "a continuation mints nothing"
+        );
+        let thread = store.thread(&first).unwrap();
+        assert_eq!(
+            thread.iter().map(|m| m.text.as_str()).collect::<Vec<_>>(),
+            vec!["first", "second"]
+        );
+        assert_eq!(thread[1].parent_id, Some(thread[0].id), "one line, not two");
+        assert!(store.conversation(&first).unwrap().unwrap().forked_from.is_none());
+    }
+
+    #[test]
+    fn a_conversation_that_is_already_named_keeps_the_name_it_has() {
+        let store = Store::in_memory().unwrap();
+        let id = open_conversation(&store, &request("first"), "run-1", &RunConversation::New)
+            .unwrap();
+        store.set_conversation_title(&id, "the inbox sweep").unwrap();
+        open_conversation(
+            &store,
+            &request("second"),
+            "run-2",
+            &RunConversation::Existing(id.clone()),
+        );
+        assert_eq!(
+            store.conversation(&id).unwrap().unwrap().title,
+            "the inbox sweep"
+        );
+    }
+
+    #[test]
+    fn a_detached_run_is_recorded_in_no_conversation_at_all() {
+        let store = Store::in_memory().unwrap();
+        assert!(open_conversation(
+            &store,
+            &request("extract the facts from …"),
+            "run-1",
+            &RunConversation::Detached
+        )
+        .is_none());
+        assert!(store.conversations(10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_run_pointed_at_a_conversation_that_does_not_exist_is_left_unrecorded() {
+        let store = Store::in_memory().unwrap();
+        let bound = open_conversation(
+            &store,
+            &request("hello"),
+            "run-1",
+            &RunConversation::Existing("nope".into()),
+        );
+        assert!(bound.is_none(), "a bad id must not invent a conversation");
+        assert!(store.conversations(10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_long_prompt_yields_a_title_a_listing_can_show() {
+        let title = title_from(&"averylongword ".repeat(20));
+        assert!(title.chars().count() <= TITLE_CHARS, "{title}");
+        assert!(title.ends_with('…'));
+    }
+
+    #[test]
+    fn the_events_of_a_run_become_messages_in_the_order_they_arrived() {
+        let store = Store::in_memory().unwrap();
+        let id = open_conversation(&store, &request("go"), "run-1", &RunConversation::New).unwrap();
+
+        for (seq, event) in [
+            AgentEvent::Started {
+                session_id: Some("sess-1".into()),
+                model: Some("opus".into()),
+            },
+            AgentEvent::Thinking {
+                text: "considering".into(),
+            },
+            AgentEvent::ToolCall {
+                name: "Bash".into(),
+                input: Some(serde_json::json!({"command": "ls"})),
+            },
+            AgentEvent::ToolResult {
+                name: "Bash".into(),
+                summary: Some("a.txt".into()),
+                is_error: false,
+            },
+            AgentEvent::Message {
+                text: "there is one file".into(),
+            },
+            AgentEvent::Raw {
+                line: "noise".into(),
+            },
+            AgentEvent::Finished {
+                text: Some("there is one file".into()),
+                exit_code: Some(0),
+                is_error: false,
+                usage: Usage::default(),
+            },
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            record_in_conversation(&store, &id, &envelope("run-1", seq as u64, event));
+        }
+
+        use crate::conversation::Role;
+        let thread = store.thread(&id).unwrap();
+        assert_eq!(
+            thread.iter().map(|m| m.role).collect::<Vec<_>>(),
+            vec![
+                Role::User,
+                Role::Thinking,
+                Role::ToolCall,
+                Role::ToolResult,
+                Role::Assistant
+            ],
+            "metadata and unclassifiable lines are not turns"
+        );
+        assert_eq!(thread[2].tool_name.as_deref(), Some("Bash"));
+        assert!(thread[1..].iter().all(|m| m.run_id.as_deref() == Some("run-1")));
+    }
+
+    #[test]
+    fn the_session_the_harness_reports_lands_on_the_conversation_so_it_can_resume() {
+        let store = Store::in_memory().unwrap();
+        let id = open_conversation(&store, &request("go"), "run-1", &RunConversation::New).unwrap();
+        record_in_conversation(
+            &store,
+            &id,
+            &envelope(
+                "run-1",
+                0,
+                AgentEvent::Started {
+                    session_id: Some("sess-1".into()),
+                    model: None,
+                },
+            ),
+        );
+        assert_eq!(
+            store.resume_for(&id).unwrap(),
+            crate::harness::Resume::Session("sess-1".into())
+        );
+    }
+
+    /// Two processes may follow one run, and a follower that reconnects
+    /// replays from its cursor — so the store dedupes on `(run_id, seq)`. This
+    /// is the call site depending on that: the envelope's sequence has to reach
+    /// the write, or every restart would double the transcript.
+    #[test]
+    fn the_same_event_recorded_twice_leaves_one_message() {
+        let store = Store::in_memory().unwrap();
+        let id = open_conversation(&store, &request("go"), "run-1", &RunConversation::New).unwrap();
+        let event = envelope(
+            "run-1",
+            0,
+            AgentEvent::Message {
+                text: "the answer".into(),
+            },
+        );
+
+        record_in_conversation(&store, &id, &event);
+        record_in_conversation(&store, &id, &event);
+
+        let thread = store.thread(&id).unwrap();
+        assert_eq!(
+            thread.iter().map(|m| m.text.as_str()).collect::<Vec<_>>(),
+            vec!["go", "the answer"]
+        );
+    }
+
+    /// A conversation is a side effect of a run. The Hermes audit found what
+    /// happens when a memory side effect is allowed to fail the work it was
+    /// watching, so this direction is one-way: the transcript may lose a turn,
+    /// the run may not lose anything.
+    #[test]
+    fn a_conversation_write_that_fails_leaves_the_run_untouched() {
+        let store = Store::in_memory().unwrap();
+        let event = envelope(
+            "run-1",
+            0,
+            AgentEvent::Message {
+                text: "said something".into(),
+            },
+        );
+        store.append_event(&event).unwrap();
+
+        // No such conversation: every write inside must fail, and none of it
+        // may reach the caller.
+        record_in_conversation(&store, "no-such-conversation", &event);
+        record_in_conversation(
+            &store,
+            "no-such-conversation",
+            &envelope(
+                "run-1",
+                1,
+                AgentEvent::Started {
+                    session_id: Some("sess-1".into()),
+                    model: None,
+                },
+            ),
+        );
+
+        assert_eq!(store.events("run-1").unwrap().len(), 1, "the run is intact");
+        assert!(store.conversations(10).unwrap().is_empty());
     }
 
     /// The old summaries recorded a tmux session and no pid. Losing a whole

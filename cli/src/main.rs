@@ -10,9 +10,14 @@ mod tui;
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
-use jod_core::store::{NewFact, Origin};
+use jod_core::consolidate::{Consolidation, Provenance};
+use jod_core::conversation::PortableMessage;
+use jod_core::service::RunConversation;
+use jod_core::store::{NewFact, Origin, Store};
 use jod_core::team::MemberStatus;
-use jod_core::{HarnessKind, Jod, PermissionPolicy, Resume, SpawnRequest};
+use jod_core::{
+    AgentEnvelope, AgentEvent, HarnessKind, Jod, PermissionPolicy, Resume, SpawnRequest,
+};
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -125,6 +130,34 @@ enum Command {
         scope: Option<String>,
         #[arg(long)]
         json: bool,
+    },
+    /// Read a conversation and write what it established into memory.
+    ///
+    /// Jod has no model client, so the reading is itself an agent run: the
+    /// material goes out as a prompt, the answer comes back as JSON lines, and
+    /// every trust decision — which scope, which origin, what may supersede
+    /// what — is made here rather than by the agent. Without this, `facts` has
+    /// no writer but a person typing `jod remember`.
+    Consolidate {
+        /// The conversation to read. A prefix of its id is enough.
+        conversation: Option<String>,
+        /// Read a run's event stream instead of a conversation.
+        #[arg(long, conflicts_with = "conversation")]
+        run: Option<String>,
+        /// Where this material came from. Required, and never inferred: by the
+        /// time Reljod's own chat and a page Jod fetched are both a string of
+        /// text they look identical, so the caller — which does know — says.
+        #[arg(long, value_enum)]
+        provenance: ProvenanceArg,
+        /// Which domain the facts belong to. Scopes are hard partitions, and a
+        /// line naming another one is discarded rather than filed.
+        #[arg(long, default_value = jod_core::store::DEFAULT_SCOPE)]
+        scope: String,
+        #[arg(short = 'H', long, value_enum, default_value_t = HarnessArg::Claude)]
+        harness: HarnessArg,
+        /// Run the extraction and print what it would write, writing nothing.
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Permanently destroy a fact — every version of it, not just the current.
     Forget {
@@ -519,6 +552,29 @@ impl From<OriginArg> for Origin {
     }
 }
 
+/// Where consolidated material came from.
+///
+/// Deliberately not a superset of `OriginArg`: no provenance yields
+/// `Origin::Owner`. An agent reading a transcript *concludes* things; only
+/// Reljod asserts them, by typing `jod remember`.
+#[derive(Copy, Clone, PartialEq, Eq, ValueEnum)]
+enum ProvenanceArg {
+    /// A conversation between Reljod and Jod.
+    OwnerChat,
+    /// Anything Jod ingested — a fetched page, a payload, an email. Untrusted,
+    /// and excluded from recall by default.
+    Ingested,
+}
+
+impl From<ProvenanceArg> for Provenance {
+    fn from(a: ProvenanceArg) -> Self {
+        match a {
+            ProvenanceArg::OwnerChat => Provenance::OwnerChat,
+            ProvenanceArg::Ingested => Provenance::Ingested,
+        }
+    }
+}
+
 #[derive(Copy, Clone, PartialEq, Eq, ValueEnum)]
 enum PermissionArg {
     /// Let the agent read — files and the web — and refuse everything that
@@ -758,6 +814,18 @@ async fn main() -> Result<()> {
                 1 => println!("forgot 1 version, permanently"),
                 n => println!("forgot {n} versions, permanently"),
             }
+        }
+
+        Command::Consolidate {
+            conversation,
+            run,
+            provenance,
+            scope,
+            harness,
+            dry_run,
+        } => {
+            consolidate_command(&jod, conversation, run, provenance, scope, harness, dry_run)
+                .await?;
         }
 
         Command::Recall {
@@ -1046,29 +1114,13 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// Refuse to start an agent when nothing could supervise it.
-///
-/// `jod-run` is what holds a run's output once the caller walks away; without
-/// it a spawn would fail later and less clearly, after the run had a name.
 /// Carry out a `jod conv …` subcommand.
 ///
-/// An id prefix is enough everywhere one is taken, because retyping a UUID is
-/// not a user interface — and an ambiguous prefix is refused rather than
-/// guessed, since reverting the wrong conversation is not undoable by the
-/// person who did it.
+/// An id prefix is enough everywhere one is taken — see
+/// [`resolve_conversation`].
 fn conv_command(jod: &Jod, what: ConvCommand) -> Result<()> {
     let store = jod.store().context("this command needs the database")?;
-
-    // Resolve a prefix against the conversations that exist.
-    let resolve = |typed: &str| -> Result<String> {
-        let all = store.conversations(500)?;
-        let hits: Vec<_> = all.iter().filter(|c| c.id.starts_with(typed)).collect();
-        match hits.as_slice() {
-            [only] => Ok(only.id.clone()),
-            [] => bail!("no conversation starts with {typed}"),
-            many => bail!("{typed} matches {} conversations — type more of it", many.len()),
-        }
-    };
+    let resolve = |typed: &str| resolve_conversation(store, typed);
 
     match what {
         ConvCommand::Ls { limit, json } => {
@@ -1165,6 +1217,273 @@ fn conv_command(jod: &Jod, what: ConvCommand) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Resolve a typed id prefix against the conversations that exist.
+///
+/// An ambiguous prefix is refused rather than guessed: reverting or
+/// consolidating the wrong conversation is not undoable by the person who did
+/// it.
+fn resolve_conversation(store: &Store, typed: &str) -> Result<String> {
+    let all = store.conversations(500)?;
+    let hits: Vec<_> = all.iter().filter(|c| c.id.starts_with(typed)).collect();
+    match hits.as_slice() {
+        [only] => Ok(only.id.clone()),
+        [] => bail!("no conversation starts with {typed}"),
+        many => bail!(
+            "{typed} matches {} conversations — type more of it",
+            many.len()
+        ),
+    }
+}
+
+/// Turn a conversation, or a run, into memory.
+///
+/// The shape of this command follows the module it drives: Jod builds the
+/// prompt, an agent does the reading, and Jod reads the answer back under rules
+/// the agent cannot reach. So the flow is spawn → wait → parse → write, and the
+/// only thing the caller decides is *where the material came from*, which is
+/// the one input that cannot be recovered from the text.
+async fn consolidate_command(
+    jod: &std::sync::Arc<Jod>,
+    conversation: Option<String>,
+    run: Option<String>,
+    provenance: ProvenanceArg,
+    scope: String,
+    harness: HarnessArg,
+    dry_run: bool,
+) -> Result<()> {
+    let store = jod.store().context("this command needs the database")?;
+
+    let (material, source) = match (conversation, run) {
+        (Some(typed), _) => {
+            let id = resolve_conversation(store, &typed)?;
+            (
+                transcript_material(&store.transcript(&id)?),
+                format!("conversation:{id}"),
+            )
+        }
+        (None, Some(id)) => {
+            // Straight from the event log, so a run that was never placed in a
+            // conversation — anything launched before this existed, or by a
+            // process that has since gone — can still be read.
+            let events = jod.events_since(&id, None).await?;
+            (run_material(&id, &events), format!("run:{id}"))
+        }
+        (None, None) => bail!(
+            "say which conversation to consolidate — `jod conv ls` lists them — \
+             or pass --run <id>"
+        ),
+    };
+    if material.trim().is_empty() {
+        bail!("{source} has nothing in it to read");
+    }
+
+    let consolidation = Consolidation::new(scope, provenance.into(), material)
+        .from(source.clone())
+        .with_harness(harness.into());
+
+    require_supervisor(jod)?;
+    // Subscribe before spawning, so no early event is missed.
+    let events = jod.subscribe();
+    let agent = jod
+        // Detached: the extraction's prompt *is* a transcript, and recording it
+        // as a conversation would store the same text twice and index it twice
+        // for search.
+        .spawn_agent_in(consolidation.extraction_request(), RunConversation::Detached)
+        .await?;
+    eprintln!(
+        "reading {source} with {} as {} …",
+        agent.harness_label,
+        &agent.id[..agent.id.len().min(8)]
+    );
+    let output = collect_output(events, &agent.id).await;
+
+    settle_consolidation(store, &consolidation, &output, dry_run)
+}
+
+/// Read an extraction's output, report it, and write it unless this is a dry
+/// run.
+///
+/// Split out from the command because "did the dry run write anything" is the
+/// question worth a test here, and a test cannot spawn an agent.
+fn settle_consolidation(
+    store: &Store,
+    consolidation: &Consolidation,
+    output: &str,
+    dry_run: bool,
+) -> Result<()> {
+    if dry_run {
+        let batch = consolidation.parse(output);
+        if batch.facts.is_empty() && batch.dropped.is_empty() {
+            println!("nothing durable in that material — a correct and common answer");
+            return Ok(());
+        }
+        for fact in &batch.facts {
+            println!(
+                "would write  {} | {} | {}   ({})",
+                fact.subject,
+                fact.predicate,
+                fact.object,
+                would_do(store, fact)?
+            );
+        }
+        report_dropped(&batch.dropped);
+        if batch.truncated {
+            println!("the agent offered more lines than the cap allows; the rest were not read");
+        }
+        println!(
+            "nothing was written. The trust and loss rules are applied at write \
+             time, so a real run may still refuse some of this."
+        );
+        return Ok(());
+    }
+
+    let outcome = consolidation.apply(store, output);
+    if let Some(refusal) = &outcome.refused {
+        // Nothing was written at all — a consolidation that would lose most of
+        // what was known about a subject is not partially right.
+        println!(
+            "refused: this would retire {} of the {} things known about {} ({:.0}%, limit {:.0}%)",
+            refusal.retiring,
+            refusal.prior,
+            refusal.subject,
+            refusal.fraction * 100.0,
+            refusal.limit * 100.0
+        );
+        println!("nothing was written");
+        return Ok(());
+    }
+    println!(
+        "wrote {} fact(s) · {} superseded a belief · {} already known",
+        outcome.written.len(),
+        outcome.superseded,
+        outcome.restated
+    );
+    report_dropped(&outcome.dropped);
+    if outcome.truncated {
+        println!("the agent offered more lines than the cap allows; the rest were not read");
+    }
+    if let Some(error) = &outcome.error {
+        // Reported, not raised: the conversation still happened.
+        println!("the store stopped part-way through: {error}");
+    }
+    Ok(())
+}
+
+/// What writing one extracted line would do to what Jod already believes.
+///
+/// The same question `Consolidation::apply` asks — the current belief on this
+/// subject, predicate and scope — asked read-only, so a dry run says something
+/// more useful than "it parsed". It stops short of the trust ranking and the
+/// loss guard, which are the store's to apply and are stated as such.
+fn would_do(store: &Store, fact: &NewFact) -> Result<String> {
+    let current = store
+        .facts_about(&fact.subject)?
+        .into_iter()
+        .find(|f| f.scope == fact.scope && f.predicate == fact.predicate);
+    Ok(match current {
+        Some(f) if f.object.trim().eq_ignore_ascii_case(fact.object.trim()) => {
+            "already known".to_string()
+        }
+        Some(f) => format!("supersedes “{}”", f.object),
+        None => "new".to_string(),
+    })
+}
+
+fn report_dropped(dropped: &[jod_core::consolidate::Dropped]) {
+    if dropped.is_empty() {
+        return;
+    }
+    println!("{} line(s) dropped:", dropped.len());
+    for d in dropped {
+        // The reason as the parser named it. Rendered debug rather than
+        // translated, so a reason added later shows up here rather than
+        // vanishing into a catch-all arm.
+        println!("  {:?}  {}", d.reason, d.line);
+    }
+}
+
+/// A conversation as the text an extraction reads.
+///
+/// Thinking is left out. It is one model's private reasoning — speculation,
+/// options weighed and dropped — and a fact extracted from it is something
+/// nobody ever asserted.
+fn transcript_material(transcript: &[PortableMessage]) -> String {
+    transcript
+        .iter()
+        .filter(|m| m.role != "thinking")
+        .map(|m| match m.role.as_str() {
+            "tool_call" => format!(
+                "{} call: {}",
+                m.tool_name.as_deref().unwrap_or("tool"),
+                m.text
+            ),
+            "tool_result" => format!(
+                "{} result: {}",
+                m.tool_name.as_deref().unwrap_or("tool"),
+                m.text
+            ),
+            role => format!("{role}: {}", m.text),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// A run as the text an extraction reads.
+///
+/// The prompt comes off disk rather than out of the events, because no harness
+/// reports its own prompt back — and the prompt is usually the densest thing in
+/// the run, since it is the part a person wrote.
+fn run_material(run_id: &str, events: &[AgentEnvelope]) -> String {
+    let mut lines = Vec::new();
+    if let Ok(prompt) = std::fs::read_to_string(jod_core::paths::prompt_path(run_id)) {
+        lines.push(format!("user: {}", prompt.trim()));
+    }
+    for envelope in events {
+        match &envelope.event {
+            AgentEvent::Message { text } => lines.push(format!("assistant: {text}")),
+            AgentEvent::ToolResult {
+                name,
+                summary: Some(summary),
+                ..
+            } => lines.push(format!("{name} result: {summary}")),
+            _ => {}
+        }
+    }
+    lines.join("\n")
+}
+
+/// Wait for one run to finish, and return everything it said.
+///
+/// Every assistant message, not only the last: an agent asked for JSON lines
+/// will preface them, apologise, or wrap them in a fence, and the parser passes
+/// over prose in silence anyway — so keeping the lot costs nothing and loses no
+/// facts to a stray "here you go".
+async fn collect_output(
+    mut events: jod_core::broadcast::Receiver<AgentEnvelope>,
+    agent_id: &str,
+) -> String {
+    use jod_core::broadcast::error::RecvError;
+    let mut said = String::new();
+    loop {
+        match events.recv().await {
+            Ok(envelope) if envelope.agent_id == agent_id => match envelope.event {
+                AgentEvent::Message { text } => {
+                    said.push_str(&text);
+                    said.push('\n');
+                }
+                // `Finished.text` repeats the last message, so it is not added.
+                AgentEvent::Finished { .. } => return said,
+                AgentEvent::Error { message } => eprintln!("[jod] {message}"),
+                _ => {}
+            },
+            Ok(_) => {}
+            // Nothing more is coming. Whatever was said is still worth reading.
+            Err(RecvError::Closed) => return said,
+            Err(RecvError::Lagged(_)) => continue,
+        }
+    }
 }
 
 /// Carry out a `jod schedule …` subcommand.
@@ -1360,6 +1679,10 @@ fn goal_command(jod: &Jod, what: GoalCommand) -> Result<()> {
     Ok(())
 }
 
+/// Refuse to start an agent when nothing could supervise it.
+///
+/// `jod-run` is what holds a run's output once the caller walks away; without
+/// it a spawn would fail later and less clearly, after the run had a name.
 fn require_supervisor(jod: &Jod) -> Result<()> {
     if !jod.supervisor_available() {
         bail!(
@@ -1374,8 +1697,10 @@ fn require_supervisor(jod: &Jod) -> Result<()> {
 /// One conversation, many turns.
 ///
 /// Every turn after the first resumes the harness session the previous turn
-/// reported, so context carries across turns without Jod storing any of it —
-/// the harness owns the transcript, which is the whole point of the seam.
+/// reported, so context carries across turns — and every turn is recorded into
+/// the *same* Jod conversation, which is a separate thing from the harness
+/// session and outlives it. Both are needed: the session is what makes the next
+/// turn cheap, the conversation is what survives the harness being swapped.
 async fn chat(
     jod: std::sync::Arc<Jod>,
     harness: HarnessArg,
@@ -1393,6 +1718,7 @@ async fn chat(
     } else {
         Resume::Fresh
     };
+    let mut conversation = RunConversation::New;
 
     eprintln!("jod chat · {} · Ctrl-D to leave", kind.label());
     loop {
@@ -1414,17 +1740,27 @@ async fn chat(
 
         let events = jod.subscribe();
         let agent = jod
-            .spawn_agent(SpawnRequest {
-                name: default_name(&prompt),
-                harness: kind,
-                prompt,
-                cwd: cwd.clone(),
-                model: model.clone(),
-                permission: permission.into(),
-                resume: resume.clone(),
-            })
+            .spawn_agent_in(
+                SpawnRequest {
+                    name: default_name(&prompt),
+                    harness: kind,
+                    prompt,
+                    cwd: cwd.clone(),
+                    model: model.clone(),
+                    permission: permission.into(),
+                    resume: resume.clone(),
+                },
+                conversation.clone(),
+            )
             .await?;
         render::stream(events, &agent.id, false, false).await;
+
+        // The rest of the chat lands in the conversation the first turn opened,
+        // so `jod conv show` reads back as the conversation it was rather than
+        // as one thread per line typed.
+        if let Some(id) = jod.conversation_of(&agent.id).await {
+            conversation = RunConversation::Existing(id);
+        }
 
         // Prefer the id the harness reported; fall back to "continue the most
         // recent", which every harness also supports.
@@ -1539,5 +1875,83 @@ mod tests {
     fn the_cli_definition_is_valid() {
         use clap::CommandFactory;
         Cli::command().debug_assert();
+    }
+
+    fn extraction() -> Consolidation {
+        Consolidation::new("work", Provenance::OwnerChat, "…the conversation…")
+    }
+
+    const ONE_FACT: &str =
+        r#"{"scope":"work","subject":"reljod","predicate":"prefers","object":"linear for tasks"}"#;
+
+    #[test]
+    fn a_dry_run_writes_nothing_at_all() {
+        let store = Store::in_memory().unwrap();
+        settle_consolidation(&store, &extraction(), ONE_FACT, true).unwrap();
+        assert!(
+            store.facts_about("reljod").unwrap().is_empty(),
+            "a dry run that wrote anything would be the worst bug this command has"
+        );
+    }
+
+    #[test]
+    fn dropping_the_dry_run_flag_is_what_writes_the_facts() {
+        let store = Store::in_memory().unwrap();
+        settle_consolidation(&store, &extraction(), ONE_FACT, false).unwrap();
+        let believed = store.facts_about("reljod").unwrap();
+        assert_eq!(believed.len(), 1);
+        assert_eq!(believed[0].object, "linear for tasks");
+        // Read from a conversation, so it is an agent's conclusion — never the
+        // owner's own word, whatever the transcript said.
+        assert_eq!(believed[0].origin, Origin::Agent);
+    }
+
+    #[test]
+    fn a_dry_run_says_which_lines_would_replace_a_belief_and_which_are_new() {
+        let store = Store::in_memory().unwrap();
+        store
+            .remember(NewFact::new("reljod", "prefers", "notion for tasks").in_scope("work"))
+            .unwrap();
+        let batch = extraction().parse(ONE_FACT);
+        assert_eq!(
+            would_do(&store, &batch.facts[0]).unwrap(),
+            "supersedes “notion for tasks”"
+        );
+        assert_eq!(
+            would_do(&store, &NewFact::new("jod", "runs", "on a vps").in_scope("work")).unwrap(),
+            "new"
+        );
+    }
+
+    #[test]
+    fn an_extraction_never_reads_another_models_thinking() {
+        let material = transcript_material(&[
+            PortableMessage {
+                role: "user".into(),
+                text: "where do tasks go?".into(),
+                tool_name: None,
+                tool_input: None,
+                at_ms: 1,
+            },
+            PortableMessage {
+                role: "thinking".into(),
+                text: "maybe he uses notion".into(),
+                tool_name: None,
+                tool_input: None,
+                at_ms: 2,
+            },
+            PortableMessage {
+                role: "assistant".into(),
+                text: "linear".into(),
+                tool_name: None,
+                tool_input: None,
+                at_ms: 3,
+            },
+        ]);
+        assert!(
+            !material.contains("maybe he uses notion"),
+            "reasoning is speculation, and a fact extracted from it was never asserted"
+        );
+        assert_eq!(material, "user: where do tasks go?\nassistant: linear");
     }
 }
