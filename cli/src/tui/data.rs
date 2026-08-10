@@ -1188,9 +1188,13 @@ fn day(at_ms: i64) -> String {
 /// below reads as read, so the `u` filter shows nothing — unread is a *per
 /// person* fact about an event, and there is nowhere to put it yet.
 pub fn activity(jod: &Arc<Jod>) -> Vec<ActivityItem> {
-    let Some(store) = jod.store() else {
-        return Vec::new();
-    };
+    match jod.store() {
+        Some(store) => activity_from(store),
+        None => Vec::new(),
+    }
+}
+
+fn activity_from(store: &Store) -> Vec<ActivityItem> {
     let mut items: Vec<ActivityItem> = Vec::new();
 
     for s in store.schedules().unwrap_or_default() {
@@ -1232,6 +1236,17 @@ pub fn activity(jod: &Arc<Jod>) -> Vec<ActivityItem> {
         }
     }
 
+    // A delivery names its rule by id; the hooks screen's rows are keyed by
+    // name. Without the translation `⏎` would jump to the screen and select
+    // nothing, and the next tick's `reconcile` would move the cursor somewhere
+    // else entirely — a jump that looks like it worked and did not.
+    let rule_names: HashMap<String, String> = store
+        .webhook_rules()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|r| (r.id, r.name))
+        .collect();
+
     for d in store.deliveries(DELIVERY_WINDOW).unwrap_or_default() {
         items.push(ActivityItem {
             id: format!("delivery/{}", d.delivery_id),
@@ -1251,8 +1266,9 @@ pub fn activity(jod: &Arc<Jod>) -> Vec<ActivityItem> {
             ),
             jump_to: d
                 .rule_id
-                .clone()
-                .map(|rule| (Workspace::Hooks, rule)),
+                .as_deref()
+                .and_then(|id| rule_names.get(id))
+                .map(|name| (Workspace::Hooks, name.clone())),
         });
     }
 
@@ -1689,6 +1705,55 @@ mod tests {
         r.enabled = true;
         let failed = vec![stored_delivery(&r, AT, DeliveryStatus::Failed)];
         assert_eq!(hook_row(r, &failed, AT).state, HookState::Failing);
+    }
+
+    // ---- activity ----
+
+    /// `⏎` sets the target list's selection to this id, so it has to be the id
+    /// that list is keyed by — a name for schedules, goals and hooks, never the
+    /// row's database id. Getting it wrong renders perfectly and jumps nowhere.
+    #[test]
+    fn every_activity_item_jumps_to_an_id_its_screen_actually_has() {
+        let store = store();
+        let s = schedule("shepherd");
+        store.add_schedule(&s).unwrap();
+        store.record_fire(&fire(&s.id, AT, FireOutcome::Ran)).unwrap();
+        let g = goal("inbox-to-zero");
+        store.add_goal(&g).unwrap();
+        store.remember(iteration_fact(&g, "1: filed 12 messages")).unwrap();
+        let r = rule("pr-review");
+        store.add_webhook_rule(&r).unwrap();
+        store
+            .record_delivery(&stored_delivery(&r, AT, DeliveryStatus::Accepted))
+            .unwrap();
+
+        let items = activity_from(&store);
+        let jumps: Vec<(Workspace, String)> =
+            items.iter().filter_map(|i| i.jump_to.clone()).collect();
+        assert!(jumps.contains(&(Workspace::Schedules, "shepherd".to_string())));
+        assert!(jumps.contains(&(Workspace::Goals, "inbox-to-zero".to_string())));
+        assert!(
+            jumps.contains(&(Workspace::Hooks, "pr-review".to_string())),
+            "a delivery names its rule by id, and the hooks list is keyed by name"
+        );
+    }
+
+    #[test]
+    fn a_delivery_that_failed_its_signature_check_needs_a_person() {
+        let store = store();
+        let r = rule("pr-review");
+        store.add_webhook_rule(&r).unwrap();
+        let mut rejected = stored_delivery(&r, AT, DeliveryStatus::Rejected);
+        rejected.rule_id = None;
+        store.record_delivery(&rejected).unwrap();
+
+        let items = activity_from(&store);
+        assert_eq!(items.len(), 1);
+        assert!(items[0].needs_you);
+        assert_eq!(
+            items[0].jump_to, None,
+            "a rejection is recorded before any rule matched, so it names none"
+        );
     }
 
     // ---- memory ----
