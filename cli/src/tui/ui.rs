@@ -49,17 +49,24 @@ pub fn draw(f: &mut Frame, app: &App) -> usize {
 /// screen, and a list that grows downwards would be clipped exactly when it is
 /// longest.
 fn draw_completions(f: &mut Frame, app: &App, input: Rect) {
-    let suggestions = crate::tui::command::completions(&app.input);
+    let suggestions = crate::tui::command::completions(&app.input, &app.agents);
     if suggestions.is_empty() {
         return;
     }
 
-    let widest = suggestions
+    // Every row is now the same shape — mark, padded name, hint — so the width
+    // is the widest of each part rather than the widest whole row.
+    let widest_name = suggestions
         .iter()
-        .map(|c| c.line.chars().count() + c.hint.chars().count() + 6)
+        .map(|c| c.line.trim_end().chars().count())
         .max()
-        .unwrap_or(20);
-    let w = (widest as u16).clamp(24, 64).min(input.width);
+        .unwrap_or(0);
+    let widest_hint = suggestions
+        .iter()
+        .map(|c| c.hint.chars().count())
+        .max()
+        .unwrap_or(0);
+    let w = ((widest_name + widest_hint + 8) as u16).clamp(24, 72).min(input.width);
     // Only as tall as it needs to be, and never taller than the space above.
     let h = ((suggestions.len() + 2) as u16).min(input.y.saturating_sub(1)).max(3);
     let panel = Rect {
@@ -70,6 +77,13 @@ fn draw_completions(f: &mut Frame, app: &App, input: Rect) {
     };
 
     let selected = app.suggestion.min(suggestions.len().saturating_sub(1));
+    // Hints in a column. Ragged ones made a list of eighteen commands read as
+    // noise, because the eye had no edge to run down.
+    let names = suggestions
+        .iter()
+        .map(|c| c.line.trim_end().chars().count())
+        .max()
+        .unwrap_or(0);
     let items: Vec<ListItem> = suggestions
         .iter()
         .enumerate()
@@ -79,10 +93,12 @@ fn draw_completions(f: &mut Frame, app: &App, input: Rect) {
             } else {
                 ("  ", Style::default())
             };
+            let name = c.line.trim_end();
+            let pad = " ".repeat(names.saturating_sub(name.chars().count()) + 2);
             ListItem::new(Line::from(vec![
                 Span::styled(mark, style),
-                Span::styled(c.line.clone(), style),
-                Span::styled(format!("  {}", c.hint), Style::default().fg(MUTED)),
+                Span::styled(name.to_string(), style),
+                Span::styled(format!("{pad}{}", c.hint), Style::default().fg(MUTED)),
             ]))
         })
         .collect();
@@ -152,12 +168,18 @@ fn draw_team(f: &mut Frame, app: &App, area: Rect) {
         }
     }
 
-    if !app.tasks.is_empty() {
+    if app.tasks.is_empty() {
+        items.push(ListItem::new(Span::styled(
+            "── board ── empty · /todo <title> adds one",
+            Style::default().fg(MUTED),
+        )));
+    } else {
         items.push(ListItem::new(Span::styled(
             "── board ──",
             Style::default().fg(MUTED),
         )));
-        for t in &app.tasks {
+        let selected = app.task_sel.min(app.tasks.len().saturating_sub(1));
+        for (i, t) in app.tasks.iter().enumerate() {
             // Open / claimed / done, so progress is readable at a glance.
             let (mark, colour) = if t.is_done() {
                 ("✓", GOOD)
@@ -166,9 +188,19 @@ fn draw_team(f: &mut Frame, app: &App, area: Rect) {
             } else {
                 ("○", MUTED)
             };
+            let chosen = i == selected;
             items.push(ListItem::new(Line::from(vec![
+                Span::styled(if chosen { "▸" } else { " " }, Style::default().fg(USER)),
                 Span::styled(format!("{mark} "), Style::default().fg(colour)),
-                Span::raw(t.title.clone()),
+                Span::styled(format!("{:<10}", t.id), Style::default().fg(MUTED)),
+                Span::styled(
+                    t.title.clone(),
+                    if chosen {
+                        Style::default().add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default()
+                    },
+                ),
                 Span::styled(
                     t.owner
                         .as_ref()
@@ -181,8 +213,8 @@ fn draw_team(f: &mut Frame, app: &App, area: Rect) {
     }
 
     let title = match &app.team {
-        Some(name) => format!(" team {name} · Ctrl-G to close "),
-        None => " team · Ctrl-G to close ".to_string(),
+        Some(name) => format!(" team {name} "),
+        None => " team ".to_string(),
     };
 
     // Clear first: this floats over the transcript.
@@ -192,7 +224,8 @@ fn draw_team(f: &mut Frame, app: &App, area: Rect) {
             Block::default()
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(USER))
-                .title(title),
+                .title(title)
+                .title_bottom(" ↑↓ pick · ⏎ mark done · /todo adds · Esc close "),
         ),
         panel,
     );
@@ -213,10 +246,21 @@ fn draw_transcript(f: &mut Frame, app: &App, area: Rect) -> usize {
     let max_offset = total.saturating_sub(viewport);
     let offset = max_offset.saturating_sub(app.scroll.min(max_offset));
 
+    // Naming what is on screen matters once several agents exist: a transcript
+    // that could belong to any of them is a transcript you cannot trust.
+    let watching = app
+        .watching
+        .as_deref()
+        .and_then(|id| app.agents.iter().find(|a| a.id == id))
+        .map(|a| format!(" jod · {} ", a.name))
+        .unwrap_or_else(|| " jod ".to_string());
     let title = if app.following() {
-        " jod ".to_string()
+        watching
     } else {
-        format!(" jod — scrolled up {} · Esc to follow ", app.scroll)
+        format!(
+            "{}— scrolled up {} · Esc to follow ",
+            watching, app.scroll
+        )
     };
 
     let block = Block::default()
@@ -360,11 +404,20 @@ pub fn wrap(text: &str, width: usize, indent: usize) -> Vec<String> {
 }
 
 fn draw_input(f: &mut Frame, app: &App, area: Rect) {
-    let border = if app.busy { MUTED } else { USER };
+    // The box stays live while an agent works — a prompt typed now is queued,
+    // not refused — so it keeps its colour and says what will happen instead.
+    let title = match (app.busy, app.queued.len()) {
+        (_, n) if n > 0 => format!(" you · {n} queued "),
+        (true, _) => format!(
+            " you · sends after this turn{} ",
+            app.elapsed().map(|t| format!(" ({t})")).unwrap_or_default()
+        ),
+        _ => " you ".to_string(),
+    };
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(border))
-        .title(if app.busy { " working… " } else { " you " });
+        .border_style(Style::default().fg(if app.busy { WARN } else { USER }))
+        .title(title);
 
     let inner_width = area.width.saturating_sub(2).max(1) as usize;
     // Keep the cursor on screen by scrolling the field horizontally once the
@@ -378,32 +431,46 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_status(f: &mut Frame, app: &App, area: Rect) {
-    let left = Span::styled(app.status(), Style::default().fg(MUTED));
-    let right = Span::styled(
-        "Ctrl-A agents · Ctrl-G team · Ctrl-T thinking · Ctrl-C quit",
-        Style::default().fg(MUTED),
+    // Working is the state worth colouring: it is the one the eye returns to.
+    let left = Span::styled(
+        app.status(),
+        Style::default().fg(if app.busy { WARN } else { MUTED }),
     );
-    let gap = (area.width as usize)
-        .saturating_sub(left.content.chars().count() + right.content.chars().count() + 2);
-    f.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::raw(" "),
-            left,
-            Span::raw(" ".repeat(gap)),
-            right,
-            Span::raw(" "),
-        ])),
-        area,
-    );
+    // The hints follow what the pane can actually do. A panel's own keys are on
+    // its footer, so here the bar offers the way out rather than repeating them.
+    let hints = match app.pane {
+        Pane::Chat if app.busy => "Ctrl-X stop · Ctrl-B delegate · Ctrl-A agents · Ctrl-C quit",
+        Pane::Chat => "Ctrl-B delegate · Ctrl-A agents · Ctrl-G team · Ctrl-C quit",
+        _ => "Esc closes this panel · Ctrl-C quit",
+    };
+    // The status grows — a spinner, a clock, a background count, a queue — so
+    // the hints have to yield rather than collide with it. Running them
+    // together produced `1 queuedCtrl-X stop`, which reads as neither.
+    let used = left.content.chars().count() + 2;
+    let room = (area.width as usize).saturating_sub(used);
+    let mut spans = vec![Span::raw(" "), left];
+    if room >= hints.chars().count() + 2 {
+        spans.push(Span::raw(" ".repeat(room - hints.chars().count())));
+        spans.push(Span::styled(hints, Style::default().fg(MUTED)));
+    }
+    spans.push(Span::raw(" "));
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
+/// The agents panel: every delegation this process knows about, and the cursor
+/// that manages them.
+///
+/// This is where unattended work is actually run, so it shows the two things a
+/// list of names cannot — how long each has been going, and what it last said —
+/// and it says which keys act on the selected row. A panel you can only look at
+/// makes you leave the UI to do anything about what you saw.
 fn draw_agents(f: &mut Frame, app: &App, area: Rect) {
-    // Never larger than the terminal. Clamping to a comfortable 20..70 alone
+    // Never larger than the terminal. Clamping to a comfortable minimum alone
     // can produce a panel wider than a narrow window, which would place the
     // rect outside the buffer.
-    let w = area.width.saturating_sub(8).clamp(20, 70).min(area.width);
-    let h = ((app.agents.len() + 2) as u16)
-        .clamp(5, area.height.saturating_sub(4).max(5))
+    let w = area.width.saturating_sub(6).clamp(20, 96).min(area.width);
+    let h = ((app.agents.len() + 3) as u16)
+        .clamp(5, area.height.saturating_sub(2).max(5))
         .min(area.height);
     let panel = Rect {
         x: area.x + (area.width.saturating_sub(w)) / 2,
@@ -412,26 +479,49 @@ fn draw_agents(f: &mut Frame, app: &App, area: Rect) {
         height: h,
     };
 
+    // Two rows go to the border and one to the footer of key hints.
+    let rows = panel.height.saturating_sub(3).max(1) as usize;
+    let selected = app.agent_sel.min(app.agents.len().saturating_sub(1));
+    let first = window_start(selected, rows, app.agents.len());
+
     let items: Vec<ListItem> = if app.agents.is_empty() {
         vec![ListItem::new(Span::styled(
-            "no agents yet",
+            "no agents yet — Ctrl-B delegates one",
             Style::default().fg(MUTED),
         ))]
     } else {
         app.agents
             .iter()
-            .map(|a| {
-                let colour = match a.status.as_str() {
-                    "running" => WARN,
-                    "completed" => GOOD,
-                    "failed" => BAD,
-                    _ => MUTED,
-                };
+            .enumerate()
+            .skip(first)
+            .take(rows)
+            .map(|(i, a)| {
+                let colour = status_colour(&a.status);
+                let chosen = i == selected;
+                let name = Style::default().fg(if chosen { USER } else { AGENT }).add_modifier(
+                    if chosen { Modifier::BOLD } else { Modifier::empty() },
+                );
+                // The age of a finished run is how long ago it started, which is
+                // still the right number to sort your attention by.
+                let age = crate::tui::app::short_duration(app.now_ms.saturating_sub(a.created_at_ms));
+                let watched = app.watching.as_deref() == Some(a.id.as_str());
                 ListItem::new(Line::from(vec![
+                    Span::styled(if chosen { "▸ " } else { "  " }, Style::default().fg(USER)),
                     Span::styled(format!("{:<9}", short(&a.id)), Style::default().fg(MUTED)),
                     Span::styled(format!("{:<10}", a.status), Style::default().fg(colour)),
-                    Span::styled(format!("{:<13}", a.harness), Style::default().fg(MUTED)),
-                    Span::raw(a.name.clone()),
+                    Span::styled(format!("{age:>7}  "), Style::default().fg(MUTED)),
+                    // Thirteen, not eleven: "Claude Code" is exactly eleven
+                    // characters, so a tighter column ran the harness straight
+                    // into the name — `Claude CodeHow are you running?`.
+                    Span::styled(
+                        format!("{:<13}", a.harness),
+                        Style::default().fg(MUTED),
+                    ),
+                    Span::styled(a.name.clone(), name),
+                    Span::styled(
+                        if watched { "  ← on screen" } else { "" },
+                        Style::default().fg(USER),
+                    ),
                 ]))
             })
             .collect()
@@ -445,10 +535,35 @@ fn draw_agents(f: &mut Frame, app: &App, area: Rect) {
             Block::default()
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(USER))
-                .title(" agents · Ctrl-A to close "),
+                .title(format!(
+                    " agents · {} running of {} ",
+                    app.running(),
+                    app.agents.len()
+                ))
+                .title_bottom(" ↑↓ pick · ⏎ watch · s stop · r resume · a attach · Esc close "),
         ),
         panel,
     );
+}
+
+fn status_colour(status: &str) -> Color {
+    match status {
+        "running" => WARN,
+        "completed" => GOOD,
+        "failed" => BAD,
+        _ => MUTED,
+    }
+}
+
+/// The first visible row of a list `len` long showing `rows` at a time with
+/// `selected` in view. Keeps the cursor on screen without jumping the window
+/// about, which is what makes a long fleet navigable at all.
+pub fn window_start(selected: usize, rows: usize, len: usize) -> usize {
+    if len <= rows {
+        return 0;
+    }
+    let last_start = len - rows;
+    selected.saturating_sub(rows / 2).min(last_start)
 }
 
 fn short(id: &str) -> String {
@@ -766,6 +881,9 @@ mod tests {
             harness: "AGY".into(),
             status: "running".into(),
             session: None,
+            created_at_ms: 0,
+            cost_usd: None,
+            last: None,
         }];
         let out = rendered(&a, 80, 16);
         assert!(out.contains("agents"), "{out}");
@@ -803,6 +921,9 @@ mod tests {
                 harness: "AGY".into(),
                 status: "running".into(),
                 session: None,
+                created_at_ms: 0,
+                cost_usd: None,
+                last: None,
             })
             .collect();
         for (w, h) in [(10, 4), (12, 5), (18, 6), (21, 7), (40, 8)] {
@@ -820,6 +941,185 @@ mod tests {
             out.matches("word").count() > 10,
             "text must survive:\n{out}"
         );
+    }
+
+    fn agent_line(id: &str, name: &str, status: &str) -> super::super::AgentLine {
+        super::super::AgentLine {
+            id: id.into(),
+            name: name.into(),
+            harness: "Claude Code".into(),
+            status: status.into(),
+            session: None,
+            created_at_ms: 0,
+            cost_usd: None,
+            last: None,
+        }
+    }
+
+    /// The panel is a control surface, not a list of names: it has to say what
+    /// the selected row is and which keys act on it.
+    #[test]
+    fn the_agents_panel_marks_its_selection_and_offers_its_keys() {
+        let mut a = app();
+        a.pane = Pane::Agents;
+        a.agents = vec![
+            agent_line("aaa11111", "port the parser", "running"),
+            agent_line("bbb22222", "write the docs", "completed"),
+        ];
+        a.agent_sel = 1;
+        let screen = rendered(&a, 100, 20);
+        assert!(screen.contains("▸"), "the selection must be visible:\n{screen}");
+        assert!(screen.contains("⏎ watch"), "the keys must be stated:\n{screen}");
+        assert!(screen.contains("s stop"));
+        assert!(screen.contains("1 running of 2"), "{screen}");
+    }
+
+    /// How long a run has been going is the number that decides whether to look
+    /// at it, and a list of names cannot tell you.
+    #[test]
+    fn the_agents_panel_shows_how_long_each_run_has_been_going() {
+        let mut a = app();
+        a.pane = Pane::Agents;
+        a.agents = vec![agent_line("aaa11111", "port the parser", "running")];
+        a.advance(125_000);
+        let screen = rendered(&a, 100, 20);
+        assert!(screen.contains("2m05s"), "expected an age:\n{screen}");
+    }
+
+    /// Regression: the harness column was exactly as wide as "Claude Code", so
+    /// it ran straight into the name — `Claude CodeHow are you running?`.
+    #[test]
+    fn the_panel_columns_do_not_run_into_each_other() {
+        let mut a = app();
+        a.pane = Pane::Agents;
+        a.agents = vec![agent_line("aaa11111", "How are you running?", "completed")];
+        let screen = rendered(&a, 100, 20);
+        assert!(
+            screen.contains("Claude Code  How are you running?"),
+            "columns must be separated:\n{screen}"
+        );
+    }
+
+    /// Eighteen ragged rows read as noise; the eye needs an edge to run down.
+    #[test]
+    fn the_completion_hints_line_up_in_a_column() {
+        let mut a = app();
+        a.input = "/".into();
+        let screen = rendered(&a, 100, 30);
+        // Counted in characters, not bytes: the selection marker is three bytes
+        // wide and one column wide, and a byte index would call the two rows
+        // misaligned when they are not.
+        let column = |line: &str, hint: &str| {
+            line.find(hint).map(|byte| line[..byte].chars().count())
+        };
+        let starts: Vec<usize> = screen
+            .lines()
+            .filter_map(|l| column(l, "this list").or_else(|| column(l, "the team panel")))
+            .collect();
+        assert_eq!(starts.len(), 2, "expected both rows:\n{screen}");
+        assert_eq!(starts[0], starts[1], "hints must share a column:\n{screen}");
+    }
+
+    #[test]
+    fn the_agents_panel_says_which_run_is_on_screen() {
+        let mut a = app();
+        a.pane = Pane::Agents;
+        a.agents = vec![agent_line("aaa11111", "port the parser", "running")];
+        a.watching = Some("aaa11111".into());
+        assert!(rendered(&a, 100, 20).contains("on screen"));
+    }
+
+    /// A fleet longer than the panel must scroll to keep the cursor visible,
+    /// not silently hide the row being acted on.
+    #[test]
+    fn a_long_fleet_scrolls_to_keep_the_selection_in_view() {
+        let mut a = app();
+        a.pane = Pane::Agents;
+        a.agents = (0..40)
+            .map(|i| agent_line(&format!("id{i:06}"), &format!("job {i}"), "running"))
+            .collect();
+        a.agent_sel = 39;
+        let screen = rendered(&a, 100, 16);
+        assert!(screen.contains("job 39"), "the selected row must show:\n{screen}");
+        assert!(!screen.contains("job 0 "), "the top must have scrolled off");
+    }
+
+    #[test]
+    fn the_visible_window_keeps_the_cursor_inside_it() {
+        assert_eq!(window_start(0, 10, 5), 0, "a short list never scrolls");
+        assert_eq!(window_start(0, 10, 40), 0);
+        assert_eq!(window_start(20, 10, 40), 15, "centred on the cursor");
+        assert_eq!(window_start(39, 10, 40), 30, "clamped to the last page");
+    }
+
+    /// The whole point of delegating is that the work continues off screen.
+    #[test]
+    fn the_status_bar_reports_agents_working_off_screen() {
+        let mut a = app();
+        a.agents = vec![agent_line("bbb22222", "audit the deps", "running")];
+        assert!(rendered(&a, 100, 12).contains("1 in background"));
+    }
+
+    /// Regression: the status and the hints were run together on a narrow
+    /// terminal — `1 queuedCtrl-X stop`, which reads as neither.
+    #[test]
+    fn the_status_bar_drops_its_hints_rather_than_colliding_with_them() {
+        let mut a = app();
+        a.busy = true;
+        a.turn_started_ms = Some(0);
+        a.advance(5_000);
+        a.queue("next".into());
+        let screen = rendered(&a, 60, 12);
+        let bar = screen.lines().last().unwrap();
+        assert!(bar.contains("1 queued"), "the status wins: {bar}");
+        assert!(!bar.contains("queuedCtrl"), "they must not run together: {bar}");
+
+        // With room for both, the hints come back.
+        assert!(rendered(&a, 140, 12).lines().last().unwrap().contains("Ctrl-X stop"));
+    }
+
+    #[test]
+    fn the_input_box_says_a_prompt_is_waiting_rather_than_looking_broken() {
+        let mut a = app();
+        a.busy = true;
+        a.queue("next thing".into());
+        assert!(rendered(&a, 80, 12).contains("1 queued"));
+    }
+
+    #[test]
+    fn a_busy_input_box_says_when_the_line_will_be_sent() {
+        let mut a = app();
+        a.busy = true;
+        assert!(rendered(&a, 80, 12).contains("sends after this turn"));
+    }
+
+    /// A transcript that could belong to any of several agents is one you
+    /// cannot trust.
+    #[test]
+    fn the_transcript_names_the_agent_it_is_showing() {
+        let mut a = app();
+        a.agents = vec![agent_line("aaa11111", "port the parser", "running")];
+        a.watching = Some("aaa11111".into());
+        assert!(rendered(&a, 80, 12).contains("port the parser"));
+    }
+
+    #[test]
+    fn the_team_panel_offers_its_keys_too() {
+        let mut a = app();
+        a.pane = Pane::Team;
+        a.team = Some("crew".into());
+        a.tasks = vec![task("t1", "port the parser", None, "open")];
+        let screen = rendered(&a, 100, 20);
+        assert!(screen.contains("mark done"), "{screen}");
+        assert!(screen.contains("▸"), "the selection must be visible:\n{screen}");
+    }
+
+    #[test]
+    fn an_empty_board_says_how_to_add_to_it() {
+        let mut a = app();
+        a.pane = Pane::Team;
+        a.team = Some("crew".into());
+        assert!(rendered(&a, 100, 20).contains("/todo"));
     }
 
     #[test]

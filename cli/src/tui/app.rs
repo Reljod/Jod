@@ -45,6 +45,24 @@ pub enum Pane {
     Team,
 }
 
+/// The spinner shown while a turn is in flight. Ten frames at four a second is
+/// slow enough not to strobe and fast enough to prove the UI is alive — the
+/// thing a static "working…" cannot do.
+const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+/// A duration as the shortest thing that still reads as a duration.
+///
+/// Watching agents means reading a column of these, so they are padded to a
+/// consistent shape rather than spelled out: `9s`, `4m12s`, `2h05m`.
+pub fn short_duration(ms: i64) -> String {
+    let secs = (ms.max(0) / 1000) as u64;
+    match secs {
+        0..=59 => format!("{secs}s"),
+        60..=3599 => format!("{}m{:02}s", secs / 60, secs % 60),
+        _ => format!("{}h{:02}m", secs / 3600, (secs % 3600) / 60),
+    }
+}
+
 pub struct App {
     pub transcript: Vec<Entry>,
     pub input: String,
@@ -72,9 +90,32 @@ pub struct App {
     /// harness work is to see what it is doing.
     pub show_details: bool,
     pub pane: Pane,
-    /// True while an agent is working, so the UI can refuse a second prompt.
+    /// True while the conversation on screen is mid-turn. Other agents may be
+    /// working at the same time; this is only about the one being watched.
     pub busy: bool,
     pub agents: Vec<AgentLine>,
+    /// Prompts typed while the watched conversation was still working. They are
+    /// sent in order as the turn ends, so thinking ahead is not punished by
+    /// having to wait with a finished sentence in your hands.
+    pub queued: Vec<String>,
+    /// Everything sent this session, oldest first, for ↑/↓ recall.
+    pub history: Vec<String>,
+    /// How far back through `history` the user has walked. `None` means "in the
+    /// line I am writing", which is what typing anything returns to.
+    pub history_at: Option<usize>,
+    /// The half-written line ↑ was pressed on, restored by walking back down.
+    pub draft: String,
+    /// Which row of the agents panel is selected.
+    pub agent_sel: usize,
+    /// Which row of the team board is selected.
+    pub task_sel: usize,
+    /// Wall clock, refreshed on every tick so everything that renders an age
+    /// stays a pure function of state.
+    pub now_ms: i64,
+    /// When the turn on screen started, for the elapsed counter.
+    pub turn_started_ms: Option<i64>,
+    /// Ticks since start, which is all the spinner needs.
+    pub tick: u64,
     /// Which entry of the slash-command popup is highlighted. Meaningless when
     /// there is no popup, and clamped every time the input changes.
     pub suggestion: usize,
@@ -86,9 +127,13 @@ pub struct App {
     pub should_quit: bool,
     /// Set when the user asks to leave while an agent is still running.
     pub confirm_quit: bool,
+    /// The agent whose output fills the transcript. Every other agent keeps
+    /// running and reports in through the panel and a notice when it ends —
+    /// which is what makes this an orchestrator rather than a chat window.
+    pub watching: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AgentLine {
     pub id: String,
     pub name: String,
@@ -98,6 +143,18 @@ pub struct AgentLine {
     /// what `/resume` actually needs — the panel shows Jod's agent id, which is
     /// a different thing entirely.
     pub session: Option<String>,
+    /// When it was launched, so the panel can show how long it has been going.
+    pub created_at_ms: i64,
+    pub cost_usd: Option<f64>,
+    /// The last thing it said, which is the only summary an unattended run
+    /// offers of what it actually did.
+    pub last: Option<String>,
+}
+
+impl AgentLine {
+    pub fn is_running(&self) -> bool {
+        self.status == "running"
+    }
 }
 
 /// What `/resume <id>` turned out to mean.
@@ -177,6 +234,16 @@ fn one_line(s: &str, max: usize) -> String {
     format!("{}…", flat.chars().take(max).collect::<String>())
 }
 
+/// Move a list cursor by `delta`, clamped to `len`.
+fn step(at: usize, delta: isize, len: usize) -> usize {
+    if len == 0 {
+        return 0;
+    }
+    let last = len - 1;
+    let moved = at as isize + delta;
+    moved.clamp(0, last as isize) as usize
+}
+
 /// Keep the first `n` lines of tool output, saying how much was left.
 fn first_lines(s: &str, n: usize) -> String {
     let lines: Vec<&str> = s.lines().collect();
@@ -208,12 +275,22 @@ impl App {
             pane: Pane::Chat,
             busy: false,
             agents: Vec::new(),
+            queued: Vec::new(),
+            history: Vec::new(),
+            history_at: None,
+            draft: String::new(),
+            agent_sel: 0,
+            task_sel: 0,
+            now_ms: 0,
+            turn_started_ms: None,
+            tick: 0,
             suggestion: 0,
             team: None,
             members: Vec::new(),
             tasks: Vec::new(),
             should_quit: false,
             confirm_quit: false,
+            watching: None,
         }
     }
 
@@ -257,14 +334,149 @@ impl App {
     }
 
     /// Take the typed line, clearing the input. `None` if there was nothing.
+    ///
+    /// Remembering it here rather than at the call site means every route out of
+    /// the input box — a prompt, a background delegation, a slash command — ends
+    /// up recallable with ↑.
     pub fn take_input(&mut self) -> Option<String> {
         let text = self.input.trim().to_string();
         if text.is_empty() {
             return None;
         }
+        self.remember_typed(&text);
         self.input.clear();
         self.cursor = 0;
         Some(text)
+    }
+
+    /// Add a line to the recall history, newest last.
+    ///
+    /// A line identical to the previous one is not stored twice: re-running the
+    /// same prompt is common, and a history of repeats makes ↑ useless.
+    pub fn remember_typed(&mut self, text: &str) {
+        if self.history.last().map(String::as_str) != Some(text) {
+            self.history.push(text.to_string());
+        }
+        self.history_at = None;
+        self.draft.clear();
+    }
+
+    /// Walk back through what has been sent. The line being written is kept, so
+    /// walking forward again returns to it rather than losing it.
+    pub fn history_prev(&mut self) {
+        if self.history.is_empty() {
+            return;
+        }
+        let next = match self.history_at {
+            None => {
+                self.draft = self.input.clone();
+                self.history.len() - 1
+            }
+            Some(0) => 0,
+            Some(at) => at - 1,
+        };
+        self.history_at = Some(next);
+        self.input = self.history[next].clone();
+        self.cursor = self.input.len();
+    }
+
+    /// Walk forward again, ending on the half-written line.
+    pub fn history_next(&mut self) {
+        let Some(at) = self.history_at else {
+            return;
+        };
+        if at + 1 >= self.history.len() {
+            self.history_at = None;
+            self.input = std::mem::take(&mut self.draft);
+        } else {
+            self.history_at = Some(at + 1);
+            self.input = self.history[at + 1].clone();
+        }
+        self.cursor = self.input.len();
+    }
+
+    // ---- queued prompts -------------------------------------------------
+
+    /// Hold a prompt until the turn on screen finishes.
+    pub fn queue(&mut self, prompt: String) {
+        self.queued.push(prompt);
+    }
+
+    /// The next queued prompt, if any.
+    pub fn next_queued(&mut self) -> Option<String> {
+        if self.queued.is_empty() {
+            return None;
+        }
+        Some(self.queued.remove(0))
+    }
+
+    // ---- panel selection ------------------------------------------------
+
+    /// Move the agents-panel cursor, stopping at both ends rather than wrapping:
+    /// in a list that changes under you, wrapping means overshooting lands
+    /// somewhere unrelated.
+    pub fn select_agent(&mut self, delta: isize) {
+        self.agent_sel = step(self.agent_sel, delta, self.agents.len());
+    }
+
+    pub fn selected_agent(&self) -> Option<&AgentLine> {
+        self.agents.get(self.agent_sel.min(self.agents.len().saturating_sub(1)))
+    }
+
+    pub fn select_task(&mut self, delta: isize) {
+        self.task_sel = step(self.task_sel, delta, self.tasks.len());
+    }
+
+    pub fn selected_task(&self) -> Option<&TeamTask> {
+        self.tasks.get(self.task_sel.min(self.tasks.len().saturating_sub(1)))
+    }
+
+    /// Keep both panel cursors inside their lists as those lists change.
+    pub fn clamp_selection(&mut self) {
+        self.agent_sel = self.agent_sel.min(self.agents.len().saturating_sub(1));
+        self.task_sel = self.task_sel.min(self.tasks.len().saturating_sub(1));
+    }
+
+    // ---- liveness -------------------------------------------------------
+
+    /// One animation frame. `now_ms` is passed in rather than read here so the
+    /// whole of the UI stays testable without a clock.
+    pub fn advance(&mut self, now_ms: i64) {
+        self.tick = self.tick.wrapping_add(1);
+        self.now_ms = now_ms;
+    }
+
+    pub fn spinner(&self) -> &'static str {
+        SPINNER[(self.tick as usize) % SPINNER.len()]
+    }
+
+    /// How long the turn on screen has been going.
+    pub fn elapsed(&self) -> Option<String> {
+        let started = self.turn_started_ms?;
+        Some(short_duration(self.now_ms.saturating_sub(started)))
+    }
+
+    /// Point the next turn at the harness that produced a run.
+    ///
+    /// Resuming an OpenCode conversation while the UI is set to Claude Code
+    /// hands the session id to a harness that has never heard of it, so picking
+    /// up a run has to bring its harness with it.
+    pub fn harness_from_label(&mut self, label: &str) {
+        if let Some(kind) = HarnessKind::ALL
+            .into_iter()
+            .find(|k| k.label().eq_ignore_ascii_case(label))
+        {
+            if kind != self.harness {
+                self.harness = kind;
+                self.model = None;
+                self.reported_model = None;
+            }
+        }
+    }
+
+    /// How many agents are working, watched or not.
+    pub fn running(&self) -> usize {
+        self.agents.iter().filter(|a| a.is_running()).count()
     }
 
     // ---- input editing -------------------------------------------------
@@ -450,11 +662,15 @@ impl App {
                 if let Some(c) = usage.cost_usd {
                     bits.push(format!("${c:.4}"));
                 }
+                if let Some(t) = self.elapsed() {
+                    bits.push(t);
+                }
                 self.push(Entry::Done {
                     text: bits.join(" · "),
                     failed: *is_error,
                 });
                 self.busy = false;
+                self.turn_started_ms = None;
             }
             AgentEvent::Error { message } => self.push(Entry::Notice(message.clone())),
             AgentEvent::Raw { line } => {
@@ -515,10 +731,30 @@ impl App {
             parts.push(format!("${:.4}", self.cost_usd));
         }
         parts.push(if self.busy {
-            "working".into()
+            // The spinner and the elapsed time are the difference between "this
+            // is working" and "this has hung", which a static word cannot tell
+            // you during a run that legitimately takes ten minutes.
+            match self.elapsed() {
+                Some(t) => format!("{} working {t}", self.spinner()),
+                None => format!("{} working", self.spinner()),
+            }
         } else {
             "ready".into()
         });
+        // Background work is the reason this is an orchestrator, so it is stated
+        // even when the conversation on screen is idle. Only the agents *other*
+        // than the watched one are counted: the watched one already said so.
+        let background = self
+            .agents
+            .iter()
+            .filter(|a| a.is_running() && Some(a.id.as_str()) != self.watching.as_deref())
+            .count();
+        if background > 0 {
+            parts.push(format!("{background} in background"));
+        }
+        if !self.queued.is_empty() {
+            parts.push(format!("{} queued", self.queued.len()));
+        }
         parts.join(" · ")
     }
 }
@@ -1056,5 +1292,232 @@ mod tests {
         assert!(!a.status().contains('$'));
         a.cost_usd = 0.5;
         assert!(a.status().contains("$0.5000"));
+    }
+
+    // ---- recalling what was sent ----
+
+    /// Retyping a prompt to change one word is the commonest thing there is,
+    /// and without recall the only way to do it is to type it again.
+    /// Type a line and send it, as pressing Enter would.
+    fn send(a: &mut App, text: &str) {
+        for c in text.chars() {
+            a.insert(c);
+        }
+        a.take_input();
+    }
+
+    #[test]
+    fn the_arrows_walk_back_through_what_was_sent() {
+        let mut a = app();
+        send(&mut a, "first");
+        send(&mut a, "second");
+
+        a.history_prev();
+        assert_eq!(a.input, "second", "the newest comes back first");
+        a.history_prev();
+        assert_eq!(a.input, "first");
+        a.history_prev();
+        assert_eq!(a.input, "first", "the top of the history is a floor");
+        a.history_next();
+        assert_eq!(a.input, "second");
+    }
+
+    /// Walking into the history and back out must return the half-written line,
+    /// not an empty box — losing a sentence to a stray ↑ is unforgivable.
+    #[test]
+    fn walking_back_out_of_the_history_restores_the_line_being_written() {
+        let mut a = app();
+        send(&mut a, "done");
+        for c in "half writ".chars() {
+            a.insert(c);
+        }
+        a.history_prev();
+        assert_eq!(a.input, "done");
+        a.history_next();
+        assert_eq!(a.input, "half writ", "the draft survived the detour");
+    }
+
+    #[test]
+    fn the_cursor_lands_at_the_end_of_a_recalled_line() {
+        let mut a = typed("summarise the inbox");
+        a.take_input();
+        a.history_prev();
+        assert_eq!(a.cursor, a.input.len());
+    }
+
+    /// A history of repeats makes ↑ useless: pressing it four times to get past
+    /// four identical retries is worse than no history.
+    #[test]
+    fn sending_the_same_line_twice_stores_it_once() {
+        let mut a = app();
+        send(&mut a, "again");
+        send(&mut a, "again");
+        assert_eq!(a.history, vec!["again".to_string()]);
+    }
+
+    #[test]
+    fn recall_on_an_empty_history_does_nothing() {
+        let mut a = typed("mine");
+        a.history_prev();
+        assert_eq!(a.input, "mine");
+        a.history_next();
+        assert_eq!(a.input, "mine");
+    }
+
+    // ---- queueing ----
+
+    #[test]
+    fn queued_prompts_come_back_in_the_order_they_were_typed() {
+        let mut a = app();
+        a.queue("one".into());
+        a.queue("two".into());
+        assert_eq!(a.next_queued().as_deref(), Some("one"));
+        assert_eq!(a.next_queued().as_deref(), Some("two"));
+        assert_eq!(a.next_queued(), None);
+    }
+
+    // ---- the fleet ----
+
+    fn line(id: &str, status: &str) -> AgentLine {
+        AgentLine {
+            id: id.into(),
+            name: format!("job {id}"),
+            harness: "Claude Code".into(),
+            status: status.into(),
+            session: None,
+            created_at_ms: 0,
+            cost_usd: None,
+            last: None,
+        }
+    }
+
+    #[test]
+    fn the_selection_stops_at_both_ends_rather_than_wrapping() {
+        let mut a = app();
+        a.agents = vec![line("a", "running"), line("b", "completed")];
+        a.select_agent(-1);
+        assert_eq!(a.agent_sel, 0, "already at the top");
+        a.select_agent(1);
+        a.select_agent(1);
+        assert_eq!(a.agent_sel, 1, "cannot fall off the bottom");
+    }
+
+    #[test]
+    fn selecting_in_an_empty_panel_is_harmless() {
+        let mut a = app();
+        a.select_agent(1);
+        assert_eq!(a.agent_sel, 0);
+        assert!(a.selected_agent().is_none());
+    }
+
+    /// Agents disappear from the list as older runs age out. A cursor left past
+    /// the end would then act on nothing, or on the wrong row.
+    #[test]
+    fn the_cursor_is_pulled_back_when_the_list_shrinks() {
+        let mut a = app();
+        a.agents = vec![line("a", "running"), line("b", "running"), line("c", "running")];
+        a.agent_sel = 2;
+        a.agents.truncate(1);
+        a.clamp_selection();
+        assert_eq!(a.agent_sel, 0);
+        assert_eq!(a.selected_agent().unwrap().id, "a");
+    }
+
+    /// The whole point of delegating is that work continues off screen, so the
+    /// status bar has to account for it even when the conversation is idle.
+    #[test]
+    fn the_status_line_counts_the_agents_working_off_screen() {
+        let mut a = app();
+        a.agents = vec![
+            line("watched", "running"),
+            line("other", "running"),
+            line("old", "completed"),
+        ];
+        a.watching = Some("watched".into());
+        let status = a.status();
+        assert!(
+            status.contains("1 in background"),
+            "the watched one is not background: {status}"
+        );
+        assert_eq!(a.running(), 2, "but it is still running");
+    }
+
+    #[test]
+    fn the_status_line_says_how_many_prompts_are_waiting() {
+        let mut a = app();
+        a.queue("next".into());
+        assert!(a.status().contains("1 queued"), "{}", a.status());
+    }
+
+    /// A run that legitimately takes ten minutes is indistinguishable from a
+    /// hung one unless something on screen moves.
+    #[test]
+    fn a_working_status_carries_a_moving_spinner_and_a_clock() {
+        let mut a = app();
+        a.busy = true;
+        a.turn_started_ms = Some(0);
+        a.advance(65_000);
+        let status = a.status();
+        assert!(status.contains("working"), "{status}");
+        assert!(status.contains("1m05s"), "elapsed must show: {status}");
+
+        let first = a.spinner();
+        a.advance(65_250);
+        assert_ne!(first, a.spinner(), "the spinner must actually turn");
+    }
+
+    #[test]
+    fn a_duration_is_written_at_the_scale_it_deserves() {
+        assert_eq!(short_duration(0), "0s");
+        assert_eq!(short_duration(9_400), "9s");
+        assert_eq!(short_duration(252_000), "4m12s");
+        assert_eq!(short_duration(7_500_000), "2h05m");
+        assert_eq!(short_duration(-5), "0s", "a clock that went backwards");
+    }
+
+    /// How long a turn took is the number you want when deciding whether to
+    /// delegate the next one, and it is gone the moment the run ends.
+    #[test]
+    fn a_finished_turn_reports_how_long_it_took() {
+        let mut a = app();
+        a.turn_started_ms = Some(0);
+        a.advance(30_000);
+        a.apply(&AgentEvent::Finished {
+            text: None,
+            exit_code: Some(0),
+            is_error: false,
+            usage: Usage::default(),
+        });
+        match &a.transcript[0] {
+            Entry::Done { text, .. } => assert!(text.contains("30s"), "got {text}"),
+            other => panic!("expected a done line, got {other:?}"),
+        }
+        assert_eq!(a.turn_started_ms, None, "the clock stops");
+    }
+
+    /// Picking up an OpenCode run while the UI is set to Claude Code would hand
+    /// the session id to a harness that has never heard of it.
+    #[test]
+    fn continuing_a_run_switches_to_the_harness_that_produced_it() {
+        let mut a = app();
+        a.model = Some("opus".into());
+        a.harness_from_label("OpenCode");
+        assert_eq!(a.harness, HarnessKind::OpenCode);
+        assert_eq!(a.model, None, "the model name does not cross the seam");
+    }
+
+    #[test]
+    fn continuing_a_run_from_the_same_harness_keeps_the_chosen_model() {
+        let mut a = app();
+        a.model = Some("haiku".into());
+        a.harness_from_label("Claude Code");
+        assert_eq!(a.model.as_deref(), Some("haiku"));
+    }
+
+    #[test]
+    fn an_unrecognised_harness_label_changes_nothing() {
+        let mut a = app();
+        a.harness_from_label("something else entirely");
+        assert_eq!(a.harness, HarnessKind::ClaudeCode);
     }
 }

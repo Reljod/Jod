@@ -86,7 +86,10 @@ cargo build --release
 
 `jod tui` is the one to start with: a scrolling conversation, an input box, and
 `Ctrl-A` for a panel listing every agent Jod has running — which is the part
-that makes it an orchestrator's interface rather than a chat window.
+that makes it an orchestrator's interface rather than a chat window. `Ctrl-B`
+delegates the typed line to an agent that runs in the background and reports
+back when it ends; the panel is where those runs are watched, stopped, resumed
+or attached to.
 
 The full design — including the planned knowledge graph (Open Knowledge Format
 notes indexed by GraphQLite) and agent-to-agent messaging — is in

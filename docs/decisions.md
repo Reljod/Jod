@@ -766,3 +766,44 @@ check already rules out.
 
 What separated the live bug from the four latent ones was not the syntax but
 the reachability — `ready_args` was empty on the ordinary path, every day.
+
+## The busy TUI refused work instead of holding it
+
+Two rules made the interface fight the thing it exists for. Enter while an agent
+worked printed *"still working — wait for this turn to finish"* and left the
+line sitting in a box that stayed blocked until the turn ended; every event from
+an agent other than the one on screen was dropped on the floor. Together they
+meant the orchestrator's UI could watch exactly one agent, and while it did, the
+only thing for its user to do was sit still.
+
+Both are now the opposite. A prompt typed mid-turn is queued and sent when the
+turn ends — the sentence was already written, and blocking on it buys nothing
+that holding it does not. An agent that is not on screen still reports: its
+ending arrives as a notice naming it, how it went and how long it took, because
+the whole point of delegating is that nobody was watching.
+
+`Ctrl-B` is the key that makes the difference — the typed line becomes an agent
+that never takes the screen. It always resumes `Fresh`. A background job that
+silently continued the conversation on screen would inherit context nobody gave
+it, and two agents writing into one harness session is not a conversation.
+
+The agents panel became a cursor rather than a list: `⏎` watch, `s` stop, `r`
+continue that run's conversation, `a` attach. A panel you can only read makes
+you leave the UI to act on what you saw, which is where the state you were
+reading goes stale. It is modal while open, so its letters are commands — the
+alternative, reserving Ctrl chords for every verb, runs out of keys and out of
+memorability at about four.
+
+Taking `↑`/`↓` for recall cost transcript scrolling its most obvious keys, which
+moved to `PageUp`/`PageDown`, the mouse and `Ctrl` with an arrow. Worth it:
+re-running a prompt with one word changed is constant, and scrolling has three
+other ways to ask.
+
+`Ctrl-X` stops the watched run because `Ctrl-C` is quit; without it the only way
+to interrupt a runaway agent is to leave the process that is watching it. And
+quitting now warns about every running agent, not just the one on screen —
+walking out on four background jobs unwarned is the same mistake, four times.
+
+A 250ms tick pays for all of it. A ten-minute run and a hung one are the same
+picture unless something moves, and a fleet that only refreshed when the watched
+agent finished was showing state minutes old.
