@@ -28,6 +28,7 @@ pub mod idempotency;
 pub mod routes;
 pub mod session;
 pub mod sse;
+pub mod webhook;
 
 use std::sync::Arc;
 
@@ -151,6 +152,9 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/v1/health", get(routes::health))
         .merge(session)
+        // Outside the authenticated group on purpose: GitHub holds no bearer
+        // token, and its HMAC signature is the credential instead. → [`webhook`]
+        .merge(webhook::routes_from_env(max_body))
         .merge(protected)
         .with_state(state)
 }
