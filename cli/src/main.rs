@@ -158,6 +158,18 @@ enum Command {
         #[command(subcommand)]
         what: TeamCommand,
     },
+    /// Run the scheduler: fire due schedules and advance goals, for ever.
+    ///
+    /// This is the process that makes a schedule mean anything. Without it the
+    /// tick exists and is tested and nothing calls it, so `jod schedule ls`
+    /// describes work that will never happen. Install it with
+    /// `deploy/jod-daemon.service`.
+    Daemon {
+        /// Tick once and exit, rather than staying resident. For a systemd
+        /// timer, or for checking the thing works before enabling the unit.
+        #[arg(long)]
+        once: bool,
+    },
     /// Work that fires on the clock.
     ///
     /// A schedule is a prompt, a cron expression and a timezone. Everything
@@ -626,6 +638,27 @@ async fn main() -> Result<()> {
             match store.path_between(&scope, &from, &to, max)? {
                 Some(route) => println!("{}", route.join("  →  ")),
                 None => println!("no path from {from} to {to} within {max} hops"),
+            }
+        }
+
+        Command::Daemon { once } => {
+            let daemon = jod_core::daemon::Daemon::persistent().await?;
+            if once {
+                let report = daemon.run_once().await?;
+                println!(
+                    "claimed {} · started {} · held {} · failed {}",
+                    report.claimed, report.started, report.held, report.failed
+                );
+            } else {
+                // Runs until SIGTERM, finishing the tick in flight rather than
+                // being killed mid-claim — an abandoned claim is exactly the
+                // case the lease exists to recover, and not creating one is
+                // better than recovering from it.
+                let report = daemon.run(jod_core::daemon::shutdown_signal()).await;
+                println!(
+                    "stopped after {} ticks · {} runs started · {} failed",
+                    report.ticks, report.started, report.failed
+                );
             }
         }
 
