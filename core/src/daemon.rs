@@ -60,8 +60,21 @@ pub trait Tick: Send + Sync {
 }
 
 impl Tick for Ticker {
-    fn tick(&self, now_ms: i64) -> impl Future<Output = Result<TickReport>> + Send {
-        Ticker::tick(self, now_ms)
+    /// Schedules first, then goals, and both every pass.
+    ///
+    /// Two separate claims rather than one, because they are different
+    /// contended resources — a process holding a goal must not thereby hold a
+    /// schedule — and a failure in one must not stop the other. A goal whose
+    /// harness is wedged should not silently stop the nightly backup.
+    async fn tick(&self, now_ms: i64) -> Result<TickReport> {
+        let schedules = Ticker::tick(self, now_ms).await?;
+        let goals = self.tick_goals(now_ms).await?;
+        Ok(TickReport {
+            claimed: schedules.claimed + goals.claimed,
+            started: schedules.started + goals.started,
+            held: schedules.held + goals.held,
+            failed: schedules.failed + goals.failed,
+        })
     }
 }
 

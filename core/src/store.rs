@@ -1871,6 +1871,25 @@ impl Store {
         Ok(goal.state)
     }
 
+    /// Let go of a goal without advancing it.
+    ///
+    /// A claim exists to stop two processes acting on one goal *in the same
+    /// tick*, not to hold it for the life of an iteration. Holding it across
+    /// the whole run would mean the tick that should settle the finished run
+    /// cannot claim it, so the goal sits idle until the lease expires and every
+    /// iteration costs an extra lease-length of nothing happening.
+    ///
+    /// What is in flight is recorded as a fact, not as a claim.
+    pub fn release_goal(&self, id: &str) -> Result<()> {
+        self.write(|tx| {
+            tx.execute(
+                "UPDATE goals SET claimed_by = NULL, lease_until_ms = NULL WHERE id = ?1",
+                params![id],
+            )?;
+            Ok(())
+        })
+    }
+
     pub fn set_goal_state(&self, name: &str, state: GoalState) -> Result<bool> {
         let next = if state == GoalState::Running {
             let conn = self.conn.lock().expect("store lock poisoned");

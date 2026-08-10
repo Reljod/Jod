@@ -320,6 +320,16 @@ enum GoalCommand {
     /// Run one iteration now.
     Run { name: String },
     Rm { name: String },
+    /// What this goal has done, out of its own memory.
+    ///
+    /// A goal's progress lives in the fact store rather than in its columns,
+    /// under a scope keyed by its id — which nobody can be expected to type.
+    /// This is the way in.
+    Log {
+        name: String,
+        #[arg(short, long, default_value_t = 10)]
+        limit: usize,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1132,6 +1142,31 @@ fn goal_command(jod: &Jod, what: GoalCommand) -> Result<()> {
         GoalCommand::Rm { name } => {
             let gone = store.delete_goal(&name)?;
             println!("{}", if gone { format!("{name} forgotten") } else { format!("no goal {name}") });
+        }
+        GoalCommand::Log { name, limit } => {
+            if store.goal_named(&name)?.is_none() {
+                bail!("no goal {name}");
+            }
+            // Keyed on the subject, which is derived from the name, precisely
+            // so this does not need the id the scope is keyed on.
+            let facts = store.facts_about(&format!("goal/{name}"))?;
+            if facts.is_empty() {
+                println!("{name} has not iterated yet");
+                return Ok(());
+            }
+            for f in facts.iter().filter(|f| f.predicate == "pursuing") {
+                println!("pursuing  {}", f.object);
+            }
+            for f in facts.iter().filter(|f| f.predicate == "ended") {
+                println!("ended     {}", f.object);
+            }
+            let history: Vec<_> = facts.iter().filter(|f| f.predicate == "iteration").collect();
+            if history.is_empty() {
+                println!("no iteration has finished yet");
+            }
+            for f in history.iter().take(limit) {
+                println!("  {}", f.object);
+            }
         }
     }
     Ok(())

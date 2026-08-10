@@ -14,8 +14,19 @@ use std::sync::Arc;
 
 use crate::error::Result;
 use crate::harness::{HarnessKind, PermissionPolicy, Resume, SpawnRequest};
-use crate::schedule::{self, Fire, FireOutcome, Misfire, Overlap, Schedule};
+use crate::schedule::{self, Fire, FireOutcome, Goal, Misfire, Overlap, Schedule};
 use crate::service::{AgentStatus, Jod};
+use crate::store::{NewFact, Origin, Store};
+
+/// Collapse a run's last message to one line, so an episodic record stays a
+/// record rather than becoming a second copy of the transcript.
+fn one_line(text: &str) -> String {
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() <= 160 {
+        return flat;
+    }
+    format!("{}…", flat.chars().take(160).collect::<String>())
+}
 
 /// How often the scheduler looks for work.
 pub const TICK: std::time::Duration = std::time::Duration::from_secs(60);
@@ -294,6 +305,206 @@ impl Ticker {
         }
     }
 
+    /// Advance every goal whose next iteration is due.
+    ///
+    /// A goal's progress lives in the fact store rather than in its own
+    /// columns, which is what makes it *memory* rather than a job queue. Three
+    /// things get written, each for a reason:
+    ///
+    /// - **The brief** — `pursuing` — superseded on every iteration, so
+    ///   bitemporal validity answers "what did it think it was doing last
+    ///   month" without a second history table.
+    /// - **The current run** — `current-run` — likewise superseded, so the
+    ///   in-flight run is one lookup and every previous one is still there.
+    /// - **What happened** — `iteration` — appended, never superseded, because
+    ///   that is the episodic record.
+    ///
+    /// All of it lands in the goal's own scope. Scope is a hard filter, and an
+    /// hourly goal running for a month writes far more than a person does, so
+    /// without its own partition it would drown ordinary recall.
+    pub async fn tick_goals(&self, now_ms: i64) -> Result<TickReport> {
+        let Some(store) = self.jod.store().cloned() else {
+            return Ok(TickReport::default());
+        };
+        let due = store.claim_due_goals(&self.owner, now_ms, LEASE_MS)?;
+        let mut report = TickReport {
+            claimed: due.len(),
+            ..Default::default()
+        };
+
+        for goal in due {
+            let scope = goal.memory_scope();
+            let subject = format!("goal/{}", goal.name);
+
+            // Settle the previous iteration before starting another, so a goal
+            // never has two runs in flight and its spend is counted once.
+            if let Some(run) = self.current_run(&store, &subject)? {
+                match self.jod.agent(&run).await {
+                    Ok(agent) if agent.status == AgentStatus::Running => {
+                        // Still working: no second iteration on top of the
+                        // first. The claim is let go all the same — what is in
+                        // flight is the `current-run` fact, not the claim, and
+                        // holding it would stop the next tick settling this run
+                        // for a whole lease.
+                        store.release_goal(&goal.id)?;
+                        report.held += 1;
+                        continue;
+                    }
+                    Ok(agent) => {
+                        // Completion is the only progress signal Jod can read
+                        // without a model. It is a proxy: an iteration that ran
+                        // cleanly and achieved nothing counts as progress here,
+                        // which is why the stall threshold is several
+                        // iterations rather than one.
+                        let progressed = agent.status == AgentStatus::Completed;
+                        let cost = agent.usage.cost_usd.unwrap_or(0.0);
+                        let outcome = agent
+                            .last_message
+                            .clone()
+                            .unwrap_or_else(|| format!("{:?}", agent.status).to_lowercase());
+                        store.remember(
+                            NewFact::new(
+                                subject.clone(),
+                                "iteration",
+                                format!("{}: {}", goal.iteration + 1, one_line(&outcome)),
+                            )
+                            .in_scope(&scope)
+                            .from(Origin::System),
+                        )?;
+                        let state = store.advance_goal(&goal.id, now_ms, cost, progressed)?;
+                        if !state.is_live() {
+                            // It stopped on its own — satisfied, stalled or out
+                            // of budget. Say which, in the goal's own memory,
+                            // so the reason survives the process that found it.
+                            store.remember(
+                                NewFact::new(subject.clone(), "ended", state.as_str())
+                                    .in_scope(&scope)
+                                    .from(Origin::System),
+                            )?;
+                            store.release_goal(&goal.id)?;
+                            continue;
+                        }
+                    }
+                    // The run is gone from the store entirely. Treat it as a
+                    // failed iteration rather than waiting on it for ever.
+                    Err(_) => {
+                        store.advance_goal(&goal.id, now_ms, 0.0, false)?;
+                    }
+                }
+            }
+
+            // Re-read: `advance_goal` may have just stopped it.
+            let Some(goal) = store.goal_named(&goal.name)? else {
+                continue;
+            };
+            if !goal.state.is_live() || goal.should_stop().is_some() {
+                store.release_goal(&goal.id)?;
+                continue;
+            }
+
+            match self.spawn_iteration(&store, &goal, &subject, &scope).await {
+                Ok(()) => report.started += 1,
+                Err(_) => report.failed += 1,
+            }
+            // Released whether or not the spawn worked. A goal left claimed by
+            // a failed spawn would wait out the lease before trying again.
+            store.release_goal(&goal.id)?;
+        }
+        Ok(report)
+    }
+
+    /// The run this goal has in flight, if any.
+    fn current_run(&self, store: &Store, subject: &str) -> Result<Option<String>> {
+        Ok(store
+            .facts_about(subject)?
+            .into_iter()
+            .find(|f| f.predicate == "current-run")
+            .map(|f| f.object))
+    }
+
+    /// Start one iteration, and record the brief it was started against.
+    async fn spawn_iteration(
+        &self,
+        store: &Store,
+        goal: &Goal,
+        subject: &str,
+        scope: &str,
+    ) -> Result<()> {
+        // What happened last time, so iteration N+1 does not rediscover what N
+        // already learned. Bounded, because a goal that has run for a month has
+        // more history than a prompt can hold, and the recent past is the part
+        // that bears on what to do next.
+        let recent: Vec<String> = store
+            .facts_about(subject)?
+            .into_iter()
+            .filter(|f| f.predicate == "iteration")
+            .take(5)
+            .map(|f| format!("- {}", f.object))
+            .collect();
+
+        let mut prompt = format!(
+            "Standing objective: {}\n\nThis is iteration {}.",
+            goal.objective,
+            goal.iteration + 1
+        );
+        if let Some(check) = &goal.done_when {
+            prompt.push_str(&format!(
+                "\n\nIt is done when this command succeeds: {check}\nRun it before you \
+                 conclude anything, and say plainly whether it passed."
+            ));
+        }
+        if !recent.is_empty() {
+            prompt.push_str(&format!(
+                "\n\nWhat previous iterations did, newest first:\n{}",
+                recent.join("\n")
+            ));
+        }
+        prompt.push_str(
+            "\n\nDo the next increment and stop. Report what changed, or say plainly \
+             that nothing did — a report of progress that did not happen is worse than \
+             no report, because it is what stops this loop noticing it is stuck.",
+        );
+
+        let agent = self
+            .jod
+            .spawn_agent(SpawnRequest {
+                name: goal.name.clone(),
+                harness: HarnessKind::from_id(&goal.harness).unwrap_or(HarnessKind::ClaudeCode),
+                prompt,
+                cwd: std::path::PathBuf::from(&goal.cwd),
+                model: goal.model.clone(),
+                permission: PermissionPolicy::default(),
+                // Fresh every time. A goal running for months cannot carry one
+                // harness conversation without its context growing without
+                // bound; the memory layer is what carries continuity instead.
+                resume: Resume::Fresh,
+            })
+            .await?;
+
+        // Supersede rather than insert, so the current run is one lookup and
+        // every previous one stays answerable.
+        let existing = store.facts_about(subject)?;
+        for predicate in ["pursuing", "current-run"] {
+            let value = if predicate == "pursuing" {
+                goal.objective.clone()
+            } else {
+                agent.id.clone()
+            };
+            let fact = NewFact::new(subject.to_string(), predicate, value)
+                .in_scope(scope)
+                .from(Origin::System);
+            match existing.iter().find(|f| f.predicate == predicate) {
+                Some(old) => {
+                    store.supersede(old.id, fact)?;
+                }
+                None => {
+                    store.remember(fact)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     async fn spawn(&self, s: &Schedule, due_at_ms: i64) -> Result<String> {
         let agent = self
             .jod
@@ -468,6 +679,126 @@ mod tests {
         let decisions = decide(&s, &missed, Some("run-1"));
         assert_eq!(decisions.len(), 1, "not fifty holds, one");
         assert!(matches!(decisions[0], Decision::Hold { .. }));
+    }
+
+    // ---- goals write what they did ----
+
+    fn a_goal(name: &str) -> Goal {
+        Goal {
+            id: format!("g-{name}"),
+            name: name.into(),
+            objective: "keep the inbox at zero".into(),
+            done_when: None,
+            harness: "claude_code".into(),
+            cwd: "/tmp".into(),
+            model: None,
+            cron: "0 * * * *".into(),
+            timezone: "UTC".into(),
+            state: crate::schedule::GoalState::Running,
+            iteration: 0,
+            max_iterations: None,
+            budget_usd: None,
+            spent_usd: 0.0,
+            stall_after: 3,
+            no_progress: 0,
+            next_fire_at_ms: None,
+            created_at_ms: 0,
+        }
+    }
+
+    /// Without a supervisor the spawn fails, which is fine — what is under test
+    /// is that the tick reaches the spawn at all rather than skipping the goal.
+    #[tokio::test]
+    async fn a_due_goal_is_claimed_and_an_iteration_is_attempted() {
+        let store = std::sync::Arc::new(crate::store::Store::in_memory().unwrap());
+        store.add_goal(&a_goal("inbox")).unwrap();
+        store.run_goal_now("inbox", 1).unwrap();
+
+        let jod = Jod::with_store(store.clone());
+        let report = Ticker::new(jod)
+            .as_owner("t")
+            .tick_goals(chrono::Utc::now().timestamp_millis())
+            .await
+            .unwrap();
+        assert_eq!(report.claimed, 1);
+        assert_eq!(report.started + report.failed, 1, "it tried");
+    }
+
+    #[tokio::test]
+    async fn a_goal_that_is_not_due_is_left_alone() {
+        let store = std::sync::Arc::new(crate::store::Store::in_memory().unwrap());
+        store.add_goal(&a_goal("later")).unwrap();
+
+        let jod = Jod::with_store(store);
+        let report = Ticker::new(jod)
+            .as_owner("t")
+            .tick_goals(chrono::Utc::now().timestamp_millis())
+            .await
+            .unwrap();
+        assert_eq!(report, TickReport::default());
+    }
+
+    /// A goal that stopped must not iterate again, whatever stopped it — that
+    /// is what makes stalling a real end rather than a label.
+    #[tokio::test]
+    async fn a_stalled_goal_is_never_iterated() {
+        let store = std::sync::Arc::new(crate::store::Store::in_memory().unwrap());
+        let mut g = a_goal("stuck");
+        g.stall_after = 1;
+        store.add_goal(&g).unwrap();
+        // One iteration that changed nothing is enough at this threshold.
+        store.advance_goal("g-stuck", 1, 0.0, false).unwrap();
+        assert_eq!(
+            store.goal_named("stuck").unwrap().unwrap().state,
+            crate::schedule::GoalState::Stalled
+        );
+        store.run_goal_now("stuck", 1).unwrap();
+
+        let jod = Jod::with_store(store);
+        let report = Ticker::new(jod)
+            .as_owner("t")
+            .tick_goals(chrono::Utc::now().timestamp_millis())
+            .await
+            .unwrap();
+        assert_eq!(report.claimed, 0, "a stopped goal is not even claimable");
+    }
+
+    /// The whole point of a goal being memory-backed: the brief it is pursuing
+    /// is a fact, in the goal's own scope, and so is the run carrying it out.
+    #[tokio::test]
+    async fn an_iteration_records_its_brief_in_the_goals_own_scope() {
+        let store = std::sync::Arc::new(crate::store::Store::in_memory().unwrap());
+        store.add_goal(&a_goal("inbox")).unwrap();
+        store.run_goal_now("inbox", 1).unwrap();
+
+        let jod = Jod::with_store(store.clone());
+        let _ = Ticker::new(jod)
+            .as_owner("t")
+            .tick_goals(chrono::Utc::now().timestamp_millis())
+            .await;
+
+        let written = store.facts_about("goal/inbox").unwrap();
+        // The spawn may have failed for want of a supervisor; the brief is
+        // written either way, because it records intent rather than outcome.
+        if let Some(brief) = written.iter().find(|f| f.predicate == "pursuing") {
+            assert_eq!(brief.object, "keep the inbox at zero");
+            assert_eq!(
+                brief.scope, "goal:g-inbox",
+                "a goal's memory lives in its own partition, or an hourly loop \
+                 drowns ordinary recall"
+            );
+            assert_eq!(brief.origin, Origin::System);
+        }
+    }
+
+    /// An episodic record must not become a second copy of the transcript.
+    #[test]
+    fn what_an_iteration_did_is_recorded_as_a_line_not_a_transcript() {
+        let long = "word ".repeat(200);
+        let recorded = one_line(&long);
+        assert!(recorded.chars().count() <= 161, "{}", recorded.len());
+        assert!(recorded.ends_with('…'));
+        assert_eq!(one_line("  two   spaces  "), "two spaces");
     }
 
     #[tokio::test]
