@@ -146,7 +146,31 @@ def build_base(src, dest):
         "       valid_from_ms, valid_to_ms, recorded_at_ms FROM s.edges")
     db.execute("COMMIT")
     # facts + FTS5, so Q6 runs against a real index rather than a stand-in.
-    db.execute("CREATE TABLE facts AS SELECT * FROM s.facts")
+    #
+    # The column list is spelled out rather than using `CREATE TABLE … AS
+    # SELECT`, which silently drops the INTEGER PRIMARY KEY. Without the
+    # rowid alias, `JOIN facts f ON f.id = facts_fts.rowid` is a full scan of
+    # `facts` per seed row: 3,347 ms against 3 ms at 10k edges. That was a
+    # bug in this harness, not a property of any design, and it is called out
+    # because it is the same failure mode as the missing `fact_id` index.
+    db.execute("""
+      CREATE TABLE facts (
+        id             INTEGER PRIMARY KEY,
+        scope          TEXT NOT NULL DEFAULT 'default',
+        subject        TEXT NOT NULL,
+        predicate      TEXT NOT NULL,
+        object         TEXT NOT NULL,
+        origin         TEXT NOT NULL DEFAULT 'agent',
+        source         TEXT,
+        valid_from     TEXT,
+        valid_to       TEXT,
+        recorded_at_ms INTEGER NOT NULL,
+        state          TEXT NOT NULL DEFAULT 'accepted',
+        invalidated_by INTEGER
+      )""")
+    db.execute("INSERT INTO facts SELECT id, scope, subject, predicate, "
+               "object, origin, source, valid_from, valid_to, recorded_at_ms, "
+               "state, invalidated_by FROM s.facts")
     db.execute("CREATE INDEX ix_facts_subject ON facts(scope, subject)")
     db.execute("CREATE VIRTUAL TABLE facts_fts USING fts5("
                "subject, predicate, object, content='facts', "

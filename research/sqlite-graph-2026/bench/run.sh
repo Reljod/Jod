@@ -29,6 +29,14 @@ echo "== concurrency (100k)"
 python3 "$here/concurrency.py" "$dbdir/g100k.db" \
     --out "$root/out/concurrency-100k.json"
 
+echo "== ten graded schema designs (100k)"
+python3 "$here/iterations.py" "$dbdir/g100k.db" \
+    --out "$root/out/iterations-100k.json" > /dev/null
+
+echo "== JOIN vs CROSS JOIN, with and without ANALYZE (100k)"
+python3 "$here/join_vs_crossjoin.py" "$dbdir/g100k.db" \
+    --out "$root/out/join-vs-crossjoin.json" --depth 2 > /dev/null
+
 echo "== out-degree hubs (100k)"
 python3 "$here/outdegree.py" "$dbdir/g100k.db" \
     --out "$root/out/outdegree-100k.json" > /dev/null

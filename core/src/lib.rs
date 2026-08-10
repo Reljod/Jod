@@ -27,6 +27,7 @@ pub mod harness;
 pub mod paths;
 pub mod proc;
 pub mod runner;
+pub mod schedule;
 pub mod service;
 pub mod store;
 pub mod team;

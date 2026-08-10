@@ -5,7 +5,23 @@ after `0003_process_supervision`. Nothing here needs a new dependency: it is
 `rusqlite` with the `bundled` feature Jod already links, and SQLite 3.50.2's
 recursive CTEs.
 
-Every measurement behind these choices is in [`REPORT.md`](REPORT.md).
+Every measurement behind these choices is in
+[`RECOMMENDATION.md`](RECOMMENDATION.md), and the implementation was
+independently re-measured in [`MEASURED.md`](MEASURED.md).
+
+> **Read this before copying any query below.** Every recursive term uses
+> **`CROSS JOIN`, not `JOIN`**, and that is not a stylistic choice. A recursive
+> CTE has no statistics for its own frontier, so on a database without
+> `sqlite_stat1` the planner makes `relations` the outer loop — matched on
+> `scope=?` alone — and scans the frontier inside it, a cross product per step.
+> Measured on the same file: **`JOIN` 1,076 ms vs `CROSS JOIN` 0.32 ms**, a
+> 3,515x difference that appears only once statistics are absent, which is
+> exactly the state a freshly-migrated database is in.
+> → [`bench/join_vs_crossjoin.py`](bench/join_vs_crossjoin.py)
+>
+> Run `ANALYZE` after building the indexes too. It also fixes the plan, but it
+> goes stale and nobody remembers to re-run it, so `CROSS JOIN` is the fix and
+> `ANALYZE` is the belt.
 
 ---
 
@@ -107,7 +123,7 @@ WITH RECURSIVE reach(node, depth) AS (
   UNION
   SELECT r2.dst, r.depth + 1
     FROM reach r
-    JOIN relations r2 ON r2.src = r.node AND r2.scope = ?3
+    CROSS JOIN relations r2 ON r2.src = r.node AND r2.scope = ?3
    WHERE r.depth < ?2
      AND (r2.valid_to_ms IS NULL OR r2.valid_to_ms > ?4)
      AND (r2.valid_from_ms IS NULL OR r2.valid_from_ms <= ?4)
@@ -134,11 +150,11 @@ WITH RECURSIVE reach(node, depth) AS (
   SELECT ?1, 0
   UNION
   SELECT r2.dst, r.depth + 1
-    FROM reach r JOIN relations r2 ON r2.src = r.node AND r2.scope = ?3
+    FROM reach r CROSS JOIN relations r2 ON r2.src = r.node AND r2.scope = ?3
    WHERE r.depth < ?2 AND (r2.valid_to_ms IS NULL OR r2.valid_to_ms > ?4)
   UNION
   SELECT r2.src, r.depth + 1
-    FROM reach r JOIN relations r2 ON r2.dst = r.node AND r2.scope = ?3
+    FROM reach r CROSS JOIN relations r2 ON r2.dst = r.node AND r2.scope = ?3
    WHERE r.depth < ?2 AND (r2.valid_to_ms IS NULL OR r2.valid_to_ms > ?4)
 )
 SELECT e.id, e.name, MIN(reach.depth) AS hops
@@ -162,11 +178,11 @@ WITH RECURSIVE reach(node, depth) AS (
   SELECT ?1, 0
   UNION
   SELECT r2.dst, r.depth + 1
-    FROM reach r JOIN relations r2 ON r2.src = r.node
+    FROM reach r CROSS JOIN relations r2 ON r2.src = r.node
    WHERE r.depth < ?3
   UNION
   SELECT r2.src, r.depth + 1
-    FROM reach r JOIN relations r2 ON r2.dst = r.node
+    FROM reach r CROSS JOIN relations r2 ON r2.dst = r.node
    WHERE r.depth < ?3
 )
 SELECT MIN(depth) FROM reach WHERE node = ?2;
@@ -210,7 +226,7 @@ reach(node, depth, rank) AS (
   SELECT node, 0, rank FROM seeds
   UNION
   SELECT r.dst, x.depth + 1, x.rank
-    FROM reach x JOIN relations r ON r.src = x.node AND r.scope = ?2
+    FROM reach x CROSS JOIN relations r ON r.src = x.node AND r.scope = ?2
    WHERE x.depth < ?3 AND r.valid_to_ms IS NULL
 )
 SELECT e.id, e.name, MIN(reach.depth) AS hops,

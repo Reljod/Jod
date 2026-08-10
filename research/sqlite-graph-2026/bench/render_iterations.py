@@ -56,23 +56,36 @@ def main(src, dest):
 
     p("\nWhat changed at each step, and what it bought:\n")
     prev = None
+    prev_classes = None
     for r in it:
         w = r["score"]["worst_core_p95_ms"]
+        classes = set(r["queries"])
         delta = ""
         if prev is not None and prev and w:
-            if w < prev:
-                delta = " **%.0fx faster** than the previous step." % (prev / w)
-            elif w > prev * 1.05:
-                delta = " **%.0f%% slower** than the previous step." % (
-                    100.0 * (w / prev - 1))
+            if classes != prev_classes:
+                # Comparing a worst-case across designs that answer different
+                # question sets is not a comparison. Say so instead of
+                # printing a ratio that means nothing.
+                delta = (" Not comparable to the previous step: it answers a "
+                         "different set of query classes.")
             else:
-                delta = " No material change in the worst core query."
+                ratio = prev / w
+                if ratio >= 1.15:
+                    fmt = "%.0fx" if ratio >= 10 else "%.1fx"
+                    delta = (" **" + fmt % ratio +
+                             " faster** than the previous step.")
+                elif ratio <= 0.87:
+                    delta = " **%.0f%% slower** than the previous step." % (
+                        100.0 * (w / prev - 1))
+                else:
+                    delta = " No material change in the worst core query."
         p("- **%d. %s** — %s Worst core p95 **%s ms**, rubric **%.3f**.%s"
           % (r["iteration"], LABEL[r["name"]], r["changed"], w,
              r["score"]["total"], delta))
         if r.get("declared_why"):
             p("  - Declared score note: %s" % r["declared_why"])
         prev = w
+        prev_classes = classes
 
     iters = "\n".join(L)
 

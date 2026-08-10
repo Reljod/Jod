@@ -14,6 +14,8 @@ uuid.workspace = true
 chrono.workspace = true
 rusqlite.workspace = true
 libc.workspace = true
+croner.workspace = true
+chrono-tz.workspace = true
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }

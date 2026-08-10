@@ -29,3 +29,13 @@ rusqlite = { version = "0.37", features = ["bundled"] }
 # Process groups and signals — what replaced tmux as the way a run is
 # supervised, killed, and checked for life.
 libc = "0.2"
+# Cron parsing. Chosen by measurement, not popularity: across the two DST
+# transitions `cron` 0.17 fires a daily job *twice* on fall-back and reads `1-5`
+# as Sun–Thu, and `saffron` has no timezone concept at all. croner is the only
+# one that fires once across fall-back, runs at 03:00 rather than skipping the
+# spring-forward day, and accepts `@daily`, seconds, `L`, `#` and `W`.
+# → research/scheduling-2026/out/cron-dst.txt
+croner = "3"
+# The IANA database. A schedule stores a zone *name*, never a captured offset —
+# an offset is only correct until the next transition.
+chrono-tz = "0.10"
