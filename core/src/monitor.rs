@@ -336,23 +336,48 @@ pub fn decide(monitor: &Monitor, seen: &Observation) -> Decision {
     }
 }
 
-/// Run a monitor's probe and decide, turning a probe that could not run at all
-/// into [`Decision::Failed`] rather than an error.
+/// The status recorded for a probe that never ran at all.
 ///
-/// A monitor that cannot be executed is a monitoring failure like any other:
-/// it belongs in the check history where somebody will see it, not propagated
-/// up to abort the tick that was going to record it.
-pub fn check(monitor: &Monitor, probes: &dyn Probes) -> Decision {
+/// Distinct from the `-1` a signalled command reports, and from any code a
+/// shell returns, so "the fetch could not be attempted" is never read back as
+/// "the command exited".
+pub const PROBE_DID_NOT_RUN: i32 = -2;
+
+/// Run a monitor's probe and return both what it saw and what that means.
+///
+/// Both, because the two halves are wanted by different callers:
+/// [`Store::record_check`] needs the bytes — the digest that becomes the next
+/// baseline is over the observation, not over the verdict — while everything
+/// that acts on a tick needs only the verdict. [`check`] is this without the
+/// bytes.
+///
+/// A probe that could not run at all becomes [`Decision::Failed`] rather than
+/// an error: a monitor that cannot be executed is a monitoring failure like
+/// any other, and it belongs in the check history where somebody will see it,
+/// not propagated up to abort the tick that was going to record it.
+pub fn observe(monitor: &Monitor, probes: &dyn Probes) -> (Observation, Decision) {
     let seen = match &monitor.probe {
         Probe::Command(command) => probes.run(command, &monitor.cwd),
         Probe::Url(url) => probes.fetch(url),
     };
     match seen {
-        Ok(seen) => decide(monitor, &seen),
-        Err(e) => Decision::Failed {
-            detail: format!("the monitor could not run: {e}"),
-        },
+        Ok(seen) => {
+            let decision = decide(monitor, &seen);
+            (seen, decision)
+        }
+        Err(e) => {
+            let detail = format!("the monitor could not run: {e}");
+            (
+                Observation::failed(PROBE_DID_NOT_RUN, detail.clone()),
+                Decision::Failed { detail },
+            )
+        }
     }
+}
+
+/// [`observe`], for callers with nothing to record.
+pub fn check(monitor: &Monitor, probes: &dyn Probes) -> Decision {
+    observe(monitor, probes).1
 }
 
 fn failure_detail(monitor: &Monitor, seen: &Observation) -> String {

@@ -9,11 +9,18 @@
 //!
 //! The tick is 60 seconds because that is the resolution a cron expression has.
 //! Polling faster buys nothing; polling slower makes `* * * * *` a lie.
+//!
+//! A schedule may also carry a [`monitor`], and then the tick asks it before it
+//! spends anything: [`plan`] folds what the monitor saw into what the schedule
+//! alone decided, and on almost every tick the fold is "start nothing". That
+//! fold is pure too, so "unchanged suppresses the run" is tested from a value
+//! rather than from a process.
 
 use std::sync::Arc;
 
 use crate::error::Result;
 use crate::harness::{HarnessKind, PermissionPolicy, Resume, SpawnRequest};
+use crate::monitor::{self, LocalProbes, Observation, Probes};
 use crate::schedule::{self, Fire, FireOutcome, Goal, Misfire, Overlap, Schedule};
 use crate::service::{AgentStatus, Jod};
 use crate::store::{NewFact, Origin, Store};
@@ -37,6 +44,15 @@ pub const TICK: std::time::Duration = std::time::Duration::from_secs(60);
 /// claim, and short enough that a machine which dies mid-fire is picked up
 /// within a few minutes rather than at the next restart.
 pub const LEASE_MS: i64 = 300_000;
+
+/// How long a monitor gets to answer before the tick gives up on it.
+///
+/// [`monitor::LocalProbes`] deliberately imposes no timeout of its own, on the
+/// grounds that only the caller knows whether it is holding a scheduler tick
+/// open while it waits. This is that caller. Schedules are handled one after
+/// another, so a probe that never returns stalls every schedule behind it —
+/// and a watchdog that hangs has failed, which is what it gets recorded as.
+pub const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// One thing the tick decided to do about one schedule.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -130,12 +146,84 @@ pub fn decide(s: &Schedule, missed: &[i64], running: Option<&str>) -> Vec<Decisi
     }
 }
 
+/// Whether carrying this decision out would start a harness.
+fn spawns(d: &Decision) -> bool {
+    matches!(d, Decision::Run { .. } | Decision::Replace { .. })
+}
+
+/// Fold what a schedule's monitor saw into what the schedule alone decided.
+///
+/// This is where monitor suppression actually happens, and it is a pure
+/// function of two values so that every branch of it is tested without a
+/// process: the only impure step is producing `watch`, which the caller does
+/// first.
+///
+/// `watch` is `None` for a schedule with no monitor, and then nothing here
+/// changes anything — a schedule without a monitor fires exactly as it always
+/// did.
+///
+/// Note what is *kept* when a monitor suppresses: the holds. They account for
+/// instants that passed while Jod was down, which is a fact about the clock
+/// rather than about what the monitor saw, and dropping them would lose the
+/// only record that those instants existed.
+pub fn plan(planned: Vec<Decision>, watch: Option<&monitor::Decision>) -> Vec<Decision> {
+    let Some(watch) = watch else {
+        return planned;
+    };
+    if !watch.wakes_agent() {
+        // Unchanged, still a baseline, broken, or a `no_agent` script that has
+        // already done the whole job — none of them is a reason to pay for a
+        // model. The tick is not silent about it: the caller writes what was
+        // seen to `monitor_checks`, whose vocabulary keeps "nothing changed"
+        // and "this watchdog is broken" apart.
+        return planned.into_iter().filter(|d| !spawns(d)).collect();
+    }
+    // One change is one change. A `fire_all` schedule coming back from an
+    // outage would otherwise start twenty runs carrying the identical diff,
+    // which is the bill a monitor exists to avoid rather than to multiply.
+    let last = planned.iter().rposition(spawns);
+    planned
+        .into_iter()
+        .enumerate()
+        .filter(|(i, d)| !spawns(d) || Some(*i) == last)
+        .map(|(_, d)| d)
+        .collect()
+}
+
+/// The prompt a run is started with.
+///
+/// A monitored change goes in *front* of the operator's words rather than
+/// replacing them, wrapped by [`monitor::changed_prompt`], because whoever
+/// writes the watched page is not the operator and the transcript should say
+/// so.
+pub fn prompt_for(s: &Schedule, watch: Option<&monitor::Decision>) -> String {
+    match watch {
+        Some(monitor::Decision::Run { diff }) => monitor::changed_prompt(&s.prompt, diff),
+        _ => s.prompt.clone(),
+    }
+}
+
+/// A monitor that produced no verdict at all, as a failed check.
+fn probe_gave_up(detail: String) -> (Observation, monitor::Decision) {
+    (
+        Observation::failed(monitor::PROBE_DID_NOT_RUN, detail.clone()),
+        monitor::Decision::Failed { detail },
+    )
+}
+
 /// Drives schedules and goals against a running [`Jod`].
 pub struct Ticker {
     jod: Arc<Jod>,
     /// Who this process is, for the claim. Distinct per process, because two
     /// `jod` processes on one box must not look like the same claimant.
     owner: String,
+    /// How a monitor reaches the world outside the process.
+    ///
+    /// Injectable because it is the only part of a tick that runs a command or
+    /// opens a socket: the daemon substitutes one that can fetch a URL — see
+    /// [`monitor::Probes`] for why the HTTP half is not implemented in `core` —
+    /// and tests substitute one that answers from a script.
+    probes: Arc<dyn Probes + Send + Sync>,
 }
 
 /// What one tick did, for logging and for tests.
@@ -152,12 +240,19 @@ impl Ticker {
         Ticker {
             jod,
             owner: format!("{}@{}", std::process::id(), hostname()),
+            probes: Arc::new(LocalProbes),
         }
     }
 
     /// Use a fixed owner name. Tests need two "processes" in one process.
     pub fn as_owner(mut self, owner: impl Into<String>) -> Ticker {
         self.owner = owner.into();
+        self
+    }
+
+    /// Run monitors through these instead of this machine's shell.
+    pub fn with_probes(mut self, probes: Arc<dyn Probes + Send + Sync>) -> Ticker {
+        self.probes = probes;
         self
     }
 
@@ -180,11 +275,20 @@ impl Ticker {
         for s in due {
             let missed = self.missed_for(&s, now_ms)?;
             let running = self.running_run(&s).await?;
+            let planned = decide(&s, &missed, running.as_deref());
+            // Before anything is spent. A schedule with no monitor answers
+            // `None` here and everything below is exactly as it was.
+            let watched = self.watch(&s, &planned).await?;
+            let watch = watched.as_ref().map(|(_, verdict)| verdict);
             let mut failed = false;
+            let mut ran = false;
 
-            for decision in decide(&s, &missed, running.as_deref()) {
-                match self.carry_out(&s, &decision, now_ms).await {
-                    Ok(true) => report.started += 1,
+            for decision in plan(planned, watch) {
+                match self.carry_out(&s, &decision, now_ms, watch).await {
+                    Ok(true) => {
+                        report.started += 1;
+                        ran = true;
+                    }
                     Ok(false) => report.held += 1,
                     Err(e) => {
                         failed = true;
@@ -204,9 +308,90 @@ impl Ticker {
                     }
                 }
             }
+
+            if let Some((seen, verdict)) = watched {
+                // A change that was seen but whose run never started must not
+                // become the new normal. Recorded as a failure it leaves the
+                // digest where it was, so the next tick reports the same change
+                // again instead of adopting it and never mentioning it.
+                let verdict = if verdict.wakes_agent() && !ran {
+                    monitor::Decision::Failed {
+                        detail: "the monitor saw a change, but the run that would \
+                                 report it did not start"
+                            .into(),
+                    }
+                } else {
+                    verdict
+                };
+
+                if matches!(verdict, monitor::Decision::Failed { .. }) {
+                    // A watchdog that cannot run is a schedule that is failing.
+                    // Counting it is what makes it back off and eventually
+                    // break, rather than probe a dead host every minute for
+                    // ever while its history fills with identical failures.
+                    if !failed {
+                        report.failed += 1;
+                    }
+                    failed = true;
+                } else if !verdict.wakes_agent() {
+                    // The tick did its whole job and cost nothing.
+                    report.held += 1;
+                }
+                // Written whatever it says. A check nobody recorded is how a
+                // watchdog broken for a week comes to look like one dutifully
+                // reporting that all is well.
+                store.record_check(&s.id, &seen, &verdict, now_ms)?;
+            }
+
             store.release_schedule(&s.id, now_ms, failed)?;
         }
         Ok(report)
+    }
+
+    /// Run this schedule's monitor, if it has one and this tick would otherwise
+    /// start something.
+    ///
+    /// Nothing is probed for a tick that was going to hold anyway. A successful
+    /// check moves the baseline, so probing a schedule whose run is already
+    /// blocked — by an overlap, or by there being nothing due — would consume
+    /// the change and leave the tick that could finally act on it reading
+    /// "unchanged".
+    async fn watch(
+        &self,
+        s: &Schedule,
+        planned: &[Decision],
+    ) -> Result<Option<(Observation, monitor::Decision)>> {
+        if !planned.iter().any(spawns) {
+            return Ok(None);
+        }
+        let Some(store) = self.jod.store() else {
+            return Ok(None);
+        };
+        let Some(watching) = store.monitor(&s.id)? else {
+            return Ok(None);
+        };
+
+        // Off the runtime: a command probe blocks on a child process and the
+        // daemon's URL probe blocks on a request, either of which would stall
+        // every other task sharing the executor thread. A blocking context is
+        // also what lets that implementation drive an async client with
+        // `Handle::block_on`, which is how `fetch` gets written at all.
+        let probes = self.probes.clone();
+        let checking = tokio::task::spawn_blocking(move || monitor::observe(&watching, &*probes));
+
+        // On a timeout the blocking task is left to finish on its own. An
+        // abandoned thread costs less than a tick that never ends, and the
+        // schedule is told the truth either way: the monitor did not answer.
+        Ok(Some(
+            match tokio::time::timeout(PROBE_TIMEOUT, checking).await {
+                Ok(Ok(observed)) => observed,
+                Ok(Err(e)) => probe_gave_up(format!("the monitor panicked: {e}")),
+                Err(_) => probe_gave_up(format!(
+                    "the monitor did not answer within {}s",
+                    PROBE_TIMEOUT.as_secs()
+                )),
+            },
+        ))
     }
 
     /// Every instant this schedule should have fired but did not.
@@ -245,7 +430,16 @@ impl Ticker {
     }
 
     /// Returns whether a run was started.
-    async fn carry_out(&self, s: &Schedule, d: &Decision, now_ms: i64) -> Result<bool> {
+    ///
+    /// `watch` is what the schedule's monitor saw, and reaches this far only to
+    /// put the diff in front of the prompt of whatever it starts.
+    async fn carry_out(
+        &self,
+        s: &Schedule,
+        d: &Decision,
+        now_ms: i64,
+        watch: Option<&monitor::Decision>,
+    ) -> Result<bool> {
         let store = self.jod.store().cloned().expect("checked by the caller");
         match d {
             Decision::Hold {
@@ -277,7 +471,7 @@ impl Ticker {
                     outcome: FireOutcome::Replaced,
                     detail: Some(format!("stopped {stop}")),
                 })?;
-                let run = self.spawn(s, *due_at_ms).await?;
+                let run = self.spawn(s, *due_at_ms, watch).await?;
                 store.record_fire(&Fire {
                     id: 0,
                     schedule_id: s.id.clone(),
@@ -290,7 +484,7 @@ impl Ticker {
                 Ok(true)
             }
             Decision::Run { due_at_ms } => {
-                let run = self.spawn(s, *due_at_ms).await?;
+                let run = self.spawn(s, *due_at_ms, watch).await?;
                 store.record_fire(&Fire {
                     id: 0,
                     schedule_id: s.id.clone(),
@@ -505,13 +699,18 @@ impl Ticker {
         Ok(())
     }
 
-    async fn spawn(&self, s: &Schedule, due_at_ms: i64) -> Result<String> {
+    async fn spawn(
+        &self,
+        s: &Schedule,
+        due_at_ms: i64,
+        watch: Option<&monitor::Decision>,
+    ) -> Result<String> {
         let agent = self
             .jod
             .spawn_agent(SpawnRequest {
                 name: s.name.clone(),
                 harness: HarnessKind::from_id(&s.harness).unwrap_or(HarnessKind::ClaudeCode),
-                prompt: s.prompt.clone(),
+                prompt: prompt_for(s, watch),
                 cwd: std::path::PathBuf::from(&s.cwd),
                 model: s.model.clone(),
                 permission: PermissionPolicy::default(),
@@ -533,6 +732,7 @@ fn hostname() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::monitor::{Mode, Monitor, Probe};
     use crate::schedule::ScheduleState;
 
     fn sched(misfire: Misfire, overlap: Overlap) -> Schedule {
@@ -832,5 +1032,284 @@ mod tests {
 
         assert_eq!(first.claimed, 1);
         assert_eq!(second.claimed, 0, "the second ticker must find nothing due");
+    }
+
+    // ---- a monitor decides whether the tick spends anything ----
+
+    /// What a monitor says when the page it watches moved.
+    fn changed() -> monitor::Decision {
+        monitor::Decision::Run {
+            diff: monitor::render_diff(Some(b"version 4\n"), b"version 5\n"),
+        }
+    }
+
+    fn one_run() -> Vec<Decision> {
+        vec![Decision::Run { due_at_ms: 5_000 }]
+    }
+
+    #[test]
+    fn a_schedule_without_a_monitor_is_planned_exactly_as_it_always_was() {
+        let planned = decide(&sched(Misfire::FireOnce, Overlap::Skip), &[5_000], None);
+        assert_eq!(plan(planned.clone(), None), planned);
+    }
+
+    #[test]
+    fn an_unchanged_monitor_leaves_no_run_in_the_plan() {
+        assert!(plan(one_run(), Some(&monitor::Decision::Suppress)).is_empty());
+    }
+
+    #[test]
+    fn a_first_sighting_is_a_baseline_and_leaves_no_run_in_the_plan() {
+        assert!(plan(one_run(), Some(&monitor::Decision::Baseline)).is_empty());
+    }
+
+    /// The two must never collapse into each other: a watchdog that has been
+    /// broken for a week would otherwise look exactly like one dutifully
+    /// reporting that all is well.
+    #[test]
+    fn a_broken_monitor_starts_nothing_and_is_not_filed_as_no_change() {
+        let broken = monitor::Decision::Failed {
+            detail: "`check.sh` exited 7".into(),
+        };
+        assert!(plan(one_run(), Some(&broken)).is_empty());
+        assert_ne!(broken.outcome(), monitor::Decision::Suppress.outcome());
+    }
+
+    #[test]
+    fn a_changed_monitor_leaves_the_run_exactly_where_it_was() {
+        assert_eq!(plan(one_run(), Some(&changed())), one_run());
+    }
+
+    /// One change is one change, whatever the misfire policy would have
+    /// replayed — twenty runs carrying the identical diff is the bill a
+    /// monitor exists to avoid rather than to multiply.
+    #[test]
+    fn one_change_starts_one_run_however_many_instants_an_outage_missed() {
+        let s = sched(Misfire::FireAll, Overlap::Allow);
+        let missed: Vec<i64> = (1..=20).map(|i| i * 1_000).collect();
+        let planned = decide(&s, &missed, None);
+        assert_eq!(planned.len(), 20);
+        assert_eq!(
+            plan(planned, Some(&changed())),
+            vec![Decision::Run { due_at_ms: 20_000 }]
+        );
+    }
+
+    /// Which instants were missed is a fact about the clock, not about what the
+    /// monitor saw, so suppressing the run must not erase the accounting.
+    #[test]
+    fn a_suppressed_tick_still_accounts_for_the_instants_an_outage_missed() {
+        let s = sched(Misfire::Skip, Overlap::Skip);
+        let planned = decide(&s, &[1_000, 2_000, 3_000], None);
+        let left = plan(planned, Some(&monitor::Decision::Suppress));
+        assert_eq!(left.len(), 2, "the two skipped instants, and no run");
+        assert!(left.iter().all(|d| matches!(d, Decision::Hold { .. })));
+    }
+
+    #[test]
+    fn a_suppressed_tick_does_not_kill_the_run_it_would_have_replaced() {
+        let planned = vec![Decision::Replace {
+            due_at_ms: 5_000,
+            stop: "run-1".into(),
+        }];
+        assert!(
+            plan(planned, Some(&monitor::Decision::Suppress)).is_empty(),
+            "stopping a run to start nothing in its place is pure loss"
+        );
+    }
+
+    #[test]
+    fn a_no_agent_verdict_leaves_nothing_to_run_whatever_the_script_printed() {
+        for verdict in [
+            monitor::Decision::Report {
+                text: "disk at 91%".into(),
+            },
+            monitor::Decision::Silent,
+            monitor::Decision::Failed {
+                detail: "`watchdog.sh` exited 2".into(),
+            },
+        ] {
+            assert!(
+                plan(one_run(), Some(&verdict)).is_empty(),
+                "{verdict:?} must not wake a model"
+            );
+        }
+    }
+
+    #[test]
+    fn a_woken_run_carries_the_diff_in_front_of_the_operators_prompt() {
+        let s = sched(Misfire::FireOnce, Overlap::Skip);
+        let prompt = prompt_for(&s, Some(&changed()));
+        assert!(prompt.starts_with(monitor::MONITOR_PREAMBLE), "{prompt}");
+        assert!(prompt.contains(monitor::CHANGE_HEADER), "{prompt}");
+        assert!(prompt.contains("+ version 5"), "{prompt}");
+        assert!(
+            prompt.trim_end().ends_with(&s.prompt),
+            "the operator's words come last: {prompt}"
+        );
+    }
+
+    #[test]
+    fn a_run_nothing_woke_carries_the_operators_prompt_untouched() {
+        let s = sched(Misfire::FireOnce, Overlap::Skip);
+        assert_eq!(prompt_for(&s, None), s.prompt);
+        assert_eq!(prompt_for(&s, Some(&monitor::Decision::Baseline)), s.prompt);
+    }
+
+    // ---- and the whole tick, through the store ----
+
+    /// A probe that answers the same thing every time, so a tick is driven
+    /// without a process.
+    struct Says(Observation);
+
+    impl Probes for Says {
+        fn run(&self, _command: &str, _cwd: &str) -> Result<Observation> {
+            Ok(self.0.clone())
+        }
+        fn fetch(&self, _url: &str) -> Result<Observation> {
+            Ok(self.0.clone())
+        }
+    }
+
+    /// A monitor that has already seen this body once.
+    fn watching(body: &str) -> Monitor {
+        Monitor {
+            last_digest: Some(monitor::digest(body.as_bytes())),
+            last_body: Some(body.as_bytes().to_vec()),
+            ..Monitor::new("s1", Probe::Command("check.sh".into()))
+        }
+    }
+
+    /// One armed schedule, due now, with `m` watching it.
+    fn due_and_watched(m: Monitor) -> Arc<Store> {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let mut s = sched(Misfire::FireOnce, Overlap::Skip);
+        s.next_fire_at_ms = None;
+        store.add_schedule(&s).unwrap();
+        store
+            .write(|tx| {
+                tx.execute("UPDATE schedules SET next_fire_at_ms = 1", [])
+                    .unwrap();
+                Ok(())
+            })
+            .unwrap();
+        store.set_monitor(&m).unwrap();
+        store
+    }
+
+    async fn tick_seeing(store: &Arc<Store>, seen: Observation) -> TickReport {
+        Ticker::new(Jod::with_store(store.clone()))
+            .as_owner("t")
+            .with_probes(Arc::new(Says(seen)))
+            .tick(chrono::Utc::now().timestamp_millis())
+            .await
+            .unwrap()
+    }
+
+    /// The branch the whole monitor module exists for: a page that did not move
+    /// costs nothing, and is still written down.
+    #[tokio::test]
+    async fn an_unchanged_monitor_suppresses_the_run_and_still_writes_the_tick_down() {
+        let store = due_and_watched(watching("version 4\n"));
+        let report = tick_seeing(&store, Observation::ok("version 4\n")).await;
+
+        assert_eq!(report.claimed, 1);
+        assert_eq!(report.started, 0, "no agent for a page that did not move");
+        assert_eq!(report.held, 1, "a suppressed tick is accounted for");
+
+        let checks = store.monitor_checks("s1", 10).unwrap();
+        assert_eq!(checks.len(), 1, "silence with a row, not silence");
+        assert_eq!(checks[0].outcome, "unchanged");
+        assert!(
+            store.fires("s1", 10).unwrap().is_empty(),
+            "nothing fired, so nothing claims to have"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_monitors_first_tick_is_a_baseline_and_starts_nothing() {
+        let store = due_and_watched(Monitor::new("s1", Probe::Command("check.sh".into())));
+        let report = tick_seeing(&store, Observation::ok("version 4\n")).await;
+
+        assert_eq!(report.started, 0, "everything being new is not a change");
+        let checks = store.monitor_checks("s1", 10).unwrap();
+        assert_eq!(checks[0].outcome, "baseline");
+        assert_eq!(
+            store.monitor("s1").unwrap().unwrap().last_digest,
+            Some(monitor::digest(b"version 4\n")),
+            "and the next tick has something to compare against"
+        );
+    }
+
+    /// Otherwise one outage produces two false alarms: the emptiness becomes
+    /// the baseline, and the resource "changes" back when it recovers.
+    #[tokio::test]
+    async fn a_failing_probe_is_recorded_and_does_not_become_the_new_baseline() {
+        let store = due_and_watched(watching("version 4\n"));
+        let report = tick_seeing(&store, Observation::failed(7, "could not resolve host")).await;
+
+        assert_eq!(report.started, 0);
+        assert_eq!(report.failed, 1, "a broken watchdog is a failing schedule");
+
+        let checks = store.monitor_checks("s1", 10).unwrap();
+        assert_eq!(checks[0].outcome, "failed");
+        assert!(checks[0].detail.as_deref().unwrap().contains("exited 7"));
+        assert_eq!(
+            store.monitor("s1").unwrap().unwrap().last_digest,
+            Some(monitor::digest(b"version 4\n")),
+            "the failure must not become the truth the next tick compares against"
+        );
+        assert_eq!(
+            store
+                .schedule_named("nightly")
+                .unwrap()
+                .unwrap()
+                .consecutive_failures,
+            1,
+            "so it backs off instead of probing a dead host every minute"
+        );
+    }
+
+    /// The script *is* the job: no harness is started for it, ever, and what it
+    /// said is the result.
+    #[tokio::test]
+    async fn a_no_agent_schedule_never_starts_a_harness_whatever_its_script_prints() {
+        for (printed, outcome) in [("disk at 91%\n", "reported"), ("", "silent")] {
+            let store = due_and_watched(
+                Monitor::new("s1", Probe::Command("watchdog.sh".into())).with_mode(Mode::NoAgent),
+            );
+            let report = tick_seeing(&store, Observation::ok(printed)).await;
+
+            assert_eq!(report.started, 0, "printed {printed:?}");
+            assert!(store.fires("s1", 10).unwrap().is_empty());
+            let checks = store.monitor_checks("s1", 10).unwrap();
+            assert_eq!(checks[0].outcome, outcome);
+        }
+    }
+
+    /// The other half of suppression: a change does reach the harness. The
+    /// spawn itself has no supervisor to talk to in a test, so what is asserted
+    /// is that the tick got that far — and that a change whose run never
+    /// started is not quietly adopted as the new normal.
+    #[tokio::test]
+    async fn a_changed_monitor_takes_the_tick_as_far_as_starting_a_run() {
+        let store = due_and_watched(watching("version 4\n"));
+        let report = tick_seeing(&store, Observation::ok("version 5\n")).await;
+
+        assert_eq!(report.started + report.failed, 1, "it tried");
+        assert_eq!(store.fires("s1", 10).unwrap().len(), 1, "and said so");
+
+        let checks = store.monitor_checks("s1", 10).unwrap();
+        assert_eq!(checks.len(), 1);
+        if report.started == 1 {
+            assert_eq!(checks[0].outcome, "changed");
+        } else {
+            assert_eq!(checks[0].outcome, "failed");
+            assert_eq!(
+                store.monitor("s1").unwrap().unwrap().last_digest,
+                Some(monitor::digest(b"version 4\n")),
+                "a change nobody was told about must be reported again next tick"
+            );
+        }
     }
 }
