@@ -22,6 +22,7 @@
 
 pub mod consolidate;
 pub mod conversation;
+pub mod daemon;
 pub mod discovery;
 pub mod error;
 pub mod event;

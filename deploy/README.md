@@ -220,3 +220,99 @@ sudo -u jod jod kill <id>                    # stops the group, and its children
 
 Then read the transcripts of anything that ran. Revocation stops future use; it
 does not undo what already executed.
+
+---
+
+# The scheduler — `jod-daemon`
+
+`jod-api` answers requests. Nothing in it looks at the clock, so a machine with
+only `jod-api` on it has schedules that are stored, listed, and never fired.
+`jod-daemon` is the process that ticks.
+
+One tick, every 60 seconds — cron's own resolution, so polling faster buys
+nothing and polling slower makes `* * * * *` a lie. Each tick claims what is
+due, decides what to do about it, and lets go. → [`core/src/daemon.rs`](../core/src/daemon.rs),
+[`core/src/ticker.rs`](../core/src/ticker.rs)
+
+## Why a resident process and not a systemd timer
+
+A timer invoking `jod tick` every minute is the smaller-looking design. It is
+rejected because a one-shot process pays for opening the store, reloading prior
+runs and re-parsing every armed cron expression *before* it can answer "is
+anything due" — 1,440 times a day, to do 1,440 tiny reads. That startup cost
+also puts a floor under how often you can tick at all. The full argument,
+including what WAL mode has to do with it, is the module doc of
+[`core/src/daemon.rs`](../core/src/daemon.rs).
+
+The timer shape still works if you prefer it: a single tick is one call and one
+exit code, and a claim left behind by a process that died mid-fire is recovered
+after the 5-minute lease.
+
+## Install
+
+`jod-daemon` is a second unit over the **same** `jod` user, `/home/jod/.jod`
+and binary set as `jod-api` — sections 1 and 2 above are its prerequisites, not
+a separate setup. Running both at once is safe: they claim schedules out of one
+SQLite file with a compare-and-swap and a lease, so a schedule cannot fire
+twice.
+
+```sh
+sudo cp deploy/jod-daemon.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now jod-daemon
+```
+
+You do **not** need `jod-api` for the scheduler to work. You do need `jod-run`
+installed, exactly as in section 2 — a schedule that fires spawns an agent, and
+an agent without its supervisor produces nothing.
+
+## Checking it is alive
+
+`active (running)` is not evidence. A scheduler is the kind of process that
+looks healthy while doing nothing at all, so check that it *ticked*:
+
+```sh
+systemctl status jod-daemon
+journalctl -u jod-daemon -f            # a failing tick logs and carries on
+sudo -u jod jod schedule ls            # next fire should move
+sudo -u jod jod schedule log <name>    # one row per fire, skips included
+```
+
+The last one is the real check. Every decision writes a row — including the
+ones that decided *not* to run — so "it never fired" and "it fired and was
+skipped" are distinguishable. A schedule whose `next_fire_at` is in the past
+and has no matching row is a daemon that is not ticking.
+
+## Restarts and stopping
+
+`SIGTERM` — what `systemctl stop` and `systemctl restart` send — is not acted on
+until the tick in flight has finished. A claim abandoned between claiming a
+schedule and firing it is precisely the case the lease exists to recover, and it
+is better not to create it. `TimeoutStopSec=45s` bounds the wait.
+
+Running agents survive a restart: each is its own process group, not a child of
+this unit, and the daemon reloads prior runs from the store at boot. That reload
+is load-bearing rather than cosmetic — the overlap policy asks "is a run from
+this schedule still going", and a daemon that had forgotten would answer *no*
+and start a second one.
+
+A failing tick is logged and the loop continues. Ending on the first error would
+leave the unit `active` with nothing firing, which is worse than having no
+scheduler, because it looks like one.
+
+## What has not been verified
+
+**The unit file in this repo has never been installed or started on a machine.**
+It is written against `jod-api.service`'s conventions and reviewed, not
+observed — nobody has watched `systemctl enable --now jod-daemon` come up, seen
+a schedule fire from it, or timed a `systemctl stop` against a tick in flight.
+The same caveat the scheduling research carries about its own units applies
+here. Treat the first install as a test, and check the fires table before
+trusting it.
+
+**`ExecStart=/usr/local/bin/jod daemon` names a subcommand the `jod` CLI does
+not have yet.** The loop itself is `jod_core::daemon` and is tested; wiring it
+to a command line belongs to whoever owns `cli/`. Until that lands, the unit
+will start and immediately fail on an unrecognised argument. What it needs is
+`Daemon::persistent().await?.run(daemon::shutdown_signal()).await` for the
+resident form, and `run_once()` for a one-shot `jod tick`.

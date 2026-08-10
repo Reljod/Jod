@@ -9,7 +9,9 @@ description = "Core service for Jod: harness abstraction, agent runner, durable 
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tokio.workspace = true
+# `signal` is additive on top of the workspace features: the scheduler daemon
+# finishes the tick in flight on SIGTERM rather than being killed mid-claim.
+tokio = { workspace = true, features = ["signal"] }
 uuid.workspace = true
 chrono.workspace = true
 rusqlite.workspace = true
