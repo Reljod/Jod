@@ -30,7 +30,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::{JodError, Result};
 use crate::event::AgentEnvelope;
 use crate::harness::HarnessKind;
-use crate::schedule::{Fire, FireOutcome, Schedule, ScheduleState};
+use crate::schedule::{Fire, FireOutcome, Goal, GoalState, Schedule, ScheduleState};
 use crate::team::{Member, MemberStatus, Message, TeamTask};
 
 /// Applied in order; each is recorded so it runs exactly once.
@@ -1624,6 +1624,173 @@ impl Store {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
+    // ---- goals ------------------------------------------------------------
+
+    pub fn add_goal(&self, g: &Goal) -> Result<()> {
+        crate::schedule::validate(&g.cron, &g.timezone)?;
+        let next = crate::schedule::next_fire(&g.cron, &g.timezone, now_ms())?;
+        self.write(|tx| {
+            tx.execute(
+                "INSERT INTO goals
+                   (id, name, objective, done_when, harness, cwd, model, cron, timezone,
+                    state, iteration, max_iterations, budget_usd, spent_usd,
+                    stall_after, no_progress, next_fire_at_ms, created_at_ms)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,0,?11,?12,0,?13,0,?14,?15)",
+                params![
+                    g.id, g.name, g.objective, g.done_when, g.harness, g.cwd, g.model,
+                    g.cron, g.timezone, g.state.as_str(), g.max_iterations,
+                    g.budget_usd, g.stall_after, next, now_ms()
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn goals(&self) -> Result<Vec<Goal>> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        let mut stmt = conn.prepare(&format!("{GOAL_COLUMNS} ORDER BY name"))?;
+        let rows = stmt.query_map([], row_to_goal)?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    pub fn goal_named(&self, name: &str) -> Result<Option<Goal>> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        Ok(conn
+            .query_row(
+                &format!("{GOAL_COLUMNS} WHERE name = ?1"),
+                params![name],
+                row_to_goal,
+            )
+            .optional()?)
+    }
+
+    /// Take ownership of goals whose next iteration is due.
+    ///
+    /// The same compare-and-swap as [`Store::claim_due_schedules`], and for the
+    /// same reason: a goal iterating twice because two processes both thought
+    /// it was theirs would double its spend and corrupt its own progress count.
+    pub fn claim_due_goals(&self, owner: &str, now_ms_at: i64, lease_ms: i64) -> Result<Vec<Goal>> {
+        self.write(|tx| {
+            let ids: Vec<String> = {
+                let mut stmt = tx.prepare(
+                    "SELECT id FROM goals
+                      WHERE state = 'running'
+                        AND next_fire_at_ms IS NOT NULL
+                        AND next_fire_at_ms <= ?1
+                        AND (claimed_by IS NULL OR lease_until_ms < ?1)",
+                )?;
+                let rows = stmt.query_map(params![now_ms_at], |r| r.get(0))?;
+                rows.collect::<std::result::Result<Vec<_>, _>>()?
+            };
+            let mut taken = Vec::new();
+            for id in ids {
+                let won = tx.execute(
+                    "UPDATE goals SET claimed_by = ?2, lease_until_ms = ?3
+                      WHERE id = ?1 AND state = 'running'
+                        AND next_fire_at_ms <= ?4
+                        AND (claimed_by IS NULL OR lease_until_ms < ?4)",
+                    params![id, owner, now_ms_at + lease_ms, now_ms_at],
+                )?;
+                if won == 1 {
+                    let mut stmt = tx.prepare(&format!("{GOAL_COLUMNS} WHERE id = ?1"))?;
+                    taken.push(stmt.query_row(params![id], row_to_goal)?);
+                }
+            }
+            Ok(taken)
+        })
+    }
+
+    /// Record what one iteration cost and whether it moved.
+    ///
+    /// `progressed` is the whole safety story. A goal that keeps completing
+    /// iterations while nothing changes is the characteristic failure of an
+    /// autonomous loop, and it is invisible unless something counts — so a
+    /// no-progress iteration increments a counter that eventually stalls the
+    /// goal, and any progress resets it.
+    pub fn advance_goal(
+        &self,
+        id: &str,
+        at_ms: i64,
+        spent_usd: f64,
+        progressed: bool,
+    ) -> Result<GoalState> {
+        let (cron, timezone) = {
+            let conn = self.conn.lock().expect("store lock poisoned");
+            conn.query_row(
+                "SELECT cron, timezone FROM goals WHERE id = ?1",
+                params![id],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+            )?
+        };
+        let next = crate::schedule::next_fire(&cron, &timezone, at_ms)?;
+        self.write(|tx| {
+            tx.execute(
+                "UPDATE goals
+                    SET iteration = iteration + 1,
+                        spent_usd = spent_usd + ?2,
+                        no_progress = CASE WHEN ?3 THEN 0 ELSE no_progress + 1 END,
+                        next_fire_at_ms = ?4,
+                        claimed_by = NULL, lease_until_ms = NULL
+                  WHERE id = ?1",
+                params![id, spent_usd, progressed, next],
+            )?;
+            Ok(())
+        })?;
+
+        // Re-read and apply the stop conditions, so a goal that has just run
+        // out of budget stops before it can spend more proving it.
+        let goal = {
+            let conn = self.conn.lock().expect("store lock poisoned");
+            let mut stmt = conn.prepare(&format!("{GOAL_COLUMNS} WHERE id = ?1"))?;
+            stmt.query_row(params![id], row_to_goal)?
+        };
+        if let Some(stop) = goal.should_stop() {
+            self.set_goal_state(&goal.name, stop)?;
+            return Ok(stop);
+        }
+        Ok(goal.state)
+    }
+
+    pub fn set_goal_state(&self, name: &str, state: GoalState) -> Result<bool> {
+        let next = if state == GoalState::Running {
+            let conn = self.conn.lock().expect("store lock poisoned");
+            let found: Option<(String, String)> = conn
+                .query_row(
+                    "SELECT cron, timezone FROM goals WHERE name = ?1",
+                    params![name],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?;
+            drop(conn);
+            match found {
+                Some((cron, tz)) => crate::schedule::next_fire(&cron, &tz, now_ms())?,
+                None => return Ok(false),
+            }
+        } else {
+            None
+        };
+        self.write(|tx| {
+            let changed = tx.execute(
+                "UPDATE goals
+                    SET state = ?2,
+                        no_progress = CASE WHEN ?2 = 'running' THEN 0 ELSE no_progress END,
+                        next_fire_at_ms = CASE WHEN ?2 = 'running' THEN ?3
+                                               ELSE next_fire_at_ms END,
+                        claimed_by = NULL, lease_until_ms = NULL
+                  WHERE name = ?1",
+                params![name, state.as_str(), next],
+            )?;
+            Ok(changed > 0)
+        })
+    }
+
+    pub fn delete_goal(&self, name: &str) -> Result<bool> {
+        self.write(|tx| {
+            let gone = tx.execute("DELETE FROM goals WHERE name = ?1", params![name])?;
+            Ok(gone > 0)
+        })
+    }
+
     // ---- the memory graph -----------------------------------------------
 
     /// Everything within `depth` hops of `name`, nearest first.
@@ -1980,6 +2147,33 @@ fn row_to_schedule(r: &rusqlite::Row) -> rusqlite::Result<Schedule> {
         last_fire_at_ms: r.get(14)?,
         consecutive_failures: r.get(15)?,
         created_at_ms: r.get(16)?,
+    })
+}
+
+const GOAL_COLUMNS: &str = "SELECT id, name, objective, done_when, harness, cwd, model, cron,
+        timezone, state, iteration, max_iterations, budget_usd, spent_usd,
+        stall_after, no_progress, next_fire_at_ms, created_at_ms FROM goals";
+
+fn row_to_goal(r: &rusqlite::Row) -> rusqlite::Result<Goal> {
+    Ok(Goal {
+        id: r.get(0)?,
+        name: r.get(1)?,
+        objective: r.get(2)?,
+        done_when: r.get(3)?,
+        harness: r.get(4)?,
+        cwd: r.get(5)?,
+        model: r.get(6)?,
+        cron: r.get(7)?,
+        timezone: r.get(8)?,
+        state: GoalState::parse(&r.get::<_, String>(9)?),
+        iteration: r.get(10)?,
+        max_iterations: r.get(11)?,
+        budget_usd: r.get(12)?,
+        spent_usd: r.get(13)?,
+        stall_after: r.get(14)?,
+        no_progress: r.get(15)?,
+        next_fire_at_ms: r.get(16)?,
+        created_at_ms: r.get(17)?,
     })
 }
 
@@ -3736,6 +3930,174 @@ mod tests {
         let mut twin = a_schedule("same", "0 3 * * *");
         twin.id = "different-id".into();
         assert!(s.add_schedule(&twin).is_err());
+    }
+
+    // ---- goals ----
+
+    fn a_goal(name: &str) -> Goal {
+        Goal {
+            id: format!("g-{name}"),
+            name: name.into(),
+            objective: "keep the inbox at zero".into(),
+            done_when: Some("test -z \"$(inbox)\"".into()),
+            harness: "claude_code".into(),
+            cwd: "/tmp".into(),
+            model: None,
+            cron: "0 * * * *".into(),
+            timezone: "UTC".into(),
+            state: GoalState::Running,
+            iteration: 0,
+            max_iterations: None,
+            budget_usd: None,
+            spent_usd: 0.0,
+            stall_after: 6,
+            no_progress: 0,
+            next_fire_at_ms: None,
+            created_at_ms: 0,
+        }
+    }
+
+    #[test]
+    fn a_new_goal_is_running_and_armed() {
+        let s = store();
+        s.add_goal(&a_goal("inbox")).unwrap();
+        let g = s.goal_named("inbox").unwrap().unwrap();
+        assert_eq!(g.state, GoalState::Running);
+        assert!(g.next_fire_at_ms.unwrap() > now_ms());
+        assert_eq!(g.iteration, 0);
+    }
+
+    #[test]
+    fn an_iteration_that_moved_advances_the_count_and_resets_the_stall() {
+        let s = store();
+        s.add_goal(&a_goal("inbox")).unwrap();
+        s.advance_goal("g-inbox", now_ms(), 0.25, false).unwrap();
+        assert_eq!(s.goal_named("inbox").unwrap().unwrap().no_progress, 1);
+
+        s.advance_goal("g-inbox", now_ms(), 0.25, true).unwrap();
+        let g = s.goal_named("inbox").unwrap().unwrap();
+        assert_eq!(g.no_progress, 0, "progress forgives the run of nothing");
+        assert_eq!(g.iteration, 2);
+        assert!((g.spent_usd - 0.5).abs() < 1e-9);
+    }
+
+    /// The characteristic failure of an autonomous loop: it keeps completing
+    /// iterations and nothing changes. Left alone it runs for ever.
+    #[test]
+    fn a_goal_that_stops_moving_stalls_itself() {
+        let s = store();
+        let mut g = a_goal("stuck");
+        g.stall_after = 3;
+        s.add_goal(&g).unwrap();
+
+        for _ in 0..2 {
+            let state = s.advance_goal("g-stuck", now_ms(), 0.0, false).unwrap();
+            assert_eq!(state, GoalState::Running);
+        }
+        let state = s.advance_goal("g-stuck", now_ms(), 0.0, false).unwrap();
+        assert_eq!(state, GoalState::Stalled);
+        assert_eq!(
+            s.goal_named("stuck").unwrap().unwrap().state,
+            GoalState::Stalled
+        );
+    }
+
+    /// A goal must stop *before* it can spend more proving it has run out.
+    #[test]
+    fn a_goal_stops_the_moment_its_budget_is_gone() {
+        let s = store();
+        let mut g = a_goal("pricey");
+        g.budget_usd = Some(1.0);
+        s.add_goal(&g).unwrap();
+
+        assert_eq!(
+            s.advance_goal("g-pricey", now_ms(), 0.5, true).unwrap(),
+            GoalState::Running
+        );
+        assert_eq!(
+            s.advance_goal("g-pricey", now_ms(), 0.6, true).unwrap(),
+            GoalState::Exhausted
+        );
+    }
+
+    #[test]
+    fn a_goal_stops_after_the_iterations_it_was_given() {
+        let s = store();
+        let mut g = a_goal("bounded");
+        g.max_iterations = Some(2);
+        s.add_goal(&g).unwrap();
+        s.advance_goal("g-bounded", now_ms(), 0.0, true).unwrap();
+        assert_eq!(
+            s.advance_goal("g-bounded", now_ms(), 0.0, true).unwrap(),
+            GoalState::Exhausted
+        );
+    }
+
+    /// A stopped goal must not keep firing, whatever stopped it.
+    #[test]
+    fn only_a_running_goal_is_ever_claimed() {
+        let s = store();
+        s.add_goal(&a_goal("paused")).unwrap();
+        s.write(|tx| {
+            tx.execute("UPDATE goals SET next_fire_at_ms = 1", []).unwrap();
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(s.claim_due_goals("me", now_ms(), 60_000).unwrap().len(), 1);
+
+        s.set_goal_state("paused", GoalState::Paused).unwrap();
+        s.write(|tx| {
+            tx.execute("UPDATE goals SET next_fire_at_ms = 1", []).unwrap();
+            Ok(())
+        })
+        .unwrap();
+        assert!(s.claim_due_goals("me", now_ms(), 60_000).unwrap().is_empty());
+    }
+
+    /// Two processes iterating one goal would double its spend and corrupt its
+    /// own progress count.
+    #[test]
+    fn a_goal_is_never_claimed_by_two_processes_at_once() {
+        let s = store();
+        s.add_goal(&a_goal("contended")).unwrap();
+        s.write(|tx| {
+            tx.execute("UPDATE goals SET next_fire_at_ms = 1", []).unwrap();
+            Ok(())
+        })
+        .unwrap();
+        let now = now_ms();
+        assert_eq!(s.claim_due_goals("first", now, 60_000).unwrap().len(), 1);
+        assert!(s.claim_due_goals("second", now, 60_000).unwrap().is_empty());
+    }
+
+    /// Restarting a stalled goal is a person saying the situation changed, so
+    /// the count that stopped it starts again from nothing.
+    #[test]
+    fn restarting_a_stalled_goal_clears_what_stalled_it() {
+        let s = store();
+        let mut g = a_goal("revived");
+        g.stall_after = 1;
+        s.add_goal(&g).unwrap();
+        s.advance_goal("g-revived", now_ms(), 0.0, false).unwrap();
+        assert_eq!(
+            s.goal_named("revived").unwrap().unwrap().state,
+            GoalState::Stalled
+        );
+
+        s.set_goal_state("revived", GoalState::Running).unwrap();
+        let back = s.goal_named("revived").unwrap().unwrap();
+        assert_eq!(back.state, GoalState::Running);
+        assert_eq!(back.no_progress, 0);
+        assert!(back.next_fire_at_ms.unwrap() > now_ms());
+    }
+
+    #[test]
+    fn a_goal_with_an_impossible_cadence_is_refused() {
+        let s = store();
+        let mut g = a_goal("bad");
+        g.cron = "not a cron".into();
+        assert!(s.add_goal(&g).is_err());
+        assert!(s.goals().unwrap().is_empty());
     }
 
     // ---- trust admission ----
