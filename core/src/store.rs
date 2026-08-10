@@ -2181,6 +2181,67 @@ impl Store {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
+    /// Every entity in a scope with how many edges it has, most connected
+    /// first.
+    ///
+    /// One query rather than one per node. The obvious shape — list the
+    /// entities, then count each one's edges — is N+1 round trips for a screen
+    /// that redraws four times a second, and the degree is the column that
+    /// makes the list worth reading: it is the cheapest honest answer to "is
+    /// this memory load-bearing, or did it get written once and never used".
+    ///
+    /// Degree counts both directions, because an entity nine facts *point at*
+    /// is exactly as central as one that points at nine.
+    pub fn memory_nodes(&self, scope: Option<&str>, limit: usize) -> Result<Vec<MemoryNode>> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT e.id, e.scope, e.name, e.kind, e.last_seen_ms,
+                    (SELECT COUNT(*) FROM relations r
+                      WHERE (r.src = e.id OR r.dst = e.id) AND r.valid_to_ms IS NULL)
+               FROM entities e
+              WHERE (?1 IS NULL OR e.scope = ?1)
+              ORDER BY 6 DESC, e.last_seen_ms DESC
+              LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![scope, limit as i64], |r| {
+            Ok(MemoryNode {
+                id: r.get(0)?,
+                scope: r.get(1)?,
+                name: r.get(2)?,
+                kind: r.get(3)?,
+                last_seen_ms: r.get(4)?,
+                degree: r.get(5)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// The edges touching one entity, both directions, with the far end named.
+    ///
+    /// What the local-graph view draws: in-edges above, out-edges below. The
+    /// direction is kept because `contradicts` and `derived-from` do not mean
+    /// the same thing read backwards.
+    pub fn edges_of(&self, entity_id: i64, limit: usize) -> Result<Vec<Edge>> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT r.predicate, e.id, e.name, r.src = ?1
+               FROM relations r
+               JOIN entities e ON e.id = CASE WHEN r.src = ?1 THEN r.dst ELSE r.src END
+              WHERE (r.src = ?1 OR r.dst = ?1) AND r.valid_to_ms IS NULL
+              ORDER BY r.recorded_at_ms DESC
+              LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![entity_id, limit as i64], |r| {
+            Ok(Edge {
+                predicate: r.get(0)?,
+                other_id: r.get(1)?,
+                other: r.get(2)?,
+                outgoing: r.get(3)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
     fn entity_id(&self, scope: &str, name: &str) -> Result<Option<i64>> {
         let conn = self.conn.lock().expect("store lock poisoned");
         Ok(conn
@@ -2316,15 +2377,48 @@ fn row_to_goal(r: &rusqlite::Row) -> rusqlite::Result<Goal> {
     })
 }
 
+/// Read a stored outcome back.
+///
+/// The fallback is `Unknown`, not `Ran`, and that is the whole point of it: an
+/// outcome written by a newer build, or corrupted, used to read back as a
+/// successful run. A row that exists to record that something did *not* happen
+/// must never decay into a claim that it did.
 fn parse_outcome(s: &str) -> FireOutcome {
     match s {
+        "ran" => FireOutcome::Ran,
         "skipped_overlap" => FireOutcome::SkippedOverlap,
         "skipped_misfire" => FireOutcome::SkippedMisfire,
         "replaced" => FireOutcome::Replaced,
         "spawn_failed" => FireOutcome::SpawnFailed,
         "abandoned" => FireOutcome::Abandoned,
-        _ => FireOutcome::Ran,
+        "monitor_quiet" => FireOutcome::MonitorQuiet,
+        _ => FireOutcome::Unknown,
     }
+}
+
+/// One entity in the memory list, with how connected it is.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryNode {
+    pub id: i64,
+    pub scope: String,
+    pub name: String,
+    pub kind: String,
+    pub last_seen_ms: i64,
+    /// Edges in either direction. The cheapest honest answer to whether this
+    /// memory is load-bearing or was written once and never used again.
+    pub degree: i64,
+}
+
+/// One edge, from the point of view of the entity being looked at.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Edge {
+    pub predicate: String,
+    pub other_id: i64,
+    pub other: String,
+    /// True when the entity in question is the *subject*. Kept because
+    /// `contradicts` and `derived-from` do not mean the same thing read
+    /// backwards.
+    pub outgoing: bool,
 }
 
 /// An entity reached from another, and how far away it was.
@@ -4303,6 +4397,143 @@ mod tests {
             .map(|n| n.name)
             .collect();
         assert!(found.is_empty(), "an untrusted seed reached the graph: {found:?}");
+    }
+
+    /// The fallback used to be `Ran`, so an outcome written by a newer build
+    /// read back as a successful run. A row whose whole job is to record that
+    /// something did *not* happen must never decay into a claim that it did.
+    #[test]
+    fn an_outcome_this_build_does_not_know_never_reads_as_a_run() {
+        assert_eq!(parse_outcome("something_from_the_future"), FireOutcome::Unknown);
+        assert_eq!(parse_outcome(""), FireOutcome::Unknown);
+        assert!(!FireOutcome::Unknown.started_a_run());
+    }
+
+    /// Every outcome must survive the round trip, or the table lies about
+    /// history in exactly the way it exists to prevent.
+    #[test]
+    fn every_outcome_survives_the_round_trip_through_the_database() {
+        for outcome in [
+            FireOutcome::Ran,
+            FireOutcome::SkippedOverlap,
+            FireOutcome::SkippedMisfire,
+            FireOutcome::Replaced,
+            FireOutcome::SpawnFailed,
+            FireOutcome::Abandoned,
+            FireOutcome::MonitorQuiet,
+        ] {
+            assert_eq!(parse_outcome(outcome.as_str()), outcome, "{outcome:?}");
+        }
+    }
+
+    /// A quiet monitor tick is a success that started nothing. Counting it as a
+    /// run would report a watchdog as the busiest schedule on the box.
+    #[test]
+    fn a_quiet_monitor_tick_is_recorded_without_being_counted_as_a_run() {
+        let s = store();
+        s.add_schedule(&a_schedule("watch", "*/5 * * * *")).unwrap();
+        s.record_fire(&Fire {
+            id: 0,
+            schedule_id: "id-watch".into(),
+            due_at_ms: 1,
+            fired_at_ms: 2,
+            run_id: None,
+            outcome: FireOutcome::MonitorQuiet,
+            detail: Some("nothing changed".into()),
+        })
+        .unwrap();
+
+        let history = s.fires("id-watch", 5).unwrap();
+        assert_eq!(history[0].outcome, FireOutcome::MonitorQuiet);
+        assert!(!history[0].outcome.started_a_run());
+        assert_eq!(history[0].run_id, None, "nothing was spawned");
+    }
+
+    // ---- listing memory for a screen ----
+
+    /// Degree is the column that makes a memory list worth reading, so the most
+    /// connected thing comes first rather than the most recent.
+    #[test]
+    fn memory_nodes_come_back_most_connected_first() {
+        let s = store();
+        s.remember(NewFact::new("reljod", "uses", "jod")).unwrap();
+        s.remember(NewFact::new("reljod", "owns", "jod-cloud")).unwrap();
+        s.remember(NewFact::new("reljod", "prefers", "linear")).unwrap();
+        s.remember(NewFact::new("jod", "runs-on", "jod-cloud")).unwrap();
+
+        let nodes = s.memory_nodes(None, 10).unwrap();
+        assert_eq!(nodes[0].name, "reljod");
+        assert_eq!(nodes[0].degree, 3);
+        // jod-cloud is pointed *at* twice, which is as central as pointing out
+        // twice — a node nobody links to is the one that is not load-bearing.
+        let cloud = nodes.iter().find(|n| n.name == "jod-cloud").unwrap();
+        assert_eq!(cloud.degree, 2);
+    }
+
+    #[test]
+    fn memory_nodes_can_be_narrowed_to_one_scope() {
+        let s = store();
+        s.remember(NewFact::new("a", "to", "b").in_scope("finance")).unwrap();
+        s.remember(NewFact::new("c", "to", "d").in_scope("tasks")).unwrap();
+
+        let finance = s.memory_nodes(Some("finance"), 10).unwrap();
+        assert_eq!(finance.len(), 2);
+        assert!(finance.iter().all(|n| n.scope == "finance"));
+    }
+
+    #[test]
+    fn an_empty_memory_lists_nothing_rather_than_failing() {
+        assert!(store().memory_nodes(None, 10).unwrap().is_empty());
+    }
+
+    /// The local-graph view draws in-edges above and out-edges below, so which
+    /// way an edge points has to survive the query.
+    #[test]
+    fn an_entitys_edges_say_which_way_they_point() {
+        let s = store();
+        s.remember(NewFact::new("reljod", "uses", "jod")).unwrap();
+        s.remember(NewFact::new("jod-cloud", "hosts", "jod")).unwrap();
+
+        let jod = s
+            .memory_nodes(None, 10)
+            .unwrap()
+            .into_iter()
+            .find(|n| n.name == "jod")
+            .unwrap();
+        let edges = s.edges_of(jod.id, 10).unwrap();
+        assert_eq!(edges.len(), 2);
+
+        let incoming: Vec<&str> = edges
+            .iter()
+            .filter(|e| !e.outgoing)
+            .map(|e| e.other.as_str())
+            .collect();
+        assert_eq!(incoming.len(), 2, "both facts point at jod: {edges:?}");
+        assert!(incoming.contains(&"reljod"));
+        assert!(incoming.contains(&"jod-cloud"));
+    }
+
+    /// A superseded belief must not still be drawn as an edge.
+    #[test]
+    fn a_retired_belief_leaves_the_edge_list() {
+        let s = store();
+        let old = s.remember(NewFact::new("reljod", "lives-in", "manila")).unwrap();
+        // By name, not by position: both ends have degree 1 here, and which of
+        // two equal-degree rows sorts first is arbitrary.
+        let reljod = s
+            .memory_nodes(None, 10)
+            .unwrap()
+            .into_iter()
+            .find(|n| n.name == "reljod")
+            .unwrap()
+            .id;
+        assert_eq!(s.edges_of(reljod, 10).unwrap().len(), 1);
+
+        s.supersede(old, NewFact::new("reljod", "lives-in", "singapore"))
+            .unwrap();
+        let edges = s.edges_of(reljod, 10).unwrap();
+        assert_eq!(edges.len(), 1, "one current belief, not two");
+        assert_eq!(edges[0].other, "singapore");
     }
 
     #[test]

@@ -196,6 +196,22 @@ pub enum FireOutcome {
     /// A claimant took the schedule and then died without recording anything.
     /// Written by whoever displaces the dead lease.
     Abandoned,
+    /// A monitor ran, nothing it watches had changed, and so no agent was
+    /// woken.
+    ///
+    /// This is a *success*: the schedule did its job for the price of a hash.
+    /// It gets a row because the alternative is a schedule that shows no fires
+    /// for a week, which is indistinguishable from one that is broken — and
+    /// telling those apart is the entire reason this table exists.
+    MonitorQuiet,
+    /// Read back from a row this build does not understand.
+    ///
+    /// Only ever produced by parsing, never written. It exists because the
+    /// fallback used to be `Ran`, which meant a future outcome added without a
+    /// matching parse arm would read back out of the database as a successful
+    /// run — the precise lie every other decision here is arranged to prevent.
+    /// An honest "I do not know what this was" is always better.
+    Unknown,
 }
 
 impl FireOutcome {
@@ -207,7 +223,18 @@ impl FireOutcome {
             FireOutcome::Replaced => "replaced",
             FireOutcome::SpawnFailed => "spawn_failed",
             FireOutcome::Abandoned => "abandoned",
+            FireOutcome::MonitorQuiet => "monitor_quiet",
+            FireOutcome::Unknown => "unknown",
         }
+    }
+
+    /// Whether this outcome means an agent actually ran.
+    ///
+    /// `MonitorQuiet` is deliberately *not* a run: the point of a monitor is
+    /// that nothing was spawned. Anything that counts quiet ticks as runs would
+    /// report a watchdog as the busiest schedule on the box.
+    pub fn started_a_run(&self) -> bool {
+        matches!(self, FireOutcome::Ran | FireOutcome::Replaced)
     }
 }
 
