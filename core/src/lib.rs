@@ -20,6 +20,8 @@
 //! is held only in the memory of the process that started it, which is why a
 //! restarted daemon — or a phone — can pick it straight back up.
 
+pub mod consolidate;
+pub mod conversation;
 pub mod discovery;
 pub mod error;
 pub mod event;
@@ -29,6 +31,9 @@ pub mod proc;
 pub mod runner;
 pub mod schedule;
 pub mod service;
+pub mod telegram;
+pub mod ticker;
+pub mod webhook;
 pub mod store;
 pub mod team;
 
