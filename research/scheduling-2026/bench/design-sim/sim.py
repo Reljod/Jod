@@ -17,7 +17,7 @@ Run: python3 sim.py
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -351,7 +351,13 @@ def s1_downtime(d: Design):
 
 
 def s2_dst_spring(d: Design):
-    """02:30 daily, New York, across 2026-03-08. Does the day happen, and when?"""
+    """02:30 daily, New York, across 2026-03-08. Does the day happen, and when?
+
+    Run with jitter forced off. Jitter also moves a fire, but that is a
+    predictability cost and is scored there; mixing it in here would blame the
+    timezone handling for something the timezone handling did not do.
+    """
+    d = replace(d, jitter_ms=0)
     start = datetime(2026, 3, 6, 12, 0, tzinfo=UTC)
     s = Sched("30 2 * * *", "America/New_York", -300, start, grace=timedelta(hours=6))
     ev = simulate(d, s, start, start + timedelta(days=5), tick=timedelta(minutes=1))
@@ -369,7 +375,14 @@ def s2_dst_spring(d: Design):
 
 
 def s3_dst_fall(d: Design):
-    """01:30 daily, New York, across 2026-11-01. Exactly one fire, or two?"""
+    """01:30 daily, New York, across 2026-11-01. Exactly one fire is required.
+
+    This harness's reference resolver implements croner's fold rule, so the
+    double-fire that `cron` 0.17.0 and `cronexpr` 1.6.0 actually exhibit is
+    measured next door in bench/cron-dst, not here. What this checks is that
+    no design in the set drops or duplicates the day.
+    """
+    d = replace(d, jitter_ms=0)
     start = datetime(2026, 10, 30, 12, 0, tzinfo=UTC)
     s = Sched("30 1 * * *", "America/New_York", -240, start, grace=timedelta(hours=6))
     ev = simulate(d, s, start, start + timedelta(days=4))
@@ -472,16 +485,16 @@ RUBRIC = [
     ("observability", 7),
 ]
 
-# Measured next door by bench/claim-race/claim_race.py, 8 processes, 4 s per
-# arm. Reproduced in out/claim-race.txt; quoted here so the two scores that
-# need real concurrency are not guesses.
+# Measured next door by bench/claim-race/claim_race.py with 16 real OS
+# processes, 6 s per arm. Reproduced verbatim in out/claim-race.txt; quoted
+# here so the two scores that need real concurrency are not guesses.
 RACE = {
-    "naive_dup_pct": 19.88,       # design 1
+    "naive_dup_pct": 41.26,       # design 1
     "cas_dup_pct": 0.00,          # designs 2-10
-    "lease_unaccounted": 28,      # design 3: claims lost with nothing recorded
-    "lease_claims": 205,
+    "lease_unaccounted": 52,      # design 3: claims lost with nothing recorded
+    "lease_claims": 255,
     "reaping_unaccounted": 0,     # designs 4-10
-    "reaping_claims": 199,
+    "reaping_claims": 270,
 }
 
 
@@ -572,7 +585,7 @@ def main():
 
     print("\n== SCENARIO OUTCOMES ==")
     hdr = (f"{'#':>2} {'design':<26}{'catch':>6}{'sprg':>6}{'fall':>6}"
-           f"{'peak':>6}{'jitL':>6}{'fail':>6}{'goal-iters':>11} {'goal end':<24}")
+           f"{'peak':>6}{'jitL':>6}{'fail':>6}{'skipR':>6}{'goal-iters':>11} {'goal end':<24}")
     print(hdr)
     for d in DESIGNS:
         r = results[d.n]
@@ -584,6 +597,7 @@ def main():
             f"{r['s4']['peak_concurrent']:>6}"
             f"{r['s5']['lost_to_jitter']:>6}"
             f"{r['s6']['spawn_attempts']:>6}"
+            f"{r['s1']['skipped_recorded']:>6}"
             f"{r['s7']['iterations']:>11} {r['s7']['ended']:<24}"
         )
     print("  catch = runs launched in the first minute back after a 6h outage")
@@ -592,6 +606,18 @@ def main():
     print("  peak  = concurrent runs, hourly schedule with 90-minute runs")
     print("  jitL  = fires lost because jitter pushed them past grace_ms")
     print("  fail  = spawn attempts in 24h for a schedule whose every run fails")
+    print("  skipR = skips written down as rows. A skip nobody recorded is a silent failure.")
+
+    # What the third misfire policy costs, on the same outage.
+    fire_all = replace(DESIGNS[-1], misfire_policy=True)
+    start = datetime(2026, 8, 10, 0, 0, tzinfo=UTC)
+    s = Sched("*/5 * * * *", "Asia/Manila", 480, start, misfire="fire_all",
+              grace=timedelta(minutes=2, seconds=30))
+    ev = simulate(fire_all, s, start, start + timedelta(hours=8),
+                  gap=(start + timedelta(hours=1), start + timedelta(hours=7)))
+    caught = sum(1 for e in ev if e[0] == "caught_up")
+    print(f"\n  same outage under misfire='fire_all': {caught} missed instants replayed "
+          f"(the reason the policy is capped at 100)")
 
     print("\n== DST DETAIL ==")
     for d in DESIGNS:

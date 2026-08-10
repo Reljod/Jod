@@ -2,12 +2,17 @@ python 3.14.4  sqlite 3.46.1
 16 OS processes, 6.0s per arm, 4 schedules
 
 arm           claims  distinct   dupes    dup%   busy   claims/s
-cas             7436      7436       0   0.00%      3       1201
-immediate      11950     11950       0   0.00%      3       1889
-naive           7621      3986    3635  47.70%      3       1227
+cas             5408      5408       0   0.00%      2        870
+immediate       5085      5085       0   0.00%      6        817
+naive           3585      2106    1479  41.26%      2        569
 
 lease takeover — a dead claimant's schedule, contested at a barrier
   500 rounds x 16 processes: winners per round min=1 max=1, rounds != 1 winner: 0, duplicate claims: 0
+
+crash injection — workers abandon 30% of the claims they win
+claim           claims  dupes   done  reaped  twice  UNACCOUNTED
+lease only         255      0    168      35      0           52
+lease+reap         270      0    182      88      0            0
 
 VERDICT
   cas       must show 0 duplicates
