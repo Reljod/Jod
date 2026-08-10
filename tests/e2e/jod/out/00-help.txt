@@ -1,0 +1,643 @@
+==============================================================
+== top level
+==============================================================
+$ jod --help
+Delegate to an agent harness and watch it work.
+
+Usage: jod <COMMAND>
+
+Commands:
+  run        Delegate a prompt to a harness and stream the result
+  ls         List the agents this process knows about
+  harnesses  Show which harnesses are installed and usable
+  watch      Follow a running agent, or replay a finished one
+  kill       Stop an agent and everything it started
+  report     Counts and total spend across all agents
+  history    Runs from earlier sessions, newest first
+  remember   Teach Jod something it should remember
+  recall     Search what Jod remembers
+  forget     Permanently destroy a fact — every version of it, not just the current
+  tui        The full-screen interface: conversation, live agents, status
+  team       Agent teams: several agents on one job, talking to each other
+  daemon     Run the scheduler: fire due schedules and advance goals, for ever
+  conv       Conversations Jod owns: list them, fork one, take one back
+  schedule   Work that fires on the clock
+  goal       Standing objectives, pursued until they are met
+  related    What Jod's memory connects to a thing
+  path       How two things in memory are connected, if they are
+  chat       Hold a conversation on a plain terminal, without the full-screen UI
+  help       Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help     Print help
+  -V, --version  Print version
+
+$ jod --version
+jod 0.1.0
+
+==============================================================
+== jod remember
+==============================================================
+$ jod remember --help
+Teach Jod something it should remember
+
+Usage: jod remember [OPTIONS] <SUBJECT> <PREDICATE> <OBJECT>
+
+Arguments:
+  <SUBJECT>
+          What the fact is about, e.g. "reljod"
+
+  <PREDICATE>
+          The relation, e.g. "prefers"
+
+  <OBJECT>
+          The value, e.g. "linear for tasks"
+
+Options:
+      --source <SOURCE>
+          Where this came from — a note path, a URL, a person
+
+      --scope <SCOPE>
+          Which domain this belongs to. Scopes are hard partitions
+          
+          [default: default]
+
+      --origin <ORIGIN>
+          Who asserted it. Never inferred from the text itself
+
+          Possible values:
+          - owner:     Reljod said so. The default when a human types `jod remember`
+          - agent:     An agent concluded it
+          - untrusted: Read from outside — a page, an email, a document
+          - system:    Jod itself recorded it
+          
+          [default: owner]
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+==============================================================
+== jod recall
+==============================================================
+$ jod recall --help
+Search what Jod remembers
+
+Usage: jod recall [OPTIONS] [QUERY]...
+
+Arguments:
+  [QUERY]...  
+
+Options:
+  -l, --limit <LIMIT>  [default: 10]
+      --scope <SCOPE>  Restrict to one domain. Omit to search every scope
+      --json           
+  -h, --help           Print help
+
+==============================================================
+== jod forget
+==============================================================
+$ jod forget --help
+Permanently destroy a fact — every version of it, not just the current
+
+Usage: jod forget [OPTIONS] <SUBJECT> <PREDICATE>
+
+Arguments:
+  <SUBJECT>    
+  <PREDICATE>  
+
+Options:
+      --scope <SCOPE>  [default: default]
+  -h, --help           Print help
+
+==============================================================
+== jod related
+==============================================================
+$ jod related --help
+What Jod's memory connects to a thing.
+
+Recall answers "what do I know about X". This answers "what is X connected to", which no list of facts can — it walks the graph.
+
+Usage: jod related [OPTIONS] <SUBJECT>
+
+Arguments:
+  <SUBJECT>
+          The entity to start from
+
+Options:
+  -n, --hops <HOPS>
+          How many hops out. Capped: four undirected hops from a well-connected thing returns a fifth of everything Jod knows
+          
+          [default: 2]
+
+      --scope <SCOPE>
+          [default: default]
+
+      --json
+          
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+==============================================================
+== jod path
+==============================================================
+$ jod path --help
+How two things in memory are connected, if they are
+
+Usage: jod path [OPTIONS] <FROM> <TO>
+
+Arguments:
+  <FROM>  
+  <TO>    
+
+Options:
+      --scope <SCOPE>  [default: default]
+  -n, --max <MAX>      [default: 5]
+  -h, --help           Print help
+
+==============================================================
+== jod conv
+==============================================================
+$ jod conv --help
+Conversations Jod owns: list them, fork one, take one back.
+
+A conversation here is a tree, not a line. Two of the three harnesses can fork themselves and none can hand a thread to another, so the transcript that survives a harness switch has to be Jod's.
+
+Usage: jod conv <COMMAND>
+
+Commands:
+  ls       Every conversation, newest first
+  show     Read one, from its root to wherever its head currently points
+  fork     Copy a conversation from a point, leaving the original untouched
+  revert   Move the head back to an earlier message
+  goto     Point the head at any message sharing this conversation's root — including a branch abandoned earlier, which revert cannot reach because it is a cousin of the head rather than an ancestor
+  search   Search every conversation. Returns the match with the conversation's opening and closing around it, so a hit reads without the transcript
+  compact  Summarise a span out of the live window, keeping it on disk
+  handoff  What this conversation would be handed to another harness as
+  help     Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help
+          Print help (see a summary with '-h')
+
+==============================================================
+== jod schedule
+==============================================================
+$ jod schedule --help
+Work that fires on the clock.
+
+A schedule is a prompt, a cron expression and a timezone. Everything else — what to do about a run that overran, or instants missed while Jod was down — is policy with a default that was chosen by measuring what happens without it.
+
+Usage: jod schedule <COMMAND>
+
+Commands:
+  ls      Every schedule, with when it next fires
+  add     Arm a new one
+  pause   Stop a schedule firing, without forgetting it
+  resume  Arm it again. Also clears whatever failure count stopped it
+  run     Fire it now, through the ordinary tick so every policy still applies
+  rm      Forget a schedule and its history
+  log     What a schedule has done lately
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help
+          Print help (see a summary with '-h')
+
+==============================================================
+== jod goal
+==============================================================
+$ jod goal --help
+Standing objectives, pursued until they are met.
+
+A goal differs from a schedule in having an end: it stops when it is satisfied, when it runs out of budget or iterations, or when it stops making progress. That last one matters most — a loop that keeps running while nothing changes looks exactly like a loop doing useful work.
+
+Usage: jod goal <COMMAND>
+
+Commands:
+  ls      
+  add     Set a standing objective
+  pause   
+  resume  
+  run     Run one iteration now
+  rm      
+  log     What this goal has done, out of its own memory
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help
+          Print help (see a summary with '-h')
+
+==============================================================
+== jod daemon
+==============================================================
+$ jod daemon --help
+Run the scheduler: fire due schedules and advance goals, for ever.
+
+This is the process that makes a schedule mean anything. Without it the tick exists and is tested and nothing calls it, so `jod schedule ls` describes work that will never happen. Install it with `deploy/jod-daemon.service`.
+
+Usage: jod daemon [OPTIONS]
+
+Options:
+      --once
+          Tick once and exit, rather than staying resident. For a systemd timer, or for checking the thing works before enabling the unit
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+==============================================================
+== jod tui
+==============================================================
+$ jod tui --help
+The full-screen interface: conversation, live agents, status
+
+Usage: jod tui [OPTIONS]
+
+Options:
+  -H, --harness <HARNESS>
+          [default: claude]
+          [possible values: claude, opencode, agy]
+
+  -c, --cwd <CWD>
+          
+
+  -m, --model <MODEL>
+          
+
+  -p, --permission <PERMISSION>
+          Possible values:
+          - ask:          Let the agent read — files and the web — and refuse everything that could change something
+          - accept-edits: Let file edits through; still prompt for anything else
+          - bypass:       Auto-approve everything. Only sane in a throwaway directory
+          
+          [default: ask]
+
+  -C, --continue
+          Pick up the last conversation instead of starting a new one
+
+      --team <TEAM>
+          Watch a team: Ctrl-G shows its members and its task board
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+==============================================================
+== jod chat
+==============================================================
+$ jod chat --help
+Hold a conversation on a plain terminal, without the full-screen UI
+
+Usage: jod chat [OPTIONS]
+
+Options:
+  -H, --harness <HARNESS>
+          [default: claude]
+          [possible values: claude, opencode, agy]
+
+  -c, --cwd <CWD>
+          
+
+  -m, --model <MODEL>
+          
+
+  -p, --permission <PERMISSION>
+          Possible values:
+          - ask:          Let the agent read — files and the web — and refuse everything that could change something
+          - accept-edits: Let file edits through; still prompt for anything else
+          - bypass:       Auto-approve everything. Only sane in a throwaway directory
+          
+          [default: ask]
+
+  -C, --continue
+          Pick up the last conversation instead of starting a new one
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+==============================================================
+== jod team
+==============================================================
+$ jod team --help
+Agent teams: several agents on one job, talking to each other.
+
+A team can mix harnesses — a lead on Claude Code with teammates on AGY and OpenCode — which is the thing no single harness can do.
+
+Usage: jod team <COMMAND>
+
+Commands:
+  join   Put a member on a team, or update the one already there
+  task   Put a task on the team's board
+  claim  Take ownership of a task. Reports whether this member won the race
+  done   Mark a task finished
+  msg    Send a message. Without --to it goes to every member but the sender
+  inbox  Read a member's waiting messages and mark them delivered
+  wake   Deliver waiting messages: resume every idle member that has mail
+  start  Give a member its first turn, so it has a conversation to resume
+  show   Who is on the team, and what is on its board
+  list   Every team that has a member
+  help   Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help
+          Print help (see a summary with '-h')
+
+==============================================================
+== schedule subcommands
+==============================================================
+$ jod schedule add --help
+Arm a new one
+
+Usage: jod schedule add [OPTIONS] --cron <CRON> <NAME> <PROMPT>
+
+Arguments:
+  <NAME>    A short name, used everywhere else to refer to it
+  <PROMPT>  What to ask the agent to do
+
+Options:
+  -c, --cron <CRON>          A cron expression: `0 2 * * *`, `@daily`, `*/15 * * * *`
+  -z, --timezone <TIMEZONE>  An IANA zone name — `Asia/Manila`, not `+08:00`. An offset is only correct until the next daylight-saving transition [default: UTC]
+  -H, --harness <HARNESS>    [default: claude] [possible values: claude, opencode, agy]
+      --cwd <CWD>            
+  -m, --model <MODEL>        
+      --misfire <MISFIRE>    What to do about instants missed while Jod was not running [default: fire_once]
+      --overlap <OVERLAP>    What to do when it comes due and the last run is still going [default: skip]
+  -h, --help                 Print help
+
+$ jod schedule ls --help
+Every schedule, with when it next fires
+
+Usage: jod schedule ls [OPTIONS]
+
+Options:
+      --json  
+  -h, --help  Print help
+
+$ jod schedule pause --help
+Stop a schedule firing, without forgetting it
+
+Usage: jod schedule pause <NAME>
+
+Arguments:
+  <NAME>  
+
+Options:
+  -h, --help  Print help
+
+$ jod schedule resume --help
+Arm it again. Also clears whatever failure count stopped it
+
+Usage: jod schedule resume <NAME>
+
+Arguments:
+  <NAME>  
+
+Options:
+  -h, --help  Print help
+
+$ jod schedule run --help
+Fire it now, through the ordinary tick so every policy still applies
+
+Usage: jod schedule run <NAME>
+
+Arguments:
+  <NAME>  
+
+Options:
+  -h, --help  Print help
+
+$ jod schedule rm --help
+Forget a schedule and its history
+
+Usage: jod schedule rm <NAME>
+
+Arguments:
+  <NAME>  
+
+Options:
+  -h, --help  Print help
+
+$ jod schedule log --help
+What a schedule has done lately
+
+Usage: jod schedule log [OPTIONS] <NAME>
+
+Arguments:
+  <NAME>  
+
+Options:
+  -l, --limit <LIMIT>  [default: 10]
+  -h, --help           Print help
+
+==============================================================
+== goal subcommands
+==============================================================
+$ jod goal add --help
+Set a standing objective
+
+Usage: jod goal add [OPTIONS] <NAME> <OBJECTIVE>
+
+Arguments:
+  <NAME>       
+  <OBJECTIVE>  What the goal is, in a sentence
+
+Options:
+  -c, --cron <CRON>
+          How often to work on it [default: "0 * * * *"]
+  -z, --timezone <TIMEZONE>
+          [default: UTC]
+  -H, --harness <HARNESS>
+          [default: claude] [possible values: claude, opencode, agy]
+      --cwd <CWD>
+          
+      --done-when <DONE_WHEN>
+          A command that decides "done". Deterministic, and consulted before anything is asked to judge progress
+      --max-iterations <MAX_ITERATIONS>
+          Stop after this many iterations, whatever the state
+      --budget <BUDGET>
+          Stop once this much has been spent
+      --stall-after <STALL_AFTER>
+          How many iterations may finish without progress before it is called stalled rather than left running [default: 6]
+  -h, --help
+          Print help
+
+$ jod goal ls --help
+Usage: jod goal ls [OPTIONS]
+
+Options:
+      --json  
+  -h, --help  Print help
+
+$ jod goal pause --help
+Usage: jod goal pause <NAME>
+
+Arguments:
+  <NAME>  
+
+Options:
+  -h, --help  Print help
+
+$ jod goal resume --help
+Usage: jod goal resume <NAME>
+
+Arguments:
+  <NAME>  
+
+Options:
+  -h, --help  Print help
+
+$ jod goal run --help
+Run one iteration now
+
+Usage: jod goal run <NAME>
+
+Arguments:
+  <NAME>  
+
+Options:
+  -h, --help  Print help
+
+$ jod goal rm --help
+Usage: jod goal rm <NAME>
+
+Arguments:
+  <NAME>  
+
+Options:
+  -h, --help  Print help
+
+$ jod goal log --help
+What this goal has done, out of its own memory.
+
+A goal's progress lives in the fact store rather than in its columns, under a scope keyed by its id — which nobody can be expected to type. This is the way in.
+
+Usage: jod goal log [OPTIONS] <NAME>
+
+Arguments:
+  <NAME>
+          
+
+Options:
+  -l, --limit <LIMIT>
+          [default: 10]
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+==============================================================
+== conv subcommands
+==============================================================
+$ jod conv ls --help
+Every conversation, newest first
+
+Usage: jod conv ls [OPTIONS]
+
+Options:
+  -l, --limit <LIMIT>  [default: 20]
+      --json           
+  -h, --help           Print help
+
+$ jod conv show --help
+Read one, from its root to wherever its head currently points
+
+Usage: jod conv show [OPTIONS] <ID>
+
+Arguments:
+  <ID>  
+
+Options:
+      --live  Only what a harness would still be sent, after compaction
+  -h, --help  Print help
+
+$ jod conv fork --help
+Copy a conversation from a point, leaving the original untouched.
+
+Without `--at`, forks from the current head.
+
+Usage: jod conv fork [OPTIONS] <ID>
+
+Arguments:
+  <ID>
+          
+
+Options:
+      --at <AT>
+          
+
+      --title <TITLE>
+          
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+$ jod conv revert --help
+Move the head back to an earlier message.
+
+Non-destructive: the abandoned tail stays on disk and stays reachable, which is what makes this recoverable rather than a deletion.
+
+Usage: jod conv revert <ID> <MESSAGE>
+
+Arguments:
+  <ID>
+          
+
+  <MESSAGE>
+          
+
+Options:
+  -h, --help
+          Print help (see a summary with '-h')
+
+$ jod conv goto --help
+Point the head at any message sharing this conversation's root — including a branch abandoned earlier, which revert cannot reach because it is a cousin of the head rather than an ancestor
+
+Usage: jod conv goto <ID> <MESSAGE>
+
+Arguments:
+  <ID>       
+  <MESSAGE>  
+
+Options:
+  -h, --help  Print help
+
+$ jod conv search --help
+Search every conversation. Returns the match with the conversation's opening and closing around it, so a hit reads without the transcript
+
+Usage: jod conv search [OPTIONS] [QUERY]...
+
+Arguments:
+  [QUERY]...  
+
+Options:
+  -l, --limit <LIMIT>  [default: 5]
+  -h, --help           Print help
+
+$ jod conv compact --help
+Summarise a span out of the live window, keeping it on disk
+
+Usage: jod conv compact <ID> <SUMMARY>
+
+Arguments:
+  <ID>       
+  <SUMMARY>  The summary. Jod has no model client, so the text comes from whoever ran the summarising agent
+
+Options:
+  -h, --help  Print help
+
+$ jod conv handoff --help
+What this conversation would be handed to another harness as.
+
+Prints the carrier rather than moving anything, because seeing what survives is the point — and for AGY the honest answer is that it becomes prompt text.
+
+Usage: jod conv handoff --to <TO> <ID>
+
+Arguments:
+  <ID>
+          
+
+Options:
+  -H, --to <TO>
+          [possible values: claude, opencode, agy]
+
+  -h, --help
+          Print help (see a summary with '-h')
+

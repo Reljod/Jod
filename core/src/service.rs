@@ -1254,6 +1254,7 @@ mod tests {
                 model: None,
                 permission: PermissionPolicy::Ask,
                 resume: crate::harness::Resume::Fresh,
+                tools: None,
             })
             .await;
 
@@ -1278,6 +1279,7 @@ mod tests {
                 model: None,
                 permission: PermissionPolicy::Ask,
                 resume: crate::harness::Resume::Fresh,
+                tools: None,
             })
             .await;
         assert!(matches!(result, Err(JodError::StoreRequired)));
@@ -1312,6 +1314,7 @@ mod tests {
             model: Some("opus".into()),
             permission: PermissionPolicy::Ask,
             resume: crate::harness::Resume::Fresh,
+            tools: None,
         }
     }
 

@@ -1,0 +1,82 @@
+==============================================================
+== 1. arm a schedule and let it come due
+==============================================================
+$ jod schedule add tick-demo say OK and stop --cron * * * * *
+tick-demo armed — next Aug 10 22:56 (in 48s)
+
+$ python3 -c "
+import time
+w = 62 - (time.time() % 60)
+print(f'sleeping {w:.1f}s so the instant is genuinely past')
+time.sleep(w)"
+sleeping 50.2s so the instant is genuinely past
+
+==============================================================
+== 2. tick with jod-run absent from PATH
+==============================================================
+$ PATH='/tmp/jod-e2e/only-jod:/usr/bin:/bin' JOD_HOME='/tmp/jod-e2e/spawnfail' '/tmp/jod-e2e/only-jod/jod' daemon --once
+claimed 1 · started 0 · held 0 · failed 1
+
+$ PATH='/tmp/jod-e2e/only-jod:/usr/bin:/bin' JOD_HOME='/tmp/jod-e2e/spawnfail' '/tmp/jod-e2e/only-jod/jod' schedule log tick-demo
+[31m✗[0m Aug 10 22:56 (0s ago)          [2mspawn_failed    [0m harness `Claude Code` is not installed or could not be found on this machine
+
+$ q "SELECT id, outcome, detail, run_id FROM schedule_fires ORDER BY id"
+id | outcome | detail | run_id
+---+---------+--------+-------
+1 | spawn_failed | harness `Claude Code` is not installed or could not be found on this machine | 
+(1 rows)
+
+==============================================================
+== 3. the failure must be counted against the schedule
+==============================================================
+$ q "SELECT name, state, consecutive_failures, last_fire_at_ms, next_fire_at_ms FROM schedules"
+name | state | consecutive_failures | last_fire_at_ms | next_fire_at_ms
+-----+-------+----------------------+-----------------+----------------
+tick-demo | armed | 1 | 1786402562025 | 1786402740000
+(1 rows)
+
+==============================================================
+== 4. no orphan run row for a spawn that never happened
+==============================================================
+$ q "SELECT id, name, status FROM runs"
+id | name | status
+---+------+-------
+(0 rows)
+
+$ jod ls
+no agents
+
+==============================================================
+== 5. repeated failures: does the breaker the PR mentions trip?
+==============================================================
+$ python3 -c "
+import time
+time.sleep(max(0, 62 - (time.time() % 60)))"
+
+--- tick 1 ---
+$ PATH='/tmp/jod-e2e/only-jod:/usr/bin:/bin' JOD_HOME='/tmp/jod-e2e/spawnfail' '/tmp/jod-e2e/only-jod/jod' daemon --once
+claimed 0 · started 0 · held 0 · failed 0
+
+$ q "SELECT name, state, consecutive_failures FROM schedules"
+name | state | consecutive_failures
+-----+-------+---------------------
+tick-demo | armed | 1
+(1 rows)
+
+$ python3 -c "
+import time
+time.sleep(max(0, 62 - (time.time() % 60)))"
+
+--- tick 2 ---
+$ PATH='/tmp/jod-e2e/only-jod:/usr/bin:/bin' JOD_HOME='/tmp/jod-e2e/spawnfail' '/tmp/jod-e2e/only-jod/jod' daemon --once
+claimed 0 · started 0 · held 0 · failed 0
+
+$ q "SELECT name, state, consecutive_failures FROM schedules"
+name | state | consecutive_failures
+-----+-------+---------------------
+tick-demo | armed | 1
+(1 rows)
+
+$ python3 -c "
+import time
+time.sleep(max(0, 62 - (time.time() % 60)))"

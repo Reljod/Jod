@@ -996,3 +996,56 @@ graph expansion — a page that cannot answer directly must not be able to steer
 which part of the graph gets walked. It is excluded, not deleted: "what did that
 page claim" stays answerable through an explicit call, where the decision to
 believe it is visible at the call site.
+
+## MCP is the seam, and it is what Jod *is*
+
+The charter says `jod-core` has no model client, no prompt templates and no
+tools. That was read too narrowly for a while — as though it meant Jod could
+only ever ask an agent a question and parse an answer out of its prose.
+
+The harnesses already have a tool mechanism, and all Jod had to do was speak it.
+Verified by running them: Claude Code takes `--mcp-config <files...>` and
+`--strict-mcp-config`; OpenCode has `opencode mcp add`.
+
+So **Jod is an MCP server**. `jod mcp` exposes what Jod can do — list what is
+running, delegate, continue an agent, stop one, schedule, set a goal, remember,
+recall, walk the memory graph — and a harness pointed at it thinks *and* acts in
+one loop.
+
+This does not weaken the charter, it is the sharpest expression of it yet:
+
+- **The harness supplies judgement.** Whether "fix the CI failure" belongs to the
+  agent already looking at CI is a call Jod is not equipped to make and should
+  not try to.
+- **Jod supplies effects.** Spawning a process group, claiming a schedule,
+  superseding a fact. Things with consequences, done under rules the agent
+  cannot argue with.
+
+Neither has to become the other, which is what the rule was protecting.
+
+**It belongs on `SpawnRequest`, not on the orchestrator.** Putting it on one
+special conversation would have made it a feature; on the spawn it is the seam,
+and a scheduled run, a goal iteration, a webhook-triggered agent and a teammate
+all get the same tools as the main chat. An agent that can see what else is
+running can hand work sideways instead of duplicating it — which is as much of
+agent-to-agent as Jod needs to have an opinion about.
+
+**Access is a capability set, not a boolean.** "Can see what is running" and "can
+start another agent" are different amounts of trust, and an agent triggered by a
+stranger's pull request should get the first and not the second. Three levels:
+read-only, delegate, orchestrate. The line that matters is between delegating and
+orchestrating: delegating spends money now and is visible, while a schedule
+spends it at 2am whether or not anyone is watching, and a goal spends it until
+something stops it.
+
+Default is read-only and it is opt-in, because the failure mode of getting this
+wrong is an agent that can give itself more agents.
+
+### What this replaces
+
+An earlier design had the orchestrator ask a harness for a JSON decision and
+parse it — propose-and-dispose. It works, and it survives as the fallback for
+any harness with no MCP support, but it is a weaker version of the same idea: it
+allows exactly one decision per turn, cannot ask a follow-up question before
+deciding, and turns every capability into a new line in a prompt and a new arm
+in a parser. With tools, adding a capability is adding a tool.

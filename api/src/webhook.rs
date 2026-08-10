@@ -393,6 +393,7 @@ impl SpawnTask {
             // Always a fresh context. Resuming would carry one stranger's
             // payload into the next stranger's run.
             resume: Resume::Fresh,
+            tools: None,
         };
 
         let agent = self

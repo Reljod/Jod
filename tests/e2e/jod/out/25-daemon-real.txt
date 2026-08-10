@@ -1,0 +1,186 @@
+==============================================================
+== 0. what is on PATH
+==============================================================
+$ which jod
+/tmp/jod-e2e/bin/jod
+
+$ which jod-run
+/tmp/jod-e2e/bin/jod-run
+
+$ which claude
+/home/reljod/.local/bin/claude
+
+$ jod harnesses
+✓ Claude Code    /home/reljod/.local/bin/claude
+✓ OpenCode       /home/reljod/.opencode/bin/opencode
+✓ AGY            /home/reljod/.local/bin/agy
+
+==============================================================
+== 1. a schedule due every minute, with a one-word job
+==============================================================
+$ jod schedule add ping say OK and stop --cron * * * * *
+ping armed — next Aug 10 22:54 (in 17s)
+
+$ jod schedule ls
+[32m●[0m [1mping                [0m [2m* * * * *       [0m Aug 10 22:54 (in 17s)
+
+==============================================================
+== 2. tick with the supervisor NOT on PATH
+==============================================================
+-- PR claims: 'spawn_failed  the jod-run supervisor was not found' --
+$ PATH=/usr/bin:/bin JOD_HOME='/tmp/jod-e2e/daemon' '/tmp/jod-e2e/bin/jod' daemon --once
+claimed 0 · started 0 · held 0 · failed 0
+
+$ jod schedule log ping
+ping has not fired yet
+
+$ q "SELECT id, outcome, detail, run_id FROM schedule_fires ORDER BY id"
+id | outcome | detail | run_id
+---+---------+--------+-------
+(0 rows)
+
+-- a failed fire must not be recorded as a success, and must count --
+$ q "SELECT name, state, consecutive_failures, last_fire_at_ms FROM schedules"
+name | state | consecutive_failures | last_fire_at_ms
+-----+-------+----------------------+----------------
+ping | armed | 0 | 
+(1 rows)
+
+==============================================================
+== 3. wait for the next minute boundary, then tick WITH the supervisor
+==============================================================
+$ python3 -c "
+import time
+t = time.time()
+w = 61 - (t % 60)
+print(f'sleeping {w:.1f}s for the next due instant')
+time.sleep(w)"
+sleeping 18.0s for the next due instant
+
+$ jod daemon --once
+claimed 1 · started 1 · held 0 · failed 0
+
+-- the fire record --
+$ jod schedule log ping
+[32m✓[0m Aug 10 22:54 (0s ago)          [2mran             [0m 
+
+$ q "SELECT id, outcome, detail, run_id FROM schedule_fires ORDER BY id"
+id | outcome | detail | run_id
+---+---------+--------+-------
+1 | ran |  | 158df70d-0b44-4a3c-8698-0b2e4ecbda5d
+(1 rows)
+
+==============================================================
+== 4. is a real process actually running?
+==============================================================
+$ jod ls
+158df70d   running   Claude Code  ping
+
+$ q "SELECT id, name, harness, status, pid, pgid FROM runs ORDER BY created_at_ms"
+id | name | harness | status | pid | pgid
+---+------+---------+--------+-----+-----
+158df70d-0b44-4a3c-8698-0b2e4ecbda5d | ping | claude_code | running | 1767226 | 1767226
+(1 rows)
+
+$ pgrep -a -f 'jod-run' | head -5
+1767226 /tmp/jod-e2e/bin/jod-run /tmp/jod-e2e/daemon/runs/158df70d-0b44-4a3c-8698-0b2e4ecbda5d/spawn.json
+
+$ pgrep -a claude | grep -v 'bg-spare\|bg-pty\|daemon run' | head -5
+710331 claude agents
+1767244 /home/reljod/.local/bin/claude -p say OK and stop --output-format stream-json --verbose --allowedTools Read,Grep,Glob,WebSearch,WebFetch
+
+==============================================================
+== 5. wait for it to finish, and read what the harness actually said
+==============================================================
+$ python3 - <<'PY'
+import sqlite3, time, os
+db = os.environ['JOD_HOME'] + '/jod.db'
+for i in range(60):
+    con = sqlite3.connect(f'file:{db}?mode=ro', uri=True)
+    rows = con.execute('SELECT id, status FROM runs').fetchall()
+    con.close()
+    print(f'[{i*5:3d}s] ' + ', '.join(f'{r[0][:8]}={r[1]}' for r in rows))
+    if rows and all(r[1] not in ('running', 'starting', 'queued') for r in rows):
+        print('settled')
+        break
+    time.sleep(5)
+PY
+[  0s] 158df70d=running
+[  5s] 158df70d=running
+[ 10s] 158df70d=completed
+settled
+
+$ jod ls
+158df70d   done      Claude Code  ping
+
+$ jod schedule log ping
+[32m✓[0m Aug 10 22:54 (10s ago)         [2mran             [0m 
+
+$ q "SELECT id, name, harness, status, session_id, summary FROM runs"
+id | name | harness | status | session_id | summary
+---+------+---------+--------+------------+--------
+158df70d-0b44-4a3c-8698-0b2e4ecbda5d | ping | claude_code | completed | 6a923fc9-0fec-4d53-8324-1d566c24e1d0 | {"created_at_ms":1786402441039,"cwd":"/home/reljod/repo/Jod/.claude/worktrees/feat+memory-graph-scheduler-webhooks","event_count":0,"harness":"claude_code","harness_label":"Claude Code","id":"158df70d-0b44-4a3c-8698-0b2e4ecbda5d","last_message":null,"model":null,"name":"ping","permission":"ask","pgid":null,"pid":null,"process_alive":false,"session_id":null,"status":"running","usage":{},"watch_command":"jod watch 158df70d-0b44-4a3c-8698-0b2e4ecbda5d"}
+(1 rows)
+
+==============================================================
+== 6. the transcript the supervisor wrote back
+==============================================================
+$ q "SELECT run_id, seq, kind, substr(text,1,200) FROM events ORDER BY run_id, seq LIMIT 40"
+Traceback (most recent call last):
+  File [35m"/home/reljod/repo/Jod/.claude/worktrees/feat+memory-graph-scheduler-webhooks/tests/e2e/jod/db.py"[0m, line [35m15[0m, in [35m<module>[0m
+    cur = con.execute(sql)
+[1;35msqlite3.OperationalError[0m: [35mno such column: text[0m
+[exit 1]
+
+-- the last assistant message, which the PR quotes as proof --
+$ q "SELECT status, summary FROM runs"
+status | summary
+-------+--------
+completed | {"created_at_ms":1786402441039,"cwd":"/home/reljod/repo/Jod/.claude/worktrees/feat+memory-graph-scheduler-webhooks","event_count":0,"harness":"claude_code","harness_label":"Claude Code","id":"158df70d-0b44-4a3c-8698-0b2e4ecbda5d","last_message":null,"model":null,"name":"ping","permission":"ask","pgid":null,"pid":null,"process_alive":false,"session_id":null,"status":"running","usage":{},"watch_command":"jod watch 158df70d-0b44-4a3c-8698-0b2e4ecbda5d"}
+(1 rows)
+
+==============================================================
+== 7. jod watch replays a finished run
+==============================================================
+$ RID=$(python3 "/home/reljod/repo/Jod/.claude/worktrees/feat+memory-graph-scheduler-webhooks/tests/e2e/jod/db.py" "/tmp/jod-e2e/daemon/jod.db" 'SELECT id FROM runs LIMIT 1' | sed -n 3p); echo run=$RID; '/tmp/jod-e2e/bin/jod' watch $RID
+run=158df70d-0b44-4a3c-8698-0b2e4ecbda5d
+Ignoring 10 permissions.allow entries from .claude/settings.json: this workspace has not been trusted. Run Claude Code interactively here once and accept the trust dialog, or set projects["/home/reljod/repo/Jod"].hasTrustDialogAccepted: true in /home/reljod/.claude.json.
+  model claude-opus-5[1m]
+OK
+✓ done · $0.0984 · 4 out
+
+==============================================================
+== 8. history and report
+==============================================================
+$ jod history
+158df70d 2026-08-10 22:54 completed  ping
+
+$ jod report
+running   0
+completed 1
+failed    0
+killed    0
+spend     $0.0984
+
+==============================================================
+== 9. a second tick must not double-fire the same instant
+==============================================================
+$ jod daemon --once
+[jod/daemon] reloaded 1 prior run(s)
+claimed 0 · started 0 · held 0 · failed 0
+
+$ q "SELECT id, due_at_ms, outcome FROM schedule_fires ORDER BY id"
+id | due_at_ms | outcome
+---+-----------+--------
+1 | 1786402440000 | ran
+(1 rows)
+
+==============================================================
+== 10. the run was recorded against the schedule
+==============================================================
+$ q "SELECT sf.outcome, sf.run_id, r.status FROM schedule_fires sf LEFT JOIN runs r ON r.id = sf.run_id ORDER BY sf.id"
+outcome | run_id | status
+--------+--------+-------
+ran | 158df70d-0b44-4a3c-8698-0b2e4ecbda5d | completed
+(1 rows)
+

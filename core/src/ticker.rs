@@ -175,7 +175,9 @@ pub fn plan(planned: Vec<Decision>, watch: Option<&monitor::Decision>) -> Vec<De
         // already done the whole job — none of them is a reason to pay for a
         // model. The tick is not silent about it: the caller writes what was
         // seen to `monitor_checks`, whose vocabulary keeps "nothing changed"
-        // and "this watchdog is broken" apart.
+        // and "this watchdog is broken" apart, and a row to `schedule_fires`
+        // so that a person asking "is this thing alive" gets an answer in the
+        // one place they look for it.
         return planned.into_iter().filter(|d| !spawns(d)).collect();
     }
     // One change is one change. A `fire_all` schedule coming back from an
@@ -200,6 +202,22 @@ pub fn prompt_for(s: &Schedule, watch: Option<&monitor::Decision>) -> String {
     match watch {
         Some(monitor::Decision::Run { diff }) => monitor::changed_prompt(&s.prompt, diff),
         _ => s.prompt.clone(),
+    }
+}
+
+/// What a quiet tick says about itself in the fire history.
+///
+/// The monitor's own word, because [`FireOutcome::MonitorQuiet`] covers four
+/// different quiets — nothing changed, nothing to compare against yet, a
+/// `no_agent` script with nothing to say, and one that had something to say —
+/// and a person reading the log wants to know which. Bounded, because a fire's
+/// detail is a line in a listing and a `no_agent` script may print a page.
+fn quietly(verdict: &monitor::Decision) -> String {
+    match verdict {
+        monitor::Decision::Report { text } => {
+            format!("{}: {}", verdict.outcome(), one_line(text))
+        }
+        _ => verdict.outcome().to_string(),
     }
 }
 
@@ -280,6 +298,16 @@ impl Ticker {
             // `None` here and everything below is exactly as it was.
             let watched = self.watch(&s, &planned).await?;
             let watch = watched.as_ref().map(|(_, verdict)| verdict);
+            // The instant the monitor answered for: the one a run would have
+            // been started for, which is the last of them. Taken before
+            // `plan` consumes the list, and always present when `watched` is,
+            // because nothing is probed for a tick that would start nothing.
+            let answered_for = planned
+                .iter()
+                .rev()
+                .find(|d| spawns(d))
+                .map(|d| d.due_at_ms())
+                .unwrap_or(now_ms);
             let mut failed = false;
             let mut ran = false;
 
@@ -310,6 +338,9 @@ impl Ticker {
             }
 
             if let Some((seen, verdict)) = watched {
+                // True only if the loop above already wrote a `SpawnFailed`
+                // row for this tick. One failure earns one row.
+                let spawn_already_failed = failed;
                 // A change that was seen but whose run never started must not
                 // become the new normal. Recorded as a failure it leaves the
                 // digest where it was, so the next tick reports the same change
@@ -324,18 +355,39 @@ impl Ticker {
                     verdict
                 };
 
-                if matches!(verdict, monitor::Decision::Failed { .. }) {
-                    // A watchdog that cannot run is a schedule that is failing.
-                    // Counting it is what makes it back off and eventually
-                    // break, rather than probe a dead host every minute for
-                    // ever while its history fills with identical failures.
-                    if !failed {
-                        report.failed += 1;
+                let fire = |outcome, detail| Fire {
+                    id: 0,
+                    schedule_id: s.id.clone(),
+                    due_at_ms: answered_for,
+                    fired_at_ms: now_ms,
+                    run_id: None,
+                    outcome,
+                    detail: Some(detail),
+                };
+                match &verdict {
+                    monitor::Decision::Failed { detail } => {
+                        // A watchdog that cannot run is a schedule that is
+                        // failing. Counting it is what makes it back off and
+                        // eventually break, rather than probe a dead host every
+                        // minute for ever while its history fills with
+                        // identical failures.
+                        if !spawn_already_failed {
+                            report.failed += 1;
+                            store.record_fire(&fire(FireOutcome::SpawnFailed, detail.clone()))?;
+                        }
+                        failed = true;
                     }
-                    failed = true;
-                } else if !verdict.wakes_agent() {
-                    // The tick did its whole job and cost nothing.
-                    report.held += 1;
+                    quiet if !quiet.wakes_agent() => {
+                        // The tick did its whole job and cost nothing — and
+                        // says so where a person looks to ask whether a
+                        // schedule is alive, because a week of no rows at all
+                        // is indistinguishable from a week of being broken.
+                        report.held += 1;
+                        store.record_fire(&fire(FireOutcome::MonitorQuiet, quietly(quiet)))?;
+                    }
+                    // A change that woke a run: the loop above already recorded
+                    // it as the ordinary fire it is.
+                    _ => {}
                 }
                 // Written whatever it says. A check nobody recorded is how a
                 // watchdog broken for a week comes to look like one dutifully
@@ -672,6 +724,7 @@ impl Ticker {
                 // harness conversation without its context growing without
                 // bound; the memory layer is what carries continuity instead.
                 resume: Resume::Fresh,
+                tools: None,
             })
             .await?;
 
@@ -718,6 +771,7 @@ impl Ticker {
                 // continued last night's thread would inherit context nobody
                 // chose for it, and the context would grow without bound.
                 resume: Resume::Fresh,
+                tools: None,
             })
             .await?;
         let _ = due_at_ms;
@@ -1220,9 +1274,16 @@ mod tests {
         let checks = store.monitor_checks("s1", 10).unwrap();
         assert_eq!(checks.len(), 1, "silence with a row, not silence");
         assert_eq!(checks[0].outcome, "unchanged");
+
+        // And in the fire history too, which is where a person looks to ask
+        // whether the schedule is alive at all.
+        let fires = store.fires("s1", 10).unwrap();
+        assert_eq!(fires.len(), 1);
+        assert_eq!(fires[0].outcome, FireOutcome::MonitorQuiet);
+        assert_eq!(fires[0].detail.as_deref(), Some("unchanged"));
         assert!(
-            store.fires("s1", 10).unwrap().is_empty(),
-            "nothing fired, so nothing claims to have"
+            !fires[0].outcome.started_a_run(),
+            "a quiet watchdog is not the busiest schedule on the box"
         );
     }
 
@@ -1254,6 +1315,15 @@ mod tests {
         let checks = store.monitor_checks("s1", 10).unwrap();
         assert_eq!(checks[0].outcome, "failed");
         assert!(checks[0].detail.as_deref().unwrap().contains("exited 7"));
+
+        // Reported where the other failures are, and never as a quiet tick —
+        // a broken watchdog that read as "nothing changed" would suppress its
+        // agent for ever.
+        let fires = store.fires("s1", 10).unwrap();
+        assert_eq!(fires.len(), 1);
+        assert_eq!(fires[0].outcome, FireOutcome::SpawnFailed);
+        assert!(fires[0].detail.as_deref().unwrap().contains("exited 7"));
+
         assert_eq!(
             store.monitor("s1").unwrap().unwrap().last_digest,
             Some(monitor::digest(b"version 4\n")),
@@ -1281,10 +1351,41 @@ mod tests {
             let report = tick_seeing(&store, Observation::ok(printed)).await;
 
             assert_eq!(report.started, 0, "printed {printed:?}");
-            assert!(store.fires("s1", 10).unwrap().is_empty());
             let checks = store.monitor_checks("s1", 10).unwrap();
             assert_eq!(checks[0].outcome, outcome);
+
+            // The script having done the job is still a fire, and the log says
+            // which kind of quiet it was.
+            let fires = store.fires("s1", 10).unwrap();
+            assert_eq!(fires.len(), 1);
+            assert_eq!(fires[0].outcome, FireOutcome::MonitorQuiet);
+            assert!(
+                fires[0].detail.as_deref().unwrap().starts_with(outcome),
+                "{:?}",
+                fires[0].detail
+            );
         }
+    }
+
+    /// The fire log is a listing, and a `no_agent` script may print a page.
+    #[tokio::test]
+    async fn a_talkative_no_agent_script_does_not_put_a_page_in_the_fire_log() {
+        let store = due_and_watched(
+            Monitor::new("s1", Probe::Command("watchdog.sh".into())).with_mode(Mode::NoAgent),
+        );
+        tick_seeing(&store, Observation::ok("chatter ".repeat(200))).await;
+
+        let detail = store.fires("s1", 10).unwrap()[0].detail.clone().unwrap();
+        assert!(detail.chars().count() <= 180, "{}", detail.len());
+        // The whole of what it said is still kept where it belongs.
+        assert!(
+            store.monitor_checks("s1", 10).unwrap()[0]
+                .detail
+                .as_deref()
+                .unwrap()
+                .len()
+                > 1_000
+        );
     }
 
     /// The other half of suppression: a change does reach the harness. The

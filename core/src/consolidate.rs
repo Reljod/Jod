@@ -218,6 +218,7 @@ impl Consolidation {
             // not write, and the whole value of this run is that its output
             // format is predictable.
             resume: Resume::Fresh,
+            tools: None,
         }
     }
 

@@ -19,10 +19,14 @@
 
 mod app;
 mod command;
-mod data;
+// `data` and `ui` are public so `examples/screens.rs` can build the app from
+// the real loaders and render it against a `TestBackend`. That example is how
+// "the screens show what is in the database" is demonstrated without a TTY, and
+// it can only reach these two by name.
+pub mod data;
 mod graph;
 mod keys;
-mod ui;
+pub mod ui;
 mod workspace;
 
 pub use app::{short_duration, AgentLine, App, Entry, Overlay, PromptIntent};
@@ -1576,6 +1580,7 @@ async fn spawn(
     opts: &Options,
     prompt: String,
     resume: Resume,
+    tools: None,
 ) -> Result<String> {
     let agent = jod
         .spawn_agent(SpawnRequest {
@@ -1623,13 +1628,18 @@ fn refresh_team(jod: &Arc<Jod>, app: &mut App) {
 /// processes*, so an in-memory copy could never be authoritative. Each loader
 /// swallows its own errors rather than taking the UI down over a locked
 /// database.
+///
+/// Two of them take what the screen is showing rather than reading everything:
+/// memory has no listing query and searches the store from the filter instead,
+/// and the board is one team's when a team is joined.
 fn refresh_workspaces(jod: &Arc<Jod>, app: &mut App) {
-    app.memory = data::memory(jod);
+    let needle = app.list(Workspace::Memory).filter.clone();
+    app.memory = data::memory(jod, needle.as_deref());
     app.schedules = data::schedules(jod);
     app.goals = data::goals(jod);
     app.hooks = data::hooks(jod);
     app.activity = data::activity(jod);
-    app.board = data::tasks(jod);
+    app.board = data::tasks(jod, app.team.as_deref());
 }
 
 /// Hand the typed line to `$EDITOR`, and take back whatever comes out.

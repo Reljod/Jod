@@ -149,6 +149,70 @@ pub struct SpawnRequest {
     /// Whether to continue an existing conversation instead of starting one.
     #[serde(default)]
     pub resume: Resume,
+    /// Give this agent Jod's own tools, over MCP.
+    ///
+    /// This is the seam the whole system turns on, so it belongs on *every*
+    /// spawn rather than on one special conversation. Jod has no model client
+    /// and never will; what it has is effects — delegating, scheduling,
+    /// remembering, listing what is running — and MCP is how a harness reaches
+    /// them. The harness supplies the judgement, Jod supplies the verbs, and
+    /// neither has to become the other.
+    ///
+    /// Because it lives here rather than in the orchestrator, a scheduled run,
+    /// a goal iteration, a webhook-triggered agent and a teammate all get the
+    /// same tools as the main chat. An agent that can see what else is running
+    /// can hand work sideways instead of duplicating it, which is the whole of
+    /// agent-to-agent as far as Jod needs to care.
+    ///
+    /// `None` means a plain agent with no access to Jod — the right default for
+    /// anything untrusted, and the reason this is opt-in rather than automatic.
+    #[serde(default)]
+    pub tools: Option<ToolAccess>,
+}
+
+/// What an agent may do to Jod itself.
+///
+/// A capability set rather than a boolean, because "can see what is running" and
+/// "can start another agent" are different amounts of trust, and a webhook-
+/// triggered run started by a stranger's pull request should get the first
+/// without the second.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolAccess {
+    /// Read Jod: what is running, what is scheduled, what it remembers.
+    /// Cannot spawn, cannot schedule, cannot write memory.
+    #[default]
+    ReadOnly,
+    /// Everything read-only allows, plus delegating to and stopping agents.
+    Delegate,
+    /// The full set, including creating schedules and goals and writing
+    /// memory. What the main chat gets, and what nothing reached from outside
+    /// should.
+    Orchestrate,
+}
+
+impl ToolAccess {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ToolAccess::ReadOnly => "read_only",
+            ToolAccess::Delegate => "delegate",
+            ToolAccess::Orchestrate => "orchestrate",
+        }
+    }
+
+    /// Whether this level may start or stop agents.
+    pub fn may_delegate(&self) -> bool {
+        matches!(self, ToolAccess::Delegate | ToolAccess::Orchestrate)
+    }
+
+    /// Whether this level may create schedules and goals, or write memory.
+    ///
+    /// The distinction that matters: delegating spends money now and is
+    /// visible; scheduling spends it every night at 2am whether or not anyone
+    /// is watching, and a goal spends it until something stops it.
+    pub fn may_orchestrate(&self) -> bool {
+        matches!(self, ToolAccess::Orchestrate)
+    }
 }
 
 /// One argv entry. `Prompt` is a placeholder the runner substitutes with a

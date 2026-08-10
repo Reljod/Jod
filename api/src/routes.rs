@@ -356,6 +356,7 @@ pub async fn spawn_agent(
         model: body.model,
         permission: body.permission,
         resume: body.resume,
+        tools: None,
     };
 
     let agent = state.jod.spawn_agent(req).await.map_err(|e| {

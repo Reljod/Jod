@@ -370,6 +370,7 @@ mod tests {
             model: None,
             permission: PermissionPolicy::Ask,
             resume: Resume::Fresh,
+            tools: None,
         }
     }
 

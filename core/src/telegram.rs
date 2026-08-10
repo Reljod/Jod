@@ -1255,6 +1255,12 @@ impl<B: BotApi + 'static> Bridge<B> {
             model: None,
             permission: self.permission,
             resume,
+            // A message from the phone is Reljod, on an allowlisted chat id, so
+            // it is as trusted as the terminal — but the tools stay off until
+            // there is a way to see from a phone what an agent did with them.
+            // Granting them is one field, and it should be a decision rather
+            // than a default nobody chose.
+            tools: None,
         };
         let agent = match self.jod.spawn_agent(request).await {
             Ok(a) => a,

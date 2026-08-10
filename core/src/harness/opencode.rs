@@ -223,6 +223,7 @@ mod tests {
             model: model.map(str::to_string),
             permission,
             resume: Resume::Fresh,
+            tools: None,
         }
     }
 

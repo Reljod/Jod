@@ -1010,6 +1010,7 @@ async fn main() -> Result<()> {
                                 model: None,
                                 permission: permission.into(),
                                 resume: Resume::Session(order.session_id),
+                                tools: None,
                             })
                             .await?;
                         // Drain only once the spawn succeeded, so a failure
@@ -1067,6 +1068,7 @@ async fn main() -> Result<()> {
                             model: None,
                             permission: permission.into(),
                             resume: Resume::Fresh,
+                            tools: None,
                         })
                         .await?;
                     store.set_member_status(&team, &member, MemberStatus::Busy)?;
@@ -1749,6 +1751,7 @@ async fn chat(
                     model: model.clone(),
                     permission: permission.into(),
                     resume: resume.clone(),
+                    tools: None,
                 },
                 conversation.clone(),
             )
