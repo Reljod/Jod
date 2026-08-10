@@ -19,9 +19,14 @@
 
 mod app;
 mod command;
+mod data;
+mod graph;
+mod keys;
 mod ui;
+mod workspace;
 
-pub use app::{AgentLine, App, Entry, Pane};
+pub use app::{AgentLine, App, Entry, Overlay, PromptIntent};
+pub use workspace::Workspace;
 
 use std::io;
 use std::sync::Arc;
@@ -63,6 +68,16 @@ pub enum Action {
     AddTask(String),
     /// Mark a task on that board finished.
     FinishTask(String),
+    /// Open the typed line in `$EDITOR`. The TUI has to be suspended and
+    /// restored around it, which only the loop can do.
+    Editor,
+    /// A verb the screens offer and the store cannot carry out yet. Named
+    /// rather than silently ignored, and naming the missing call rather than
+    /// apologising, so the gap is a to-do and not a mystery.
+    Pending {
+        verb: String,
+        needs: &'static str,
+    },
 }
 
 pub struct Options {
@@ -116,11 +131,13 @@ async fn event_loop(
     app.now_ms = now_ms();
     app.agents = list_agents(&jod).await;
     refresh_team(&jod, &mut app);
+    refresh_workspaces(&jod, &mut app);
+    app.reconcile();
     // No harness name here: this line is frozen into the scrollback, so naming
     // the harness would leave a stale claim on screen the moment `/harness`
     // switches. The status bar is the one place that tracks it.
     app.push(Entry::Notice(
-        "/help for commands · Enter send · Ctrl-B delegate in the background · Ctrl-A agents · Ctrl-G team · Ctrl-C quit"
+        "Ctrl-K opens every screen · / for commands · Enter send · Ctrl-B delegate in the background · ? for keys · Ctrl-C quit"
             .to_string(),
     ));
 
@@ -146,8 +163,13 @@ async fn event_loop(
             Some(Ok(ev)) = keys.next() => {
                 match ev {
                     Event::Key(key) if key.kind == KeyEventKind::Press => {
-                        if let Some(action) = on_key(&mut app, key, viewport) {
-                            perform(&jod, &mut app, &opts, action).await;
+                        match on_key(&mut app, key, viewport) {
+                            // The editor takes the terminal, so it can only be
+                            // done from here — with the same discipline as
+                            // `enter`/`restore`, panic hook included.
+                            Some(Action::Editor) => edit_in_editor(terminal, &mut app),
+                            Some(action) => perform(&jod, &mut app, &opts, action).await,
+                            None => {}
                         }
                     }
                     Event::Mouse(m) => match m.kind {
@@ -168,8 +190,9 @@ async fn event_loop(
                 }
                 if finished {
                     app.agents = list_agents(&jod).await;
-                    app.clamp_selection();
                     refresh_team(&jod, &mut app);
+                    refresh_workspaces(&jod, &mut app);
+                    app.reconcile();
                     if watched {
                         // A prompt typed mid-turn goes now rather than being
                         // refused earlier and forgotten.
@@ -189,10 +212,11 @@ async fn event_loop(
                 // shows a fleet that stopped moving minutes ago.
                 if app.tick.is_multiple_of(4) {
                     app.agents = list_agents(&jod).await;
-                    app.clamp_selection();
-                    if app.pane == Pane::Team {
+                    refresh_workspaces(&jod, &mut app);
+                    if matches!(app.workspace, Workspace::Team | Workspace::Tasks) {
                         refresh_team(&jod, &mut app);
                     }
+                    app.reconcile();
                 }
             }
         }
@@ -331,6 +355,16 @@ async fn perform(jod: &Arc<Jod>, app: &mut App, opts: &Options, action: Action) 
                 Err(e) => app.push(Entry::Notice(format!("could not finish {id}: {e}"))),
             }
         }
+        // Suspending and restoring the terminal is the loop's job, so this is
+        // handled there rather than here. Reaching it means the loop did not.
+        Action::Editor => app.push(Entry::Notice(
+            "no $EDITOR handoff from here — set $EDITOR and try Ctrl-F in chat".into(),
+        )),
+        // Named rather than silently ignored: a key that appears to do nothing
+        // is worse than one that says what it is waiting for.
+        Action::Pending { verb, needs } => {
+            app.push(Entry::Notice(format!("{verb} — not wired yet: needs {needs}")));
+        }
     }
 }
 
@@ -365,134 +399,843 @@ fn short(id: &str) -> String {
 }
 
 /// Handle one keypress. Returns work for the loop to carry out, if any.
+///
+/// Three layers, checked in order, and the status bar always says which one you
+/// are in: an **overlay** owns the keyboard while it is up, a **workspace**
+/// makes letters into commands, and **chat** makes them text again. Quitting is
+/// ahead of all three, because a key that cannot always leave is a trap.
 fn on_key(app: &mut App, key: KeyEvent, viewport: usize) -> Option<Action> {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-    let max_scroll = app.transcript.len();
 
+    if ctrl && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('d')) {
+        return on_quit(app);
+    }
+    // Any key other than a second quit means the user changed their mind.
+    app.confirm_quit = false;
+
+    if app.overlay.is_open() {
+        return on_overlay_key(app, key);
+    }
     if ctrl {
+        if let Some(action) = on_chord(app, key) {
+            return action;
+        }
+    }
+    if app.workspace.is_list() {
+        return on_workspace_key(app, key, viewport);
+    }
+    on_chat_key(app, key, viewport)
+}
+
+/// Refuse to leave silently while work is in flight; a second press goes
+/// anyway. Any running agent counts, not just the one on screen — walking out
+/// on four background jobs without being told is the same mistake, four times
+/// over.
+fn on_quit(app: &mut App) -> Option<Action> {
+    let running = app.running();
+    if running > 0 && !app.confirm_quit {
+        app.confirm_quit = true;
+        let what = if running == 1 {
+            "an agent is still running".to_string()
+        } else {
+            format!("{running} agents are still running")
+        };
+        app.push(Entry::Notice(format!(
+            "{what} — press again to leave them running"
+        )));
+    } else {
+        app.should_quit = true;
+    }
+    None
+}
+
+/// The chords that work in every layer. `Some` means the chord was handled.
+fn on_chord(app: &mut App, key: KeyEvent) -> Option<Option<Action>> {
+    let handled = |a: Option<Action>| Some(a);
+    match key.code {
+        // The leader. One free chord reaches nine screens, which is the whole
+        // reason this is a menu rather than five more chords.
+        KeyCode::Char('k') => {
+            app.overlay = Overlay::WhichKey;
+            handled(None)
+        }
+        KeyCode::Char('a') => {
+            app.go(if app.workspace == Workspace::Fleet {
+                Workspace::Chat
+            } else {
+                Workspace::Fleet
+            });
+            handled(None)
+        }
+        KeyCode::Char('g') => {
+            app.go(if app.workspace == Workspace::Team {
+                Workspace::Chat
+            } else {
+                Workspace::Team
+            });
+            handled(None)
+        }
+        // Only meaningful once cron, goals and webhooks report endings while
+        // nobody is at the terminal.
+        KeyCode::Char('n') => {
+            jump_to_oldest_unread(app);
+            handled(None)
+        }
+        // `$EDITOR` on the input. Claude Code spells this `Ctrl+G`, which is
+        // Jod's team panel and is documented — so `Ctrl-F`, with `Ctrl-K e` as
+        // the discoverable alias.
+        KeyCode::Char('f') => handled(Some(Action::Editor)),
+        KeyCode::Char('t') => {
+            app.show_thinking = !app.show_thinking;
+            app.push(Entry::Notice(format!(
+                "thinking {}",
+                if app.show_thinking { "shown" } else { "hidden" }
+            )));
+            handled(None)
+        }
+        KeyCode::Char('o') => {
+            app.show_details = !app.show_details;
+            app.push(Entry::Notice(format!(
+                "tool output {}",
+                if app.show_details { "shown" } else { "hidden" }
+            )));
+            handled(None)
+        }
+        // Delegate: the typed line becomes an agent that runs without taking
+        // the screen. This is the key that makes several jobs at once possible
+        // without leaving the UI.
+        KeyCode::Char('b') => handled(app.take_input().map(Action::Delegate)),
+        // Stop what is being watched. Ctrl-C is quit, so interrupting a run
+        // needs a key of its own or the only way out is to leave.
+        KeyCode::Char('x') => handled(match app.watching.clone() {
+            Some(id) if app.busy => Some(Action::Stop(id)),
+            _ => {
+                app.push(Entry::Notice("nothing running to stop here".into()));
+                None
+            }
+        }),
+        KeyCode::Char('l') => {
+            app.transcript.clear();
+            app.scroll_to_bottom();
+            handled(None)
+        }
+        KeyCode::Char('u') => {
+            app.clear_line();
+            handled(None)
+        }
+        KeyCode::Char('w') => {
+            app.delete_word();
+            handled(None)
+        }
+        // Scrolling keeps a Ctrl form, because the bare arrows now walk back
+        // through what has been sent.
+        KeyCode::Up => {
+            let max = app.transcript.len();
+            app.scroll_up(1, max);
+            handled(None)
+        }
+        KeyCode::Down => {
+            app.scroll_down(1);
+            handled(None)
+        }
+        // Ctrl-A is the fleet, so start-of-line is Home rather than the
+        // readline binding.
+        KeyCode::Home => {
+            app.home();
+            handled(None)
+        }
+        KeyCode::Char('e') | KeyCode::End => {
+            app.end();
+            handled(None)
+        }
+        _ => None,
+    }
+}
+
+/// Put the cursor on the oldest thing you have not read, and open it.
+fn jump_to_oldest_unread(app: &mut App) {
+    let oldest = app
+        .activity
+        .iter()
+        .filter(|a| a.unread)
+        .min_by_key(|a| a.at_ms)
+        .map(|a| a.id.clone());
+    app.go(Workspace::Activity);
+    match oldest {
+        Some(id) => app.list_mut(Workspace::Activity).selected = Some(id),
+        None => app.push(Entry::Notice("nothing unread".into())),
+    }
+}
+
+/// Keys while an overlay is up. `Esc` always cancels exactly this overlay.
+fn on_overlay_key(app: &mut App, key: KeyEvent) -> Option<Action> {
+    // A prompt is a line being typed, so it takes characters before anything
+    // else looks at them.
+    if let Overlay::Prompt {
+        value,
+        intent,
+        label,
+    } = &mut app.overlay
+    {
         match key.code {
-            KeyCode::Char('c') | KeyCode::Char('d') => {
-                // Refuse to leave silently while work is in flight; a second
-                // press goes anyway. Any running agent counts, not just the one
-                // on screen — walking out on four background jobs without being
-                // told is the same mistake, four times over.
-                let running = app.running();
-                if running > 0 && !app.confirm_quit {
-                    app.confirm_quit = true;
-                    let what = if running == 1 {
-                        "an agent is still running".to_string()
-                    } else {
-                        format!("{running} agents are still running")
-                    };
-                    app.push(Entry::Notice(format!(
-                        "{what} — press again to leave them running"
-                    )));
-                } else {
-                    app.should_quit = true;
-                }
+            KeyCode::Char(c) => {
+                value.push(c);
                 return None;
             }
-            KeyCode::Char('a') => {
-                app.pane = if app.pane == Pane::Agents {
-                    Pane::Chat
-                } else {
-                    Pane::Agents
-                };
+            KeyCode::Backspace => {
+                value.pop();
                 return None;
             }
-            KeyCode::Char('g') => {
-                app.pane = if app.pane == Pane::Team {
-                    Pane::Chat
-                } else {
-                    Pane::Team
-                };
+            KeyCode::Enter => {
+                let (typed, intent, label) = (value.clone(), intent.clone(), label.clone());
+                app.overlay = Overlay::None;
+                return accept_prompt(app, label, typed, intent);
+            }
+            KeyCode::Esc => {
+                app.overlay = Overlay::None;
                 return None;
             }
-            KeyCode::Char('t') => {
-                app.show_thinking = !app.show_thinking;
-                app.push(Entry::Notice(format!(
-                    "thinking {}",
-                    if app.show_thinking { "shown" } else { "hidden" }
-                )));
-                return None;
-            }
-            KeyCode::Char('o') => {
-                app.show_details = !app.show_details;
-                app.push(Entry::Notice(format!(
-                    "tool output {}",
-                    if app.show_details { "shown" } else { "hidden" }
-                )));
-                return None;
-            }
-            // Delegate: the typed line becomes an agent that runs without
-            // taking the screen. This is the key that makes several jobs at
-            // once possible without leaving the UI.
-            KeyCode::Char('b') => {
-                return app.take_input().map(Action::Delegate);
-            }
-            // Stop what is being watched. Ctrl-C is quit, so interrupting a run
-            // needs a key of its own or the only way out is to leave.
-            KeyCode::Char('x') => {
-                return match app.watching.clone() {
-                    Some(id) if app.busy => Some(Action::Stop(id)),
-                    _ => {
-                        app.push(Entry::Notice("nothing running to stop here".into()));
-                        None
-                    }
-                };
-            }
-            KeyCode::Char('l') => {
-                app.transcript.clear();
-                app.scroll_to_bottom();
-                return None;
-            }
-            KeyCode::Char('u') => {
-                app.clear_line();
-                return None;
-            }
-            KeyCode::Char('w') => {
-                app.delete_word();
-                return None;
-            }
-            // Scrolling keeps a Ctrl form, because the bare arrows now walk
-            // back through what has been sent.
-            KeyCode::Up => {
-                app.scroll_up(1, max_scroll);
-                return None;
-            }
-            KeyCode::Down => {
-                app.scroll_down(1);
-                return None;
-            }
-            // Ctrl-A is the agents panel, so start-of-line is Home rather than
-            // the readline binding.
-            KeyCode::Home => {
-                app.home();
-                return None;
-            }
-            KeyCode::Char('e') | KeyCode::End => {
-                app.end();
-                return None;
-            }
-            _ => {}
+            _ => return None,
         }
     }
 
-    // Any key other than a second quit means the user changed their mind.
-    if !matches!(key.code, KeyCode::Char('c') | KeyCode::Char('d')) {
-        app.confirm_quit = false;
+    match &app.overlay {
+        // A destructive verb on a bare letter is one fat-fingered `Ctrl-K h x`
+        // away from losing a secret, so the confirmation names the thing.
+        Overlay::Confirm { verb, what, .. } => {
+            let (verb, what) = (verb.clone(), what.clone());
+            match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    app.overlay = Overlay::None;
+                    Some(Action::Pending {
+                        verb: format!("{verb} {what}"),
+                        needs: "the store method for this kind — see cli/src/tui/data.rs",
+                    })
+                }
+                // Anything that is not a yes is a no.
+                _ => {
+                    app.overlay = Overlay::None;
+                    None
+                }
+            }
+        }
+        Overlay::Keymap => {
+            app.overlay = Overlay::None;
+            None
+        }
+        Overlay::WhichKey => on_which_key(app, key),
+        Overlay::WhichKeyNew => {
+            app.overlay = Overlay::None;
+            match key.code {
+                KeyCode::Char(c) => match Workspace::from_letter(c) {
+                    Some(ws) if ws.is_list() => {
+                        app.go(ws);
+                        begin_new(app, ws)
+                    }
+                    _ => None,
+                },
+                _ => None,
+            }
+        }
+        Overlay::Prompt { .. } | Overlay::None => {
+            app.overlay = Overlay::None;
+            None
+        }
+    }
+}
+
+/// The which-key menu's second keystroke. Anything it does not know cancels
+/// silently rather than doing something surprising.
+fn on_which_key(app: &mut App, key: KeyEvent) -> Option<Action> {
+    let KeyCode::Char(c) = key.code else {
+        app.overlay = Overlay::None;
+        return None;
+    };
+    match c {
+        'n' => {
+            app.overlay = Overlay::WhichKeyNew;
+            None
+        }
+        'e' => {
+            app.overlay = Overlay::None;
+            Some(Action::Editor)
+        }
+        '?' => {
+            app.overlay = Overlay::Keymap;
+            None
+        }
+        _ => {
+            app.overlay = Overlay::None;
+            if let Some(ws) = Workspace::from_letter(c) {
+                app.go(ws);
+            }
+            None
+        }
+    }
+}
+
+/// Keys while a workspace owns the keyboard.
+fn on_workspace_key(app: &mut App, key: KeyEvent, viewport: usize) -> Option<Action> {
+    let ws = app.workspace;
+    if ws == Workspace::MemoryGraph {
+        return on_graph_key(app, key);
     }
 
-    // An open panel owns the keyboard. It is a list you act on, so the letters
-    // are commands rather than text — the input box is one Esc away, and the
-    // panel's own footer says which letters do what.
-    if app.pane != Pane::Chat {
-        return on_panel_key(app, key);
+    // A `/` line being typed owns the keyboard, letters and all — otherwise
+    // filtering for "stop" would stop something.
+    if app.here().editing_filter {
+        match key.code {
+            KeyCode::Char(c) => {
+                if let Some(f) = app.here_mut().filter.as_mut() {
+                    f.push(c);
+                }
+            }
+            KeyCode::Backspace => {
+                if let Some(f) = app.here_mut().filter.as_mut() {
+                    f.pop();
+                }
+            }
+            // Accepting keeps the filter and hands the letters back to being
+            // commands. `Esc` is the one that clears it.
+            KeyCode::Enter => app.here_mut().editing_filter = false,
+            KeyCode::Esc => {
+                let list = app.here_mut();
+                list.filter = None;
+                list.editing_filter = false;
+            }
+            _ => {}
+        }
+        app.reconcile();
+        return None;
     }
+
+    let ids = app.row_ids(ws);
+    let page = viewport.max(1) as isize;
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') => {
+            app.back();
+            return None;
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            app.here_mut().step(-1, &ids);
+            return None;
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            app.here_mut().step(1, &ids);
+            return None;
+        }
+        KeyCode::PageUp => {
+            app.here_mut().step(-page, &ids);
+            return None;
+        }
+        KeyCode::PageDown => {
+            app.here_mut().step(page, &ids);
+            return None;
+        }
+        KeyCode::Home => {
+            app.here_mut().first(&ids);
+            return None;
+        }
+        KeyCode::End => {
+            app.here_mut().last(&ids);
+            return None;
+        }
+        KeyCode::Char('/') => {
+            let list = app.here_mut();
+            list.filter = Some(String::new());
+            list.editing_filter = true;
+            return None;
+        }
+        KeyCode::Char('S') => {
+            app.here_mut().sort += 1;
+            app.reconcile();
+            let name = ws.sort_name(app.here().sort);
+            app.push(Entry::Notice(format!("sorted by {name}")));
+            return None;
+        }
+        KeyCode::Char('?') => {
+            app.overlay = Overlay::Keymap;
+            return None;
+        }
+        KeyCode::Char('n') => return begin_new(app, ws),
+        KeyCode::Char('e') => {
+            return selected_label(app, ws).map(|what| Action::Pending {
+                verb: format!("edit {what}"),
+                needs: "the $EDITOR form ladder — tier 3 of the report's §5.4",
+            })
+        }
+        KeyCode::Char('x') => {
+            if let Some(what) = selected_label(app, ws) {
+                app.overlay = Overlay::Confirm {
+                    verb: delete_verb(ws).to_string(),
+                    what: what.clone(),
+                    id: what,
+                };
+            }
+            return None;
+        }
+        KeyCode::Char(c) if c.is_ascii_digit() => {
+            if let Some(target) = Workspace::from_digit(c) {
+                app.go(target);
+            }
+            return None;
+        }
+        _ => {}
+    }
+
+    match ws {
+        Workspace::Fleet => on_fleet_key(app, key),
+        Workspace::Memory => on_memory_key(app, key),
+        Workspace::Schedules => on_schedule_key(app, key),
+        Workspace::Goals => on_goal_key(app, key),
+        Workspace::Hooks => on_hook_key(app, key),
+        Workspace::Tasks => on_task_key(app, key),
+        Workspace::Activity => on_activity_key(app, key),
+        Workspace::Team => on_team_key(app, key),
+        Workspace::Chat | Workspace::MemoryGraph => None,
+    }
+}
+
+/// What `x` is called on each screen. "Forget" rather than "delete" for memory,
+/// because that is what it does to you rather than to a row.
+fn delete_verb(ws: Workspace) -> &'static str {
+    match ws {
+        Workspace::Memory => "forget",
+        Workspace::Tasks => "remove",
+        _ => "delete",
+    }
+}
+
+/// The name of whatever the cursor is on, for a confirmation that names it.
+fn selected_label(app: &App, ws: Workspace) -> Option<String> {
+    match ws {
+        Workspace::Fleet => app.selected_agent().map(|a| a.name.clone()),
+        Workspace::Memory => app.selected_memory().map(|n| n.name.clone()),
+        Workspace::Schedules => app.selected_schedule().map(|s| s.name.clone()),
+        Workspace::Goals => app.selected_goal().map(|g| g.name.clone()),
+        Workspace::Hooks => app.selected_hook().map(|h| h.name.clone()),
+        Workspace::Tasks => app.selected_board_task().map(|t| t.id),
+        Workspace::Activity => app.selected_activity().map(|a| a.id.clone()),
+        Workspace::Team => app.selected_task().map(|t| t.id.clone()),
+        Workspace::Chat | Workspace::MemoryGraph => None,
+    }
+}
+
+/// `n` — tier 1 of the form ladder for the kinds whose first question is one
+/// value, and a named to-do for the kinds that need the editor.
+fn begin_new(app: &mut App, ws: Workspace) -> Option<Action> {
+    let label = match ws {
+        Workspace::Memory => "remember",
+        Workspace::Tasks | Workspace::Team => "task",
+        Workspace::Schedules => "schedule",
+        Workspace::Goals => "goal",
+        Workspace::Hooks => "webhook",
+        _ => return None,
+    };
+    app.overlay = Overlay::Prompt {
+        label: label.to_string(),
+        value: String::new(),
+        intent: PromptIntent::New(ws),
+    };
+    None
+}
+
+/// What a tier-1 prompt does once `⏎` is pressed.
+fn accept_prompt(
+    app: &mut App,
+    label: String,
+    typed: String,
+    intent: PromptIntent,
+) -> Option<Action> {
+    let typed = typed.trim().to_string();
+    if typed.is_empty() {
+        return None;
+    }
+    match intent {
+        // The board is the one kind the store can already take.
+        PromptIntent::New(Workspace::Tasks) | PromptIntent::New(Workspace::Team) => {
+            Some(Action::AddTask(typed))
+        }
+        PromptIntent::New(Workspace::Memory) => Some(Action::Pending {
+            verb: format!("remember “{typed}”"),
+            needs: "Store::remember with the memory-types NewFact shape",
+        }),
+        PromptIntent::New(ws) => Some(Action::Pending {
+            verb: format!("new {} “{typed}”", ws.menu_name()),
+            needs: "the $EDITOR form ladder — tier 3 of the report's §5.4",
+        }),
+        PromptIntent::Link(from) => Some(Action::Pending {
+            verb: format!("link {from} → {typed}"),
+            needs: "Store::link_memory from the graph work",
+        }),
+    }
+    .or_else(|| {
+        app.push(Entry::Notice(format!("{label}: nothing to do")));
+        None
+    })
+}
+
+fn on_fleet_key(app: &mut App, key: KeyEvent) -> Option<Action> {
+    match key.code {
+        // Reading a run is the common case, so it is the plain key.
+        KeyCode::Enter => {
+            let id = app.selected_agent()?.id.clone();
+            app.go(Workspace::Chat);
+            Some(Action::Watch(id))
+        }
+        KeyCode::Char('s') => {
+            let agent = app.selected_agent()?;
+            let (id, running, status) = (agent.id.clone(), agent.is_running(), agent.status.clone());
+            if !running {
+                // Killing a finished run only reclaims its tmux session, which
+                // is not what "s" looks like it does. Say so instead.
+                app.push(Entry::Notice(format!(
+                    "{} is already {status} — nothing to stop",
+                    short(&id)
+                )));
+                return None;
+            }
+            Some(Action::Stop(id))
+        }
+        KeyCode::Char('a') => Some(Action::Attach(app.selected_agent()?.id.clone())),
+        // Continue the selected agent's conversation from the input box, which
+        // is how an unattended run gets picked up and corrected.
+        KeyCode::Char('r') => {
+            let agent = app.selected_agent()?.clone();
+            app.go(Workspace::Chat);
+            match agent.session {
+                Some(session) => {
+                    app.resume = Resume::Session(session.clone());
+                    app.session = Some(session);
+                    app.harness_from_label(&agent.harness);
+                    app.push(Entry::Notice(format!(
+                        "next turn continues {} — type to carry on",
+                        agent.name
+                    )));
+                }
+                None => app.push(Entry::Notice(format!(
+                    "{} never reported a conversation, so there is nothing to continue",
+                    agent.name
+                ))),
+            }
+            None
+        }
+        // Run the same prompt again as a fresh background agent — the fastest
+        // way to retry something that nearly worked.
+        KeyCode::Char('d') => {
+            let agent = app.selected_agent()?;
+            Some(Action::Delegate(agent.name.clone()))
+        }
+        _ => None,
+    }
+}
+
+fn on_memory_key(app: &mut App, key: KeyEvent) -> Option<Action> {
+    match key.code {
+        KeyCode::Enter => None,
+        // The local graph is memory's second level, so it is drilled into
+        // rather than jumped to: Esc comes back to the list.
+        KeyCode::Char('g') => {
+            let id = app.selected_memory()?.id.clone();
+            app.graph = graph::GraphView::new(id);
+            app.drill(Workspace::MemoryGraph);
+            None
+        }
+        KeyCode::Char('t') => {
+            app.memory_type = next_memory_type(app.memory_type);
+            app.reconcile();
+            let what = app
+                .memory_type
+                .map(|k| k.label().to_string())
+                .unwrap_or_else(|| "every kind".into());
+            app.push(Entry::Notice(format!("showing {what}")));
+            None
+        }
+        KeyCode::Char('l') => {
+            let from = app.selected_memory()?.name.clone();
+            app.overlay = Overlay::Prompt {
+                label: format!("link {from} →"),
+                value: String::new(),
+                intent: PromptIntent::Link(from),
+            };
+            None
+        }
+        // Memory writes are already events, so the last one can be un-written —
+        // which is strictly better than a confirmation dialog.
+        KeyCode::Char('u') => Some(Action::Pending {
+            verb: "undo the last memory write".into(),
+            needs: "Store::undo_last_memory_write from the memory-types work",
+        }),
+        _ => None,
+    }
+}
+
+fn next_memory_type(current: Option<data::MemoryKind>) -> Option<data::MemoryKind> {
+    let all = data::MemoryKind::ALL;
+    match current {
+        None => Some(all[0]),
+        Some(kind) => match all.iter().position(|k| *k == kind) {
+            Some(at) if at + 1 < all.len() => Some(all[at + 1]),
+            _ => None,
+        },
+    }
+}
+
+fn on_graph_key(app: &mut App, key: KeyEvent) -> Option<Action> {
+    let node = app.focused_memory().cloned();
+    let rows = node
+        .as_ref()
+        .map(|n| graph::neighbours(n, app.graph.edge_kind.as_deref()))
+        .unwrap_or_default();
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('g') => {
+            app.back();
+            None
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            app.graph.step(-1, rows.len());
+            None
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            app.graph.step(1, rows.len());
+            None
+        }
+        KeyCode::Home => {
+            app.graph.sel = 0;
+            None
+        }
+        KeyCode::End => {
+            app.graph.sel = rows.len().saturating_sub(1);
+            None
+        }
+        KeyCode::Enter => {
+            let row = rows.get(app.graph.sel)?;
+            app.graph.recentre(row.edge.other.clone());
+            // The list's cursor follows the eye, so leaving the graph lands on
+            // the node you were last looking at rather than the one you left.
+            app.list_mut(Workspace::Memory).selected = Some(app.graph.focus.clone());
+            None
+        }
+        // Walking a graph without being able to walk back out of it is how you
+        // get lost in one. An empty stack leaves the graph entirely.
+        KeyCode::Backspace => {
+            if !app.graph.back() {
+                app.back();
+            } else {
+                app.list_mut(Workspace::Memory).selected = Some(app.graph.focus.clone());
+            }
+            None
+        }
+        KeyCode::Char('h') => {
+            app.graph.toggle_hops();
+            None
+        }
+        KeyCode::Char('f') => {
+            let kinds = node.as_ref().map(graph::edge_kinds).unwrap_or_default();
+            app.graph.cycle_edge_kind(&kinds);
+            None
+        }
+        KeyCode::Char('?') => {
+            app.overlay = Overlay::Keymap;
+            None
+        }
+        KeyCode::Char(c) if c.is_ascii_digit() => {
+            if let Some(target) = Workspace::from_digit(c) {
+                app.go(target);
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+fn on_schedule_key(app: &mut App, key: KeyEvent) -> Option<Action> {
+    let name = app.selected_schedule().map(|s| s.name.clone())?;
+    match key.code {
+        KeyCode::Enter => Some(Action::Pending {
+            verb: format!("open {name}'s last run"),
+            needs: "Store::fires to name the run a fire started",
+        }),
+        KeyCode::Char('r') => Some(Action::Pending {
+            verb: format!("run {name} now"),
+            needs: "Jod::fire_schedule from the scheduler work",
+        }),
+        KeyCode::Char('p') => Some(Action::Pending {
+            verb: format!("pause or resume {name}"),
+            needs: "Store::set_schedule_state, which exists but is not wired here",
+        }),
+        // Dry run: the honest answer to "did I get the cron right", which no
+        // amount of staring at `0 2 * * *` gives you.
+        KeyCode::Char('t') => Some(Action::Pending {
+            verb: format!("show {name}'s next five fire times"),
+            needs: "jod_core::schedule::next_fire, called five times",
+        }),
+        _ => None,
+    }
+}
+
+fn on_goal_key(app: &mut App, key: KeyEvent) -> Option<Action> {
+    let name = app.selected_goal().map(|g| g.name.clone())?;
+    match key.code {
+        KeyCode::Enter => Some(Action::Pending {
+            verb: format!("open {name}'s last iteration"),
+            needs: "Store::goal_iterations from the scheduler work",
+        }),
+        KeyCode::Char('r') => Some(Action::Pending {
+            verb: format!("run an iteration of {name} now"),
+            needs: "Jod::run_goal_iteration from the scheduler work",
+        }),
+        KeyCode::Char('p') => Some(Action::Pending {
+            verb: format!("pause {name}"),
+            needs: "Store::set_goal_state from the scheduler work",
+        }),
+        // A looping objective that quietly needs you and never says so is worse
+        // than no goal at all.
+        KeyCode::Char('a') => Some(Action::Pending {
+            verb: format!("answer {name}'s escalation"),
+            needs: "Store::answer_escalation from the scheduler work",
+        }),
+        _ => None,
+    }
+}
+
+fn on_hook_key(app: &mut App, key: KeyEvent) -> Option<Action> {
+    let hook = app.selected_hook()?;
+    let (name, endpoint) = (hook.name.clone(), hook.endpoint.clone());
+    match key.code {
+        KeyCode::Enter => Some(Action::Pending {
+            verb: format!("open the run {name}'s last delivery started"),
+            needs: "Store::deliveries from the webhook work",
+        }),
+        KeyCode::Char('t') => Some(Action::Pending {
+            verb: format!("test {name} with a sample payload"),
+            needs: "Jod::test_webhook from the webhook work",
+        }),
+        KeyCode::Char('p') => Some(Action::Pending {
+            verb: format!("pause {name}"),
+            needs: "Store::set_webhook_state from the webhook work",
+        }),
+        KeyCode::Char('c') => {
+            // No clipboard daemon and no OSC 52 yet, so the URL goes where it
+            // can always be copied from: the transcript.
+            app.push(Entry::Notice(format!("{name}: {endpoint}")));
+            None
+        }
+        _ => None,
+    }
+}
+
+fn on_task_key(app: &mut App, key: KeyEvent) -> Option<Action> {
+    let task = app.selected_board_task()?;
+    match key.code {
+        KeyCode::Enter => {
+            if task.state == data::TaskState::Done {
+                app.push(Entry::Notice(format!("{} is already done", task.id)));
+                return None;
+            }
+            Some(Action::FinishTask(task.id))
+        }
+        // The verb that makes the board worth a screen: it turns a task into an
+        // agent run, so the board is where work starts rather than a list kept
+        // in parallel with the fleet.
+        KeyCode::Char('d') => Some(Action::Delegate(delegation_prompt(&task))),
+        KeyCode::Char('c') => Some(Action::Pending {
+            verb: format!("claim {}", task.id),
+            needs: "Store::claim_task, which exists but is not wired here",
+        }),
+        KeyCode::Char('o') => match task.run {
+            Some(run) => Some(Action::Watch(run)),
+            None => {
+                app.push(Entry::Notice(format!("{} has no run yet", task.id)));
+                None
+            }
+        },
+        _ => None,
+    }
+}
+
+/// The prompt `d` seeds an agent with: the title, the runnable check, and the
+/// spec, so the run starts knowing what "done" means.
+fn delegation_prompt(task: &data::TaskRow) -> String {
+    let mut prompt = task.title.clone();
+    if !task.check.trim().is_empty() {
+        prompt.push_str(&format!("\n\nIt is done when this passes: {}", task.check));
+    }
+    if let Some(spec) = &task.spec {
+        prompt.push_str(&format!("\n\nThe spec is {spec}."));
+    }
+    prompt
+}
+
+fn on_activity_key(app: &mut App, key: KeyEvent) -> Option<Action> {
+    match key.code {
+        KeyCode::Enter => {
+            let (ws, id) = app.selected_activity()?.jump_to.clone()?;
+            app.go(ws);
+            app.list_mut(ws).selected = Some(id);
+            None
+        }
+        KeyCode::Char('m') => {
+            let id = app.selected_activity()?.id.clone();
+            if let Some(item) = app.activity.iter_mut().find(|a| a.id == id) {
+                item.unread = false;
+            }
+            app.reconcile();
+            None
+        }
+        KeyCode::Char('M') => {
+            for item in &mut app.activity {
+                item.unread = false;
+            }
+            app.reconcile();
+            None
+        }
+        KeyCode::Char('u') => {
+            app.unread_only = !app.unread_only;
+            app.reconcile();
+            None
+        }
+        KeyCode::Char('f') => {
+            app.activity_source = next_source(app.activity_source);
+            app.reconcile();
+            None
+        }
+        _ => None,
+    }
+}
+
+fn next_source(current: Option<data::Source>) -> Option<data::Source> {
+    let all = data::Source::ALL;
+    match current {
+        None => Some(all[0]),
+        Some(source) => match all.iter().position(|s| *s == source) {
+            Some(at) if at + 1 < all.len() => Some(all[at + 1]),
+            _ => None,
+        },
+    }
+}
+
+fn on_team_key(app: &mut App, key: KeyEvent) -> Option<Action> {
+    match key.code {
+        KeyCode::Enter => {
+            let task = app.selected_task()?;
+            if task.is_done() {
+                app.push(Entry::Notice(format!("{} is already done", task.id)));
+                return None;
+            }
+            Some(Action::FinishTask(task.id.clone()))
+        }
+        _ => None,
+    }
+}
+
+/// Keys in chat, where letters are text and the input box owns them.
+fn on_chat_key(app: &mut App, key: KeyEvent, viewport: usize) -> Option<Action> {
+    let max_scroll = app.transcript.len();
 
     // While the completion popup is up it owns Tab and the arrows, and Enter
     // finishes the word rather than sending a half-typed command.
-    let suggestions = command::completions(&app.input, &app.agents);
+    let suggestions = command::completions(&app.input, app);
     if !suggestions.is_empty() {
         app.clamp_suggestion(suggestions.len());
         match key.code {
@@ -565,7 +1308,11 @@ fn on_key(app: &mut App, key: KeyEvent, viewport: usize) -> Option<Action> {
         KeyCode::Down => app.history_next(),
         KeyCode::PageUp => app.scroll_up(viewport.max(1), max_scroll),
         KeyCode::PageDown => app.scroll_down(viewport.max(1)),
-        KeyCode::Esc => app.scroll_to_bottom(),
+        KeyCode::Esc => app.back(),
+        // `?` on an *empty* input opens the keymap; with anything typed it is
+        // the character it looks like. Backspacing down to a lone `?` therefore
+        // never fires it, which is the edge case that makes the rule usable.
+        KeyCode::Char('?') if app.input.is_empty() => app.overlay = Overlay::Keymap,
         KeyCode::Char(c) => {
             app.insert(c);
             // Typing means the recalled line is now the user's own draft, so
@@ -575,102 +1322,6 @@ fn on_key(app: &mut App, key: KeyEvent, viewport: usize) -> Option<Action> {
         _ => {}
     }
     None
-}
-
-/// Keys while a panel is open. The panel is modal: this is a list you act on.
-fn on_panel_key(app: &mut App, key: KeyEvent) -> Option<Action> {
-    match key.code {
-        KeyCode::Esc | KeyCode::Char('q') => {
-            app.pane = Pane::Chat;
-            None
-        }
-        KeyCode::Up | KeyCode::Char('k') => {
-            match app.pane {
-                Pane::Team => app.select_task(-1),
-                _ => app.select_agent(-1),
-            }
-            None
-        }
-        KeyCode::Down | KeyCode::Char('j') => {
-            match app.pane {
-                Pane::Team => app.select_task(1),
-                _ => app.select_agent(1),
-            }
-            None
-        }
-        KeyCode::Home => {
-            match app.pane {
-                Pane::Team => app.task_sel = 0,
-                _ => app.agent_sel = 0,
-            }
-            None
-        }
-        KeyCode::End => {
-            match app.pane {
-                Pane::Team => app.task_sel = app.tasks.len().saturating_sub(1),
-                _ => app.agent_sel = app.agents.len().saturating_sub(1),
-            }
-            None
-        }
-        KeyCode::Enter => match app.pane {
-            // Reading a run is the common case, so it is the plain key.
-            Pane::Agents => {
-                let id = app.selected_agent()?.id.clone();
-                app.pane = Pane::Chat;
-                Some(Action::Watch(id))
-            }
-            Pane::Team => {
-                let task = app.selected_task()?;
-                if task.is_done() {
-                    app.push(Entry::Notice(format!("{} is already done", task.id)));
-                    return None;
-                }
-                Some(Action::FinishTask(task.id.clone()))
-            }
-            Pane::Chat => None,
-        },
-        KeyCode::Char('s') if app.pane == Pane::Agents => {
-            let agent = app.selected_agent()?;
-            let (id, running) = (agent.id.clone(), agent.is_running());
-            if !running {
-                // Killing a finished run only reclaims its tmux session, which
-                // is not what "s" looks like it does. Say so instead.
-                app.push(Entry::Notice(format!(
-                    "{} is already {} — nothing to stop",
-                    short(&id),
-                    agent.status
-                )));
-                return None;
-            }
-            Some(Action::Stop(id))
-        }
-        KeyCode::Char('a') if app.pane == Pane::Agents => {
-            Some(Action::Attach(app.selected_agent()?.id.clone()))
-        }
-        // Continue the selected agent's conversation from the input box, which
-        // is how an unattended run gets picked up and corrected.
-        KeyCode::Char('r') if app.pane == Pane::Agents => {
-            let agent = app.selected_agent()?.clone();
-            app.pane = Pane::Chat;
-            match agent.session {
-                Some(session) => {
-                    app.resume = Resume::Session(session.clone());
-                    app.session = Some(session);
-                    app.harness_from_label(&agent.harness);
-                    app.push(Entry::Notice(format!(
-                        "next turn continues {} — type to carry on",
-                        agent.name
-                    )));
-                }
-                None => app.push(Entry::Notice(format!(
-                    "{} never reported a conversation, so there is nothing to continue",
-                    agent.name
-                ))),
-            }
-            None
-        }
-        _ => None,
-    }
 }
 
 /// Carry out a slash command. Everything it touches is app state, so this
@@ -741,9 +1392,9 @@ fn apply_slash(app: &mut App, slash: command::Slash) -> Option<Action> {
             app.push(Entry::Notice("new conversation".into()));
         }
         Slash::Sessions => {
-            app.pane = Pane::Agents;
+            app.go(Workspace::Fleet);
             app.push(Entry::Notice(
-                "pick an id from the panel, then /resume <id> — the shown prefix is enough".into(),
+                "pick an id from the fleet, then /resume <id> — the shown prefix is enough".into(),
             ));
         }
         Slash::Resume(id) => match app.resolve_session(&id) {
@@ -777,11 +1428,63 @@ fn apply_slash(app: &mut App, slash: command::Slash) -> Option<Action> {
                 )));
             }
         },
-        Slash::Agents => {
-            app.pane = if app.pane == Pane::Agents { Pane::Chat } else { Pane::Agents };
+        // Every workspace verb is a toggle, so typing the command you are
+        // already looking at takes you home rather than doing nothing.
+        Slash::Open(ws) => app.go(toggled(app.workspace, ws)),
+        // Naming a row lands the cursor on it, which is what makes
+        // `/schedule nightly-inbox` worth having beside `/schedules`.
+        Slash::OpenNamed(ws, name) => {
+            app.go(ws);
+            match app.row_ids(ws).into_iter().find(|id| id.starts_with(&name)) {
+                Some(id) => app.list_mut(ws).selected = Some(id),
+                None => app.push(Entry::Notice(format!(
+                    "no {} called {name}",
+                    ws.menu_name()
+                ))),
+            }
         }
-        Slash::Team => {
-            app.pane = if app.pane == Pane::Team { Pane::Chat } else { Pane::Team };
+        Slash::Memory(query) => {
+            app.go(Workspace::Memory);
+            if let Some(q) = query {
+                let list = app.list_mut(Workspace::Memory);
+                list.filter = Some(q);
+                list.editing_filter = false;
+                app.reconcile();
+            }
+        }
+        Slash::NewKind(ws) => {
+            app.go(ws);
+            return begin_new(app, ws);
+        }
+        Slash::Pause(name) => {
+            return Some(Action::Pending {
+                verb: format!("pause {name}"),
+                needs: "Store::set_schedule_state / set_goal_state, wired to a name lookup",
+            })
+        }
+        Slash::Unpause(name) => {
+            return Some(Action::Pending {
+                verb: format!("resume {name}"),
+                needs: "Store::set_schedule_state / set_goal_state, wired to a name lookup",
+            })
+        }
+        Slash::Run(name) => {
+            return Some(Action::Pending {
+                verb: format!("run {name} now"),
+                needs: "Jod::fire_schedule / run_goal_iteration from the scheduler work",
+            })
+        }
+        Slash::Remember(text) => {
+            return Some(Action::Pending {
+                verb: format!("remember “{text}”"),
+                needs: "Store::remember with the memory-types NewFact shape",
+            })
+        }
+        Slash::Forget(name) => {
+            return Some(Action::Pending {
+                verb: format!("forget {name}"),
+                needs: "Store::forget, wired to a node id rather than a triple",
+            })
         }
         Slash::Delegate(prompt) => return Some(Action::Delegate(prompt)),
         Slash::Stop(which) => return resolve_agent(app, &which).map(Action::Stop),
@@ -802,6 +1505,16 @@ fn apply_slash(app: &mut App, slash: command::Slash) -> Option<Action> {
         }
     }
     None
+}
+
+/// Where a workspace command lands: the workspace, unless you are already
+/// there, in which case home.
+fn toggled(here: Workspace, asked: Workspace) -> Workspace {
+    if here == asked {
+        Workspace::Chat
+    } else {
+        asked
+    }
 }
 
 /// Turn what was typed at `/stop`, `/watch` or `/attach` into one agent id.
@@ -877,6 +1590,72 @@ fn refresh_team(jod: &Arc<Jod>, app: &mut App) {
     if let Ok(tasks) = store.team_tasks(&team) {
         app.tasks = tasks;
     }
+}
+
+/// Re-read what the workspaces show.
+///
+/// Off the render path, on the tick, exactly as the team board already is — and
+/// for the same reason: cron, webhooks and goals write these from *other
+/// processes*, so an in-memory copy could never be authoritative. Each loader
+/// swallows its own errors rather than taking the UI down over a locked
+/// database.
+fn refresh_workspaces(jod: &Arc<Jod>, app: &mut App) {
+    app.memory = data::memory(jod);
+    app.schedules = data::schedules(jod);
+    app.goals = data::goals(jod);
+    app.hooks = data::hooks(jod);
+    app.activity = data::activity(jod);
+    app.board = data::tasks(jod);
+}
+
+/// Hand the typed line to `$EDITOR`, and take back whatever comes out.
+///
+/// The user already has a configured editor; a one-line TUI field will never
+/// beat it for a forty-line prompt. The terminal has to be given back and
+/// retaken around the child, with the same discipline as `enter`/`restore` —
+/// including the panic hook, which `enter` reinstalls.
+fn edit_in_editor(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) {
+    let Some(editor) = std::env::var("EDITOR").ok().filter(|e| !e.trim().is_empty()) else {
+        app.push(Entry::Notice(
+            "no $EDITOR set — export one and press Ctrl-F again".into(),
+        ));
+        return;
+    };
+
+    let path = std::env::temp_dir().join(format!("jod-prompt-{}.md", std::process::id()));
+    if let Err(e) = std::fs::write(&path, &app.input) {
+        app.push(Entry::Notice(format!("could not open an editor: {e}")));
+        return;
+    }
+
+    restore();
+    let status = std::process::Command::new(&editor).arg(&path).status();
+    let re_entered = enter();
+    match re_entered {
+        Ok(fresh) => *terminal = fresh,
+        Err(e) => {
+            app.push(Entry::Notice(format!("could not take the terminal back: {e}")));
+            return;
+        }
+    }
+    let _ = terminal.clear();
+
+    match status {
+        // A failed edit must not throw the work away — that is the one thing a
+        // form must never do.
+        Ok(code) if !code.success() => {
+            app.push(Entry::Notice(format!("{editor} exited {code} — nothing changed")));
+        }
+        Err(e) => app.push(Entry::Notice(format!("could not run {editor}: {e}"))),
+        Ok(_) => match std::fs::read_to_string(&path) {
+            Ok(text) => {
+                app.input = text.trim_end().to_string();
+                app.cursor = app.input.len();
+            }
+            Err(e) => app.push(Entry::Notice(format!("could not read it back: {e}"))),
+        },
+    }
+    let _ = std::fs::remove_file(&path);
 }
 
 async fn list_agents(jod: &Arc<Jod>) -> Vec<AgentLine> {
@@ -1195,7 +1974,7 @@ mod tests {
         assert!(app.should_quit);
     }
 
-    // ---- the agents panel as a control surface ----
+    // ---- the fleet as a control surface ----
 
     fn panel_with_agents() -> App {
         let mut app = app_on(HarnessKind::ClaudeCode);
@@ -1204,18 +1983,34 @@ mod tests {
             done.status = "completed".into();
             done
         }];
-        app.pane = Pane::Agents;
+        app.go(Workspace::Fleet);
         app
+    }
+
+    /// The id the fleet cursor is on, which is what every key acts on.
+    fn fleet_at(app: &App) -> String {
+        app.selected_agent().map(|a| a.id.clone()).unwrap_or_default()
     }
 
     #[test]
     fn the_panel_arrows_move_its_cursor_rather_than_the_transcript() {
         let mut app = panel_with_agents();
         press(&mut app, KeyCode::Down);
-        assert_eq!(app.agent_sel, 1);
+        assert_eq!(fleet_at(&app), "bbb22222");
         assert_eq!(app.scroll, 0, "the transcript did not move");
         press(&mut app, KeyCode::Up);
-        assert_eq!(app.agent_sel, 0);
+        assert_eq!(fleet_at(&app), "aaa11111");
+    }
+
+    /// `j` and `k` do the same, on every workspace, so vim fingers work without
+    /// vim modes.
+    #[test]
+    fn jk_move_the_cursor_wherever_the_arrows_do() {
+        let mut app = panel_with_agents();
+        press(&mut app, KeyCode::Char('j'));
+        assert_eq!(fleet_at(&app), "bbb22222");
+        press(&mut app, KeyCode::Char('k'));
+        assert_eq!(fleet_at(&app), "aaa11111");
     }
 
     #[test]
@@ -1226,7 +2021,11 @@ mod tests {
             press(&mut app, KeyCode::Enter),
             Some(Action::Watch("bbb22222".into()))
         );
-        assert_eq!(app.pane, Pane::Chat, "you asked to read it, so show it");
+        assert_eq!(
+            app.workspace,
+            Workspace::Chat,
+            "you asked to read it, so show it"
+        );
     }
 
     #[test]
@@ -1264,7 +2063,7 @@ mod tests {
         let mut app = panel_with_agents();
         press(&mut app, KeyCode::Char('r'));
         assert_eq!(app.resume, Resume::Session("sess-aaa11111".into()));
-        assert_eq!(app.pane, Pane::Chat);
+        assert_eq!(app.workspace, Workspace::Chat);
     }
 
     #[test]
@@ -1289,13 +2088,13 @@ mod tests {
     fn esc_closes_the_panel() {
         let mut app = panel_with_agents();
         press(&mut app, KeyCode::Esc);
-        assert_eq!(app.pane, Pane::Chat);
+        assert_eq!(app.workspace, Workspace::Chat);
     }
 
     #[test]
     fn the_team_panel_marks_the_selected_task_done() {
         let mut app = app_on(HarnessKind::ClaudeCode);
-        app.pane = Pane::Team;
+        app.go(Workspace::Team);
         app.tasks = vec![
             jod_core::team::TeamTask {
                 id: "t1".into(),
@@ -1310,6 +2109,9 @@ mod tests {
                 status: "done".into(),
             },
         ];
+        // The cursor is an id, so it has to be placed once the rows exist —
+        // which is what the refresh does in the loop.
+        app.reconcile();
         assert_eq!(
             press(&mut app, KeyCode::Enter),
             Some(Action::FinishTask("t1".into()))

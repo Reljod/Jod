@@ -12,6 +12,8 @@
 
 use jod_core::HarnessKind;
 
+use super::workspace::Workspace;
+
 /// What a `/…` line asked for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Slash {
@@ -29,8 +31,22 @@ pub enum Slash {
     Sessions,
     /// Continue a specific conversation by its harness-assigned id.
     Resume(String),
-    Agents,
-    Team,
+    /// Go to a workspace. One variant for all nine, because the palette and the
+    /// which-key menu must reach the same set — a screen you can open one way
+    /// and not the other is a screen half the users never find.
+    Open(Workspace),
+    /// Go to a workspace and land the cursor on a named row.
+    OpenNamed(Workspace, String),
+    /// The memory list, optionally with the filter already typed in.
+    Memory(Option<String>),
+    /// `/new schedule|goal|hook|memory|task` — start making one.
+    NewKind(Workspace),
+    Pause(String),
+    Unpause(String),
+    /// Fire a schedule, or run one iteration of a goal, now.
+    Run(String),
+    Remember(String),
+    Forget(String),
     /// Start an agent that runs without taking over the screen.
     Delegate(String),
     /// Stop an agent, by an id prefix or its name.
@@ -81,8 +97,83 @@ pub fn parse(line: &str) -> Option<Slash> {
         }
         "thinking" | "reasoning" => Slash::Thinking,
         "details" | "output" => Slash::Details,
-        "new" => Slash::New,
+        // `/new` alone is still a fresh conversation, which is what it has
+        // always meant; `/new schedule` is the form ladder's front door.
+        "new" => match kind_from(arg) {
+            Some(ws) => Slash::NewKind(ws),
+            None if arg.is_empty() => Slash::New,
+            None => Slash::Unknown(format!("/new {arg}")),
+        },
         "sessions" => Slash::Sessions,
+        "memory" | "memories" => {
+            if arg.is_empty() {
+                Slash::Memory(None)
+            } else {
+                Slash::Memory(Some(arg.to_string()))
+            }
+        }
+        "graph" => Slash::Open(Workspace::Memory),
+        "schedules" | "cron" => Slash::Open(Workspace::Schedules),
+        "schedule" => {
+            if arg.is_empty() {
+                Slash::NeedsArgument("/schedule <name>")
+            } else {
+                Slash::OpenNamed(Workspace::Schedules, arg.to_string())
+            }
+        }
+        "goals" => Slash::Open(Workspace::Goals),
+        "goal" => {
+            if arg.is_empty() {
+                Slash::NeedsArgument("/goal <name>")
+            } else {
+                Slash::OpenNamed(Workspace::Goals, arg.to_string())
+            }
+        }
+        "hooks" | "webhooks" => Slash::Open(Workspace::Hooks),
+        "hook" | "webhook" => {
+            if arg.is_empty() {
+                Slash::NeedsArgument("/hook <name>")
+            } else {
+                Slash::OpenNamed(Workspace::Hooks, arg.to_string())
+            }
+        }
+        "tasks" | "board" => Slash::Open(Workspace::Tasks),
+        "activity" | "inbox" => Slash::Open(Workspace::Activity),
+        "pause" => {
+            if arg.is_empty() {
+                Slash::NeedsArgument("/pause <name>")
+            } else {
+                Slash::Pause(arg.to_string())
+            }
+        }
+        "unpause" | "resume-schedule" => {
+            if arg.is_empty() {
+                Slash::NeedsArgument("/unpause <name>")
+            } else {
+                Slash::Unpause(arg.to_string())
+            }
+        }
+        "run" => {
+            if arg.is_empty() {
+                Slash::NeedsArgument("/run <name>")
+            } else {
+                Slash::Run(arg.to_string())
+            }
+        }
+        "remember" => {
+            if arg.is_empty() {
+                Slash::NeedsArgument("/remember <text>")
+            } else {
+                Slash::Remember(arg.to_string())
+            }
+        }
+        "forget" => {
+            if arg.is_empty() {
+                Slash::NeedsArgument("/forget <name>")
+            } else {
+                Slash::Forget(arg.to_string())
+            }
+        }
         "resume" | "continue" => {
             if arg.is_empty() {
                 Slash::NeedsArgument("/resume <session-id>")
@@ -90,8 +181,8 @@ pub fn parse(line: &str) -> Option<Slash> {
                 Slash::Resume(arg.to_string())
             }
         }
-        "agents" => Slash::Agents,
-        "team" => Slash::Team,
+        "agents" | "fleet" => Slash::Open(Workspace::Fleet),
+        "team" => Slash::Open(Workspace::Team),
         "delegate" | "bg" | "spawn" => {
             if arg.is_empty() {
                 Slash::NeedsArgument("/delegate <prompt>")
@@ -140,6 +231,19 @@ pub fn parse(line: &str) -> Option<Slash> {
     })
 }
 
+/// What `/new <kind>` is asking to make. Named after the singular of the
+/// screen, because that is the word on the screen you just came from.
+fn kind_from(name: &str) -> Option<Workspace> {
+    Some(match name.to_ascii_lowercase().as_str() {
+        "schedule" | "cron" | "timer" => Workspace::Schedules,
+        "goal" => Workspace::Goals,
+        "hook" | "webhook" => Workspace::Hooks,
+        "memory" | "fact" | "belief" => Workspace::Memory,
+        "task" | "todo" => Workspace::Tasks,
+        _ => return None,
+    })
+}
+
 fn harness_from(name: &str) -> Option<HarnessKind> {
     match name.to_ascii_lowercase().as_str() {
         "claude" | "claude-code" | "claude_code" | "cc" => Some(HarnessKind::ClaudeCode),
@@ -157,20 +261,37 @@ pub const HELP: &[(&str, &str)] = &[
     ("/model <name>", "set the model; no argument restores the default"),
     ("/thinking", "show or hide reasoning"),
     ("/details", "show or hide what tools returned"),
-    ("/new", "start a fresh conversation"),
+    ("/new [kind]", "a fresh conversation, or a new schedule/goal/hook/task"),
     ("/sessions", "conversations you can pick up"),
     ("/resume <id>", "continue one of them"),
     ("/delegate <prompt>", "run it in the background (Ctrl-B)"),
-    ("/agents", "the delegations panel (Ctrl-A)"),
+    ("/agents", "the fleet (Ctrl-A, Ctrl-K f)"),
     ("/watch <id>", "put an agent's output on screen"),
     ("/stop <id>", "stop an agent and close its session"),
     ("/attach <id>", "how to attach to its tmux session"),
+    ("/memory [query]", "what Jod remembers (Ctrl-K m)"),
+    ("/schedules", "cron-triggered runs (Ctrl-K s)"),
+    ("/schedule <name>", "open one of them"),
+    ("/goals", "looping objectives (Ctrl-K g)"),
+    ("/goal <name>", "open one of them"),
+    ("/hooks", "webhook rules (Ctrl-K h)"),
+    ("/hook <name>", "open one of them"),
+    ("/tasks", "the board as a screen (Ctrl-K t)"),
+    ("/activity", "what happened while you were away (Ctrl-K a)"),
+    ("/run <name>", "fire a schedule or a goal iteration now"),
+    ("/pause <name>", "stop a schedule or goal firing"),
+    ("/unpause <name>", "arm it again"),
+    ("/remember <text>", "write something to memory"),
+    ("/forget <name>", "drop a memory node"),
     ("/team", "the team panel (Ctrl-G)"),
     ("/todo <title>", "put a task on the team's board"),
     ("/done <task-id>", "mark one of those tasks finished"),
     ("/clear", "clear the transcript on screen"),
     ("/exit", "leave; running agents keep going"),
 ];
+
+/// The kinds `/new` accepts, offered rather than remembered.
+const KINDS: [&str; 5] = ["schedule", "goal", "hook", "memory", "task"];
 
 /// One thing the completion popup can offer.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -197,7 +318,8 @@ impl Completion {
 /// — `/harness ` is the point where a user has to remember three spellings, and
 /// the commands that take an agent id are otherwise a UUID-retyping exercise,
 /// so the live fleet is offered there.
-pub fn completions(input: &str, agents: &[crate::tui::AgentLine]) -> Vec<Completion> {
+pub fn completions(input: &str, app: &crate::tui::App) -> Vec<Completion> {
+    let agents = &app.agents;
     let Some(rest) = input.strip_prefix('/') else {
         return vec![];
     };
@@ -254,8 +376,36 @@ pub fn completions(input: &str, agents: &[crate::tui::AgentLine]) -> Vec<Complet
                 )
             })
             .collect(),
+        "new" => KINDS
+            .iter()
+            .filter(|kind| kind.starts_with(&typed))
+            .map(|kind| Completion::new(format!("/new {kind}"), format!("a new {kind}")))
+            .collect(),
+        // The same reasoning as the agent ids: retyping a name off the screen
+        // above is not a user interface. A schedule and a goal are both things
+        // you pause, run and un-pause, so both are offered on those verbs.
+        "schedule" => named(&name, &typed, app.schedules.iter().map(|s| (&s.name, &s.gloss))),
+        "goal" => named(&name, &typed, app.goals.iter().map(|g| (&g.name, &g.cadence))),
+        "hook" | "webhook" => named(&name, &typed, app.hooks.iter().map(|h| (&h.name, &h.repo))),
+        "forget" => named(&name, &typed, app.memory.iter().map(|n| (&n.name, &n.body))),
+        "pause" | "unpause" | "run" => {
+            let schedules = app.schedules.iter().map(|s| (&s.name, &s.gloss));
+            let goals = app.goals.iter().map(|g| (&g.name, &g.cadence));
+            named(&name, &typed, schedules.chain(goals))
+        }
         _ => vec![],
     }
+}
+
+/// Offer live names for a command that takes one.
+fn named<'a>(
+    command: &str,
+    typed: &str,
+    rows: impl Iterator<Item = (&'a String, &'a String)>,
+) -> Vec<Completion> {
+    rows.filter(|(name, _)| name.to_ascii_lowercase().starts_with(typed))
+        .map(|(name, hint)| Completion::new(format!("/{command} {name}"), hint.clone()))
+        .collect()
 }
 
 /// The spelling offered for a harness — the shortest one `parse` accepts.
@@ -271,8 +421,17 @@ fn short_name(kind: HarnessKind) -> &'static str {
 mod tests {
     use super::*;
 
+    /// Completions read live rows off the app, so a fixture app is what the
+    /// tests hand them. Only the fleet varies here; the other lists are empty
+    /// until their loaders land.
+    fn fleet(agents: &[crate::tui::AgentLine]) -> crate::tui::App {
+        let mut app = crate::tui::App::new(HarnessKind::ClaudeCode, None, jod_core::Resume::Fresh);
+        app.agents = agents.to_vec();
+        app
+    }
+
     fn lines(input: &str) -> Vec<String> {
-        completions(input, &[]).into_iter().map(|c| c.line).collect()
+        completions(input, &fleet(&[])).into_iter().map(|c| c.line).collect()
     }
 
     fn agent(id: &str, status: &str) -> crate::tui::AgentLine {
@@ -290,13 +449,13 @@ mod tests {
 
     #[test]
     fn a_plain_prompt_offers_no_completions() {
-        assert!(completions("hello", &[]).is_empty());
-        assert!(completions("", &[]).is_empty());
+        assert!(completions("hello", &fleet(&[])).is_empty());
+        assert!(completions("", &fleet(&[])).is_empty());
     }
 
     #[test]
     fn a_bare_slash_offers_everything() {
-        assert_eq!(completions("/", &[]).len(), HELP.len());
+        assert_eq!(completions("/", &fleet(&[])).len(), HELP.len());
     }
 
     #[test]
@@ -318,7 +477,7 @@ mod tests {
 
     #[test]
     fn nonsense_completes_to_nothing() {
-        assert!(completions("/zzzz", &[]).is_empty());
+        assert!(completions("/zzzz", &fleet(&[])).is_empty());
     }
 
     /// The bit that saves remembering three spellings.
@@ -336,7 +495,7 @@ mod tests {
     /// popup would suggest something that then fails.
     #[test]
     fn every_suggested_harness_parses() {
-        for c in completions("/harness ", &[]) {
+        for c in completions("/harness ", &fleet(&[])) {
             assert!(
                 matches!(parse(&c.line), Some(Slash::Harness(_))),
                 "{} was suggested but does not parse",
@@ -349,7 +508,7 @@ mod tests {
     /// something the parser calls unknown.
     #[test]
     fn every_suggested_command_parses() {
-        for c in completions("/", &[]) {
+        for c in completions("/", &fleet(&[])) {
             let parsed = parse(c.line.trim());
             assert!(
                 !matches!(parsed, Some(Slash::Unknown(_)) | None),
@@ -368,7 +527,7 @@ mod tests {
         // Trimmed, the only suggestion is what is already typed — so there is
         // nothing to accept and Enter must run it.
         for input in ["/resume", "/harness"] {
-            let only = &completions(input, &[])[0].line;
+            let only = &completions(input, &fleet(&[]))[0].line;
             assert_eq!(only.trim_end(), input.trim_end());
         }
     }
@@ -466,8 +625,10 @@ mod tests {
         assert_eq!(parse("/reasoning"), Some(Slash::Thinking));
         assert_eq!(parse("/new"), Some(Slash::New));
         assert_eq!(parse("/sessions"), Some(Slash::Sessions));
-        assert_eq!(parse("/agents"), Some(Slash::Agents));
-        assert_eq!(parse("/team"), Some(Slash::Team));
+        // `/agents` and `/team` now name workspaces rather than panels, which
+        // is what lets one variant cover all nine screens.
+        assert_eq!(parse("/agents"), Some(Slash::Open(Workspace::Fleet)));
+        assert_eq!(parse("/team"), Some(Slash::Open(Workspace::Team)));
         assert_eq!(parse("/clear"), Some(Slash::Clear));
         for text in ["/exit", "/quit", "/q"] {
             assert_eq!(parse(text), Some(Slash::Exit), "{text}");
@@ -526,14 +687,14 @@ mod tests {
     #[test]
     fn the_live_agents_complete_the_commands_that_name_one() {
         let agents = [agent("abcdef1234", "running"), agent("99887766", "completed")];
-        let offered = completions("/watch ", &agents)
+        let offered = completions("/watch ", &fleet(&agents))
             .into_iter()
             .map(|c| c.line)
             .collect::<Vec<_>>();
         assert_eq!(offered, vec!["/watch abcdef12", "/watch 99887766"]);
 
         assert_eq!(
-            completions("/watch abc", &agents)[0].line,
+            completions("/watch abc", &fleet(&agents))[0].line,
             "/watch abcdef12",
             "typing narrows it"
         );
@@ -544,7 +705,7 @@ mod tests {
     #[test]
     fn stopping_only_offers_the_agents_that_are_still_running() {
         let agents = [agent("abcdef1234", "running"), agent("99887766", "completed")];
-        let offered = completions("/stop ", &agents)
+        let offered = completions("/stop ", &fleet(&agents))
             .into_iter()
             .map(|c| c.line)
             .collect::<Vec<_>>();
@@ -555,12 +716,12 @@ mod tests {
     #[test]
     fn an_offered_agent_is_described_by_its_status_and_name() {
         let agents = [agent("abcdef1234", "running")];
-        assert_eq!(completions("/watch ", &agents)[0].hint, "running · port the parser");
+        assert_eq!(completions("/watch ", &fleet(&agents))[0].hint, "running · port the parser");
     }
 
     #[test]
     fn naming_an_agent_completes_to_nothing_when_there_are_none() {
-        assert!(completions("/stop ", &[]).is_empty());
+        assert!(completions("/stop ", &fleet(&[])).is_empty());
     }
 
     /// `/help` must not list a command the parser rejects.
