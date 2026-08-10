@@ -625,6 +625,29 @@ const MIGRATIONS: &[(&str, &str)] = &[
       WHERE state IN ('pending', 'attempting');
     "#,
     ),
+    (
+        "0009_messages_are_idempotent",
+        r#"
+    -- Where a message came from in its run's event stream.
+    --
+    -- Without this, appending a run's events to a conversation is not
+    -- idempotent, and replay is *normal* on the run path rather than
+    -- exceptional: `runner::follow` restarts from a caller-held cursor, and a
+    -- reconnecting client legitimately re-receives events it has already seen.
+    -- A naive wiring therefore duplicates every turn on reconnect — and passes
+    -- a single-shot test while doing it, which is the kind of bug that ships.
+    --
+    -- `events` already solved this with UNIQUE(run_id, seq). This is the same
+    -- guard for the same reason, one table along.
+    ALTER TABLE messages ADD COLUMN run_seq INTEGER;
+
+    -- Partial, because a message a person typed has no run and no sequence,
+    -- and several of those must not collide on NULL. Only run-derived messages
+    -- are constrained, which is exactly the set that can be replayed.
+    CREATE UNIQUE INDEX ux_messages_run_seq ON messages(run_id, run_seq)
+      WHERE run_id IS NOT NULL AND run_seq IS NOT NULL;
+    "#,
+    ),
 ];
 
 /// Who asserted a fact. Kept out of the fact's text so that content Jod
