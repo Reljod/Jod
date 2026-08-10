@@ -34,4 +34,56 @@ a mistake here is a service other things depend on.
   stopping services, editing config that a service reads, package installs and
   upgrades, firewall or SSH changes, deleting anything, rebooting.
 
-_Notes on what actually runs there to be filled in as the box's role solidifies._
+## When an agent "goes idle"
+
+Check these in order. The cheap one is nearly always the answer, and the
+tempting one nearly always is not.
+→ [why](../../docs/decisions.md#an-idle-agent-is-usually-a-full-disk-not-a-dropped-ssh)
+
+```sh
+df -h /                      # 1. full disk — the usual culprit
+tmux ls                      # 2. session gone -> the agent died, not stalled
+ss -tanpo | grep claude      # 3. ESTAB with a stuck timer -> half-open socket
+```
+
+**A full root filesystem presents as an idle agent, not as an error.** The agent
+cannot write its transcript, shell snapshot or SQLite commit, so it stalls
+silently. `df` first, every time.
+
+The disk fills from one place: `.claude/worktrees/<job>/target`. Every background
+job takes a worktree and cargo-builds 2–5GB into it, and nothing removes it
+afterwards. `target/` is gitignored and regenerable, so it is safe to delete —
+but never delete one belonging to a *locked* worktree, which means a live
+session still holds it:
+
+```sh
+du -xsh /home/reljod/repo/Jod/.claude/worktrees/*/target | sort -rh
+git worktree list                    # anything marked `locked` is in use — leave it
+rm -rf /home/reljod/repo/Jod/.claude/worktrees/<name>/target
+```
+
+## Session persistence — what is configured and why
+
+Applied on the box; all four survive reboot.
+
+| Setting | Value | File |
+|---|---|---|
+| SSH keepalive | `ClientAliveInterval 30`, `CountMax 6` | `/etc/ssh/sshd_config.d/70-keepalive.conf` |
+| TCP keepalive | `time 300`, `intvl 15`, `probes 4` | `/etc/sysctl.d/99-tcp-keepalive.conf` |
+| Linger | `enabled` for `reljod` | `loginctl enable-linger` |
+| mosh | installed, UDP `60000:61000` open | `ufw` |
+
+Two things worth knowing before changing any of it:
+
+- **sshd here is socket-activated** (`ssh.socket` enabled, `ssh.service`
+  disabled), so it re-reads its config on every new connection. No reload is
+  needed and established sessions are never disturbed — but a syntax error
+  breaks *new* logins while you are still comfortably connected. Always
+  `sudo sshd -t` before trusting a change, and verify with
+  `sudo sshd -T | grep -i clientalive`.
+- **`tcp_keepalive_time` does not affect the agents.** Node sets `TCP_KEEPIDLE`
+  per socket and overrides it; only `intvl` and `probes` reach them.
+
+Run agents inside tmux (`tmux new -As <name>` — attaches or creates), or
+headless via `claude -p` under a systemd user unit, which needs the linger above
+and drops the TTY dependency entirely.

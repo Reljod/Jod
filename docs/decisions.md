@@ -807,3 +807,44 @@ walking out on four background jobs unwarned is the same mistake, four times.
 A 250ms tick pays for all of it. A ten-minute run and a hung one are the same
 picture unless something moves, and a fleet that only refreshed when the watched
 agent finished was showing state minutes old.
+
+## An idle agent is usually a full disk, not a dropped SSH
+
+"The agent goes idle when my SSH connection drops" describes three unrelated
+failures that look identical from the far end, and each wants a different fix.
+
+The first is `SIGHUP`. An agent started directly in an SSH shell belongs to that
+session's process group, so the connection dying takes the agent with it. tmux
+answers that one — and this box already ran everything in tmux, which is the
+first clue that the symptom had another cause.
+
+The second is logind reaping the user slice at logout. `KillUserProcesses` is
+`no` here, so it was never it. Linger is enabled now anyway, because the
+headless path wants a user manager that outlives the session.
+
+The third is the one that genuinely *idles*. A long-running agent holds a
+streaming HTTPS connection to the model API; when the network path breaks — NAT
+eviction, host migration, an ISP flap — the peer never sends a FIN, so the read
+blocks on a socket nobody will ever speak on again. The process is up, the run
+is alive, nothing moves. The obvious remedy, lowering
+`net.ipv4.tcp_keepalive_time`, does nothing at all here: Node sets
+`TCP_KEEPIDLE` per socket and overrides the sysctl. `ss -tanpo` settles it —
+the agent's sockets count down from under a minute while the sysctl still reads
+two hours. What Node does *not* set is the probe phase, so `tcp_keepalive_intvl`
+and `tcp_keepalive_probes` are the only lines with leverage: 9 × 75s became
+4 × 15s, and a dead peer is noticed in about a minute instead of eleven.
+
+None of which was the real problem. The root filesystem was **100% full** — 53MB
+free of 45GB — and 29GB of that was Rust `target/` directories, one per
+abandoned agent worktree. An agent that cannot write its transcript, its shell
+snapshot or a SQLite commit does not crash and does not report; it stalls, which
+is indistinguishable from thinking. Check `df` before tuning anything.
+
+That accumulation is structural rather than unlucky. Every background job takes
+a worktree, every worktree cargo-builds its own 2–5GB `target/`, and removing it
+afterwards is nobody's job. `target/` is gitignored and regenerable, so
+reclaiming it costs a rebuild and nothing else — but the sweep has to recur, or
+`CARGO_TARGET_DIR` has to point at one shared directory, which trades the disk
+for cargo's lock serialising builds across concurrent agents. The sweep is the
+cheaper trade while agents run in parallel; it is also the one that gets
+forgotten, so it belongs in the box's notes, not in somebody's memory.
