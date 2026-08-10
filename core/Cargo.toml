@@ -32,10 +32,20 @@ subtle = "2"
 # the payload structs fit on one screen. `rustls` rather than the system
 # OpenSSL, because Jod ships as one static binary onto a VPS — see the
 # transport note in `telegram.rs`.
-reqwest = { version = "0.13", default-features = false, features = [
+reqwest = { version = "0.13", default-features = false, optional = true, features = [
   "json",
   "rustls",
 ] }
+
+[features]
+# On by default, because the owner wants Jod on a phone and a default that
+# silently omits it would be a surprise rather than a choice.
+default = ["telegram"]
+# The HTTPS client, and the only reason a TLS stack is in the tree at all.
+# `--no-default-features` builds a Jod with no `rustls`, no `aws-lc-rs` and no
+# vendored C — everything except `HttpBot` is pure and stays compiled either
+# way, including all of its tests.
+telegram = ["dep:reqwest"]
 
 [dev-dependencies]
 # `test-util` on top of `full`: the Telegram rate-limit tests run on a paused

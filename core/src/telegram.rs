@@ -889,11 +889,25 @@ pub const POLL_TIMEOUT_S: u64 = 50;
 /// suite into a claim about code that was never run. Everything this type does
 /// beyond the HTTP call itself lives in the pure functions above, which are
 /// tested.
+///
+/// **This is the only thing in Jod that needs an HTTPS client**, and therefore
+/// the only reason the tree contains a TLS stack at all — `reqwest` pulls
+/// `rustls`, which pulls `aws-lc-rs`, which pulls a million lines of vendored C
+/// in `aws-lc-sys`. That is a large price for one caller, so it is behind a
+/// feature: `--no-default-features` builds a Jod with no TLS in it whatsoever.
+///
+/// The alternative considered and rejected was swapping the crypto provider for
+/// `ring` via `rustls-no-provider`. It is smaller, but it requires installing a
+/// default provider at startup, and forgetting that is a *runtime panic on the
+/// first TLS call* — in a daemon meant to run unattended for weeks. Trading a
+/// 3am panic for a shorter build is the wrong way round.
+#[cfg(feature = "telegram")]
 pub struct HttpBot {
     client: reqwest::Client,
     base: String,
 }
 
+#[cfg(feature = "telegram")]
 impl HttpBot {
     pub fn new(token: &str) -> Result<HttpBot> {
         let client = reqwest::Client::builder()
@@ -939,6 +953,7 @@ impl HttpBot {
     }
 }
 
+#[cfg(feature = "telegram")]
 impl BotApi for HttpBot {
     fn get_updates(
         &self,
