@@ -122,7 +122,10 @@ pub enum Resume {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PermissionPolicy {
-    /// Tool calls that need approval are refused — safe for read-only prompts.
+    /// Reading is allowed — the filesystem and the web — and anything that
+    /// could change something is refused. Named for the prompt it *would*
+    /// raise if a person were watching; under `-p` nobody is, so the harness
+    /// grants the read-only set outright rather than denying the lot.
     #[default]
     Ask,
     /// File edits go through; other sensitive calls still prompt.

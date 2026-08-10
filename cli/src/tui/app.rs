@@ -64,6 +64,9 @@ pub struct App {
     pub session: Option<String>,
     pub resume: Resume,
     pub cost_usd: f64,
+    /// Whether reasoning is shown. On by default, for the same reason tool
+    /// output is: watching a harness think is most of why you sit in front of
+    /// it. `/thinking` and `Ctrl-T` turn it off when the noise wins.
     pub show_thinking: bool,
     /// Whether tool output is shown. On by default: the reason to watch a
     /// harness work is to see what it is doing.
@@ -200,7 +203,7 @@ impl App {
             session: None,
             resume,
             cost_usd: 0.0,
-            show_thinking: false,
+            show_thinking: true,
             show_details: true,
             pane: Pane::Chat,
             busy: false,
@@ -716,13 +719,18 @@ mod tests {
     }
 
     #[test]
-    fn thinking_is_hidden_until_it_is_asked_for() {
+    fn thinking_is_shown_without_being_asked_for() {
         let mut a = app();
         a.apply(&AgentEvent::Thinking { text: "hmm".into() });
-        assert!(a.transcript.is_empty());
-        a.show_thinking = true;
-        a.apply(&AgentEvent::Thinking { text: "hmm".into() });
         assert_eq!(a.transcript, vec![Entry::Thinking("hmm".into())]);
+    }
+
+    #[test]
+    fn thinking_can_still_be_turned_off() {
+        let mut a = app();
+        a.show_thinking = false;
+        a.apply(&AgentEvent::Thinking { text: "hmm".into() });
+        assert!(a.transcript.is_empty());
     }
 
     /// A tool already announced adds nothing when it merely worked; a failure
