@@ -45,6 +45,8 @@ use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use futures::StreamExt;
+use jod_core::schedule::{GoalState, ScheduleState};
+use jod_core::store::Store;
 use jod_core::{AgentEvent, HarnessKind, Jod, PermissionPolicy, Resume, SpawnRequest};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
@@ -72,6 +74,22 @@ pub enum Action {
     AddTask(String),
     /// Mark a task on that board finished.
     FinishTask(String),
+    /// Bring a schedule's next instant forward so the ordinary tick fires it.
+    RunSchedule(String),
+    /// Pause a schedule that is armed, or arm one that is stopped.
+    ToggleSchedule(String),
+    DeleteSchedule(String),
+    /// Watch the run a schedule's most recent fire started.
+    OpenScheduleRun(String),
+    /// The same three, for a goal's iteration loop.
+    RunGoal(String),
+    ToggleGoal(String),
+    DeleteGoal(String),
+    /// Disable a webhook rule that is enabled, or enable one that is not.
+    ToggleHook(String),
+    DeleteHook(String),
+    /// Destroy everything Jod believes about one subject.
+    Forget(String),
     /// Open the typed line in `$EDITOR`. The TUI has to be suspended and
     /// restored around it, which only the loop can do.
     Editor,
@@ -254,6 +272,10 @@ fn announce(app: &mut App, id: &str) {
 
 /// Carry out one action against the service.
 async fn perform(jod: &Arc<Jod>, app: &mut App, opts: &Options, action: Action) {
+    // The clock the app is already drawing with, rather than a fresh reading:
+    // "run now" writes an instant the *tick* then compares against `now`, and a
+    // value a hair in the future would sit undue for a quarter of a second.
+    let now = app.now_ms;
     match action {
         Action::Send(prompt) => {
             match spawn(jod, app, opts, prompt.clone(), app.resume.clone()).await {
@@ -293,34 +315,7 @@ async fn perform(jod: &Arc<Jod>, app: &mut App, opts: &Options, action: Action) 
             }
             Err(e) => app.push(Entry::Notice(format!("could not stop {}: {e}", short(&id)))),
         },
-        Action::Watch(id) => match jod.events_since(&id, None).await {
-            Ok(events) => {
-                let running = app.agents.iter().any(|a| a.id == id && a.is_running());
-                app.transcript.clear();
-                app.watching = Some(id.clone());
-                app.busy = running;
-                app.turn_started_ms = running
-                    .then(|| app.agents.iter().find(|a| a.id == id).map(|a| a.created_at_ms))
-                    .flatten();
-                // The session cursor follows the eye: typing next continues the
-                // conversation being read, not the one that scrolled away.
-                if let Some(session) = app
-                    .agents
-                    .iter()
-                    .find(|a| a.id == id)
-                    .and_then(|a| a.session.clone())
-                {
-                    app.resume = Resume::Session(session.clone());
-                    app.session = Some(session);
-                }
-                app.push(Entry::Notice(format!("watching {}", short(&id))));
-                for envelope in events {
-                    app.apply(&envelope.event);
-                }
-                app.scroll_to_bottom();
-            }
-            Err(e) => app.push(Entry::Notice(format!("cannot open {}: {e}", short(&id)))),
-        },
+        Action::Watch(id) => watch(jod, app, id).await,
         Action::Attach(id) => match jod.agent(&id).await {
             Ok(agent) => {
                 app.push(Entry::Notice(format!(
@@ -359,6 +354,32 @@ async fn perform(jod: &Arc<Jod>, app: &mut App, opts: &Options, action: Action) 
                 Err(e) => app.push(Entry::Notice(format!("could not finish {id}: {e}"))),
             }
         }
+        // Every verb below is one store call and one sentence about it. The
+        // sentence is written by a free function over `&Store` so that what the
+        // user is told — including a refusal and including a failure — is
+        // testable against `Store::in_memory()` without a terminal.
+        Action::RunSchedule(name) => on_store(jod, app, |store| run_schedule(store, &name, now)),
+        Action::ToggleSchedule(name) => on_store(jod, app, |store| toggle_schedule(store, &name)),
+        Action::DeleteSchedule(name) => on_store(jod, app, |store| delete_schedule(store, &name)),
+        Action::RunGoal(name) => on_store(jod, app, |store| run_goal(store, &name, now)),
+        Action::ToggleGoal(name) => on_store(jod, app, |store| toggle_goal(store, &name)),
+        Action::DeleteGoal(name) => on_store(jod, app, |store| delete_goal(store, &name)),
+        Action::ToggleHook(name) => on_store(jod, app, |store| toggle_hook(store, &name)),
+        Action::DeleteHook(name) => on_store(jod, app, |store| delete_hook(store, &name)),
+        Action::Forget(subject) => on_store(jod, app, |store| forget_about(store, &subject)),
+        Action::OpenScheduleRun(name) => {
+            let found = match jod.store() {
+                Some(store) => last_run_of(store, &name),
+                None => Err(NO_STORE.to_string()),
+            };
+            match found {
+                Ok(id) => {
+                    app.go(Workspace::Chat);
+                    watch(jod, app, id).await;
+                }
+                Err(said) => app.push(Entry::Notice(said)),
+            }
+        }
         // Suspending and restoring the terminal is the loop's job, so this is
         // handled there rather than here. Reaching it means the loop did not.
         Action::Editor => app.push(Entry::Notice(
@@ -370,6 +391,260 @@ async fn perform(jod: &Arc<Jod>, app: &mut App, opts: &Options, action: Action) 
             app.push(Entry::Notice(format!("{verb} — not wired yet: needs {needs}")));
         }
     }
+}
+
+/// What every store verb says when there is no database to talk to.
+const NO_STORE: &str = "no database is open, so nothing was changed";
+
+/// Run one store verb, say what it did, and re-read the screens.
+///
+/// The refresh is the point: a row that still says `armed` after `p` reads as a
+/// key that did nothing, and the tick that would eventually correct it is up to
+/// four seconds away. Errors come back as a sentence rather than as a `Result`,
+/// because a locked database must cost the user a notice and not the session —
+/// the same discipline `refresh_team` already keeps.
+fn on_store(jod: &Arc<Jod>, app: &mut App, verb: impl FnOnce(&Store) -> String) {
+    let said = match jod.store() {
+        Some(store) => verb(store),
+        None => NO_STORE.to_string(),
+    };
+    app.push(Entry::Notice(said));
+    refresh_workspaces(jod, app);
+}
+
+/// Put a run's output on screen and follow it.
+///
+/// Its own function because two verbs end here: `⏎` on the fleet, and `⏎` on a
+/// schedule, which finds the run its last fire started and then wants exactly
+/// this.
+async fn watch(jod: &Arc<Jod>, app: &mut App, id: String) {
+    match jod.events_since(&id, None).await {
+        Ok(events) => {
+            let running = app.agents.iter().any(|a| a.id == id && a.is_running());
+            app.transcript.clear();
+            app.watching = Some(id.clone());
+            app.busy = running;
+            app.turn_started_ms = running
+                .then(|| app.agents.iter().find(|a| a.id == id).map(|a| a.created_at_ms))
+                .flatten();
+            // The session cursor follows the eye: typing next continues the
+            // conversation being read, not the one that scrolled away.
+            if let Some(session) = app
+                .agents
+                .iter()
+                .find(|a| a.id == id)
+                .and_then(|a| a.session.clone())
+            {
+                app.resume = Resume::Session(session.clone());
+                app.session = Some(session);
+            }
+            app.push(Entry::Notice(format!("watching {}", short(&id))));
+            for envelope in events {
+                app.apply(&envelope.event);
+            }
+            app.scroll_to_bottom();
+        }
+        Err(e) => app.push(Entry::Notice(format!("cannot open {}: {e}", short(&id)))),
+    }
+}
+
+/// Bring a schedule's next instant forward to now.
+///
+/// The store refuses one that is not armed, and that refusal has to be *said*.
+/// A paused schedule that stays paused while the key looks like it worked is
+/// the failure this whole screen exists to prevent, so the reason is read back
+/// out of the row rather than reported as a bare "no".
+fn run_schedule(store: &Store, name: &str, at_ms: i64) -> String {
+    match store.run_schedule_now(name, at_ms) {
+        Ok(true) => format!("{name} is due now — the next tick starts it"),
+        Ok(false) => match store.schedule_named(name) {
+            Ok(Some(s)) => format!(
+                "{name} is {}, so it was not brought forward — press p to arm it",
+                s.state.as_str()
+            ),
+            Ok(None) => format!("no schedule called {name}"),
+            Err(e) => format!("could not bring {name} forward: {e}"),
+        },
+        Err(e) => format!("could not bring {name} forward: {e}"),
+    }
+}
+
+/// Stop an armed schedule, or start any stopped one.
+///
+/// Not a two-state toggle: `broken` is a third stored state, and treating it as
+/// "not paused" would make `p` on a schedule the breaker tripped pause
+/// something that was already stopped — two presses to reach the one thing a
+/// person looking at a broken row wants. Anything that is not armed arms.
+fn toggle_schedule(store: &Store, name: &str) -> String {
+    let state = match store.schedule_named(name) {
+        Ok(Some(s)) => s.state,
+        Ok(None) => return format!("no schedule called {name}"),
+        Err(e) => return format!("could not read {name}: {e}"),
+    };
+    let armed = state == ScheduleState::Armed;
+    let next = if armed { ScheduleState::Paused } else { ScheduleState::Armed };
+    match store.set_schedule_state(name, next) {
+        Ok(true) if armed => format!("{name} is paused — it will not fire until you arm it"),
+        Ok(true) => match store.schedule_named(name) {
+            Ok(Some(s)) => match s.next_fire_at_ms {
+                Some(at) => format!("{name} is armed — next {}", clock(at)),
+                None => format!("{name} is armed"),
+            },
+            _ => format!("{name} is armed"),
+        },
+        Ok(false) => format!("no schedule called {name}"),
+        Err(e) => format!("could not change {name}: {e}"),
+    }
+}
+
+fn delete_schedule(store: &Store, name: &str) -> String {
+    match store.delete_schedule(name) {
+        Ok(true) => format!("deleted {name} — its fire history went with it"),
+        Ok(false) => format!("no schedule called {name}"),
+        Err(e) => format!("could not delete {name}: {e}"),
+    }
+}
+
+/// The run a schedule most recently started, for `⏎` to open.
+///
+/// Read out of the fire record rather than the schedule row: a fire is the only
+/// thing that names a run, and a fire that skipped or failed to spawn names
+/// none — so the newest fire is not necessarily the newest *run*.
+fn last_run_of(store: &Store, name: &str) -> std::result::Result<String, String> {
+    let id = match store.schedule_named(name) {
+        Ok(Some(s)) => s.id,
+        Ok(None) => return Err(format!("no schedule called {name}")),
+        Err(e) => return Err(format!("could not read {name}: {e}")),
+    };
+    match store.fires(&id, FIRE_LOOKBACK) {
+        Ok(fires) => fires
+            .into_iter()
+            .find_map(|f| f.run_id)
+            .ok_or_else(|| format!("{name} has not started a run yet")),
+        Err(e) => Err(format!("could not read {name}'s fires: {e}")),
+    }
+}
+
+/// How far back `⏎` looks for a fire that started a run. A schedule that has
+/// been skipping all week still has a run worth opening.
+const FIRE_LOOKBACK: usize = 50;
+
+fn run_goal(store: &Store, name: &str, at_ms: i64) -> String {
+    match store.run_goal_now(name, at_ms) {
+        Ok(true) => format!("{name}'s next iteration is due now — the next tick starts it"),
+        Ok(false) => match store.goal_named(name) {
+            Ok(Some(g)) => format!(
+                "{name} is {}, so it was not brought forward — press p to start it again",
+                g.state.as_str()
+            ),
+            Ok(None) => format!("no goal called {name}"),
+            Err(e) => format!("could not bring {name} forward: {e}"),
+        },
+        Err(e) => format!("could not bring {name} forward: {e}"),
+    }
+}
+
+/// Stop a running goal, or start any stopped one — including a stalled or
+/// exhausted one, where restarting is exactly the decision a person is there
+/// to make.
+fn toggle_goal(store: &Store, name: &str) -> String {
+    let state = match store.goal_named(name) {
+        Ok(Some(g)) => g.state,
+        Ok(None) => return format!("no goal called {name}"),
+        Err(e) => return format!("could not read {name}: {e}"),
+    };
+    let running = state == GoalState::Running;
+    let next = if running { GoalState::Paused } else { GoalState::Running };
+    match store.set_goal_state(name, next) {
+        Ok(true) if running => format!("{name} is paused — no further iterations"),
+        Ok(true) => format!("{name} is running again, from {}", state.as_str()),
+        Ok(false) => format!("no goal called {name}"),
+        Err(e) => format!("could not change {name}: {e}"),
+    }
+}
+
+fn delete_goal(store: &Store, name: &str) -> String {
+    match store.delete_goal(name) {
+        Ok(true) => format!("deleted {name} — what it learned stays in memory"),
+        Ok(false) => format!("no goal called {name}"),
+        Err(e) => format!("could not delete {name}: {e}"),
+    }
+}
+
+fn toggle_hook(store: &Store, name: &str) -> String {
+    let enabled = match store.webhook_rule(name) {
+        Ok(Some(rule)) => rule.enabled,
+        Ok(None) => return format!("no webhook called {name}"),
+        Err(e) => return format!("could not read {name}: {e}"),
+    };
+    match store.set_webhook_rule_enabled(name, !enabled) {
+        Ok(true) if enabled => {
+            format!("{name} is off — deliveries are still recorded, but start nothing")
+        }
+        Ok(true) => format!("{name} is on"),
+        Ok(false) => format!("no webhook called {name}"),
+        Err(e) => format!("could not change {name}: {e}"),
+    }
+}
+
+fn delete_hook(store: &Store, name: &str) -> String {
+    match store.delete_webhook_rule(name) {
+        Ok(true) => format!("deleted {name} — its deliveries are kept, matched to no rule"),
+        Ok(false) => format!("no webhook called {name}"),
+        Err(e) => format!("could not delete {name}: {e}"),
+    }
+}
+
+/// Destroy everything Jod believes about one subject.
+///
+/// `Store::forget` takes a triple and a memory row is a *subject*, so the
+/// predicates are read first and each one forgotten in turn. Forgetting only
+/// the predicate that happens to be showing would leave the rest of the node
+/// readable and the screen claiming it was gone.
+///
+/// The bare name survives, with no edges: `facts` cascades into `relations` but
+/// not into `entities`, so the row stays until the graph is rebuilt. Said out
+/// loud, because the row not disappearing otherwise reads as a key that failed.
+fn forget_about(store: &Store, subject: &str) -> String {
+    let facts = match store.facts_about(subject) {
+        Ok(facts) => facts,
+        Err(e) => return format!("could not read what is known about {subject}: {e}"),
+    };
+    let mut triples: Vec<(String, String)> =
+        facts.into_iter().map(|f| (f.scope, f.predicate)).collect();
+    triples.sort();
+    triples.dedup();
+    if triples.is_empty() {
+        return format!("nothing is recorded about {subject}, so there was nothing to forget");
+    }
+
+    let mut gone = 0usize;
+    for (scope, predicate) in triples {
+        match store.forget(&scope, subject, &predicate) {
+            Ok(versions) => gone += versions,
+            // Partial is reported as partial. Claiming the whole node was
+            // forgotten when half of it is still answerable is the one failure
+            // `Store::forget` is written to avoid.
+            Err(e) => {
+                return format!("forgot {gone} of what is known about {subject}, then failed: {e}")
+            }
+        }
+    }
+    format!(
+        "forgot {gone} {} about {subject} — the bare name stays in the graph until it is rebuilt",
+        if gone == 1 { "thing" } else { "things" }
+    )
+}
+
+/// An absolute instant, for the fire times a dry run prints.
+///
+/// Local time, always: the person reading it is at this terminal, and a
+/// schedule's own timezone is printed beside the expression so the two can be
+/// compared rather than confused.
+fn clock(at_ms: i64) -> String {
+    chrono::DateTime::from_timestamp_millis(at_ms)
+        .map(|t| t.with_timezone(&chrono::Local).format("%a %d %b %H:%M").to_string())
+        .unwrap_or_else(|| "—".to_string())
 }
 
 /// A short, stable id for a task typed into the board.
@@ -611,10 +886,7 @@ fn on_overlay_key(app: &mut App, key: KeyEvent) -> Option<Action> {
             match key.code {
                 KeyCode::Char('y') | KeyCode::Char('Y') => {
                     app.overlay = Overlay::None;
-                    Some(Action::Pending {
-                        verb: format!("{verb} {what}"),
-                        needs: "the store method for this kind — see cli/src/tui/data.rs",
-                    })
+                    confirmed(app, &verb, &what)
                 }
                 // Anything that is not a yes is a no.
                 _ => {
@@ -645,6 +917,30 @@ fn on_overlay_key(app: &mut App, key: KeyEvent) -> Option<Action> {
             app.overlay = Overlay::None;
             None
         }
+    }
+}
+
+/// What `y` on a confirmation actually does.
+///
+/// Read off the screen the question was asked on rather than carried inside
+/// `Overlay::Confirm`: an overlay owns the keyboard for as long as it is up, so
+/// the workspace cannot have moved between the question and the answer — and
+/// keeping the overlay to a verb and a name is what lets the renderer draw it
+/// without knowing that actions exist.
+fn confirmed(app: &mut App, verb: &str, what: &str) -> Option<Action> {
+    let what = what.to_string();
+    match app.workspace {
+        Workspace::Schedules => Some(Action::DeleteSchedule(what)),
+        Workspace::Goals => Some(Action::DeleteGoal(what)),
+        Workspace::Hooks => Some(Action::DeleteHook(what)),
+        Workspace::Memory => Some(Action::Forget(what)),
+        // A board row is a team's, not this session's: removing one is a verb
+        // the store does not have, and `complete_task` is a different thing
+        // wearing the same word.
+        _ => Some(Action::Pending {
+            verb: format!("{verb} {what}"),
+            needs: "a store method to remove a task from a board — only complete_task exists",
+        }),
     }
 }
 
@@ -876,17 +1172,23 @@ fn accept_prompt(
         PromptIntent::New(Workspace::Tasks) | PromptIntent::New(Workspace::Team) => {
             Some(Action::AddTask(typed))
         }
+        // `Store::remember` takes a triple — subject, predicate, object — and
+        // splitting one typed line into three would be Jod guessing at which
+        // word is the relation. That guess belongs in a form, not here.
         PromptIntent::New(Workspace::Memory) => Some(Action::Pending {
             verb: format!("remember “{typed}”"),
-            needs: "Store::remember with the memory-types NewFact shape",
+            needs: "a three-field form — Store::remember wants a triple, not a sentence",
         }),
         PromptIntent::New(ws) => Some(Action::Pending {
             verb: format!("new {} “{typed}”", ws.menu_name()),
             needs: "the $EDITOR form ladder — tier 3 of the report's §5.4",
         }),
+        // Edges are derived from facts rather than written directly, so linking
+        // two nodes by hand means asserting the fact the edge would come from —
+        // a triple, which a one-line prompt cannot collect.
         PromptIntent::Link(from) => Some(Action::Pending {
             verb: format!("link {from} → {typed}"),
-            needs: "Store::link_memory from the graph work",
+            needs: "a predicate as well as the two ends — edges are folded out of facts",
         }),
     }
     .or_else(|| {
@@ -980,11 +1282,12 @@ fn on_memory_key(app: &mut App, key: KeyEvent) -> Option<Action> {
             };
             None
         }
-        // Memory writes are already events, so the last one can be un-written —
-        // which is strictly better than a confirmation dialog.
+        // Memory writes are already events, so the last one could be un-written
+        // — which is strictly better than a confirmation dialog. Nothing keeps
+        // the order of writes yet, so `x` asks instead.
         KeyCode::Char('u') => Some(Action::Pending {
             verb: "undo the last memory write".into(),
-            needs: "Store::undo_last_memory_write from the memory-types work",
+            needs: "a record of the last write — Store::forget cannot be reversed",
         }),
         _ => None,
     }
@@ -1070,50 +1373,77 @@ fn on_graph_key(app: &mut App, key: KeyEvent) -> Option<Action> {
 }
 
 fn on_schedule_key(app: &mut App, key: KeyEvent) -> Option<Action> {
-    let name = app.selected_schedule().map(|s| s.name.clone())?;
+    let row = app.selected_schedule()?.clone();
+    let name = row.name.clone();
     match key.code {
-        KeyCode::Enter => Some(Action::Pending {
-            verb: format!("open {name}'s last run"),
-            needs: "Store::fires to name the run a fire started",
-        }),
-        KeyCode::Char('r') => Some(Action::Pending {
-            verb: format!("run {name} now"),
-            needs: "Jod::fire_schedule from the scheduler work",
-        }),
-        KeyCode::Char('p') => Some(Action::Pending {
-            verb: format!("pause or resume {name}"),
-            needs: "Store::set_schedule_state, which exists but is not wired here",
-        }),
+        KeyCode::Enter => Some(Action::OpenScheduleRun(name)),
+        KeyCode::Char('r') => Some(Action::RunSchedule(name)),
+        KeyCode::Char('p') => Some(Action::ToggleSchedule(name)),
         // Dry run: the honest answer to "did I get the cron right", which no
-        // amount of staring at `0 2 * * *` gives you.
-        KeyCode::Char('t') => Some(Action::Pending {
-            verb: format!("show {name}'s next five fire times"),
-            needs: "jod_core::schedule::next_fire, called five times",
-        }),
+        // amount of staring at `0 2 * * *` gives you. Nothing is stored and
+        // nothing is read, so it is answered here rather than as an action.
+        KeyCode::Char('t') => {
+            for line in next_fires(&row.cron, &row.timezone, app.now_ms, DRY_RUN_FIRES) {
+                app.push(Entry::Notice(line));
+            }
+            None
+        }
         _ => None,
     }
+}
+
+/// How many fire times `t` prints. Five is enough to see a weekly pattern and
+/// short enough not to bury the transcript.
+const DRY_RUN_FIRES: usize = 5;
+
+/// When a cron expression would next fire, as lines for the transcript.
+///
+/// A refusal is a line too. An expression the store already accepted can still
+/// fail here — a timezone the build has no data for — and printing nothing
+/// would make the key look broken rather than the schedule.
+fn next_fires(cron: &str, timezone: &str, from_ms: i64, how_many: usize) -> Vec<String> {
+    let mut lines = vec![format!("{cron} in {timezone}, shown in local time:")];
+    let mut at = from_ms;
+    for _ in 0..how_many {
+        match jod_core::schedule::next_fire(cron, timezone, at) {
+            Ok(Some(next)) => {
+                lines.push(format!("  {}", clock(next)));
+                at = next;
+            }
+            // A cron expression can genuinely run out — `0 0 30 2 *` names a
+            // day that never comes — and saying so is the point of a dry run.
+            Ok(None) => {
+                lines.push("  and never again".to_string());
+                break;
+            }
+            Err(e) => {
+                lines.push(format!("  cannot be read: {e}"));
+                break;
+            }
+        }
+    }
+    lines
 }
 
 fn on_goal_key(app: &mut App, key: KeyEvent) -> Option<Action> {
     let name = app.selected_goal().map(|g| g.name.clone())?;
     match key.code {
+        // An iteration leaves an episodic fact and nothing else: `current-run`
+        // is superseded every time round, so by the time an iteration is in the
+        // log the id that would name its run is gone. Opening one needs the
+        // ticker to keep the run id on the `iteration` fact.
         KeyCode::Enter => Some(Action::Pending {
             verb: format!("open {name}'s last iteration"),
-            needs: "Store::goal_iterations from the scheduler work",
+            needs: "the run id on the iteration fact — the ticker supersedes it away",
         }),
-        KeyCode::Char('r') => Some(Action::Pending {
-            verb: format!("run an iteration of {name} now"),
-            needs: "Jod::run_goal_iteration from the scheduler work",
-        }),
-        KeyCode::Char('p') => Some(Action::Pending {
-            verb: format!("pause {name}"),
-            needs: "Store::set_goal_state from the scheduler work",
-        }),
+        KeyCode::Char('r') => Some(Action::RunGoal(name)),
+        KeyCode::Char('p') => Some(Action::ToggleGoal(name)),
         // A looping objective that quietly needs you and never says so is worse
-        // than no goal at all.
+        // than no goal at all. Reading the escalation works — it is on the
+        // screen — but answering it has nowhere to go.
         KeyCode::Char('a') => Some(Action::Pending {
             verb: format!("answer {name}'s escalation"),
-            needs: "Store::answer_escalation from the scheduler work",
+            needs: "Store::answer_escalation, which does not exist yet",
         }),
         _ => None,
     }
@@ -1122,19 +1452,28 @@ fn on_goal_key(app: &mut App, key: KeyEvent) -> Option<Action> {
 fn on_hook_key(app: &mut App, key: KeyEvent) -> Option<Action> {
     let hook = app.selected_hook()?;
     let (name, endpoint) = (hook.name.clone(), hook.endpoint.clone());
+    // The deliveries are already loaded and already carry the run each one
+    // started, so `⏎` needs no store call — unlike a schedule, where the run
+    // lives in a fire record the row does not hold.
+    let last_run = hook.deliveries.iter().find_map(|d| d.run.clone());
     match key.code {
-        KeyCode::Enter => Some(Action::Pending {
-            verb: format!("open the run {name}'s last delivery started"),
-            needs: "Store::deliveries from the webhook work",
-        }),
+        KeyCode::Enter => match last_run {
+            Some(run) => Some(Action::Watch(run)),
+            None => {
+                app.push(Entry::Notice(format!(
+                    "no delivery to {name} has started a run yet"
+                )));
+                None
+            }
+        },
+        // Not a store verb at all: a test delivery has to be *posted* at the
+        // running daemon, signed, so that it goes through the same signature
+        // check and the same rule match as a real one.
         KeyCode::Char('t') => Some(Action::Pending {
             verb: format!("test {name} with a sample payload"),
-            needs: "Jod::test_webhook from the webhook work",
+            needs: "a signed POST at the running jod-api, which the TUI cannot reach",
         }),
-        KeyCode::Char('p') => Some(Action::Pending {
-            verb: format!("pause {name}"),
-            needs: "Store::set_webhook_state from the webhook work",
-        }),
+        KeyCode::Char('p') => Some(Action::ToggleHook(name)),
         KeyCode::Char('c') => {
             // No clipboard daemon and no OSC 52 yet, so the URL goes where it
             // can always be copied from: the transcript.
@@ -1159,9 +1498,13 @@ fn on_task_key(app: &mut App, key: KeyEvent) -> Option<Action> {
         // agent run, so the board is where work starts rather than a list kept
         // in parallel with the fleet.
         KeyCode::Char('d') => Some(Action::Delegate(delegation_prompt(&task))),
+        // `Store::claim_task` takes an owner, and this session has no name on
+        // any board — a TUI started with `--team` watches a team without being
+        // a member of it. Claiming as nobody would put a row in a state no
+        // teammate could take back.
         KeyCode::Char('c') => Some(Action::Pending {
             verb: format!("claim {}", task.id),
-            needs: "Store::claim_task, which exists but is not wired here",
+            needs: "a member name for this session — Store::claim_task claims as somebody",
         }),
         KeyCode::Char('o') => match task.run {
             Some(run) => Some(Action::Watch(run)),
@@ -1484,35 +1827,42 @@ fn apply_slash(app: &mut App, slash: command::Slash) -> Option<Action> {
             app.go(ws);
             return begin_new(app, ws);
         }
-        Slash::Pause(name) => {
-            return Some(Action::Pending {
-                verb: format!("pause {name}"),
-                needs: "Store::set_schedule_state / set_goal_state, wired to a name lookup",
-            })
-        }
-        Slash::Unpause(name) => {
-            return Some(Action::Pending {
-                verb: format!("resume {name}"),
-                needs: "Store::set_schedule_state / set_goal_state, wired to a name lookup",
-            })
+        // `/pause` and `/unpause` are the same verb typed two ways: both toggle,
+        // because the alternative is a command that reports success having
+        // changed nothing when the thing was already in the state asked for.
+        Slash::Pause(name) | Slash::Unpause(name) => {
+            return match named(app, &name) {
+                Named::Schedule => Some(Action::ToggleSchedule(name)),
+                Named::Goal => Some(Action::ToggleGoal(name)),
+                Named::Neither | Named::Both => None,
+            }
         }
         Slash::Run(name) => {
-            return Some(Action::Pending {
-                verb: format!("run {name} now"),
-                needs: "Jod::fire_schedule / run_goal_iteration from the scheduler work",
-            })
+            return match named(app, &name) {
+                Named::Schedule => Some(Action::RunSchedule(name)),
+                Named::Goal => Some(Action::RunGoal(name)),
+                Named::Neither | Named::Both => None,
+            }
         }
         Slash::Remember(text) => {
             return Some(Action::Pending {
                 verb: format!("remember “{text}”"),
-                needs: "Store::remember with the memory-types NewFact shape",
+                needs: "a three-field form — Store::remember wants a triple, not a sentence",
             })
         }
+        // Typed rather than pointed at, and still destructive, so it goes
+        // through the same confirmation the `x` key does — landing on the row
+        // first, so the thing about to be forgotten is on screen while the
+        // question is asked.
         Slash::Forget(name) => {
-            return Some(Action::Pending {
-                verb: format!("forget {name}"),
-                needs: "Store::forget, wired to a node id rather than a triple",
-            })
+            app.go(Workspace::Memory);
+            if let Some(id) = app.row_ids(Workspace::Memory).into_iter().find(|id| *id == name) {
+                app.list_mut(Workspace::Memory).selected = Some(id);
+            }
+            app.overlay = Overlay::Confirm {
+                verb: "forget".to_string(),
+                what: name,
+            };
         }
         Slash::Delegate(prompt) => return Some(Action::Delegate(prompt)),
         Slash::Stop(which) => return resolve_agent(app, &which).map(Action::Stop),
@@ -1533,6 +1883,43 @@ fn apply_slash(app: &mut App, slash: command::Slash) -> Option<Action> {
         }
     }
     None
+}
+
+/// What kind of thing a name typed at `/pause`, `/unpause` or `/run` is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Named {
+    Schedule,
+    Goal,
+    /// A name that is both. Refused rather than guessed at.
+    Both,
+    Neither,
+}
+
+/// Decide which screen a typed name belongs to, and say so when it cannot.
+///
+/// Schedules and goals share a namespace on screen but not in the store, so one
+/// name can legitimately be both — and pausing the wrong one is invisible until
+/// the thing that should have happened does not. Exact matches only: a prefix
+/// that pauses the wrong nightly job is the same mistake with a shorter cause.
+fn named(app: &mut App, name: &str) -> Named {
+    let schedule = app.schedules.iter().any(|s| s.name == name);
+    let goal = app.goals.iter().any(|g| g.name == name);
+    match (schedule, goal) {
+        (true, false) => Named::Schedule,
+        (false, true) => Named::Goal,
+        (true, true) => {
+            app.push(Entry::Notice(format!(
+                "{name} is both a schedule and a goal — open the screen and press p there"
+            )));
+            Named::Both
+        }
+        (false, false) => {
+            app.push(Entry::Notice(format!(
+                "no schedule or goal called {name} — /schedules and /goals list them"
+            )));
+            Named::Neither
+        }
+    }
 }
 
 /// Where a workspace command lands: the workspace, unless you are already
@@ -2649,10 +3036,9 @@ mod tests {
     fn y_confirms_the_deletion() {
         let mut app = with_schedules();
         press(&mut app, KeyCode::Char('x'));
-        let action = press(&mut app, KeyCode::Char('y'));
-        assert!(
-            matches!(&action, Some(Action::Pending { verb, .. }) if verb.contains("nightly-inbox")),
-            "{action:?}"
+        assert_eq!(
+            press(&mut app, KeyCode::Char('y')),
+            Some(Action::DeleteSchedule("nightly-inbox".into()))
         );
         assert_eq!(app.overlay, Overlay::None);
     }
@@ -2989,7 +3375,7 @@ mod tests {
     #[test]
     fn a_verb_the_store_cannot_do_yet_says_what_it_is_waiting_for() {
         let mut app = with_schedules();
-        match press(&mut app, KeyCode::Char('r')) {
+        match press(&mut app, KeyCode::Char('e')) {
             Some(Action::Pending { verb, needs }) => {
                 assert!(verb.contains("nightly-inbox"), "{verb}");
                 assert!(!needs.is_empty(), "it has to name the missing call");
@@ -3021,5 +3407,623 @@ mod tests {
         ctrl(&mut app, KeyCode::Char('k'));
         ctrl(&mut app, KeyCode::Char('c'));
         assert!(app.should_quit);
+    }
+
+    // ---- the verbs, as keys ----
+
+    fn with_goals() -> App {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.goals = vec![data::GoalRow {
+            name: "ship-the-tui".into(),
+            cadence: "every hour".into(),
+            last_ms: None,
+            next_ms: Some(1),
+            state: data::GoalState::Running,
+            iteration: 3,
+            objective: "Wire every verb to the store".into(),
+            checks: vec![],
+            stop_if: "5 iterations move nothing".into(),
+            spent_usd: 0.0,
+            budget_usd: 0.0,
+            iterations: vec![],
+            escalation: None,
+        }];
+        app.go(Workspace::Goals);
+        app
+    }
+
+    fn with_hooks(last_run: Option<&str>) -> App {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.hooks = vec![data::HookRow {
+            name: "ci-failed".into(),
+            repo: "Reljod/Jod".into(),
+            event: "workflow_run.completed".into(),
+            runs: "Claude Code".into(),
+            deliveries_24h: 1,
+            last_ms: Some(1),
+            last_outcome: data::Outcome::Ok,
+            state: data::HookState::Armed,
+            endpoint: "POST /webhooks/github".into(),
+            secret: "✓ verified".into(),
+            match_rule: "github on Reljod/Jod".into(),
+            runs_as: "Claude Code · /tmp".into(),
+            prompt: "Fix {{title}}".into(),
+            policy: "untrusted payload".into(),
+            created: "2026-08-01".into(),
+            total: 1,
+            deliveries: vec![data::Delivery {
+                at_ms: 1,
+                id: "d-1".into(),
+                what: "workflow_run.completed".into(),
+                accepted: true,
+                run: last_run.map(str::to_string),
+                verdict: "accepted".into(),
+            }],
+        }];
+        app.go(Workspace::Hooks);
+        app
+    }
+
+    /// `r` must not spawn. Bringing the next instant forward is what makes a
+    /// hand-started run pick up the same overlap policy and failure count as a
+    /// timed one.
+    #[test]
+    fn r_on_a_schedule_brings_its_next_fire_forward_rather_than_spawning() {
+        let mut app = with_schedules();
+        assert_eq!(
+            press(&mut app, KeyCode::Char('r')),
+            Some(Action::RunSchedule("nightly-inbox".into()))
+        );
+    }
+
+    #[test]
+    fn p_on_a_schedule_asks_the_store_to_flip_its_state() {
+        let mut app = with_schedules();
+        assert_eq!(
+            press(&mut app, KeyCode::Char('p')),
+            Some(Action::ToggleSchedule("nightly-inbox".into()))
+        );
+    }
+
+    #[test]
+    fn enter_on_a_schedule_opens_the_run_its_last_fire_started() {
+        let mut app = with_schedules();
+        assert_eq!(
+            press(&mut app, KeyCode::Enter),
+            Some(Action::OpenScheduleRun("nightly-inbox".into()))
+        );
+    }
+
+    /// The dry run reads nothing and writes nothing, so it answers on the spot.
+    #[test]
+    fn t_on_a_schedule_prints_its_next_fire_times_without_asking_the_store() {
+        let mut app = with_schedules();
+        let before = app.transcript.len();
+        assert_eq!(press(&mut app, KeyCode::Char('t')), None);
+        let printed = format!("{:?}", &app.transcript[before..]);
+        assert!(printed.contains("0 2 * * *"), "{printed}");
+        assert_eq!(
+            app.transcript.len() - before,
+            DRY_RUN_FIRES + 1,
+            "one heading and five times: {printed}"
+        );
+    }
+
+    /// A cron expression the store would never have accepted still has to
+    /// produce a line, or the key looks broken rather than the schedule.
+    #[test]
+    fn a_dry_run_of_an_unreadable_expression_says_so_rather_than_printing_nothing() {
+        let lines = next_fires("0 2 * * *", "Mars/Olympus", 0, DRY_RUN_FIRES);
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(lines[1].contains("cannot be read"), "{lines:?}");
+    }
+
+    #[test]
+    fn r_and_p_on_a_goal_reach_the_goal_loop_rather_than_the_scheduler() {
+        let mut app = with_goals();
+        assert_eq!(
+            press(&mut app, KeyCode::Char('r')),
+            Some(Action::RunGoal("ship-the-tui".into()))
+        );
+        assert_eq!(
+            press(&mut app, KeyCode::Char('p')),
+            Some(Action::ToggleGoal("ship-the-tui".into()))
+        );
+    }
+
+    #[test]
+    fn p_on_a_webhook_turns_the_rule_off() {
+        let mut app = with_hooks(None);
+        assert_eq!(
+            press(&mut app, KeyCode::Char('p')),
+            Some(Action::ToggleHook("ci-failed".into()))
+        );
+    }
+
+    /// A delivery already names the run it started, so `⏎` needs no store call.
+    #[test]
+    fn enter_on_a_webhook_opens_the_run_its_last_delivery_started() {
+        let mut app = with_hooks(Some("run-77"));
+        assert_eq!(press(&mut app, KeyCode::Enter), Some(Action::Watch("run-77".into())));
+    }
+
+    #[test]
+    fn enter_on_a_webhook_that_has_started_no_run_says_so_rather_than_nothing() {
+        let mut app = with_hooks(None);
+        assert_eq!(press(&mut app, KeyCode::Enter), None);
+        let last = format!("{:?}", app.transcript.last().unwrap());
+        assert!(last.contains("has started a run"), "{last}");
+    }
+
+    /// One confirmation, four screens: what `y` means is read off the screen the
+    /// question was asked on.
+    #[test]
+    fn y_deletes_the_kind_of_thing_the_screen_is_showing() {
+        for (mut app, expected) in [
+            (with_goals(), Action::DeleteGoal("ship-the-tui".into())),
+            (with_hooks(None), Action::DeleteHook("ci-failed".into())),
+            (with_memory(), Action::Forget("prefers-spec-first".into())),
+        ] {
+            press(&mut app, KeyCode::Char('x'));
+            assert!(matches!(app.overlay, Overlay::Confirm { .. }), "it must ask first");
+            assert_eq!(press(&mut app, KeyCode::Char('y')), Some(expected));
+        }
+    }
+
+    #[test]
+    fn n_on_the_confirmation_deletes_nothing_on_any_screen() {
+        for mut app in [with_goals(), with_hooks(None), with_memory()] {
+            press(&mut app, KeyCode::Char('x'));
+            assert_eq!(press(&mut app, KeyCode::Char('n')), None);
+            assert_eq!(app.overlay, Overlay::None);
+        }
+    }
+
+    // ---- the verbs, as slash commands ----
+
+    fn with_both_screens() -> App {
+        let mut app = with_schedules();
+        app.goals = with_goals().goals;
+        app.go(Workspace::Chat);
+        app
+    }
+
+    #[test]
+    fn run_typed_at_a_name_reaches_whichever_kind_owns_it() {
+        let mut app = with_both_screens();
+        assert_eq!(
+            apply_slash(&mut app, command::Slash::Run("nightly-inbox".into())),
+            Some(Action::RunSchedule("nightly-inbox".into()))
+        );
+        assert_eq!(
+            apply_slash(&mut app, command::Slash::Run("ship-the-tui".into())),
+            Some(Action::RunGoal("ship-the-tui".into()))
+        );
+    }
+
+    /// `/pause` and `/unpause` are the same verb: a command that reports success
+    /// having changed nothing is worse than one that toggles.
+    #[test]
+    fn pause_and_unpause_both_flip_whichever_state_the_thing_is_in() {
+        let mut app = with_both_screens();
+        assert_eq!(
+            apply_slash(&mut app, command::Slash::Pause("nightly-inbox".into())),
+            Some(Action::ToggleSchedule("nightly-inbox".into()))
+        );
+        assert_eq!(
+            apply_slash(&mut app, command::Slash::Unpause("ship-the-tui".into())),
+            Some(Action::ToggleGoal("ship-the-tui".into()))
+        );
+    }
+
+    #[test]
+    fn pausing_a_name_that_is_neither_a_schedule_nor_a_goal_says_so() {
+        let mut app = with_both_screens();
+        assert_eq!(apply_slash(&mut app, command::Slash::Pause("nope".into())), None);
+        let last = format!("{:?}", app.transcript.last().unwrap());
+        assert!(last.contains("no schedule or goal called nope"), "{last}");
+    }
+
+    /// Pausing the wrong one of two things sharing a name is invisible until the
+    /// thing that should have happened does not.
+    #[test]
+    fn a_name_that_is_both_a_schedule_and_a_goal_is_refused_rather_than_guessed() {
+        let mut app = with_both_screens();
+        app.goals[0].name = "nightly-inbox".into();
+        assert_eq!(
+            apply_slash(&mut app, command::Slash::Pause("nightly-inbox".into())),
+            None
+        );
+        let last = format!("{:?}", app.transcript.last().unwrap());
+        assert!(last.contains("both a schedule and a goal"), "{last}");
+    }
+
+    /// Typed or pointed at, forgetting is the same irreversible thing.
+    #[test]
+    fn forget_typed_as_a_command_still_asks_before_it_forgets() {
+        let mut app = with_memory();
+        app.go(Workspace::Chat);
+        assert_eq!(
+            apply_slash(&mut app, command::Slash::Forget("linear-is-truth".into())),
+            None
+        );
+        assert_eq!(app.workspace, Workspace::Memory, "and it shows you what it means");
+        match &app.overlay {
+            Overlay::Confirm { verb, what, .. } => {
+                assert_eq!(verb, "forget");
+                assert_eq!(what, "linear-is-truth");
+            }
+            other => panic!("expected a confirmation, got {other:?}"),
+        }
+        assert_eq!(
+            press(&mut app, KeyCode::Char('y')),
+            Some(Action::Forget("linear-is-truth".into()))
+        );
+    }
+
+    // ---- the verbs, against a real store ----
+
+    use jod_core::schedule::{Goal, Misfire, Overlap, Schedule};
+    use jod_core::store::{NewFact, Store as RealStore};
+    use jod_core::webhook::{Conditions, Rule};
+
+    fn store() -> RealStore {
+        RealStore::in_memory().expect("an in-memory store")
+    }
+
+    fn a_schedule(name: &str) -> Schedule {
+        Schedule {
+            id: format!("sch-{name}"),
+            name: name.to_string(),
+            prompt: "Triage the inbox.".into(),
+            harness: "claude_code".into(),
+            cwd: "/tmp".into(),
+            model: None,
+            cron: "0 2 * * *".into(),
+            timezone: "UTC".into(),
+            state: ScheduleState::Armed,
+            misfire: Misfire::default(),
+            overlap: Overlap::default(),
+            grace_ms: 60_000,
+            jitter_ms: 0,
+            next_fire_at_ms: None,
+            last_fire_at_ms: None,
+            consecutive_failures: 0,
+            created_at_ms: 0,
+        }
+    }
+
+    fn a_goal(name: &str) -> Goal {
+        Goal {
+            id: format!("goal-{name}"),
+            name: name.to_string(),
+            objective: "Wire every verb to the store".into(),
+            done_when: None,
+            harness: "claude_code".into(),
+            cwd: "/tmp".into(),
+            model: None,
+            cron: "0 * * * *".into(),
+            timezone: "UTC".into(),
+            state: GoalState::Running,
+            iteration: 0,
+            max_iterations: None,
+            budget_usd: None,
+            spent_usd: 0.0,
+            stall_after: 5,
+            no_progress: 0,
+            next_fire_at_ms: None,
+            created_at_ms: 0,
+        }
+    }
+
+    fn a_rule(name: &str) -> Rule {
+        Rule {
+            id: format!("wr-{name}"),
+            name: name.to_string(),
+            source: "github".into(),
+            repo: "Reljod/Jod".into(),
+            event: "pull_request".into(),
+            action: None,
+            conditions: Conditions::default(),
+            prompt: "Look at {{title}}".into(),
+            harness: "claude_code".into(),
+            cwd: "/tmp".into(),
+            model: None,
+            enabled: true,
+            created_at_ms: 0,
+        }
+    }
+
+    #[test]
+    fn pausing_a_schedule_stops_it_and_pressing_p_again_arms_it() {
+        let store = store();
+        store.add_schedule(&a_schedule("nightly-inbox")).unwrap();
+
+        let said = toggle_schedule(&store, "nightly-inbox");
+        assert!(said.contains("paused"), "{said}");
+        let paused = store.schedule_named("nightly-inbox").unwrap().unwrap();
+        assert_eq!(paused.state, ScheduleState::Paused);
+
+        let said = toggle_schedule(&store, "nightly-inbox");
+        assert!(said.contains("armed"), "{said}");
+        let armed = store.schedule_named("nightly-inbox").unwrap().unwrap();
+        assert_eq!(armed.state, ScheduleState::Armed);
+        assert!(armed.next_fire_at_ms.is_some(), "and it knows when it fires next");
+    }
+
+    /// A broken schedule is what a person is most likely to be pressing `p` at,
+    /// so it must take one press rather than two.
+    #[test]
+    fn arming_a_broken_schedule_takes_one_press_not_two() {
+        let store = store();
+        store.add_schedule(&a_schedule("nightly-inbox")).unwrap();
+        store
+            .set_schedule_state("nightly-inbox", ScheduleState::Broken)
+            .unwrap();
+
+        let said = toggle_schedule(&store, "nightly-inbox");
+        assert!(said.contains("armed"), "{said}");
+        let armed = store.schedule_named("nightly-inbox").unwrap().unwrap();
+        assert_eq!(armed.state, ScheduleState::Armed);
+        assert_eq!(armed.consecutive_failures, 0, "arming believes it will work now");
+    }
+
+    #[test]
+    fn running_a_schedule_now_makes_it_due_now() {
+        let store = store();
+        store.add_schedule(&a_schedule("nightly-inbox")).unwrap();
+
+        let said = run_schedule(&store, "nightly-inbox", 1_700_000_000_000);
+        assert!(said.contains("due now"), "{said}");
+        let s = store.schedule_named("nightly-inbox").unwrap().unwrap();
+        assert_eq!(s.next_fire_at_ms, Some(1_700_000_000_000));
+    }
+
+    /// The store refuses a schedule that is not armed, and a refusal nobody is
+    /// told about is indistinguishable from a key that does nothing.
+    #[test]
+    fn running_a_paused_schedule_reports_the_refusal_and_changes_nothing() {
+        let store = store();
+        store.add_schedule(&a_schedule("nightly-inbox")).unwrap();
+        store
+            .set_schedule_state("nightly-inbox", ScheduleState::Paused)
+            .unwrap();
+        let before = store.schedule_named("nightly-inbox").unwrap().unwrap();
+
+        let said = run_schedule(&store, "nightly-inbox", 1_700_000_000_000);
+        assert!(said.contains("paused"), "{said}");
+        assert!(said.contains("nightly-inbox"), "{said}");
+
+        let after = store.schedule_named("nightly-inbox").unwrap().unwrap();
+        assert_eq!(after.next_fire_at_ms, before.next_fire_at_ms, "nothing moved");
+    }
+
+    #[test]
+    fn deleting_a_schedule_removes_it_and_deleting_it_twice_says_it_is_gone() {
+        let store = store();
+        store.add_schedule(&a_schedule("nightly-inbox")).unwrap();
+
+        assert!(delete_schedule(&store, "nightly-inbox").contains("deleted"));
+        assert!(store.schedule_named("nightly-inbox").unwrap().is_none());
+        assert!(delete_schedule(&store, "nightly-inbox").contains("no schedule called"));
+    }
+
+    /// Every verb has to survive being pointed at nothing: a row can be deleted
+    /// in another process between the tick that drew it and the key.
+    #[test]
+    fn a_verb_pointed_at_something_that_is_gone_says_so_rather_than_failing_silently() {
+        let store = store();
+        assert!(run_schedule(&store, "ghost", 0).contains("no schedule called ghost"));
+        assert!(toggle_schedule(&store, "ghost").contains("no schedule called ghost"));
+        assert!(run_goal(&store, "ghost", 0).contains("no goal called ghost"));
+        assert!(toggle_goal(&store, "ghost").contains("no goal called ghost"));
+        assert!(delete_goal(&store, "ghost").contains("no goal called ghost"));
+        assert!(toggle_hook(&store, "ghost").contains("no webhook called ghost"));
+        assert!(delete_hook(&store, "ghost").contains("no webhook called ghost"));
+        assert_eq!(last_run_of(&store, "ghost"), Err("no schedule called ghost".into()));
+    }
+
+    #[test]
+    fn pausing_a_goal_stops_it_and_a_stalled_goal_starts_again_on_one_press() {
+        let store = store();
+        store.add_goal(&a_goal("ship-the-tui")).unwrap();
+
+        assert!(toggle_goal(&store, "ship-the-tui").contains("paused"));
+        assert_eq!(
+            store.goal_named("ship-the-tui").unwrap().unwrap().state,
+            GoalState::Paused
+        );
+
+        store.set_goal_state("ship-the-tui", GoalState::Stalled).unwrap();
+        let said = toggle_goal(&store, "ship-the-tui");
+        assert!(said.contains("running again"), "{said}");
+        assert_eq!(
+            store.goal_named("ship-the-tui").unwrap().unwrap().state,
+            GoalState::Running
+        );
+    }
+
+    #[test]
+    fn running_a_paused_goal_reports_the_refusal_and_changes_nothing() {
+        let store = store();
+        store.add_goal(&a_goal("ship-the-tui")).unwrap();
+        store.set_goal_state("ship-the-tui", GoalState::Paused).unwrap();
+        let before = store.goal_named("ship-the-tui").unwrap().unwrap();
+
+        let said = run_goal(&store, "ship-the-tui", 1_700_000_000_000);
+        assert!(said.contains("paused"), "{said}");
+        assert_eq!(
+            store.goal_named("ship-the-tui").unwrap().unwrap().next_fire_at_ms,
+            before.next_fire_at_ms
+        );
+    }
+
+    #[test]
+    fn a_webhook_turned_off_stays_a_rule_and_can_be_turned_back_on() {
+        let store = store();
+        store.add_webhook_rule(&a_rule("ci-failed")).unwrap();
+
+        let said = toggle_hook(&store, "ci-failed");
+        assert!(said.contains("off"), "{said}");
+        assert!(!store.webhook_rule("ci-failed").unwrap().unwrap().enabled);
+
+        assert!(toggle_hook(&store, "ci-failed").contains("on"));
+        assert!(store.webhook_rule("ci-failed").unwrap().unwrap().enabled);
+    }
+
+    #[test]
+    fn deleting_a_webhook_removes_the_rule() {
+        let store = store();
+        store.add_webhook_rule(&a_rule("ci-failed")).unwrap();
+        assert!(delete_hook(&store, "ci-failed").contains("deleted"));
+        assert!(store.webhook_rule("ci-failed").unwrap().is_none());
+    }
+
+    /// Forgetting only the predicate that happens to be showing would leave the
+    /// rest of the node readable while the screen claimed it was gone.
+    #[test]
+    fn forgetting_a_node_destroys_every_predicate_of_it() {
+        let store = store();
+        store
+            .remember(NewFact::new("reljod", "prefers", "linear for tasks"))
+            .unwrap();
+        store
+            .remember(NewFact::new("reljod", "works-on", "jod"))
+            .unwrap();
+        store
+            .remember(NewFact::new("someone-else", "prefers", "notion"))
+            .unwrap();
+
+        let said = forget_about(&store, "reljod");
+        assert!(said.contains("forgot 2 things"), "{said}");
+        assert!(store.facts_about("reljod").unwrap().is_empty());
+        assert_eq!(
+            store.facts_about("someone-else").unwrap().len(),
+            1,
+            "and it forgot nothing about anybody else"
+        );
+    }
+
+    #[test]
+    fn forgetting_something_nothing_is_known_about_says_so_rather_than_claiming_a_deletion() {
+        let store = store();
+        let said = forget_about(&store, "never-heard-of-it");
+        assert!(said.contains("nothing is recorded"), "{said}");
+    }
+
+    /// A schedule that has fired without ever starting a run — every fire
+    /// skipped — has nothing to open, and saying so beats opening the wrong run.
+    #[test]
+    fn opening_a_schedule_that_has_started_no_run_says_so() {
+        let store = store();
+        store.add_schedule(&a_schedule("nightly-inbox")).unwrap();
+        assert_eq!(
+            last_run_of(&store, "nightly-inbox"),
+            Err("nightly-inbox has not started a run yet".into())
+        );
+    }
+
+    #[test]
+    fn opening_a_schedule_finds_the_newest_fire_that_started_a_run() {
+        use jod_core::schedule::{Fire, FireOutcome};
+        let store = store();
+        store.add_schedule(&a_schedule("nightly-inbox")).unwrap();
+        for (fired_at_ms, run_id, outcome) in [
+            (1_000, Some("run-old"), FireOutcome::Ran),
+            // Newer, but it started nothing — so it must not be the answer.
+            (2_000, None, FireOutcome::SkippedOverlap),
+        ] {
+            store
+                .record_fire(&Fire {
+                    id: 0,
+                    schedule_id: "sch-nightly-inbox".into(),
+                    due_at_ms: fired_at_ms,
+                    fired_at_ms,
+                    run_id: run_id.map(str::to_string),
+                    outcome,
+                    detail: None,
+                })
+                .unwrap();
+        }
+        assert_eq!(last_run_of(&store, "nightly-inbox"), Ok("run-old".into()));
+    }
+
+    // ---- the loop carries them out ----
+
+    fn jod_with(store: RealStore) -> Arc<Jod> {
+        Jod::with_store(Arc::new(store))
+    }
+
+    fn options() -> Options {
+        Options {
+            harness: HarnessKind::ClaudeCode,
+            team: None,
+            cwd: PathBuf::from("/tmp"),
+            model: None,
+            permission: PermissionPolicy::default(),
+            resume: Resume::Fresh,
+        }
+    }
+
+    /// The row has to reflect what just happened. Waiting for the next tick to
+    /// correct it makes a working key look like a broken one for four seconds.
+    #[tokio::test]
+    async fn acting_on_a_row_refreshes_it_rather_than_leaving_it_stale() {
+        let store = store();
+        store.add_schedule(&a_schedule("nightly-inbox")).unwrap();
+        let jod = jod_with(store);
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        refresh_workspaces(&jod, &mut app);
+        assert_eq!(app.schedules[0].state, data::ScheduleState::Armed);
+
+        perform(
+            &jod,
+            &mut app,
+            &options(),
+            Action::ToggleSchedule("nightly-inbox".into()),
+        )
+        .await;
+
+        assert_eq!(app.schedules[0].state, data::ScheduleState::Paused);
+        let last = format!("{:?}", app.transcript.last().unwrap());
+        assert!(last.contains("paused"), "{last}");
+    }
+
+    #[tokio::test]
+    async fn deleting_through_the_loop_takes_the_row_off_the_screen() {
+        let store = store();
+        store.add_schedule(&a_schedule("nightly-inbox")).unwrap();
+        let jod = jod_with(store);
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        refresh_workspaces(&jod, &mut app);
+
+        perform(
+            &jod,
+            &mut app,
+            &options(),
+            Action::DeleteSchedule("nightly-inbox".into()),
+        )
+        .await;
+
+        assert!(app.schedules.is_empty());
+    }
+
+    /// A TUI with no database must lose the keypress, not the session.
+    #[tokio::test]
+    async fn a_verb_with_no_database_behind_it_is_a_notice_rather_than_a_crash() {
+        let jod = Jod::new();
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        for action in [
+            Action::RunSchedule("nightly-inbox".into()),
+            Action::ToggleGoal("ship-the-tui".into()),
+            Action::DeleteHook("ci-failed".into()),
+            Action::Forget("reljod".into()),
+            Action::OpenScheduleRun("nightly-inbox".into()),
+        ] {
+            perform(&jod, &mut app, &options(), action).await;
+            let last = format!("{:?}", app.transcript.last().unwrap());
+            assert!(last.contains(NO_STORE), "{last}");
+        }
+        assert!(!app.should_quit, "and the session is still up");
     }
 }
