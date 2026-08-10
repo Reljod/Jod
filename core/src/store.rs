@@ -2371,7 +2371,10 @@ fn iso_now() -> String {
 /// `what's the plan?` would otherwise fail the query rather than search for it.
 /// Each word becomes a quoted term; terms are OR-ed and ranked, so a long
 /// question still matches the facts sharing most of its words.
-fn fts_query(input: &str) -> Option<String> {
+/// Shared across the crate on purpose. This is the function that stops raw
+/// prompt text from being an FTS5 syntax error, and a second copy that drifts
+/// from the first is precisely the bug you do not want in a query sanitiser.
+pub(crate) fn fts_query(input: &str) -> Option<String> {
     let terms: Vec<String> = input
         .split(|c: char| !c.is_alphanumeric() && c != '_')
         .filter(|w| !w.is_empty())
