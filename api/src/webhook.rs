@@ -396,10 +396,14 @@ impl SpawnTask {
             tools: None,
         };
 
+        // `spawn_from_untrusted`, not `spawn_agent`. The prompt was built from
+        // a payload a stranger wrote, so whatever tool grant the rule carries
+        // is capped to reading on the way in — at the point of use, rather than
+        // trusted to the rule's row.
         let agent = self
             .state
             .jod
-            .spawn_agent(req)
+            .spawn_from_untrusted(req)
             .await
             .map_err(|e| e.to_string())?;
 

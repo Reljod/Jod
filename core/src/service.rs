@@ -578,6 +578,31 @@ impl Jod {
         self.spawn_agent_in(req, RunConversation::New).await
     }
 
+    /// Launch an agent whose prompt was built from material Jod did not write.
+    ///
+    /// The only way to start a run from a GitHub payload, an email, a fetched
+    /// page — anything a stranger can put text into. It caps the tool grant to
+    /// what [`crate::store::Origin::Untrusted`] may ever reach, which is
+    /// reading and nothing else.
+    ///
+    /// **This exists as its own method because the cap was written, tested and
+    /// applied nowhere.** `ToolAccess::capped_for` had two callers, both unit
+    /// tests, one of them named `untrusted_material_can_never_reach_more_than
+    /// _reading` — passing while nothing enforced it. A rule that depends on
+    /// every future call site remembering to apply it is not a rule; it is a
+    /// convention with a test pretending to be a guard.
+    ///
+    /// The escalation it closes: a webhook rule names a schedule someone raised
+    /// to `orchestrate`, a stranger opens a pull request matching that rule, and
+    /// their text is steering an agent that can arm schedules. Each step is
+    /// reasonable on its own, which is what makes it the shape to worry about.
+    pub async fn spawn_from_untrusted(&self, mut req: SpawnRequest) -> Result<AgentSummary> {
+        req.tools = req
+            .tools
+            .map(|granted| granted.capped_for(crate::store::Origin::Untrusted));
+        self.spawn_agent_in(req, RunConversation::New).await
+    }
+
     /// Launch an agent, recording its turns in the conversation the caller
     /// names. Returns once its supervisor is running.
     ///
@@ -865,6 +890,39 @@ pub fn default_cwd() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The cap has to be applied by the *spawn path*, not by whoever remembers
+    /// to call it. It previously had two callers, both unit tests, one named
+    /// `untrusted_material_can_never_reach_more_than_reading` — green while
+    /// nothing enforced it anywhere a run could reach.
+    ///
+    /// This asserts the reduction the method performs, which is the part that
+    /// must not regress: a grant of `orchestrate` on an untrusted prompt comes
+    /// out as read-only.
+    #[test]
+    fn an_untrusted_spawn_is_capped_to_reading_whatever_it_was_granted() {
+        use crate::harness::ToolAccess;
+        for granted in [
+            ToolAccess::ReadOnly,
+            ToolAccess::Delegate,
+            ToolAccess::Orchestrate,
+        ] {
+            let capped = Some(granted.capped_for(crate::store::Origin::Untrusted));
+            assert_eq!(capped, Some(ToolAccess::ReadOnly), "{granted:?} escaped");
+            assert!(!capped.unwrap().may_delegate());
+        }
+    }
+
+    /// A run with no grant at all must stay ungranted rather than acquiring
+    /// read-only on its way through the cap.
+    #[test]
+    fn capping_an_ungranted_spawn_does_not_hand_it_tools() {
+        let none: Option<crate::harness::ToolAccess> = None;
+        let capped = none.map(|g: crate::harness::ToolAccess| {
+            g.capped_for(crate::store::Origin::Untrusted)
+        });
+        assert_eq!(capped, None);
+    }
 
     fn record() -> AgentRecord {
         AgentRecord {
