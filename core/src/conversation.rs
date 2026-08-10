@@ -372,6 +372,35 @@ impl Store {
         read_conversation(&conn, id)
     }
 
+    /// The conversation a run wrote into, if it wrote anything.
+    ///
+    /// The inverse of [`Message::run_id`], and the join every client wants the
+    /// moment runs start populating the graph: a run id is what the CLI, the
+    /// TUI and the API all already hold, and "show me the thread this produced"
+    /// is the next question after "show me this run".
+    ///
+    /// `None` covers two different situations that look alike and are not: a
+    /// run that produced no message at all — every event was a `Started`, a
+    /// `Raw` or a `Finished` — and a run nobody wired to a conversation. Both
+    /// mean "there is no thread to show", which is what a caller needs.
+    ///
+    /// Reads the first message the run minted rather than the last, so the
+    /// answer does not change as the run goes on. Note it scans: `messages` is
+    /// indexed on `(conversation_id, id)` and on `parent_id`, not on `run_id`.
+    /// Fine at the size a single machine's history reaches, and an index worth
+    /// adding in a later migration if this ever lands in a hot path.
+    pub fn conversation_for_run(&self, run_id: &str) -> Result<Option<String>> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        Ok(conn
+            .query_row(
+                "SELECT conversation_id FROM messages
+                  WHERE run_id = ?1 ORDER BY id LIMIT 1",
+                params![run_id],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
     /// Every conversation, newest first.
     pub fn conversations(&self, limit: usize) -> Result<Vec<ConversationSummary>> {
         let conn = self.conn.lock().expect("store lock poisoned");
@@ -470,6 +499,20 @@ impl Store {
 
     /// Append a run of events as one transaction, skipping the ones that are
     /// not turns. Returns the ids of the messages that were actually written.
+    ///
+    /// **Not idempotent, unlike [`Store::append_event`].** That one dedupes on
+    /// `(run_id, seq)` so a replayed stream cannot duplicate the event log;
+    /// this one cannot, because `0006_conversations` gives a message no
+    /// sequence column to dedupe against. Feeding the same events twice
+    /// appends them twice.
+    ///
+    /// That matters because replay is normal here rather than exceptional:
+    /// [`crate::runner::follow`] restarts from a caller-held cursor, and a
+    /// client that reconnects with `after: None` legitimately receives the
+    /// whole run again. Whatever drives this must therefore hold its own
+    /// durable cursor and hand each envelope over exactly once — the event log
+    /// is the replayable surface, and the conversation is written from it, not
+    /// alongside it.
     pub fn append_events(
         &self,
         conversation_id: &str,
@@ -1807,6 +1850,69 @@ mod tests {
 
         assert!(written.is_empty());
         assert_eq!(s.thread(&id).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_run_can_be_traced_back_to_the_conversation_it_wrote_into() {
+        let s = store();
+        let (first, _) = conversation_with(&s, &["one"]);
+        let (second, _) = conversation_with(&s, &["two"]);
+        let said = |text: &str| AgentEvent::Message { text: text.into() };
+
+        s.append_events(&first, "run-a", &[said("from a")]).unwrap();
+        s.append_events(&second, "run-b", &[said("from b")])
+            .unwrap();
+
+        assert_eq!(
+            s.conversation_for_run("run-a").unwrap().as_deref(),
+            Some(first.as_str())
+        );
+        assert_eq!(
+            s.conversation_for_run("run-b").unwrap().as_deref(),
+            Some(second.as_str())
+        );
+        assert_eq!(s.conversation_for_run("never-ran").unwrap(), None);
+    }
+
+    #[test]
+    fn a_run_that_said_nothing_worth_keeping_has_no_conversation_to_show() {
+        let s = store();
+        let (id, _) = conversation_with(&s, &["go"]);
+        // Every one of these is metadata, so none becomes a message.
+        s.append_events(
+            &id,
+            "run-quiet",
+            &[
+                AgentEvent::Started {
+                    session_id: Some("s".into()),
+                    model: None,
+                },
+                AgentEvent::Raw { line: "{}".into() },
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(s.conversation_for_run("run-quiet").unwrap(), None);
+    }
+
+    #[test]
+    fn replaying_a_run_appends_it_again_because_a_message_has_no_sequence() {
+        let s = store();
+        let (id, _) = conversation_with(&s, &["go"]);
+        let events = [AgentEvent::Message {
+            text: "the answer".into(),
+        }];
+
+        s.append_events(&id, "run-1", &events).unwrap();
+        s.append_events(&id, "run-1", &events).unwrap();
+
+        // Pinning the contract rather than the behaviour we want: unlike
+        // `append_event`, this cannot dedupe, so whoever drives it owes the
+        // cursor. A future `seq` column would make this test change.
+        assert_eq!(
+            texts(&s.thread(&id).unwrap()),
+            ["go", "the answer", "the answer"]
+        );
     }
 
     #[test]
