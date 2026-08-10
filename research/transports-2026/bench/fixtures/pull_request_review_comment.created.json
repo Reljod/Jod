@@ -1,0 +1,29 @@
+{
+  "action": "created",
+  "comment": {
+    "id": 2211009988,
+    "body": "This branch is attacker-controlled — worth a test.",
+    "path": "api/src/hooks.rs",
+    "line": 42,
+    "original_line": 42,
+    "diff_hunk": "@@ -0,0 +1,12 @@\n+pub async fn github_hook(",
+    "in_reply_to_id": null,
+    "html_url": "https://github.com/Reljod/Jod/pull/61#discussion_r2211009988",
+    "author_association": "OWNER",
+    "user": { "login": "Reljod", "id": 12345678 }
+  },
+  "pull_request": {
+    "number": 61,
+    "state": "open",
+    "author_association": "CONTRIBUTOR",
+    "head": { "ref": "fix/empty-transcripts", "repo": { "full_name": "outside-contributor/Jod" } },
+    "base": { "ref": "main", "repo": { "full_name": "Reljod/Jod" } }
+  },
+  "repository": {
+    "full_name": "Reljod/Jod",
+    "default_branch": "main",
+    "private": false,
+    "owner": { "login": "Reljod", "id": 12345678 }
+  },
+  "sender": { "login": "Reljod", "id": 12345678 }
+}

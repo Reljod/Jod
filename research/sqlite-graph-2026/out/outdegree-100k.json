@@ -1,0 +1,42 @@
+{
+  "db": "/home/reljod/.claude/jobs/eb39fa18/tmp/dbs/g100k.db",
+  "edges": 100000,
+  "top_out_degrees": [
+    11,
+    11,
+    11,
+    11,
+    11
+  ],
+  "max_in_degree": 284,
+  "khop": {
+    "directed.k1.out_hub": {
+      "n": 30,
+      "p50_ms": 0.278,
+      "p95_ms": 5.615,
+      "mean_rows": 7.9,
+      "timeouts": 0
+    },
+    "directed.k2.out_hub": {
+      "n": 30,
+      "p50_ms": 0.724,
+      "p95_ms": 7.387,
+      "mean_rows": 50.1,
+      "timeouts": 0
+    },
+    "directed.k3.out_hub": {
+      "n": 30,
+      "p50_ms": 0.9,
+      "p95_ms": 2.7,
+      "mean_rows": 157.9,
+      "timeouts": 0
+    },
+    "directed.k4.out_hub": {
+      "n": 30,
+      "p50_ms": 1.36,
+      "p95_ms": 3.849,
+      "mean_rows": 329.8,
+      "timeouts": 0
+    }
+  }
+}

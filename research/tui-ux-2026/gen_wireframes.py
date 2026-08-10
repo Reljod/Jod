@@ -463,19 +463,21 @@ rows = []
 for l in wk_under:
     rows.append(one(l, "wk"))
 overlay = [
-    '       ┌─ Ctrl-K ───────────────────────────────────────────────────┐',
-    '       │  c  chat            the conversation                       │',
-    '       │  f  fleet           14 runs · 3 running · 2 failed         │',
-    '       │  m  memory          142 nodes · 1 contradiction            │',
-    '       │  s  schedules       8 · next vps-healthcheck in 13s        │',
-    '       │  g  goals           5 · 1 blocked · 1 needs you            │',
-    '       │  h  hooks           6 webhooks · 1 failing                 │',
-    '       │  a  activity        3 unread                               │',
-    '       │  t  team            crew · 4 members · 6 open tasks        │',
-    '       │                                                            │',
-    '       │  n  new…            n s schedule · n g goal · n h hook     │',
-    '       │  ?  keys            the whole keymap                       │',
-    '       └─ Esc cancels · any other key is ignored ───────────────────┘',
+    '     ┌─ Ctrl-K ───────────────────────────────────────────────────────┐',
+    '     │  c  chat            the conversation                           │',
+    '     │  f  fleet           14 runs · 3 running · 2 failed             │',
+    '     │  m  memory          142 nodes · 318 edges · 1 contradiction    │',
+    '     │  s  schedules       8 · next vps-healthcheck in 13s            │',
+    '     │  g  goals           5 · 1 blocked · 1 needs you                │',
+    '     │  h  hooks           6 webhooks · 1 failing                     │',
+    '     │  t  tasks           12 open · 3 claimed · 1 blocked            │',
+    '     │  a  activity        3 unread                                   │',
+    '     │  w  team            crew · 4 members · 2 busy                  │',
+    '     │                                                                │',
+    '     │  n  new…            n s sched · n g goal · n h hook · n t task │',
+    '     │  e  editor          the input in $EDITOR                       │',
+    '     │  ?  keys            the whole keymap                           │',
+    '     └─ Esc cancels · any other key is ignored ───────────────────────┘',
 ]
 for l in overlay:
     rows.append(one(l, "wk"))

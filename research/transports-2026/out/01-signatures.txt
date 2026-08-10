@@ -1,0 +1,135 @@
+# Experiment 1 — GitHub `X-Hub-Signature-256`
+
+GitHub's own published vector (docs: validating-webhook-deliveries):
+  sign("It's a Secret to Everybody", "Hello, World!")
+  = sha256=757107ea0eb2509fc211221cce984b8a37570b6d7586c22c46f4379c8b043e17
+  expected sha256=757107ea0eb2509fc211221cce984b8a37570b6d7586c22c46f4379c8b043e17
+  match: true
+
+## issues.labeled.json (1411 bytes)
+  signature                     sha256=c80e98bacaa025cbd303c356c840db155d88a49465497bae6b1a1599d057d597
+  raw bytes                     ACCEPT
+  raw bytes, verify_slice       ACCEPT
+  serde round-trip <- THE TRAP  reject
+  whitespace stripped           reject
+  one bit flipped               reject
+  truncated by one byte         reject
+  wrong secret                  reject
+  no header                     reject
+  sha1= prefix                  reject
+  re-serialised body is 1042 bytes vs 1411 on the wire
+
+## issue_comment.created.json (1052 bytes)
+  signature                     sha256=c27100c1841303278da419bc69c579fca20c0d07e294210eecc90b5ab91a94fb
+  raw bytes                     ACCEPT
+  raw bytes, verify_slice       ACCEPT
+  serde round-trip <- THE TRAP  reject
+  whitespace stripped           reject
+  one bit flipped               reject
+  truncated by one byte         reject
+  wrong secret                  reject
+  no header                     reject
+  sha1= prefix                  reject
+  re-serialised body is 884 bytes vs 1052 on the wire
+
+## issue_comment.created.stranger.json (846 bytes)
+  signature                     sha256=6716138322172001194058bce198821e8ac97cb6218a83f4f82a1636e9c04659
+  raw bytes                     ACCEPT
+  raw bytes, verify_slice       ACCEPT
+  serde round-trip <- THE TRAP  reject
+  whitespace stripped           reject
+  one bit flipped               reject
+  truncated by one byte         reject
+  wrong secret                  reject
+  no header                     reject
+  sha1= prefix                  reject
+  re-serialised body is 705 bytes vs 846 on the wire
+
+## pull_request.opened.fork.json (1047 bytes)
+  signature                     sha256=59340e71548faaa87b7ebc38fb0d1b4ce0ce643eb9716ac84d4455f5cac90a74
+  raw bytes                     ACCEPT
+  raw bytes, verify_slice       ACCEPT
+  serde round-trip <- THE TRAP  reject
+  whitespace stripped           reject
+  one bit flipped               reject
+  truncated by one byte         reject
+  wrong secret                  reject
+  no header                     reject
+  sha1= prefix                  reject
+  re-serialised body is 844 bytes vs 1047 on the wire
+
+## pull_request.opened.hostile_ref.json (909 bytes)
+  signature                     sha256=cf2e0ed83bc86d7b3f321ddfbc9632886213f55f22c56610964c69667798f16f
+  raw bytes                     ACCEPT
+  raw bytes, verify_slice       ACCEPT
+  serde round-trip <- THE TRAP  reject
+  whitespace stripped           reject
+  one bit flipped               reject
+  truncated by one byte         reject
+  wrong secret                  reject
+  no header                     reject
+  sha1= prefix                  reject
+  re-serialised body is 703 bytes vs 909 on the wire
+
+## pull_request_review_comment.created.json (949 bytes)
+  signature                     sha256=b0b60d482dea5904df56d3bfc15a0e7ccf736e146dfb42b71f5e2140a574b6f4
+  raw bytes                     ACCEPT
+  raw bytes, verify_slice       ACCEPT
+  serde round-trip <- THE TRAP  reject
+  whitespace stripped           reject
+  one bit flipped               reject
+  truncated by one byte         reject
+  wrong secret                  reject
+  no header                     reject
+  sha1= prefix                  reject
+  re-serialised body is 773 bytes vs 949 on the wire
+
+## push.json (955 bytes)
+  signature                     sha256=4aac0a090220c815e0892f86d0197f8863b844270cfbf483affa887b4fa214ec
+  raw bytes                     ACCEPT
+  raw bytes, verify_slice       ACCEPT
+  serde round-trip <- THE TRAP  reject
+  whitespace stripped           reject
+  one bit flipped               reject
+  truncated by one byte         reject
+  wrong secret                  reject
+  no header                     reject
+  sha1= prefix                  reject
+  re-serialised body is 787 bytes vs 955 on the wire
+
+## workflow_run.completed.json (630 bytes)
+  signature                     sha256=58172e43dd499c52326c7cb2c4f7e0674629216b03a2b806afe2a87f1dfbad92
+  raw bytes                     ACCEPT
+  raw bytes, verify_slice       ACCEPT
+  serde round-trip <- THE TRAP  reject
+  whitespace stripped           reject
+  one bit flipped               reject
+  truncated by one byte         reject
+  wrong secret                  reject
+  no header                     reject
+  sha1= prefix                  reject
+  re-serialised body is 509 bytes vs 630 on the wire
+
+## check_suite.completed.json (515 bytes)
+  signature                     sha256=4e5a5cf7546f06ec0a804cf46c046bf3c5f68b215cc6d0ad98d6e3dcf73a3c90
+  raw bytes                     ACCEPT
+  raw bytes, verify_slice       ACCEPT
+  serde round-trip <- THE TRAP  reject
+  whitespace stripped           reject
+  one bit flipped               reject
+  truncated by one byte         reject
+  wrong secret                  reject
+  no header                     reject
+  sha1= prefix                  reject
+  re-serialised body is 409 bytes vs 515 on the wire
+
+## malformed headers
+  None           -> reject
+  Some("")       -> reject
+  Some("sha256=") -> reject
+  Some("sha256=zz") -> reject
+  Some("sha256=abc") -> reject
+  Some("sha256=abcd") -> reject
+  Some("sha256=00") -> reject
+  Some("abcdef") -> reject
+  Some("SHA256=00") -> reject

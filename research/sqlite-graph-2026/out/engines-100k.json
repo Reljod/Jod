@@ -1,0 +1,29 @@
+{
+  "source_db": "/home/reljod/.claude/jobs/eb39fa18/tmp/dbs/g100k.db",
+  "nodes": 12500,
+  "edges": 100000,
+  "python": "3.14.4",
+  "sqlite": {
+    "p50_ms": 0.26,
+    "p95_ms": 0.633,
+    "bytes": 41353216
+  },
+  "kuzu": {
+    "version": "0.11.3",
+    "load_seconds": 0.19,
+    "p50_ms": 3.777,
+    "p95_ms": 7.631,
+    "bytes": 4956160,
+    "second_process_readonly": "SECOND_PROCESS_FAILED: RuntimeError IO exception: Could not set lock on file : /tmp/jod-engines-q5z_kxh1/kuzu\nSee the docs: https://docs.kuzudb.com/concurrency for more information.",
+    "second_process_readwrite": "SECOND_PROCESS_FAILED: RuntimeError IO exception: Could not set lock on file : /tmp/jod-engines-q5z_kxh1/kuzu\nSee the docs: https://docs.kuzudb.com/concurrency for more information."
+  },
+  "duckdb": {
+    "version": "1.5.5",
+    "load_seconds": 110.7,
+    "duckpgq": "unavailable: HTTP Error: Failed to download extension \"duckpgq\" at URL \"http://community-extensions.duckdb.org/v1.5.5/linux_amd64/duckpgq.duckdb_extension.gz\" (HTTP 404)\n\nCandidate extensions: \"ducklake\", \"quack\",",
+    "p50_ms": 7.873,
+    "p95_ms": 13.648,
+    "bytes": 4468736,
+    "second_process_readonly": "SECOND_PROCESS_OK"
+  }
+}

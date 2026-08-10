@@ -988,6 +988,17 @@ impl Store {
         self.write(|tx| insert_fact(tx, &fact))
     }
 
+    /// Remember many facts in one transaction.
+    ///
+    /// An agent that has just read a conversation writes what it learned all at
+    /// once, and a transaction per fact would pay the commit cost per fact for
+    /// no isolation anyone asked for. Either every fact from one extraction
+    /// lands or none does, which is also the honest unit: half an extraction is
+    /// a memory of something that did not happen.
+    pub fn remember_all(&self, facts: &[NewFact]) -> Result<Vec<i64>> {
+        self.write(|tx| facts.iter().map(|f| insert_fact(tx, f)).collect())
+    }
+
     /// Replace a belief. The old fact is closed, never deleted, and points at
     /// the one that replaced it — so "what did Jod think last month" stays
     /// answerable.
@@ -1102,20 +1113,34 @@ impl Store {
         };
         let depth = depth.clamp(1, MAX_HOPS) as i64;
         let conn = self.conn.lock().expect("store lock poisoned");
-        // `UNION` rather than `UNION ALL` is the whole trick: it deduplicates,
-        // so a cycle terminates without a visited table.
+        // Two things in this query are load-bearing, and neither is obvious.
+        //
+        // `UNION` rather than `UNION ALL` deduplicates, so a cycle terminates
+        // without a visited table.
+        //
+        // `CROSS JOIN` rather than `JOIN` pins the join order. A recursive CTE
+        // has no statistics, so the planner guesses — and it guesses wrong:
+        // measured, it made `relations` the outer loop matching on `scope=?`
+        // alone, which selects every row, then scanned the frontier inside it.
+        // That is a cross product per step, and it used the in-edge index for
+        // both directions, so the out-edge index was never touched at all.
+        // 2-hop over 10k edges took 903 ms. With the order pinned, the frontier
+        // drives and each step is a covering-index probe: 14 ms. Same schema,
+        // same indexes, 64x.
         let mut stmt = conn.prepare(
             "WITH RECURSIVE reach(node, depth) AS (
                SELECT ?1, 0
                UNION
                SELECT r.dst, x.depth + 1
-                 FROM reach x JOIN relations r ON r.src = x.node AND r.scope = ?3
+                 FROM reach x CROSS JOIN relations r
+                      ON r.src = x.node AND r.scope = ?3
                 WHERE x.depth < ?2
                   AND (r.valid_to_ms   IS NULL OR r.valid_to_ms   > ?4)
                   AND (r.valid_from_ms IS NULL OR r.valid_from_ms <= ?4)
                UNION
                SELECT r.src, x.depth + 1
-                 FROM reach x JOIN relations r ON r.dst = x.node AND r.scope = ?3
+                 FROM reach x CROSS JOIN relations r
+                      ON r.dst = x.node AND r.scope = ?3
                 WHERE x.depth < ?2
                   AND (r.valid_to_ms   IS NULL OR r.valid_to_ms   > ?4)
                   AND (r.valid_from_ms IS NULL OR r.valid_from_ms <= ?4)
@@ -1124,16 +1149,20 @@ impl Store {
                FROM reach JOIN entities e ON e.id = reach.node
               WHERE reach.node <> ?1
               GROUP BY e.id
-              ORDER BY hops, e.name",
+              ORDER BY hops, e.name
+              LIMIT ?5",
         )?;
-        let rows = stmt.query_map(params![start, depth, scope, at_ms], |r| {
-            Ok(Neighbour {
-                id: r.get(0)?,
-                name: r.get(1)?,
-                kind: r.get(2)?,
-                hops: r.get(3)?,
-            })
-        })?;
+        let rows = stmt.query_map(
+            params![start, depth, scope, at_ms, MAX_NEIGHBOURS],
+            |r| {
+                Ok(Neighbour {
+                    id: r.get(0)?,
+                    name: r.get(1)?,
+                    kind: r.get(2)?,
+                    hops: r.get(3)?,
+                })
+            },
+        )?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
@@ -1279,8 +1308,12 @@ impl Store {
              reach(node, depth, rank) AS (
                SELECT node, 0, rank FROM seeds
                UNION
+               -- CROSS JOIN for the same reason as `neighbourhood`: without it
+               -- the planner drives from `relations` and the covering index is
+               -- never used.
                SELECT r.dst, x.depth + 1, x.rank
-                 FROM reach x JOIN relations r ON r.src = x.node AND r.scope = ?2
+                 FROM reach x CROSS JOIN relations r
+                      ON r.src = x.node AND r.scope = ?2
                 WHERE x.depth < ?3 AND r.valid_to_ms IS NULL
              )
              SELECT e.id, e.name, e.kind, MIN(reach.depth) AS hops
@@ -1369,6 +1402,15 @@ const MAX_HOPS: u32 = 3;
 /// Paths may run longer than a neighbourhood, because a route is one chain
 /// rather than an expanding front.
 const MAX_PATH_DEPTH: u32 = 6;
+
+/// The most neighbours one traversal will hand back.
+///
+/// Traversal from a hub is the case that decides whether this is usable: three
+/// undirected hops from the highest-degree node reaches most of a scale-free
+/// graph. Nothing reads two thousand neighbours, so the cap is about what a
+/// caller can use rather than what SQLite can produce — and it bounds the sort,
+/// which is the part that grows fastest.
+const MAX_NEIGHBOURS: i64 = 500;
 
 /// An entity reached from another, and how far away it was.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

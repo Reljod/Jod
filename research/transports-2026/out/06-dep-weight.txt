@@ -1,0 +1,17 @@
+Jod's Cargo.lock already contains 260 packages.
+
+candidate                             total      new   new crates (first 8)
+----------------------------------------------------------------------------------------------------
+hmac (github signatures)                  7        1   hmac 
+hyper+rustls (raw HTTP)                  38       13   aws-lc-rs aws-lc-sys hyper-rustls openssl-probe rustls rustls-native-certs rustls-pki-types rustls-webpki 
+hyper+rustls/ring+webpki-roots           37       11   hyper-rustls ring rustls rustls-pki-types rustls-webpki tokio-rustls try-lock untrusted 
+reqwest minimal (raw HTTP)               84       41   aws-lc-rs aws-lc-sys displaydoc hyper-rustls icu_collections icu_locale_core icu_normalizer icu_normalizer_data 
+reqwest default (raw HTTP)               94       43   aws-lc-rs aws-lc-sys displaydoc encoding_rs h2 hyper-rustls icu_collections icu_locale_core 
+ureq (blocking raw HTTP)                 32       15   adler2 crc32fast flate2 miniz_oxide ring rustls rustls-pki-types rustls-webpki 
+frankenstein (reqwest)                  109       54   async-trait aws-lc-rs aws-lc-sys bon bon-macros displaydoc frankenstein hyper-rustls 
+teloxide (default/native-tls)           136       63   aquamarine colored displaydoc dptree erasable foreign-types foreign-types-shared hyper-tls 
+teloxide (rustls)                       135       61   aquamarine colored displaydoc dptree erasable hyper-rustls icu_collections icu_locale_core 
+
+'new' is what would be added to Cargo.lock. Lower is not automatically
+better, but for a box that also runs agent harnesses it is the axis that
+shows up in build time, audit surface and supply-chain exposure.

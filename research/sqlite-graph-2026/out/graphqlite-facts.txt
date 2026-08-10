@@ -1,0 +1,38 @@
+
+-- 1. tables it created in your database --
+    edge_props_bool
+    edge_props_int
+    edge_props_json
+    edge_props_real
+    edge_props_text
+    edges
+    node_labels
+    node_props_bool
+    node_props_int
+    node_props_json
+    node_props_real
+    node_props_text
+    nodes
+    property_keys
+    sqlite_sequence
+    sqlite_stat1
+   (`nodes` and `edges` are taken unconditionally)
+
+-- 2. what a MATCH returns --
+   type: str  value: '[{"p.name": "alice"}]'
+   (a scalar JSON string — no table-valued interface, so this cannot be joined against facts_fts by the planner)
+
+-- 3. building the graph --
+   1250 nodes in 0.04s (29599/s)
+   10000 edges in 1.20s (8346/s) — import is not the problem
+
+-- 4. where the query time goes --
+   fixed 1 hop, no DISTINCT                           0.4 ms  rows=5
+   fixed 1 hop, DISTINCT                              0.5 ms  rows=5
+   fixed 2 hop, explicit chain                        0.5 ms  rows=34
+   variable length *1..1 (same answer as row 1)    8496.4 ms  rows=5
+
+-- 5. the same 1-hop question as a recursive CTE --
+   recursive CTE, 1 hop                                    0.327 ms  rows=12
+   recursive CTE, 2 hops                                   0.173 ms  rows=78
+   recursive CTE, 3 hops                                   0.917 ms  rows=469

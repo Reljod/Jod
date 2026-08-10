@@ -1,0 +1,15 @@
+
+# Experiment 2 — constant-time comparison
+
+200000 rounds per cell, 32-byte digests, mismatch at byte N.
+
+mismatch         naive ns/op      subtle ns/op
+byte 0                  1.76             62.87
+byte 8                  3.20             70.06
+byte 16                 5.83             61.61
+byte 24                 7.38             60.52
+byte 31                 8.57             60.87
+
+spread across positions: naive 385.8%, subtle 15.8%
+(A gradient in the naive column is the leak. The absolute numbers are
+machine-specific and mean nothing on their own.)

@@ -1,0 +1,53 @@
+
+# Experiment 4 — Telegram MarkdownV2
+
+case                                plain  escaped roundtrip  unescaped?      html
+empty                                   0        0        ok        none         0
+plain ascii                            11       11        ok        none        11
+every reserved char                    19       38        ok        none        22
+every reserved char, doubled           38       76        ok        none        44
+all ascii printable                    95      114        ok        none       105
+unmatched bold                         18       19        ok        none        18
+unmatched italic                       20       21        ok        none        20
+unmatched spoiler                      22       24        ok        none        22
+unmatched code fence                   19       26        ok        none        19
+nested entities                        36       46        ok        none        36
+the docs' own ambiguity case           22       28        ok        none        22
+link with paren in url                 24       31        ok        none        24
+link with backslash in url             22       28        ok        none        22
+markdown table                         29       44        ok        none        29
+windows path                           33       40        ok        none        33
+regex                                  17       29        ok        none        17
+diff hunk                              25       29        ok        none        25
+shell                                  38       43        ok        none        46
+semver + url                           36       42        ok        none        36
+emoji                                  23       26        ok        none        23
+zwj family emoji                       11       11        ok        none        11
+rtl                                    16       20        ok        none        16
+combining marks                         5        6        ok        none         5
+lone backslash at end                   9       10        ok        none         9
+double backslash then reserved          3        6        ok        none         3
+backslash before every char            10       17        ok        none        10
+newlines and tabs                       7        7        ok        none         7
+null-adjacent controls                  5        5        ok        none         5
+unicode tag chars                      15       15        ok        none        15
+marker-lookalike                       47       57        ok        none        47
+json blob                              27       34        ok        none        27
+html-in-markdown                       31       34        ok        none        53
+reserved chars x 500                  500     1000        ok        none       578
+
+corpus failures: 0
+
+## the three contexts
+
+  text     "a\\.b\\-c \\`x\\` \\\\y \\(z\\)"
+  code     "a.b-c \\`x\\` \\\\y (z)"
+  link url "https://x/a(b\\)c"
+  html     "a.b-c `x` \\y (z)"
+
+## chunking
+
+  40390 UTF-16 units -> 10 chunks, max 4095, all <= 4096: true, rejoins: true
+  8000 UTF-16 units of emoji -> 2 chunks, max 4096, rejoins: true
+  escape-then-split leaves a dangling backslash at the cut: true
+  split-then-escape: every chunk round-trips: true

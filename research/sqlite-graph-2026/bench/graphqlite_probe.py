@@ -51,6 +51,7 @@ def main():
     ap.add_argument("--edges", type=int, default=10000)
     ap.add_argument("--chunk", type=int, default=500)
     ap.add_argument("--budget", type=float, default=60.0)
+    ap.add_argument("--qsamples", type=int, default=15)
     a = ap.parse_args()
 
     work = tempfile.mkdtemp(prefix="jod-gqlp-")
@@ -100,7 +101,7 @@ def main():
     khop = {}
     for k in (1, 2, 3):
         lat, timeouts = [], 0
-        for _ in range(15):
+        for _ in range(a.qsamples):
             s = rng.randint(1, a.nodes)
             q = ("MATCH (a:N {id: %d})-[:E*1..%d]->(b:N) RETURN DISTINCT b.id"
                  % (s, k))
@@ -121,6 +122,29 @@ def main():
                                   "timeouts": timeouts}
         print("cypher k=%d p50 %s ms p95 %s ms (%d timeouts)"
               % (k, pct(lat, 50), pct(lat, 95), timeouts), flush=True)
+    # The control that attributes the cost: the identical answer written as
+    # a fixed-length pattern instead of a variable-length one.
+    ctrl = {}
+    for label, q in (
+        ("fixed_1hop", "MATCH (a:N {id: 5})-[:E]->(b:N) RETURN b.id"),
+        ("fixed_1hop_distinct",
+         "MATCH (a:N {id: 5})-[:E]->(b:N) RETURN DISTINCT b.id"),
+        ("fixed_2hop_chain",
+         "MATCH (a:N {id: 5})-[:E]->()-[:E]->(b:N) RETURN b.id"),
+        ("varlen_1to1", "MATCH (a:N {id: 5})-[:E*1..1]->(b:N) RETURN b.id"),
+    ):
+        t = threading.Timer(20.0, db.interrupt)
+        t.start()
+        t0 = time.time()
+        try:
+            db.execute("SELECT cypher(?)", (q,)).fetchone()
+            ctrl[label] = round((time.time() - t0) * 1000, 1)
+        except sqlite3.Error:
+            ctrl[label] = ">20000 (interrupted)"
+        finally:
+            t.cancel()
+        print("control %-20s %s ms" % (label, ctrl[label]), flush=True)
+    res["fixed_vs_varlen_ms"] = ctrl
     res["cypher_khop"] = khop
 
     # The same graph, the same file, as ordinary tables + a recursive CTE.
@@ -141,7 +165,7 @@ def main():
     cte_out = {}
     for k in (1, 2, 3):
         lat = []
-        for _ in range(15):
+        for _ in range(a.qsamples):
             s = rng.randint(1, a.nodes)
             t0 = time.time()
             db.execute(cte, (s, k)).fetchall()

