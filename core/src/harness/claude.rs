@@ -7,6 +7,16 @@ use serde_json::Value;
 use super::{Accumulator, ArgPart, Harness, HarnessKind, PermissionPolicy, Resume, SpawnRequest};
 use crate::event::{summarize, AgentEvent, Usage};
 
+/// Tools `PermissionPolicy::Ask` hands over without being asked.
+///
+/// Every one of them only *reads* — the filesystem or the web. Nothing here
+/// can write a file, run a command or change anything outside the agent's own
+/// answer, so granting them up front costs the caller no ground it could have
+/// defended anyway: under `-p` the alternative is a silent denial, not a
+/// prompt. Anything that mutates still needs `--permission accept-edits` or
+/// `--permission bypass`.
+const READ_ONLY_TOOLS: &[&str] = &["Read", "Grep", "Glob", "WebSearch", "WebFetch"];
+
 #[derive(Default)]
 pub struct ClaudeCode {
     acc: Accumulator,
@@ -42,7 +52,14 @@ impl Harness for ClaudeCode {
             }
         }
         match req.permission {
-            PermissionPolicy::Ask => {}
+            // Nobody is at the other end of `-p` to answer a prompt, so "ask"
+            // is really "deny" — and a bare `claude -p` refused to so much as
+            // search the web. Allow the tools that cannot change anything, and
+            // keep denying the rest.
+            PermissionPolicy::Ask => {
+                args.push(ArgPart::lit("--allowedTools"));
+                args.push(ArgPart::lit(READ_ONLY_TOOLS.join(",")));
+            }
             PermissionPolicy::AcceptEdits => {
                 args.push(ArgPart::lit("--permission-mode"));
                 args.push(ArgPart::lit("acceptEdits"));
@@ -239,12 +256,43 @@ mod tests {
     fn permission_policies_map_to_distinct_flags() {
         let ask = ClaudeCode::default().args(&req(PermissionPolicy::Ask, None));
         assert!(!ask.contains(&ArgPart::lit("--permission-mode")));
+        assert!(!ask.contains(&ArgPart::lit("--dangerously-skip-permissions")));
 
         let edits = ClaudeCode::default().args(&req(PermissionPolicy::AcceptEdits, None));
         assert!(edits.contains(&ArgPart::lit("acceptEdits")));
 
         let bypass = ClaudeCode::default().args(&req(PermissionPolicy::Bypass, None));
         assert!(bypass.contains(&ArgPart::lit("--dangerously-skip-permissions")));
+    }
+
+    /// The default policy has to leave the agent able to *look things up*.
+    /// Without this, `claude -p` denied WebSearch and a question as ordinary as
+    /// the weather came back as "I need permission".
+    #[test]
+    fn asking_still_grants_the_tools_that_only_read() {
+        let a = ClaudeCode::default().args(&req(PermissionPolicy::Ask, None));
+        let i = a
+            .iter()
+            .position(|p| p == &ArgPart::lit("--allowedTools"))
+            .expect("--allowedTools must be passed");
+        let ArgPart::Literal(list) = &a[i + 1] else {
+            panic!("--allowedTools must be followed by a list");
+        };
+        for tool in READ_ONLY_TOOLS {
+            assert!(list.split(',').any(|t| t == *tool), "{tool} is not granted");
+        }
+    }
+
+    /// The point of `Ask` is that it still refuses everything that can change
+    /// something. If a mutating tool ever joins the grant list, this fails.
+    #[test]
+    fn asking_never_grants_a_tool_that_can_change_anything() {
+        for tool in ["Bash", "Write", "Edit", "NotebookEdit", "Task"] {
+            assert!(
+                !READ_ONLY_TOOLS.contains(&tool),
+                "{tool} can mutate and must not be granted without being asked"
+            );
+        }
     }
 
     #[test]

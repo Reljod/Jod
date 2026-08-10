@@ -661,3 +661,27 @@ stream and saying the agent keeps running is not a compromise, it is the command
 
 A parity table that says "no, same rule" three times is more honest than one
 that says "yes" by reimplementing a terminal inside a WebView.
+
+## Nobody is there to ask, so "ask" grants what only reads
+
+`claude -p` has no terminal to prompt on. `PermissionPolicy::Ask` pushed no
+flag at all, which meant the CLI fell back to its own default — deny anything
+needing approval — and the policy named "ask" behaved as "deny everything".
+The symptom was a question as ordinary as the weather coming back as *I need
+permission to search the web*, with no prompt anywhere for the user to answer.
+
+Renaming it would have been the cheap fix and the wrong one. The policy is
+right; the flag set was empty. `Ask` now passes `--allowedTools` with the tools
+that can only read — `Read`, `Grep`, `Glob`, `WebSearch`, `WebFetch` — and
+nothing else. Writes, `Bash` and subagents stay refused, which a test asserts
+by name so a future addition to that list has to argue for itself.
+
+The ground given up is none. The alternative was never "the user approves the
+web search"; it was a silent refusal. Granting the tools that cannot change
+anything costs a guarantee nobody held, and buys back the reason to have a
+default policy at all — that the safe setting is still a usable one. Anything
+that mutates still needs `--permission accept-edits` or `--permission bypass`,
+chosen deliberately.
+
+Only the Claude Code adapter changed. OpenCode and AGY have their own flag
+surfaces and were not verified against a live binary here.

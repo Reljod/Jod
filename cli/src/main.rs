@@ -281,7 +281,8 @@ impl From<OriginArg> for Origin {
 
 #[derive(Copy, Clone, PartialEq, Eq, ValueEnum)]
 enum PermissionArg {
-    /// Refuse tool calls that need approval — safe for read-only prompts.
+    /// Let the agent read — files and the web — and refuse everything that
+    /// could change something.
     Ask,
     /// Let file edits through; still prompt for anything else.
     AcceptEdits,

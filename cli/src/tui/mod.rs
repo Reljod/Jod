@@ -567,9 +567,11 @@ mod tests {
         type_line(&mut app, "/thi");
         assert!(press(&mut app, KeyCode::Enter).is_none());
         assert_eq!(app.input, "/thinking");
-        // A second Enter runs it.
+        // A second Enter runs it — asserted as a flip, not a value, so the
+        // test says "the command fired" rather than restating the default.
+        let before = app.show_thinking;
         press(&mut app, KeyCode::Enter);
-        assert!(app.show_thinking);
+        assert_eq!(app.show_thinking, !before);
     }
 
     fn agent_line(id: &str, session: Option<&str>) -> AgentLine {
