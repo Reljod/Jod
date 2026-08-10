@@ -27,6 +27,8 @@ pub mod discovery;
 pub mod error;
 pub mod event;
 pub mod harness;
+pub mod ledger;
+pub mod monitor;
 pub mod paths;
 pub mod proc;
 pub mod runner;

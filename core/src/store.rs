@@ -539,6 +539,92 @@ const MIGRATIONS: &[(&str, &str)] = &[
     CREATE INDEX ix_webhook_deliveries ON webhook_deliveries(received_at_ms DESC);
     "#,
     ),
+    (
+        "0008_monitors_and_ledger",
+        r#"
+    -- The script a schedule runs before it decides whether to wake a model.
+    --
+    -- One row per schedule, because the question it answers is "should this
+    -- fire become an agent run at all" and a schedule has exactly one answer.
+    -- The point of the whole table: most scheduled work should not wake a
+    -- model. A watchdog is a script and a hash, and for an agent that runs
+    -- 24/7 that is the difference between a scheduler and a bill.
+    CREATE TABLE monitors (
+      schedule_id   TEXT PRIMARY KEY REFERENCES schedules(id) ON DELETE CASCADE,
+      -- command | url. Which one decides how the bytes are obtained and
+      -- nothing else — everything downstream sees the same opaque bytes.
+      probe_kind    TEXT NOT NULL,
+      probe         TEXT NOT NULL,
+      -- Where a command runs. Empty for a url.
+      cwd           TEXT NOT NULL DEFAULT '',
+      -- watch | no_agent. `watch` hashes and suppresses; `no_agent` is
+      -- Hermes' flag of that name — the script *is* the job and its stdout is
+      -- the result.
+      mode          TEXT NOT NULL DEFAULT 'watch',
+      -- The hash of the exact bytes last seen. The whole change detector.
+      last_digest   TEXT,
+      -- A bounded copy of those bytes, kept only so a change can be rendered
+      -- as a diff. The digest is over everything; this is over as much as is
+      -- worth showing a person. Losing it costs a diff, never a decision.
+      last_body     BLOB,
+      last_checked_at_ms INTEGER,
+      last_changed_at_ms INTEGER
+    );
+
+    -- Every check, including the overwhelming majority that changed nothing.
+    --
+    -- Same argument as `schedule_fires`: a monitor that has been silently
+    -- failing for a week and a monitor watching something that genuinely never
+    -- changes look identical from outside, and only a row tells them apart.
+    CREATE TABLE monitor_checks (
+      id          INTEGER PRIMARY KEY,
+      schedule_id TEXT NOT NULL REFERENCES schedules(id) ON DELETE CASCADE,
+      at_ms       INTEGER NOT NULL,
+      -- baseline | unchanged | changed | reported | silent | failed
+      outcome     TEXT NOT NULL,
+      digest      TEXT,
+      detail      TEXT
+    );
+    CREATE INDEX ix_monitor_checks ON monitor_checks(schedule_id, at_ms DESC);
+
+    -- One durable row per outbound message, from before it is sent until it
+    -- is known to have arrived.
+    --
+    -- Jod's rule is that a failed run must never look like a successful one.
+    -- A reply the process died holding is exactly that failure: the run
+    -- succeeded, the person heard nothing, and nothing anywhere records the
+    -- difference. The state column is what makes an interrupted send
+    -- answerable — `pending` never left, `attempting` may have arrived — and
+    -- the two are redelivered differently on purpose.
+    CREATE TABLE delivery_ledger (
+      id            INTEGER PRIMARY KEY,
+      -- The caller's idempotency key, usually the id of the thing being
+      -- reported. Unique, so a retried caller queues one message rather than
+      -- two: the ledger exists to stop duplicates, and would be a poor place
+      -- to introduce them.
+      message_key   TEXT NOT NULL UNIQUE,
+      channel       TEXT NOT NULL,
+      target        TEXT NOT NULL,
+      body          TEXT NOT NULL,
+      -- pending | attempting | delivered | failed
+      state         TEXT NOT NULL DEFAULT 'pending',
+      attempts      INTEGER NOT NULL DEFAULT 0,
+      -- Which process is answerable for this row. Split into machine and pid
+      -- because a pid is only meaningful beside the machine that issued it,
+      -- and the sweep may only judge processes on its own machine.
+      owner_machine TEXT NOT NULL,
+      owner_pid     INTEGER NOT NULL,
+      run_id        TEXT,
+      detail        TEXT,
+      created_at_ms INTEGER NOT NULL,
+      updated_at_ms INTEGER NOT NULL
+    );
+    -- The startup sweep's only query. Partial, so the delivered rows that make
+    -- up almost the whole table cost nothing to skip.
+    CREATE INDEX ix_delivery_ledger_open ON delivery_ledger(state, updated_at_ms)
+      WHERE state IN ('pending', 'attempting');
+    "#,
+    ),
 ];
 
 /// Who asserted a fact. Kept out of the fact's text so that content Jod
