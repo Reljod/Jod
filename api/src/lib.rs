@@ -154,7 +154,7 @@ pub fn router(state: AppState) -> Router {
         .merge(session)
         // Outside the authenticated group on purpose: GitHub holds no bearer
         // token, and its HMAC signature is the credential instead. → [`webhook`]
-        .merge(webhook::routes_from_env(max_body))
+        .merge(webhook::routes_from_env())
         .merge(protected)
         .with_state(state)
 }

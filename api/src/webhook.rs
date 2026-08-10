@@ -69,6 +69,25 @@ const SIGNATURE_HEADER: &str = "x-hub-signature-256";
 
 const SOURCE: &str = "github";
 
+/// How large a delivery may be.
+///
+/// Deliberately **not** [`crate::config::Config::max_body_bytes`], which
+/// defaults to 256KB because it is sized for a prompt somebody typed. A `push`
+/// carrying a hundred commits is comfortably past that, and inheriting the
+/// prompt-sized limit would 413 real deliveries.
+///
+/// It is not GitHub's own 25MB ceiling either. This route is the one thing in
+/// the crate a stranger on the internet can reach, and a MAC cannot be checked
+/// without buffering the whole body first — so the limit is what bounds how
+/// much memory an unauthenticated request can make the daemon hold. 8MB is far
+/// above every payload GitHub actually sends and far below what would matter on
+/// a small VPS.
+///
+/// A delivery over the limit is refused by the layer, before the handler, so it
+/// leaves no row here. It is still visible: GitHub records it as a failed
+/// delivery in the repository's webhook pane and retries it.
+pub const MAX_PAYLOAD_BYTES: usize = 8 * 1024 * 1024;
+
 /// The shared secret, or the absence of one.
 ///
 /// Wrapped so it travels as a request extension rather than as a `String` that
@@ -110,17 +129,14 @@ pub fn routes(secret: Secret, max_body: usize) -> Router<AppState> {
     Router::new()
         .route(PATH, post(github))
         .layer(Extension(secret))
-        // GitHub's own cap is 25MB, and this route is unauthenticated, so the
-        // limit is the only thing standing between a stranger and the daemon's
-        // memory. It is applied here rather than inherited, because the
-        // authenticated routes are sized for a prompt, not for a payload.
         .layer(RequestBodyLimitLayer::new(max_body))
 }
 
-/// Mount the route with the secret from the environment. The form the daemon
-/// uses; kept separate so [`routes`] stays a pure function of its arguments.
-pub fn routes_from_env(max_body: usize) -> Router<AppState> {
-    routes(Secret::from_env(), max_body)
+/// Mount the route as the daemon does: secret from the environment, payload
+/// limit from [`MAX_PAYLOAD_BYTES`]. Kept separate so [`routes`] stays a pure
+/// function of its arguments and a test can pin both.
+pub fn routes_from_env() -> Router<AppState> {
+    routes(Secret::from_env(), MAX_PAYLOAD_BYTES)
 }
 
 /// Receive one delivery.

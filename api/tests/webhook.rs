@@ -29,7 +29,16 @@ use jod_core::webhook::{Conditions, DeliveryStatus, Rule};
 use tower::ServiceExt;
 
 const SECRET: &str = "it-is-a-shared-secret";
-const MAX_BODY: usize = 1024 * 1024;
+/// The limit the daemon really mounts, so a size test measures the shipped
+/// value rather than one the test picked.
+const MAX_BODY: usize = jod_api::webhook::MAX_PAYLOAD_BYTES;
+
+/// Both values are constants, so this is checked when the tests compile rather
+/// than when they run — the strongest place to put it.
+const _: () = assert!(
+    jod_api::webhook::MAX_PAYLOAD_BYTES > jod_api::config::DEFAULT_MAX_BODY_BYTES,
+    "the webhook limit is no larger than the one sized for prompts"
+);
 
 struct Harness {
     app: axum::Router,
@@ -316,6 +325,32 @@ async fn a_payload_no_rule_wants_is_recorded_as_no_match() {
     assert_eq!(body["status"], "no_match");
     assert_eq!(body["matched"], 0);
     assert_eq!(status_of(&h, "d-1"), DeliveryStatus::NoMatch);
+}
+
+/// The webhook route must not inherit the prompt-sized body limit the
+/// authenticated routes use. A `push` carrying a hundred commits is past
+/// `Config::max_body_bytes`, and a 413 leaves no delivery row — the event would
+/// simply never arrive, with nothing on this side saying why.
+#[tokio::test]
+async fn a_payload_larger_than_a_prompt_is_still_accepted() {
+    let h = harness(Some(SECRET));
+    h.store.add_webhook_rule(&rule("triage")).unwrap();
+
+    let mut payload = pull_request("opened");
+    // Comfortably past the 256KB prompt limit, comfortably inside GitHub's own.
+    payload["pull_request"]["body"] = serde_json::json!("x".repeat(600 * 1024));
+
+    let (status, body) = send(
+        &h.app,
+        delivery("d-1", "pull_request", &payload, Some(SECRET)),
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::ACCEPTED,
+        "a realistic payload was refused: {body}"
+    );
 }
 
 #[tokio::test]
