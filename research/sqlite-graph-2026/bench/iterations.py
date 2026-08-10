@@ -253,6 +253,42 @@ SELECT reach.node, MIN(reach.depth) FROM reach
  GROUP BY reach.node
 """
 
+# I7/I8 put `scope` first in the index, which means every traversal must
+# carry the scope predicate or the index is dead to it. Found the hard way:
+# the first version of I7 reused the scope-free undirected query above and a
+# 3-hop went from milliseconds to a full scan per recursion step. That is not
+# a flaw in the design — scope is a hard partition Jod applies to every
+# query — but it is a rule the design imposes, so the queries state it.
+KHOP_UNDIRECTED_SCOPED = """
+WITH RECURSIVE reach(node, depth) AS (
+  SELECT ?1, 0
+  UNION
+  SELECT e.dst, r.depth + 1
+    FROM reach r JOIN relations e ON e.src = r.node AND e.scope = 'default'
+   WHERE r.depth < ?2
+  UNION
+  SELECT e.src, r.depth + 1
+    FROM reach r JOIN relations e ON e.dst = r.node AND e.scope = 'default'
+   WHERE r.depth < ?2
+)
+SELECT node, MIN(depth) FROM reach WHERE node <> ?1 GROUP BY node
+"""
+
+SP_DISTANCE_SCOPED = """
+WITH RECURSIVE reach(node, depth) AS (
+  SELECT ?1, 0
+  UNION
+  SELECT e.dst, r.depth + 1
+    FROM reach r JOIN relations e ON e.src = r.node AND e.scope = 'default'
+   WHERE r.depth < ?3
+  UNION
+  SELECT e.src, r.depth + 1
+    FROM reach r JOIN relations e ON e.dst = r.node AND e.scope = 'default'
+   WHERE r.depth < ?3
+)
+SELECT MIN(depth) FROM reach WHERE node = ?2
+"""
+
 SP_DISTANCE = """
 WITH RECURSIVE reach(node, depth) AS (
   SELECT ?1, 0
@@ -396,16 +432,16 @@ def queries_for(name):
     elif name == "I7_scope_temporal_covering":
         q["Q1"] = ("khop", khop_directed(extra="AND e.scope = 'default'"), 1)
         q["Q2"] = ("khop", khop_directed(extra="AND e.scope = 'default'"), 3)
-        q["Q3"] = ("khop", KHOP_UNDIRECTED_TWO_TERMS, 3)
+        q["Q3"] = ("khop", KHOP_UNDIRECTED_SCOPED, 3)
         q["Q4"] = ("asof", KHOP_ASOF_PUSHDOWN, 3)
-        q["Q5"] = ("sp", SP_DISTANCE)
+        q["Q5"] = ("sp", SP_DISTANCE_SCOPED)
         q["Q6"] = ("hybrid", HYBRID)
     elif name == "I8_temporal_postfilter":
         q["Q1"] = ("khop", khop_directed(extra="AND e.scope = 'default'"), 1)
         q["Q2"] = ("khop", khop_directed(extra="AND e.scope = 'default'"), 3)
-        q["Q3"] = ("khop", KHOP_UNDIRECTED_TWO_TERMS, 3)
+        q["Q3"] = ("khop", KHOP_UNDIRECTED_SCOPED, 3)
         q["Q4"] = ("asof", KHOP_ASOF_POSTFILTER, 3)
-        q["Q5"] = ("sp", SP_DISTANCE)
+        q["Q5"] = ("sp", SP_DISTANCE_SCOPED)
         q["Q6"] = ("hybrid", HYBRID)
     elif name == "I9_2hop_closure":
         q["Q1"] = ("khop", khop_directed(), 1)

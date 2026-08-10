@@ -1,0 +1,251 @@
+{
+  "source": "/home/reljod/.claude/jobs/eb39fa18/tmp/dbs/g100k.db",
+  "edges": 100000,
+  "entities": 12500,
+  "sqlite_version": "3.46.1",
+  "base_bytes": 26472448,
+  "iterations": [
+    {
+      "name": "I1_noindex_unionall",
+      "changed": "Baseline. A bare heap table, and a recursive CTE with `UNION ALL` and a depth cap but no deduplication.",
+      "build_seconds": 0.02,
+      "queries": {
+        "Q1": {
+          "n": 60,
+          "p50_ms": 74.806,
+          "p95_ms": 77.711
+        },
+        "Q2": {
+          "n": 5,
+          "p50_ms": 75.375,
+          "p95_ms": 76.833
+        },
+        "Q3": {
+          "n": 5,
+          "p50_ms": 3972.575,
+          "p95_ms": 5000.0,
+          "timeouts": 1
+        },
+        "Q5": {
+          "n": 5,
+          "p50_ms": 233.519,
+          "p95_ms": 253.23
+        }
+      },
+      "bytes": 26472448,
+      "score": {
+        "worst_core_p95_ms": 5000.0,
+        "latency": 0,
+        "query_power": 3.33,
+        "build": 5,
+        "one_file": 5,
+        "multiproc": 5,
+        "maint": 5,
+        "simple": 5,
+        "total": 3.416
+      },
+      "iteration": 1
+    },
+    {
+      "name": "I2_noindex_union",
+      "changed": "Same storage. `UNION` instead of `UNION ALL`, so the recursion deduplicates `(node, depth)` and a cycle terminates.",
+      "build_seconds": 0.02,
+      "queries": {
+        "Q1": {
+          "n": 60,
+          "p50_ms": 75.13,
+          "p95_ms": 78.95
+        },
+        "Q2": {
+          "n": 5,
+          "p50_ms": 74.194,
+          "p95_ms": 74.844
+        },
+        "Q3": {
+          "n": 5,
+          "p50_ms": 3754.031,
+          "p95_ms": 4800.138
+        },
+        "Q5": {
+          "n": 5,
+          "p50_ms": 228.278,
+          "p95_ms": 249.952
+        }
+      },
+      "bytes": 26472448,
+      "score": {
+        "worst_core_p95_ms": 4800.138,
+        "latency": 0,
+        "query_power": 3.33,
+        "build": 5,
+        "one_file": 5,
+        "multiproc": 5,
+        "maint": 5,
+        "simple": 5,
+        "total": 3.416
+      },
+      "iteration": 2
+    },
+    {
+      "name": "I3_index_src",
+      "changed": "Add `relations(src)`. The recursive step can seek instead of scan, but still reads the table for `dst`.",
+      "build_seconds": 0.06,
+      "queries": {
+        "Q1": {
+          "n": 60,
+          "p50_ms": 0.08,
+          "p95_ms": 0.162
+        },
+        "Q2": {
+          "n": 5,
+          "p50_ms": 1.235,
+          "p95_ms": 1.861
+        },
+        "Q3": {
+          "n": 5,
+          "p50_ms": 3792.618,
+          "p95_ms": 4879.25
+        },
+        "Q5": {
+          "n": 5,
+          "p50_ms": 360.801,
+          "p95_ms": 386.36
+        }
+      },
+      "bytes": 26472448,
+      "score": {
+        "worst_core_p95_ms": 4879.25,
+        "latency": 0,
+        "query_power": 3.33,
+        "build": 5,
+        "one_file": 5,
+        "multiproc": 5,
+        "maint": 5,
+        "simple": 5,
+        "total": 3.416
+      },
+      "iteration": 3
+    },
+    {
+      "name": "I4_covering_src_dst",
+      "changed": "Widen it to `relations(src, dst)`. The step is now covering: the table is never touched.",
+      "build_seconds": 0.09,
+      "queries": {
+        "Q1": {
+          "n": 60,
+          "p50_ms": 0.052,
+          "p95_ms": 0.103
+        },
+        "Q2": {
+          "n": 5,
+          "p50_ms": 0.483,
+          "p95_ms": 0.643
+        },
+        "Q3": {
+          "n": 5,
+          "p50_ms": 2952.627,
+          "p95_ms": 3959.615
+        },
+        "Q5": {
+          "n": 5,
+          "p50_ms": 163.708,
+          "p95_ms": 196.75
+        }
+      },
+      "bytes": 26656768,
+      "score": {
+        "worst_core_p95_ms": 3959.615,
+        "latency": 0,
+        "query_power": 3.33,
+        "build": 5,
+        "one_file": 5,
+        "multiproc": 5,
+        "maint": 5,
+        "simple": 5,
+        "total": 3.416
+      },
+      "iteration": 4
+    },
+    {
+      "name": "I5_plus_reverse",
+      "changed": "Add `relations(dst, src)` and rewrite undirected traversal as two recursive terms, one per index, replacing the `OR` join.",
+      "build_seconds": 0.14,
+      "queries": {
+        "Q1": {
+          "n": 60,
+          "p50_ms": 0.063,
+          "p95_ms": 0.089
+        },
+        "Q2": {
+          "n": 60,
+          "p50_ms": 0.374,
+          "p95_ms": 0.493
+        },
+        "Q3": {
+          "n": 60,
+          "p50_ms": 7.366,
+          "p95_ms": 10.924
+        },
+        "Q5": {
+          "n": 20,
+          "p50_ms": 83.572,
+          "p95_ms": 104.336
+        }
+      },
+      "bytes": 28028928,
+      "score": {
+        "worst_core_p95_ms": 10.924,
+        "latency": 3,
+        "query_power": 3.33,
+        "build": 5,
+        "one_file": 5,
+        "multiproc": 5,
+        "maint": 5,
+        "simple": 5,
+        "total": 4.166
+      },
+      "iteration": 5
+    },
+    {
+      "name": "I6_both_direction_rows",
+      "changed": "Materialise every edge twice in `relations_u(a, b)` so undirected traversal is a single recursive term over one index.",
+      "build_seconds": 0.27,
+      "queries": {
+        "Q1": {
+          "n": 60,
+          "p50_ms": 0.053,
+          "p95_ms": 0.085
+        },
+        "Q2": {
+          "n": 60,
+          "p50_ms": 0.391,
+          "p95_ms": 0.534
+        },
+        "Q3": {
+          "n": 60,
+          "p50_ms": 7.996,
+          "p95_ms": 11.101
+        },
+        "Q5": {
+          "n": 20,
+          "p50_ms": 163.422,
+          "p95_ms": 186.402
+        }
+      },
+      "bytes": 32755712,
+      "score": {
+        "worst_core_p95_ms": 11.101,
+        "latency": 3,
+        "query_power": 3.33,
+        "build": 5,
+        "one_file": 5,
+        "multiproc": 5,
+        "maint": 5,
+        "simple": 3,
+        "total": 3.966
+      },
+      "declared_why": "simplicity 3: every edge exists as two rows, so every write and every supersession has to touch both, and 'is this row the edge or its mirror' becomes a thing callers can get wrong.",
+      "iteration": 6
+    }
+  ]
+}
