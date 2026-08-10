@@ -59,6 +59,11 @@ pub const PATH: &str = "/webhooks/github";
 /// Not [`crate::config::Config`], because that file is a TOML the daemon reads
 /// and prints; a secret belongs in the process environment, next to the other
 /// things you would not want in a config dump.
+///
+/// `Config` derives `Serialize`, which is the deciding detail: a field on it is
+/// one `to_string_pretty` away from a log line or an HTTP response, and that is
+/// the kind of leak that happens years later, in code nobody connected to this
+/// decision. The environment is the right home, not a placeholder for one.
 pub const SECRET_ENV: &str = "JOD_GITHUB_WEBHOOK_SECRET";
 
 /// GitHub's headers. Named rather than inlined because all three are load
@@ -181,10 +186,6 @@ pub async fn github(
         // secret has an endpoint that spawns agents for anyone who finds it.
         Secret(None) => Some("no secret is configured"),
         Secret(Some(secret)) => {
-            // TODO: `JOD_GITHUB_WEBHOOK_SECRET` belongs in `crate::config::Config`
-            // alongside the other daemon settings. It is read from the
-            // environment only because nobody owned `config.rs` when this
-            // landed, not because the environment is the right home for it.
             if jod_core::webhook::verify_signature(secret, &body, header(SIGNATURE_HEADER)) {
                 None
             } else {
