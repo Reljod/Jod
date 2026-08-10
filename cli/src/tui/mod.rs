@@ -2230,4 +2230,738 @@ mod tests {
         press(&mut app, KeyCode::Down);
         assert_eq!(app.input, "original!", "the edit survived");
     }
+
+    // ---- the which-key menu ----
+
+    /// The discoverability spine. One free chord, a menu of every screen, and
+    /// recognition instead of recall.
+    #[test]
+    fn ctrl_k_opens_the_which_key_menu() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        ctrl(&mut app, KeyCode::Char('k'));
+        assert_eq!(app.overlay, Overlay::WhichKey);
+    }
+
+    #[test]
+    fn a_which_key_letter_reaches_its_workspace() {
+        for (letter, expected) in [
+            ('f', Workspace::Fleet),
+            ('m', Workspace::Memory),
+            ('s', Workspace::Schedules),
+            ('g', Workspace::Goals),
+            ('h', Workspace::Hooks),
+            ('t', Workspace::Tasks),
+            ('a', Workspace::Activity),
+            ('w', Workspace::Team),
+            ('c', Workspace::Chat),
+        ] {
+            let mut app = app_on(HarnessKind::ClaudeCode);
+            ctrl(&mut app, KeyCode::Char('k'));
+            press(&mut app, KeyCode::Char(letter));
+            assert_eq!(app.workspace, expected, "Ctrl-K {letter}");
+            assert_eq!(app.overlay, Overlay::None, "and the menu closed");
+        }
+    }
+
+    /// Any key the menu does not know cancels silently rather than doing
+    /// something surprising.
+    #[test]
+    fn an_unknown_which_key_letter_cancels_without_going_anywhere() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        ctrl(&mut app, KeyCode::Char('k'));
+        press(&mut app, KeyCode::Char('z'));
+        assert_eq!(app.overlay, Overlay::None);
+        assert_eq!(app.workspace, Workspace::Chat);
+        assert_eq!(app.input, "", "and it certainly is not typed into the box");
+    }
+
+    #[test]
+    fn esc_cancels_the_which_key_menu() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        ctrl(&mut app, KeyCode::Char('k'));
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(app.overlay, Overlay::None);
+        assert_eq!(app.workspace, Workspace::Chat);
+    }
+
+    /// `Ctrl-K n s` is the two-key route into making a schedule.
+    #[test]
+    fn the_new_submenu_lands_on_the_screen_and_opens_its_prompt() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        ctrl(&mut app, KeyCode::Char('k'));
+        press(&mut app, KeyCode::Char('n'));
+        assert_eq!(app.overlay, Overlay::WhichKeyNew);
+        press(&mut app, KeyCode::Char('s'));
+        assert_eq!(app.workspace, Workspace::Schedules);
+        assert!(matches!(app.overlay, Overlay::Prompt { .. }), "{:?}", app.overlay);
+    }
+
+    #[test]
+    fn ctrl_k_question_mark_opens_the_keymap() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        ctrl(&mut app, KeyCode::Char('k'));
+        press(&mut app, KeyCode::Char('?'));
+        assert_eq!(app.overlay, Overlay::Keymap);
+    }
+
+    /// `Ctrl-A` and `Ctrl-G` keep exactly the meanings they have today, and
+    /// pressing them again comes home.
+    #[test]
+    fn the_old_chords_still_toggle_their_screens() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        ctrl(&mut app, KeyCode::Char('a'));
+        assert_eq!(app.workspace, Workspace::Fleet);
+        ctrl(&mut app, KeyCode::Char('a'));
+        assert_eq!(app.workspace, Workspace::Chat);
+
+        ctrl(&mut app, KeyCode::Char('g'));
+        assert_eq!(app.workspace, Workspace::Team);
+        ctrl(&mut app, KeyCode::Char('g'));
+        assert_eq!(app.workspace, Workspace::Chat);
+    }
+
+    // ---- Esc goes back exactly one level ----
+
+    fn with_memory() -> App {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.memory = vec![memory_node("prefers-spec-first"), memory_node("linear-is-truth")];
+        app.go(Workspace::Memory);
+        app
+    }
+
+    fn memory_node(name: &str) -> data::MemoryNode {
+        data::MemoryNode {
+            id: name.into(),
+            name: name.into(),
+            kind: data::MemoryKind::Belief,
+            confidence: 0.9,
+            degree: 3,
+            age_ms: 0,
+            seen: 1,
+            body: "a belief".into(),
+            contradicted: false,
+            in_edges: vec![data::MemoryEdge {
+                kind: "supports".into(),
+                other: "linear-is-truth".into(),
+                other_name: "linear-is-truth".into(),
+                other_kind: data::MemoryKind::Belief,
+                warn: false,
+            }],
+            out_edges: vec![],
+            provenance: vec![],
+        }
+    }
+
+    /// One back key, one meaning, and the bottom is always chat.
+    #[test]
+    fn esc_unwinds_exactly_one_level_and_ends_at_chat() {
+        let mut app = with_memory();
+        press(&mut app, KeyCode::Char('g'));
+        assert_eq!(app.workspace, Workspace::MemoryGraph);
+
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(app.workspace, Workspace::Memory, "one level, not two");
+
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(app.workspace, Workspace::Chat);
+
+        // And chat's own Esc is unchanged: follow the tail again.
+        app.scroll_up(3, 10);
+        press(&mut app, KeyCode::Esc);
+        assert!(app.following());
+    }
+
+    /// An active filter is a level of its own: `Esc` clears it before it takes
+    /// you anywhere, so you never lose the screen by trying to clear the box.
+    #[test]
+    fn esc_clears_an_active_filter_before_it_leaves_the_screen() {
+        let mut app = with_memory();
+        press(&mut app, KeyCode::Char('/'));
+        type_line(&mut app, "spec");
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.here().filter.as_deref(), Some("spec"));
+
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(app.here().filter, None, "the filter went");
+        assert_eq!(app.workspace, Workspace::Memory, "and the screen stayed");
+
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(app.workspace, Workspace::Chat);
+    }
+
+    /// A top-level jump forgets the way back deliberately: `Esc` twice landing
+    /// in a memory node you forgot opening is a maze, not a back button.
+    #[test]
+    fn jumping_to_another_workspace_resets_the_way_back() {
+        let mut app = with_memory();
+        press(&mut app, KeyCode::Char('g'));
+        assert_eq!(app.workspace, Workspace::MemoryGraph);
+
+        press(&mut app, KeyCode::Char('4'));
+        assert_eq!(app.workspace, Workspace::Schedules);
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(app.workspace, Workspace::Chat, "straight home");
+    }
+
+    #[test]
+    fn q_is_a_synonym_for_esc_in_a_workspace() {
+        let mut app = with_memory();
+        press(&mut app, KeyCode::Char('q'));
+        assert_eq!(app.workspace, Workspace::Chat);
+    }
+
+    // ---- direct jumps ----
+
+    #[test]
+    fn a_digit_jumps_straight_to_its_workspace_from_another_one() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.go(Workspace::Fleet);
+        for (digit, expected) in [
+            ('1', Workspace::Chat),
+            ('3', Workspace::Memory),
+            ('4', Workspace::Schedules),
+            ('8', Workspace::Activity),
+        ] {
+            app.go(Workspace::Fleet);
+            press(&mut app, KeyCode::Char(digit));
+            assert_eq!(app.workspace, expected, "digit {digit}");
+        }
+    }
+
+    /// Digits stay literal text in chat. For digits to be navigation, digits
+    /// would have to stop being text — which is a mode, and this is not one.
+    #[test]
+    fn digits_are_still_text_in_the_chat_box() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        type_line(&mut app, "run 4 agents");
+        assert_eq!(app.input, "run 4 agents");
+        assert_eq!(app.workspace, Workspace::Chat);
+    }
+
+    // ---- the `?` overlay ----
+
+    /// Claude Code's rule exactly, including the edge case: backspacing down to
+    /// a lone `?` must not fire it, because the key only acts on an *empty*
+    /// input.
+    #[test]
+    fn question_mark_opens_the_keymap_only_on_an_empty_input() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        press(&mut app, KeyCode::Char('?'));
+        assert_eq!(app.overlay, Overlay::Keymap);
+        press(&mut app, KeyCode::Esc);
+
+        type_line(&mut app, "what?");
+        assert_eq!(app.overlay, Overlay::None, "with text typed it is a character");
+        assert_eq!(app.input, "what?");
+
+        // Backspacing down to a lone `?` leaves it as text, not as a command:
+        // the rule is about the keypress, not about what is in the box after
+        // it.
+        app.clear_line();
+        app.input = "?x".into();
+        app.cursor = app.input.len();
+        press(&mut app, KeyCode::Backspace);
+        assert_eq!(app.input, "?");
+        assert_eq!(app.overlay, Overlay::None);
+    }
+
+    #[test]
+    fn question_mark_opens_the_keymap_on_a_workspace_too() {
+        let mut app = with_memory();
+        press(&mut app, KeyCode::Char('?'));
+        assert_eq!(app.overlay, Overlay::Keymap);
+        press(&mut app, KeyCode::Char('x'));
+        assert_eq!(app.overlay, Overlay::None, "any key closes it");
+    }
+
+    // ---- filtering ----
+
+    /// While the `/` line is being typed it owns the keyboard, letters and all
+    /// — otherwise filtering for "stop" would stop something.
+    #[test]
+    fn a_filter_being_typed_swallows_the_letters_that_are_otherwise_commands() {
+        let mut app = panel_with_agents();
+        press(&mut app, KeyCode::Char('/'));
+        type_line(&mut app, "stop");
+        assert_eq!(app.here().filter.as_deref(), Some("stop"));
+        assert!(
+            app.transcript.is_empty(),
+            "nothing was stopped: {:?}",
+            app.transcript
+        );
+    }
+
+    #[test]
+    fn a_filter_narrows_the_list_and_the_cursor_lands_on_what_is_left() {
+        let mut app = panel_with_agents();
+        press(&mut app, KeyCode::Char('/'));
+        type_line(&mut app, "docs");
+        assert_eq!(app.row_ids(Workspace::Fleet), vec!["bbb22222".to_string()]);
+        assert_eq!(fleet_at(&app), "bbb22222");
+    }
+
+    /// `⏎` keeps the filter and hands the letters back; only `Esc` clears it.
+    #[test]
+    fn accepting_a_filter_keeps_it_and_returns_the_letters_to_being_commands() {
+        let mut app = panel_with_agents();
+        press(&mut app, KeyCode::Char('/'));
+        type_line(&mut app, "port");
+        press(&mut app, KeyCode::Enter);
+        assert!(!app.here().editing_filter);
+        assert_eq!(app.here().filter.as_deref(), Some("port"));
+
+        assert_eq!(
+            press(&mut app, KeyCode::Char('s')),
+            Some(Action::Stop("aaa11111".into())),
+            "letters are commands again"
+        );
+    }
+
+    #[test]
+    fn backspace_edits_the_filter_rather_than_leaving_the_screen() {
+        let mut app = panel_with_agents();
+        press(&mut app, KeyCode::Char('/'));
+        type_line(&mut app, "port");
+        press(&mut app, KeyCode::Backspace);
+        assert_eq!(app.here().filter.as_deref(), Some("por"));
+        assert_eq!(app.workspace, Workspace::Fleet);
+    }
+
+    // ---- sorting ----
+
+    #[test]
+    fn capital_s_cycles_the_sort_and_says_which_one_is_in_force() {
+        let mut app = panel_with_agents();
+        assert_eq!(app.here().sort, 0);
+        press(&mut app, KeyCode::Char('S'));
+        assert_eq!(app.here().sort, 1);
+        assert!(
+            format!("{:?}", app.transcript.last().unwrap()).contains("sorted by"),
+            "{:?}",
+            app.transcript.last()
+        );
+    }
+
+    /// Re-sorting must not move the cursor onto a different row.
+    #[test]
+    fn re_sorting_keeps_the_cursor_on_the_same_item() {
+        let mut app = panel_with_agents();
+        press(&mut app, KeyCode::Down);
+        assert_eq!(fleet_at(&app), "bbb22222");
+        press(&mut app, KeyCode::Char('S'));
+        assert_eq!(fleet_at(&app), "bbb22222");
+    }
+
+    // ---- destructive verbs ----
+
+    fn with_schedules() -> App {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.schedules = vec![data::ScheduleRow {
+            name: "nightly-inbox".into(),
+            gloss: "02:00 every day".into(),
+            cron: "0 2 * * *".into(),
+            timezone: "Asia/Manila".into(),
+            next_ms: Some(1),
+            last_ms: None,
+            state: data::ScheduleState::Armed,
+            history: vec![],
+            prompt: "Triage the inbox.".into(),
+            runs_as: "Claude Code".into(),
+            policy: "overlap: skip".into(),
+            recent: vec![],
+        }];
+        app.go(Workspace::Schedules);
+        app
+    }
+
+    /// `x` deleting a webhook silently is one fat-fingered `Ctrl-K h x` away
+    /// from losing a secret, so it asks first — and the question names the
+    /// thing.
+    #[test]
+    fn x_asks_before_it_deletes_and_names_what_it_would_delete() {
+        let mut app = with_schedules();
+        assert_eq!(press(&mut app, KeyCode::Char('x')), None, "nothing yet");
+        match &app.overlay {
+            Overlay::Confirm { verb, what, .. } => {
+                assert_eq!(verb, "delete");
+                assert_eq!(what, "nightly-inbox");
+            }
+            other => panic!("expected a confirmation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn anything_that_is_not_a_yes_cancels_the_deletion() {
+        let mut app = with_schedules();
+        press(&mut app, KeyCode::Char('x'));
+        assert_eq!(press(&mut app, KeyCode::Char('n')), None);
+        assert_eq!(app.overlay, Overlay::None, "and it did not delete");
+
+        press(&mut app, KeyCode::Char('x'));
+        assert_eq!(press(&mut app, KeyCode::Esc), None);
+        assert_eq!(app.overlay, Overlay::None);
+    }
+
+    #[test]
+    fn y_confirms_the_deletion() {
+        let mut app = with_schedules();
+        press(&mut app, KeyCode::Char('x'));
+        let action = press(&mut app, KeyCode::Char('y'));
+        assert!(
+            matches!(&action, Some(Action::Pending { verb, .. }) if verb.contains("nightly-inbox")),
+            "{action:?}"
+        );
+        assert_eq!(app.overlay, Overlay::None);
+    }
+
+    /// Memory is forgotten, not deleted — the word on the screen is what it
+    /// does to you, not what it does to a row.
+    #[test]
+    fn forgetting_a_memory_is_called_forgetting() {
+        let mut app = with_memory();
+        press(&mut app, KeyCode::Char('x'));
+        match &app.overlay {
+            Overlay::Confirm { verb, .. } => assert_eq!(verb, "forget"),
+            other => panic!("expected a confirmation, got {other:?}"),
+        }
+    }
+
+    // ---- the local graph ----
+
+    #[test]
+    fn g_drills_from_the_memory_list_into_the_local_graph_of_the_selected_node() {
+        let mut app = with_memory();
+        press(&mut app, KeyCode::Char('g'));
+        assert_eq!(app.workspace, Workspace::MemoryGraph);
+        assert_eq!(app.graph.focus, "prefers-spec-first");
+    }
+
+    /// `⏎` re-centres on the highlighted neighbour and pushes the old focus;
+    /// `Backspace` pops it.
+    #[test]
+    fn enter_re_centres_the_graph_and_backspace_walks_back() {
+        let mut app = with_memory();
+        press(&mut app, KeyCode::Char('g'));
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.graph.focus, "linear-is-truth");
+        assert_eq!(app.graph.trail, vec!["prefers-spec-first".to_string()]);
+
+        press(&mut app, KeyCode::Backspace);
+        assert_eq!(app.graph.focus, "prefers-spec-first");
+        assert!(app.graph.trail.is_empty());
+        assert_eq!(app.workspace, Workspace::MemoryGraph, "still in the graph");
+    }
+
+    /// Walking back past the beginning leaves the graph rather than sitting
+    /// there doing nothing.
+    #[test]
+    fn backspace_on_an_empty_visit_stack_leaves_the_graph() {
+        let mut app = with_memory();
+        press(&mut app, KeyCode::Char('g'));
+        press(&mut app, KeyCode::Backspace);
+        assert_eq!(app.workspace, Workspace::Memory);
+    }
+
+    /// Coming back out of the graph should land on the node you were last
+    /// looking at, not the one you left from.
+    #[test]
+    fn re_centring_moves_the_list_cursor_to_follow_the_eye() {
+        let mut app = with_memory();
+        press(&mut app, KeyCode::Char('g'));
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(app.workspace, Workspace::Memory);
+        assert_eq!(
+            app.list(Workspace::Memory).selected.as_deref(),
+            Some("linear-is-truth")
+        );
+    }
+
+    #[test]
+    fn h_toggles_between_one_hop_and_two() {
+        let mut app = with_memory();
+        press(&mut app, KeyCode::Char('g'));
+        assert_eq!(app.graph.hops, 1);
+        press(&mut app, KeyCode::Char('h'));
+        assert_eq!(app.graph.hops, 2);
+    }
+
+    // ---- activity ----
+
+    fn with_activity() -> App {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.activity = vec![
+            activity_item("newest", 100, true, None),
+            activity_item("oldest", 1, true, Some((Workspace::Fleet, "aaa11111".into()))),
+        ];
+        app.go(Workspace::Activity);
+        app
+    }
+
+    fn activity_item(
+        id: &str,
+        at_ms: i64,
+        unread: bool,
+        jump_to: Option<(Workspace, String)>,
+    ) -> data::ActivityItem {
+        data::ActivityItem {
+            id: id.into(),
+            at_ms,
+            source: data::Source::Cron,
+            text: format!("{id} happened"),
+            unread,
+            needs_you: false,
+            jump_to,
+        }
+    }
+
+    #[test]
+    fn m_marks_one_item_read_and_capital_m_marks_them_all() {
+        let mut app = with_activity();
+        press(&mut app, KeyCode::Char('m'));
+        assert_eq!(app.unread(), 1);
+        press(&mut app, KeyCode::Char('M'));
+        assert_eq!(app.unread(), 0);
+    }
+
+    #[test]
+    fn u_hides_what_has_already_been_read() {
+        let mut app = with_activity();
+        press(&mut app, KeyCode::Char('m'));
+        press(&mut app, KeyCode::Char('u'));
+        assert!(app.unread_only);
+        assert_eq!(app.row_ids(Workspace::Activity), vec!["oldest".to_string()]);
+    }
+
+    /// `⏎` jumps to the thing the event is about rather than showing a copy of
+    /// it, which is what makes the feed a control surface.
+    #[test]
+    fn enter_on_an_activity_item_jumps_to_the_object_it_is_about() {
+        let mut app = with_activity();
+        app.agents = vec![running("aaa11111", "port the parser")];
+        app.reconcile();
+        press(&mut app, KeyCode::End);
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.workspace, Workspace::Fleet);
+        assert_eq!(fleet_at(&app), "aaa11111");
+    }
+
+    /// `Ctrl-N` exists because an ending that arrived while you were away has
+    /// to be reachable without hunting for it.
+    #[test]
+    fn ctrl_n_lands_on_the_oldest_thing_you_have_not_read() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.activity = vec![
+            activity_item("newest", 100, true, None),
+            activity_item("oldest", 1, true, None),
+        ];
+        app.reconcile();
+        ctrl(&mut app, KeyCode::Char('n'));
+        assert_eq!(app.workspace, Workspace::Activity);
+        assert_eq!(
+            app.list(Workspace::Activity).selected.as_deref(),
+            Some("oldest")
+        );
+    }
+
+    #[test]
+    fn ctrl_n_with_nothing_unread_says_so_rather_than_pretending() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        ctrl(&mut app, KeyCode::Char('n'));
+        assert!(format!("{:?}", app.transcript.last().unwrap()).contains("nothing unread"));
+    }
+
+    // ---- tasks ----
+
+    fn with_board() -> App {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.tasks = vec![jod_core::team::TeamTask {
+            id: "port-the-parser".into(),
+            title: "Port the parser to the new AST".into(),
+            owner: None,
+            status: "open".into(),
+        }];
+        app.go(Workspace::Tasks);
+        app
+    }
+
+    /// The verb that makes the board worth a screen: a task becomes a run,
+    /// seeded with what it is and how you would know it was done.
+    #[test]
+    fn d_turns_the_selected_task_into_an_agent_run() {
+        let mut app = with_board();
+        match press(&mut app, KeyCode::Char('d')) {
+            Some(Action::Delegate(prompt)) => {
+                assert!(prompt.contains("Port the parser to the new AST"), "{prompt}");
+            }
+            other => panic!("expected a delegation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_delegated_task_carries_its_runnable_check_into_the_prompt() {
+        let task = data::TaskRow {
+            id: "migrate-store".into(),
+            title: "Move the run transport into SQLite".into(),
+            owner: None,
+            state: data::TaskState::Open,
+            run: None,
+            age_ms: 0,
+            what: "…".into(),
+            check: "cargo test -p jod-core".into(),
+            blocked_by: vec![],
+            blocks: vec![],
+            spec: Some("SPEC.md".into()),
+            history: vec![],
+        };
+        let prompt = delegation_prompt(&task);
+        assert!(prompt.contains("cargo test -p jod-core"), "{prompt}");
+        assert!(prompt.contains("SPEC.md"), "{prompt}");
+    }
+
+    #[test]
+    fn enter_on_the_tasks_screen_marks_it_done_as_the_board_always_has() {
+        let mut app = with_board();
+        assert_eq!(
+            press(&mut app, KeyCode::Enter),
+            Some(Action::FinishTask("port-the-parser".into()))
+        );
+    }
+
+    #[test]
+    fn n_on_the_tasks_screen_asks_for_a_title_and_puts_it_on_the_board() {
+        let mut app = with_board();
+        press(&mut app, KeyCode::Char('n'));
+        assert!(matches!(app.overlay, Overlay::Prompt { .. }));
+        type_line(&mut app, "write the docs");
+        assert_eq!(
+            press(&mut app, KeyCode::Enter),
+            Some(Action::AddTask("write the docs".into()))
+        );
+        assert_eq!(app.overlay, Overlay::None);
+    }
+
+    #[test]
+    fn cancelling_a_prompt_adds_nothing() {
+        let mut app = with_board();
+        press(&mut app, KeyCode::Char('n'));
+        type_line(&mut app, "never mind");
+        assert_eq!(press(&mut app, KeyCode::Esc), None);
+        assert_eq!(app.overlay, Overlay::None);
+    }
+
+    // ---- the palette reaches the same places ----
+
+    /// A screen you can open one way and not the other is a screen half the
+    /// users never find.
+    #[test]
+    fn every_workspace_is_reachable_by_a_slash_command_as_well_as_a_letter() {
+        for (line, expected) in [
+            ("/agents", Workspace::Fleet),
+            ("/memory", Workspace::Memory),
+            ("/schedules", Workspace::Schedules),
+            ("/goals", Workspace::Goals),
+            ("/hooks", Workspace::Hooks),
+            ("/tasks", Workspace::Tasks),
+            ("/activity", Workspace::Activity),
+            ("/team", Workspace::Team),
+        ] {
+            let mut app = app_on(HarnessKind::ClaudeCode);
+            let slash = command::parse(line).unwrap_or_else(|| panic!("{line} did not parse"));
+            apply_slash(&mut app, slash);
+            assert_eq!(app.workspace, expected, "{line}");
+        }
+    }
+
+    /// Typing the command for the screen you are already on takes you home,
+    /// exactly as pressing `Ctrl-A` twice does.
+    #[test]
+    fn a_workspace_command_typed_twice_comes_back_to_chat() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        apply_slash(&mut app, command::Slash::Open(Workspace::Fleet));
+        assert_eq!(app.workspace, Workspace::Fleet);
+        apply_slash(&mut app, command::Slash::Open(Workspace::Fleet));
+        assert_eq!(app.workspace, Workspace::Chat);
+    }
+
+    /// `/memory prefers` should land you looking at the answer, not at the
+    /// list with the query still to type.
+    #[test]
+    fn memory_with_a_query_opens_the_list_already_filtered() {
+        let mut app = with_memory();
+        app.go(Workspace::Chat);
+        apply_slash(&mut app, command::Slash::Memory(Some("linear".into())));
+        assert_eq!(app.workspace, Workspace::Memory);
+        assert_eq!(
+            app.row_ids(Workspace::Memory),
+            vec!["linear-is-truth".to_string()]
+        );
+    }
+
+    /// Naming a row is what makes `/schedule <name>` worth having beside
+    /// `/schedules`.
+    #[test]
+    fn naming_a_row_lands_the_cursor_on_it() {
+        let mut app = with_schedules();
+        app.go(Workspace::Chat);
+        apply_slash(
+            &mut app,
+            command::Slash::OpenNamed(Workspace::Schedules, "nightly".into()),
+        );
+        assert_eq!(app.workspace, Workspace::Schedules);
+        assert_eq!(
+            app.list(Workspace::Schedules).selected.as_deref(),
+            Some("nightly-inbox")
+        );
+    }
+
+    #[test]
+    fn naming_a_row_that_is_not_there_says_so_rather_than_guessing() {
+        let mut app = with_schedules();
+        apply_slash(
+            &mut app,
+            command::Slash::OpenNamed(Workspace::Schedules, "nope".into()),
+        );
+        assert!(format!("{:?}", app.transcript.last().unwrap()).contains("no schedules called nope"));
+    }
+
+    /// A verb the store cannot carry out yet is named, not silently ignored:
+    /// a key that appears to do nothing is worse than one that says what it is
+    /// waiting for.
+    #[test]
+    fn a_verb_the_store_cannot_do_yet_says_what_it_is_waiting_for() {
+        let mut app = with_schedules();
+        match press(&mut app, KeyCode::Char('r')) {
+            Some(Action::Pending { verb, needs }) => {
+                assert!(verb.contains("nightly-inbox"), "{verb}");
+                assert!(!needs.is_empty(), "it has to name the missing call");
+            }
+            other => panic!("expected a named to-do, got {other:?}"),
+        }
+    }
+
+    /// The editor handoff is a decision the key handler makes and the loop
+    /// carries out, so the decision is testable without a terminal.
+    #[test]
+    fn ctrl_f_asks_for_the_editor() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        assert_eq!(ctrl(&mut app, KeyCode::Char('f')), Some(Action::Editor));
+    }
+
+    #[test]
+    fn ctrl_k_e_is_the_discoverable_alias_for_the_editor() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        ctrl(&mut app, KeyCode::Char('k'));
+        assert_eq!(press(&mut app, KeyCode::Char('e')), Some(Action::Editor));
+    }
+
+    /// Quitting is ahead of every layer, because a key that cannot always leave
+    /// is a trap.
+    #[test]
+    fn ctrl_c_still_leaves_from_inside_an_overlay() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        ctrl(&mut app, KeyCode::Char('k'));
+        ctrl(&mut app, KeyCode::Char('c'));
+        assert!(app.should_quit);
+    }
 }
