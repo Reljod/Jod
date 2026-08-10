@@ -221,7 +221,8 @@ export class HttpTransport implements Transport {
 
   /**
    * The roster carries state the event stream cannot reconstruct — most
-   * importantly `session_closed`, since a tmux session outlives its agent.
+   * importantly `process_alive`, which is a live probe of the run's process
+   * group rather than anything the event stream carries.
    * Rather than poll, refresh it only when the stream says a lifecycle
    * boundary was crossed, debounced so a burst costs one request.
    */

@@ -125,7 +125,7 @@ describe("SimTransport", () => {
 
     const agent = c.reports.at(-1)!.agents.find((a) => a.id === id)!;
     expect(agent.status).toBe("killed");
-    expect(agent.session_closed).toBe(true);
+    expect(agent.process_alive).toBe(false);
     t.stop();
   });
 });

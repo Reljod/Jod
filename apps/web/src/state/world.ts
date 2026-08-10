@@ -276,7 +276,10 @@ export class WorldStore {
       case "finished":
         node.phase = env.is_error ? "failed" : "done";
         node.summary.status = env.is_error ? "failed" : "completed";
-        node.summary.session_closed = true;
+        // The supervisor exits with the run, so a finished run has no live
+        // process group. Under tmux the session outlived the agent and this
+        // was the opposite claim.
+        node.summary.process_alive = false;
         node.summary.usage = env.usage;
         node.inFlight = null;
         if (env.text) node.summary.last_message = env.text;

@@ -311,9 +311,9 @@ pub async fn spawn_agent(
         ApiError::Forbidden(e.to_string())
     })?;
 
-    if !state.jod.tmux_available() {
+    if !state.jod.supervisor_available() {
         return Err(ApiError::Internal(
-            "tmux is not installed, and every agent runs inside a tmux session".into(),
+            "`jod-run` is not installed on this machine, and it supervises every agent".into(),
         ));
     }
 
@@ -371,7 +371,7 @@ pub async fn spawn_agent(
     Ok((StatusCode::CREATED, location(&agent), Json(agent)).into_response())
 }
 
-/// Stop an agent and close its tmux session.
+/// Stop an agent, and everything it started.
 ///
 /// Killing an already-finished agent is not an error: the session outlives the
 /// agent, so this also serves as "reclaim the session".

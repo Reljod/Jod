@@ -24,7 +24,7 @@ struct AppState {
 #[derive(Serialize)]
 struct SystemStatus {
     harnesses: Vec<HarnessInfo>,
-    tmux_available: bool,
+    supervisor_available: bool,
     default_workdir: String,
 }
 
@@ -48,7 +48,7 @@ fn to_msg(e: impl std::fmt::Display) -> String {
 fn system_status(state: tauri::State<'_, AppState>) -> SystemStatus {
     SystemStatus {
         harnesses: state.jod.harnesses(),
-        tmux_available: state.jod.tmux_available(),
+        supervisor_available: state.jod.supervisor_available(),
         default_workdir: jod_core::service::default_cwd().to_string_lossy().to_string(),
     }
 }
@@ -112,18 +112,16 @@ async fn report(state: tauri::State<'_, AppState>) -> Result<Report, String> {
     Ok(state.jod.report().await)
 }
 
-/// Open a real terminal already watching the agent's tmux session.
+/// Open a real terminal already following the agent.
 ///
-/// Uses `watch_command` rather than a bare `tmux attach`: the new window's
-/// login shell may auto-start tmux before our command runs (oh-my-zsh's tmux
-/// plugin does exactly this), and `attach` refuses to nest.
+/// `jod watch` reads the run out of the database, so unlike `tmux attach` this
+/// works for a finished run too — it replays the transcript rather than
+/// refusing. There is no session left behind to be "closed", so there is
+/// nothing to check before opening the window.
 #[tauri::command]
 async fn open_in_terminal(state: tauri::State<'_, AppState>, id: String) -> Result<(), String> {
     let agent = state.jod.agent(&id).await.map_err(to_msg)?;
-    if agent.session_closed {
-        return Err("this agent's tmux session has been closed".into());
-    }
-    let command = jod_core::tmux::watch_command(&agent.tmux_session);
+    let command = agent.watch_command;
 
     #[cfg(target_os = "macos")]
     {
@@ -148,8 +146,9 @@ async fn open_in_terminal(state: tauri::State<'_, AppState>, id: String) -> Resu
 /// want Terminal.app windows appearing instead.
 #[cfg(target_os = "macos")]
 fn terminal_script(command: &str) -> String {
-    // AppleScript string literals escape with backslashes, and the command
-    // contains double quotes (`[ -n "$TMUX" ]`).
+    // AppleScript string literals escape with backslashes. `jod watch <id>`
+    // carries no quotes today, but escaping is kept — and tested directly —
+    // so a command that grows one does not silently break the script.
     let escaped = command.replace('\\', r"\\").replace('"', "\\\"");
 
     if std::path::Path::new("/Applications/iTerm.app").exists() {
@@ -252,19 +251,22 @@ mod contract {
         }
     }
 
-    /// The command is embedded in an AppleScript string literal, and it
-    /// contains double quotes (`[ -n "$TMUX" ]`). Unescaped, they terminate
-    /// the literal and the script fails to compile.
+    /// A command embedded in an AppleScript string literal must have its double
+    /// quotes escaped, or they terminate the literal and the script fails to
+    /// compile. `jod watch <id>` has no quotes today, so the escaping is tested
+    /// directly rather than through it — otherwise the guard would quietly stop
+    /// guarding anything.
     #[cfg(target_os = "macos")]
     #[test]
-    fn the_terminal_script_escapes_the_quotes_in_the_watch_command() {
-        let command = jod_core::tmux::watch_command("jod-x");
-        assert!(command.contains('"'), "precondition: the command has quotes");
+    fn the_terminal_script_escapes_quotes_in_the_command() {
+        let script = terminal_script(&jod_core::service::watch_command("a1"));
+        assert!(script.contains("jod watch a1"), "{script}");
 
-        let script = terminal_script(&command);
-        assert!(script.contains("\\\"$TMUX\\\""), "quotes must be escaped:\n{script}");
-        assert!(script.contains("switch-client -t jod-x"));
-        assert!(script.contains("attach -t jod-x"));
+        let script = terminal_script(r#"echo "hi""#);
+        assert!(
+            script.contains("\\\"hi\\\""),
+            "quotes must be escaped:\n{script}"
+        );
     }
 
     #[cfg(target_os = "macos")]
@@ -308,9 +310,14 @@ mod contract {
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
-            // `block_on` puts us inside Tauri's Tokio runtime, which `Jod::new`
-            // needs in order to spawn its event-collector task.
-            let jod = tauri::async_runtime::block_on(async { Jod::new() });
+            // `block_on` puts us inside Tauri's Tokio runtime, which the
+            // constructor needs in order to spawn its event-collector task.
+            //
+            // Persistent, not `Jod::new()`: a run is supervised by a separate
+            // process that reports through the database, so an app without one
+            // could start agents it would then never hear from again.
+            let jod = tauri::async_runtime::block_on(async { Jod::persistent() })
+                .expect("opening ~/.jod/jod.db");
 
             // Bridge core events onto the webview's event bus.
             let mut rx = jod.subscribe();

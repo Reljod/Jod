@@ -38,9 +38,11 @@ checkout, so one owner per path* — two live agents in the same `cwd` is the
 collision that rule exists to prevent, so it is drawn hot and labelled with the
 path rather than shown as neutral structure.
 
-`status` and `session_closed` are surfaced **separately**, because a tmux session
-outlives its agent: a `completed` agent with an open session is still attachable,
-and the dossier offers the attach command exactly then.
+`status` and `process_alive` are surfaced **separately**, because they answer
+different questions: a run marked `running` with nothing alive behind it never
+reported how it ended, and that gap is the thing worth seeing. The dossier shows
+the process group beside the status, and offers `jod watch` whatever the state —
+watching a finished run replays it.
 
 Controls: drag a node to reposition · drag the background to pan · scroll to zoom
 · double-click to clear selection · `⌘K` for the command palette.

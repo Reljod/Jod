@@ -18,16 +18,15 @@ function node(
     cwd,
     model: null,
     permission: "ask",
-    tmux_session: `t-${id}`,
-    attach_command: "",
-    switch_command: "",
-    session_closed: false,
+    pid: 4242,
+    pgid: 4242,
+    process_alive: true,
+    watch_command: `jod watch ${id}`,
     created_at_ms: 1000,
     session_id: null,
     usage: {},
     event_count: 0,
     last_message: null,
-    stream_path: "",
   } as AgentSummary;
 
   return {

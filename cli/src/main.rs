@@ -69,9 +69,20 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Print the command that attaches to an agent's tmux session.
-    Attach { id: String },
-    /// Stop an agent and close its session.
+    /// Follow a running agent, or replay a finished one.
+    ///
+    /// Reads the run out of the database, so it works for an agent this
+    /// process never launched — including one still running from a session
+    /// that has since been closed.
+    Watch {
+        id: String,
+        #[arg(long)]
+        json: bool,
+        /// Show the agent's reasoning as well as its output.
+        #[arg(long)]
+        thinking: bool,
+    },
+    /// Stop an agent and everything it started.
     Kill { id: String },
     /// Counts and total spend across all agents.
     Report {
@@ -337,9 +348,7 @@ async fn main() -> Result<()> {
             if prompt.trim().is_empty() {
                 bail!("empty prompt — pass one as an argument or pipe it on stdin");
             }
-            if !jod.tmux_available() {
-                bail!("tmux is not installed, and every agent runs inside a tmux session");
-            }
+            require_supervisor(&jod)?;
 
             let req = SpawnRequest {
                 name: name.unwrap_or_else(|| default_name(&prompt)),
@@ -379,10 +388,27 @@ async fn main() -> Result<()> {
             }
         }
 
-        Command::Attach { id } => {
+        Command::Watch { id, json, thinking } => {
+            // Subscribe before rehydrating: rehydrate starts the followers that
+            // produce the live events, and one that fired first would be lost.
+            let events = jod.subscribe();
             jod.rehydrate(200).await?;
             let agent = jod.agent(&id).await?;
-            println!("{}", agent.attach_command);
+
+            // Everything that already happened, then everything that follows,
+            // with no gap between the two — the same contract the SSE stream
+            // gives a phone.
+            let history = jod.events_since(&id, None).await?;
+            let last_seen = history.last().map(|e| e.seq);
+            for envelope in history {
+                render::print_envelope(&envelope, json, thinking);
+            }
+
+            if agent.status != jod_core::AgentStatus::Running {
+                return Ok(());
+            }
+            let code = render::stream_after(events, &id, last_seen, json, thinking).await;
+            std::process::exit(code);
         }
 
         Command::Kill { id } => {
@@ -468,9 +494,7 @@ async fn main() -> Result<()> {
             continue_last,
             team,
         } => {
-            if !jod.tmux_available() {
-                bail!("tmux is not installed, and every agent runs inside a tmux session");
-            }
+            require_supervisor(&jod)?;
             jod.rehydrate(200).await?;
             tui::run(
                 jod,
@@ -725,13 +749,26 @@ async fn main() -> Result<()> {
             permission,
             continue_last,
         } => {
-            if !jod.tmux_available() {
-                bail!("tmux is not installed, and every agent runs inside a tmux session");
-            }
+            require_supervisor(&jod)?;
             chat(jod, harness, cwd, model, permission, continue_last).await?;
         }
     }
 
+    Ok(())
+}
+
+/// Refuse to start an agent when nothing could supervise it.
+///
+/// `jod-run` is what holds a run's output once the caller walks away; without
+/// it a spawn would fail later and less clearly, after the run had a name.
+fn require_supervisor(jod: &Jod) -> Result<()> {
+    if !jod.supervisor_available() {
+        bail!(
+            "`jod-run` was not found — it supervises every agent and ships \
+             alongside `jod`. Point at it with JOD_SUPERVISOR_BIN if it lives \
+             somewhere unusual."
+        );
+    }
     Ok(())
 }
 

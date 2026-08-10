@@ -238,8 +238,8 @@ describe("folding events into the transcript", () => {
   });
 
   it("surfaces an error as a notice", () => {
-    const s = applyEvent(session(), { kind: "error", message: "tmux is missing" });
-    expect(s.transcript).toEqual([{ kind: "notice", text: "tmux is missing" }]);
+    const s = applyEvent(session(), { kind: "error", message: "jod-run is missing" });
+    expect(s.transcript).toEqual([{ kind: "notice", text: "jod-run is missing" }]);
   });
 
   it("surfaces a line it could not classify rather than dropping it", () => {

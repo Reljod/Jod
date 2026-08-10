@@ -17,7 +17,7 @@ disagreeing about it.
 
 ```
    iOS / Android ─┐
-   web app       ─┼─ HTTPS (tailnet) ─► jod-api ─► service::Jod ─► tmux ─► harness
+   web app       ─┼─ HTTPS (tailnet) ─► jod-api ─► service::Jod ─► jod-run ─► harness
    curl          ─┘                     (127.0.0.1)
 ```
 
@@ -134,7 +134,7 @@ All JSON, all under `/v1`. Errors are
 | `GET` | `/v1/agents` | `read` | Every agent this daemon knows about. |
 | `POST` | `/v1/agents` | `write` | Delegate a prompt. Returns the agent. |
 | `GET` | `/v1/agents/{id}` | `read` | One agent. |
-| `DELETE` | `/v1/agents/{id}` | `write` | Kill it, close its tmux session. |
+| `DELETE` | `/v1/agents/{id}` | `write` | Stop it, and everything it started. |
 | `GET` | `/v1/agents/{id}/events` | `read` | History, `?after_seq=&limit=`. |
 | `GET` | `/v1/agents/{id}/stream` | `read` | SSE: that agent, live, resumable. |
 | `GET` | `/v1/events` | `read` | SSE: every agent, for a dashboard. |
@@ -175,12 +175,15 @@ The response is an `AgentSummary` — the same struct the CLI prints — plus
 
 ### Killing
 
-`DELETE /v1/agents/{id}` is idempotent by nature: killing a finished agent
-reclaims its tmux session and is not an error. This mirrors `jod kill`, and it
-matters because [an agent's tmux session outlives the
-agent](decisions.md#an-agents-tmux-session-outlives-the-agent) — "the run is
-over" and "the session is gone" are different questions, and the API answers
-both via `status` and `session_closed`.
+`DELETE /v1/agents/{id}` is idempotent by nature: signalling a process group
+that has already gone is the outcome the caller wanted, not an error. This
+mirrors `jod kill`. The signal reaches the whole group, so a harness that
+spawned children does not leave them behind.
+
+"The run is over" and "is anything still alive" stay separate questions, and the
+API answers both — via `status` and `process_alive`. They can disagree, and when
+they do it is worth seeing: a run marked `running` with a dead process group
+never reported how it ended.
 
 There is no `PATCH`. An agent is not editable; it is spawned, watched, and
 stopped.
@@ -310,8 +313,8 @@ takes a list of permitted roots and rejects anything outside them. Paths are
 canonicalised **before** the check, so `/allowed/../../etc` is caught rather than
 string-matched — the classic traversal bug.
 
-**A concurrency cap.** Each agent is a tmux session, a harness process, and real
-money. A looping client should hit `429`, not fork-bomb the VPS or empty an
+**A concurrency cap.** Each agent is a supervisor process, a harness process,
+and real money. A looping client should hit `429`, not fork-bomb the VPS or empty an
 account. Default 8.
 
 **A prompt size limit.** Bodies are capped (256 KiB default) so a large POST

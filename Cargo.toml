@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["core", "cli", "api"]
+members = ["core", "cli", "api", "supervisor"]
 
 [workspace.package]
 version = "0.1.0"
@@ -26,3 +26,6 @@ chrono = { version = "0.4", features = ["serde"] }
 # `bundled` compiles SQLite in, so a VPS needs no system libsqlite3, and the
 # FTS5 recall index is always available rather than depending on the host build.
 rusqlite = { version = "0.37", features = ["bundled"] }
+# Process groups and signals — what replaced tmux as the way a run is
+# supervised, killed, and checked for life.
+libc = "0.2"

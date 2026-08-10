@@ -64,15 +64,16 @@ to watch every agent at once.
 
 | | | |
 |---|---|---|
-| 🦀 | [`core/`](./core) | the service: harness seam, tmux runner, event stream, memory |
+| 🦀 | [`core/`](./core) | the service: harness seam, process supervision, event stream, memory |
 | ⌨️ | [`cli/`](./cli) | the `jod` command — delegate, watch, remember, chat |
 | 📱 | HTTP API, mobile | *planned — same core behind an API* |
 
-Each delegated task runs in its own `tmux` session under **Claude Code**,
-**OpenCode** or **AGY**, so you can attach to any agent, kill it, or log out
-without stopping the work. Output from all three is normalised into one event
-vocabulary; runs stay readable as plain files under `~/.jod`, and everything Jod
-learns lands in one SQLite file beside them.
+Each delegated task runs as its own detached process group under **Claude
+Code**, **OpenCode** or **AGY**, supervised by `jod-run`, so you can watch any
+agent, kill it, or log out without stopping the work. Output from all three is
+normalised into one event vocabulary and written straight into one SQLite file —
+which is what lets `jod watch`, the HTTP API and the phone all follow the same
+run without one of them owning it.
 
 ```sh
 cargo build --release
@@ -261,7 +262,8 @@ agents/            the four subagents, where a plugin reads them from
 .claude/agents/    the same four, so they work here without the plugin
 .agents/skills/    the portable toolkit — reusable Claude Code skills
 domains/           personal operating notes, one per area of Reljod's life
-core/              the orchestrator service — harnesses, tmux, events, memory
+core/              the orchestrator service — harnesses, supervision, events, memory
+supervisor/        jod-run — supervises one agent process, writes its events
 cli/               the `jod` command, the way you talk to it
 research/          the measured groundwork the design rests on
 ```

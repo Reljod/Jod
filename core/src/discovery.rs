@@ -19,6 +19,23 @@ pub fn find_binary(env_override: &str, names: &[&str], well_known: &[&str]) -> O
         }
     }
 
+    // Next to the running executable, before `PATH`. Jod's own helpers ship as
+    // siblings of the binary that looks for them, and that copy is the one built
+    // from the same source — an older `jod-run` earlier in `PATH` would be a
+    // version mismatch nobody asked for. Harnesses are not found this way in
+    // practice, since nothing installs `claude` beside `jod`.
+    if let Some(dir) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf))
+    {
+        for name in names {
+            let candidate = dir.join(name);
+            if is_executable(&candidate) {
+                return Some(candidate);
+            }
+        }
+    }
+
     if let Ok(path) = std::env::var("PATH") {
         for dir in std::env::split_paths(&path) {
             for name in names {

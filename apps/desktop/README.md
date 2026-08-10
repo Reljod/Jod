@@ -1,7 +1,7 @@
 # Jod desktop
 
 A Tauri v2 shell over [`jod-core`](../../crates/jod-core). Delegate a task, watch
-the agent stream in, attach to its tmux session, kill it.
+the agent stream in, follow it in a real terminal, kill it.
 
 The shell is deliberately thin — every command in `src-tauri/src/lib.rs` is a
 one-liner over `jod_core::Jod`. Logic lives in the core so the planned iOS client
@@ -11,7 +11,7 @@ and VPS daemon reuse it unchanged.
 
 | Thing | Why | Check |
 |---|---|---|
-| `tmux` | every agent runs in its own session | `tmux -V` |
+| `jod-run` | supervises every agent; ships beside `jod` | `jod-run` on `PATH` |
 | Claude Code and/or OpenCode | the harness that actually thinks | `claude --version`, `opencode --version` |
 | Rust ≥ 1.88 | Tauri v2's dependency tree | `rustc --version` |
 | Node ≥ 20, pnpm | the frontend | `pnpm --version` |
@@ -19,7 +19,10 @@ and VPS daemon reuse it unchanged.
 The app finds harness binaries even when launched from Finder with a minimal
 `PATH` — it searches `PATH`, then well-known locations (`~/.nvm/versions/node/*/bin`,
 `~/.opencode/bin`, Homebrew). Override with `JOD_CLAUDE_BIN`, `JOD_OPENCODE_BIN`
-or `JOD_TMUX_BIN`. Missing pieces show as a banner rather than a failed spawn.
+or `JOD_SUPERVISOR_BIN`. The supervisor is looked for beside the running
+executable first, so a bundled app uses the copy it shipped with rather than an
+older one earlier in `PATH`. Missing pieces show as a banner rather than a
+failed spawn.
 
 ## Run it
 
@@ -31,22 +34,21 @@ pnpm tauri dev          # or: pnpm tauri build  →  src-tauri/target/release/bu
 
 ## Watching an agent
 
-**Watch in tmux** opens a new window in iTerm2 (or Terminal.app if iTerm2 is not
-installed) already showing the agent. To do it by hand, the right command
-depends on where you are — the UI shows both:
+**Watch** opens a new window in iTerm2 (or Terminal.app if iTerm2 is not
+installed) already following the agent. By hand it is one command, wherever you
+are:
 
 ```sh
-tmux attach -t jod-<id>          # from outside tmux
-tmux switch-client -t jod-<id>   # from inside tmux, where attach refuses to nest
+jod watch <id>
 ```
 
-**An agent's tmux session outlives the agent.** When a run finishes the pane
-prints the exit status and becomes a normal shell in the agent's working
-directory. This is deliberate: a session that destroys itself takes any attached
-client with it, which closes the terminal window of whoever was watching
-([why](../../docs/decisions.md)). Jod also sets `detach-on-destroy off` on its
-own sessions — never globally — so closing one returns you to another session
-instead of ending your client.
+**It works on a finished run too**, replaying the transcript rather than
+refusing — the run is read out of `~/.jod/jod.db`, not out of a live terminal.
+That is also why the same view reaches the web client and the phone
+([why](../../docs/decisions.md#a-run-is-a-detached-process-group-and-the-database-is-its-only-transport)).
+
+**Kill** is the button that needs a live run: it signals the run's process
+group, which stops the harness and anything the harness started.
 
 Sessions therefore stay until you close them: **Close session** in the app, or
 `Ctrl-D` in the pane.
@@ -65,16 +67,20 @@ cargo run -p jod-core --example delegate -- open_code   "Reply with exactly: PON
 
 ## Where things go
 
-Runtime state is plain files under `~/.jod` (override with `JOD_HOME`), so a run
-stays readable long after the app is closed:
+A run's transcript lives in `~/.jod/jod.db`, because it is contended state that
+several processes append to and read. What is left on disk is the record of the
+launch (override the location with `JOD_HOME`):
 
 ```
 ~/.jod/runs/<agent-id>/
-  prompt.txt      the task, kept out of shell quoting entirely
-  run.sh          the generated launcher tmux executes
-  stream.jsonl    the harness's raw output
+  prompt.txt      the task, as it was asked
+  spawn.json      exactly what was launched, and where its events go
+  supervisor.log  the supervisor's own stdout/stderr, for when it fails early
   agent.json      metadata
 ```
+
+Read a run back with `jod watch <id>`, which works whether or not it is still
+going.
 
 ## Permissions
 

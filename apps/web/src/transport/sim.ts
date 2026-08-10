@@ -226,6 +226,8 @@ const HARNESS_LABEL: Record<HarnessKind, string> = {
 
 function summaryFor(bp: Blueprint, id: string, createdAt: number): AgentSummary {
   const session = `${bp.harness}-${id.slice(0, 8)}`;
+  // The supervisor leads its own group, so on a real box these are one number.
+  const pid = 40000 + Math.floor(Math.random() * 10000);
   return {
     id,
     name: bp.name,
@@ -235,16 +237,15 @@ function summaryFor(bp: Blueprint, id: string, createdAt: number): AgentSummary 
     cwd: bp.cwd,
     model: bp.model,
     permission: bp.harness === "agy" ? "ask" : "accept_edits",
-    tmux_session: `jod-${bp.name}`,
-    attach_command: `tmux attach -t jod-${bp.name}`,
-    switch_command: `tmux switch-client -t jod-${bp.name}`,
-    session_closed: false,
+    pid,
+    pgid: pid,
+    process_alive: true,
+    watch_command: `jod watch ${id}`,
     created_at_ms: createdAt,
     session_id: session,
     usage: {},
     event_count: 0,
     last_message: null,
-    stream_path: `~/.jod/streams/${id}.jsonl`,
   };
 }
 
@@ -357,7 +358,7 @@ export class SimTransport implements Transport {
     if (event.kind === "started" && event.model) agent.model = event.model;
     if (event.kind === "finished") {
       agent.status = event.is_error ? "failed" : "completed";
-      agent.session_closed = true;
+      agent.process_alive = false;
       agent.usage = event.usage;
       if (event.text) agent.last_message = event.text;
     } else {
@@ -423,7 +424,7 @@ export class SimTransport implements Transport {
     const agent = this.agents.get(agentId);
     if (!agent || agent.status !== "running") return;
     agent.status = "killed";
-    agent.session_closed = true;
+    agent.process_alive = false;
     this.emit(agentId, {
       kind: "error",
       message: "killed by operator",
@@ -463,7 +464,8 @@ export class SimTransport implements Transport {
       status: a.status,
       cwd: a.cwd,
       session_id: a.session_id,
-      tmux_session: a.tmux_session,
+      pid: a.pid,
+      pgid: a.pgid,
       created_at_ms: a.created_at_ms,
       summary: a as unknown as StoredRun["summary"],
     }));

@@ -63,10 +63,12 @@ export function Roster({ world, selectedId, onSelect }: Props) {
                 {contended.has(n.summary.cwd) && (
                   <i className="warn" title="Another live agent shares this directory">⚠</i>
                 )}
-                {/* status and session_closed are different questions: a finished
-                    agent can still have a live tmux session to attach to. */}
-                {!n.summary.session_closed && !live && (
-                  <i className="sess" title="tmux session still open">▣</i>
+                {/* status and process_alive are different questions: a run can
+                    read as finished while its process group is still winding
+                    down, and — the case that matters — one marked running with
+                    nothing alive behind it never reported how it ended. */}
+                {n.summary.process_alive && !live && (
+                  <i className="sess" title="its process group is still alive">▣</i>
                 )}
               </span>
               <span className="rr-mid">

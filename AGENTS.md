@@ -11,7 +11,8 @@ skill that owns it.
 executes, to be delegated to like a competent chief of staff. Three parts:
 
 - **`core/` + `cli/`** — Jod the program, resident on a VPS. `jod-core` delegates
-  tasks to agent harnesses (Claude Code, OpenCode, AGY), one tmux session each,
+  tasks to agent harnesses (Claude Code, OpenCode, AGY), one supervised
+  process group each,
   normalises their output into one event stream, and keeps runs and memory in
   one SQLite file; `cli/` is the `jod` command over it. Jod never does the work
   itself. → [design](docs/jod-system.md)

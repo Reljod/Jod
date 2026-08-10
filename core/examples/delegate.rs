@@ -34,7 +34,13 @@ async fn main() {
         .unwrap_or_else(|| "Reply with exactly: PONG".into());
     let model = args.next();
 
-    let jod = Jod::new();
+    // Persistent, not `Jod::new()`: a run is supervised by a separate process
+    // that reports through the database, so there is nowhere for its output to
+    // go without one.
+    let jod = Jod::persistent().unwrap_or_else(|e| {
+        eprintln!("could not open the store: {e}");
+        std::process::exit(1);
+    });
 
     for h in jod.harnesses() {
         println!(
@@ -44,7 +50,7 @@ async fn main() {
             h.path.unwrap_or_default()
         );
     }
-    println!("tmux available: {}\n", jod.tmux_available());
+    println!("supervisor available: {}\n", jod.supervisor_available());
 
     let mut rx = jod.subscribe();
 
@@ -71,7 +77,8 @@ async fn main() {
         });
 
     println!("agent   {}", agent.id);
-    println!("tmux    {}\n", agent.attach_command);
+    println!("pgid    {:?}", agent.pgid);
+    println!("watch   {}\n", agent.watch_command);
 
     // Give up rather than hang forever if a harness stalls.
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(300);
@@ -90,7 +97,7 @@ async fn main() {
                     let summary = jod.agent(&agent.id).await.expect("agent must exist");
                     println!("\nstatus  {:?}", summary.status);
                     println!("events  {}", summary.event_count);
-                    println!("stream  {}", summary.stream_path);
+                    println!("pgid    {:?}", summary.pgid);
                     return;
                 }
             }

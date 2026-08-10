@@ -94,18 +94,21 @@ export interface AgentSummary {
   cwd: string;
   model: string | null;
   permission: PermissionPolicy;
-  tmux_session: string;
-  attach_command: string;
-  /** Use this instead of attach_command from inside an existing tmux session. */
-  switch_command: string;
-  /** Sessions outlive the agent, so this is a different question to `status`. */
-  session_closed: boolean;
+  /** The supervising `jod-run` process, and the group holding it and the
+   *  harness. Null before the launch; kept afterwards, so a finished run still
+   *  says what ran it. */
+  pid: number | null;
+  pgid: number | null;
+  /** Whether that process group still exists. A different question to
+   *  `status`: a run can be marked running with nothing alive behind it. */
+  process_alive: boolean;
+  /** What a human runs to follow this agent — `jod watch <id>`. */
+  watch_command: string;
   created_at_ms: number;
   session_id: string | null;
   usage: Usage;
   event_count: number;
   last_message: string | null;
-  stream_path: string;
 }
 
 export interface Report {
@@ -169,7 +172,8 @@ export interface StoredRun {
   status: string;
   cwd: string;
   session_id: string | null;
-  tmux_session: string;
+  pid: number | null;
+  pgid: number | null;
   created_at_ms: number;
   /** The full client-facing summary, kept verbatim. Shape of `AgentSummary`. */
   summary: Partial<AgentSummary> & Record<string, unknown>;

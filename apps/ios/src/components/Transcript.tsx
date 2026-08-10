@@ -95,7 +95,7 @@ export function Transcript({ entries, following, onFollowingChange }: Transcript
         {entries.length === 0 ? (
           <div className="placeholder">
             <strong>Jod delegates. It does not do the work.</strong>
-            Ask for something. It runs on the box, in its own tmux session, and
+            Ask for something. It runs on the box, in its own process, and
             streams back here. <code>/help</code> lists the commands.
           </div>
         ) : (

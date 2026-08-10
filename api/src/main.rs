@@ -196,8 +196,8 @@ async fn serve(
         Ok(_) => {}
         Err(e) => eprintln!("jod-api: could not reload prior runs: {e}"),
     }
-    if !jod.tmux_available() {
-        eprintln!("jod-api: tmux is not installed — spawning will fail until it is.");
+    if !jod.supervisor_available() {
+        eprintln!("jod-api: `jod-run` was not found — spawning will fail until it is installed.");
     }
 
     let audit = AuditLog::new(AuditLog::default_path());

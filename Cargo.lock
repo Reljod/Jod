@@ -1014,12 +1014,23 @@ name = "jod-core"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "libc",
  "rusqlite",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
  "tokio",
  "uuid",
+]
+
+[[package]]
+name = "jod-supervisor"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "jod-core",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

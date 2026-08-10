@@ -78,7 +78,8 @@ The app asks two things, once each:
    itself is never stored on the device**. Only its scope is remembered, so a
    relaunch is not read-only.
 
-Then type. The turn runs on the box in its own tmux session and streams back.
+Then type. The turn runs on the box as its own supervised process and streams
+back.
 
 ---
 
@@ -96,7 +97,7 @@ at the box over the tailnet.
 
 ## What it is
 
-An iPhone cannot host an agent. There is no tmux on it, no `claude` binary, and
+An iPhone cannot host an agent. There is no `claude` binary on it, and
 no shell to run them in — so unlike `apps/desktop`, which is a Tauri shell
 calling `jod_core` in-process, **this app embeds nothing**. Every capability
 comes over HTTP from `jod-api` running on the box.
@@ -171,7 +172,7 @@ GET /v1/teams/{team}     → { team, members, tasks }
 
 Both need only `read` scope. Nothing else was added, and deliberately: joining,
 claiming and messaging are how a *teammate* participates, and a teammate is an
-agent on the box with a tmux session. A phone watches the board; it does not
+agent on the box with a process group. A phone watches the board; it does not
 play on it.
 
 Roster and board come back in **one** request, because the sheet draws them

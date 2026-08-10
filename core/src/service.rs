@@ -16,7 +16,7 @@ use crate::error::{JodError, Result};
 use crate::event::{AgentEnvelope, AgentEvent, Usage};
 use crate::harness::{HarnessKind, PermissionPolicy, SpawnRequest};
 use crate::store::{Store, StoredRun};
-use crate::{paths, runner, tmux};
+use crate::{paths, proc, runner};
 
 /// The persisted view of one agent. The whole summary is kept verbatim so
 /// adding a field to `AgentSummary` never needs a schema migration.
@@ -31,7 +31,8 @@ fn stored_run(s: &AgentSummary) -> StoredRun {
             .unwrap_or_else(|| "running".into()),
         cwd: s.cwd.clone(),
         session_id: s.session_id.clone(),
-        tmux_session: s.tmux_session.clone(),
+        pid: s.pid,
+        pgid: s.pgid,
         created_at_ms: s.created_at_ms,
         summary: serde_json::to_value(s).unwrap_or(serde_json::Value::Null),
     }
@@ -44,6 +45,33 @@ pub enum AgentStatus {
     Completed,
     Failed,
     Killed,
+}
+
+impl AgentStatus {
+    /// The spelling stored in `runs.status`.
+    ///
+    /// The supervisor is a separate process that writes this column directly,
+    /// so the two sides need one definition of the word rather than two string
+    /// literals that can drift apart.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            AgentStatus::Running => "running",
+            AgentStatus::Completed => "completed",
+            AgentStatus::Failed => "failed",
+            AgentStatus::Killed => "killed",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<AgentStatus> {
+        [
+            AgentStatus::Running,
+            AgentStatus::Completed,
+            AgentStatus::Failed,
+            AgentStatus::Killed,
+        ]
+        .into_iter()
+        .find(|c| c.as_str() == s)
+    }
 }
 
 /// Whether a harness can actually be used on this machine.
@@ -66,21 +94,45 @@ pub struct AgentSummary {
     pub cwd: String,
     pub model: Option<String>,
     pub permission: PermissionPolicy,
-    pub tmux_session: String,
-    pub attach_command: String,
-    /// What to run from inside an existing tmux session, where `attach` refuses.
-    pub switch_command: String,
-    /// Agent sessions outlive the agent, so "is the run over" and "is the
-    /// session gone" are different questions. This answers the second.
-    pub session_closed: bool,
+    /// The supervising `jod-run` process, and the group holding both it and the
+    /// harness. `None` before the launch; kept afterwards, so a finished run
+    /// still says what ran it.
+    ///
+    /// Defaulted on deserialise so a summary written by an older build — one
+    /// that recorded a tmux session instead — still loads. Losing a whole run's
+    /// history to a renamed field would be a worse trade than a missing pid.
+    #[serde(default)]
+    pub pid: Option<u32>,
+    #[serde(default)]
+    pub pgid: Option<u32>,
+    /// Whether the run's process group still exists. Recomputed on read rather
+    /// than stored, because a process can die without telling anyone.
+    #[serde(default)]
+    pub process_alive: bool,
+    /// What a human runs to watch this agent. `jod watch` reads the same rows
+    /// every other client does, so it works from anywhere the database does —
+    /// which `tmux attach` never did.
+    #[serde(default)]
+    pub watch_command: String,
     pub created_at_ms: i64,
     pub session_id: Option<String>,
     pub usage: Usage,
     pub event_count: usize,
     /// Last assistant message, for a one-line status in a list view.
     pub last_message: Option<String>,
-    pub stream_path: String,
 }
+
+/// What a human types to follow this run.
+pub fn watch_command(agent_id: &str) -> String {
+    format!("jod watch {agent_id}")
+}
+
+/// How long a run gets to shut down cleanly before it is killed outright.
+///
+/// Long enough for the supervisor to write the run's final events, which is the
+/// entire point of asking rather than killing: a supervisor that vanishes
+/// leaves the run marked running with no explanation.
+const KILL_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 
 struct AgentRecord {
     summary: AgentSummary,
@@ -176,14 +228,28 @@ impl Jod {
     /// Load prior runs from the database back into memory. Returns how many.
     ///
     /// A daemon that restarts has no idea what it launched before; without this
-    /// every earlier agent vanishes from `agents()` even though its tmux session
+    /// every earlier agent vanishes from `agents()` even though its supervisor
     /// may still be running. Call it once at boot.
     ///
-    /// Each run's status is recomputed by replaying its stored events rather
-    /// than trusting the last status written — a process killed mid-run never
-    /// got to record how it ended. A run still marked running whose tmux
-    /// session is gone did not report a result, and is reported as failed
-    /// rather than left running forever.
+    /// Each run's summary is rebuilt by replaying its stored events, because a
+    /// summary is only as fresh as the last process that serialised one.
+    ///
+    /// The *status* then comes from the `runs` row, when that row records a
+    /// terminal one. The supervisor is the only process that saw the harness
+    /// exit, so it is the only one that can tell a clean finish from a signal —
+    /// and the replay cannot: a killed run's `Finished` event looks exactly
+    /// like a completed run's. Trusting the replay here reported every killed
+    /// run as `completed`.
+    ///
+    /// A row still saying `running` is the case where nothing authoritative was
+    /// ever written, and that is where the process group is probed: a run
+    /// marked running with a dead group did not report a result, and becomes
+    /// *failed* rather than running forever.
+    ///
+    /// A run that *is* still alive is picked back up: a follower starts on it,
+    /// so its remaining events reach this process's clients as they arrive.
+    /// That is what the file tailer could never do, because it had to be
+    /// started by whoever spawned the agent.
     pub async fn rehydrate(&self, limit: usize) -> Result<usize> {
         let Some(store) = &self.store else {
             return Ok(0);
@@ -207,19 +273,57 @@ impl Jod {
                 apply(&mut record, &envelope);
             }
 
-            let alive = tmux::has_session(&record.summary.tmux_session).await;
-            record.summary.session_closed = !alive;
+            // The pgid comes from the row, not from the summary: the summary is
+            // whatever the launching process last serialised, while the column
+            // is written by the supervisor itself.
+            record.summary.pid = run.pid;
+            record.summary.pgid = run.pgid;
+            record.summary.watch_command = watch_command(&run.id);
+
+            // The supervisor's word on how it ended beats anything inferred
+            // from the events, which cannot distinguish a kill from a clean
+            // exit. A row still saying `running` says nothing, so it does not
+            // override the replay.
+            match AgentStatus::parse(&run.status) {
+                Some(AgentStatus::Running) | None => {}
+                Some(recorded) => record.summary.status = recorded,
+            }
+
+            // Only probe a run that still claims to be running. Pids are
+            // recycled, and asking about a finished run's long-dead pgid is how
+            // a stranger's process gets mistaken for an agent.
+            let alive = record.summary.status == AgentStatus::Running
+                && run.pgid.is_some_and(proc::group_alive);
+            record.summary.process_alive = alive;
             if record.summary.status == AgentStatus::Running && !alive {
                 record.summary.status = AgentStatus::Failed;
             }
 
-            let mut guard = self.state.write().await;
-            if guard.agents.contains_key(&run.id) {
-                continue; // this process already owns a live copy
+            // Resume the follower *after* the last event already folded in
+            // above, or rehydration's own replay would be delivered a second
+            // time and every event would appear twice.
+            let cursor = record.events.last().map(|e| e.seq);
+            let follow = alive.then(|| (run.id.clone(), run.pgid.unwrap_or(0), cursor));
+
+            {
+                let mut guard = self.state.write().await;
+                if guard.agents.contains_key(&run.id) {
+                    continue; // this process already owns a live copy
+                }
+                guard.order.push(run.id.clone());
+                guard.agents.insert(run.id.clone(), record);
             }
-            guard.order.push(run.id.clone());
-            guard.agents.insert(run.id.clone(), record);
             loaded += 1;
+
+            if let Some((id, pgid, cursor)) = follow {
+                tokio::spawn(runner::follow(
+                    id,
+                    pgid,
+                    store.clone(),
+                    self.events_tx.clone(),
+                    cursor,
+                ));
+            }
         }
         Ok(loaded)
     }
@@ -273,20 +377,27 @@ impl Jod {
             .collect()
     }
 
-    /// tmux is a hard requirement — without it there is nothing to observe.
-    pub fn tmux_available(&self) -> bool {
-        tmux::locate().is_some()
+    /// Whether the `jod-run` supervisor is installed.
+    ///
+    /// A hard requirement, as tmux used to be, and for the same reason: without
+    /// it there is nothing to hold a run's output once the caller walks away.
+    pub fn supervisor_available(&self) -> bool {
+        runner::locate_supervisor().is_some()
     }
 
-    /// Launch an agent. Returns once its tmux session exists.
+    /// Launch an agent. Returns once its supervisor is running.
+    ///
+    /// Requires a store. A run reports itself by writing to the database, so a
+    /// Jod without one would start an agent whose output goes nowhere — and
+    /// would then have to pretend that was a success.
     pub async fn spawn_agent(&self, req: SpawnRequest) -> Result<AgentSummary> {
+        let store = self.store.clone().ok_or(JodError::StoreRequired)?;
         let program = req
             .harness
             .locate()
             .ok_or_else(|| JodError::HarnessNotFound(req.harness.label().to_string()))?;
 
         let id = uuid::Uuid::new_v4().to_string();
-        let session = tmux::session_name(&id);
         let summary = AgentSummary {
             id: id.clone(),
             name: req.name.clone(),
@@ -296,16 +407,15 @@ impl Jod {
             cwd: req.cwd.to_string_lossy().to_string(),
             model: req.model.clone(),
             permission: req.permission,
-            tmux_session: session.clone(),
-            attach_command: tmux::attach_command(&session),
-            switch_command: tmux::switch_command(&session),
-            session_closed: false,
+            pid: None,
+            pgid: None,
+            process_alive: false,
+            watch_command: watch_command(&id),
             created_at_ms: chrono::Utc::now().timestamp_millis(),
             session_id: None,
             usage: Usage::default(),
             event_count: 0,
             last_message: None,
-            stream_path: paths::stream_path(&id).to_string_lossy().to_string(),
         };
 
         // Register before launching, so no event can arrive before its agent.
@@ -321,12 +431,11 @@ impl Jod {
             );
         }
 
-        // Record the run before it starts, so a crash mid-launch still leaves a
-        // trace of what was attempted.
-        if let Some(store) = &self.store {
-            if let Err(e) = store.save_run(&stored_run(&summary)) {
-                eprintln!("[jod] could not persist run: {e}");
-            }
+        // Record the run before it starts. The supervisor updates this row from
+        // its own process, so the row has to exist before it is launched —
+        // and a crash mid-launch still leaves a trace of what was attempted.
+        if let Err(e) = store.save_run(&stored_run(&summary)) {
+            eprintln!("[jod] could not persist run: {e}");
         }
 
         let launch = runner::launch(
@@ -334,17 +443,31 @@ impl Jod {
             &req,
             &program,
             req.harness.build(),
+            store.clone(),
             self.events_tx.clone(),
         )
         .await;
 
-        if let Err(e) = launch {
-            let mut guard = self.state.write().await;
-            if let Some(record) = guard.agents.get_mut(&id) {
-                record.summary.status = AgentStatus::Failed;
+        let launched = match launch {
+            Ok(l) => l,
+            Err(e) => {
+                let mut guard = self.state.write().await;
+                if let Some(record) = guard.agents.get_mut(&id) {
+                    record.summary.status = AgentStatus::Failed;
+                }
+                let _ = store.set_run_status(&id, AgentStatus::Failed.as_str());
+                return Err(e);
             }
-            return Err(e);
-        }
+        };
+
+        let summary = {
+            let mut guard = self.state.write().await;
+            let record = guard.agents.get_mut(&id).expect("just registered");
+            record.summary.pid = Some(launched.pid);
+            record.summary.pgid = Some(launched.pgid);
+            record.summary.process_alive = true;
+            record.summary.clone()
+        };
 
         // Persist metadata so a run remains inspectable after the app closes.
         let meta = paths::meta_path(&id);
@@ -384,27 +507,36 @@ impl Jod {
             .ok_or_else(|| JodError::UnknownAgent(id.to_string()))
     }
 
-    /// Close an agent's tmux session.
+    /// Stop an agent, and everything it started.
     ///
-    /// While the agent is still running this stops it, and the tailer notices
-    /// and finalises the run. After it has finished this just reclaims the
-    /// session, which outlives the agent so that watching one can never close
-    /// the watcher's terminal.
+    /// The signal goes to the whole process group, so a harness that spawned
+    /// children does not leave them behind — the same reach `tmux kill-session`
+    /// had. `SIGTERM` first, so the supervisor gets to record how the run ended
+    /// rather than disappearing and leaving it marked running for ever;
+    /// `SIGKILL` only for a group that ignores it.
+    ///
+    /// Works from any process, including one that never launched this run: the
+    /// process-group id is a column, not a handle.
     pub async fn kill_agent(&self, id: &str) -> Result<()> {
-        let session = {
-            let guard = self.state.read().await;
-            guard
-                .agents
-                .get(id)
-                .map(|r| r.summary.tmux_session.clone())
-                .ok_or_else(|| JodError::UnknownAgent(id.to_string()))?
+        let pgid = match self.state.read().await.agents.get(id) {
+            Some(record) => record.summary.pgid,
+            None => return Err(JodError::UnknownAgent(id.to_string())),
         };
-        tmux::kill_session(&session).await?;
+
+        if let Some(pgid) = pgid {
+            proc::terminate_group(pgid, KILL_GRACE)
+                .await
+                .map_err(|e| JodError::Spawn(format!("could not stop process group {pgid}: {e}")))?;
+        }
+
         let mut guard = self.state.write().await;
         if let Some(record) = guard.agents.get_mut(id) {
-            record.summary.session_closed = true;
+            record.summary.process_alive = false;
             if record.summary.status == AgentStatus::Running {
                 record.summary.status = AgentStatus::Killed;
+                if let Some(store) = &self.store {
+                    let _ = store.set_run_status(id, AgentStatus::Killed.as_str());
+                }
             }
         }
         Ok(())
@@ -518,16 +650,15 @@ mod tests {
                 cwd: "/tmp".into(),
                 model: None,
                 permission: PermissionPolicy::Ask,
-                tmux_session: "jod-a".into(),
-                attach_command: "tmux attach -t jod-a".into(),
-                switch_command: "tmux switch-client -t jod-a".into(),
-                session_closed: false,
+                pid: Some(4242),
+                pgid: Some(4242),
+                process_alive: true,
+                watch_command: watch_command("a"),
                 created_at_ms: 0,
                 session_id: None,
                 usage: Usage::default(),
                 event_count: 0,
                 last_message: None,
-                stream_path: "/tmp/s".into(),
             },
             events: vec![],
         }
@@ -592,8 +723,11 @@ mod tests {
         assert_eq!(r.summary.status, AgentStatus::Failed);
     }
 
+    /// A finished run keeps saying which process group ran it. That is the
+    /// record of what happened, and dropping it on completion would make a
+    /// completed run indistinguishable from one that never launched.
     #[test]
-    fn a_finished_agent_still_has_a_session_to_reclaim() {
+    fn a_finished_agent_still_reports_the_group_that_ran_it() {
         let mut r = record();
         apply(
             &mut r,
@@ -605,10 +739,7 @@ mod tests {
             }),
         );
         assert_eq!(r.summary.status, AgentStatus::Completed);
-        assert!(
-            !r.summary.session_closed,
-            "the tmux session outlives the agent, so it is still closeable"
-        );
+        assert_eq!(r.summary.pgid, Some(4242));
     }
 
     #[test]
@@ -652,7 +783,9 @@ mod tests {
         let mut summary = record().summary;
         summary.id = "past".into();
         summary.name = "yesterday's work".into();
-        summary.tmux_session = "jod-past-session-that-does-not-exist".into();
+        // A pid from a previous boot. Nothing is listening on it now.
+        summary.pid = Some(4_000_000);
+        summary.pgid = Some(4_000_000);
         store.save_run(&stored_run(&summary)).unwrap();
         store
             .append_event(&AgentEnvelope {
@@ -700,24 +833,99 @@ mod tests {
         assert_eq!(agent.status, AgentStatus::Completed);
         assert_eq!(agent.last_message.as_deref(), Some("all done"));
         assert_eq!(agent.event_count, 2);
-        assert!(agent.session_closed, "its tmux session is long gone");
+        assert!(
+            !agent.process_alive,
+            "the process group that ran it is long gone"
+        );
     }
 
     /// A process killed mid-run never records how it ended. Leaving such a run
     /// "running" forever would make the report permanently wrong.
     #[tokio::test]
-    async fn a_run_still_marked_running_with_no_session_is_reported_failed() {
+    async fn a_run_still_marked_running_with_a_dead_group_is_reported_failed() {
         let store = std::sync::Arc::new(Store::in_memory().unwrap());
         let mut summary = record().summary;
         summary.id = "orphan".into();
         summary.status = AgentStatus::Running;
-        summary.tmux_session = "jod-orphan-no-such-session".into();
+        summary.pid = Some(4_000_000);
+        summary.pgid = Some(4_000_000);
         store.save_run(&stored_run(&summary)).unwrap();
 
         let jod = Jod::with_store(store);
         jod.rehydrate(100).await.unwrap();
         assert_eq!(
             jod.agent("orphan").await.unwrap().status,
+            AgentStatus::Failed
+        );
+    }
+
+    /// Regression, found by killing a real detached run and listing it from a
+    /// fresh process: the run came back as `completed`.
+    ///
+    /// A killed run's `Finished` event is indistinguishable from a clean one —
+    /// no exit code, `is_error` false — because the harness was signalled
+    /// rather than having failed. Only the supervisor saw the signal, and only
+    /// the `runs` row carries what it saw.
+    #[tokio::test]
+    async fn a_killed_run_does_not_come_back_as_completed() {
+        let store = std::sync::Arc::new(Store::in_memory().unwrap());
+        let mut summary = record().summary;
+        summary.id = "killed".into();
+        summary.status = AgentStatus::Running; // what the launcher last saved
+        store.save_run(&stored_run(&summary)).unwrap();
+        store
+            .append_event(&AgentEnvelope {
+                agent_id: "killed".into(),
+                at_ms: 1,
+                seq: 0,
+                event: AgentEvent::Finished {
+                    text: None,
+                    exit_code: None,
+                    is_error: false,
+                    usage: Usage::default(),
+                },
+            })
+            .unwrap();
+        store.set_run_status("killed", "killed").unwrap();
+
+        let jod = Jod::with_store(store);
+        jod.rehydrate(100).await.unwrap();
+        assert_eq!(
+            jod.agent("killed").await.unwrap().status,
+            AgentStatus::Killed,
+            "the supervisor's word must beat the replay"
+        );
+    }
+
+    /// The converse, and the reason the row is not trusted blindly: a row left
+    /// saying `running` records nothing at all, so the replay still decides.
+    #[tokio::test]
+    async fn a_stale_running_row_does_not_override_a_finished_replay() {
+        let store = std::sync::Arc::new(Store::in_memory().unwrap());
+        let mut summary = record().summary;
+        summary.id = "raced".into();
+        summary.status = AgentStatus::Running;
+        store.save_run(&stored_run(&summary)).unwrap();
+        store
+            .append_event(&AgentEnvelope {
+                agent_id: "raced".into(),
+                at_ms: 1,
+                seq: 0,
+                event: AgentEvent::Finished {
+                    text: None,
+                    exit_code: Some(1),
+                    is_error: true,
+                    usage: Usage::default(),
+                },
+            })
+            .unwrap();
+        // `runs.status` is still "running": the supervisor died before it could
+        // write the final status, but its last event did land.
+
+        let jod = Jod::with_store(store);
+        jod.rehydrate(100).await.unwrap();
+        assert_eq!(
+            jod.agent("raced").await.unwrap().status,
             AgentStatus::Failed
         );
     }
@@ -810,7 +1018,8 @@ mod tests {
         std::env::set_var("PATH", "/definitely/not/a/dir");
         std::env::set_var("HOME", "/definitely/not/a/home");
 
-        let jod = Jod::new();
+        // A store, so the request gets as far as looking for the harness.
+        let jod = Jod::with_store(std::sync::Arc::new(Store::in_memory().unwrap()));
         let result = jod
             .spawn_agent(SpawnRequest {
                 name: "x".into(),
@@ -828,5 +1037,63 @@ mod tests {
         std::env::remove_var("JOD_CLAUDE_BIN");
 
         assert!(matches!(result, Err(JodError::HarnessNotFound(_))));
+    }
+
+    /// A run reports itself by writing to the database. Without one there is
+    /// nowhere for its output to go, and starting the agent anyway would leave
+    /// a real process running that nothing could ever observe or stop.
+    #[tokio::test]
+    async fn spawning_without_a_store_is_refused_rather_than_unobserved() {
+        let result = Jod::new()
+            .spawn_agent(SpawnRequest {
+                name: "x".into(),
+                harness: HarnessKind::ClaudeCode,
+                prompt: "hi".into(),
+                cwd: PathBuf::from("/tmp"),
+                model: None,
+                permission: PermissionPolicy::Ask,
+                resume: crate::harness::Resume::Fresh,
+            })
+            .await;
+        assert!(matches!(result, Err(JodError::StoreRequired)));
+    }
+
+    #[test]
+    fn every_status_has_one_spelling_shared_with_the_supervisor() {
+        for status in [
+            AgentStatus::Running,
+            AgentStatus::Completed,
+            AgentStatus::Failed,
+            AgentStatus::Killed,
+        ] {
+            assert_eq!(AgentStatus::parse(status.as_str()), Some(status));
+            // The column and the JSON must agree, or a rehydrated run's status
+            // would depend on which of the two was read.
+            assert_eq!(
+                serde_json::to_value(status).unwrap(),
+                serde_json::Value::String(status.as_str().into())
+            );
+        }
+    }
+
+    /// The old summaries recorded a tmux session and no pid. Losing a whole
+    /// run's history to a renamed field would be a worse trade than a blank one.
+    #[test]
+    fn a_summary_written_before_process_supervision_still_loads() {
+        let legacy = serde_json::json!({
+            "id": "old", "name": "n", "harness": "claude_code",
+            "harness_label": "Claude Code", "status": "completed", "cwd": "/tmp",
+            "model": null, "permission": "ask",
+            "tmux_session": "jod-old", "attach_command": "tmux attach -t jod-old",
+            "switch_command": "tmux switch-client -t jod-old", "session_closed": true,
+            "stream_path": "/x/stream.jsonl",
+            "created_at_ms": 1, "session_id": null, "usage": {},
+            "event_count": 3, "last_message": "done"
+        });
+        let summary: AgentSummary = serde_json::from_value(legacy).expect("must still parse");
+        assert_eq!(summary.id, "old");
+        assert_eq!(summary.status, AgentStatus::Completed);
+        assert_eq!(summary.pgid, None);
+        assert!(!summary.process_alive);
     }
 }
