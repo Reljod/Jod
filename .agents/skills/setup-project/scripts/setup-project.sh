@@ -110,9 +110,13 @@ run_interactive() {
   info "  Jod · setup-project — scaffolding $(basename "$TARGET")"
   info ""
 
+  # `${opts[@]+…}`, not `"${opts[@]}"`: on bash 3.2 — which this file already
+  # works around for `mapfile` — expanding an empty array under `set -u` is an
+  # unbound-variable error, so a checkout that listed no presets would die with
+  # `opts[@]: unbound variable` instead of the picker's own message.
   local p s opts=() chosen preselect
   while read -r p; do opts+=("$p|$(clip "$(preset_blurb "$p")" 60)"); done < <(list_presets)
-  if ! PRESET="$(prompt_select_one "Behavior preset" "$PRESET" "${opts[@]}")"; then
+  if ! PRESET="$(prompt_select_one "Behavior preset" "$PRESET" ${opts[@]+"${opts[@]}"})"; then
     err "cancelled — nothing written"
   fi
 
@@ -127,7 +131,7 @@ run_interactive() {
   esac
   opts=()
   while read -r s; do opts+=("$s|$(clip "$(skill_blurb "$s")" 56)"); done < <(list_skills)
-  if ! chosen="$(prompt_select_many "Skills to copy in" "$preselect" "${opts[@]}")"; then
+  if ! chosen="$(prompt_select_many "Skills to copy in" "$preselect" ${opts[@]+"${opts[@]}"})"; then
     err "cancelled — nothing written"
   fi
   SKILLS="$(printf '%s' "$chosen" | tr '\n' ',' | sed 's/,$//')"
@@ -284,7 +288,7 @@ if [ -n "$SKILLS" ]; then
     IFS=',' read -r -a WANT <<< "$SKILLS"
   fi
   mkdir -p "$TARGET/.agents/skills" "$TARGET/.claude/commands"
-  for raw in "${WANT[@]}"; do
+  for raw in ${WANT[@]+"${WANT[@]}"}; do
     s="$(printf '%s' "$raw" | tr -d '[:space:]')"
     [ -z "$s" ] && continue
     # A skill is a single directory name — reject path traversal so a crafted

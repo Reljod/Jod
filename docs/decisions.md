@@ -685,3 +685,34 @@ chosen deliberately.
 
 Only the Claude Code adapter changed. OpenCode and AGY have their own flag
 surfaces and were not verified against a live binary here.
+
+## The gate died between deciding and acting
+
+macOS ships bash 3.2, where `"${a[@]}"` on an *empty* array is an
+unbound-variable error under `set -u`. bash 4+ and zsh expand it to nothing, so
+the bug never fires on CI or on the VPS — only on the machine the maintainer
+actually works from.
+
+`merge_pr.sh` built `ready_args=()` and left it empty on every run that did not
+pass `--repo`. The gate evaluated all its preconditions, printed `ok` for three
+checks, `base 0 commit(s) ahead`, `triage auto-merge` — and then crashed on
+`gh pr ready`, exiting 1. That is the worst possible failure for this script:
+exit 1 means "refused", the charter says obey the exit code, and the transcript
+above it says the opposite. A refusal that is really a crash trains whoever
+reads it to stop trusting the exit code, which is the only thing making the gate
+a gate.
+
+The fix is the `${a[@]+"${a[@]}"}` form `pr_sweep.sh` already used and
+documented; `merge_pr.sh` had simply missed one site.
+
+`tests/shell-arrays.test.sh` now scans every `set -u` script for the pattern.
+Its rule has two clauses, and the second is not a loophole: an array must be
+guarded at each expansion, **or** the script must test `${#a[@]}` first — taking
+a length is safe on an empty array, so a script that checks has genuinely proved
+the thing the guard would protect. `tdd-loop.sh` does that, and must not be
+"fixed": with `CMD` empty the guarded form would reduce `"${CMD[@]}"; rc=$?` to
+a bare `; rc=$?`, trading a clear error for a syntax error in a state its own
+check already rules out.
+
+What separated the live bug from the four latent ones was not the syntax but
+the reachability — `ready_args` was empty on the ordinary path, every day.

@@ -216,9 +216,15 @@ if [ -n "$dry_run" ]; then
 fi
 
 if [ -n "$was_draft" ]; then
+  # `${a[@]}` on an *empty* array is an unbound-variable error under `set -u` in
+  # bash 3.2, which is what macOS ships — and without `--repo` this array is
+  # empty on every run. The guard is the same `${a[@]+...}` form pr_sweep.sh
+  # uses. Reached only after every precondition already passed, so the crash
+  # landed between the verdict and the merge: the gate said `auto-merge`, then
+  # died, and the PR sat open looking refused.
   ready_args=()
   [ -n "$repo" ] && ready_args+=(--repo "$repo")
-  gh pr ready "$pr" "${ready_args[@]}"
+  gh pr ready "$pr" ${ready_args[@]+"${ready_args[@]}"}
   echo "Marked PR #$pr ready for review."
 fi
 
