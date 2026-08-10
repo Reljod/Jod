@@ -9,12 +9,14 @@ use crate::event::{summarize, AgentEvent, Usage};
 
 /// Tools `PermissionPolicy::Ask` hands over without being asked.
 ///
-/// Every one of them only *reads* — the filesystem or the web. Nothing here
-/// can write a file, run a command or change anything outside the agent's own
-/// answer, so granting them up front costs the caller no ground it could have
-/// defended anyway: under `-p` the alternative is a silent denial, not a
-/// prompt. Anything that mutates still needs `--permission accept-edits` or
-/// `--permission bypass`.
+/// Every one of them only *reads*, so granting them up front costs nothing: the
+/// alternative under `-p` is a silent denial rather than a prompt.
+///
+/// **This list is a convenience, not the boundary.** It was believed to be the
+/// boundary and it is not: `--allowedTools` grants without prompting and denies
+/// nothing, so a run holding exactly these five once ran Bash and wrote a file.
+/// What actually confines an `Ask` run is `--permission-mode plan`, applied
+/// beside this list. See the comment at the call site.
 const READ_ONLY_TOOLS: &[&str] = &["Read", "Grep", "Glob", "WebSearch", "WebFetch"];
 
 #[derive(Default)]
@@ -57,6 +59,27 @@ impl Harness for ClaudeCode {
             // search the web. Allow the tools that cannot change anything, and
             // keep denying the rest.
             PermissionPolicy::Ask => {
+                // Plan mode, and this is a security fix rather than a
+                // preference. The comment here used to claim that an allowlist
+                // "keeps denying the rest"; measured against the real binary,
+                // it does not deny anything at all. `--allowedTools` *grants
+                // without prompting* — it is not a boundary, and a run given
+                // `Read,Grep,Glob,WebSearch,WebFetch` cheerfully ran Bash and
+                // wrote a file, with `permission_denials: []` in its own
+                // result. Since `Ask` is the default, Jod's default was
+                // effectively bypass while documented as the opposite.
+                //
+                // A name blocklist is not the answer either: `--disallowedTools
+                // Bash` blocked Bash and the agent reached the same shell
+                // through another tool. Enumerating the tools that can execute
+                // is a race you lose on the next release.
+                //
+                // `--permission-mode plan` is a *mode*, so it closes the class
+                // rather than the names — verified: reads and reasoning still
+                // work, and every write path is refused, including a Bash
+                // heredoc or `printf >`.
+                args.push(ArgPart::lit("--permission-mode"));
+                args.push(ArgPart::lit("plan"));
                 args.push(ArgPart::lit("--allowedTools"));
                 let mut allowed: Vec<String> =
                     READ_ONLY_TOOLS.iter().map(|t| t.to_string()).collect();
@@ -383,10 +406,16 @@ mod tests {
         assert!(a.contains(&ArgPart::Prompt));
     }
 
+    /// Each policy still maps to its own flags. The `Ask` assertion changed
+    /// deliberately: it used to require that `Ask` set **no** permission mode,
+    /// which is exactly what made Jod's default permissive — the run was
+    /// confined by an allowlist that confines nothing. The property being
+    /// tested (three distinct policies) is unchanged; what `Ask` means is not.
     #[test]
     fn permission_policies_map_to_distinct_flags() {
         let ask = ClaudeCode::default().args(&req(PermissionPolicy::Ask, None));
-        assert!(!ask.contains(&ArgPart::lit("--permission-mode")));
+        assert!(ask.contains(&ArgPart::lit("plan")));
+        assert!(!ask.contains(&ArgPart::lit("acceptEdits")));
         assert!(!ask.contains(&ArgPart::lit("--dangerously-skip-permissions")));
 
         let edits = ClaudeCode::default().args(&req(PermissionPolicy::AcceptEdits, None));
@@ -399,6 +428,44 @@ mod tests {
     /// The default policy has to leave the agent able to *look things up*.
     /// Without this, `claude -p` denied WebSearch and a question as ordinary as
     /// the weather came back as "I need permission".
+    #[test]
+    /// The regression guard for a false security claim. `Ask` is Jod's default,
+    /// and it was documented as denying everything not on the allowlist while
+    /// denying nothing at all — a run holding only the five read tools ran Bash
+    /// and wrote a file, its own result reporting `permission_denials: []`.
+    ///
+    /// The mode is what confines it. A tool *blocklist* is not a substitute and
+    /// must not be swapped back in: blocking `Bash` by name left the agent free
+    /// to reach the same shell through another tool, and enumerating everything
+    /// that can execute is a race lost on the next release.
+    #[test]
+    fn asking_confines_the_run_by_mode_rather_than_by_a_list_of_names() {
+        let a = ClaudeCode::default().args(&req(PermissionPolicy::Ask, None));
+        let i = a
+            .iter()
+            .position(|p| p == &ArgPart::lit("--permission-mode"))
+            .expect("`Ask` must set a permission mode, or it grants everything");
+        assert_eq!(
+            a[i + 1],
+            ArgPart::lit("plan"),
+            "only plan mode refuses every write path, including a Bash heredoc"
+        );
+    }
+
+    /// The modes that are meant to permit work must not inherit the confinement.
+    #[test]
+    fn a_run_allowed_to_work_is_not_put_in_plan_mode() {
+        for policy in [PermissionPolicy::AcceptEdits, PermissionPolicy::Bypass] {
+            let a = ClaudeCode::default().args(&req(policy, None));
+            let plan = a
+                .iter()
+                .position(|p| p == &ArgPart::lit("--permission-mode"))
+                .map(|i| a[i + 1] == ArgPart::lit("plan"))
+                .unwrap_or(false);
+            assert!(!plan, "{policy:?} was confined to planning");
+        }
+    }
+
     #[test]
     fn asking_still_grants_the_tools_that_only_read() {
         let a = ClaudeCode::default().args(&req(PermissionPolicy::Ask, None));
