@@ -49,7 +49,7 @@ pub fn launched(agent: &AgentSummary) {
     println!("{} {}", paint(BOLD, "agent"), agent.id);
     println!("  name    {}", agent.name);
     println!("  harness {}", agent.harness_label);
-    println!("  watch   {}", paint(CYAN, &agent.attach_command));
+    println!("  watch   {}", paint(CYAN, &agent.watch_command));
 }
 
 pub fn launched_waiting(agent: &AgentSummary) {
@@ -58,14 +58,28 @@ pub fn launched_waiting(agent: &AgentSummary) {
         paint(DIM, "▸"),
         paint(BOLD, &agent.name),
         paint(DIM, &format!("({})", agent.harness_label)),
-        paint(DIM, &format!("· {}", agent.attach_command)),
+        paint(DIM, &format!("· {}", agent.watch_command)),
     );
 }
 
 /// Follow one agent until it finishes. Returns the process exit code to use.
 pub async fn stream(
+    events: broadcast::Receiver<AgentEnvelope>,
+    agent_id: &str,
+    json: bool,
+    show_thinking: bool,
+) -> i32 {
+    stream_after(events, agent_id, None, json, show_thinking).await
+}
+
+/// As [`stream`], skipping anything at or before `last_seen`.
+///
+/// `jod watch` prints the run's history first and then goes live on the same
+/// call; without a cursor the overlap between the two would be printed twice.
+pub async fn stream_after(
     mut events: broadcast::Receiver<AgentEnvelope>,
     agent_id: &str,
+    last_seen: Option<u64>,
     json: bool,
     show_thinking: bool,
 ) -> i32 {
@@ -90,13 +104,10 @@ pub async fn stream(
         if envelope.agent_id != agent_id {
             continue;
         }
-        if json {
-            if let Ok(line) = serde_json::to_string(&envelope) {
-                println!("{line}");
-            }
-        } else {
-            print_event(&envelope.event, show_thinking);
+        if last_seen.is_some_and(|seen| envelope.seq <= seen) {
+            continue; // already printed from history
         }
+        print_envelope(&envelope, json, show_thinking);
         if let AgentEvent::Finished {
             is_error,
             exit_code,
@@ -105,6 +116,17 @@ pub async fn stream(
         {
             return exit_status(*is_error, *exit_code);
         }
+    }
+}
+
+/// Render one event, in whichever form was asked for.
+pub fn print_envelope(envelope: &AgentEnvelope, json: bool, show_thinking: bool) {
+    if json {
+        if let Ok(line) = serde_json::to_string(envelope) {
+            println!("{line}");
+        }
+    } else {
+        print_event(&envelope.event, show_thinking);
     }
 }
 

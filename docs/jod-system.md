@@ -14,25 +14,28 @@ local file on one box, which is what makes a 24/7 assistant affordable.
         jod run ─────┤
         cron ────────┤        the `jod` command
         HTTP API ────┤              │
-        (planned)    │              ▼
+                     │              ▼
                      └────►  jod-core :: service::Jod
-                                    │
+                                    │ setsid + spawn
                      ┌──────────────┼──────────────┐
                      ▼              ▼              ▼
-              tmux session   tmux session   tmux session
+                  jod-run        jod-run        jod-run     ← one per run,
+                     │              │              │          detached
                claude -p …    opencode run…   agy --print …
                      │              │              │
                      └──────────────┴──────────────┘
-                                    │ JSONL via tee
-                                    ▼
-                       ~/.jod/runs/<id>/stream.jsonl
-                                    │ tail + parse
-                                    ▼
-                               AgentEvent
+                          stdout ─► parse ─► AgentEvent
                                     │
                                     ▼
                           ~/.jod/jod.db  (SQLite, WAL)
+                                    │ poll (WAL: readers never block)
+                                    ▼
+                        every client — TUI, API, phone
 ```
+
+Note which way the arrows run. Nothing reads a run *through* the process that
+started it, so "watch this agent" is a query rather than a privilege held by one
+process.
 
 ## The four pillars
 
@@ -64,28 +67,42 @@ This is a CLI on top of other CLIs, and that is the point. Every harness is a
 program that already works; Jod's job is to run them uniformly, watch them, and
 keep what they produced.
 
-### Why tmux is load-bearing
+### How a run is supervised
 
-Every agent runs inside its own `tmux` session, not as a child process of the
-app. That single choice buys four things that would otherwise each need code:
+Every agent runs under its own **`jod-run` supervisor**: a small process that
+Jod `setsid`s into a session of its own, hands one file — the run's
+`spawn.json` — and then forgets about. The supervisor spawns the harness with
+its output piped, parses each line through the harness adapter, and appends the
+resulting events straight into `jod.db`.
 
-- **Observability** — `tmux attach -t jod-<id>` shows the live agent.
-- **A kill switch that works** — `tmux kill-session` stops an agent whether or
-  not Jod is running.
-- **Survivability** — closing your SSH session does not kill running work. On a
-  VPS this is the difference between an assistant and a foreground script.
-- **One transport for every client** — the CLI, an SSH session, and a future
-  HTTP API all watch the same sessions.
+Four properties fall out, and they are the same four tmux used to provide:
 
-The launcher is a generated bash script (`runner::render_script`) that pipes the
-harness through `tee`, so the pane a human watches and the JSONL Jod parses are
-the same bytes. The prompt is passed via `"$JOD_PROMPT"` read from a file, so a
-prompt containing quotes or `$(...)` can never be re-interpreted by the shell.
+- **Observability** — `jod watch <id>` follows a live agent. It reads the store,
+  so unlike `tmux attach` it needs no shell on the box: the web client and the
+  phone show the same run through the API.
+- **A kill switch that works** — the supervisor leads its own process group, so
+  its pid *is* its pgid. `kill(-pgid, SIGTERM)` stops the agent and everything
+  it started, from any process, whether or not Jod is running.
+- **Survivability** — `setsid` gives the run no controlling terminal, so closing
+  an SSH connection cannot `SIGHUP` it. On a VPS this is the difference between
+  an assistant and a foreground script.
+- **One transport for every client** — one SQLite file, which in WAL mode lets
+  every reader poll while the supervisor writes.
 
-**The session outlives the agent.** When the harness exits, the pane prints the
-status and `exec`s a shell rather than letting the session end — because a
-session that destroys itself takes any attached client with it, closing the
-terminal of whoever was watching. → [why](decisions.md)
+**There is no shell in the path.** The plan is `execve`'d directly, so a prompt
+containing quotes or `$(...)` is simply an argument — the whole class of quoting
+bug the old generated launcher had to defend against cannot arise.
+
+**The supervisor is a separate binary, and that is not incidental.** A thread
+inside `jod` could not hold the harness's stdout pipe past its own process's
+death, so the agent would die with the terminal that launched it —
+worse than tmux, not better. → [why](decisions.md#a-run-is-a-detached-process-group-and-the-database-is-its-only-transport)
+
+**A run reports how it ended, always.** The supervisor writes a terminal event
+and a status for a clean exit, a non-zero exit, a signal, and a harness that
+never started at all. `SIGTERM` before `SIGKILL` exists for exactly this: a
+supervisor killed outright records nothing, and the run would sit marked
+running for ever.
 
 ### The harness seam
 
@@ -315,8 +332,15 @@ Free text is escaped into a safe FTS expression before it reaches SQLite:
 `Jod::rehydrate` loads prior runs back into memory. It does not trust the last
 status written — a process killed mid-run never recorded how it ended — so it
 replays each run's stored events through the same fold a live process uses. A
-run still marked running whose tmux session is gone did not report a result and
-becomes *failed*, rather than running forever.
+run still marked running whose process group is gone did not report a result and
+becomes *failed*, rather than running forever. Only a run that still claims to
+be running is probed at all — pids are recycled, and asking about a finished
+run's long-dead pgid is how a stranger's process gets mistaken for an agent.
+
+A run that *is* still alive is picked back up: a follower starts on it, so its
+remaining events reach this process's clients as they arrive. The old file
+tailer could never do that, because it had to belong to whoever spawned the
+agent.
 
 `Jod::events_since(id, after_seq)` serves a reconnecting client only the tail it
 missed, from memory when this process owns the agent and from the database when
@@ -326,8 +350,8 @@ it does not.
 
 ## Pillar 4 — Agents and A2A
 
-**Built:** agents run under all three harnesses, each in its own tmux session,
-each managing its own context.
+**Built:** agents run under all three harnesses, each in its own supervised
+process group, each managing its own context.
 
 **Built: agent teams.** `core/src/team.rs`, with the state in the same SQLite
 file as everything else. A team has members, a message bus, and a shared task
@@ -372,8 +396,8 @@ jod team wake  crew                                      # resumes that session
 ```
 
 The decision of *whether* to wake is a pure function, `team::wake_order`, kept
-separate from the spawning so the judgement in it can be tested without a tmux
-server or a harness. It declines in four cases, each on purpose:
+separate from the spawning so the judgement in it can be tested without a
+supervisor or a harness. It declines in four cases, each on purpose:
 
 - **Nothing waiting** — waking an agent to tell it nothing burns a turn.
 - **Not idle** — a busy member reads its inbox on its next turn anyway, and
@@ -386,14 +410,18 @@ server or a harness. It declines in four cases, each on purpose:
 That last rule is why `jod team start` exists: a member has no conversation
 until it has run once, and `start` is the first turn that creates one.
 
-**Both commands wait for their runs by default**, and that is not a UI
-preference — it is forced by where the tailer lives. The task that follows a
-run's output and records its events belongs to the process that spawned it, so
-a command that returned early would take the tailer with it: no `Finished`
-event would ever be written, and the member would stay marked busy for ever,
-never eligible to be woken again. Waiting is what lets the command record the
-session id and mark the member idle before it exits. `--detach` is available and
-honest about the consequence — the state is reconciled on the next `wake`.
+**Both commands wait for their runs by default.** This used to be *forced*: the
+task that recorded a run's events belonged to the process that spawned it, so a
+command that returned early took the tailer with it — no `Finished` event would
+ever be written, and the member stayed marked busy for ever, never eligible to
+be woken again.
+
+That constraint is gone. The supervisor records the run whether or not anything
+is watching, so an early return now loses nothing. Waiting remains the default
+because it is what lets the command mark the member idle before it exits, but it
+is a choice again rather than a requirement, and `--detach` no longer trades
+correctness for speed. Making `wake` non-blocking is follow-up work, not a
+missing piece.
 
 Mail is drained only *after* a spawn succeeds, so a failure leaves it waiting
 rather than losing it.
@@ -426,7 +454,8 @@ make it load-bearing before it has to be.
 
 ## Roadmap
 
-1. ~~Core service: harness seam, tmux runner, event normalisation~~ **done**
+1. ~~Core service: harness seam, process supervision, event normalisation~~
+   **done**
 2. ~~Third harness (AGY) and normalised session resume~~ **done**
 3. ~~Durable runs, transcripts and memory in SQLite~~ **done**
 4. ~~CLI: delegate, watch, list, report, remember, recall, chat~~ **done**
@@ -456,8 +485,8 @@ rather than a terminal emulator's.
 
 Three things fall out of the hardware, and they decide the whole design:
 
-- **An iPhone cannot host an agent.** No tmux, no `claude` binary, no shell to
-  run them in. So this client does not embed `jod-core` the way `apps/desktop`
+- **An iPhone cannot host an agent.** No `claude` binary, no shell to run one
+  in, no way to keep a process group alive. So this client does not embed `jod-core` the way `apps/desktop`
   does; it is a *client of the daemon*, and every capability arrives over HTTP
   from `jod-api`. That is the seam the architecture already had — the core has
   no UI, so clients are interchangeable.
@@ -496,7 +525,7 @@ team, which the TUI reads straight out of SQLite — impossible from a phone. So
 `jod-api` now serves `GET /v1/teams` and `GET /v1/teams/{team}`, both read-scope,
 returning the roster and the board in one answer. Nothing else was added:
 joining, claiming and messaging are how a *teammate* participates, and a
-teammate is an agent on the box with a tmux session. A phone watches the board;
+teammate is an agent on the box with a process group. A phone watches the board;
 it does not play on it.
 
 **How it is verified, and what is left.** The behaviour is unit-tested, and the
@@ -519,8 +548,10 @@ unsigned by design. → [`apps/ios/README.md`](../apps/ios/README.md)
 
 - **Jod delegates; harnesses think.** No model client in `jod-core`, ever.
 - **Local first.** Every dependency is a local process or a local file.
-- **Plain files at the boundaries.** Anything Jod stores stays readable with
-  `cat` when Jod is not running — and the database is rebuildable from them.
+- **Plain files at the boundaries.** What was asked (`prompt.txt`) and what was
+  run (`spawn.json`) stay readable with `cat` when Jod is not running. A run's
+  *transcript* is the exception, and deliberately so: it is contended state that
+  several processes append to and read, which is the one job a file cannot do.
 - **Unknown input is surfaced, not swallowed.** `Raw` over silent drops.
 - **A failed run must never look like a successful one.** Exit codes, empty
   answers and lost sessions are all checked, because every harness has at least

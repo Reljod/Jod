@@ -22,7 +22,7 @@ export interface TeamSheetProps {
  *
  * **Read-only, and that is the design.** Joining, claiming and messaging are
  * how a *teammate* participates, and a teammate is an agent on the box with a
- * tmux session. A phone watches the board; it does not play on it. So the
+ * process group. A phone watches the board; it does not play on it. So the
  * daemon exposes `GET /v1/teams/{team}` and nothing else, and there is no
  * button here that would need more.
  */

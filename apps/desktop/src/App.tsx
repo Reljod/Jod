@@ -112,8 +112,10 @@ export default function App() {
   const blockers = useMemo(() => {
     if (!status) return [];
     const out: string[] = [];
-    if (!status.tmux_available) {
-      out.push("tmux was not found — agents run inside tmux, so nothing can start.");
+    if (!status.supervisor_available) {
+      out.push(
+        "jod-run was not found — it supervises every agent, so nothing can start.",
+      );
     }
     if (!status.harnesses.some((h) => h.available)) {
       out.push("No agent harness found. Install Claude Code or OpenCode.");
@@ -173,9 +175,9 @@ export default function App() {
           <div className="placeholder">
             <h2>Jod delegates. It does not do the work.</h2>
             <p>
-              Every task you hand over is launched into its own tmux session, driven
-              by a real agent harness — Claude Code or OpenCode — and streamed back
-              here.
+              Every task you hand over is launched as its own supervised process,
+              driven by a real agent harness — Claude Code or OpenCode — and
+              streamed back here.
             </p>
           </div>
         )}

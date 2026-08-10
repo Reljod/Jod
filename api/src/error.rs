@@ -134,8 +134,8 @@ impl From<jod_core::JodError> for ApiError {
             jod_core::JodError::HarnessNotFound(h) => {
                 ApiError::BadRequest(format!("harness `{h}` is not installed on this machine"))
             }
-            jod_core::JodError::TmuxNotFound => ApiError::Internal(
-                "tmux is not installed, and every agent runs inside a tmux session".into(),
+            jod_core::JodError::SupervisorNotFound => ApiError::Internal(
+                "`jod-run` is not installed on this machine, and it supervises every agent".into(),
             ),
             other => ApiError::Internal(other.to_string()),
         }

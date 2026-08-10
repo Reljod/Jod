@@ -36,7 +36,62 @@ harness changing its JSON breaks an adapter. That is why unrecognised output
 becomes a `Raw` event rather than being dropped — the prototype found OpenCode's
 `tool_use` rename that way, on the first real run.
 
-## Agents run in tmux, not as child processes
+## A run is a detached process group, and the database is its only transport
+
+**Supersedes "Agents run in tmux, not as child processes" and "An agent's tmux
+session outlives the agent."** Both were right about the problem and are kept
+below, because the requirements they identified are the ones the replacement had
+to meet.
+
+Every delegated task used to get its own `tmux` session, whose pane was piped
+through `tee` into `~/.jod/runs/<id>/stream.jsonl`, which Jod tailed and folded
+into the `events` table. Three intermediaries between a harness and the store.
+
+Now: Jod writes a plan, starts a detached `jod-run` supervisor on it, and the
+supervisor parses the harness's stdout and appends events **straight into
+`jod.db`**. tmux is gone, the JSONL file is gone, and — because a plan is
+`execve`'d rather than sourced — so is the generated shell script and every
+quoting concern that came with it.
+
+What tmux was buying, and where each thing went:
+
+| tmux gave us | now |
+|---|---|
+| A live view (`tmux attach`) | `jod watch <id>`, reading the store |
+| A kill switch that works when Jod is closed | `kill(-pgid, SIGTERM)`, from any process |
+| Survival of the launcher quitting | `setsid`, so the run leads its own session |
+| One transport for laptop, SSH and API | one SQLite file, which the API already served |
+
+The first row is the one that got *better*. `tmux attach` needed a shell on the
+box; `jod watch` is a query, so the same view reaches the web client and the
+phone. It also works on a finished run, replaying it instead of refusing.
+
+**Why the supervisor is a separate executable and not a thread.** The whole
+promise is that a run outlives its launcher. A thread cannot hold the read end
+of the harness's stdout pipe past its own process's death — the harness would
+take `EPIPE` on its next write, so closing an SSH session would kill the agent,
+which is strictly worse than what tmux did. `fork()`ing in-process is also out:
+`jod` is multithreaded, and only async-signal-safe calls are legal in the child,
+which rules out running SQLite there. A `setsid`'d binary is the only option
+that keeps the promise, and it costs a dependency that ships from the same
+`cargo build` rather than one the box has to install.
+
+**A killed run must not read as a clean one.** Found by testing rather than by
+reasoning: `SIGTERM` to the group reaches the harness *and* the supervisor at
+once, the harness usually dies first, its pipes close, and the supervisor can
+finish the whole run before its own signal handler gets a turn — recording a
+killed run as `completed`. The status is therefore derived from the child's exit
+status, where a signal death is visible as a fact rather than inferred from
+having handled one. → [the general rule](#a-failed-run-must-never-look-like-a-successful-one)
+
+**What the old entries got right, and what it cost to keep.** The second one
+below is a chain of sensible defaults that closed a user's terminal window; none
+of it can happen now, because Jod no longer owns a terminal to close. The
+general lesson it drew still stands and still constrains the design: a killed
+supervisor is asked with `SIGTERM` and only then `SIGKILL`, precisely so it can
+record how the run ended rather than vanishing and leaving it marked running.
+
+### Superseded: Agents run in tmux, not as child processes
 
 Every delegated task gets its own `tmux` session. A child process would have
 been less code.
@@ -51,7 +106,7 @@ second code path that can disagree with what was actually shown.
 It also makes tmux a hard dependency, which the UI states plainly rather than
 discovering at spawn time.
 
-## An agent's tmux session outlives the agent
+### Superseded: An agent's tmux session outlives the agent
 
 Jod's sessions used to end when their agent did. That closed the terminal window
 of anyone watching, and the chain is worth writing down because every link is a
@@ -64,16 +119,11 @@ sensible default on its own:
 3. So: watch an agent → agent finishes → session destroyed → client exits →
    the shell exits → **the terminal window closes.**
 
-Two fixes, because either alone leaves a hole. The launcher now `exec`s a shell
+Two fixes, because either alone leaves a hole. The launcher `exec`s a shell
 after the agent exits, so a *completed* run never destroys anything. And Jod
 sets `detach-on-destroy off` **on its own sessions only**, so an explicit kill
 returns the watcher to another session instead of ending their client. The
 user's global tmux config is never touched — it is not ours to change.
-
-The cost is that sessions accumulate until closed. That is the behaviour that
-was asked for ("kill the session if it's not needed"), it leaves the final
-output on screen with the agent's directory ready to inspect, and the UI keeps
-its close button live after a run finishes rather than greying it out.
 
 The general lesson: **a long-running process Jod spawns must never be able to
 take a user's terminal with it when it ends.**
@@ -632,7 +682,7 @@ moment against a roster from another is a screen that was never true.
 
 Two routes, and deliberately no more. The obvious next ask is `POST` for join,
 claim and message, and it is the wrong ask: a *teammate* is an agent on the box
-with a tmux session and a conversation to resume, and the bus exists so those
+with a process group and a conversation to resume, and the bus exists so those
 agents can coordinate. A phone has none of that. Letting it claim a task would
 put an owner on the board that no run is behind, which is worse than not being
 able to claim — the board's whole value is that every claim names something

@@ -12,16 +12,15 @@ function agent(over: Partial<AgentSummary> = {}): AgentSummary {
     cwd: "/repo/Jod",
     model: "claude-opus-5",
     permission: "ask",
-    tmux_session: "jod-probe",
-    attach_command: "tmux attach -t jod-probe",
-    switch_command: "tmux switch-client -t jod-probe",
-    session_closed: false,
+    pid: 4242,
+    pgid: 4242,
+    process_alive: true,
+    watch_command: "jod watch a1",
     created_at_ms: 1_000_000,
     session_id: null,
     usage: {},
     event_count: 0,
     last_message: null,
-    stream_path: "/tmp/a1.jsonl",
     ...over,
   };
 }
@@ -109,7 +108,7 @@ describe("WorldStore", () => {
     const node = store.world.agents.get("a1")!;
     expect(node.summary.status).toBe("failed");
     expect(node.phase).toBe("failed");
-    expect(node.summary.session_closed).toBe(true);
+    expect(node.summary.process_alive).toBe(false);
     expect(node.summary.usage.cost_usd).toBe(0.27);
   });
 

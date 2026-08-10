@@ -3,7 +3,7 @@ name = "jod-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Core service for Jod: harness abstraction, agent runner, tmux session control."
+description = "Core service for Jod: harness abstraction, agent runner, durable state."
 
 [dependencies]
 serde.workspace = true
@@ -13,6 +13,7 @@ tokio.workspace = true
 uuid.workspace = true
 chrono.workspace = true
 rusqlite.workspace = true
+libc.workspace = true
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }

@@ -1,0 +1,16 @@
+[package]
+name = "jod-supervisor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "jod-run — supervises one agent process and writes its events into SQLite."
+
+[[bin]]
+name = "jod-run"
+path = "src/main.rs"
+
+[dependencies]
+jod-core.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["signal"] }
+chrono.workspace = true

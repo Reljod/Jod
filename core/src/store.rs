@@ -171,6 +171,46 @@ const MIGRATIONS: &[(&str, &str)] = &[
     CREATE INDEX ix_tasks_team ON tasks(team);
     "#,
     ),
+    (
+        "0003_process_supervision",
+        r#"
+    -- Runs are no longer tmux sessions. A run is a detached process group led
+    -- by a `jod-run` supervisor, and that group's id is the whole control
+    -- surface: any process can ask whether the run is alive and stop it.
+    --
+    -- `tmux_session` was NOT NULL, which SQLite cannot relax in place, so the
+    -- table is rebuilt. Every existing row is carried over — history is the
+    -- point of this table — and the dead session name is simply dropped.
+    CREATE TABLE runs_new (
+      id            TEXT PRIMARY KEY,
+      name          TEXT NOT NULL,
+      harness       TEXT NOT NULL,
+      status        TEXT NOT NULL,
+      cwd           TEXT NOT NULL,
+      session_id    TEXT,
+      -- The supervisor's pid, and the group it leads. Null until it starts,
+      -- and left in place afterwards so a finished run still says what ran it.
+      pid           INTEGER,
+      pgid          INTEGER,
+      created_at_ms INTEGER NOT NULL,
+      summary       TEXT NOT NULL
+    );
+
+    INSERT INTO runs_new (id, name, harness, status, cwd, session_id,
+                          pid, pgid, created_at_ms, summary)
+      SELECT id, name, harness,
+             -- A run inherited from the tmux era cannot still be running: its
+             -- session is gone with the transport. Recording that here means
+             -- rehydrate never has to guess about a row it cannot probe.
+             CASE WHEN status = 'running' THEN 'failed' ELSE status END,
+             cwd, session_id, NULL, NULL, created_at_ms, summary
+        FROM runs;
+
+    DROP TABLE runs;
+    ALTER TABLE runs_new RENAME TO runs;
+    CREATE INDEX ix_runs_created ON runs(created_at_ms DESC);
+    "#,
+    ),
 ];
 
 /// Who asserted a fact. Kept out of the fact's text so that content Jod
@@ -284,6 +324,11 @@ pub struct Store {
     /// Write transactions cost microseconds, so one lock over one connection is
     /// cheaper than a pool and makes "one writer" explicit.
     conn: Mutex<Connection>,
+    /// Where this database lives, when it lives anywhere. A run's supervisor is
+    /// a separate process and has to be told which file to write into, so the
+    /// store has to be able to say. `None` for an in-memory store — which is
+    /// exactly the case where no other process could ever share it.
+    path: Option<std::path::PathBuf>,
 }
 
 impl Store {
@@ -291,13 +336,26 @@ impl Store {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        Store::from_connection(Connection::open(path)?)
+        // Canonicalised, because the supervisor runs elsewhere and a relative
+        // path would resolve against the wrong directory.
+        let absolute = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        Store::build(Connection::open(path)?, Some(absolute))
     }
 
     /// An ephemeral database. Used by tests, and by any caller that wants the
     /// orchestrator without a file on disk.
     pub fn in_memory() -> Result<Store> {
-        Store::from_connection(Connection::open_in_memory()?)
+        Store::build(Connection::open_in_memory()?, None)
+    }
+
+    /// The file this store is backed by, if any.
+    pub fn path(&self) -> Option<std::path::PathBuf> {
+        self.path.clone()
+    }
+
+    fn build(conn: Connection, path: Option<std::path::PathBuf>) -> Result<Store> {
+        let store = Store::from_connection(conn)?;
+        Ok(Store { path, ..store })
     }
 
     fn from_connection(conn: Connection) -> Result<Store> {
@@ -309,6 +367,7 @@ impl Store {
         )?;
         let store = Store {
             conn: Mutex::new(conn),
+            path: None,
         };
         store.migrate()?;
         Ok(store)
@@ -446,18 +505,41 @@ impl Store {
     }
 
     /// Insert or update the record of one delegation.
+    ///
+    /// Two fields resist being overwritten, because two processes write this
+    /// row and only one of them knows the truth about each.
+    ///
+    /// `pid`/`pgid` are not overwritten by an update that does not carry them.
+    /// The supervisor records them once, and the process that spawned the run
+    /// may keep saving summaries long afterwards from an in-memory copy that
+    /// never learned them; `COALESCE` keeps the launch facts from being erased
+    /// by a later save that simply did not know.
+    ///
+    /// **A terminal `status` is never overwritten.** Anyone following a run
+    /// derives a status from its events, and the events cannot tell a killed
+    /// run from a completed one — both end in a `Finished` with no exit code.
+    /// Only the supervisor saw the signal, and it records that through
+    /// [`Store::set_run_status`], which is unconditional. Without this guard a
+    /// follower's save landing afterwards reported every killed run as
+    /// `completed`; it did, and that is what this clause is for.
     pub fn save_run(&self, run: &StoredRun) -> Result<()> {
         let summary = serde_json::to_string(&run.summary)?;
         self.write(|tx| {
             tx.execute(
                 "INSERT INTO runs
-                   (id, name, harness, status, cwd, session_id, tmux_session,
+                   (id, name, harness, status, cwd, session_id, pid, pgid,
                     created_at_ms, summary)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
                  ON CONFLICT(id) DO UPDATE SET
                    name = excluded.name,
-                   status = excluded.status,
+                   status = CASE
+                     WHEN runs.status IN ('completed', 'failed', 'killed')
+                       THEN runs.status
+                     ELSE excluded.status
+                   END,
                    session_id = excluded.session_id,
+                   pid = COALESCE(excluded.pid, runs.pid),
+                   pgid = COALESCE(excluded.pgid, runs.pgid),
                    summary = excluded.summary",
                 params![
                     run.id,
@@ -466,7 +548,8 @@ impl Store {
                     run.status,
                     run.cwd,
                     run.session_id,
-                    run.tmux_session,
+                    run.pid,
+                    run.pgid,
                     run.created_at_ms,
                     summary,
                 ],
@@ -475,27 +558,71 @@ impl Store {
         })
     }
 
+    /// Record which process group is supervising a run.
+    ///
+    /// Its own statement rather than part of `save_run`, because the pgid is
+    /// known only after the launch succeeded, and it must not depend on the
+    /// caller holding an otherwise up-to-date summary.
+    pub fn set_run_process(&self, run_id: &str, pid: u32, pgid: u32) -> Result<()> {
+        self.write(|tx| {
+            tx.execute(
+                "UPDATE runs SET pid = ?2, pgid = ?3 WHERE id = ?1",
+                params![run_id, pid, pgid],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Record the harness-assigned conversation id for a run.
+    ///
+    /// Written by the supervisor the moment the harness reports it, because
+    /// `--resume` depends on it and the process that launched the run may be
+    /// long gone by the time anyone wants to continue the conversation.
+    pub fn set_run_session(&self, run_id: &str, session_id: &str) -> Result<()> {
+        self.write(|tx| {
+            tx.execute(
+                "UPDATE runs SET session_id = ?2 WHERE id = ?1",
+                params![run_id, session_id],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Set a run's terminal status. Used by the supervisor, which is the only
+    /// process that knows how the harness actually exited.
+    pub fn set_run_status(&self, run_id: &str, status: &str) -> Result<()> {
+        self.write(|tx| {
+            tx.execute(
+                "UPDATE runs SET status = ?2 WHERE id = ?1",
+                params![run_id, status],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// One run by id, or `None`.
+    pub fn run(&self, run_id: &str) -> Result<Option<StoredRun>> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        Ok(conn
+            .query_row(
+                "SELECT id, name, harness, status, cwd, session_id, pid, pgid,
+                        created_at_ms, summary
+                   FROM runs WHERE id = ?1",
+                params![run_id],
+                run_from_row,
+            )
+            .optional()?)
+    }
+
     /// Most recent runs first.
     pub fn runs(&self, limit: usize) -> Result<Vec<StoredRun>> {
         let conn = self.conn.lock().expect("store lock poisoned");
         let mut stmt = conn.prepare(
-            "SELECT id, name, harness, status, cwd, session_id, tmux_session,
+            "SELECT id, name, harness, status, cwd, session_id, pid, pgid,
                     created_at_ms, summary
                FROM runs ORDER BY created_at_ms DESC LIMIT ?1",
         )?;
-        let rows = stmt.query_map(params![limit as i64], |r| {
-            Ok(StoredRun {
-                id: r.get(0)?,
-                name: r.get(1)?,
-                harness: r.get(2)?,
-                status: r.get(3)?,
-                cwd: r.get(4)?,
-                session_id: r.get(5)?,
-                tmux_session: r.get(6)?,
-                created_at_ms: r.get(7)?,
-                summary: serde_json::from_str(&r.get::<_, String>(8)?).unwrap_or_default(),
-            })
-        })?;
+        let rows = stmt.query_map(params![limit as i64], run_from_row)?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
@@ -910,11 +1037,29 @@ pub struct StoredRun {
     pub status: String,
     pub cwd: String,
     pub session_id: Option<String>,
-    pub tmux_session: String,
+    /// The supervising `jod-run` process, and the group it leads. `None` until
+    /// the run has been launched.
+    pub pid: Option<u32>,
+    pub pgid: Option<u32>,
     pub created_at_ms: i64,
     /// The full client-facing summary, kept verbatim so adding a field to it
     /// never needs a migration here.
     pub summary: serde_json::Value,
+}
+
+fn run_from_row(r: &rusqlite::Row) -> rusqlite::Result<StoredRun> {
+    Ok(StoredRun {
+        id: r.get(0)?,
+        name: r.get(1)?,
+        harness: r.get(2)?,
+        status: r.get(3)?,
+        cwd: r.get(4)?,
+        session_id: r.get(5)?,
+        pid: r.get(6)?,
+        pgid: r.get(7)?,
+        created_at_ms: r.get(8)?,
+        summary: serde_json::from_str(&r.get::<_, String>(9)?).unwrap_or_default(),
+    })
 }
 
 fn event_kind(env: &AgentEnvelope) -> String {
@@ -1294,6 +1439,140 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// `0003` rebuilds `runs` to drop a `NOT NULL` column SQLite cannot relax
+    /// in place. A rebuild that lost rows would delete a person's history, so
+    /// this opens a genuine pre-`0003` database rather than a simulation of one.
+    #[test]
+    fn a_database_from_the_tmux_era_still_opens_and_keeps_its_history() {
+        let dir = std::env::temp_dir().join(format!("jod-migrate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("jod.db");
+
+        // Exactly what an installed 0.1 wrote: migrations 0001 and 0002, and a
+        // `runs` table whose `tmux_session` column is NOT NULL.
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS migrations (
+                   name TEXT PRIMARY KEY, applied_at_ms INTEGER NOT NULL);",
+            )
+            .unwrap();
+            for (name, sql) in &MIGRATIONS[..2] {
+                conn.execute_batch(sql).unwrap();
+                conn.execute(
+                    "INSERT INTO migrations (name, applied_at_ms) VALUES (?1, 0)",
+                    params![name],
+                )
+                .unwrap();
+            }
+            for (id, status) in [("done", "completed"), ("interrupted", "running")] {
+                conn.execute(
+                    "INSERT INTO runs (id, name, harness, status, cwd, session_id,
+                                       tmux_session, created_at_ms, summary)
+                     VALUES (?1, 'old', 'claude_code', ?2, '/tmp', 'sess-1',
+                             'jod-old', 1, '{}')",
+                    params![id, status],
+                )
+                .unwrap();
+            }
+            conn.execute(
+                "INSERT INTO events (run_id, seq, kind, at_ms, payload)
+                 VALUES ('done', 0, 'message', 1, '{\"kind\":\"message\",\"text\":\"hi\"}')",
+                [],
+            )
+            .unwrap();
+        }
+
+        let store = Store::open(&path).unwrap();
+
+        let runs = store.runs(10).unwrap();
+        assert_eq!(runs.len(), 2, "the rebuild must carry every row over");
+        assert_eq!(store.events("done").unwrap().len(), 1, "events are untouched");
+
+        let done = store.run("done").unwrap().unwrap();
+        assert_eq!(done.status, "completed");
+        assert_eq!(done.session_id.as_deref(), Some("sess-1"));
+        assert_eq!(done.pid, None, "there is no process to claim it had");
+
+        // A run left mid-flight by the old transport cannot still be running:
+        // its tmux session went away with tmux. Saying so here means nothing
+        // downstream has to guess about a row it can no longer probe.
+        assert_eq!(
+            store.run("interrupted").unwrap().unwrap().status,
+            "failed",
+            "a run inherited as `running` has no process group to check"
+        );
+
+        // And the new columns work on the migrated table.
+        store.set_run_process("done", 111, 111).unwrap();
+        assert_eq!(store.run("done").unwrap().unwrap().pgid, Some(111));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Regression, found by killing a real detached run: a follower's
+    /// event-derived save landed after the supervisor's authoritative one and
+    /// turned `killed` into `completed`.
+    #[test]
+    fn a_terminal_status_is_not_overwritten_by_a_later_save() {
+        let s = store();
+        s.save_run(&run("a", "agy", 1)).unwrap();
+        s.set_run_status("a", "killed").unwrap();
+
+        // A follower saw `Finished` and concluded the run completed. It did
+        // not see the signal, so it does not get to say.
+        let mut derived = run("a", "agy", 1);
+        derived.status = "completed".into();
+        s.save_run(&derived).unwrap();
+        assert_eq!(s.run("a").unwrap().unwrap().status, "killed");
+
+        // The supervisor may still correct itself outright, because it is the
+        // one process that knows.
+        s.set_run_status("a", "failed").unwrap();
+        assert_eq!(s.run("a").unwrap().unwrap().status, "failed");
+    }
+
+    /// The guard must not freeze a run before it has finished, or a live run
+    /// would never leave `running`.
+    #[test]
+    fn a_running_status_is_still_updated_by_a_save() {
+        let s = store();
+        s.save_run(&run("a", "agy", 1)).unwrap();
+        assert_eq!(s.run("a").unwrap().unwrap().status, "running");
+
+        let mut done = run("a", "agy", 1);
+        done.status = "completed".into();
+        s.save_run(&done).unwrap();
+        assert_eq!(s.run("a").unwrap().unwrap().status, "completed");
+    }
+
+    #[test]
+    fn recording_a_process_and_a_status_survives_a_later_summary_save() {
+        let s = store();
+        s.save_run(&run("a", "agy", 1)).unwrap();
+        s.set_run_process("a", 4242, 4242).unwrap();
+        s.set_run_session("a", "sess-live").unwrap();
+        s.set_run_status("a", "completed").unwrap();
+
+        // The launching process keeps saving an in-memory summary that never
+        // learned the pid. It must not erase what the supervisor recorded.
+        let mut stale = run("a", "agy", 1);
+        stale.pid = None;
+        stale.pgid = None;
+        s.save_run(&stale).unwrap();
+
+        let got = s.run("a").unwrap().unwrap();
+        assert_eq!(got.pid, Some(4242), "a later save erased the pid");
+        assert_eq!(got.pgid, Some(4242));
+    }
+
+    #[test]
+    fn an_in_memory_store_admits_it_has_no_path_to_share() {
+        // A supervisor is a separate process; it cannot open this.
+        assert_eq!(Store::in_memory().unwrap().path(), None);
+    }
+
     #[test]
     fn a_fresh_store_migrates_and_is_empty() {
         let s = store();
@@ -1423,7 +1702,8 @@ mod tests {
             status: "running".into(),
             cwd: "/tmp".into(),
             session_id: Some(format!("sess-{id}")),
-            tmux_session: format!("jod-{id}"),
+            pid: None,
+            pgid: None,
             created_at_ms: at,
             summary: serde_json::json!({"id": id}),
         }

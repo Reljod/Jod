@@ -1,8 +1,10 @@
 //! Where Jod keeps its runtime state: `~/.jod`, overridable with `JOD_HOME`.
 //!
-//! Everything is a plain file on purpose. An agent's transcript stays readable
-//! with `cat` after the desktop app is closed, and the same layout works
-//! unchanged on a VPS.
+//! A run's *transcript* lives in `jod.db`, because it is contended state that
+//! several processes append to and read. What is left on disk is the record of
+//! the launch — what was asked (`prompt.txt`), what was run (`spawn.json`), and
+//! anything the supervisor itself had to say (`supervisor.log`) — so a run stays
+//! inspectable with `cat` even when Jod is not running.
 
 use std::path::PathBuf;
 
@@ -27,19 +29,25 @@ pub fn run_dir(agent_id: &str) -> PathBuf {
     runs_dir().join(agent_id)
 }
 
-/// The harness's raw JSONL, tailed by the runner and readable afterwards.
-pub fn stream_path(agent_id: &str) -> PathBuf {
-    run_dir(agent_id).join("stream.jsonl")
-}
-
-/// The prompt, written to disk so it never has to survive shell quoting.
+/// The prompt, as it was asked. The harness's output no longer touches the
+/// filesystem — it goes to SQLite — but what was *asked* stays greppable.
 pub fn prompt_path(agent_id: &str) -> PathBuf {
     run_dir(agent_id).join("prompt.txt")
 }
 
-/// The generated launcher that tmux executes.
-pub fn script_path(agent_id: &str) -> PathBuf {
-    run_dir(agent_id).join("run.sh")
+/// Everything the supervisor needs to launch this run, and the human-readable
+/// record of exactly what was launched. Replaced the generated `run.sh`.
+pub fn spawn_path(agent_id: &str) -> PathBuf {
+    run_dir(agent_id).join("spawn.json")
+}
+
+/// The supervisor's own stdout and stderr.
+///
+/// Not the transport: agent output is parsed into events and written to the
+/// database. This is where a supervisor that failed *before* it could reach the
+/// database leaves its explanation, so such a failure is never silent.
+pub fn supervisor_log_path(agent_id: &str) -> PathBuf {
+    run_dir(agent_id).join("supervisor.log")
 }
 
 /// The run's metadata, so a restarted app can rebuild its agent list.
@@ -65,9 +73,9 @@ mod tests {
         std::env::set_var("JOD_HOME", "/tmp/jod-test-home");
         let dir = run_dir("abc");
         for p in [
-            stream_path("abc"),
             prompt_path("abc"),
-            script_path("abc"),
+            spawn_path("abc"),
+            supervisor_log_path("abc"),
             meta_path("abc"),
         ] {
             assert!(p.starts_with(&dir), "{p:?} escaped {dir:?}");

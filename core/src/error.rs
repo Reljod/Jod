@@ -5,14 +5,20 @@ pub enum JodError {
     #[error("harness `{0}` is not installed or could not be found on this machine")]
     HarnessNotFound(String),
 
-    #[error("tmux is required to run agents but was not found on this machine")]
-    TmuxNotFound,
+    #[error("the `jod-run` supervisor was not found; it ships alongside `jod`")]
+    SupervisorNotFound,
 
     #[error("no agent with id `{0}`")]
     UnknownAgent(String),
 
-    #[error("tmux command failed: {0}")]
-    Tmux(String),
+    #[error("could not start the agent: {0}")]
+    Spawn(String),
+
+    /// A run is supervised by a detached process that reports through the
+    /// database, so there is nowhere for its output to go without one. Failing
+    /// here is better than launching an agent nobody will ever hear from.
+    #[error("this Jod has no store, and a run cannot be observed without one")]
+    StoreRequired,
 
     #[error(transparent)]
     Io(#[from] std::io::Error),

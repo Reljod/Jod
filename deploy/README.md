@@ -25,7 +25,7 @@ a deliberate act, never a side effect of installing a CLI.
     │ 127.0.0.1:8787     │   jod-api — loopback only
     └─────┬──────────────┘
           │
-      jod-core ──► tmux ──► claude / opencode / agy
+      jod-core ──► jod-run ──► claude / opencode / agy
 ```
 
 Nothing listens on a public interface at any point.
@@ -49,15 +49,21 @@ Build on the box (or copy a matching binary in):
 
 ```sh
 sudo -u jod git clone <repo> /home/jod/src/Jod
-cd /home/jod/src/Jod && cargo build --release -p jod-api
+cd /home/jod/src/Jod && cargo build --release -p jod-api -p jod-supervisor
 sudo install -m 0755 target/release/jod-api /usr/local/bin/jod-api
+sudo install -m 0755 target/release/jod-run /usr/local/bin/jod-run
 ```
 
-`tmux` is a hard requirement — every agent runs inside a session. So is at least
-one harness (`claude`, `opencode`, or `agy`) on the `jod` user's `PATH`.
+**Install both.** `jod-run` supervises every agent — it holds the run's output
+and writes it to the store — so `jod-api` without it can serve requests but
+cannot start anything. It is looked for beside the running executable first,
+then on `PATH`; `JOD_SUPERVISOR_BIN` overrides both. Keep the two at the same
+version: they share the event and plan formats.
+
+At least one harness (`claude`, `opencode`, or `agy`) must be on the `jod`
+user's `PATH`.
 
 ```sh
-sudo apt install tmux
 sudo -u jod jod-api serve --bind 127.0.0.1:8787   # will warn about anything missing
 ```
 
@@ -191,12 +197,16 @@ curl -s -H "Authorization: Bearer $TOKEN" -X POST \
   with the token *label*, never the token.
   `jq -r 'select(.outcome != "ok")' /home/jod/.jod/audit.jsonl` shows refusals;
   a run of `refused_scope` means a read credential is being probed.
-- **Transcripts:** `/home/jod/.jod/runs/<id>/stream.jsonl`, readable with `cat`
-  whether or not the daemon is running.
-- **Watch an agent directly:** `sudo -u jod tmux attach -t jod-<id>`.
-- **Restart:** `sudo systemctl restart jod-api`. Running agents survive — they
-  live in tmux, not as children of the daemon — and the daemon reloads prior
-  runs from the store on boot. Browser sessions are dropped, which is deliberate.
+- **Transcripts:** `/home/jod/.jod/jod.db`, readable whether or not the daemon
+  is running — `sudo -u jod jod watch <id>` replays one. What was *asked* stays
+  on disk as `/home/jod/.jod/runs/<id>/prompt.txt`, alongside the `spawn.json`
+  recording exactly what was launched.
+- **A supervisor that failed early:** `/home/jod/.jod/runs/<id>/supervisor.log`.
+  A run that never produced an event left its reason there.
+- **Restart:** `sudo systemctl restart jod-api`. Running agents survive — each
+  is its own `setsid` process group, not a child of the daemon — and the daemon
+  reloads prior runs from the store on boot, resuming its followers on the ones
+  still alive. Browser sessions are dropped, which is deliberate.
 
 ## If a token leaks
 
@@ -204,7 +214,8 @@ curl -s -H "Authorization: Bearer $TOKEN" -X POST \
 sudo -u jod jod-api token revoke <label>
 sudo systemctl restart jod-api      # also drops every browser session
 grep '<label>' /home/jod/.jod/audit.jsonl    # what it did
-sudo -u jod tmux ls                          # what is still running
+sudo -u jod jod ls                           # what is still running
+sudo -u jod jod kill <id>                    # stops the group, and its children
 ```
 
 Then read the transcripts of anything that ran. Revocation stops future use; it

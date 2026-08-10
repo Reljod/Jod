@@ -8,25 +8,28 @@
 //!
 //! - [`harness`] — the seam. One trait per harness: build a command line, parse
 //!   its JSONL back into [`event::AgentEvent`]s.
-//! - [`tmux`] — every agent runs in its own tmux session, so a human can attach
-//!   and watch, or kill it, without going through Jod.
-//! - [`runner`] — generates the launcher, follows the output, emits events.
+//! - [`proc`] — detached process groups: how a run outlives the process that
+//!   started it, and how any process can check on one or stop it.
+//! - [`runner`] — writes the launch plan, starts the supervisor, and follows a
+//!   run's events out of the store.
 //! - [`service::Jod`] — the facade every client drives. The Tauri desktop app is
 //!   a thin shell over it; an iOS app or a VPS daemon would be another.
 //!
-//! Runtime state is plain files under `~/.jod` ([`paths`]), so a run stays
-//! readable with `cat` long after the app is closed.
+//! A run's transcript lives in one SQLite file ([`store`]); what is left on disk
+//! under `~/.jod` ([`paths`]) is the record of the launch. Nothing about a run
+//! is held only in the memory of the process that started it, which is why a
+//! restarted daemon — or a phone — can pick it straight back up.
 
 pub mod discovery;
 pub mod error;
 pub mod event;
 pub mod harness;
 pub mod paths;
+pub mod proc;
 pub mod runner;
 pub mod service;
 pub mod store;
 pub mod team;
-pub mod tmux;
 
 /// Re-exported so clients can name the subscription channel's types without
 /// taking their own Tokio dependency.

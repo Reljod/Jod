@@ -88,8 +88,12 @@ export function Dossier({ world, selectedId, onKill, onResume, canWrite }: Props
         <Fact k="PERMISSION" v={s.permission.replace("_", " ").toUpperCase()} />
         <Fact k="SESSION" v={s.session_id ?? "pending"} mono />
         <Fact
-          k="TMUX"
-          v={`${s.tmux_session} · ${s.session_closed ? "CLOSED" : "OPEN"}`}
+          k="PROCESS"
+          v={
+            s.pgid == null
+              ? "not launched"
+              : `pgid ${s.pgid} · ${s.process_alive ? "ALIVE" : "GONE"}`
+          }
           mono
         />
         <Fact k="EVENTS" v={String(s.event_count)} />
@@ -99,17 +103,14 @@ export function Dossier({ world, selectedId, onKill, onResume, canWrite }: Props
         <Fact k="FAULTS" v={String(node.errorCount)} />
       </dl>
 
-      {/* A session outliving its agent is exactly when you want to attach. */}
-      {!s.session_closed && (
-        <div className="dz-attach">
-          <button onClick={() => copy(s.attach_command, "attach")}>
-            {copied === "attach" ? "COPIED" : "COPY ATTACH"}
-          </button>
-          <button onClick={() => copy(s.switch_command, "switch")}>
-            {copied === "switch" ? "COPIED" : "COPY SWITCH"}
-          </button>
-        </div>
-      )}
+      {/* Offered whatever the run's state: `jod watch` replays a finished run
+          from the store as readily as it follows a live one. There is no longer
+          a second command for "from inside tmux", because there is no tmux. */}
+      <div className="dz-attach">
+        <button onClick={() => copy(s.watch_command, "watch")}>
+          {copied === "watch" ? "COPIED" : "COPY WATCH"}
+        </button>
+      </div>
 
       <div className="dz-actions">
         <button
