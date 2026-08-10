@@ -5,6 +5,7 @@
 //! harness's output into one event stream that every command here renders.
 
 mod render;
+mod render_time;
 mod tui;
 
 use anyhow::{bail, Context, Result};
@@ -157,6 +158,51 @@ enum Command {
         #[command(subcommand)]
         what: TeamCommand,
     },
+    /// Work that fires on the clock.
+    ///
+    /// A schedule is a prompt, a cron expression and a timezone. Everything
+    /// else — what to do about a run that overran, or instants missed while
+    /// Jod was down — is policy with a default that was chosen by measuring
+    /// what happens without it.
+    Schedule {
+        #[command(subcommand)]
+        what: ScheduleCommand,
+    },
+    /// Standing objectives, pursued until they are met.
+    ///
+    /// A goal differs from a schedule in having an end: it stops when it is
+    /// satisfied, when it runs out of budget or iterations, or when it stops
+    /// making progress. That last one matters most — a loop that keeps running
+    /// while nothing changes looks exactly like a loop doing useful work.
+    Goal {
+        #[command(subcommand)]
+        what: GoalCommand,
+    },
+    /// What Jod's memory connects to a thing.
+    ///
+    /// Recall answers "what do I know about X". This answers "what is X
+    /// connected to", which no list of facts can — it walks the graph.
+    Related {
+        /// The entity to start from.
+        subject: String,
+        /// How many hops out. Capped: four undirected hops from a
+        /// well-connected thing returns a fifth of everything Jod knows.
+        #[arg(short = 'n', long, default_value_t = 2)]
+        hops: u32,
+        #[arg(long, default_value = "default")]
+        scope: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// How two things in memory are connected, if they are.
+    Path {
+        from: String,
+        to: String,
+        #[arg(long, default_value = "default")]
+        scope: String,
+        #[arg(short = 'n', long, default_value_t = 5)]
+        max: u32,
+    },
     /// Hold a conversation on a plain terminal, without the full-screen UI.
     Chat {
         #[arg(short = 'H', long, value_enum, default_value_t = HarnessArg::Claude)]
@@ -171,6 +217,97 @@ enum Command {
         #[arg(short = 'C', long = "continue")]
         continue_last: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum ScheduleCommand {
+    /// Every schedule, with when it next fires.
+    Ls {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Arm a new one.
+    Add {
+        /// A short name, used everywhere else to refer to it.
+        name: String,
+        /// What to ask the agent to do.
+        prompt: String,
+        /// A cron expression: `0 2 * * *`, `@daily`, `*/15 * * * *`.
+        #[arg(short, long)]
+        cron: String,
+        /// An IANA zone name — `Asia/Manila`, not `+08:00`. An offset is only
+        /// correct until the next daylight-saving transition.
+        #[arg(short = 'z', long, default_value = "UTC")]
+        timezone: String,
+        #[arg(short = 'H', long, value_enum, default_value_t = HarnessArg::Claude)]
+        harness: HarnessArg,
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+        #[arg(short, long)]
+        model: Option<String>,
+        /// What to do about instants missed while Jod was not running.
+        #[arg(long, default_value = "fire_once")]
+        misfire: String,
+        /// What to do when it comes due and the last run is still going.
+        #[arg(long, default_value = "skip")]
+        overlap: String,
+    },
+    /// Stop a schedule firing, without forgetting it.
+    Pause { name: String },
+    /// Arm it again. Also clears whatever failure count stopped it.
+    Resume { name: String },
+    /// Fire it now, through the ordinary tick so every policy still applies.
+    Run { name: String },
+    /// Forget a schedule and its history.
+    Rm { name: String },
+    /// What a schedule has done lately.
+    Log {
+        name: String,
+        #[arg(short, long, default_value_t = 10)]
+        limit: usize,
+    },
+}
+
+#[derive(Subcommand)]
+enum GoalCommand {
+    Ls {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Set a standing objective.
+    Add {
+        name: String,
+        /// What the goal is, in a sentence.
+        objective: String,
+        /// How often to work on it.
+        #[arg(short, long, default_value = "0 * * * *")]
+        cron: String,
+        #[arg(short = 'z', long, default_value = "UTC")]
+        timezone: String,
+        #[arg(short = 'H', long, value_enum, default_value_t = HarnessArg::Claude)]
+        harness: HarnessArg,
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+        /// A command that decides "done". Deterministic, and consulted before
+        /// anything is asked to judge progress.
+        #[arg(long)]
+        done_when: Option<String>,
+        /// Stop after this many iterations, whatever the state.
+        #[arg(long)]
+        max_iterations: Option<i64>,
+        /// Stop once this much has been spent.
+        #[arg(long)]
+        budget: Option<f64>,
+        /// How many iterations may finish without progress before it is called
+        /// stalled rather than left running.
+        #[arg(long, default_value_t = 6)]
+        stall_after: i64,
+    },
+    Pause { name: String },
+    Resume { name: String },
+    /// Run one iteration now.
+    Run { name: String },
+    Rm { name: String },
 }
 
 #[derive(Subcommand)]
@@ -456,6 +593,44 @@ async fn main() -> Result<()> {
             })?;
             println!("remembered #{id}");
         }
+
+        Command::Related {
+            subject,
+            hops,
+            scope,
+            json,
+        } => {
+            let store = jod.store().context("this command needs the database")?;
+            let now = chrono::Utc::now().timestamp_millis();
+            let found = store.neighbourhood(&scope, &subject, hops, now)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&found)?);
+            } else if found.is_empty() {
+                println!("nothing connected to {subject}");
+            } else {
+                for n in &found {
+                    // The hop count is the point: a thing two steps away is
+                    // related differently from one Jod was told about directly.
+                    println!("{:>2} hop  {}", n.hops, n.name);
+                }
+            }
+        }
+
+        Command::Path {
+            from,
+            to,
+            scope,
+            max,
+        } => {
+            let store = jod.store().context("this command needs the database")?;
+            match store.path_between(&scope, &from, &to, max)? {
+                Some(route) => println!("{}", route.join("  →  ")),
+                None => println!("no path from {from} to {to} within {max} hops"),
+            }
+        }
+
+        Command::Schedule { what } => schedule_command(&jod, what)?,
+        Command::Goal { what } => goal_command(&jod, what)?,
 
         Command::Forget {
             subject,
@@ -761,6 +936,174 @@ async fn main() -> Result<()> {
 ///
 /// `jod-run` is what holds a run's output once the caller walks away; without
 /// it a spawn would fail later and less clearly, after the run had a name.
+/// Carry out a `jod schedule …` subcommand.
+///
+/// Every path here goes through the store rather than spawning anything: a
+/// schedule is armed by writing a row, and the tick is what fires it. Even
+/// `run` only brings the next instant forward, so a hand-started run picks up
+/// the same overlap policy, failure count and fire record as a timed one.
+fn schedule_command(jod: &Jod, what: ScheduleCommand) -> Result<()> {
+    let store = jod.store().context("this command needs the database")?;
+    let now = chrono::Utc::now().timestamp_millis();
+    match what {
+        ScheduleCommand::Ls { json } => {
+            let all = store.schedules()?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&all)?);
+            } else if all.is_empty() {
+                println!("no schedules — `jod schedule add` arms one");
+            } else {
+                render_time::schedules(&all, now);
+            }
+        }
+        ScheduleCommand::Add {
+            name,
+            prompt,
+            cron,
+            timezone,
+            harness,
+            cwd,
+            model,
+            misfire,
+            overlap,
+        } => {
+            let s = jod_core::schedule::Schedule {
+                id: uuid::Uuid::new_v4().to_string(),
+                name: name.clone(),
+                prompt,
+                harness: HarnessKind::from(harness).id().to_string(),
+                cwd: cwd.unwrap_or(std::env::current_dir()?).display().to_string(),
+                model,
+                cron,
+                timezone,
+                state: jod_core::schedule::ScheduleState::Armed,
+                misfire: misfire.parse().map_err(|e| anyhow::anyhow!("{e}"))?,
+                overlap: overlap.parse().map_err(|e| anyhow::anyhow!("{e}"))?,
+                grace_ms: 300_000,
+                jitter_ms: 0,
+                next_fire_at_ms: None,
+                last_fire_at_ms: None,
+                consecutive_failures: 0,
+                created_at_ms: now,
+            };
+            store.add_schedule(&s)?;
+            let armed = store.schedule_named(&name)?.and_then(|s| s.next_fire_at_ms);
+            match armed {
+                Some(at) => println!("{name} armed — next {}", render_time::when(at, now)),
+                None => println!("{name} armed"),
+            }
+        }
+        ScheduleCommand::Pause { name } => {
+            let changed =
+                store.set_schedule_state(&name, jod_core::schedule::ScheduleState::Paused)?;
+            println!("{}", if changed { format!("{name} paused") } else { format!("no schedule {name}") });
+        }
+        ScheduleCommand::Resume { name } => {
+            let changed =
+                store.set_schedule_state(&name, jod_core::schedule::ScheduleState::Armed)?;
+            println!("{}", if changed { format!("{name} armed") } else { format!("no schedule {name}") });
+        }
+        ScheduleCommand::Run { name } => {
+            if store.run_schedule_now(&name, now)? {
+                println!("{name} is due now — the next tick will fire it");
+            } else {
+                // Refused rather than forced: firing something paused or broken
+                // silently would defeat the reason it was stopped.
+                println!("{name} is not armed, so it was not brought forward");
+            }
+        }
+        ScheduleCommand::Rm { name } => {
+            let gone = store.delete_schedule(&name)?;
+            println!("{}", if gone { format!("{name} forgotten") } else { format!("no schedule {name}") });
+        }
+        ScheduleCommand::Log { name, limit } => {
+            let Some(s) = store.schedule_named(&name)? else {
+                bail!("no schedule {name}");
+            };
+            let fires = store.fires(&s.id, limit)?;
+            if fires.is_empty() {
+                println!("{name} has not fired yet");
+            } else {
+                render_time::fires(&fires, now);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Carry out a `jod goal …` subcommand.
+fn goal_command(jod: &Jod, what: GoalCommand) -> Result<()> {
+    let store = jod.store().context("this command needs the database")?;
+    let now = chrono::Utc::now().timestamp_millis();
+    match what {
+        GoalCommand::Ls { json } => {
+            let all = store.goals()?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&all)?);
+            } else if all.is_empty() {
+                println!("no goals — `jod goal add` sets one");
+            } else {
+                render_time::goals(&all, now);
+            }
+        }
+        GoalCommand::Add {
+            name,
+            objective,
+            cron,
+            timezone,
+            harness,
+            cwd,
+            done_when,
+            max_iterations,
+            budget,
+            stall_after,
+        } => {
+            let g = jod_core::schedule::Goal {
+                id: uuid::Uuid::new_v4().to_string(),
+                name: name.clone(),
+                objective,
+                done_when,
+                harness: HarnessKind::from(harness).id().to_string(),
+                cwd: cwd.unwrap_or(std::env::current_dir()?).display().to_string(),
+                model: None,
+                cron,
+                timezone,
+                state: jod_core::schedule::GoalState::Running,
+                iteration: 0,
+                max_iterations,
+                budget_usd: budget,
+                spent_usd: 0.0,
+                stall_after,
+                no_progress: 0,
+                next_fire_at_ms: None,
+                created_at_ms: now,
+            };
+            store.add_goal(&g)?;
+            println!("{name} is running");
+        }
+        GoalCommand::Pause { name } => {
+            let changed = store.set_goal_state(&name, jod_core::schedule::GoalState::Paused)?;
+            println!("{}", if changed { format!("{name} paused") } else { format!("no goal {name}") });
+        }
+        GoalCommand::Resume { name } => {
+            let changed = store.set_goal_state(&name, jod_core::schedule::GoalState::Running)?;
+            println!("{}", if changed { format!("{name} running") } else { format!("no goal {name}") });
+        }
+        GoalCommand::Run { name } => {
+            if store.run_goal_now(&name, now)? {
+                println!("{name} will iterate on the next tick");
+            } else {
+                println!("{name} is not running, so it was not brought forward");
+            }
+        }
+        GoalCommand::Rm { name } => {
+            let gone = store.delete_goal(&name)?;
+            println!("{}", if gone { format!("{name} forgotten") } else { format!("no goal {name}") });
+        }
+    }
+    Ok(())
+}
+
 fn require_supervisor(jod: &Jod) -> Result<()> {
     if !jod.supervisor_available() {
         bail!(
