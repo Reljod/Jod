@@ -848,3 +848,151 @@ reclaiming it costs a rebuild and nothing else — but the sweep has to recur, o
 for cargo's lock serialising builds across concurrent agents. The sweep is the
 cheaper trade while agents run in parallel; it is also the one that gets
 forgotten, so it belongs in the box's notes, not in somebody's memory.
+
+## Jod owns the transcript now
+
+This reverses a claim made in [`jod-system.md`](jod-system.md): *"Jod needs no
+memory of the transcript: the harness owns it."*
+
+That was right while a conversation was a line you could only continue. Session
+resume was normalised behind one `Resume` field, each harness spelled it
+differently, and the seam hid it. Nothing above the seam had to know what a turn
+contained.
+
+It stops being right the moment you want to **fork, revert, or move a thread to
+a different harness**. A session id issued by Claude Code means nothing to
+OpenCode. Probing the three binaries directly:
+
+| | Claude Code | OpenCode | AGY |
+|---|---|---|---|
+| fork | `--fork-session` | `--fork` | **none** |
+| assign a session id | `--session-id <uuid>` | none | none |
+| export a transcript | — | `opencode export` | none |
+| accept one back | `--input-format stream-json` | `opencode import` | none |
+
+So two of the three can fork themselves and Jod should let them. **No two of
+them can hand a thread to each other**, and AGY can do none of it. Cross-harness
+handoff has no owner unless Jod is the owner.
+
+The shape is the one ChatGPT, LangGraph and git converged on and the harnesses
+did not: **one DAG with a moving head pointer**. Claude Code and OpenCode both
+fork by copying a prefix into a new container with no parent edge — verified by
+forking a real session and reading both files. That is cheap to read, and it
+makes branch topology recoverable only by intersecting message ids, so a
+"‹ 2/3 ›" sibling pager cannot be drawn from it at all. `leafUuid`,
+`current_node` and `HEAD` are the same construct; Jod keeps one.
+
+Two consequences worth stating. The event stream is **not** sufficient as a
+transcript: `ToolResult` carried only a truncated `summary`, which is enough to
+watch a run and not enough to replay one. And revert is **non-destructive** —
+the head moves, the abandoned tail stays reachable — because git's reflog and
+OpenCode's `unrevert` both concluded that the recovery window is worth more than
+the tidiness.
+
+## The scheduler's claim is one statement, and the lease is not enough
+
+Sixteen processes racing for four due schedules, measured: a read-then-write
+claim handed the **same** schedule to two winners **41.26%** of the time. The
+guarded single-statement claim under `BEGIN IMMEDIATE` produced **0 duplicates
+in 5,408 claims**. This is the same result the database benchmark found for
+contended updates, arriving a second time in a different costume.
+
+The part that was *not* obvious is what happens when a claimant dies. A lease
+alone looks sufficient — it expires, someone else takes over, the schedule keeps
+running. But the next claimant overwrites the lease, and the original claim then
+exists nowhere: **52 of 255 claims, one in five, were accounted for in no record
+at all.** Whoever displaces a dead lease is the last process that can still see
+it existed, so the claim writes the abandonment down *before* taking it. That
+brought it to 0 of 270.
+
+Every firing decision gets a row, including the ones where nothing ran. "It
+never fired" and "it fired and was skipped" are different bugs with the same
+symptom, and a skip nobody recorded is a silent failure.
+
+Jobs are rows rather than a JSON file. Hermes keeps its cron in
+`~/.hermes/cron/jobs.json` behind an advisory `flock` and its own source carries
+a note about a root-owned copy that failed every tick for fourteen hours. Jod
+already had the store that makes this a non-question.
+
+## Jitter sounded prudent and measured worse
+
+Spreading fires to avoid a thundering herd is the obvious move, and it is the
+one addition in ten graded scheduler iterations that made things *worse*: a
+300 s spread against a 150 s grace window **lost 34 of 72 fires** outright,
+because jitter pushed them past the point where they still counted as that fire,
+and operator predictability fell from 5 to 3.
+
+It ships defaulting to zero, and a jitter wider than the grace window is
+**refused at the boundary** rather than silently losing fires.
+
+The general rule this is an instance of: a safety feature that has not been
+measured against the failure it claims to prevent is a guess, and guesses in a
+scheduler are paid at 3am.
+
+## A goal that stops moving has to say so
+
+The characteristic failure of an autonomous loop is not crashing. It is
+completing iterations for ever while nothing changes — and from outside, a goal
+making no progress looks exactly like a goal working hard.
+
+So progress is counted rather than assumed. Every iteration reports whether it
+moved; enough that did not, and the goal **stalls itself** instead of running
+for weeks. Alongside it sit the two bounds that need no judgement: an iteration
+cap and a spend cap, both re-checked immediately *after* an iteration is
+recorded, so a goal that has just spent the last of its budget stops there
+rather than spending more proving it has run out.
+
+A goal's progress lives in the memory layer rather than in its own columns — the
+brief as a prospective fact superseded each iteration, so bitemporal validity
+can answer what it thought it was doing last month, and what happened as
+episodic facts in a `goal:<id>` scope, because an hourly loop writes far more
+than a person does and scope is a hard filter. Only the counters the claim reads
+on every tick stay as columns: a claim must not depend on a text index.
+
+## The graph is an index, and the extension was not worth buying
+
+The request was for "the SQLite extension for graph". The benchmark says there
+is nothing worth buying: no extension is simultaneously maintained in 2026,
+permissively licensed, **and** statically linkable into a single binary — and
+Jod ships as one binary onto a VPS. Plain tables plus a recursive CTE answer a
+three-hop walk over a million edges fast enough that an extension would buy
+nothing.
+
+Two findings shaped the code rather than merely justifying it.
+
+**A recursive CTE has no statistics, and SQLite guesses the join order wrong.**
+Written the obvious way it made `relations` the outer loop matched on `scope`
+alone — which selects every row — and scanned the frontier inside it, a cross
+product per step, using the in-edge index for both directions so the out-edge
+index was never touched. `CROSS JOIN` pins the order: **903 ms → 14 ms**, same
+schema, same indexes. It fails *silently*, staying correct while going
+quadratic, which is the worst way for a performance bug to behave.
+
+**The headline number described a query we do not run.** 0.37 ms for three hops
+at a million edges is the *directed* traversal. "What is related to this" is
+undirected, needs two recursive terms, and measures 92 ms at 100k. Both are
+correct; only one is ours. The conclusion survived the correction, but it had to
+be made on the real figure.
+
+The graph stays derived: it rebuilds from `facts` alone, and `ON DELETE CASCADE`
+carries `forget` through to the edges — otherwise a forgotten fact stays
+walkable, and "Jod forgot that" stops meaning "Jod says it forgot that".
+
+## Origin was stored for months and never consulted
+
+`facts` has carried an `origin` column since the first migration — owner, agent,
+untrusted, system — deliberately outside the fact text so ingested content
+cannot forge its own trust level. Recall never looked at it. A page Jod merely
+*fetched* answered exactly as readily as something Reljod said, and a
+hand-labelled corpus put the poisoned fact in the answer set on 10% of queries.
+
+The lesson is not "add a WHERE clause". It is that **a trust boundary nothing
+enforces is decoration**, and the way to find out is to measure the shipped
+behaviour rather than re-read the design. The column, the doc comment and the
+migration comment all described a control that did not exist.
+
+Untrusted material is now excluded by default from answers *and* from seeding a
+graph expansion — a page that cannot answer directly must not be able to steer
+which part of the graph gets walked. It is excluded, not deleted: "what did that
+page claim" stays answerable through an explicit call, where the decision to
+believe it is visible at the call site.
