@@ -297,7 +297,7 @@ async fn perform(jod: &Arc<Jod>, app: &mut App, opts: &Options, action: Action) 
             Ok(agent) => {
                 app.push(Entry::Notice(format!(
                     "from another terminal: {}",
-                    agent.attach_command
+                    agent.watch_command
                 )));
             }
             Err(e) => app.push(Entry::Notice(format!("no agent {}: {e}", short(&id)))),
