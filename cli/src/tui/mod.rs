@@ -1183,6 +1183,14 @@ fn delegation_prompt(task: &data::TaskRow) -> String {
     prompt
 }
 
+/// Keys on the activity feed.
+///
+/// `m` and `M` mark read in memory, which is the right optimistic behaviour —
+/// but the feed is re-read from the store on every fourth tick, so once
+/// `Store::activity` exists these two **must** also write through
+/// (`Store::mark_activity_read`) or the tick will quietly un-read them. Noted
+/// here rather than in the loader, because this is the call site that would
+/// look correct and not be.
 fn on_activity_key(app: &mut App, key: KeyEvent) -> Option<Action> {
     match key.code {
         KeyCode::Enter => {
