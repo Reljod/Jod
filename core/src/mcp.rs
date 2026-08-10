@@ -388,6 +388,15 @@ pub enum ToolError {
     /// rather than a tool result: the model asked for something that was never
     /// advertised.
     Unknown(String),
+    /// The tool exists but this agent was never shown it, because its
+    /// [`ToolAccess`] does not reach that far.
+    ///
+    /// A JSON-RPC error rather than a tool result, and the distinction is
+    /// deliberate: from the caller's side a tool it was never offered is
+    /// indistinguishable from one that does not exist, so the two answer alike.
+    /// Contrast [`ToolError::Refused`], which is "you may use this tool, but not
+    /// like that" — a well-formed call the caller could make differently.
+    Forbidden(String),
     /// The arguments do not describe a call that could be made.
     BadParams(String),
     /// The call was understood and Jod would not, or could not, carry it out.
@@ -452,8 +461,11 @@ impl Server {
         let Some(tool) = catalogue().into_iter().find(|t| t.name == name) else {
             return Err(ToolError::Unknown(name.to_string()));
         };
+        // Checked here as well as in `tools()`, because `tools/list` is advice.
+        // Nothing stops a model calling a name it read somewhere else, and the
+        // list is not the control — this is.
         if !allows(self.access, tool.needs) {
-            return Err(ToolError::Refused(format!(
+            return Err(ToolError::Forbidden(format!(
                 "`{name}` needs `{}` access and this agent has `{}`",
                 tool.needs.as_str(),
                 self.access.as_str()
@@ -1071,7 +1083,9 @@ async fn call_tool(server: &Server, id: Value, params: &Value) -> Value {
         Err(ToolError::Unknown(name)) => {
             error(id, INVALID_PARAMS, format!("unknown tool `{name}`"))
         }
-        Err(ToolError::BadParams(why)) => error(id, INVALID_PARAMS, why),
+        Err(ToolError::Forbidden(why)) | Err(ToolError::BadParams(why)) => {
+            error(id, INVALID_PARAMS, why)
+        }
         // A refusal is an answer the model should read and act on, so it goes
         // back as a tool result rather than as a protocol error — the same
         // reason a compiler prints an error instead of exiting silently.
@@ -1227,18 +1241,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn every_advertised_tool_is_dispatchable() {
+    async fn every_advertised_tool_is_dispatchable_at_every_access_level() {
         // The failure this guards is a tool listed but not wired: the model
         // spends a turn discovering it, and cannot tell that from Jod being
-        // broken. Called with no arguments, so most fail — the assertion is only
-        // that none is *unknown*.
-        let server = server(ToolAccess::Orchestrate);
-        for tool in server.tools() {
-            match server.call(tool.name, &json!({})).await {
-                Err(ToolError::Unknown(name)) => {
-                    panic!("{name} is advertised but the dispatcher does not know it")
+        // broken. Now that the list is a function of the level, it has to hold
+        // per level — a tool advertised at one and dispatchable only at another
+        // is the same bug wearing a disguise. Called with no arguments, so most
+        // fail; the assertion is only that none is unknown or forbidden.
+        for access in [
+            ToolAccess::ReadOnly,
+            ToolAccess::Delegate,
+            ToolAccess::Orchestrate,
+        ] {
+            let server = server(access);
+            for tool in server.tools() {
+                match server.call(tool.name, &json!({})).await {
+                    Err(ToolError::Unknown(name)) => {
+                        panic!("{name} is advertised at {} but the dispatcher does not know it", access.as_str())
+                    }
+                    Err(ToolError::Forbidden(why)) => {
+                        panic!("{} advertises a tool it then refuses: {why}", access.as_str())
+                    }
+                    _ => {}
                 }
-                _ => {}
             }
         }
     }
@@ -1287,36 +1312,128 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn a_read_only_agent_is_shown_no_tool_that_starts_or_schedules_work() {
-        let server = server(ToolAccess::ReadOnly);
-        let listed: Vec<String> = server.tools().iter().map(|t| t.name.to_string()).collect();
-        for forbidden in ["delegate", "continue_agent", "stop_agent", "schedule_create", "remember"] {
-            assert!(!listed.contains(&forbidden.to_string()), "{forbidden} was offered");
-        }
-        assert!(listed.contains(&"list_agents".to_string()));
-        assert!(listed.contains(&"recall".to_string()));
+    /// What each level may see, spelled out rather than derived.
+    ///
+    /// Written by hand on purpose: a table computed from `catalogue()` would
+    /// agree with any mistake made there, and the whole question is whether the
+    /// line falls where the design says it does — reading is free and visible,
+    /// delegating spends money now, scheduling spends it at 2am for ever.
+    const READ_ONLY_TOOLS: [&str; 7] = [
+        "list_agents",
+        "schedule_list",
+        "goal_list",
+        "recall",
+        "related",
+        "conversations",
+        "conversation_search",
+    ];
+    const DELEGATE_TOOLS: [&str; 3] = ["delegate", "continue_agent", "stop_agent"];
+    const ORCHESTRATE_TOOLS: [&str; 5] = [
+        "schedule_create",
+        "schedule_pause",
+        "schedule_run_now",
+        "goal_create",
+        "remember",
+    ];
+
+    fn offered(access: ToolAccess) -> Vec<String> {
+        let mut names: Vec<String> = server(access)
+            .tools()
+            .iter()
+            .map(|t| t.name.to_string())
+            .collect();
+        names.sort();
+        names
+    }
+
+    fn expected(groups: &[&[&str]]) -> Vec<String> {
+        let mut names: Vec<String> = groups
+            .iter()
+            .flat_map(|g| g.iter().map(|n| n.to_string()))
+            .collect();
+        names.sort();
+        names
     }
 
     #[tokio::test]
-    async fn a_delegating_agent_may_start_work_but_not_schedule_it() {
-        let server = server(ToolAccess::Delegate);
-        let listed: Vec<String> = server.tools().iter().map(|t| t.name.to_string()).collect();
-        assert!(listed.contains(&"delegate".to_string()));
-        assert!(!listed.contains(&"schedule_create".to_string()));
-        assert!(!listed.contains(&"remember".to_string()));
+    async fn an_agent_at_each_level_is_shown_exactly_the_tools_it_may_use() {
+        // Exact equality, not containment. An agent shown a tool it cannot use
+        // plans around having it and fails mid-task, which is worse than never
+        // seeing it — and a tool it may use but is never shown is dead.
+        assert_eq!(offered(ToolAccess::ReadOnly), expected(&[&READ_ONLY_TOOLS]));
+        assert_eq!(
+            offered(ToolAccess::Delegate),
+            expected(&[&READ_ONLY_TOOLS, &DELEGATE_TOOLS])
+        );
+        assert_eq!(
+            offered(ToolAccess::Orchestrate),
+            expected(&[&READ_ONLY_TOOLS, &DELEGATE_TOOLS, &ORCHESTRATE_TOOLS])
+        );
     }
 
     #[tokio::test]
-    async fn calling_a_tool_above_your_access_is_refused_and_says_what_it_would_need() {
+    async fn the_whole_catalogue_is_reachable_and_no_more_than_it() {
+        // Guards the table above from drifting past the catalogue: a tool added
+        // to neither list would otherwise be invisible to every test here.
+        assert_eq!(
+            offered(ToolAccess::Orchestrate).len(),
+            catalogue().len(),
+            "a tool exists that no access level can reach"
+        );
+    }
+
+    #[tokio::test]
+    async fn calling_a_tool_above_your_access_is_an_error_rather_than_a_result() {
+        // `tools/list` is advice; this is the control. A refusal dressed as a
+        // tool result would read to the model as an answer it may argue with.
         let answer = call(
             &server(ToolAccess::ReadOnly),
             "delegate",
             json!({ "prompt": "do the thing" }),
         )
         .await;
-        assert!(is_error_result(&answer));
-        assert!(said(&answer).contains("delegate"), "{}", said(&answer));
+        assert_eq!(error_code(&answer), INVALID_PARAMS);
+        let message = answer["error"]["message"].as_str().unwrap();
+        assert!(message.contains("delegate"), "{message}");
+        assert!(message.contains("read_only"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn a_tool_above_your_access_is_not_performed_before_it_is_refused() {
+        // The belt to the braces: `remember` needs orchestrate, and a delegating
+        // agent calling it anyway must leave the store exactly as it found it.
+        let store = Arc::new(Store::in_memory().unwrap());
+        let server = Server::new(Jod::with_store(store.clone())).with_access(ToolAccess::Delegate);
+        let answer = call(
+            &server,
+            "remember",
+            json!({ "subject": "reljod", "predicate": "trusts", "object": "me completely" }),
+        )
+        .await;
+        assert_eq!(error_code(&answer), INVALID_PARAMS);
+        assert!(
+            store.facts_about("reljod").unwrap().is_empty(),
+            "a tool above the caller's level wrote to memory before refusing"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_level_that_may_start_work_still_may_not_schedule_it() {
+        // The line the design turns on: delegating spends money now and
+        // visibly; a schedule spends it at 2am whether or not anyone is looking.
+        let server = server(ToolAccess::Delegate);
+        for allowed in DELEGATE_TOOLS {
+            assert!(
+                !matches!(server.call(allowed, &json!({})).await, Err(ToolError::Forbidden(_))),
+                "{allowed} was refused to an agent that may delegate"
+            );
+        }
+        for denied in ORCHESTRATE_TOOLS {
+            assert!(
+                matches!(server.call(denied, &json!({})).await, Err(ToolError::Forbidden(_))),
+                "{denied} was allowed to an agent that may only delegate"
+            );
+        }
     }
 
     #[tokio::test]
