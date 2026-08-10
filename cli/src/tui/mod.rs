@@ -25,7 +25,7 @@ mod keys;
 mod ui;
 mod workspace;
 
-pub use app::{AgentLine, App, Entry, Overlay, PromptIntent};
+pub use app::{short_duration, AgentLine, App, Entry, Overlay, PromptIntent};
 pub use workspace::Workspace;
 
 use std::io;
@@ -758,17 +758,17 @@ fn on_workspace_key(app: &mut App, key: KeyEvent, viewport: usize) -> Option<Act
             return None;
         }
         KeyCode::Char('n') => return begin_new(app, ws),
-        KeyCode::Char('e') => {
+        KeyCode::Char('e') if is_editable(ws) => {
             return selected_label(app, ws).map(|what| Action::Pending {
                 verb: format!("edit {what}"),
                 needs: "the $EDITOR form ladder — tier 3 of the report's §5.4",
             })
         }
-        KeyCode::Char('x') => {
+        KeyCode::Char('x') if is_editable(ws) => {
             if let Some(what) = selected_label(app, ws) {
                 app.overlay = Overlay::Confirm {
                     verb: delete_verb(ws).to_string(),
-                    what: what.clone(),
+                    what,
                 };
             }
             return None;
@@ -793,6 +793,23 @@ fn on_workspace_key(app: &mut App, key: KeyEvent, viewport: usize) -> Option<Act
         Workspace::Team => on_team_key(app, key),
         Workspace::Chat | Workspace::MemoryGraph => None,
     }
+}
+
+/// The screens where editing and deleting mean something.
+///
+/// A run is not edited and an activity line is not deleted, so on those screens
+/// `e` and `x` fall through to the screen's own keys rather than offering a
+/// verb that cannot exist — which is the same rule that keeps `s` from
+/// pretending to stop a finished run.
+fn is_editable(ws: Workspace) -> bool {
+    matches!(
+        ws,
+        Workspace::Memory
+            | Workspace::Schedules
+            | Workspace::Goals
+            | Workspace::Hooks
+            | Workspace::Tasks
+    )
 }
 
 /// What `x` is called on each screen. "Forget" rather than "delete" for memory,
@@ -2610,6 +2627,21 @@ mod tests {
             matches!(&action, Some(Action::Pending { verb, .. }) if verb.contains("nightly-inbox")),
             "{action:?}"
         );
+        assert_eq!(app.overlay, Overlay::None);
+    }
+
+    /// A run is not edited and an activity line is not deleted, so the keys
+    /// fall through rather than offering a verb that cannot exist.
+    #[test]
+    fn edit_and_delete_do_nothing_on_the_screens_that_have_no_such_verb() {
+        let mut app = panel_with_agents();
+        assert_eq!(press(&mut app, KeyCode::Char('e')), None);
+        assert_eq!(app.overlay, Overlay::None);
+        assert_eq!(press(&mut app, KeyCode::Char('x')), None);
+        assert_eq!(app.overlay, Overlay::None, "and nothing asked to delete a run");
+
+        let mut app = with_activity();
+        press(&mut app, KeyCode::Char('x'));
         assert_eq!(app.overlay, Overlay::None);
     }
 
