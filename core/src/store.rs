@@ -648,6 +648,60 @@ const MIGRATIONS: &[(&str, &str)] = &[
       WHERE run_id IS NOT NULL AND run_seq IS NOT NULL;
     "#,
     ),
+    (
+        "0010_the_main_chat",
+        r#"
+    -- The one conversation that is always there.
+    --
+    -- Every other conversation is a thread about a task. This one is the desk
+    -- you sit at: it outlives every run, it is where instructions arrive, and
+    -- it never does the work itself — it decides who does.
+    --
+    -- A flag rather than a well-known id, because "which conversation is the
+    -- main one" is a fact about a row, and a magic id would make it a fact
+    -- about a constant that any migration could silently orphan.
+    ALTER TABLE conversations ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;
+
+    -- At most one. A second pinned chat is not a feature, it is a bug that
+    -- splits where your instructions land, and finding out later means
+    -- finding out by losing something.
+    CREATE UNIQUE INDEX ux_conversations_pinned ON conversations(pinned)
+      WHERE pinned = 1;
+
+    -- When the main chat last heard from a person.
+    --
+    -- Separate from `updated_at_ms`, which moves whenever a delegated run
+    -- writes back. Compaction is triggered by *your* silence, not by the
+    -- machine's chatter: a chat that has been quiet for a day should be
+    -- compacted even though six agents wrote into it overnight.
+    ALTER TABLE conversations ADD COLUMN last_human_ms INTEGER;
+
+    -- What the orchestrator decided, and what it did about it.
+    --
+    -- Its own table rather than a message role, because a routing decision is
+    -- not a turn in the conversation — it is the record of a delegation, and
+    -- the question asked of it later is "what is running because of what I
+    -- said", which is a join and not a read.
+    CREATE TABLE delegations (
+      id             INTEGER PRIMARY KEY,
+      conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+      -- The message that asked for this.
+      message_id     INTEGER REFERENCES messages(id) ON DELETE SET NULL,
+      -- delegate_new | delegate_existing | schedule | goal | reply | refused
+      kind           TEXT NOT NULL,
+      -- Whichever of these the decision names.
+      run_id         TEXT,
+      schedule_name  TEXT,
+      goal_name      TEXT,
+      -- Why this target rather than another. Kept because a router that
+      -- silently picks is one nobody can correct.
+      reason         TEXT NOT NULL DEFAULT '',
+      at_ms          INTEGER NOT NULL
+    );
+    CREATE INDEX ix_delegations_conversation
+      ON delegations(conversation_id, at_ms DESC);
+    "#,
+    ),
 ];
 
 /// Who asserted a fact. Kept out of the fact's text so that content Jod

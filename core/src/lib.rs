@@ -29,6 +29,7 @@ pub mod event;
 pub mod harness;
 pub mod ledger;
 pub mod monitor;
+pub mod orchestrator;
 pub mod paths;
 pub mod proc;
 pub mod runner;
