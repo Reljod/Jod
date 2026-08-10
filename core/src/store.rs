@@ -20,6 +20,7 @@
 //! Markdown stays the source of truth for prose; this database is an index over
 //! it and can be deleted and rebuilt.
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -209,6 +210,82 @@ const MIGRATIONS: &[(&str, &str)] = &[
     DROP TABLE runs;
     ALTER TABLE runs_new RENAME TO runs;
     CREATE INDEX ix_runs_created ON runs(created_at_ms DESC);
+    "#,
+    ),
+    (
+        "0004_memory_graph",
+        r#"
+    -- A traversable index over `facts`. Not a second source of truth: both
+    -- tables can be dropped and rebuilt by rescanning `facts`, which is the
+    -- same property `facts_fts` already has and the reason markdown stays
+    -- authoritative.
+    --
+    -- Measured in `research/sqlite-graph-2026`: plain tables plus a recursive
+    -- CTE answer a 3-hop neighbourhood over a million edges in 0.37 ms p50.
+    -- No SQLite graph extension exists that is maintained, permissively
+    -- licensed *and* statically linkable into a Rust binary, so the extension
+    -- the question asked for is not purchasable at any price — and at these
+    -- numbers it would buy nothing.
+
+    -- A thing facts talk about. Interned once so traversal compares integers
+    -- rather than repeating the subject text on every edge.
+    CREATE TABLE entities (
+      id            INTEGER PRIMARY KEY,
+      -- The same hard partition `facts` uses, applied *before* traversal and
+      -- never as a ranking signal: measured leaking 79% cross-domain as a
+      -- boost, 0% as a filter.
+      scope         TEXT NOT NULL DEFAULT 'default',
+      kind          TEXT NOT NULL DEFAULT 'thing',
+      name          TEXT NOT NULL,
+      first_seen_ms INTEGER NOT NULL,
+      last_seen_ms  INTEGER NOT NULL,
+      UNIQUE(scope, kind, name)
+    );
+
+    -- One edge per fact: `subject --predicate--> object`, which is the shape
+    -- `facts` already stores. This table only makes it walkable.
+    CREATE TABLE relations (
+      id             INTEGER PRIMARY KEY,
+      scope          TEXT NOT NULL DEFAULT 'default',
+      src            INTEGER NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+      dst            INTEGER NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+      predicate      TEXT NOT NULL,
+      weight         REAL NOT NULL DEFAULT 1.0,
+      -- The fact this edge came from. `ON DELETE CASCADE` is what makes
+      -- `forget` reach the graph: destroying every version of a fact destroys
+      -- its edges with it. Without this, a forgotten thing stays traversable
+      -- and "Jod forgot that" stops meaning "Jod says it forgot that".
+      fact_id        INTEGER NOT NULL REFERENCES facts(id) ON DELETE CASCADE,
+      -- Milliseconds, not the ISO text `facts` keeps. A derived index may pick
+      -- its own representation, and an integer comparison inside a recursive
+      -- step is the difference between pruning an edge and parsing it.
+      valid_from_ms  INTEGER,
+      valid_to_ms    INTEGER,
+      recorded_at_ms INTEGER NOT NULL
+    );
+
+    -- Both are *covering* for one traversal step: the recursive term reads
+    -- only these five columns, so k-hop never touches the table itself. The
+    -- column order is the query's order — scope partitions first, then the
+    -- endpoint, then validity, then the far end.
+    CREATE INDEX ix_relations_out
+      ON relations(scope, src, valid_to_ms, valid_from_ms, dst);
+    CREATE INDEX ix_relations_in
+      ON relations(scope, dst, valid_to_ms, valid_from_ms, src);
+
+    -- Not optional, and not obvious. Without it the hybrid query's FTS5-seed
+    -- join degenerates to a full scan of `relations` per seed row: measured
+    -- 533 ms against 6.5 ms at 10k edges, an 82x difference from one index.
+    CREATE INDEX ix_relations_fact ON relations(fact_id);
+
+    -- Communities are recomputed by a periodic job, never at query time: one
+    -- label-propagation pass over 100k edges measured 46.8 s.
+    CREATE TABLE entity_community (
+      entity_id      INTEGER PRIMARY KEY REFERENCES entities(id) ON DELETE CASCADE,
+      community      INTEGER NOT NULL,
+      computed_at_ms INTEGER NOT NULL
+    );
+    CREATE INDEX ix_entity_community ON entity_community(community);
     "#,
     ),
 ];
@@ -922,6 +999,13 @@ impl Store {
                   WHERE id = ?1 AND valid_to IS NULL",
                 params![old_id, iso_now(), new_id],
             )?;
+            // Close the superseded belief's edge too, or a traversal would keep
+            // walking through something Jod has stopped believing.
+            tx.execute(
+                "UPDATE relations SET valid_to_ms = ?2
+                  WHERE fact_id = ?1 AND valid_to_ms IS NULL",
+                params![old_id, now_ms()],
+            )?;
             Ok(new_id)
         })
     }
@@ -991,6 +1075,378 @@ impl Store {
             Ok(versions)
         })
     }
+
+    // ---- the memory graph -----------------------------------------------
+
+    /// Everything within `depth` hops of `name`, nearest first.
+    ///
+    /// Undirected, because the question a person asks is "what is related to
+    /// this", which does not care which way the fact was phrased. That needs
+    /// *two* recursive terms, one per index — a single
+    /// `ON (src = node OR dst = node)` defeats both and falls back to a scan.
+    ///
+    /// `at_ms` selects the instant to believe: `now` for what is true, any past
+    /// instant for what Jod believed then. The predicate sits inside the
+    /// recursive step so an edge that was not valid then is never expanded —
+    /// and because that prunes about a third of the edges, the filtered
+    /// traversal measured *faster* than the unfiltered one.
+    pub fn neighbourhood(
+        &self,
+        scope: &str,
+        name: &str,
+        depth: u32,
+        at_ms: i64,
+    ) -> Result<Vec<Neighbour>> {
+        let Some(start) = self.entity_id(scope, name)? else {
+            return Ok(vec![]);
+        };
+        let depth = depth.clamp(1, MAX_HOPS) as i64;
+        let conn = self.conn.lock().expect("store lock poisoned");
+        // `UNION` rather than `UNION ALL` is the whole trick: it deduplicates,
+        // so a cycle terminates without a visited table.
+        let mut stmt = conn.prepare(
+            "WITH RECURSIVE reach(node, depth) AS (
+               SELECT ?1, 0
+               UNION
+               SELECT r.dst, x.depth + 1
+                 FROM reach x JOIN relations r ON r.src = x.node AND r.scope = ?3
+                WHERE x.depth < ?2
+                  AND (r.valid_to_ms   IS NULL OR r.valid_to_ms   > ?4)
+                  AND (r.valid_from_ms IS NULL OR r.valid_from_ms <= ?4)
+               UNION
+               SELECT r.src, x.depth + 1
+                 FROM reach x JOIN relations r ON r.dst = x.node AND r.scope = ?3
+                WHERE x.depth < ?2
+                  AND (r.valid_to_ms   IS NULL OR r.valid_to_ms   > ?4)
+                  AND (r.valid_from_ms IS NULL OR r.valid_from_ms <= ?4)
+             )
+             SELECT e.id, e.name, e.kind, MIN(reach.depth) AS hops
+               FROM reach JOIN entities e ON e.id = reach.node
+              WHERE reach.node <> ?1
+              GROUP BY e.id
+              ORDER BY hops, e.name",
+        )?;
+        let rows = stmt.query_map(params![start, depth, scope, at_ms], |r| {
+            Ok(Neighbour {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                kind: r.get(2)?,
+                hops: r.get(3)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// How two entities are connected, as the shortest chain of names.
+    ///
+    /// A bidirectional breadth-first search in Rust, one indexed query per
+    /// level, expanding whichever side is smaller. The obvious alternative —
+    /// threading the route through a recursive CTE as a string and using it as
+    /// a per-branch visited set — is exponential: it measured 7,983 ms against
+    /// 81 ms here, and hit a ten-second ceiling on 6 of 20 queries.
+    pub fn path_between(
+        &self,
+        scope: &str,
+        from: &str,
+        to: &str,
+        max_depth: u32,
+    ) -> Result<Option<Vec<String>>> {
+        let (Some(start), Some(goal)) = (self.entity_id(scope, from)?, self.entity_id(scope, to)?)
+        else {
+            return Ok(None);
+        };
+        if start == goal {
+            return Ok(Some(vec![from.to_string()]));
+        }
+
+        // Each side maps a reached node to the node it was reached from, so a
+        // meeting point can be unwound into a route without a second search.
+        let mut seen_fwd: HashMap<i64, Option<i64>> = HashMap::from([(start, None)]);
+        let mut seen_bwd: HashMap<i64, Option<i64>> = HashMap::from([(goal, None)]);
+        let mut frontier_fwd = vec![start];
+        let mut frontier_bwd = vec![goal];
+
+        for _ in 0..max_depth.clamp(1, MAX_PATH_DEPTH) {
+            // Expand the cheaper side. On a scale-free graph one frontier is
+            // routinely orders of magnitude larger than the other.
+            let forward = frontier_fwd.len() <= frontier_bwd.len();
+            let (frontier, seen, other) = if forward {
+                (&mut frontier_fwd, &mut seen_fwd, &seen_bwd)
+            } else {
+                (&mut frontier_bwd, &mut seen_bwd, &seen_fwd)
+            };
+
+            let mut next = Vec::new();
+            for (node, reached) in self.step(scope, frontier, forward)? {
+                if seen.contains_key(&reached) {
+                    continue;
+                }
+                seen.insert(reached, Some(node));
+                if other.contains_key(&reached) {
+                    return Ok(Some(self.route(&seen_fwd, &seen_bwd, reached)?));
+                }
+                next.push(reached);
+            }
+            if next.is_empty() {
+                return Ok(None);
+            }
+            *frontier = next;
+        }
+        Ok(None)
+    }
+
+    /// One breadth-first level: every node adjacent to `frontier`.
+    ///
+    /// Chunked, because SQLite's bound-parameter ceiling is 32,766 and a hub's
+    /// neighbourhood can exceed it — a limit that only shows up on the graphs
+    /// that matter.
+    fn step(&self, scope: &str, frontier: &[i64], forward: bool) -> Result<Vec<(i64, i64)>> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        let (near, far) = if forward { ("src", "dst") } else { ("dst", "src") };
+        let mut found = Vec::new();
+        for chunk in frontier.chunks(512) {
+            let holes = std::iter::repeat_n("?", chunk.len()).collect::<Vec<_>>().join(",");
+            let sql = format!(
+                "SELECT r.{near}, r.{far} FROM relations r
+                  WHERE r.scope = ? AND r.{near} IN ({holes}) AND r.valid_to_ms IS NULL"
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let mut binds: Vec<&dyn rusqlite::ToSql> = vec![&scope];
+            binds.extend(chunk.iter().map(|n| n as &dyn rusqlite::ToSql));
+            let rows = stmt.query_map(binds.as_slice(), |r| Ok((r.get(0)?, r.get(1)?)))?;
+            found.extend(rows.collect::<std::result::Result<Vec<_>, _>>()?);
+        }
+        Ok(found)
+    }
+
+    /// Unwind both halves of a bidirectional search through their meeting node.
+    fn route(
+        &self,
+        fwd: &HashMap<i64, Option<i64>>,
+        bwd: &HashMap<i64, Option<i64>>,
+        meeting: i64,
+    ) -> Result<Vec<String>> {
+        let mut left = vec![meeting];
+        while let Some(Some(prev)) = fwd.get(&left[left.len() - 1]).copied() {
+            left.push(prev);
+        }
+        left.reverse();
+        let mut at = meeting;
+        while let Some(Some(next)) = bwd.get(&at).copied() {
+            left.push(next);
+            at = next;
+        }
+        self.names(&left)
+    }
+
+    fn names(&self, ids: &[i64]) -> Result<Vec<String>> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        let mut stmt = conn.prepare("SELECT name FROM entities WHERE id = ?1")?;
+        ids.iter()
+            .map(|id| Ok(stmt.query_row(params![id], |r| r.get(0))?))
+            .collect()
+    }
+
+    /// Text recall, then one graph hop, ranked together.
+    ///
+    /// BM25 picks the entities the words point at and the graph supplies what
+    /// they connect to; scope partitions before either. The second hop is what
+    /// the prior retrieval research measured as worth 0.00 → 0.42 on multi-hop
+    /// questions, and it costs about 1.3x the text query alone.
+    pub fn recall_expanded(
+        &self,
+        scope: &str,
+        query: &str,
+        hops: u32,
+        limit: usize,
+    ) -> Result<Vec<Neighbour>> {
+        let Some(expr) = fts_query(query) else {
+            return Ok(vec![]);
+        };
+        let hops = hops.clamp(0, MAX_HOPS) as i64;
+        let conn = self.conn.lock().expect("store lock poisoned");
+        let mut stmt = conn.prepare(
+            "WITH seeds AS (
+               SELECT r.src AS node, bm25(facts_fts) AS rank
+                 FROM facts_fts
+                 JOIN facts f     ON f.id = facts_fts.rowid
+                 JOIN relations r ON r.fact_id = f.id
+                WHERE facts_fts MATCH ?1
+                  AND f.scope = ?2
+                  AND f.valid_to IS NULL
+                ORDER BY rank LIMIT 20
+             ),
+             reach(node, depth, rank) AS (
+               SELECT node, 0, rank FROM seeds
+               UNION
+               SELECT r.dst, x.depth + 1, x.rank
+                 FROM reach x JOIN relations r ON r.src = x.node AND r.scope = ?2
+                WHERE x.depth < ?3 AND r.valid_to_ms IS NULL
+             )
+             SELECT e.id, e.name, e.kind, MIN(reach.depth) AS hops
+               FROM reach JOIN entities e ON e.id = reach.node
+              GROUP BY e.id
+              -- A hop away is worth less than a direct hit, but not nothing.
+              ORDER BY MIN(reach.rank) / (1.0 + MIN(reach.depth)), e.name
+              LIMIT ?4",
+        )?;
+        let rows = stmt.query_map(params![expr, scope, hops, limit as i64], |r| {
+            Ok(Neighbour {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                kind: r.get(2)?,
+                hops: r.get(3)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    fn entity_id(&self, scope: &str, name: &str) -> Result<Option<i64>> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        Ok(conn
+            .query_row(
+                "SELECT id FROM entities WHERE scope = ?1 AND name = ?2",
+                params![scope, name],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    /// How many entities and relations the index holds.
+    pub fn graph_size(&self) -> Result<(usize, usize)> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        let entities: i64 = conn.query_row("SELECT COUNT(*) FROM entities", [], |r| r.get(0))?;
+        let relations: i64 = conn.query_row("SELECT COUNT(*) FROM relations", [], |r| r.get(0))?;
+        Ok((entities as usize, relations as usize))
+    }
+
+    /// Throw the graph away and fold it back out of `facts`.
+    ///
+    /// The index is derived, so this must always be possible — it is what makes
+    /// "the graph drifted" a repairable state rather than a corrupt one.
+    pub fn rebuild_graph(&self) -> Result<usize> {
+        self.write(|tx| {
+            tx.execute("DELETE FROM relations", [])?;
+            tx.execute("DELETE FROM entities", [])?;
+            let facts: Vec<(i64, String, String, String, String, Option<String>, Option<String>)> = {
+                let mut stmt = tx.prepare(
+                    "SELECT id, scope, subject, predicate, object, valid_from, valid_to
+                       FROM facts ORDER BY id",
+                )?;
+                let rows = stmt.query_map([], |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                        r.get(6)?,
+                    ))
+                })?;
+                rows.collect::<std::result::Result<Vec<_>, _>>()?
+            };
+            let total = facts.len();
+            for (id, scope, subject, predicate, object, valid_from, valid_to) in facts {
+                link(
+                    tx, id, &scope, &subject, &predicate, &object,
+                    valid_from.as_deref(), valid_to.as_deref(),
+                )?;
+            }
+            Ok(total)
+        })
+    }
+}
+
+/// How far a traversal may go.
+///
+/// Not a performance limit — undirected 3-hop is 22 ms at a million edges. A
+/// product one: four undirected hops from a well-connected entity returned 20%
+/// of every node in the database, and a neighbourhood that size is not a
+/// retrieval result, it is the graph.
+const MAX_HOPS: u32 = 3;
+
+/// Paths may run longer than a neighbourhood, because a route is one chain
+/// rather than an expanding front.
+const MAX_PATH_DEPTH: u32 = 6;
+
+/// An entity reached from another, and how far away it was.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Neighbour {
+    pub id: i64,
+    pub name: String,
+    pub kind: String,
+    pub hops: i64,
+}
+
+/// Intern an entity, returning its id.
+fn intern(tx: &rusqlite::Transaction, scope: &str, name: &str) -> Result<i64> {
+    let at = now_ms();
+    tx.execute(
+        "INSERT INTO entities (scope, kind, name, first_seen_ms, last_seen_ms)
+              VALUES (?1, 'thing', ?2, ?3, ?3)
+         ON CONFLICT(scope, kind, name)
+              DO UPDATE SET last_seen_ms = ?3",
+        params![scope, name, at],
+    )?;
+    Ok(tx.query_row(
+        "SELECT id FROM entities WHERE scope = ?1 AND kind = 'thing' AND name = ?2",
+        params![scope, name],
+        |r| r.get(0),
+    )?)
+}
+
+/// Add one fact to the graph as a single edge between its subject and object.
+fn link(
+    tx: &rusqlite::Transaction,
+    fact_id: i64,
+    scope: &str,
+    subject: &str,
+    predicate: &str,
+    object: &str,
+    valid_from: Option<&str>,
+    valid_to: Option<&str>,
+) -> Result<()> {
+    // A fact with no subject or object is not a relationship between two
+    // things, so it stays a fact and never becomes an edge.
+    if subject.trim().is_empty() || object.trim().is_empty() {
+        return Ok(());
+    }
+    let src = intern(tx, scope, subject)?;
+    let dst = intern(tx, scope, object)?;
+    tx.execute(
+        "INSERT INTO relations
+           (scope, src, dst, predicate, fact_id, valid_from_ms, valid_to_ms, recorded_at_ms)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            scope,
+            src,
+            dst,
+            predicate,
+            fact_id,
+            valid_from.and_then(iso_to_ms),
+            valid_to.and_then(iso_to_ms),
+            now_ms()
+        ],
+    )?;
+    Ok(())
+}
+
+/// An ISO instant as epoch milliseconds.
+///
+/// `facts` stores validity as text because that is what a human writes; the
+/// graph stores it as an integer because a recursive step compares it on every
+/// edge. A date with no time is taken at midnight UTC, which is what someone
+/// writing `2026-08-10` means.
+fn iso_to_ms(text: &str) -> Option<i64> {
+    let text = text.trim();
+    if let Ok(t) = chrono::DateTime::parse_from_rfc3339(text) {
+        return Some(t.timestamp_millis());
+    }
+    chrono::NaiveDate::parse_from_str(text, "%Y-%m-%d")
+        .ok()
+        .and_then(|d| d.and_hms_opt(0, 0, 0))
+        .map(|t| t.and_utc().timestamp_millis())
 }
 
 fn insert_fact(tx: &rusqlite::Transaction, fact: &NewFact) -> Result<i64> {
@@ -1009,7 +1465,20 @@ fn insert_fact(tx: &rusqlite::Transaction, fact: &NewFact) -> Result<i64> {
             now_ms()
         ],
     )?;
-    Ok(tx.last_insert_rowid())
+    let id = tx.last_insert_rowid();
+    // In the same transaction as the fact, so the graph can never be missing an
+    // edge for a fact that committed.
+    link(
+        tx,
+        id,
+        &fact.scope,
+        &fact.subject,
+        &fact.predicate,
+        &fact.object,
+        fact.valid_from.as_deref(),
+        None,
+    )?;
+    Ok(id)
 }
 
 fn row_to_fact(r: &rusqlite::Row) -> rusqlite::Result<Fact> {
@@ -2030,5 +2499,308 @@ mod tests {
             Some("\"what\" OR \"s\" OR \"up\"".into())
         );
         assert_eq!(fts_query("  "), None);
+    }
+
+    // ---- the memory graph ----
+
+    /// Everything reachable from `name`, as bare names — what the assertions
+    /// below actually care about.
+    fn around(s: &Store, name: &str, depth: u32) -> Vec<String> {
+        s.neighbourhood(DEFAULT_SCOPE, name, depth, now_ms())
+            .unwrap()
+            .into_iter()
+            .map(|n| n.name)
+            .collect()
+    }
+
+    /// Remembering is the only thing a caller does; the graph has to appear on
+    /// its own or it will drift the first time someone forgets to call it.
+    #[test]
+    fn remembering_a_fact_makes_both_of_its_ends_walkable() {
+        let s = store();
+        s.remember(NewFact::new("reljod", "prefers", "linear")).unwrap();
+        assert_eq!(s.graph_size().unwrap(), (2, 1));
+        assert_eq!(around(&s, "reljod", 1), vec!["linear".to_string()]);
+        // Undirected: the question "what relates to linear" must find reljod,
+        // even though the fact was phrased the other way round.
+        assert_eq!(around(&s, "linear", 1), vec!["reljod".to_string()]);
+    }
+
+    /// The whole point of a graph rather than a list: reaching something no
+    /// single fact mentions alongside the thing you asked about.
+    #[test]
+    fn a_second_hop_reaches_what_no_single_fact_says() {
+        let s = store();
+        s.remember(NewFact::new("reljod", "uses", "jod")).unwrap();
+        s.remember(NewFact::new("jod", "runs-on", "jod-cloud")).unwrap();
+
+        assert_eq!(around(&s, "reljod", 1), vec!["jod".to_string()]);
+        let two = around(&s, "reljod", 2);
+        assert!(two.contains(&"jod-cloud".to_string()), "got {two:?}");
+    }
+
+    /// Nearest first, so a caller taking the first N gets the closest N.
+    #[test]
+    fn neighbours_come_back_nearest_first() {
+        let s = store();
+        s.remember(NewFact::new("a", "to", "b")).unwrap();
+        s.remember(NewFact::new("b", "to", "c")).unwrap();
+        let hops: Vec<i64> = s
+            .neighbourhood(DEFAULT_SCOPE, "a", 3, now_ms())
+            .unwrap()
+            .into_iter()
+            .map(|n| n.hops)
+            .collect();
+        assert_eq!(hops, vec![1, 2]);
+    }
+
+    /// Four undirected hops from a well-connected entity returned a fifth of
+    /// the whole database. The cap is a product decision, so it is enforced
+    /// rather than merely documented.
+    #[test]
+    fn traversal_depth_is_capped_however_much_is_asked_for() {
+        let s = store();
+        for (a, b) in [("n0", "n1"), ("n1", "n2"), ("n2", "n3"), ("n3", "n4")] {
+            s.remember(NewFact::new(a, "to", b)).unwrap();
+        }
+        let far = around(&s, "n0", 99);
+        assert!(far.contains(&"n3".to_string()), "three hops is allowed");
+        assert!(
+            !far.contains(&"n4".to_string()),
+            "four hops must not be reachable: {far:?}"
+        );
+    }
+
+    /// Measured leaking 79% of the time when scope was a ranking boost, and 0%
+    /// as a hard partition. A traversal must not be the hole that reopens it.
+    #[test]
+    fn a_traversal_never_leaves_the_scope_it_started_in() {
+        let s = store();
+        s.remember(NewFact::new("reljod", "owes", "the bank").in_scope("finance"))
+            .unwrap();
+        s.remember(NewFact::new("reljod", "assigned", "ENG-1").in_scope("tasks"))
+            .unwrap();
+
+        let finance = s
+            .neighbourhood("finance", "reljod", 3, now_ms())
+            .unwrap()
+            .into_iter()
+            .map(|n| n.name)
+            .collect::<Vec<_>>();
+        assert_eq!(finance, vec!["the bank".to_string()]);
+        assert!(
+            !finance.contains(&"ENG-1".to_string()),
+            "a tasks fact must not answer a finance question"
+        );
+    }
+
+    /// A superseded belief is not a current one, so walking through it would
+    /// let the graph assert what the fact store has already retracted.
+    #[test]
+    fn superseding_a_fact_stops_the_traversal_walking_through_it() {
+        let s = store();
+        let old = s.remember(NewFact::new("reljod", "lives-in", "manila")).unwrap();
+        assert_eq!(around(&s, "reljod", 1), vec!["manila".to_string()]);
+
+        s.supersede(old, NewFact::new("reljod", "lives-in", "singapore"))
+            .unwrap();
+
+        let now = around(&s, "reljod", 1);
+        assert_eq!(now, vec!["singapore".to_string()]);
+        assert!(!now.contains(&"manila".to_string()), "got {now:?}");
+    }
+
+    /// "Jod forgot that" and "Jod says it forgot that" have to be the same
+    /// thing. Head-only tombstoning scored 0.00 on historical recall in the
+    /// prior research; a surviving edge is the same defect wearing a hat.
+    #[test]
+    fn forgetting_a_fact_destroys_its_edge_too() {
+        let s = store();
+        s.remember(NewFact::new("reljod", "banks-with", "acme")).unwrap();
+        assert_eq!(s.graph_size().unwrap().1, 1);
+
+        s.forget(DEFAULT_SCOPE, "reljod", "banks-with").unwrap();
+
+        assert_eq!(s.graph_size().unwrap().1, 0, "the edge must go with the fact");
+        assert!(around(&s, "reljod", 2).is_empty());
+    }
+
+    /// The reason validity is stored on the edge: asking what Jod believed last
+    /// year has to answer with last year's graph.
+    ///
+    /// Anchored to explicit dates rather than the wall clock. Reading `now_ms()`
+    /// twice and comparing gives a test that passes or fails on whether two
+    /// statements land in the same millisecond, which is a coin toss rather than
+    /// an assertion.
+    #[test]
+    fn a_traversal_can_be_asked_what_was_true_at_a_past_instant() {
+        let s = store();
+        let mut moved_in = NewFact::new("reljod", "lives-in", "manila");
+        moved_in.valid_from = Some("2020-01-01".into());
+        let old = s.remember(moved_in).unwrap();
+
+        let mut moved_out = NewFact::new("reljod", "lives-in", "singapore");
+        moved_out.valid_from = Some("2024-01-01".into());
+        s.supersede(old, moved_out).unwrap();
+
+        let at = |when: &str| {
+            s.neighbourhood(DEFAULT_SCOPE, "reljod", 1, iso_to_ms(when).unwrap())
+                .unwrap()
+                .into_iter()
+                .map(|n| n.name)
+                .collect::<Vec<_>>()
+        };
+
+        // In 2022 he had moved in but not out.
+        assert_eq!(at("2022-06-01"), vec!["manila".to_string()]);
+        // Before he ever lived there, neither edge had started.
+        assert!(at("2019-01-01").is_empty());
+        // Today only the current belief stands: the old edge was closed by
+        // `supersede`, and closing is what stops the traversal walking it.
+        assert_eq!(
+            s.neighbourhood(DEFAULT_SCOPE, "reljod", 1, now_ms())
+                .unwrap()
+                .into_iter()
+                .map(|n| n.name)
+                .collect::<Vec<_>>(),
+            vec!["singapore".to_string()]
+        );
+    }
+
+    /// `UNION` rather than `UNION ALL` is what terminates a cycle without a
+    /// visited table. A graph with a loop must not hang.
+    #[test]
+    fn a_cycle_terminates_rather_than_looping_forever() {
+        let s = store();
+        s.remember(NewFact::new("a", "to", "b")).unwrap();
+        s.remember(NewFact::new("b", "to", "c")).unwrap();
+        s.remember(NewFact::new("c", "to", "a")).unwrap();
+
+        let all = around(&s, "a", 3);
+        assert!(all.contains(&"b".to_string()));
+        assert!(all.contains(&"c".to_string()));
+        assert!(!all.contains(&"a".to_string()), "the start is not its own neighbour");
+    }
+
+    /// "How are these two connected" — the question a list of facts cannot
+    /// answer at all.
+    #[test]
+    fn a_path_between_two_entities_is_the_chain_that_links_them() {
+        let s = store();
+        s.remember(NewFact::new("reljod", "uses", "jod")).unwrap();
+        s.remember(NewFact::new("jod", "runs-on", "jod-cloud")).unwrap();
+
+        let route = s
+            .path_between(DEFAULT_SCOPE, "reljod", "jod-cloud", 4)
+            .unwrap()
+            .expect("they are connected");
+        assert_eq!(
+            route,
+            vec![
+                "reljod".to_string(),
+                "jod".to_string(),
+                "jod-cloud".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn two_unconnected_entities_have_no_path() {
+        let s = store();
+        s.remember(NewFact::new("a", "to", "b")).unwrap();
+        s.remember(NewFact::new("y", "to", "z")).unwrap();
+        assert_eq!(s.path_between(DEFAULT_SCOPE, "a", "z", 4).unwrap(), None);
+    }
+
+    #[test]
+    fn a_path_to_something_unknown_is_none_rather_than_an_error() {
+        let s = store();
+        s.remember(NewFact::new("a", "to", "b")).unwrap();
+        assert_eq!(s.path_between(DEFAULT_SCOPE, "a", "nowhere", 4).unwrap(), None);
+        assert!(s.neighbourhood(DEFAULT_SCOPE, "nowhere", 2, now_ms()).unwrap().is_empty());
+    }
+
+    /// The graph is an index, not a source of truth. If it cannot be rebuilt
+    /// from `facts` alone then it has become a second place where memory lives.
+    #[test]
+    fn the_graph_can_be_thrown_away_and_rebuilt_from_the_facts() {
+        let s = store();
+        s.remember(NewFact::new("reljod", "uses", "jod")).unwrap();
+        s.remember(NewFact::new("jod", "runs-on", "jod-cloud")).unwrap();
+        let before = s.graph_size().unwrap();
+
+        assert_eq!(s.rebuild_graph().unwrap(), 2);
+
+        assert_eq!(s.graph_size().unwrap(), before);
+        assert!(around(&s, "reljod", 2).contains(&"jod-cloud".to_string()));
+    }
+
+    /// Text finds the seed, the graph supplies the second hop. The prior
+    /// research measured that hop as worth 0.00 → 0.42 on multi-hop questions.
+    #[test]
+    fn expanded_recall_returns_the_match_and_what_it_connects_to() {
+        let s = store();
+        s.remember(NewFact::new("reljod", "uses", "jod")).unwrap();
+        s.remember(NewFact::new("jod", "runs-on", "jod-cloud")).unwrap();
+
+        let found: Vec<String> = s
+            .recall_expanded(DEFAULT_SCOPE, "reljod", 2, 10)
+            .unwrap()
+            .into_iter()
+            .map(|n| n.name)
+            .collect();
+        assert!(found.contains(&"jod".to_string()), "got {found:?}");
+        assert!(
+            found.contains(&"jod-cloud".to_string()),
+            "the second hop is the point: {found:?}"
+        );
+    }
+
+    #[test]
+    fn expanded_recall_finds_nothing_for_an_unrelated_query() {
+        let s = store();
+        s.remember(NewFact::new("reljod", "uses", "jod")).unwrap();
+        assert!(s.recall_expanded(DEFAULT_SCOPE, "kangaroo", 2, 10).unwrap().is_empty());
+    }
+
+    /// A fact with nothing on one end is not a relationship between two things,
+    /// and inventing an empty entity for it would put a hub in the graph that
+    /// every traversal runs through.
+    #[test]
+    fn a_fact_with_an_empty_end_never_becomes_an_edge() {
+        let s = store();
+        s.remember(NewFact::new("reljod", "notes", "")).unwrap();
+        assert_eq!(s.graph_size().unwrap(), (0, 0));
+        // The fact itself is still remembered and still recallable.
+        assert_eq!(s.facts_about("reljod").unwrap().len(), 1);
+    }
+
+    /// The same entity named by two different facts is one node, or the graph
+    /// is a pile of disconnected pairs and no traversal ever reaches anything.
+    #[test]
+    fn an_entity_named_twice_is_interned_once() {
+        let s = store();
+        s.remember(NewFact::new("reljod", "uses", "jod")).unwrap();
+        s.remember(NewFact::new("reljod", "owns", "jod-cloud")).unwrap();
+        let (entities, relations) = s.graph_size().unwrap();
+        assert_eq!((entities, relations), (3, 2), "reljod is one node, not two");
+    }
+
+    /// Scope is part of the identity, so the same name in two domains is two
+    /// nodes — which is what stops a traversal crossing between them.
+    #[test]
+    fn the_same_name_in_two_scopes_is_two_different_entities() {
+        let s = store();
+        s.remember(NewFact::new("budget", "is", "40").in_scope("finance")).unwrap();
+        s.remember(NewFact::new("budget", "is", "tight").in_scope("tasks")).unwrap();
+        assert_eq!(s.graph_size().unwrap().0, 4);
+    }
+
+    #[test]
+    fn an_iso_instant_is_read_as_a_date_or_a_full_timestamp() {
+        assert_eq!(iso_to_ms("1970-01-01"), Some(0));
+        assert_eq!(iso_to_ms("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(iso_to_ms("1970-01-02"), Some(86_400_000));
+        assert_eq!(iso_to_ms("not a date"), None);
     }
 }

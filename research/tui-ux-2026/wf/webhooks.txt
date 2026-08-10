@@ -1,0 +1,30 @@
+┌─ webhooks · 6 · 5 armed · 1 failing · 214 deliveries all time ───────────────────────────────────┐
+│    name             repo                event                        runs        24h  last       │
+│    ──────────────────────────────────────────────────────────────────────────────────────────    │
+│  ▸ ● pr-opened      Reljod/Jod          pull_request.opened          review-pr    18   2m  ✓     │
+│    ● ci-failed      Reljod/Jod          workflow_run.completed ✗     triage-ci     3  41m  ✓     │
+│    ● issue-labeled  Reljod/Jod          issues.labeled [jod]         plan-issue    6   4h  ✓     │
+│    ● review-asked   Reljod/Jod          pull_request.review_req      review-pr    11   1h  ✓     │
+│    ○ push-main      Reljod/jod-cloud    push refs/heads/main         deploy-vps    0   —   —     │
+│    ✗ release-cut    Reljod/Jod          release.published            announce      1   2d  ✗     │
+│                                                                                                  │
+│    ──────────────────────────────────────────────────────────────────────────────────────────    │
+│    pr-opened                                              created 2026-07-14 · 214 deliveries    │
+│                                                                                                  │
+│    endpoint   https://jod.reljod.dev/hooks/gh/pr-opened          secret  ✓ verified 2m ago       │
+│    match      event = pull_request  ·  action = opened  ·  base = main  ·  draft = false         │
+│    runs       review-pr   Claude Code · ~/repo/Jod · permission: plan · budget $1.50             │
+│    prompt     Review PR #{{number}} "{{title}}" by {{author}} against REVIEW.md. Veto only.      │
+│    policy     dedupe by delivery id · 1 run per PR at a time · queue depth 4 · retry 3×          │
+│                                                                                                  │
+│    deliveries 16:42  8f2a1c  PR #212 port the parser        ✓ 202  → a3f91c22  running           │
+│               15:10  71b93e  PR #211 bump versions          ✓ 202  → 3b7e6612  ✓ clear           │
+│               11:58  2c0dd4  PR #210 migrate the store      ✓ 202  → 0e4471bd  ✗ failed          │
+│               09:31  a41f77  PR #209 write the docs         ✓ 202  → 5c18aa93  ✓ vetoed          │
+│               08:02  55e0b1  PR #208 spec review            ✓ 202  → c0ffee11  ✓ clear           │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+└─  ↑↓ pick · ⏎ open the delivery's run · t test with a sample payload · p pause · e edit  ────────┘
+ ⏎ open run · t test payload · p pause · e edit · n new · c copy URL · x delete   Esc back · ? keys 
+ webhooks · 5 armed · 1 failing · 28 deliveries today                                    ⚑ 3 unread 

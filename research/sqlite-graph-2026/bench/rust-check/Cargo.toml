@@ -1,0 +1,13 @@
+[package]
+name = "jod-graph-check"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Deliberately the same pin as the workspace, so this measures the engine
+# Jod actually ships: rusqlite 0.37 `bundled` = SQLite 3.50.2, not the
+# system 3.46.1 the Python sweep ran on.
+[dependencies]
+rusqlite = { version = "0.37", features = ["bundled"] }
+
+[workspace]

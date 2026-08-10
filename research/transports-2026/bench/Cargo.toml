@@ -1,0 +1,21 @@
+# Its own workspace on purpose: this is an experiment, not a crate Jod ships.
+# Without the empty `[workspace]` table cargo would try to fold it into the
+# repo's root workspace and the real build would grow dependencies it does not
+# use.
+[workspace]
+
+[package]
+name = "transports-bench"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+# Deliberately pinned to the versions the repo already has in Cargo.lock, to
+# prove the webhook receiver can be built with ONE new dependency (`hmac`) and
+# no version bump anywhere else. `hmac` 0.13 wants `digest` 0.11 (i.e. sha2
+# 0.11); 0.12 is the one that pairs with the sha2 0.10 already vendored.
+hmac = "0.12"
+sha2 = "0.10"
+subtle = "2"
+serde_json = "1"

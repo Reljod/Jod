@@ -1,0 +1,30 @@
+┌─ goals · 5 · 2 running · 1 blocked · 1 escalation waiting on you ────────────────────────────────┐
+│    name                 cadence      progress            last      next     state                │
+│    ──────────────────────────────────────────────────────────────────────────────────────────    │
+│  ▸ ◎ inbox-to-zero       hourly       ▓▓▓▓▓▓▓░░░  71%     42m ago   in 18m   running  iter 118   │
+│    ◎ keep-ci-green       continuous   ▓▓▓▓▓▓▓▓▓▓ 100%      4m ago   in  6m   satisfied iter 903  │
+│    ◎ ship-ios-client     daily        ▓▓▓░░░░░░░  31%      6h ago   in 18h   waiting  iter  24   │
+│    ◎ reduce-vps-spend    weekly       ▓▓░░░░░░░░  18%      3d ago   in  4d   blocked  iter   6   │
+│    ◎ zero-open-prs       every 30m    ▓▓▓▓▓▓▓▓░░  84%     11m ago   in 19m   running  iter 412   │
+│                                                                                                  │
+│    ───────────────────────────────────────────────────────────────────────────────────────────   │
+│    inbox-to-zero                                                          started 2026-06-02     │
+│                                                                                                  │
+│    objective  Keep the Linear inbox at zero open items older than 48 hours.                      │
+│    done when  ☑ no item older than 48h    ☑ every open item has an owner                         │
+│               ☐ no item blocked without a written reason   ← 3 items fail this                   │
+│    stop if    budget $25/week spent  ·  6 iterations with no progress  ·  you say stop           │
+│    budget     $11.40 of $25.00 this week   ▓▓▓▓▓░░░░░                                            │
+│                                                                                                  │
+│    iterations 118  16:02  +4 items closed, 3 still blocked            5m11s  $0.38  ✓            │
+│               117  15:02  +1 item closed                              2m40s  $0.19  ✓            │
+│               116  14:02  nothing to do                               0m48s  $0.04  ✓            │
+│               115  13:02  +2 closed, escalated ENG-441 to you         6m22s  $0.51  ✓            │
+│               114  12:02  harness timed out after 20m                20m00s  $1.02  ✗            │
+│                                                                                                  │
+│    escalations  ENG-441 needs a decision from you — raised 13:02, still open                     │
+│                                                                                                  │
+│                                                                                                  │
+└─  ↑↓ pick · ⏎ open the last iteration · r run now · p pause · e edit · n new  ───────────────────┘
+ ⏎ last iteration · r run now · p pause · e edit · n new · a answer escalation    Esc back · ? keys 
+ goals · 2 running · 1 blocked · $11.40 this week                                        ⚑ 3 unread 

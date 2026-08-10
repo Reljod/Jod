@@ -1,0 +1,212 @@
+==============================================================================
+00-shipped-scope-blind     composite 0.6810
+  f1=0.53  leak=0.2  poison=0.1  historical=1.0  multihop=0.5  current=0.7  episodic=0.0  prospective=0.0  stale=0.0  tokens=14
+   Q1   current     f1=0.40 n=4 CROSS   f2,f6,t1,t2
+   Q2   current     f1=1.00 n=1   t7
+   Q3   scope       f1=0.40 n=4 CROSS   f2,f6,t1,t2
+   Q4   multihop    f1=0.67 n=1   t3
+   Q5   multihop    f1=0.33 n=4   f2,f6,t1,t2
+   Q6   poison      f1=0.50 n=3 POISON  f5,p1,t8
+   Q7   stable      f1=1.00 n=1   f3
+   Q8   stable      f1=1.00 n=1   t5
+   Q9   episodic    f1=0.00 n=0   
+   Q10  episodic    f1=0.00 n=2   f3,t5
+   Q11  historical  f1=1.00 n=0   
+   Q12  prospective f1=0.00 n=0   
+==============================================================================
+01-facts-only              composite 0.7509
+  f1=0.617  leak=0.0  poison=0.1  historical=1.0  multihop=0.5  current=0.834  episodic=0.0  prospective=0.0  stale=0.0  tokens=8
+   Q1   current     f1=0.67 n=2   f2,f6
+   Q2   current     f1=1.00 n=1   t7
+   Q3   scope       f1=0.67 n=2   t1,t2
+   Q4   multihop    f1=0.67 n=1   t3
+   Q5   multihop    f1=0.50 n=2   f2,f6
+   Q6   poison      f1=0.67 n=2 POISON  p1,t8
+   Q7   stable      f1=1.00 n=1   f3
+   Q8   stable      f1=1.00 n=1   t5
+   Q9   episodic    f1=0.00 n=0   
+   Q10  episodic    f1=0.00 n=1   f3
+   Q11  historical  f1=1.00 n=0   
+   Q12  prospective f1=0.00 n=0   
+==============================================================================
+02-episodic                composite 0.7392
+  f1=0.604  leak=0.0  poison=0.1  historical=1.0  multihop=0.5  current=0.584  episodic=0.834  prospective=0.0  stale=0.0  tokens=43
+   Q1   current     f1=0.50 n=3   e2,f2,f6
+   Q2   current     f1=0.67 n=2   e4,t7
+   Q3   scope       f1=0.67 n=2   t1,t2
+   Q4   multihop    f1=0.40 n=3   e1,e4,t3
+   Q5   multihop    f1=0.40 n=3   e2,f2,f6
+   Q6   poison      f1=0.67 n=2 POISON  p1,t8
+   Q7   stable      f1=0.67 n=2   e2,f3
+   Q8   stable      f1=0.40 n=4   e1,e3,e4,t5
+   Q9   episodic    f1=1.00 n=1   e1
+   Q10  episodic    f1=0.67 n=2   e2,f3
+   Q11  historical  f1=1.00 n=0   
+   Q12  prospective f1=0.00 n=0   
+==============================================================================
+03-trust-admission         composite 0.8134
+  f1=0.637  leak=0.0  poison=0.0  historical=1.0  multihop=0.5  current=0.584  episodic=0.834  prospective=0.0  stale=0.0  tokens=43
+   Q1   current     f1=0.50 n=3   e2,f2,f6
+   Q2   current     f1=0.67 n=2   e4,t7
+   Q3   scope       f1=0.67 n=2   t1,t2
+   Q4   multihop    f1=0.40 n=3   e1,e4,t3
+   Q5   multihop    f1=0.40 n=3   e2,f2,f6
+   Q6   poison      f1=1.00 n=1   t8
+   Q7   stable      f1=0.67 n=2   e2,f3
+   Q8   stable      f1=0.40 n=4   e1,e3,e4,t5
+   Q9   episodic    f1=1.00 n=1   e1
+   Q10  episodic    f1=0.67 n=2   e2,f3
+   Q11  historical  f1=1.00 n=0   
+   Q12  prospective f1=0.00 n=0   
+==============================================================================
+04-entities-mentions       composite 0.8134
+  f1=0.637  leak=0.0  poison=0.0  historical=1.0  multihop=0.5  current=0.584  episodic=0.834  prospective=0.0  stale=0.0  tokens=43
+   Q1   current     f1=0.50 n=3   e2,f2,f6
+   Q2   current     f1=0.67 n=2   e4,t7
+   Q3   scope       f1=0.67 n=2   t1,t2
+   Q4   multihop    f1=0.40 n=3   e1,e4,t3
+   Q5   multihop    f1=0.40 n=3   e2,f2,f6
+   Q6   poison      f1=1.00 n=1   t8
+   Q7   stable      f1=0.67 n=2   e2,f3
+   Q8   stable      f1=0.40 n=4   e1,e3,e4,t5
+   Q9   episodic    f1=1.00 n=1   e1
+   Q10  episodic    f1=0.67 n=2   e2,f3
+   Q11  historical  f1=1.00 n=0   
+   Q12  prospective f1=0.00 n=0   
+==============================================================================
+05-hop-merged              composite 0.7579
+  f1=0.547  leak=0.0  poison=0.0  historical=1.0  multihop=1.0  current=0.5  episodic=0.416  prospective=0.0  stale=0.0  tokens=50
+   Q1   current     f1=0.33 n=5   e2,f2,f3,f5,f6
+   Q2   current     f1=0.67 n=2   e4,t7
+   Q3   scope       f1=0.67 n=2   t1,t2
+   Q4   multihop    f1=0.67 n=4   e1,e4,t3,t4
+   Q5   multihop    f1=0.57 n=5   e2,f2,f3,f5,f6
+   Q6   poison      f1=1.00 n=1   t8
+   Q7   stable      f1=0.33 n=5   e2,f2,f3,f5,f6
+   Q8   stable      f1=0.40 n=4   e1,e3,e4,t5
+   Q9   episodic    f1=0.50 n=3   e1,t3,t4
+   Q10  episodic    f1=0.33 n=5   e2,f2,f3,f5,f6
+   Q11  historical  f1=1.00 n=0   
+   Q12  prospective f1=0.00 n=0   
+==============================================================================
+06-hop-reserved            composite 0.7954
+  f1=0.547  leak=0.0  poison=0.0  historical=1.0  multihop=1.0  current=0.5  episodic=0.416  prospective=0.0  stale=0.0  tokens=50
+   Q1   current     f1=0.33 n=5   e2,f2,f3,f5,f6
+   Q2   current     f1=0.67 n=2   e4,t7
+   Q3   scope       f1=0.67 n=2   t1,t2
+   Q4   multihop    f1=0.67 n=4   e1,e4,t3,t4
+   Q5   multihop    f1=0.57 n=5   e2,f2,f3,f5,f6
+   Q6   poison      f1=1.00 n=1   t8
+   Q7   stable      f1=0.33 n=5   e2,f2,f3,f5,f6
+   Q8   stable      f1=0.40 n=4   e1,e3,e4,t5
+   Q9   episodic    f1=0.50 n=3   e1,t3,t4
+   Q10  episodic    f1=0.33 n=5   e2,f2,f3,f5,f6
+   Q11  historical  f1=1.00 n=0   
+   Q12  prospective f1=0.00 n=0   
+==============================================================================
+07-typed-edges             composite 0.7867
+  f1=0.653  leak=0.0  poison=0.0  historical=1.0  multihop=0.75  current=0.534  episodic=0.834  prospective=0.0  stale=0.0  tokens=43
+   Q1   current     f1=0.40 n=4   e2,f2,f5,f6
+   Q2   current     f1=0.67 n=2   e4,t7
+   Q3   scope       f1=0.67 n=2   t1,t2
+   Q4   multihop    f1=0.40 n=3   e1,e4,t3
+   Q5   multihop    f1=0.67 n=4   e2,f2,f5,f6
+   Q6   poison      f1=1.00 n=1   t8
+   Q7   stable      f1=0.67 n=2   e2,f3
+   Q8   stable      f1=0.40 n=4   e1,e3,e4,t5
+   Q9   episodic    f1=1.00 n=1   e1
+   Q10  episodic    f1=0.67 n=2   e2,f3
+   Q11  historical  f1=1.00 n=0   
+   Q12  prospective f1=0.00 n=0   
+==============================================================================
+08-edges-as-facts          composite 0.8084
+  f1=0.547  leak=0.0  poison=0.0  historical=1.0  multihop=1.0  current=0.5  episodic=0.416  prospective=0.0  stale=0.0  tokens=50
+   Q1   current     f1=0.33 n=5   e2,f2,f3,f5,f6
+   Q2   current     f1=0.67 n=2   e4,t7
+   Q3   scope       f1=0.67 n=2   t1,t2
+   Q4   multihop    f1=0.67 n=4   e1,e4,t3,t4
+   Q5   multihop    f1=0.57 n=5   e2,f2,f3,f5,f6
+   Q6   poison      f1=1.00 n=1   t8
+   Q7   stable      f1=0.33 n=5   e2,f2,f3,f5,f6
+   Q8   stable      f1=0.40 n=4   e1,e3,e4,t5
+   Q9   episodic    f1=0.50 n=3   e1,t3,t4
+   Q10  episodic    f1=0.33 n=5   e2,f2,f3,f5,f6
+   Q11  historical  f1=1.00 n=0   
+   Q12  prospective f1=0.00 n=0   
+==============================================================================
+09-prospective             composite 0.8224
+  f1=0.547  leak=0.0  poison=0.0  historical=1.0  multihop=1.0  current=0.5  episodic=0.416  prospective=1.0  stale=0.0  tokens=50
+   Q1   current     f1=0.33 n=5   e2,f2,f3,f5,f6
+   Q2   current     f1=0.67 n=2   e4,t7
+   Q3   scope       f1=0.67 n=2   t1,t2
+   Q4   multihop    f1=0.67 n=4   e1,e4,t3,t4
+   Q5   multihop    f1=0.57 n=5   e2,f2,f3,f5,f6
+   Q6   poison      f1=1.00 n=1   t8
+   Q7   stable      f1=0.33 n=5   e2,f2,f3,f5,f6
+   Q8   stable      f1=0.40 n=4   e1,e3,e4,t5
+   Q9   episodic    f1=0.50 n=3   e1,t3,t4
+   Q10  episodic    f1=0.33 n=5   e2,f2,f3,f5,f6
+   Q11  historical  f1=1.00 n=0   
+   Q12  prospective f1=1.00 n=1   i1
+==============================================================================
+10-final-trimmed           composite 0.8328
+  f1=0.574  leak=0.0  poison=0.0  historical=1.0  multihop=1.0  current=0.5  episodic=0.416  prospective=1.0  stale=0.0  tokens=44
+   Q1   current     f1=0.33 n=5   e2,f2,f3,f5,f6
+   Q2   current     f1=0.67 n=2   e4,t7
+   Q3   scope       f1=0.67 n=2   t1,t2
+   Q4   multihop    f1=0.67 n=4   e1,e4,t3,t4
+   Q5   multihop    f1=0.57 n=5   e2,f2,f3,f5,f6
+   Q6   poison      f1=1.00 n=1   t8
+   Q7   stable      f1=0.33 n=5   e2,f2,f3,f5,f6
+   Q8   stable      f1=0.67 n=2   e3,t5
+   Q9   episodic    f1=0.50 n=3   e1,t3,t4
+   Q10  episodic    f1=0.33 n=5   e2,f2,f3,f5,f6
+   Q11  historical  f1=1.00 n=0   
+   Q12  prospective f1=1.00 n=1   i1
+==============================================================================
+XX-hop-gated               composite 0.8273
+  f1=0.547  leak=0.0  poison=0.0  historical=1.0  multihop=0.5  current=0.584  episodic=0.416  prospective=1.0  stale=0.0  tokens=41
+   Q1   current     f1=0.50 n=3   e2,f2,f6
+   Q2   current     f1=0.67 n=2   e4,t7
+   Q3   scope       f1=0.67 n=2   t1,t2
+   Q4   multihop    f1=0.40 n=3   e1,e4,t3
+   Q5   multihop    f1=0.40 n=3   e2,f2,f6
+   Q6   poison      f1=1.00 n=1   t8
+   Q7   stable      f1=0.33 n=5   e2,f2,f3,f5,f6
+   Q8   stable      f1=0.67 n=2   e3,t5
+   Q9   episodic    f1=0.50 n=3   e1,t3,t4
+   Q10  episodic    f1=0.33 n=5   e2,f2,f3,f5,f6
+   Q11  historical  f1=1.00 n=0   
+   Q12  prospective f1=1.00 n=1   i1
+==============================================================================
+XX-substring-alias         composite 0.7853
+  f1=0.524  leak=0.0  poison=0.0  historical=1.0  multihop=1.0  current=0.416  episodic=0.416  prospective=1.0  stale=0.0  tokens=46
+   Q1   current     f1=0.33 n=5   e2,f2,f3,f5,f6
+   Q2   current     f1=0.50 n=3   e4,t7,t8
+   Q3   scope       f1=0.67 n=2   t1,t2
+   Q4   multihop    f1=0.67 n=4   e1,e4,t3,t4
+   Q5   multihop    f1=0.57 n=5   e2,f2,f3,f5,f6
+   Q6   poison      f1=0.67 n=2   t7,t8
+   Q7   stable      f1=0.33 n=5   e2,f2,f3,f5,f6
+   Q8   stable      f1=0.67 n=2   e3,t5
+   Q9   episodic    f1=0.50 n=3   e1,t3,t4
+   Q10  episodic    f1=0.33 n=5   e2,f2,f3,f5,f6
+   Q11  historical  f1=1.00 n=0   
+   Q12  prospective f1=1.00 n=1   i1
+==============================================================================
+XX-head-only-tombstone     composite 0.6453
+  f1=0.574  leak=0.0  poison=0.0  historical=0.0  multihop=1.0  current=0.5  episodic=0.416  prospective=1.0  stale=0.0  tokens=44
+   Q1   current     f1=0.33 n=5   e2,f2,f3,f5,f6
+   Q2   current     f1=0.67 n=2   e4,t7
+   Q3   scope       f1=0.67 n=2   t1,t2
+   Q4   multihop    f1=0.67 n=4   e1,e4,t3,t4
+   Q5   multihop    f1=0.57 n=5   e2,f2,f3,f5,f6
+   Q6   poison      f1=1.00 n=1   t8
+   Q7   stable      f1=0.33 n=5   e2,f2,f3,f5,f6
+   Q8   stable      f1=0.67 n=2   e3,t5
+   Q9   episodic    f1=0.50 n=3   e1,t3,t4
+   Q10  episodic    f1=0.33 n=5   e2,f2,f3,f5,f6
+   Q11  historical  f1=0.00 n=1   f5
+   Q12  prospective f1=1.00 n=1   i1
+
+wrote out/results.json and out/RANKINGS.md

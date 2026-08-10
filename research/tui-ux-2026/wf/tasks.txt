@@ -1,0 +1,30 @@
+┌─ tasks · 12 open · 3 claimed · 1 blocked · 4 done this week ─────────────────────────────────────┐
+│    id                title                                owner    state    run       age        │
+│    ─────────────────────────────────────────────────────────────────────────────────────         │
+│  ▸ ● port-the-parser Port the parser to the new AST       a3f91c22 running  a3f91c22  4m         │
+│    ● triage-ci       Work out why CI went red on main     1d9f0034 running  1d9f0034  26m        │
+│    ◐ write-the-docs  Write the docs for the events API    scout    claimed  5c18aa93  2d         │
+│    ◐ bump-versions   Bump every crate to 0.4              lead     claimed  3b7e6612  2h         │
+│    ○ migrate-store   Move the run transport into SQLite   —        open     —         3d         │
+│    ○ ios-transcript  Match the TUI transcript on iOS      —        open     —         5d         │
+│    ⚠ deploy-vps      Redeploy jod-cloud after the bump    —        blocked  —         1d         │
+│    ✓ spec-review     Review SPEC.md before implementing   reljod   done     c0ffee11  5h         │
+│    ✓ write-the-spec  Write SPEC.md for the transport      reljod   done     2f9c88b1  2d         │
+│                                                                                                  │
+│    ─────────────────────────────────────────────────────────────────────────────────────         │
+│    migrate-store                                        open · unclaimed · on board 3d           │
+│                                                                                                  │
+│    what      Move the run transport out of tmux + JSONL and into SQLite, so a run is a           │
+│              detached process group supervised by jod-run writing straight to the store.         │
+│    check     cargo test -p jod-core -p jod-supervisor  ·  no test may be skipped                 │
+│    blocked   nothing                                                                             │
+│    blocks    deploy-vps  (⚠ waiting on this)                                                     │
+│    spec      SPEC.md  ·  920 lines  ·  last touched 2d ago                                       │
+│                                                                                                  │
+│    history   3d ago  put on the board by reljod                                                  │
+│              2d ago  claimed by lead, released 4h later — "needs the spec first"                 │
+│                                                                                                  │
+│    d delegates this to an agent: a fresh run seeded with the title, the check and the spec.      │
+└─  ↑↓ pick · ⏎ mark done · d delegate to an agent · c claim · o open its run · n new  ────────────┘
+ ⏎ mark done · d delegate · c claim · o open run · n new · x remove · / filter    Esc back · ? keys 
+ tasks · 12 open · 1 blocked · 2 being worked right now                                  ⚑ 3 unread 

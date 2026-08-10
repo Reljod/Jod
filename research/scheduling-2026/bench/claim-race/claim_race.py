@@ -43,6 +43,10 @@ CREATE TABLE IF NOT EXISTS schedules (
   next_fire_at_ms INTEGER,
   lease_owner     TEXT,
   lease_until_ms  INTEGER,
+  -- Which instant the live lease is for. Without it a reaper can clear a dead
+  -- claimant's lease but cannot say which fire was lost, which is the
+  -- difference between a recorded failure and a silent one.
+  lease_fired_for INTEGER,
   fires           INTEGER NOT NULL DEFAULT 0
 );
 
@@ -54,6 +58,26 @@ CREATE TABLE IF NOT EXISTS claims (
   fired_for_ms INTEGER NOT NULL,
   worker       TEXT NOT NULL,
   arm          TEXT NOT NULL
+);
+
+-- A claim whose worker lived long enough to finish the run.
+CREATE TABLE IF NOT EXISTS completions (
+  schedule_id  TEXT NOT NULL,
+  fired_for_ms INTEGER NOT NULL,
+  worker       TEXT NOT NULL,
+  PRIMARY KEY (schedule_id, fired_for_ms)
+);
+
+-- A claim whose worker died holding the lease, recorded by whichever reaper
+-- won the sweep. Every claim must end up in exactly one of these two tables:
+-- that is what "a failed run never looks like a successful one" means when
+-- the process that would have reported it is gone.
+CREATE TABLE IF NOT EXISTS reaps (
+  schedule_id  TEXT NOT NULL,
+  fired_for_ms INTEGER NOT NULL,
+  dead_worker  TEXT NOT NULL,
+  reaper       TEXT NOT NULL,
+  PRIMARY KEY (schedule_id, fired_for_ms)
 );
 """
 
@@ -98,13 +122,13 @@ def claim_cas(conn, sched_id, worker, lease_ms):
         cur = conn.execute(
             "UPDATE schedules "
             "   SET next_fire_at_ms = ?, lease_owner = ?, lease_until_ms = ?, "
-            "       fires = fires + 1 "
+            "       lease_fired_for = ?, fires = fires + 1 "
             " WHERE id = ? "
             "   AND state = 'active' "
             "   AND next_fire_at_ms = ? "          # <- the compare-and-swap
             "   AND next_fire_at_ms <= ? "
             "   AND (lease_until_ms IS NULL OR lease_until_ms <= ?)",
-            (following, worker, now + lease_ms, sched_id, seen, now, now),
+            (following, worker, now + lease_ms, seen, sched_id, seen, now, now),
         )
         won = cur.rowcount == 1
         if won:
@@ -188,7 +212,8 @@ def release(conn, sched_id, worker):
     """
     conn.execute("BEGIN IMMEDIATE")
     conn.execute(
-        "UPDATE schedules SET lease_owner = NULL, lease_until_ms = NULL "
+        "UPDATE schedules SET lease_owner = NULL, lease_until_ms = NULL, "
+        "       lease_fired_for = NULL "
         " WHERE id = ? AND lease_owner = ?",
         (sched_id, worker),
     )
@@ -287,6 +312,229 @@ def run_arm(db_dir, arm, workers, seconds, schedules=4):
 # ---- lease takeover -----------------------------------------------------
 
 
+# ---- crash injection ----------------------------------------------------
+#
+# Design iteration 3's whole claim: a lease turns "the process holding this
+# schedule vanished" from a schedule that is stuck for ever into one run that
+# is lost and *recorded as lost*. That is testable, so it is tested: workers
+# abandon a fraction of the claims they win, and a contested reaper has to
+# notice every one of them exactly once.
+
+
+def reap(conn, reaper, now):
+    """Clear expired leases and record which fire each one lost.
+
+    Guarded on `lease_owner` and `lease_until_ms` so that when several
+    reapers sweep at once exactly one of them records each orphan — the same
+    compare-and-swap argument as the claim itself, one table over.
+    """
+    rows = conn.execute(
+        "SELECT id, lease_owner, lease_fired_for FROM schedules "
+        " WHERE lease_owner IS NOT NULL AND lease_until_ms <= ?",
+        (now,),
+    ).fetchall()
+    reaped = 0
+    for sched_id, dead, fired_for in rows:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            cur = conn.execute(
+                "UPDATE schedules SET lease_owner = NULL, lease_until_ms = NULL, "
+                "       lease_fired_for = NULL "
+                " WHERE id = ? AND lease_owner = ? AND lease_until_ms <= ?",
+                (sched_id, dead, now),
+            )
+            if cur.rowcount == 1 and fired_for is not None:
+                conn.execute(
+                    "INSERT OR IGNORE INTO reaps "
+                    "(schedule_id, fired_for_ms, dead_worker, reaper) VALUES (?,?,?,?)",
+                    (sched_id, fired_for, dead, reaper),
+                )
+                reaped += 1
+            conn.execute("COMMIT")
+        except BaseException:
+            conn.execute("ROLLBACK")
+            raise
+    return reaped
+
+
+def claim_cas_reaping(conn, sched_id, worker, lease_ms):
+    """Iteration 3's claim, corrected: the claim reaps the lease it displaces.
+
+    Measured defect in the plain version: a claimant that takes over an
+    *expired* lease overwrites `lease_fired_for` with its own instant, so the
+    orphan the dead worker left is erased before any reaper's sweep gets to
+    it. The reaper is racing the next claimant, and over a 4-second run it
+    lost that race 26 times out of 170 claims. Recording the displaced lease
+    inside the same transaction removes the race rather than shrinking it.
+    """
+    row = conn.execute(
+        "SELECT next_fire_at_ms FROM schedules "
+        " WHERE id = ? AND state = 'active' AND next_fire_at_ms <= ? "
+        "   AND (lease_until_ms IS NULL OR lease_until_ms <= ?)",
+        (sched_id, now_ms(), now_ms()),
+    ).fetchone()
+    if row is None:
+        return None
+    seen = row[0]
+    following = seen + PERIOD_MS
+    now = now_ms()
+
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        # Whatever this claim is about to overwrite, write it down first.
+        stale = conn.execute(
+            "SELECT lease_owner, lease_fired_for FROM schedules "
+            " WHERE id = ? AND lease_owner IS NOT NULL AND lease_until_ms <= ?",
+            (sched_id, now),
+        ).fetchone()
+        if stale is not None and stale[1] is not None:
+            conn.execute(
+                "INSERT OR IGNORE INTO reaps "
+                "(schedule_id, fired_for_ms, dead_worker, reaper) VALUES (?,?,?,?)",
+                (sched_id, stale[1], stale[0], worker),
+            )
+        cur = conn.execute(
+            "UPDATE schedules "
+            "   SET next_fire_at_ms = ?, lease_owner = ?, lease_until_ms = ?, "
+            "       lease_fired_for = ?, fires = fires + 1 "
+            " WHERE id = ? AND state = 'active' "
+            "   AND next_fire_at_ms = ? AND next_fire_at_ms <= ? "
+            "   AND (lease_until_ms IS NULL OR lease_until_ms <= ?)",
+            (following, worker, now + lease_ms, seen, sched_id, seen, now, now),
+        )
+        won = cur.rowcount == 1
+        if won:
+            conn.execute(
+                "INSERT INTO claims (schedule_id, fired_for_ms, worker, arm) "
+                "VALUES (?, ?, ?, 'cas_reaping')",
+                (sched_id, seen, worker),
+            )
+        conn.execute("COMMIT")
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    return seen if won else None
+
+
+def crash_worker(db, worker, deadline, sched_ids, crash_pct, lease_ms, seed, out,
+                 claim=None):
+    import random
+
+    rng = random.Random(seed)
+    claim = claim or claim_cas
+    conn = connect(db)
+    wins = crashed = reaped = busy = 0
+    while time.time() < deadline:
+        try:
+            reaped += reap(conn, worker, now_ms())
+            for sid in sched_ids:
+                fired_for = claim(conn, sid, worker, lease_ms)
+                if fired_for is None:
+                    continue
+                wins += 1
+                if rng.random() < crash_pct:
+                    # The supervisor was SIGKILLed: no completion, no release,
+                    # and nothing this process will ever do about it.
+                    crashed += 1
+                    continue
+                conn.execute("BEGIN IMMEDIATE")
+                conn.execute(
+                    "INSERT OR IGNORE INTO completions "
+                    "(schedule_id, fired_for_ms, worker) VALUES (?,?,?)",
+                    (sid, fired_for, worker),
+                )
+                conn.execute("COMMIT")
+                release(conn, sid, worker)
+        except sqlite3.OperationalError:
+            busy += 1
+            try:
+                conn.execute("ROLLBACK")
+            except sqlite3.OperationalError:
+                pass
+    conn.close()
+    out.put((wins, crashed, reaped, busy))
+
+
+def run_crash_race(db_dir, workers=8, seconds=6, crash_pct=0.3, lease_ms=250,
+                   schedules=4, claim=None, tag="plain"):
+    """Every claim must end as a completion or as a recorded reap. Never neither."""
+    db = os.path.join(db_dir, f"race-crash-{tag}.db")
+    for suffix in ("", "-wal", "-shm"):
+        try:
+            os.remove(db + suffix)
+        except FileNotFoundError:
+            pass
+    conn = connect(db)
+    conn.executescript(SCHEMA)
+    base = now_ms() - 600_000
+    sched_ids = [f"c{i}" for i in range(schedules)]
+    conn.execute("BEGIN IMMEDIATE")
+    for sid in sched_ids:
+        conn.execute(
+            "INSERT INTO schedules (id, next_fire_at_ms) VALUES (?, ?)", (sid, base)
+        )
+    conn.execute("COMMIT")
+    conn.close()
+
+    out = mp.Queue()
+    deadline = time.time() + seconds
+    procs = [
+        mp.Process(
+            target=crash_worker,
+            args=(db, f"w{i}", deadline, sched_ids, crash_pct, lease_ms, i, out, claim),
+        )
+        for i in range(workers)
+    ]
+    for p in procs:
+        p.start()
+    tallies = [out.get() for _ in procs]
+    for p in procs:
+        p.join()
+
+    # One last sweep, because the run ended mid-flight and the final crashed
+    # claims have not aged past their lease yet.
+    conn = connect(db)
+    time.sleep(lease_ms / 1000.0 + 0.1)
+    reap(conn, "final", now_ms())
+
+    q = lambda sql: conn.execute(sql).fetchone()[0]
+    claims = q("SELECT count(*) FROM claims")
+    distinct = q(
+        "SELECT count(*) FROM (SELECT DISTINCT schedule_id, fired_for_ms FROM claims)"
+    )
+    completions = q("SELECT count(*) FROM completions")
+    reaps = q("SELECT count(*) FROM reaps")
+    both = q(
+        "SELECT count(*) FROM completions c JOIN reaps r"
+        "  ON c.schedule_id = r.schedule_id AND c.fired_for_ms = r.fired_for_ms"
+    )
+    # The invariant: a claim that is in neither table is a run that vanished
+    # with nothing written down anywhere.
+    unaccounted = q(
+        "SELECT count(*) FROM claims a"
+        " WHERE NOT EXISTS (SELECT 1 FROM completions c"
+        "                    WHERE c.schedule_id = a.schedule_id"
+        "                      AND c.fired_for_ms = a.fired_for_ms)"
+        "   AND NOT EXISTS (SELECT 1 FROM reaps r"
+        "                    WHERE r.schedule_id = a.schedule_id"
+        "                      AND r.fired_for_ms = a.fired_for_ms)"
+    )
+    conn.close()
+    return {
+        "workers": workers,
+        "crash_pct": crash_pct,
+        "lease_ms": lease_ms,
+        "claims": claims,
+        "duplicates": claims - distinct,
+        "completions": completions,
+        "reaped": reaps,
+        "double_counted": both,
+        "unaccounted": unaccounted,
+        "crashed_reported": sum(t[1] for t in tallies),
+        "busy_errors": sum(t[3] for t in tallies),
+    }
+
+
 def contender(db, worker, rounds, gate, out):
     """Race every round's dead schedule from the same starting gun."""
     conn = connect(db)
@@ -382,6 +630,21 @@ def main():
         f"rounds != 1 winner: {t['rounds_not_exactly_one']}, "
         f"duplicate claims: {t['duplicate_claims']}"
     )
+
+    print("\ncrash injection — workers abandon 30% of the claims they win")
+    print(
+        f"{'claim':<14}{'claims':>8}{'dupes':>7}{'done':>7}{'reaped':>8}"
+        f"{'twice':>7}{'UNACCOUNTED':>13}"
+    )
+    for tag, fn in (("lease only", claim_cas), ("lease+reap", claim_cas_reaping)):
+        c = run_crash_race(
+            args.dir, workers=args.workers, seconds=args.seconds,
+            claim=fn, tag=tag.replace(" ", "-").replace("+", "-"),
+        )
+        print(
+            f"{tag:<14}{c['claims']:>8}{c['duplicates']:>7}{c['completions']:>7}"
+            f"{c['reaped']:>8}{c['double_counted']:>7}{c['unaccounted']:>13}"
+        )
 
     print("\nVERDICT")
     print("  cas       must show 0 duplicates")
