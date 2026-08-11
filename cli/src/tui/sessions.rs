@@ -390,7 +390,28 @@ pub enum Request {
     /// Undo the last turn. Moves the head back; destroys nothing.
     Rewind(String),
     /// Put the head back on the branch a rewind abandoned — `unrevert`.
+    ///
+    /// The `String` is a **conversation**, not a message: which branch is
+    /// decided here, by [`restore_target`], and it is always the newest
+    /// abandoned tip. To name a specific one, use [`Request::GoTo`].
     Restore(String),
+    /// Put the head on the branch the user names by the `#id` beside it.
+    ///
+    /// Two fields rather than one, and the reason is a bug this shape prevents:
+    /// a message id passed alone has to be resolved against *something*, and
+    /// feeding it to a conversation resolver means a numeric id can prefix-match
+    /// a uuid — conversation ids are hex — and silently act on a different
+    /// thread. Carrying the conversation explicitly means the store's
+    /// `shares_root` check has something to check against, so a message outside
+    /// this graph is refused rather than grafted on.
+    ///
+    /// `branch` is the raw typed line, not a parsed id, so that the `#`
+    /// stripping and the sentence said when it is not a number live here and
+    /// are tested, rather than in a key handler that no test can reach.
+    GoTo {
+        conversation: String,
+        branch: String,
+    },
     /// A new conversation starting from this one's head.
     Fork(String),
     /// Ask the last question again, as a second answer rather than a
@@ -412,6 +433,10 @@ pub fn apply(store: &Store, request: &Request, now_ms: i64) -> Vec<String> {
         },
         Request::Rewind(needle) => on_conversation(store, needle, |id| rewind(store, id)),
         Request::Restore(needle) => on_conversation(store, needle, |id| restore(store, id)),
+        Request::GoTo {
+            conversation,
+            branch,
+        } => on_conversation(store, conversation, |id| goto(store, id, branch)),
         Request::Fork(needle) => on_conversation(store, needle, |id| fork(store, id)),
         Request::Retry(needle) => on_conversation(store, needle, |id| retry(store, id)),
     }
@@ -475,6 +500,44 @@ fn restore(store: &Store, id: &str) -> Vec<String> {
             if tip.turns == 1 { "" } else { "s" }
         )],
         Err(e) => vec![format!("could not restore #{}: {e}", tip.id)],
+    }
+}
+
+/// Go to a branch the user named off the screen.
+///
+/// Everything the typed line can be wrong about is answered here rather than
+/// let through to the store, because the store's refusals are written for a
+/// caller and this one is read by a person who has just typed a number.
+///
+/// Any message in the graph is a legal target, not only a tip. That is what
+/// `move_head` is for, and "put me back partway along that branch" is a real
+/// request; going to a tip is only the common case, because tips are what the
+/// branch list prints.
+fn goto(store: &Store, id: &str, branch: &str) -> Vec<String> {
+    // The `#` is optional because it is printed on the screen the number was
+    // read off, and making someone retype punctuation they can see is not a
+    // form. Trimmed either side of it, so `# 57` works too.
+    let typed = branch.trim().trim_start_matches('#').trim();
+    let Ok(message) = typed.parse::<i64>() else {
+        return vec![format!(
+            "“{typed}” is not a branch number — the branch list prints them as #57"
+        )];
+    };
+    let Some(target) = store.message(message).ok().flatten() else {
+        return vec![format!("there is no message #{message}")];
+    };
+    // `move_head` checks the target shares a root with the current head. That
+    // check is the reason this request carries its conversation: without one,
+    // a bare number has to be resolved against something, and resolving it as a
+    // conversation lets a numeric id prefix-match a uuid and move the head of a
+    // thread the user was not looking at.
+    match store.move_head(id, message) {
+        Ok(()) => vec![format!(
+            "{} now on #{message} — “{}”",
+            short(id),
+            one_line(&target.text, SNIPPET)
+        )],
+        Err(e) => vec![format!("could not go to #{message}: {e}")],
     }
 }
 
@@ -823,6 +886,141 @@ mod tests {
             Some(was_here),
             "redo returns to the branch undo set aside"
         );
+    }
+
+    /// `U` takes the newest abandoned branch; `g` takes the one you name. With
+    /// three lying around, only the second can reach the middle one — which is
+    /// the whole reason the branch list prints an id beside each.
+    #[test]
+    fn going_to_a_named_branch_reaches_the_one_that_u_never_would() {
+        let store = store();
+        let id = conversation(&store, "the parser");
+        say(&store, &id, Role::User, "port the parser");
+        let point = say(&store, &id, Role::Assistant, "ported");
+        say(&store, &id, Role::User, "attempt one");
+        let first = say(&store, &id, Role::Assistant, "did it badly");
+        store.revert_to(&id, point).expect("a revert");
+        say(&store, &id, Role::User, "attempt two");
+        say(&store, &id, Role::Assistant, "did it worse");
+        store.revert_to(&id, point).expect("a second revert");
+        say(&store, &id, Role::User, "attempt three");
+        say(&store, &id, Role::Assistant, "did it fine");
+
+        // `U` offers the newest, which is not the one we want back.
+        assert_ne!(
+            restore_target(&store, &id).map(|t| t.id),
+            Some(first),
+            "the premise: the first attempt is not what `U` would reach"
+        );
+
+        let said = apply(
+            &store,
+            &Request::GoTo {
+                conversation: id.clone(),
+                // The `#` is optional, because it is printed on the screen the
+                // number was read off.
+                branch: format!("#{first}"),
+            },
+            0,
+        );
+
+        assert!(said[0].contains("did it badly"), "{said:?}");
+        assert_eq!(
+            store
+                .conversation(&id)
+                .expect("the conversation")
+                .expect("it exists")
+                .head_id,
+            Some(first),
+            "the head is on the branch that was named, not the newest one"
+        );
+        // And the other two attempts are still there, still named, still
+        // reachable the same way — going to one branch abandons none of them.
+        let tips = tip_rows(&store, &id);
+        assert_eq!(
+            tips.iter().filter(|t| !t.live).count(),
+            2,
+            "the branches not chosen are still listed: {tips:?}"
+        );
+    }
+
+    /// The hazard the two-field shape exists to make impossible.
+    ///
+    /// The first cut of `g` passed the typed message id to `Request::Restore`,
+    /// which takes a *conversation*. Conversation ids are uuids and uuids are
+    /// hex, so a number can prefix-match one — and the key would then move the
+    /// head of a thread the user was not even looking at. Carrying the
+    /// conversation means `move_head`'s `shares_root` check has something to
+    /// check against.
+    #[test]
+    fn a_branch_number_cannot_move_the_head_of_another_conversation() {
+        let store = store();
+        let mine = conversation(&store, "mine");
+        say(&store, &mine, Role::User, "my question");
+        let my_head = say(&store, &mine, Role::Assistant, "my answer");
+
+        let theirs = conversation(&store, "theirs");
+        say(&store, &theirs, Role::User, "their question");
+        let their_message = say(&store, &theirs, Role::Assistant, "their answer");
+
+        let said = apply(
+            &store,
+            &Request::GoTo {
+                conversation: mine.clone(),
+                branch: their_message.to_string(),
+            },
+            0,
+        );
+
+        assert!(
+            said[0].contains("could not go to"),
+            "a message from another thread is refused: {said:?}"
+        );
+        assert_eq!(
+            store
+                .conversation(&mine)
+                .expect("the conversation")
+                .expect("it exists")
+                .head_id,
+            Some(my_head),
+            "and nothing moved"
+        );
+        assert_eq!(
+            store
+                .conversation(&theirs)
+                .expect("the conversation")
+                .expect("it exists")
+                .head_id,
+            Some(their_message),
+            "in either thread"
+        );
+    }
+
+    #[test]
+    fn a_branch_number_that_is_not_a_number_says_what_one_looks_like() {
+        let store = store();
+        let id = conversation(&store, "the parser");
+        say(&store, &id, Role::User, "port the parser");
+
+        let said = apply(
+            &store,
+            &Request::GoTo {
+                conversation: id.clone(),
+                branch: "the second one".into(),
+            },
+            0,
+        );
+        assert!(said[0].contains("prints them as #57"), "{said:?}");
+
+        let said = apply(
+            &store,
+            &Request::GoTo {
+                conversation: id,
+                branch: "#99999".into(),
+            },
+            0,
+        );
+        assert!(said[0].contains("there is no message #99999"), "{said:?}");
     }
 
     #[test]

@@ -2021,12 +2021,30 @@ fn accept_prompt(
         PromptIntent::New(Workspace::Tasks) | PromptIntent::New(Workspace::Team) => {
             Some(Action::AddTask(typed))
         }
-        // A branch named by the `#id` printed beside it. The leading `#` is
-        // optional because it is on the screen the number was read off, and
-        // making people retype punctuation they can see is not a form.
-        PromptIntent::Branch => Some(Action::Sessions(sessions::Request::Restore(
-            typed.trim_start_matches('#').to_string(),
-        ))),
+        // A branch named by the `#id` printed beside it.
+        //
+        // The conversation is read off the fleet cursor rather than carried in
+        // the overlay, for the reason `confirmed` gives: an overlay owns the
+        // keyboard for as long as it is up, so the selection cannot have moved
+        // between `g` and `⏎`.
+        //
+        // It has to be carried at all — `Request::Restore` takes a
+        // *conversation*, and handing it a message id let a number prefix-match
+        // a uuid and move the head of a thread nobody was looking at. Parsing
+        // and the refusals belong to `sessions::goto`, which is why the typed
+        // line goes through unexamined.
+        PromptIntent::Branch => {
+            let Some(conversation) = app.selected_agent().map(|a| a.id.clone()) else {
+                app.push(Entry::Notice(
+                    "the fleet moved on — reopen the branch list and try again".into(),
+                ));
+                return None;
+            };
+            Some(Action::Sessions(sessions::Request::GoTo {
+                conversation,
+                branch: typed,
+            }))
+        }
         // `Store::remember` takes a triple — subject, predicate, object — and
         // splitting one typed line into three would be Jod guessing at which
         // word is the relation. The pipe is the form: three fields on one line,
@@ -6576,6 +6594,38 @@ mod tests {
                 "`{key}` on the fleet"
             );
         }
+    }
+
+    /// `g` has to carry *which thread* as well as which branch.
+    ///
+    /// Its first cut handed the typed number to `Request::Restore`, which takes
+    /// a conversation rather than a message. Conversation ids are uuids and
+    /// uuids are hex, so a plain number can prefix-match one — the key could
+    /// move the head of a thread the user was not looking at, and it never
+    /// consulted the fleet cursor at all. Both halves are asserted here because
+    /// the shape, not the arithmetic, is what stops it coming back.
+    #[test]
+    fn going_to_a_branch_carries_the_thread_it_was_read_off() {
+        let mut app = on_fleet_with_a_run();
+
+        assert_eq!(press(&mut app, KeyCode::Char('g')), None, "`g` asks first");
+        assert!(
+            matches!(app.overlay, Overlay::Prompt { intent: PromptIntent::Branch, .. }),
+            "got {:?}",
+            app.overlay
+        );
+
+        type_line(&mut app, "57");
+        let action = press(&mut app, KeyCode::Enter);
+
+        assert_eq!(
+            action,
+            Some(Action::Sessions(sessions::Request::GoTo {
+                conversation: "run-7".into(),
+                branch: "57".into(),
+            })),
+            "the run under the cursor travels with the branch number"
+        );
     }
 
     /// `u` is undo on every screen that has one.

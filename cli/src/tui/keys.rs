@@ -2,11 +2,29 @@
 //!
 //! Two places have to agree: the keybar that is always on screen, and the `?`
 //! overlay that carries the long tail. They are generated from one table here
-//! so they cannot drift — and because the same letter deliberately means
-//! different things on different screens (`a` attaches in the fleet and answers
-//! an escalation in goals), a screen whose verbs are *not* printed would be a
-//! trap rather than a shortcut. That is the condition on the whole design, not
-//! an afterthought.
+//! so they cannot drift.
+//!
+//! ## What the bar guarantees, and what it does not
+//!
+//! **The way out is always printed. The verbs are printed as far as they fit.**
+//!
+//! The rule used to be that every one of a screen's verbs had to be on the bar,
+//! because the same letter deliberately means different things on different
+//! screens — `a` attaches in the fleet and answers an escalation in goals — so
+//! a verb that was not printed would be a trap rather than a shortcut.
+//!
+//! That rule was already false when it was written down. `ui::two_ends`
+//! reserved room for the verbs and dropped the right-hand half when none was
+//! left, and the right-hand half is the way out: at eighty columns, chat, fleet
+//! and memory all stopped saying `Esc back · ? keys`. Every render test in the
+//! suite used a hundred and fifty columns, so nothing ever saw it.
+//!
+//! The argument order was simply backwards. Being stranded is the trap the
+//! condition was written against; a terse bar is not. So the exit is reserved
+//! first, `keybar` spends whatever is left, and it drops **whole** verbs —
+//! half a chord teaches a key that does not exist — saying `? more` when it
+//! does, so a short bar reads as short rather than as complete. `?` then opens
+//! the overlay, which lists the screen's own verbs before anything else.
 //!
 //! ## Why the verbs are on Alt and the editing keys are not
 //!
@@ -98,6 +116,25 @@ const CHAT: &[Key] = &[
     k("?", "keys"),
 ];
 
+/// The fleet is the widest screen, because it is the only one that is both a
+/// list of runs and a handle on the conversation graph behind them. The first
+/// six act on the run; the last six act on its thread.
+///
+/// `u` undoes and `U` puts it back. Lower case is undo on every screen that has
+/// one — memory's `u` is an undo too — because undo and redo are a verb and its
+/// inverse, and that is the one case where a habit transferring between screens
+/// does damage rather than nothing.
+///
+/// `c` says **conversations** rather than "threads" because the two are
+/// different things here and the screen's own prose already draws the line:
+/// `c` lists conversations ("no conversations yet — every run starts one"),
+/// while `b` "opens the branches of the selected run's thread". A bar reading
+/// `c threads · b branches` would say `b` drills into what `c` lists, which is
+/// not what either key does.
+///
+/// `g` is spelled `go to #` because `#` is the exact token printed beside each
+/// branch in the listing — the label names what is on screen rather than
+/// describing it.
 const FLEET: &[Key] = &[
     k("⏎", "watch"),
     k("s", "stop"),
@@ -105,6 +142,13 @@ const FLEET: &[Key] = &[
     k("d", "delegate again"),
     k("a", "attach"),
     k("/", "filter"),
+    k("c", "conversations"),
+    k("b", "branches"),
+    k("u", "undo"),
+    k("U", "redo"),
+    k("g", "go to #"),
+    k("f", "fork"),
+    k("t", "retry"),
 ];
 
 const MEMORY: &[Key] = &[
@@ -194,14 +238,59 @@ pub fn local(ws: Workspace) -> &'static [Key] {
     }
 }
 
-/// The keybar's left half: this screen's verbs, joined.
-pub fn keybar(ws: Workspace) -> String {
-    local(ws)
+/// The keybar's left half: this screen's verbs, as many as fit beside the way
+/// out. See the module header for why the exit wins the argument.
+pub fn keybar(ws: Workspace, width: u16) -> String {
+    let verbs = items(local(ws));
+    let budget = verb_budget(ws, width);
+
+    let whole = verbs.join(SEP);
+    if whole.chars().count() <= budget {
+        return whole;
+    }
+
+    // The marker's own width comes out of the budget before any verb does.
+    // Adding it afterwards would let the announcement be the thing that
+    // overflowed — the bar would drop the exit hint in order to say it had
+    // dropped a verb.
+    let mut used = MORE.chars().count();
+    let mut shown: Vec<String> = Vec::new();
+    for verb in verbs {
+        let cost = verb.chars().count() + SEP.chars().count();
+        if used + cost > budget {
+            break;
+        }
+        used += cost;
+        shown.push(verb);
+    }
+    shown.push(MORE.to_string());
+    shown.join(SEP)
+}
+
+/// What the left half may spend before it starts eating the way out.
+///
+/// Mirrors `ui::two_ends`, which reserves the right half first and hands the
+/// remainder to the verbs: a space of margin at each end and at least one
+/// between the halves, so three columns beyond the exit text itself. If that
+/// padding ever changes there, `the_way_out_fits_beside_the_verbs_at_every_realistic_width`
+/// is what notices.
+fn verb_budget(ws: Workspace, width: u16) -> usize {
+    (width as usize).saturating_sub(keybar_exit(ws).chars().count() + 3)
+}
+
+fn items(bindings: &'static [Key]) -> Vec<String> {
+    bindings
         .iter()
         .map(|b| format!("{} {}", b.key, b.what))
-        .collect::<Vec<_>>()
-        .join(" · ")
+        .collect()
 }
+
+const SEP: &str = " · ";
+
+/// What a bar says when it has dropped something. `?` is the overlay, which
+/// leads with this screen's own verbs — so the marker is a destination, not an
+/// apology.
+const MORE: &str = "? more";
 
 /// The keybar's right half: the way out, which never changes.
 pub fn keybar_exit(ws: Workspace) -> &'static str {
@@ -214,12 +303,11 @@ pub fn keybar_exit(ws: Workspace) -> &'static str {
 /// The footer printed inside a workspace's own border, shorter than the keybar
 /// because it repeats only what acts on the selected row.
 pub fn footer(ws: Workspace) -> String {
-    let verbs = local(ws)
-        .iter()
+    let verbs = items(local(ws))
+        .into_iter()
         .take(4)
-        .map(|b| format!("{} {}", b.key, b.what))
         .collect::<Vec<_>>()
-        .join(" · ");
+        .join(SEP);
     format!(" ↑↓ pick · {verbs} ")
 }
 
@@ -391,29 +479,91 @@ fn codes_of(rest: &str) -> Vec<KeyCode> {
 mod tests {
     use super::*;
 
-    /// The same letter means different things on different screens, which is
-    /// only safe because both are on the keybar at all times.
+    /// The realistic terminal widths. Eighty is the one that matters: it is
+    /// where the exit hint was being dropped, and every render test in the
+    /// suite used a hundred and fifty, which is why nobody saw it for so long.
+    const WIDTHS: [u16; 4] = [80, 100, 120, 150];
+
+    /// The invariant. A screen showing three of its five verbs is merely
+    /// terse; a screen with no way out is one you have to kill the terminal to
+    /// leave.
     #[test]
-    fn every_workspace_prints_its_own_verbs() {
+    fn the_way_out_fits_beside_the_verbs_at_every_realistic_width() {
         for ws in Workspace::ALL {
-            let bar = keybar(ws);
-            assert!(!bar.is_empty(), "{ws:?} has an empty keybar");
-            for binding in local(ws) {
+            for width in WIDTHS {
+                let left = keybar(ws, width).chars().count();
+                let right = keybar_exit(ws).chars().count();
                 assert!(
-                    bar.contains(binding.key),
-                    "{ws:?} does not print {}",
-                    binding.key
+                    left + right + 3 <= width as usize,
+                    "{ws:?} at {width} columns wants {} before the way out fits",
+                    left + right + 3
                 );
             }
         }
     }
 
-    /// `a` attaches in the fleet and answers an escalation in goals. That is
-    /// allowed, and this test pins the condition that makes it allowed.
+    /// The bar is allowed to be terse. It is not allowed to be terse *and* look
+    /// complete — a dropped verb has to be announced, and still be findable.
     #[test]
-    fn a_letter_that_changes_meaning_is_printed_on_both_screens() {
-        assert!(keybar(Workspace::Fleet).contains("a attach"));
-        assert!(keybar(Workspace::Goals).contains("a answer escalation"));
+    fn a_bar_that_drops_verbs_says_so_and_the_overlay_still_has_them() {
+        for ws in Workspace::ALL {
+            let in_overlay: Vec<&str> = keymap(ws)
+                .into_iter()
+                .flat_map(|(_, bindings)| bindings.iter().map(|b| b.key))
+                .collect();
+            for width in WIDTHS {
+                let bar = keybar(ws, width);
+                assert!(!bar.is_empty(), "{ws:?} at {width} has an empty keybar");
+                for (binding, item) in local(ws).iter().zip(items(local(ws))) {
+                    assert!(
+                        in_overlay.contains(&binding.key),
+                        "{ws:?} hides {} from the ? overlay, which is where the rest lives",
+                        binding.key
+                    );
+                    if !bar.contains(&item) {
+                        assert!(
+                            bar.contains(MORE),
+                            "{ws:?} at {width} dropped `{item}` without saying so: {bar}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// A verb is never cut in half. `a att` is a key that does not exist, and
+    /// a bar that prints one is worse than a bar that prints fewer.
+    #[test]
+    fn a_dropped_verb_goes_whole_rather_than_being_cut() {
+        // Narrow enough that the fleet's twelve verbs cannot all fit.
+        let bar = keybar(Workspace::Fleet, 80);
+        assert!(bar.contains(MORE), "expected the fleet to be truncated at 80: {bar}");
+        for item in bar.split(SEP) {
+            assert!(
+                item == MORE || items(local(Workspace::Fleet)).iter().any(|v| v == item),
+                "`{item}` is not a whole verb: {bar}"
+            );
+        }
+    }
+
+    /// `a` attaches in the fleet and answers an escalation in goals. Both are
+    /// on the bar when there is room, and both are always in the overlay —
+    /// which is what makes the collision safe now that the bar can be partial.
+    #[test]
+    fn a_letter_that_changes_meaning_is_reachable_on_both_screens() {
+        assert!(keybar(Workspace::Fleet, 150).contains("a attach"));
+        assert!(keybar(Workspace::Goals, 150).contains("a answer escalation"));
+        for (ws, what) in [
+            (Workspace::Fleet, "attach"),
+            (Workspace::Goals, "answer escalation"),
+        ] {
+            assert!(
+                keymap(ws)
+                    .into_iter()
+                    .any(|(_, bs)| bs.iter().any(|b| b.key == "a" && b.what == what)),
+                "{ws:?} does not carry `a {what}` in the overlay"
+            );
+        }
     }
 
     #[test]

@@ -100,3 +100,27 @@ is `/thinking`.
 AGY's stream has no reasoning message type at all, only `agent_response` and
 `tool` steps, so there is nothing to show there and Jod does not pretend
 otherwise.
+
+## Terminal configuration: Option on macOS
+
+Jod's global chords are on Alt — `Alt-K` for the workspace menu, `Alt-B` to
+delegate, `Alt-A` for the fleet. The move off Ctrl was to stop a multiplexer
+eating them; tmux's own prefix is `Ctrl-B`, which used to be the delegate key,
+so under tmux that binding never arrived at all.
+
+On macOS this needs one setting, because the terminal composes Option into
+accented characters by default rather than sending it as a modifier. Until it
+is changed, `Alt-K` types `˚` into the prompt and no chord reaches Jod:
+
+- **iTerm2** — Settings → Profiles → Keys → Left Option key → `Esc+`
+- **Terminal.app** — Settings → Profiles → Keyboard → "Use Option as Meta key"
+- **Ghostty** — `macos-option-as-alt = true`
+- **kitty** — `macos_option_as_alt yes`
+- **WezTerm** — `send_composed_key_when_left_alt_is_pressed = false`
+- **VS Code's terminal** — `"terminal.integrated.macOptionIsMeta": true`
+
+Linux terminals send Alt as a modifier already and need nothing. The Ctrl
+spellings of the non-readline chords still fire and are deliberately not
+printed, so a Mac without the setting is degraded rather than stuck — but the
+keybar will be advertising chords that do not work, which is the failure this
+note exists to prevent.

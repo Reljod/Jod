@@ -568,7 +568,7 @@ fn draw_keybar(f: &mut Frame, app: &App, area: Rect) {
             "typing filters this list".to_string(),
             "⏎ keeps it · Esc clears it",
         ),
-        Overlay::None => (keys::keybar(ws), keys::keybar_exit(ws)),
+        Overlay::None => (keys::keybar(ws, area.width), keys::keybar_exit(ws)),
     };
     f.render_widget(
         Paragraph::new(two_ends(&left, right, area.width, MUTED)),
@@ -631,14 +631,56 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-/// Two strings on one row, the right one dropped rather than allowed to
-/// collide.
+/// Two strings on one row: **the right one is reserved first** and the left
+/// gets what is left over.
+///
+/// Regression, and the argument order was the whole bug. This used to measure
+/// the left half and drop the right half whole when the rest would not fit —
+/// so at 80 columns, an entirely ordinary terminal, Chat, Fleet and Memory
+/// printed their verbs and stopped saying how to leave. `keys.rs` states the
+/// condition it broke: a screen whose way out is not printed is a trap rather
+/// than a shortcut.
+///
+/// The invariant is therefore the exit, and the verb list is best-effort. A
+/// screen showing three of its five verbs is merely terse; a screen with no way
+/// out is a screen you have to kill the terminal to leave. The left half is
+/// elided rather than truncated, because `keys::keybar` budgets its own text
+/// and a half-word cut mid-chord teaches a key that does not exist.
+///
+/// **`keys::verb_budget` mirrors the arithmetic below** — `width - right - 3`,
+/// one space of margin at each end and one between the halves. Two files have
+/// to agree on those three columns: widen the padding here and the keybar hands
+/// back a string this function then elides *whole*, so a screen loses all its
+/// verbs rather than one.
+///
+/// `two_ends_accepts_a_left_half_of_exactly_the_budgeted_width` is what fails
+/// if they drift, and it has to construct that exact width by hand. Rendering a
+/// real keybar does not catch it: `keys::keybar` drops whole verbs, so it
+/// almost always lands a few columns under its budget and quietly absorbs the
+/// disagreement until the one screen whose verbs happen to end on the boundary.
 fn two_ends(left: &str, right: &str, width: u16, colour: Color) -> Line<'static> {
-    let used = left.chars().count() + 2;
-    let room = (width as usize).saturating_sub(used);
-    let mut spans = vec![Span::raw(" "), Span::styled(left.to_string(), fg(colour))];
-    if room >= right.chars().count() + 2 {
-        spans.push(Span::raw(" ".repeat(room - right.chars().count())));
+    let width = width as usize;
+    let left_len = left.chars().count();
+    let right_len = right.chars().count();
+
+    // One space of margin at each end; at least one more between the halves, so
+    // they can never run together — `1 queuedAlt-X stop` reads as neither.
+    let show_right = right_len + 2 <= width;
+    let room_for_left = if show_right {
+        width.saturating_sub(right_len + 3)
+    } else {
+        width.saturating_sub(2)
+    };
+    let show_left = left_len <= room_for_left;
+
+    let mut spans = vec![Span::raw(" ")];
+    if show_left {
+        spans.push(Span::styled(left.to_string(), fg(colour)));
+    }
+    if show_right {
+        let used = 1 + if show_left { left_len } else { 0 };
+        let gap = width.saturating_sub(used + right_len + 1);
+        spans.push(Span::raw(" ".repeat(gap)));
         spans.push(Span::styled(right.to_string(), fg(colour)));
     }
     spans.push(Span::raw(" "));
@@ -3157,6 +3199,112 @@ mod tests {
                 screen.lines().all(|l| l.chars().count() <= w as usize),
                 "{w}×{h} overflowed:\n{screen}"
             );
+        }
+    }
+
+    // ---- the way out ----
+
+    /// Regression, and the reason it survived in plain sight: `two_ends`
+    /// reserved the verb list first and dropped the exit *whole*, so at 80
+    /// columns — an entirely ordinary terminal — Chat, Fleet and Memory printed
+    /// their verbs and stopped saying how to leave. Nothing failed, because
+    /// every render test in the suite was 150 wide.
+    ///
+    /// 80×24 is the contract, so the contract is what this asserts. The exit is
+    /// the invariant; the verbs are best-effort and may be elided.
+    #[test]
+    fn every_screen_still_says_how_to_leave_at_eighty_columns() {
+        for ws in Workspace::ALL {
+            let mut a = populated();
+            a.go(ws);
+            let screen = rendered(&a, 80, 24);
+            let rows: Vec<&str> = screen.lines().collect();
+            let keybar = rows[rows.len() - 2];
+            assert!(
+                keybar.contains(keys::keybar_exit(ws)),
+                "{ws:?} at 80 columns stopped saying how to leave: {keybar}"
+            );
+
+            // Both halves, not one bought with the other. `keys::keybar`
+            // budgets its verbs against exactly the room `two_ends` leaves it,
+            // so what it hands back is what reaches the screen — if the two
+            // ever disagree about the three columns of padding, this is where
+            // the whole left half silently vanishes.
+            let verbs = keys::keybar(ws, 80);
+            assert!(!verbs.is_empty(), "{ws:?} budgeted no verbs at all");
+            assert!(
+                keybar.contains(&verbs),
+                "{ws:?} budgeted {verbs:?} but the bar printed: {keybar}"
+            );
+
+            // A bar that dropped something has to admit it, or the screen
+            // quietly teaches a subset and you never learn the rest exists.
+            // Fleet is the sharp case — twelve verbs truncate at every width.
+            if verbs != keys::keybar(ws, 400) {
+                assert!(
+                    verbs.ends_with("? more"),
+                    "{ws:?} dropped verbs without saying so: {verbs:?}"
+                );
+            }
+        }
+    }
+
+    /// The exact coupling with `keys::verb_budget`: a left half of *precisely*
+    /// the budgeted width must still be printed.
+    ///
+    /// The three columns are spelled out here on purpose — this test is the
+    /// specification of the number both files share, so changing the padding on
+    /// either side without acknowledging it here fails. `verb_budget` is
+    /// private to `keys`, so it cannot be called; if it is ever made public,
+    /// call it instead of repeating the arithmetic.
+    ///
+    /// Rendering a real keybar does not prove this. `keys::keybar` drops whole
+    /// verbs, so it lands under its budget by however much the last dropped
+    /// verb was worth and absorbs a padding disagreement of one or two columns
+    /// — measured: widening the padding below from 3 to 5 leaves every
+    /// eighty-column render passing, and would still lose a screen's entire
+    /// verb list the day its verbs ended on the boundary.
+    #[test]
+    fn two_ends_accepts_a_left_half_of_exactly_the_budgeted_width() {
+        for ws in Workspace::ALL {
+            for width in [80u16, 100, 120, 150] {
+                let right = keys::keybar_exit(ws);
+                let budget = (width as usize) - right.chars().count() - 3;
+                let left = "x".repeat(budget);
+                let line = two_ends(&left, right, width, MUTED);
+                let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+                assert!(
+                    text.contains(&left),
+                    "{ws:?} at {width}: a left half of exactly the budget was elided: {text:?}"
+                );
+                assert!(text.contains(right), "{ws:?} at {width}: the exit went: {text:?}");
+                assert!(
+                    text.chars().count() <= width as usize,
+                    "{ws:?} at {width}: overflowed: {text:?}"
+                );
+            }
+        }
+    }
+
+    /// The other half of the same rule: the two halves may never touch, at any
+    /// width. Whichever one is elided, what is printed stays legible.
+    #[test]
+    fn the_two_halves_of_a_bar_never_run_together() {
+        for width in [200u16, 150, 100, 80, 60, 40, 24, 12] {
+            let line = two_ends("Alt-B delegate · Alt-K menu", "Alt-X stop · Ctrl-C quit", width, MUTED);
+            let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+            assert!(
+                text.chars().count() <= width as usize,
+                "{width}: overflowed with {text:?}"
+            );
+            assert!(!text.contains("menuAlt-X"), "{width}: they touched: {text:?}");
+            // The exit survives every width that can hold it at all.
+            if "Alt-X stop · Ctrl-C quit".len() + 2 <= width as usize {
+                assert!(
+                    text.contains("Alt-X stop · Ctrl-C quit"),
+                    "{width}: the way out went: {text:?}"
+                );
+            }
         }
     }
 
