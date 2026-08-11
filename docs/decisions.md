@@ -1241,7 +1241,7 @@ codebase's own answer rather than a copy of it. A background agent that can
 create background agents has no bound at all, and it multiplies while nobody is
 reading.
 
-## Four guards were green, and none of them were guarding
+## Five guards were green, and none of them were guarding
 
 Every one of these passed. Every one would have kept passing through the change
 it existed to catch.
@@ -1264,8 +1264,13 @@ it existed to catch.
   `a_run_that_owed_nobody_anything_wears_no_mark` asserted the row carried
   neither `⊘` nor `♻`. Swapping the predicate for a wrong one *passed*, because
   the wrong predicate draws `○` — a third glyph the list had never heard of.
+- **An assertion pointed at the wrong half of the screen.**
+  `text_that_was_shortened_says_that_it_was` checked `!row.contains(name)` — but
+  past ninety columns the detail pane shares the rendered line and prints the
+  name in full, so it was reading the *other* pane's copy and would have passed
+  through any amount of silent clipping in the pane under test.
 
-The shape is one thing, and it is not carelessness — all four were written
+The shape is one thing, and it is not carelessness — all five were written
 deliberately, by people who had just been arguing about correctness:
 
 **A guard has to name the property, not enumerate the ways of violating it.**
@@ -1282,5 +1287,18 @@ purpose and watch the test fail.** Not once at the end — at the moment you wri
 the assertion, before you believe it. Report both directions. Three of the four
 above were caught by someone swapping in a deliberately wrong implementation to
 see what happened, and being surprised.
+
+The fifth is the one to expect. The first four are clever mistakes — a
+tautology, a fixture-bound assertion, a doc that overreached, a list that went
+stale. The fifth is none of those: the property was named correctly and the
+instrument was simply aimed past the thing under test, because two panes render
+onto one line and `contains` does not care which. It needed no ingenuity to
+write and it will recur, in any suite where the fixture is larger than the
+subject. A sibling test in the same file had already hit it, which is the tell
+that the shape is structural rather than a slip.
+
+So: **assert against the smallest region that can hold the answer.** A whole
+rendered screen is not a unit; it is several, and `contains` will find your
+string in any of them.
 
 A test you have never seen fail is a test you have never seen.
