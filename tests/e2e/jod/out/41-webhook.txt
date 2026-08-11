@@ -1,0 +1,219 @@
+==============================================================
+== 0. start the daemon with a secret configured
+==============================================================
+$ cat '/tmp/jod-e2e/webhook/api.log'
+jod-api: no tokens issued — every request will be refused.
+         mint one with: jod-api token issue <label> --scope read
+jod-api: allowed_cwd is empty — every spawn will be refused.
+         set allowed_cwd in /tmp/jod-e2e/webhook/api.toml or JOD_API_ALLOWED_CWD.
+jod-api: listening on http://127.0.0.1:18788
+
+$ curl -sS -w ' HTTP %{http_code}\n' 'http://127.0.0.1:18788/v1/health'
+{"status":"ok"} HTTP 200
+
+==============================================================
+== 1. the payload and its true signature
+==============================================================
+$ cat '/tmp/jod-e2e/hook-payload.json'
+{"action":"opened","number":7,
+ "repository":{"full_name":"Reljod/Jod"},
+ "pull_request":{"title":"a real pull request","body":"please review"}}
+
+signature: sha256=af966f68929855e8c1aec5caee6926d38f02a4af9d18686909c57d570c4b8f44
+==============================================================
+== 2. a correctly signed delivery
+==============================================================
+$ POST /webhooks/github  [valid]
+HTTP 200
+{"status":"no_match","delivery":"d-001","matched":0}
+
+$ q "SELECT delivery_id, event, status, detail FROM webhook_deliveries ORDER BY received_at_ms"
+delivery_id | event | status | detail
+------------+-------+--------+-------
+d-001 | pull_request | no_match | 
+(1 rows)
+
+==============================================================
+== 3. a WRONG signature must be refused
+==============================================================
+tag signed with the wrong secret: sha256=9ee5bcbe895ed61e9a8f6bf63c46d790ed9c34f90285f9f0d0baf87ecbefe90c
+$ POST /webhooks/github  [wrong signature]
+HTTP 401
+{"type":"about:blank#unauthorized","title":"Unauthorized","status":401}
+
+==============================================================
+== 4. a TAMPERED body against a valid signature must be refused
+==============================================================
+$ sed 's/a real pull request/a tampered pull request/' '/tmp/jod-e2e/hook-payload.json' > '/tmp/jod-e2e/hook-tampered.json'; cat '/tmp/jod-e2e/hook-tampered.json'
+{"action":"opened","number":7,
+ "repository":{"full_name":"Reljod/Jod"},
+ "pull_request":{"title":"a tampered pull request","body":"please review"}}
+
+-- sending the tampered body with the signature for the ORIGINAL body --
+$ POST /webhooks/github  [tampered body, original signature]
+HTTP 401
+{"type":"about:blank#unauthorized","title":"Unauthorized","status":401}
+
+==============================================================
+== 5. malformed and missing signatures
+==============================================================
+$ POST /webhooks/github  [no signature header]
+HTTP 401
+{"type":"about:blank#unauthorized","title":"Unauthorized","status":401}
+
+$ POST /webhooks/github  [empty signature]
+HTTP 401
+{"type":"about:blank#unauthorized","title":"Unauthorized","status":401}
+
+$ POST /webhooks/github  [prefix only]
+HTTP 401
+{"type":"about:blank#unauthorized","title":"Unauthorized","status":401}
+
+$ POST /webhooks/github  [not hex]
+HTTP 401
+{"type":"about:blank#unauthorized","title":"Unauthorized","status":401}
+
+$ POST /webhooks/github  [sha1 scheme]
+HTTP 401
+{"type":"about:blank#unauthorized","title":"Unauthorized","status":401}
+
+$ POST /webhooks/github  [correct hex, no prefix]
+HTTP 401
+{"type":"about:blank#unauthorized","title":"Unauthorized","status":401}
+
+$ POST /webhooks/github  [uppercased hex]
+HTTP 401
+{"type":"about:blank#unauthorized","title":"Unauthorized","status":401}
+
+==============================================================
+== 6. GitHub's own headers are required
+==============================================================
+$ POST /webhooks/github  [no delivery id]
+HTTP 400
+{"type":"about:blank#bad-request","title":"Bad Request","status":400,"detail":"a GitHub delivery carries X-GitHub-Delivery and X-GitHub-Event"}
+
+$ POST /webhooks/github  [no event]
+HTTP 400
+{"type":"about:blank#bad-request","title":"Bad Request","status":400,"detail":"a GitHub delivery carries X-GitHub-Delivery and X-GitHub-Event"}
+
+$ POST /webhooks/github  [neither]
+HTTP 400
+{"type":"about:blank#bad-request","title":"Bad Request","status":400,"detail":"a GitHub delivery carries X-GitHub-Delivery and X-GitHub-Event"}
+
+==============================================================
+== 7. REDELIVERY: the same delivery id twice
+==============================================================
+-- d-001 was already accepted in section 2 --
+$ POST /webhooks/github  [replay of d-001]
+HTTP 200
+{"status":"duplicate","delivery":"d-001","matched":0}
+
+$ q "SELECT delivery_id, event, status, detail FROM webhook_deliveries ORDER BY received_at_ms"
+delivery_id | event | status | detail
+------------+-------+--------+-------
+d-001 | pull_request | no_match | 
+d-002 | pull_request | rejected | bad or missing signature
+d-003 | pull_request | rejected | bad or missing signature
+d-004 | pull_request | rejected | bad or missing signature
+d-005 | pull_request | rejected | bad or missing signature
+d-006 | pull_request | rejected | bad or missing signature
+d-007 | pull_request | rejected | bad or missing signature
+d-008 | pull_request | rejected | bad or missing signature
+d-009 | pull_request | rejected | bad or missing signature
+d-010 | pull_request | rejected | bad or missing signature
+(10 rows)
+
+$ q "SELECT count(*) AS rows_for_d001 FROM webhook_deliveries WHERE delivery_id='d-001'"
+rows_for_d001
+-------------
+1
+(1 rows)
+
+==============================================================
+== 8. a body that is signed but not JSON
+==============================================================
+$ printf 'this is not json at all' > '/tmp/jod-e2e/hook-notjson.txt'
+
+$ POST /webhooks/github  [signed non-JSON]
+HTTP 400
+{"type":"about:blank#bad-request","title":"Bad Request","status":400,"detail":"the body is not JSON; set the hook's content type to application/json"}
+
+==============================================================
+== 9. every delivery this endpoint recorded
+==============================================================
+$ q "SELECT delivery_id, event, repo, action, status, detail FROM webhook_deliveries ORDER BY received_at_ms"
+delivery_id | event | repo | action | status | detail
+------------+-------+------+--------+--------+-------
+d-001 | pull_request | Reljod/Jod | opened | no_match | 
+d-002 | pull_request |  |  | rejected | bad or missing signature
+d-003 | pull_request |  |  | rejected | bad or missing signature
+d-004 | pull_request |  |  | rejected | bad or missing signature
+d-005 | pull_request |  |  | rejected | bad or missing signature
+d-006 | pull_request |  |  | rejected | bad or missing signature
+d-007 | pull_request |  |  | rejected | bad or missing signature
+d-008 | pull_request |  |  | rejected | bad or missing signature
+d-009 | pull_request |  |  | rejected | bad or missing signature
+d-010 | pull_request |  |  | rejected | bad or missing signature
+d-012 | pull_request |  |  | failed | the body is not JSON: expected ident at line 1 column 2
+(11 rows)
+
+$ cat '/tmp/jod-e2e/webhook/audit.jsonl' 2>/dev/null | tail -20
+{"at_ms":1786403762213,"action":"webhook.github","token_label":"github","outcome":"no_match","detail":"d-001"}
+{"at_ms":1786403762298,"action":"webhook.github","token_label":"github","outcome":"rejected","detail":"d-002"}
+{"at_ms":1786403762326,"action":"webhook.github","token_label":"github","outcome":"rejected","detail":"d-003"}
+{"at_ms":1786403762348,"action":"webhook.github","token_label":"github","outcome":"rejected","detail":"d-004"}
+{"at_ms":1786403762370,"action":"webhook.github","token_label":"github","outcome":"rejected","detail":"d-005"}
+{"at_ms":1786403762385,"action":"webhook.github","token_label":"github","outcome":"rejected","detail":"d-006"}
+{"at_ms":1786403762400,"action":"webhook.github","token_label":"github","outcome":"rejected","detail":"d-007"}
+{"at_ms":1786403762416,"action":"webhook.github","token_label":"github","outcome":"rejected","detail":"d-008"}
+{"at_ms":1786403762433,"action":"webhook.github","token_label":"github","outcome":"rejected","detail":"d-009"}
+{"at_ms":1786403762468,"action":"webhook.github","token_label":"github","outcome":"rejected","detail":"d-010"}
+{"at_ms":1786403762541,"action":"webhook.github","token_label":"github","outcome":"duplicate","detail":"d-001"}
+
+==============================================================
+== 10. with NO secret configured, a valid-looking delivery must be refused
+==============================================================
+$ cat '/tmp/jod-e2e/webhook/api2.log'
+jod-api: no tokens issued — every request will be refused.
+         mint one with: jod-api token issue <label> --scope read
+jod-api: allowed_cwd is empty — every spawn will be refused.
+         set allowed_cwd in /tmp/jod-e2e/webhook/api.toml or JOD_API_ALLOWED_CWD.
+jod-api: listening on http://127.0.0.1:18788
+
+$ POST /webhooks/github  [no secret configured]
+HTTP 401
+{"type":"about:blank#unauthorized","title":"Unauthorized","status":401}
+
+-- the refusal must be indistinguishable from a bad signature, but recorded --
+$ q "SELECT delivery_id, status, detail FROM webhook_deliveries WHERE delivery_id='d-020'"
+delivery_id | status | detail
+------------+--------+-------
+d-020 | rejected | no secret is configured
+(1 rows)
+
+==============================================================
+== 11. does restarting the daemon make a revoked token stop working?
+==============================================================
+$ jod-api token issue tempdevice --scope read
+jod_f34b4da15eca39c255dfb1e29dc9eb40f24e85ff164b579ec262cfd020c6378d
+
+Label: tempdevice
+Scope: read
+Stored (hashed) in /tmp/jod-e2e/webhook/api-tokens.json
+
+This is the only time the token is shown. Store it in the
+device's keychain, not in a file or a shell history.
+
+$ curl -sS -o /dev/null -w 'before revoke: HTTP %{http_code}\n' -H 'Authorization: Bearer jod_605efe93040c2c81d9eab026df8b7c4373dea063a8f216b6084cf82810d9591e' 'http://127.0.0.1:18788/v1/agents'
+before revoke: HTTP 401
+
+$ jod-api token revoke tempdevice2
+revoked 1 token(s) labelled tempdevice2
+
+$ curl -sS -o /dev/null -w 'after revoke, same daemon: HTTP %{http_code}\n' -H 'Authorization: Bearer jod_605efe93040c2c81d9eab026df8b7c4373dea063a8f216b6084cf82810d9591e' 'http://127.0.0.1:18788/v1/agents'
+after revoke, same daemon: HTTP 401
+
+$ curl -sS -o /dev/null -w 'after revoke, restarted daemon: HTTP %{http_code}\n' -H 'Authorization: Bearer jod_605efe93040c2c81d9eab026df8b7c4373dea063a8f216b6084cf82810d9591e' 'http://127.0.0.1:18788/v1/agents'
+after revoke, restarted daemon: HTTP 401
+
+daemon stopped

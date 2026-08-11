@@ -1,0 +1,51 @@
+# Rubric
+
+criterion                           weight   a 5 means
+S1 signature / spoof resistance         15   raw-byte HMAC, constant time, every negative case refused
+S2 prompt-injection containment         15   untrusted text can never occupy an instruction position
+S3 secrets + exposure surface           10   no inbound port, secrets off-database, 0600, fingerprint only
+D1 delivery correctness                 15   dedupe, at-least-once, crash-safe across a restart
+D2 ack within GitHub's 10s              10   ack in single-digit ms, work strictly afterwards
+O  operator simplicity (1 VPS)          10   one process, one config file, nothing else to run
+W  dependency weight                     8   no new crates
+T  testability, no live creds            9   every claim asserted offline against fixtures
+U  Telegram UX                           4   streaming, chunking, keyboards, completion notifications
+M  memory integration                    4   writes to jod.db with the correct trust class
+
+total                                  100
+
+
+# Scores (0-5 per criterion)
+
+iteration                              S1   S2   S3   D1   D2    O    W    T    U    M    TOTAL
+I1  naive synchronous handler           0    0    1    0    0    5    5    2    0    0     23.6
+I2  async ack + in-memory queue         0    0    1    2    5    5    5    3    0    0     41.4
+I3  + HMAC over raw bytes               5    0    2    2    5    4    5    5    0    0     60.0
+I4  + durable row, dedupe, sweep        5    0    2    5    5    4    5    5    0    2     70.6
+I5  + rule expression language          5    1    2    5    5    2    4    2    0    2     62.6
+I6  fixed condition vocabulary          5    2    2    5    5    4    5    5    0    2     76.6
+I7  + injection containment             5    4    3    5    5    4    5    5    0    4     86.2
+I8  + exposure hardening                5    4    5    5    5    3    5    5    0    4     88.2
+I9  + Telegram long-poll loop           5    4    5    5    5    3    4    4    3    4     87.2
+I10 + Telegram rendering, trimmed       5    5    5    5    5    4    4    5    5    5     96.4
+A   GitHub Actions + Tailscale          5    3    4    4    5    5    5    3    0    0     77.4
+
+
+# Ranking, by score
+
+rank  iteration                              score   delta vs prev iteration
+1     I10 + Telegram rendering, trimmed       96.4         +9.2
+2     I8  + exposure hardening                88.2         +2.0
+3     I9  + Telegram long-poll loop           87.2         -1.0
+4     I7  + injection containment             86.2         +9.6
+5     A   GitHub Actions + Tailscale          77.4             
+6     I6  fixed condition vocabulary          76.6        +14.0
+7     I4  + durable row, dedupe, sweep        70.6        +10.6
+8     I5  + rule expression language          62.6         -8.0
+9     I3  + HMAC over raw bytes               60.0        +18.6
+10    I2  async ack + in-memory queue         41.4        +17.8
+11    I1  naive synchronous handler           23.6        +23.6
+
+Winner by score: I10 + Telegram rendering, trimmed at 96.4/100.
+Dip: I5  + rule expression language scored -8.0 against its predecessor — reverted at the next iteration.
+Dip: I9  + Telegram long-poll loop scored -1.0 against its predecessor — kept anyway, see the note.

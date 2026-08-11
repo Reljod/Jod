@@ -1,0 +1,93 @@
+{
+  "source": "/home/reljod/.claude/jobs/eb39fa18/tmp/dbs/g100k.db",
+  "depth": 2,
+  "entities": 12500,
+  "relations": 100000,
+  "sqlite_version": "3.46.1",
+  "scope_distribution": {
+    "default": 74991,
+    "work": 25009
+  },
+  "cells": {
+    "JOIN / with_ANALYZE": {
+      "p50_ms": 0.306,
+      "p95_ms": 0.535,
+      "n": 15,
+      "plan": [
+        "CO-ROUTINE reach",
+        "SETUP",
+        "SCAN CONSTANT ROW",
+        "RECURSIVE STEP",
+        "COMPOUND QUERY",
+        "LEFT-MOST SUBQUERY",
+        "SCAN x",
+        "SEARCH e USING COVERING INDEX ix_rel_out (scope=? AND src=?)",
+        "UNION ALL",
+        "SCAN x",
+        "SEARCH e USING COVERING INDEX ix_rel_in (scope=? AND dst=?)",
+        "SCAN reach",
+        "USE TEMP B-TREE FOR GROUP BY"
+      ]
+    },
+    "CROSS JOIN / with_ANALYZE": {
+      "p50_ms": 0.243,
+      "p95_ms": 0.49,
+      "n": 15,
+      "plan": [
+        "CO-ROUTINE reach",
+        "SETUP",
+        "SCAN CONSTANT ROW",
+        "RECURSIVE STEP",
+        "COMPOUND QUERY",
+        "LEFT-MOST SUBQUERY",
+        "SCAN x",
+        "SEARCH e USING COVERING INDEX ix_rel_out (scope=? AND src=?)",
+        "UNION ALL",
+        "SCAN x",
+        "SEARCH e USING COVERING INDEX ix_rel_in (scope=? AND dst=?)",
+        "SCAN reach",
+        "USE TEMP B-TREE FOR GROUP BY"
+      ]
+    },
+    "JOIN / without_ANALYZE": {
+      "p50_ms": 1075.665,
+      "p95_ms": 2671.478,
+      "n": 15,
+      "plan": [
+        "CO-ROUTINE reach",
+        "SETUP",
+        "SCAN CONSTANT ROW",
+        "RECURSIVE STEP",
+        "COMPOUND QUERY",
+        "LEFT-MOST SUBQUERY",
+        "SEARCH e USING COVERING INDEX ix_rel_in (scope=?)",
+        "SCAN x",
+        "UNION ALL",
+        "SEARCH e USING COVERING INDEX ix_rel_in (scope=?)",
+        "SCAN x",
+        "SCAN reach",
+        "USE TEMP B-TREE FOR GROUP BY"
+      ]
+    },
+    "CROSS JOIN / without_ANALYZE": {
+      "p50_ms": 0.32,
+      "p95_ms": 0.591,
+      "n": 15,
+      "plan": [
+        "CO-ROUTINE reach",
+        "SETUP",
+        "SCAN CONSTANT ROW",
+        "RECURSIVE STEP",
+        "COMPOUND QUERY",
+        "LEFT-MOST SUBQUERY",
+        "SCAN x",
+        "SEARCH e USING COVERING INDEX ix_rel_out (scope=? AND src=?)",
+        "UNION ALL",
+        "SCAN x",
+        "SEARCH e USING COVERING INDEX ix_rel_in (scope=? AND dst=?)",
+        "SCAN reach",
+        "USE TEMP B-TREE FOR GROUP BY"
+      ]
+    }
+  }
+}

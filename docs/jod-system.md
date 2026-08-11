@@ -42,10 +42,22 @@ process.
 | # | Pillar | What it is | Status |
 |---|--------|-----------|--------|
 | 1 | **Brain nodes** | Flat markdown notes in Open Knowledge Format | Planned |
-| 2 | **Brain connections** | A graph over those notes | Planned |
+| 2 | **Brain connections** | A graph over those notes | **Built** — `entities` + `relations` over `facts` |
 | 3 | **Jod** | The orchestrator that delegates and reports | **Built** |
 | 4 | **Agents + A2A** | Harness-run agents that talk to each other | **Built (single-agent)** |
 | 5 | **Memory** | What Jod knows, and what it did | **Built** |
+| 6 | **Conversations** | A transcript Jod owns: list, fork, revert, compact | **Built** |
+| 7 | **Time** | Schedules that fire, and goals that persist | **Built** |
+| 8 | **Inbound** | GitHub events and Telegram messages that start work | **Built** |
+
+Pillar 2 arrived early and by a different route than planned. It is a graph over
+*facts* rather than over markdown notes — a derived, rebuildable index in the
+same `jod.db`, answering "what is related to this" and "how are these two
+connected", which a list of facts cannot answer at all. There is no SQLite graph
+extension worth having: none is simultaneously maintained, permissively
+licensed and statically linkable into one binary, and plain tables with a
+recursive CTE walk a million edges fast enough that one would buy nothing.
+→ [why](decisions.md#the-graph-is-an-index-and-the-extension-was-not-worth-buying)
 
 Pillars 3, 4 and 5 come first on purpose. They produce value on day one, and
 they are what the other two will be *built by* — once Jod can delegate reliably
@@ -139,7 +151,28 @@ and cost in `finalize`.
 Session resume is normalised behind one `Resume` field — `Fresh`, `Last`, or
 `Session(id)`. Each harness spells it differently; the seam hides that. This is
 what makes `jod chat` a conversation rather than a series of unrelated one-shot
-tasks, and it is why Jod needs no memory of the transcript: the harness owns it.
+tasks.
+
+**This page used to add "and it is why Jod needs no memory of the transcript:
+the harness owns it." That is no longer true, and the reversal is deliberate.**
+It held while a conversation was a line you could only continue. It fails the
+moment you want to fork, revert, or move a thread to a different harness,
+because a session id issued by Claude Code means nothing to OpenCode. Probing
+the three binaries directly:
+
+| | Claude Code | OpenCode | AGY |
+|---|---|---|---|
+| fork a session | `--fork-session` | `--fork` | **none** |
+| assign a session id | `--session-id <uuid>` | none | none |
+| export a transcript | — | `opencode export` | none |
+| accept one back | `--input-format stream-json` | `opencode import` | none |
+
+Two of the three can fork themselves, and Jod delegates that rather than
+reimplementing it. **None of them can hand a thread to another**, and AGY can do
+none of it — so cross-harness handoff has no owner unless Jod is the owner. Jod
+now keeps the transcript as a DAG with a moving head pointer, which is the shape
+git, ChatGPT and LangGraph converged on and the harnesses did not.
+→ [why](decisions.md#jod-owns-the-transcript-now)
 
 **AGY needs three defences, all found by probing the real CLI.** They are
 documented here because each one makes a *failed* run look successful:

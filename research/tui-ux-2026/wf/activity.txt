@@ -1,0 +1,30 @@
+┌─ activity · 3 unread · 1 needs you ──────────────────────────────────────────────────────────────┐
+│    today — Monday 10 August                                                                      │
+│    ──────────────────────────────────────────────────────────────────────────────────────────    │
+│  ▸ ● 16:44  run      ✓ port-the-parser finished · 4m12s · $0.31 · 214 tests pass                 │
+│    ● 16:42  hook     ⚑ pr-opened fired (PR #212) → triage started as a3f91c22                    │
+│    ● 16:32  hook     ⚑ ci-failed fired → triage-ci running 26m                                   │
+│      16:30  cron     ◷ pr-shepherd ran · 3 PRs swept · 1 merged · 0 vetoed · 1m04s               │
+│    ● 16:02  goal     ◎ inbox-to-zero iteration 118 · 71% (+4) · needs you on ENG-441             │
+│      15:41  memory   ◆ 3 memories written by audit-the-deps · 1 contradiction raised             │
+│      15:10  hook     ⚑ pr-opened (PR #211) → 3b7e6612 · clear                                    │
+│      14:55  run      ✗ migrate-store failed · 3h11m · exit 1 · "store is locked"                 │
+│      14:02  goal     ◎ inbox-to-zero iteration 116 · nothing to do                               │
+│      12:02  goal     ◎ inbox-to-zero iteration 114 · ✗ harness timed out after 20m               │
+│      09:00  cron     ◷ finance-sync skipped — previous run still going (overlap: skip)           │
+│                                                                                                  │
+│    yesterday — Sunday 9 August                                                                   │
+│    ──────────────────────────────────────────────────────────────────────────────────────────    │
+│      23:30  cron     ◷ backup-jod-db ✓ 41s · 18.2 MB                                             │
+│      04:00  cron     ◷ notion-sync ✗ 401 from Notion — token expired  (3rd failure in a row)     │
+│      02:00  cron     ◷ nightly-inbox ✓ 3m51s · 1 item triaged                                    │
+│                                                                                                  │
+│    ──────────────────────────────────────────────────────────────────────────────────────────    │
+│    filter  [all]  runs  cron  goals  hooks  memory      only unread: off      f cycles           │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+└─  ↑↓ pick · ⏎ jump to what it is about · m mark read · M mark all read · f filter  ──────────────┘
+ ⏎ jump to it · m mark read · M mark all · u unread only · f filter source        Esc back · ? keys 
+ activity · 3 unread · last event 2m ago                                                 ⚑ 3 unread 

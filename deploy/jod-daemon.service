@@ -1,0 +1,81 @@
+# jod-daemon — the resident scheduler: fires due schedules on the clock.
+#
+# This is the unit that makes a schedule mean anything. Without it the tick
+# exists and is tested, but nothing calls it, and `jod schedule ls` describes
+# work that will never happen. → deploy/README.md
+#
+# It spawns agent harnesses, so it is the same threat as jod-api and gets the
+# same hardening: an unprivileged user and a narrow set of writable paths.
+#
+#   sudo cp deploy/jod-daemon.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now jod-daemon
+
+[Unit]
+Description=Jod scheduler — fires due schedules and advances goals
+Documentation=https://github.com/Reljod/Jod
+After=network-online.target
+Wants=network-online.target
+
+# Deliberately *not* ordered after jod-api, and safe to run alongside it. Both
+# processes claim schedules out of the same SQLite file with a compare-and-swap
+# and a lease, so two tickers cannot fire one schedule twice; ordering them
+# would imply a dependency that does not exist.
+
+[Service]
+Type=exec
+User=jod
+Group=jod
+ExecStart=/usr/local/bin/jod daemon
+# `always`, not `on-failure`. This loop is not supposed to return at all while
+# the unit is enabled, so a clean exit is as much a fault as a crash — and
+# systemd still leaves it stopped after `systemctl stop`, which is the one case
+# where exiting was asked for.
+Restart=always
+# Longer than jod-api's 2s. A crash loop here would reopen the store and reload
+# prior runs on every restart, and the tick is only every 60s, so nothing is
+# gained by hurrying back.
+RestartSec=10s
+
+# Agents live in their own process groups, not as children of this unit.
+# Killing only the main process on stop is what lets a restart leave running
+# work alone — the same reason jod-api sets it.
+KillMode=process
+
+# The daemon finishes the tick in flight before it exits, so give it room to.
+# Comfortably under the 60s tick, and well over a tick that is only claiming
+# and spawning; a tick still going at 45s is wedged, and SIGKILL is right.
+TimeoutStopSec=45s
+
+Environment=HOME=/home/jod
+Environment=JOD_HOME=/home/jod/.jod
+# Harnesses are usually installed per-user; without this every scheduled run
+# fails to spawn.
+Environment=PATH=/home/jod/.local/bin:/usr/local/bin:/usr/bin:/bin
+
+# --- Hardening -------------------------------------------------------------
+# Same set as jod-api, and the same omissions for the same reason: this unit
+# launches arbitrary developer tooling, and ProtectHome, PrivateUsers,
+# ProtectKernelTunables or a SystemCallFilter break that in ways that surface
+# as confusing agent failures rather than clean errors.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectControlGroups=yes
+ProtectKernelModules=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+
+# The only paths the daemon may write. /home/jod/work is where agents run;
+# narrow it to the specific project directories if you can.
+ReadWritePaths=/home/jod/.jod /home/jod/work /tmp
+
+# Nothing about the scheduler needs the internet — though note the *harnesses*
+# it spawns do, so leave these commented unless you have checked that.
+# IPAddressAllow=localhost 100.64.0.0/10
+# IPAddressDeny=any
+
+LimitNOFILE=8192
+
+[Install]
+WantedBy=multi-user.target

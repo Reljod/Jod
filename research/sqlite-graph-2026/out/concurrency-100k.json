@@ -1,0 +1,42 @@
+{
+  "db": "/home/reljod/.claude/jobs/eb39fa18/tmp/dbs/g100k.db",
+  "writers": 4,
+  "seconds_each_phase": 10.0,
+  "quiet": {
+    "n": 47594,
+    "p50_ms": 0.212,
+    "p95_ms": 0.403,
+    "errors": 0
+  },
+  "under_write_load": {
+    "n": 31694,
+    "p50_ms": 0.247,
+    "p95_ms": 0.589,
+    "errors": 0
+  },
+  "writer_processes": [
+    {
+      "writer": 0,
+      "ok": 29560,
+      "errors": 0
+    },
+    {
+      "writer": 3,
+      "ok": 33074,
+      "errors": 0
+    },
+    {
+      "writer": 2,
+      "ok": 27498,
+      "errors": 0
+    },
+    {
+      "writer": 1,
+      "ok": 24654,
+      "errors": 0
+    }
+  ],
+  "writes_ok": 114786,
+  "writes_failed": 0,
+  "p50_slowdown": 1.17
+}

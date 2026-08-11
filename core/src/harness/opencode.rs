@@ -33,6 +33,17 @@ impl Harness for OpenCode {
             // the shell that launched it.
             ArgPart::lit("--dir"),
             ArgPart::lit(req.cwd.to_string_lossy().to_string()),
+            // Ask for reasoning, always. Without this flag OpenCode emits no
+            // `reasoning` parts at all, so `parse_line`'s handling of them
+            // below — and the TUI's whole "show thinking" toggle — would be
+            // switching between nothing and nothing.
+            //
+            // Requested here rather than made conditional on whether anyone is
+            // currently looking: the transcript is stored, and a conversation
+            // read back tomorrow should not be missing its reasoning because a
+            // toggle was off yesterday. What to *display* is a question for the
+            // screen; what to *record* is not.
+            ArgPart::lit("--thinking"),
         ];
         if let Some(model) = &req.model {
             args.push(ArgPart::lit("--model"));
@@ -46,8 +57,12 @@ impl Harness for OpenCode {
                 args.push(ArgPart::lit(id));
             }
         }
-        // OpenCode has one auto-approve switch; Ask and AcceptEdits both leave
-        // it off, since it cannot separate edits from other tool calls.
+        // OpenCode has one auto-approve switch and nothing else — `opencode run
+        // --help` offers `--auto` and no mode flag at all. So three of Jod's
+        // four levels collapse to "leave it off": it cannot separate edits from
+        // other tool calls, and it has no plan mode to ask for. Reported here
+        // rather than faked, because a `--mode plan` OpenCode ignores would look
+        // like a working plan mode right up until something got written.
         if req.permission == PermissionPolicy::Bypass {
             args.push(ArgPart::lit("--auto"));
         }
@@ -219,10 +234,12 @@ mod tests {
             name: "t".into(),
             harness: HarnessKind::OpenCode,
             prompt: "hi".into(),
+            system: None,
             cwd: PathBuf::from("/work"),
             model: model.map(str::to_string),
             permission,
             resume: Resume::Fresh,
+            tools: None,
         }
     }
 
@@ -241,9 +258,38 @@ mod tests {
         assert_eq!(a[i + 1], ArgPart::lit("/work"));
     }
 
+    /// Reasoning has to be asked for. `parse_line` below turns OpenCode's
+    /// `reasoning` parts into `AgentEvent::Thinking`, and without this flag
+    /// OpenCode never sends any — so the parsing, the storage and the TUI's
+    /// "show thinking" toggle would all have been correct and all been
+    /// switching between nothing and nothing.
+    #[test]
+    fn reasoning_is_requested_so_there_is_something_to_show() {
+        let a = OpenCode::default().args(&req(PermissionPolicy::Bypass, None));
+        assert!(a.contains(&ArgPart::lit("--thinking")));
+    }
+
+    /// And in every mode, because what is *recorded* is not a display setting:
+    /// a conversation read back tomorrow should not be missing its reasoning.
+    #[test]
+    fn reasoning_is_requested_whatever_the_permission_mode() {
+        for policy in PermissionPolicy::ALL {
+            assert!(
+                OpenCode::default()
+                    .args(&req(policy, None))
+                    .contains(&ArgPart::lit("--thinking")),
+                "{policy:?} would record no reasoning"
+            );
+        }
+    }
+
     #[test]
     fn only_bypass_enables_auto_approval() {
-        for policy in [PermissionPolicy::Ask, PermissionPolicy::AcceptEdits] {
+        for policy in [
+            PermissionPolicy::Plan,
+            PermissionPolicy::Ask,
+            PermissionPolicy::AcceptEdits,
+        ] {
             let a = OpenCode::default().args(&req(policy, None));
             assert!(
                 !a.contains(&ArgPart::lit("--auto")),

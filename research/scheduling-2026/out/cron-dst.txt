@@ -1,0 +1,122 @@
+cron crate DST + syntax comparison
+croner 3.0.1 · cron 0.17.0 · saffron 0.1.0 · cronexpr 1.6.0
+chrono-tz 2025b tzdata
+
+== SYNTAX ==================================================
+pattern                              croner     cron  saffron  cronexpr
+@daily                                  yes      yes       NO        NO
+seconds field (*/15 s)                  yes      yes       NO        NO
+L — last day of month                   yes       NO      yes       yes
+# — second Friday                       yes       NO      yes       yes
+W — nearest weekday to the 15th         yes       NO      yes       yes
+
+== SPRING GAP, fixed time: 02:30 daily across US spring-forward ==
+   tz America/New_York  after 2026-03-07 12:00:00 EST (-05:00)
+   expected: 2026-03-08 has no 02:30 EST. Acceptable: run at 03:00 EDT (Vixie/croner) or skip the day. Unacceptable: panic, or drift the following days.
+   croner    30 2 * * *                  
+             -> 2026-03-08 03:00:00 EDT (-04:00)
+             -> 2026-03-09 02:30:00 EDT (-04:00)
+             -> 2026-03-10 02:30:00 EDT (-04:00)
+   cron      0 30 2 * * *                
+             -> 2026-03-09 02:30:00 EDT (-04:00)
+             -> 2026-03-10 02:30:00 EDT (-04:00)
+             -> 2026-03-11 02:30:00 EDT (-04:00)
+   saffron   30 2 * * *                  
+             -> 2026-03-07 21:30:00 EST (-05:00)
+             -> 2026-03-08 22:30:00 EDT (-04:00)
+             -> 2026-03-09 22:30:00 EDT (-04:00)
+   cronexpr  30 2 * * * America/New_York 
+             -> 2026-03-09 02:30:00 EDT (-04:00)
+             -> 2026-03-10 02:30:00 EDT (-04:00)
+             -> 2026-03-11 02:30:00 EDT (-04:00)
+
+== FALL-BACK, fixed time: 01:30 daily across US fall-back ==
+   tz America/New_York  after 2026-10-31 12:00:00 EDT (-04:00)
+   expected: 2026-11-01 has two 01:30s. A fixed-time job must fire ONCE — the -04:00 one — then next on 2026-11-02.
+   croner    30 1 * * *                  
+             -> 2026-11-01 01:30:00 EDT (-04:00)
+             -> 2026-11-02 01:30:00 EST (-05:00)
+             -> 2026-11-03 01:30:00 EST (-05:00)
+   cron      0 30 1 * * *                
+             -> 2026-11-01 01:30:00 EDT (-04:00)
+             -> 2026-11-01 01:30:00 EST (-05:00)
+             -> 2026-11-02 01:30:00 EST (-05:00)
+   saffron   30 1 * * *                  
+             -> 2026-10-31 21:30:00 EDT (-04:00)
+             -> 2026-11-01 20:30:00 EST (-05:00)
+             -> 2026-11-02 20:30:00 EST (-05:00)
+   cronexpr  30 1 * * * America/New_York 
+             -> 2026-11-01 01:30:00 EDT (-04:00)
+             -> 2026-11-01 01:30:00 EST (-05:00)
+             -> 2026-11-02 01:30:00 EST (-05:00)
+
+== FALL-BACK, the zslayton#48 repro: 01:03 daily, Europe/London ==
+   tz Europe/London  after 2026-10-24 12:00:00 BST (+01:00)
+   expected: Issue #48 panicked here with 'invalid time'. Must not panic.
+   croner    3 1 * * *                   
+             -> 2026-10-25 01:03:00 BST (+01:00)
+             -> 2026-10-26 01:03:00 GMT (+00:00)
+             -> 2026-10-27 01:03:00 GMT (+00:00)
+   cron      0 3 1 * * *                 
+             -> 2026-10-25 01:03:00 BST (+01:00)
+             -> 2026-10-25 01:03:00 GMT (+00:00)
+             -> 2026-10-26 01:03:00 GMT (+00:00)
+   saffron   3 1 * * *                   
+             -> 2026-10-25 01:03:00 GMT (+00:00)
+             -> 2026-10-26 01:03:00 GMT (+00:00)
+             -> 2026-10-27 01:03:00 GMT (+00:00)
+   cronexpr  3 1 * * * Europe/London     
+             -> 2026-10-25 01:03:00 BST (+01:00)
+             -> 2026-10-25 01:03:00 GMT (+00:00)
+             -> 2026-10-26 01:03:00 GMT (+00:00)
+
+== SPRING GAP, interval job: every 30 min across US spring-forward ==
+   tz America/New_York  after 2026-03-08 01:00:00 EST (-05:00)
+   expected: 01:30 EST then 03:00 EDT — the 02:00 and 02:30 slots do not exist and must simply not appear.
+   croner    0,30 * * * *                
+             -> 2026-03-08 01:30:00 EST (-05:00)
+             -> 2026-03-08 03:00:00 EDT (-04:00)
+             -> 2026-03-08 03:30:00 EDT (-04:00)
+             -> 2026-03-08 04:00:00 EDT (-04:00)
+   cron      0 0,30 * * * *              
+             -> 2026-03-08 01:30:00 EST (-05:00)
+             -> 2026-03-08 03:00:00 EDT (-04:00)
+             -> 2026-03-08 03:30:00 EDT (-04:00)
+             -> 2026-03-08 04:00:00 EDT (-04:00)
+   saffron   0,30 * * * *                
+             -> 2026-03-08 01:30:00 EST (-05:00)
+             -> 2026-03-08 03:00:00 EDT (-04:00)
+             -> 2026-03-08 03:30:00 EDT (-04:00)
+             -> 2026-03-08 04:00:00 EDT (-04:00)
+   cronexpr  0,30 * * * * America/New_York
+             -> 2026-03-08 01:30:00 EST (-05:00)
+             -> 2026-03-08 03:00:00 EDT (-04:00)
+             -> 2026-03-08 03:30:00 EDT (-04:00)
+             -> 2026-03-08 04:00:00 EDT (-04:00)
+
+== WEEKDAYS 08:00 — the schedule Jod actually ships ==
+   tz Asia/Manila  after 2026-08-07 12:00:00 PST (+08:00)
+   expected: Fri 7th is past 12:00, so: Mon 10th, Tue 11th, Wed 12th. A crate using Quartz weekday numbering answers Sun-Thu here.
+   croner    0 8 * * 1-5                 
+             -> 2026-08-10 08:00:00 PST (+08:00)
+             -> 2026-08-11 08:00:00 PST (+08:00)
+             -> 2026-08-12 08:00:00 PST (+08:00)
+   cron      0 0 8 * * 1-5               
+             -> 2026-08-09 08:00:00 PST (+08:00)
+             -> 2026-08-10 08:00:00 PST (+08:00)
+             -> 2026-08-11 08:00:00 PST (+08:00)
+   saffron   0 8 * * 1-5                 
+             -> 2026-08-09 16:00:00 PST (+08:00)
+             -> 2026-08-10 16:00:00 PST (+08:00)
+             -> 2026-08-11 16:00:00 PST (+08:00)
+   cronexpr  0 8 * * 1-5 Asia/Manila     
+             -> 2026-08-10 08:00:00 PST (+08:00)
+             -> 2026-08-11 08:00:00 PST (+08:00)
+             -> 2026-08-12 08:00:00 PST (+08:00)
+
+== COST OF ONE NEXT-FIRE COMPUTATION ==
+   croner 0 8 * * 1-5            1283 ns/call
+   croner */5 * * * *            1129 ns/call
+   croner 0 12 L * *             5680 ns/call
+   croner 0 12 * * FRI#2         1436 ns/call
+   enumerating a 6-hour outage for */5: 72 missed fires in 63.201µs

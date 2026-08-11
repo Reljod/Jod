@@ -1,0 +1,80 @@
+Ten design iterations, one fake clock, seven scenarios
+
+RUBRIC (fixed before the first run):
+   20  crash/restart correctness
+   20  race-freedom (N processes)
+   15  DST / timezone correctness
+   15  operator predictability
+   15  goal-loop safety
+    8  implementation size
+    7  observability
+
+== SCENARIO OUTCOMES ==
+ # design                     catch  sprg  fall  peak  jitL  fail skipR goal-iters goal end                
+ 1 naive poll                    73     1     1     2     0   288     0        200 never_stopped (capped by the harness)
+ 2 + CAS claim                   73     1     1     2     0   288     0        200 never_stopped (capped by the harness)
+ 3 + lease                       73     1     1     1     0   288     0        200 never_stopped (capped by the harness)
+ 4 + claim-time reap             73     1     1     1     0   288     0        200 never_stopped (capped by the harness)
+ 5 + IANA timezone               73     1     1     1     0   288     0        200 never_stopped (capped by the harness)
+ 6 + misfire policy               0     1     1     1     0   288     1        200 never_stopped (capped by the harness)
+ 7 + overlap policy               0     1     1     1     0   288     1        200 never_stopped (capped by the harness)
+ 8 + jitter, backoff, breaker     0     1     1     1    34     5     9        200 never_stopped (capped by the harness)
+ 9 + goals                        0     1     1     1    34     5     9         10 stalled                 
+10 trimmed final                  0     1     1     1     0     5     1         10 stalled                 
+  catch = runs launched in the first minute back after a 6h outage
+  sprg  = fires on 2026-03-08 (02:30 daily, New York) — 0 means the day vanished
+  fall  = fires on 2026-11-01 (01:30 daily, New York) — 2 means it ran twice
+  peak  = concurrent runs, hourly schedule with 90-minute runs
+  jitL  = fires lost because jitter pushed them past grace_ms
+  fail  = spawn attempts in 24h for a schedule whose every run fails
+  skipR = skips written down as rows. A skip nobody recorded is a silent failure.
+
+  same outage under misfire='fire_all': 72 missed instants replayed (the reason the policy is capped at 100)
+
+== DST DETAIL ==
+ 1 naive poll                 spring-forward fire: 03:30 EDT    max drift on ordinary days: 60 min
+ 2 + CAS claim                spring-forward fire: 03:30 EDT    max drift on ordinary days: 60 min
+ 3 + lease                    spring-forward fire: 03:30 EDT    max drift on ordinary days: 60 min
+ 4 + claim-time reap          spring-forward fire: 03:30 EDT    max drift on ordinary days: 60 min
+ 5 + IANA timezone            spring-forward fire: 03:00 EDT    max drift on ordinary days: 0 min
+ 6 + misfire policy           spring-forward fire: 03:00 EDT    max drift on ordinary days: 0 min
+ 7 + overlap policy           spring-forward fire: 03:00 EDT    max drift on ordinary days: 0 min
+ 8 + jitter, backoff, breaker spring-forward fire: 03:00 EDT    max drift on ordinary days: 0 min
+ 9 + goals                    spring-forward fire: 03:00 EDT    max drift on ordinary days: 0 min
+10 trimmed final              spring-forward fire: 03:00 EDT    max drift on ordinary days: 0 min
+
+== SCORES ==
+ # design                      crash  race-    DST  opera  goal-  imple  obser   TOTAL
+ 1 naive poll                      0      0      1      2      0    5.0    0.5    17.7
+ 2 + CAS claim                     0      5      1      2      0    4.1    0.5    36.3
+ 3 + lease                         2      5      1      3      0    3.4    0.9    46.7
+ 4 + claim-time reap               5      5      1      3      0    2.6    1.4    58.1
+ 5 + IANA timezone                 5      5      5      3      0    2.4    1.4    69.8
+ 6 + misfire policy                5      5      5      5      0    2.2    2.3    76.7
+ 7 + overlap policy                5      5      5      5      0    2.1    2.7    77.1
+ 8 + jitter, backoff, breaker      5      5      5      3      0    1.7    3.6    71.8
+ 9 + goals                         5      5      5      3      5    0.0    4.5    85.3
+10 trimmed final                   5      5      5      5      5    0.5    5.0    92.8
+
+== RANKING (by score, not by recency) ==
+ 1. iteration 10  trimmed final                  92.8   jitter off by default, queue_one dropped, goal state in memory
+ 2. iteration 9   + goals                        85.3   goal state machine, stall detection, budget caps
+ 3. iteration 7   + overlap policy               77.1   skip | queue_one | replace | allow
+ 4. iteration 6   + misfire policy               76.7   fire_once | skip | fire_all, bounded by grace_ms
+ 5. iteration 8   + jitter, backoff, breaker     71.8   spread fires; back off; pause after 5 failures
+ 6. iteration 5   + IANA timezone                69.8   store the zone name, not a captured offset
+ 7. iteration 4   + claim-time reap              58.1   the claim records the expired lease it displaces
+ 8. iteration 3   + lease                        46.7   lease_until_ms, swept when a claimant dies
+ 9. iteration 2   + CAS claim                    36.3   BEGIN IMMEDIATE + compare-and-swap on next_fire_at_ms
+10. iteration 1   naive poll                     17.7   SELECT due, then UPDATE next_fire_at
+
+== REGRESSIONS: where an addition cost something measurable ==
+  iteration 1 -> 2: implementation size 5.0 -> 4.1   (BEGIN IMMEDIATE + compare-and-swap on next_fire_at_ms)
+  iteration 2 -> 3: implementation size 4.1 -> 3.4   (lease_until_ms, swept when a claimant dies)
+  iteration 3 -> 4: implementation size 3.4 -> 2.6   (the claim records the expired lease it displaces)
+  iteration 4 -> 5: implementation size 2.6 -> 2.4   (store the zone name, not a captured offset)
+  iteration 5 -> 6: implementation size 2.4 -> 2.2   (fire_once | skip | fire_all, bounded by grace_ms)
+  iteration 6 -> 7: implementation size 2.2 -> 2.1   (skip | queue_one | replace | allow)
+  iteration 7 -> 8: operator predictability 5 -> 3   (spread fires; back off; pause after 5 failures)
+  iteration 7 -> 8: implementation size 2.1 -> 1.7   (spread fires; back off; pause after 5 failures)
+  iteration 8 -> 9: implementation size 1.7 -> 0.0   (goal state machine, stall detection, budget caps)

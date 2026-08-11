@@ -20,6 +20,13 @@ pub enum JodError {
     #[error("this Jod has no store, and a run cannot be observed without one")]
     StoreRequired,
 
+    /// Something the caller asked for cannot mean anything — a cron expression
+    /// that does not parse, a timezone that is not in the IANA database, a
+    /// policy name nobody defined. Refused when it is written rather than
+    /// discovered as silence weeks later.
+    #[error("{0}")]
+    Invalid(String),
+
     #[error(transparent)]
     Io(#[from] std::io::Error),
 

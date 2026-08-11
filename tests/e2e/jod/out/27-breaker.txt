@@ -1,0 +1,156 @@
+==============================================================
+== 0. a PATH with the harness but no supervisor
+==============================================================
+$ PATH='/tmp/jod-e2e/no-supervisor:/home/reljod/.local/bin:/usr/bin:/bin' command -v claude
+/home/reljod/.local/bin/claude
+
+$ PATH='/tmp/jod-e2e/no-supervisor:/home/reljod/.local/bin:/usr/bin:/bin' command -v jod-run || echo 'jod-run: absent, as intended'
+jod-run: absent, as intended
+
+$ PATH='/tmp/jod-e2e/no-supervisor:/home/reljod/.local/bin:/usr/bin:/bin' JOD_HOME='/tmp/jod-e2e/breaker' '/tmp/jod-e2e/no-supervisor/jod' harnesses
+✓ Claude Code    /home/reljod/.local/bin/claude
+✓ OpenCode       /home/reljod/.opencode/bin/opencode
+✓ AGY            /home/reljod/.local/bin/agy
+
+==============================================================
+== 1. the PR's quoted failure: supervisor missing
+==============================================================
+$ jod schedule add tick-demo say OK and stop --cron * * * * *
+tick-demo armed — next Aug 10 23:04 (in 37s)
+
+$ PATH='/tmp/jod-e2e/no-supervisor:/home/reljod/.local/bin:/usr/bin:/bin' JOD_HOME='/tmp/jod-e2e/breaker' '/tmp/jod-e2e/no-supervisor/jod' daemon --once
+claimed 1 · started 0 · held 0 · failed 1
+
+$ PATH='/tmp/jod-e2e/no-supervisor:/home/reljod/.local/bin:/usr/bin:/bin' JOD_HOME='/tmp/jod-e2e/breaker' '/tmp/jod-e2e/no-supervisor/jod' schedule log tick-demo
+[31m✗[0m Aug 10 23:03 (0s ago)          [2mspawn_failed    [0m the `jod-run` supervisor was not found; it ships alongside `jod`
+
+$ q "SELECT outcome, detail FROM schedule_fires ORDER BY id"
+outcome | detail
+--------+-------
+spawn_failed | the `jod-run` supervisor was not found; it ships alongside `jod`
+(1 rows)
+
+==============================================================
+== 2. drive five real failures and watch the breaker
+==============================================================
+--- failure attempt 2 ---
+$ PATH='/tmp/jod-e2e/no-supervisor:/home/reljod/.local/bin:/usr/bin:/bin' JOD_HOME='/tmp/jod-e2e/breaker' '/tmp/jod-e2e/no-supervisor/jod' daemon --once
+[jod/daemon] reloaded 1 prior run(s)
+claimed 1 · started 0 · held 0 · failed 1
+
+$ q "SELECT name, state, consecutive_failures FROM schedules"
+name | state | consecutive_failures
+-----+-------+---------------------
+tick-demo | armed | 2
+(1 rows)
+
+--- failure attempt 3 ---
+$ PATH='/tmp/jod-e2e/no-supervisor:/home/reljod/.local/bin:/usr/bin:/bin' JOD_HOME='/tmp/jod-e2e/breaker' '/tmp/jod-e2e/no-supervisor/jod' daemon --once
+[jod/daemon] reloaded 2 prior run(s)
+claimed 1 · started 0 · held 0 · failed 1
+
+$ q "SELECT name, state, consecutive_failures FROM schedules"
+name | state | consecutive_failures
+-----+-------+---------------------
+tick-demo | armed | 3
+(1 rows)
+
+--- failure attempt 4 ---
+$ PATH='/tmp/jod-e2e/no-supervisor:/home/reljod/.local/bin:/usr/bin:/bin' JOD_HOME='/tmp/jod-e2e/breaker' '/tmp/jod-e2e/no-supervisor/jod' daemon --once
+[jod/daemon] reloaded 3 prior run(s)
+claimed 1 · started 0 · held 0 · failed 1
+
+$ q "SELECT name, state, consecutive_failures FROM schedules"
+name | state | consecutive_failures
+-----+-------+---------------------
+tick-demo | armed | 4
+(1 rows)
+
+--- failure attempt 5 ---
+$ PATH='/tmp/jod-e2e/no-supervisor:/home/reljod/.local/bin:/usr/bin:/bin' JOD_HOME='/tmp/jod-e2e/breaker' '/tmp/jod-e2e/no-supervisor/jod' daemon --once
+[jod/daemon] reloaded 4 prior run(s)
+claimed 1 · started 0 · held 0 · failed 1
+
+$ q "SELECT name, state, consecutive_failures FROM schedules"
+name | state | consecutive_failures
+-----+-------+---------------------
+tick-demo | broken | 5
+(1 rows)
+
+--- failure attempt 6 ---
+$ PATH='/tmp/jod-e2e/no-supervisor:/home/reljod/.local/bin:/usr/bin:/bin' JOD_HOME='/tmp/jod-e2e/breaker' '/tmp/jod-e2e/no-supervisor/jod' daemon --once
+[jod/daemon] reloaded 5 prior run(s)
+claimed 0 · started 0 · held 0 · failed 0
+
+$ q "SELECT name, state, consecutive_failures FROM schedules"
+name | state | consecutive_failures
+-----+-------+---------------------
+tick-demo | broken | 5
+(1 rows)
+
+--- failure attempt 7 ---
+$ PATH='/tmp/jod-e2e/no-supervisor:/home/reljod/.local/bin:/usr/bin:/bin' JOD_HOME='/tmp/jod-e2e/breaker' '/tmp/jod-e2e/no-supervisor/jod' daemon --once
+[jod/daemon] reloaded 5 prior run(s)
+claimed 0 · started 0 · held 0 · failed 0
+
+$ q "SELECT name, state, consecutive_failures FROM schedules"
+name | state | consecutive_failures
+-----+-------+---------------------
+tick-demo | broken | 5
+(1 rows)
+
+==============================================================
+== 3. a broken schedule in ls and log
+==============================================================
+$ PATH='/tmp/jod-e2e/no-supervisor:/home/reljod/.local/bin:/usr/bin:/bin' JOD_HOME='/tmp/jod-e2e/breaker' '/tmp/jod-e2e/no-supervisor/jod' schedule ls
+[31m✗[0m [1mtick-demo           [0m [2m* * * * *       [0m —
+  [31m5 consecutive failures[0m — stopped; `jod schedule resume` clears it
+
+$ PATH='/tmp/jod-e2e/no-supervisor:/home/reljod/.local/bin:/usr/bin:/bin' JOD_HOME='/tmp/jod-e2e/breaker' '/tmp/jod-e2e/no-supervisor/jod' schedule log tick-demo -l 20
+[31m✗[0m Aug 10 23:03 (0s ago)          [2mspawn_failed    [0m the `jod-run` supervisor was not found; it ships alongside `jod`
+[31m✗[0m Aug 10 23:03 (0s ago)          [2mspawn_failed    [0m the `jod-run` supervisor was not found; it ships alongside `jod`
+[31m✗[0m Aug 10 23:03 (0s ago)          [2mspawn_failed    [0m the `jod-run` supervisor was not found; it ships alongside `jod`
+[31m✗[0m Aug 10 23:03 (0s ago)          [2mspawn_failed    [0m the `jod-run` supervisor was not found; it ships alongside `jod`
+[31m✗[0m Aug 10 23:03 (0s ago)          [2mspawn_failed    [0m the `jod-run` supervisor was not found; it ships alongside `jod`
+
+==============================================================
+== 4. a broken schedule must not be claimed again
+==============================================================
+$ PATH='/tmp/jod-e2e/no-supervisor:/home/reljod/.local/bin:/usr/bin:/bin' JOD_HOME='/tmp/jod-e2e/breaker' '/tmp/jod-e2e/no-supervisor/jod' daemon --once
+[jod/daemon] reloaded 5 prior run(s)
+claimed 0 · started 0 · held 0 · failed 0
+
+$ q "SELECT name, state, consecutive_failures FROM schedules"
+name | state | consecutive_failures
+-----+-------+---------------------
+tick-demo | broken | 5
+(1 rows)
+
+==============================================================
+== 5. resume must revive a broken schedule and clear the count
+==============================================================
+$ jod schedule resume tick-demo
+tick-demo armed
+
+$ q "SELECT name, state, consecutive_failures FROM schedules"
+name | state | consecutive_failures
+-----+-------+---------------------
+tick-demo | armed | 0
+(1 rows)
+
+$ jod schedule ls
+[32m●[0m [1mtick-demo           [0m [2m* * * * *       [0m Aug 10 23:04 (in 36s)
+
+==============================================================
+== 6. backoff curve, for the record
+==============================================================
+$ q "SELECT id, due_at_ms, outcome FROM schedule_fires ORDER BY id"
+id | due_at_ms | outcome
+---+-----------+--------
+1 | 1786403001948 | spawn_failed
+2 | 1786403002014 | spawn_failed
+3 | 1786403002076 | spawn_failed
+4 | 1786403002184 | spawn_failed
+5 | 1786403002261 | spawn_failed
+(5 rows)
+

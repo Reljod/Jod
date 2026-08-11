@@ -1,0 +1,30 @@
+┌─ schedules · 8 · next: vps-healthcheck in 13s ───────────────────────────────────────────────────┐
+│    name             when                next            in       last            ago    7d       │
+│    ───────────────────────────────────────────────────────────────────────────────────────────   │
+│  ▸ ● nightly-inbox   02:00 every day     Aug 11 02:00    9h14m    Aug 10 02:00    14h    ▇▇▇▇▇▇▇ │
+│    ● pr-shepherd     every 30 minutes    Aug 10 17:00      14m    Aug 10 16:30    16m    ▇▇▇▅▇▇▇ │
+│    ● weekly-review   Mon 08:00           Aug 17 08:00    6d15h    Aug 10 08:00     8h    ▇▁▇▇▇▇▇ │
+│    ● finance-sync    09:00 Mon–Fri       Aug 11 09:00   16h14m    Aug 08 09:00     2d    ▇▇▇✗▇▇▇ │
+│    ● vps-healthcheck every 15 minutes    Aug 10 16:59       13s   Aug 10 16:45     1m    ▇▇▇▇▇▇▇ │
+│    ‖ deps-audit      Sun 03:00           —  paused        —       Aug 03 03:00     7d    ▇▇▁▁▁▁▁ │
+│    ✗ notion-sync     04:00 every day     Aug 11 04:00   11h14m    Aug 10 04:00    12h    ✗✗▇▇▇✗✗ │
+│    ● backup-jod-db   23:30 every day     Aug 10 23:30    6h44m    Aug 09 23:30    17h    ▇▇▇▇▇▇▇ │
+│                                                                                                  │
+│    ────────────────────────────────────────────────────────────────────────────────────────────  │
+│    nightly-inbox                                          cron  0 2 * * *   ·  Asia/Manila       │
+│                                                                                                  │
+│    prompt   Triage the Linear inbox. Close what is done, escalate what is blocked, and leave a   │
+│             one-line note on anything you touched.                                               │
+│    runs as  Claude Code · claude-opus-5 · ~/repo/Jod · permission: acceptEdits                   │
+│    policy   overlap: skip  ·  missed run: run once on wake  ·  timeout 20m  ·  budget $2/run     │
+│                                                                                                  │
+│    history  Aug 10 02:00  ✓  4m18s  $0.44   3 items triaged, 1 escalated                         │
+│             Aug 09 02:00  ✓  3m51s  $0.39   1 item triaged                                       │
+│             Aug 08 02:00  ✓  5m02s  $0.51   6 items triaged, 2 escalated                         │
+│             Aug 07 02:00  ✓  4m44s  $0.47   2 items triaged                                      │
+│             Aug 06 02:00  ✓  2m19s  $0.22   nothing to do                                        │
+│                                                                                                  │
+│                                                                                                  │
+└─  ↑↓ pick · ⏎ open the last run · r run now · p pause · e edit · n new · x delete  ──────────────┘
+ ⏎ last run · r run now · p pause/resume · e edit · n new · x delete · / filter   Esc back · ? keys 
+ schedules · 6 armed · 1 paused · 1 failing · next in 13s                                ⚑ 3 unread 

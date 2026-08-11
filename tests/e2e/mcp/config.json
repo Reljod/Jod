@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "jod": {
+      "command": "/home/reljod/repo/Jod/.claude/worktrees/feat+memory-graph-scheduler-webhooks/target/release/jod",
+      "args": ["mcp", "--access", "read-only"],
+      "env": {
+        "JOD_HOME": "/tmp/jod-mcp-demo"
+      }
+    }
+  }
+}

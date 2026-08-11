@@ -1,0 +1,189 @@
+==============================================================
+== 1. does goal run run anything by itself?
+==============================================================
+$ jod goal add tiny say OK and stop --max-iterations 2
+tiny is running
+
+$ jod goal run tiny
+tiny will iterate on the next tick
+
+$ jod ls
+no agents
+
+$ q "SELECT name, state, iteration, next_fire_at_ms FROM goals"
+name | state | iteration | next_fire_at_ms
+-----+-------+-----------+----------------
+tiny | running | 0 | 1786403354925
+(1 rows)
+
+-- nothing has started. The tick is what does the work: --
+$ jod daemon --once
+claimed 1 · started 1 · held 0 · failed 0
+
+$ jod ls
+252b15b1   running   Claude Code  tiny
+
+$ q "SELECT id, name, status FROM runs"
+id | name | status
+---+------+-------
+252b15b1-24ec-423e-9c96-f7dab07e1d2a | tiny | running
+(1 rows)
+
+==============================================================
+== 2. let the iteration finish
+==============================================================
+$ (waiting for every run to reach a terminal status)
+settled after 10s: 252b15b1=completed
+
+$ jod ls
+252b15b1   done      Claude Code  tiny
+
+$ jod goal ls
+[32m◎[0m [1mtiny                [0m [2miter 0    [0m $0.00
+  [2msay OK and stop[0m
+  [2mnext Aug 10 23:09 (10s ago)[0m
+
+==============================================================
+== 3. did the iteration count, and did the spend land on the goal?
+==============================================================
+$ q "SELECT name, state, iteration, spent_usd, no_progress FROM goals"
+name | state | iteration | spent_usd | no_progress
+-----+-------+-----------+-----------+------------
+tiny | running | 0 | 0.0 | 0
+(1 rows)
+
+$ jod report
+running   0
+completed 1
+failed    0
+killed    0
+spend     $0.1146
+
+-- the PR's stated gap: 'Goal iterations do not yet write their episodic record.' --
+$ jod goal log tiny
+pursuing  say OK and stop
+no iteration has finished yet
+
+$ q "SELECT id, scope, subject, predicate, object FROM facts ORDER BY id"
+id | scope | subject | predicate | object
+---+-------+---------+-----------+-------
+1 | goal:f2a47580-db99-450f-a313-caf31018d3c4 | goal/tiny | pursuing | say OK and stop
+2 | goal:f2a47580-db99-450f-a313-caf31018d3c4 | goal/tiny | current-run | 252b15b1-24ec-423e-9c96-f7dab07e1d2a
+(2 rows)
+
+==============================================================
+== 4. a second iteration, to reach max-iterations = 2
+==============================================================
+$ jod goal run tiny
+tiny will iterate on the next tick
+
+$ jod daemon --once
+[jod/daemon] reloaded 1 prior run(s)
+claimed 1 · started 1 · held 0 · failed 0
+
+$ (waiting for every run to reach a terminal status)
+settled after 10s: 252b15b1=completed, 31e185cf=completed
+
+$ q "SELECT name, state, iteration, spent_usd, no_progress FROM goals"
+name | state | iteration | spent_usd | no_progress
+-----+-------+-----------+-----------+------------
+tiny | running | 1 | 0.114555 | 0
+(1 rows)
+
+$ jod goal ls
+[32m◎[0m [1mtiny                [0m [2miter 1    [0m $0.11
+  [2msay OK and stop[0m
+  [2mnext Aug 11 00:00 (in 50m24s)[0m
+
+==============================================================
+== 5. max-iterations must now stop it
+==============================================================
+$ jod goal run tiny
+tiny will iterate on the next tick
+
+$ jod daemon --once
+[jod/daemon] reloaded 2 prior run(s)
+claimed 1 · started 0 · held 0 · failed 0
+
+$ q "SELECT name, state, iteration FROM goals"
+name | state | iteration
+-----+-------+----------
+tiny | exhausted | 2
+(1 rows)
+
+$ jod goal ls
+[2m■[0m [1mtiny                [0m [2miter 2    [0m $0.23
+  [2msay OK and stop[0m
+  [2mexhausted — out of budget or iterations[0m
+
+==============================================================
+== 6. the runs a goal produced
+==============================================================
+$ q "SELECT id, name, harness, status FROM runs ORDER BY created_at_ms"
+id | name | harness | status
+---+------+---------+-------
+252b15b1-24ec-423e-9c96-f7dab07e1d2a | tiny | claude_code | completed
+31e185cf-7222-4106-92b4-c0eebeba68a4 | tiny | claude_code | completed
+(2 rows)
+
+$ jod history
+31e185cf 2026-08-10 23:09 completed  tiny
+252b15b1 2026-08-10 23:09 completed  tiny
+
+==============================================================
+== 7. done-when: a deterministic check that passes
+==============================================================
+$ jod goal add finished say OK and stop --done-when true
+finished is running
+
+$ jod goal run finished
+finished will iterate on the next tick
+
+$ jod daemon --once
+[jod/daemon] reloaded 2 prior run(s)
+claimed 1 · started 1 · held 0 · failed 0
+
+$ q "SELECT name, state, iteration FROM goals WHERE name='finished'"
+name | state | iteration
+-----+-------+----------
+finished | running | 0
+(1 rows)
+
+$ jod goal ls
+[32m◎[0m [1mfinished            [0m [2miter 0    [0m $0.00
+  [2msay OK and stop[0m
+  [2mnext Aug 10 23:09 (0s ago)[0m
+[2m■[0m [1mtiny                [0m [2miter 2    [0m $0.23
+  [2msay OK and stop[0m
+  [2mexhausted — out of budget or iterations[0m
+
+==============================================================
+== 8. done-when that fails, and a budget already exceeded
+==============================================================
+$ jod goal add broke say OK and stop --done-when false --budget 0.0
+broke is running
+
+$ jod goal run broke
+broke will iterate on the next tick
+
+$ jod daemon --once
+[jod/daemon] reloaded 3 prior run(s)
+claimed 2 · started 0 · held 1 · failed 0
+
+$ q "SELECT name, state, iteration, spent_usd, budget_usd FROM goals WHERE name='broke'"
+name | state | iteration | spent_usd | budget_usd
+-----+-------+-----------+-----------+-----------
+broke | running | 0 | 0.0 | 0.0
+(1 rows)
+
+$ jod goal ls
+[32m◎[0m [1mbroke               [0m [2miter 0    [0m $0.00 of $0.00
+  [2msay OK and stop[0m
+  [2mnext Aug 10 23:09 (0s ago)[0m
+[32m◎[0m [1mfinished            [0m [2miter 0    [0m $0.00
+  [2msay OK and stop[0m
+  [2mnext Aug 10 23:09 (0s ago)[0m
+[2m■[0m [1mtiny                [0m [2miter 2    [0m $0.23
+  [2msay OK and stop[0m
+  [2mexhausted — out of budget or iterations[0m
+

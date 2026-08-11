@@ -5,8 +5,17 @@
 //! cursor movement, scrollback, which turn a message belongs to — is testable
 //! without a terminal.
 
+use std::cmp::Reverse;
+
 use jod_core::team::{Member, TeamTask};
-use jod_core::{AgentEvent, HarnessKind, Resume};
+use jod_core::{AgentEvent, HarnessKind, PermissionPolicy, Resume};
+
+use super::data::{
+    ActivityItem, GoalRow, HookRow, MemoryKind, MemoryNode, ScheduleRow, Source, TaskRow, TaskState,
+};
+use super::delivery::Verdict;
+use super::graph::GraphView;
+use super::workspace::{matches, ListState, Workspace};
 
 /// One line in the transcript, tagged with what produced it so the renderer can
 /// style it without re-inspecting the event.
@@ -36,13 +45,59 @@ pub enum Entry {
     Raw(String),
 }
 
-/// Which pane has focus. The agents list is a side view, not a mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Pane {
-    Chat,
-    Agents,
-    /// The team: who is on it, and what they are each doing.
-    Team,
+/// What is drawn over everything else, and owns the keyboard while it is.
+///
+/// Overlays are the third layer of the navigation model: chat, workspace,
+/// overlay. `Esc` always cancels one, and never does anything else.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Overlay {
+    None,
+    /// `Alt-K` — the which-key menu, waiting for one letter. Any key it does
+    /// not know cancels silently rather than doing something surprising.
+    WhichKey,
+    /// `Alt-K n` — waiting for the kind of thing to make.
+    WhichKeyNew,
+    /// `?` — the keymap, showing the current screen's verbs first.
+    Keymap,
+    /// `x` — deleting something that cannot be undone, so the prompt names it.
+    Confirm {
+        verb: String,
+        what: String,
+    },
+    /// Tier 1 of the form ladder: one value, typed on a line where the keybar
+    /// was, with no screen change and no context lost.
+    Prompt {
+        /// What is being asked for, shown to the left of the field.
+        label: String,
+        /// The line being typed.
+        value: String,
+        /// What to do with it once `⏎` is pressed.
+        intent: PromptIntent,
+    },
+}
+
+/// What a tier-1 prompt is collecting.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PromptIntent {
+    /// Make a new thing of this workspace's kind.
+    New(Workspace),
+    /// Link the selected memory node to another, named here.
+    Link(String),
+    /// Go to one specific abandoned branch, named by the `#id` printed beside
+    /// it.
+    ///
+    /// The redo key takes the newest tip, which covers undo-then-changed-my-mind
+    /// — the only case most people ever have. This is for the rest: three or
+    /// more branches set aside, and the one you want is not the last one you
+    /// left. Without it those branches are listed, numbered, and unreachable,
+    /// which is a worse state than not listing them at all.
+    Branch,
+}
+
+impl Overlay {
+    pub fn is_open(&self) -> bool {
+        *self != Overlay::None
+    }
 }
 
 /// The spinner shown while a turn is in flight. Ten frames at four a second is
@@ -84,12 +139,23 @@ pub struct App {
     pub cost_usd: f64,
     /// Whether reasoning is shown. On by default, for the same reason tool
     /// output is: watching a harness think is most of why you sit in front of
-    /// it. `/thinking` and `Ctrl-T` turn it off when the noise wins.
+    /// it. `/thinking` and `Alt-T` turn it off when the noise wins.
     pub show_thinking: bool,
     /// Whether tool output is shown. On by default: the reason to watch a
     /// harness work is to see what it is doing.
     pub show_details: bool,
-    pub pane: Pane,
+    /// The screen you are on. Chat is home, and everything else is somewhere
+    /// you go *from* it.
+    pub workspace: Workspace,
+    /// The workspaces you came through to get here, shallowest first. `Esc`
+    /// pops exactly one, and an empty stack means the next `Esc` lands on chat.
+    pub back_stack: Vec<Workspace>,
+    /// One cursor, filter and sort per workspace, kept while you are away so
+    /// coming back lands where you left.
+    pub lists: Vec<ListState>,
+    pub overlay: Overlay,
+    /// The local graph's focus, visit stack and neighbour cursor.
+    pub graph: GraphView,
     /// True while the conversation on screen is mid-turn. Other agents may be
     /// working at the same time; this is only about the one being watched.
     pub busy: bool,
@@ -105,10 +171,12 @@ pub struct App {
     pub history_at: Option<usize>,
     /// The half-written line ↑ was pressed on, restored by walking back down.
     pub draft: String,
-    /// Which row of the agents panel is selected.
-    pub agent_sel: usize,
-    /// Which row of the team board is selected.
-    pub task_sel: usize,
+    /// What the memory list is showing, or all of it. Cycled by `t`.
+    pub memory_type: Option<MemoryKind>,
+    /// What the activity feed is showing, or all of it. Cycled by `f`.
+    pub activity_source: Option<Source>,
+    /// Whether the activity feed hides what has been read. Toggled by `u`.
+    pub unread_only: bool,
     /// Wall clock, refreshed on every tick so everything that renders an age
     /// stays a pure function of state.
     pub now_ms: i64,
@@ -124,6 +192,21 @@ pub struct App {
     pub team: Option<String>,
     pub members: Vec<Member>,
     pub tasks: Vec<TeamTask>,
+    /// What the workspaces show. Each is refreshed on the tick, off the render
+    /// path, so `draw()` stays a pure function of state.
+    pub memory: Vec<MemoryNode>,
+    /// Entities and relations in the whole graph, which is not what `memory`
+    /// holds: that is capped at the most-connected few hundred. Kept beside the
+    /// list so the status bar can admit to showing a part of it, because a
+    /// memory browser that counts its own rows claims to show everything.
+    pub graph_size: (usize, usize),
+    pub schedules: Vec<ScheduleRow>,
+    pub goals: Vec<GoalRow>,
+    pub hooks: Vec<HookRow>,
+    pub activity: Vec<ActivityItem>,
+    /// The task board as a screen of its own — richer than `tasks`, which is
+    /// what the team panel reads.
+    pub board: Vec<TaskRow>,
     pub should_quit: bool,
     /// Set when the user asks to leave while an agent is still running.
     pub confirm_quit: bool,
@@ -131,7 +214,43 @@ pub struct App {
     /// running and reports in through the panel and a notice when it ends —
     /// which is what makes this an orchestrator rather than a chat window.
     pub watching: Option<String>,
+    /// How much the next turn may do without asking.
+    ///
+    /// On the app rather than only on `Options`, because it has to be
+    /// changeable *while you are talking*: the mode you want depends on what
+    /// you are about to ask for, and a setting fixed at launch means quitting
+    /// the program to change your mind. Read at every spawn, so a change takes
+    /// effect on the next turn and never mid-run.
+    pub mode: PermissionPolicy,
+    /// Whether the right-hand panel is showing. Shift-Tab opens and closes it.
+    pub panel: bool,
+    /// Tokens the watched conversation is carrying, as best the harness has
+    /// reported them.
+    ///
+    /// "As best" is the honest framing: this is the last turn's input plus
+    /// cache reads, which is what a harness reports and what actually occupies
+    /// the window. It is an estimate and the screen must say so rather than
+    /// print a precise-looking number nobody can check.
+    pub context_tokens: u64,
 }
+
+/// Where the context bar turns from information into advice.
+///
+/// Compaction is cheap and losing a conversation to a hard context error is
+/// not, so the recommendation comes well before the wall. Claude Code compacts
+/// around here too, for the same reason: the summary is better when there is
+/// still room to write it.
+pub const COMPACT_AT: f64 = 0.75;
+
+/// The window to measure `context_tokens` against.
+///
+/// A single number for every harness and model, which is a deliberate
+/// simplification: Jod cannot know the real limit — it varies by model, the
+/// harness does not report it, and guessing per model would be a table that is
+/// wrong the week a model ships. What the bar is for is "am I near the point
+/// where I should compact", and a fixed generous denominator answers that
+/// honestly as long as the screen calls it an estimate.
+pub const CONTEXT_WINDOW: u64 = 200_000;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct AgentLine {
@@ -149,6 +268,19 @@ pub struct AgentLine {
     /// The last thing it said, which is the only summary an unattended run
     /// offers of what it actually did.
     pub last: Option<String>,
+    /// Whether the message this run owed somebody actually reached them.
+    ///
+    /// On the row rather than behind a key, and that distinction is the whole
+    /// feature. The ledger could always answer "did that reply arrive" — but
+    /// only if asked, and you have to already suspect a problem to ask. "The
+    /// run says completed" is precisely the state in which nobody suspects
+    /// anything, so an answer available on request is an answer nobody gets.
+    ///
+    /// [`Verdict::Nothing`] for the great majority of runs, which owed nobody
+    /// a message at all. Deliberately not the same as `Fine`: saying
+    /// "delivered" about a message that never existed is how a reader learns
+    /// to distrust the good news.
+    pub delivery: Verdict,
 }
 
 impl AgentLine {
@@ -234,14 +366,73 @@ fn one_line(s: &str, max: usize) -> String {
     format!("{}…", flat.chars().take(max).collect::<String>())
 }
 
-/// Move a list cursor by `delta`, clamped to `len`.
-fn step(at: usize, delta: isize, len: usize) -> usize {
-    if len == 0 {
-        return 0;
+/// A team-board task as a row of the tasks screen.
+///
+/// The screen wants a run, a runnable check and a blocked-by pair that
+/// `TeamTask` does not carry yet, so those come back empty and the screen says
+/// so — rather than the board being invisible until the store catches up.
+fn task_row_from(task: &TeamTask) -> TaskRow {
+    let state = if task.is_done() {
+        TaskState::Done
+    } else if task.is_claimed() {
+        TaskState::Claimed
+    } else {
+        TaskState::Open
+    };
+    TaskRow {
+        id: task.id.clone(),
+        title: task.title.clone(),
+        owner: task.owner.clone(),
+        state,
+        run: None,
+        age_ms: 0,
+        what: task.title.clone(),
+        check: String::new(),
+        blocked_by: Vec::new(),
+        blocks: Vec::new(),
+        spec: None,
+        history: Vec::new(),
     }
-    let last = len - 1;
-    let moved = at as isize + delta;
-    moved.clamp(0, last as isize) as usize
+}
+
+/// A count and its noun, agreeing. A title bar reading `1 runs` is a small
+/// thing that makes the whole screen look unfinished.
+pub fn plural(n: usize, noun: &str) -> String {
+    if n == 1 {
+        format!("1 {noun}")
+    } else {
+        format!("{n} {noun}s")
+    }
+}
+
+/// An instant as a date and a clock — the answer to "when", which a countdown
+/// alone never gives you.
+pub fn absolute(at_ms: i64) -> String {
+    match chrono::DateTime::from_timestamp_millis(at_ms) {
+        Some(t) => t
+            .with_timezone(&chrono::Local)
+            .format("%b %d %H:%M")
+            .to_string(),
+        None => "—".to_string(),
+    }
+}
+
+/// The gap to an instant, as the countdown a table's `in` column wants. `None`
+/// is an em dash rather than a blank, so a paused row reads as deliberate.
+pub fn until(now_ms: i64, at_ms: Option<i64>) -> String {
+    match at_ms {
+        Some(at) if at >= now_ms => short_duration(at - now_ms),
+        Some(_) => "due".to_string(),
+        None => "—".to_string(),
+    }
+}
+
+/// The gap since an instant, for an `ago` column.
+pub fn since(now_ms: i64, at_ms: Option<i64>) -> String {
+    match at_ms {
+        Some(at) => short_duration(now_ms.saturating_sub(at)),
+        None => "—".to_string(),
+    }
 }
 
 /// Keep the first `n` lines of tool output, saying how much was left.
@@ -272,15 +463,20 @@ impl App {
             cost_usd: 0.0,
             show_thinking: true,
             show_details: true,
-            pane: Pane::Chat,
+            workspace: Workspace::Chat,
+            back_stack: Vec::new(),
+            lists: vec![ListState::default(); Workspace::ALL.len()],
+            overlay: Overlay::None,
+            graph: GraphView::new(String::new()),
             busy: false,
             agents: Vec::new(),
             queued: Vec::new(),
             history: Vec::new(),
             history_at: None,
             draft: String::new(),
-            agent_sel: 0,
-            task_sel: 0,
+            memory_type: None,
+            activity_source: None,
+            unread_only: false,
             now_ms: 0,
             turn_started_ms: None,
             tick: 0,
@@ -288,10 +484,51 @@ impl App {
             team: None,
             members: Vec::new(),
             tasks: Vec::new(),
+            memory: Vec::new(),
+            graph_size: (0, 0),
+            schedules: Vec::new(),
+            goals: Vec::new(),
+            hooks: Vec::new(),
+            activity: Vec::new(),
+            board: Vec::new(),
             should_quit: false,
             confirm_quit: false,
             watching: None,
+            mode: PermissionPolicy::default(),
+            panel: false,
+            context_tokens: 0,
         }
+    }
+
+    /// Move to the next permission mode, and say what happened.
+    ///
+    /// Returns the notice rather than pushing it, so the caller decides where
+    /// it goes — the same call serves the chat transcript and the status line.
+    ///
+    /// Two clocks, and the wording has to be honest about both: Jod's own MCP
+    /// tools are checked per call and change immediately, while the harness's
+    /// native tools are bounded by the `--permission-mode` flag chosen when the
+    /// process was spawned. A turn already in flight keeps the mode it started
+    /// in; there is no way to tell a running harness otherwise.
+    pub fn cycle_mode(&mut self) -> String {
+        self.mode = self.mode.next();
+        let when = if self.busy {
+            " — from the next turn; this one keeps the mode it started in"
+        } else {
+            ""
+        };
+        format!("mode: {}{when}", self.mode.label())
+    }
+
+    /// How full the context window is, as a fraction — capped at 1.0 so a bar
+    /// drawn from it cannot overflow its box.
+    pub fn context_fraction(&self) -> f64 {
+        (self.context_tokens as f64 / CONTEXT_WINDOW as f64).min(1.0)
+    }
+
+    /// Whether it is worth compacting yet.
+    pub fn should_compact(&self) -> bool {
+        self.context_fraction() >= COMPACT_AT
     }
 
     /// Replace the input with a chosen completion, cursor at the end.
@@ -410,31 +647,432 @@ impl App {
         Some(self.queued.remove(0))
     }
 
-    // ---- panel selection ------------------------------------------------
+    // ---- navigation -----------------------------------------------------
 
-    /// Move the agents-panel cursor, stopping at both ends rather than wrapping:
-    /// in a list that changes under you, wrapping means overshooting lands
-    /// somewhere unrelated.
-    pub fn select_agent(&mut self, delta: isize) {
-        self.agent_sel = step(self.agent_sel, delta, self.agents.len());
+    /// This workspace's cursor, filter and sort.
+    pub fn list(&self, ws: Workspace) -> &ListState {
+        &self.lists[ws.slot()]
+    }
+
+    pub fn list_mut(&mut self, ws: Workspace) -> &mut ListState {
+        &mut self.lists[ws.slot()]
+    }
+
+    /// The list on the screen you are looking at.
+    pub fn here(&self) -> &ListState {
+        self.list(self.workspace)
+    }
+
+    pub fn here_mut(&mut self) -> &mut ListState {
+        let ws = self.workspace;
+        self.list_mut(ws)
+    }
+
+    /// Go to a workspace from the top: `Alt-K`, a digit, or a slash command.
+    ///
+    /// Top-level travel forgets the way back on purpose. Jumping from the local
+    /// graph to schedules and then pressing `Esc` twice to end up in a memory
+    /// node you have forgotten opening is not "back one level", it is a maze.
+    pub fn go(&mut self, ws: Workspace) {
+        self.back_stack.clear();
+        self.workspace = ws;
+        self.overlay = Overlay::None;
+        self.reconcile();
+    }
+
+    /// Go one level *deeper*, remembering where from — the memory list to its
+    /// local graph is the only such move today.
+    pub fn drill(&mut self, ws: Workspace) {
+        if ws != self.workspace {
+            self.back_stack.push(self.workspace);
+        }
+        self.workspace = ws;
+        self.overlay = Overlay::None;
+        self.reconcile();
+    }
+
+    /// `Esc`: back exactly one level, and never anything else.
+    ///
+    /// An open overlay goes first, then an active filter, then a level of
+    /// nesting, and the bottom is always chat.
+    pub fn back(&mut self) {
+        if self.overlay.is_open() {
+            self.overlay = Overlay::None;
+            return;
+        }
+        if self.workspace == Workspace::Chat {
+            // Chat's own Esc is unchanged: follow the tail again.
+            self.scroll_to_bottom();
+            return;
+        }
+        if self.here().filter.is_some() {
+            let list = self.here_mut();
+            list.filter = None;
+            list.editing_filter = false;
+            self.reconcile();
+            return;
+        }
+        self.workspace = self.back_stack.pop().unwrap_or(Workspace::Chat);
+        self.reconcile();
+    }
+
+    // ---- rows -----------------------------------------------------------
+
+    /// The ids of the rows currently visible on a workspace, in the order they
+    /// are drawn. This is what the cursor moves over, so filtering and sorting
+    /// are automatically accounted for.
+    pub fn row_ids(&self, ws: Workspace) -> Vec<String> {
+        match ws {
+            Workspace::Fleet => self.fleet_rows().iter().map(|a| a.id.clone()).collect(),
+            Workspace::Memory => self.memory_rows().iter().map(|n| n.id.clone()).collect(),
+            Workspace::Schedules => self
+                .schedule_rows()
+                .iter()
+                .map(|s| s.name.clone())
+                .collect(),
+            Workspace::Goals => self.goal_rows().iter().map(|g| g.name.clone()).collect(),
+            Workspace::Hooks => self.hook_rows().iter().map(|h| h.name.clone()).collect(),
+            Workspace::Tasks => self.task_rows().iter().map(|t| t.id.clone()).collect(),
+            Workspace::Activity => self.activity_rows().iter().map(|a| a.id.clone()).collect(),
+            Workspace::Team => self.tasks.iter().map(|t| t.id.clone()).collect(),
+            Workspace::Chat | Workspace::MemoryGraph => Vec::new(),
+        }
+    }
+
+    /// Keep every cursor on a row that still exists.
+    ///
+    /// Called after every refresh, filter change and sort change. Because the
+    /// selection is an id rather than an index, a list that re-sorts under the
+    /// cursor keeps the cursor on the *item* — which is the whole reason the
+    /// fleet can refresh every four ticks without the selection wandering.
+    pub fn reconcile(&mut self) {
+        for ws in Workspace::ALL {
+            if !ws.is_list() {
+                continue;
+            }
+            let ids = self.row_ids(ws);
+            self.list_mut(ws).reconcile(&ids);
+        }
+    }
+
+    fn keep(&self, ws: Workspace, text: &str) -> bool {
+        match self.list(ws).filter.as_deref() {
+            Some(needle) => matches(needle, text),
+            None => true,
+        }
+    }
+
+    pub fn fleet_rows(&self) -> Vec<&AgentLine> {
+        let mut rows: Vec<&AgentLine> = self
+            .agents
+            .iter()
+            .filter(|a| {
+                self.keep(
+                    Workspace::Fleet,
+                    &format!("{} {} {}", a.name, a.id, a.status),
+                )
+            })
+            .collect();
+        match self.list(Workspace::Fleet).sort % 4 {
+            1 => rows.sort_by_key(|a| Reverse(a.created_at_ms)),
+            2 => rows.sort_by_key(|a| a.name.clone()),
+            3 => rows.sort_by(|a, b| {
+                b.cost_usd
+                    .unwrap_or(0.0)
+                    .total_cmp(&a.cost_usd.unwrap_or(0.0))
+            }),
+            // Running first, then newest: the top row should be the thing most
+            // likely to need attention.
+            _ => rows.sort_by(|a, b| {
+                b.is_running()
+                    .cmp(&a.is_running())
+                    .then(b.created_at_ms.cmp(&a.created_at_ms))
+            }),
+        }
+        rows
+    }
+
+    pub fn memory_rows(&self) -> Vec<&MemoryNode> {
+        let mut rows: Vec<&MemoryNode> = self
+            .memory
+            .iter()
+            .filter(|n| self.memory_type.is_none_or(|k| n.kind == k))
+            .filter(|n| self.keep(Workspace::Memory, &format!("{} {}", n.name, n.body)))
+            .collect();
+        match self.list(Workspace::Memory).sort % 4 {
+            1 => rows.sort_by(|a, b| b.confidence.total_cmp(&a.confidence)),
+            2 => rows.sort_by_key(|a| a.name.clone()),
+            3 => rows.sort_by_key(|a| a.age_ms),
+            _ => rows.sort_by_key(|a| Reverse(a.degree)),
+        }
+        rows
+    }
+
+    pub fn schedule_rows(&self) -> Vec<&ScheduleRow> {
+        let mut rows: Vec<&ScheduleRow> = self
+            .schedules
+            .iter()
+            .filter(|s| self.keep(Workspace::Schedules, &format!("{} {}", s.name, s.gloss)))
+            .collect();
+        match self.list(Workspace::Schedules).sort % 3 {
+            1 => rows.sort_by_key(|a| a.name.clone()),
+            2 => rows.sort_by_key(|a| Reverse(a.last_ms)),
+            // A paused schedule has no next fire, so it sorts last rather than
+            // first, which is what a bare `None` would do.
+            _ => rows.sort_by_key(|a| a.next_ms.unwrap_or(i64::MAX)),
+        }
+        rows
+    }
+
+    pub fn goal_rows(&self) -> Vec<&GoalRow> {
+        let mut rows: Vec<&GoalRow> = self
+            .goals
+            .iter()
+            .filter(|g| self.keep(Workspace::Goals, &format!("{} {}", g.name, g.objective)))
+            .collect();
+        match self.list(Workspace::Goals).sort % 3 {
+            1 => rows.sort_by_key(|a| a.name.clone()),
+            2 => rows.sort_by_key(|a| a.next_ms.unwrap_or(i64::MAX)),
+            _ => rows.sort_by_key(|a| Reverse(a.percent())),
+        }
+        rows
+    }
+
+    pub fn hook_rows(&self) -> Vec<&HookRow> {
+        let mut rows: Vec<&HookRow> = self
+            .hooks
+            .iter()
+            .filter(|h| {
+                self.keep(
+                    Workspace::Hooks,
+                    &format!("{} {} {}", h.name, h.repo, h.event),
+                )
+            })
+            .collect();
+        match self.list(Workspace::Hooks).sort % 3 {
+            1 => rows.sort_by_key(|a| a.name.clone()),
+            2 => rows.sort_by_key(|a| Reverse(a.last_ms)),
+            _ => rows.sort_by_key(|a| Reverse(a.deliveries_24h)),
+        }
+        rows
+    }
+
+    /// The board, as its own screen.
+    ///
+    /// Built from the team board when the richer loader has nothing yet, so
+    /// promoting tasks to a screen never *removes* the board that exists today.
+    pub fn task_rows(&self) -> Vec<TaskRow> {
+        let source: Vec<TaskRow> = if self.board.is_empty() {
+            self.tasks.iter().map(task_row_from).collect()
+        } else {
+            self.board.clone()
+        };
+        let mut rows: Vec<TaskRow> = source
+            .into_iter()
+            .filter(|t| self.keep(Workspace::Tasks, &format!("{} {}", t.id, t.title)))
+            .collect();
+        match self.list(Workspace::Tasks).sort % 3 {
+            1 => rows.sort_by_key(|a| a.id.clone()),
+            2 => rows.sort_by_key(|a| Reverse(a.age_ms)),
+            // Being worked, then claimed, then open, then blocked, then done —
+            // the order attention should travel in.
+            _ => rows.sort_by_key(|t| match t.state {
+                TaskState::Running => 0,
+                TaskState::Claimed => 1,
+                TaskState::Open => 2,
+                TaskState::Blocked => 3,
+                TaskState::Done => 4,
+            }),
+        }
+        rows
+    }
+
+    pub fn activity_rows(&self) -> Vec<&ActivityItem> {
+        let mut rows: Vec<&ActivityItem> = self
+            .activity
+            .iter()
+            .filter(|a| !self.unread_only || a.unread)
+            .filter(|a| self.activity_source.is_none_or(|s| a.source == s))
+            .filter(|a| self.keep(Workspace::Activity, &a.text))
+            .collect();
+        match self.list(Workspace::Activity).sort % 3 {
+            1 => rows.sort_by_key(|a| (Reverse(a.unread), Reverse(a.at_ms))),
+            2 => rows.sort_by_key(|a| a.source.label()),
+            _ => rows.sort_by_key(|a| Reverse(a.at_ms)),
+        }
+        rows
     }
 
     pub fn selected_agent(&self) -> Option<&AgentLine> {
-        self.agents.get(self.agent_sel.min(self.agents.len().saturating_sub(1)))
-    }
-
-    pub fn select_task(&mut self, delta: isize) {
-        self.task_sel = step(self.task_sel, delta, self.tasks.len());
+        let id = self.list(Workspace::Fleet).selected.as_deref()?;
+        self.agents.iter().find(|a| a.id == id)
     }
 
     pub fn selected_task(&self) -> Option<&TeamTask> {
-        self.tasks.get(self.task_sel.min(self.tasks.len().saturating_sub(1)))
+        let id = self.list(Workspace::Team).selected.as_deref()?;
+        self.tasks.iter().find(|t| t.id == id)
     }
 
-    /// Keep both panel cursors inside their lists as those lists change.
-    pub fn clamp_selection(&mut self) {
-        self.agent_sel = self.agent_sel.min(self.agents.len().saturating_sub(1));
-        self.task_sel = self.task_sel.min(self.tasks.len().saturating_sub(1));
+    pub fn selected_memory(&self) -> Option<&MemoryNode> {
+        let id = self.list(Workspace::Memory).selected.as_deref()?;
+        self.memory.iter().find(|n| n.id == id)
+    }
+
+    /// The node the local graph is centred on.
+    pub fn focused_memory(&self) -> Option<&MemoryNode> {
+        self.memory.iter().find(|n| n.id == self.graph.focus)
+    }
+
+    pub fn selected_schedule(&self) -> Option<&ScheduleRow> {
+        let id = self.list(Workspace::Schedules).selected.as_deref()?;
+        self.schedules.iter().find(|s| s.name == id)
+    }
+
+    pub fn selected_goal(&self) -> Option<&GoalRow> {
+        let id = self.list(Workspace::Goals).selected.as_deref()?;
+        self.goals.iter().find(|g| g.name == id)
+    }
+
+    pub fn selected_hook(&self) -> Option<&HookRow> {
+        let id = self.list(Workspace::Hooks).selected.as_deref()?;
+        self.hooks.iter().find(|h| h.name == id)
+    }
+
+    pub fn selected_activity(&self) -> Option<&ActivityItem> {
+        let id = self.list(Workspace::Activity).selected.as_deref()?;
+        self.activity.iter().find(|a| a.id == id)
+    }
+
+    pub fn selected_board_task(&self) -> Option<TaskRow> {
+        let id = self.list(Workspace::Tasks).selected.clone()?;
+        self.task_rows().into_iter().find(|t| t.id == id)
+    }
+
+    /// Endings that arrived while nobody was looking, for the `⚑ n` badge.
+    pub fn unread(&self) -> usize {
+        self.activity.iter().filter(|a| a.unread).count()
+    }
+
+    /// What the which-key menu prints beside a workspace, which is what makes
+    /// the menu a dashboard as well as a menu — you often get the answer
+    /// without pressing the second key.
+    pub fn count_for(&self, ws: Workspace) -> String {
+        match ws {
+            Workspace::Chat => "the conversation".to_string(),
+            Workspace::Fleet => {
+                if self.agents.is_empty() {
+                    return "nothing delegated yet".into();
+                }
+                let failed = self.agents.iter().filter(|a| a.status == "failed").count();
+                format!(
+                    "{} · {} running · {failed} failed",
+                    plural(self.agents.len(), "run"),
+                    self.running()
+                )
+            }
+            Workspace::Memory | Workspace::MemoryGraph => {
+                if self.memory.is_empty() {
+                    return "nothing remembered yet".into();
+                }
+                let (nodes, edges) = self.graph_size;
+                let clashes = self.memory.iter().filter(|n| n.contradicted).count();
+                // The list is capped at the most-connected few hundred, so it
+                // says which part of the graph it is when it is a part. A
+                // browser that counts its own rows tells you it is showing
+                // everything, which is the one thing it must not get wrong.
+                let shown = if nodes > self.memory.len() {
+                    format!("{} of {}", self.memory.len(), plural(nodes, "node"))
+                } else {
+                    plural(self.memory.len(), "node")
+                };
+                format!(
+                    "{shown} · {} · {}",
+                    plural(edges, "edge"),
+                    plural(clashes, "contradiction")
+                )
+            }
+            Workspace::Schedules => {
+                if self.schedules.is_empty() {
+                    return "none yet".into();
+                }
+                let next = self
+                    .schedules
+                    .iter()
+                    .filter_map(|s| s.next_ms.map(|at| (at, s.name.clone())))
+                    .min();
+                match next {
+                    Some((at, name)) => format!(
+                        "{} · next {name} in {}",
+                        self.schedules.len(),
+                        short_duration(at.saturating_sub(self.now_ms))
+                    ),
+                    None => format!("{} · none armed", self.schedules.len()),
+                }
+            }
+            Workspace::Goals => {
+                if self.goals.is_empty() {
+                    return "none yet".into();
+                }
+                let blocked = self
+                    .goals
+                    .iter()
+                    .filter(|g| g.state == crate::tui::data::GoalState::Blocked)
+                    .count();
+                let waiting = self.goals.iter().filter(|g| g.escalation.is_some()).count();
+                format!(
+                    "{} · {blocked} blocked · {waiting} needs you",
+                    self.goals.len()
+                )
+            }
+            Workspace::Hooks => {
+                if self.hooks.is_empty() {
+                    return "none yet".into();
+                }
+                let failing = self
+                    .hooks
+                    .iter()
+                    .filter(|h| h.state == crate::tui::data::HookState::Failing)
+                    .count();
+                format!(
+                    "{} · {failing} failing",
+                    plural(self.hooks.len(), "webhook")
+                )
+            }
+            Workspace::Tasks => {
+                let rows = self.task_rows();
+                if rows.is_empty() {
+                    return "the board is empty".into();
+                }
+                let claimed = rows
+                    .iter()
+                    .filter(|t| t.state == TaskState::Claimed)
+                    .count();
+                let blocked = rows
+                    .iter()
+                    .filter(|t| t.state == TaskState::Blocked)
+                    .count();
+                let open = rows.iter().filter(|t| t.state != TaskState::Done).count();
+                format!("{open} open · {claimed} claimed · {blocked} blocked")
+            }
+            Workspace::Activity => match self.unread() {
+                0 => "nothing new".to_string(),
+                n => format!("{n} unread"),
+            },
+            Workspace::Team => match &self.team {
+                None => "no team — start one with --team".to_string(),
+                Some(name) => {
+                    let busy = self
+                        .members
+                        .iter()
+                        .filter(|m| m.status == jod_core::team::MemberStatus::Busy)
+                        .count();
+                    format!(
+                        "{name} · {} · {busy} busy",
+                        plural(self.members.len(), "member")
+                    )
+                }
+            },
+        }
     }
 
     // ---- liveness -------------------------------------------------------
@@ -655,6 +1293,15 @@ impl App {
                 if let Some(c) = usage.cost_usd {
                     self.cost_usd += c;
                 }
+                // What actually occupies the window: everything the model was
+                // shown this turn, whether it was sent fresh or read from
+                // cache. Assigned rather than accumulated — each turn resends
+                // the whole conversation, so adding them up would count the
+                // same history once per turn and hit the wall almost at once.
+                let shown = usage.input_tokens.unwrap_or(0) + usage.cache_read_tokens.unwrap_or(0);
+                if shown > 0 {
+                    self.context_tokens = shown;
+                }
                 let mut bits = vec![];
                 if let Some(t) = usage.output_tokens {
                     bits.push(format!("{t} out"));
@@ -766,6 +1413,49 @@ mod tests {
 
     fn app() -> App {
         App::new(HarnessKind::ClaudeCode, None, Resume::Fresh)
+    }
+
+    /// The memory list holds the most-connected few hundred, so the count says
+    /// which part of the graph that is. A browser that counted its own rows
+    /// would claim to be showing everything, which is the one thing it must
+    /// never get wrong.
+    #[test]
+    fn the_memory_count_admits_when_it_is_showing_part_of_the_graph() {
+        let mut a = app();
+        a.memory = vec![memory_node("reljod"), memory_node("linear")];
+
+        a.graph_size = (2, 1);
+        let whole = a.count_for(Workspace::Memory);
+        assert!(whole.starts_with("2 nodes"), "{whole}");
+        assert!(
+            !whole.contains(" of "),
+            "nothing is hidden, so say nothing: {whole}"
+        );
+
+        a.graph_size = (142, 96);
+        let part = a.count_for(Workspace::Memory);
+        assert!(part.starts_with("2 of 142 nodes"), "{part}");
+        assert!(
+            part.contains("96 edges"),
+            "the edges are the graph's too: {part}"
+        );
+    }
+
+    fn memory_node(name: &str) -> MemoryNode {
+        MemoryNode {
+            id: name.into(),
+            name: name.into(),
+            kind: MemoryKind::Belief,
+            confidence: 1.0,
+            degree: 1,
+            age_ms: 0,
+            seen: 1,
+            body: String::new(),
+            contradicted: false,
+            in_edges: vec![],
+            out_edges: vec![],
+            provenance: vec![],
+        }
     }
 
     fn typed(text: &str) -> App {
@@ -999,10 +1689,7 @@ mod tests {
             is_error: true,
         });
         assert_eq!(a.transcript.len(), 2);
-        assert!(matches!(
-            a.transcript[1],
-            Entry::Tool { failed: true, .. }
-        ));
+        assert!(matches!(a.transcript[1], Entry::Tool { failed: true, .. }));
     }
 
     /// OpenCode reports a fast tool as already `completed`, so no call is ever
@@ -1158,13 +1845,19 @@ mod tests {
             is_error: true,
         });
         assert_eq!(a.transcript.len(), 2, "the failed tool and its output");
-        assert!(matches!(a.transcript[1], Entry::ToolOut { failed: true, .. }));
+        assert!(matches!(
+            a.transcript[1],
+            Entry::ToolOut { failed: true, .. }
+        ));
     }
 
     #[test]
     fn long_tool_output_is_cut_down_with_a_count() {
         let mut a = app();
-        let long = (0..40).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        let long = (0..40)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         a.apply(&AgentEvent::ToolCall {
             name: "Bash".into(),
             input: None,
@@ -1380,6 +2073,7 @@ mod tests {
 
     fn line(id: &str, status: &str) -> AgentLine {
         AgentLine {
+            delivery: Verdict::Nothing,
             id: id.into(),
             name: format!("job {id}"),
             harness: "Claude Code".into(),
@@ -1391,36 +2085,80 @@ mod tests {
         }
     }
 
+    /// Move the fleet cursor the way a keypress would.
+    fn move_fleet(a: &mut App, delta: isize) {
+        let ids = a.row_ids(Workspace::Fleet);
+        a.list_mut(Workspace::Fleet).step(delta, &ids);
+    }
+
     #[test]
     fn the_selection_stops_at_both_ends_rather_than_wrapping() {
         let mut a = app();
         a.agents = vec![line("a", "running"), line("b", "completed")];
-        a.select_agent(-1);
-        assert_eq!(a.agent_sel, 0, "already at the top");
-        a.select_agent(1);
-        a.select_agent(1);
-        assert_eq!(a.agent_sel, 1, "cannot fall off the bottom");
+        a.reconcile();
+        move_fleet(&mut a, -1);
+        assert_eq!(a.selected_agent().unwrap().id, "a", "already at the top");
+        move_fleet(&mut a, 1);
+        move_fleet(&mut a, 1);
+        assert_eq!(
+            a.selected_agent().unwrap().id,
+            "b",
+            "cannot fall off the bottom"
+        );
     }
 
     #[test]
     fn selecting_in_an_empty_panel_is_harmless() {
         let mut a = app();
-        a.select_agent(1);
-        assert_eq!(a.agent_sel, 0);
+        move_fleet(&mut a, 1);
         assert!(a.selected_agent().is_none());
     }
 
-    /// Agents disappear from the list as older runs age out. A cursor left past
-    /// the end would then act on nothing, or on the wrong row.
+    /// Agents disappear from the list as older runs age out. A cursor left on
+    /// one that is gone would act on nothing, or on the wrong row.
+    ///
+    /// Updated from asserting an index to asserting an *id*: the cursor is now
+    /// tracked by id, so "pulled back" means "put on a row that still exists"
+    /// rather than "clamped to the last index".
     #[test]
     fn the_cursor_is_pulled_back_when_the_list_shrinks() {
         let mut a = app();
-        a.agents = vec![line("a", "running"), line("b", "running"), line("c", "running")];
-        a.agent_sel = 2;
+        a.agents = vec![
+            line("a", "running"),
+            line("b", "running"),
+            line("c", "running"),
+        ];
+        a.reconcile();
+        move_fleet(&mut a, 2);
+        assert_eq!(a.selected_agent().unwrap().id, "c");
         a.agents.truncate(1);
-        a.clamp_selection();
-        assert_eq!(a.agent_sel, 0);
+        a.reconcile();
         assert_eq!(a.selected_agent().unwrap().id, "a");
+    }
+
+    /// The fleet re-sorts under the cursor every four ticks. Tracking a row
+    /// index would move the selection onto a different run the moment one
+    /// finished — which is exactly when you are about to press a key.
+    #[test]
+    fn the_fleet_cursor_stays_on_the_run_when_one_finishes_and_the_list_re_sorts() {
+        let mut a = app();
+        a.agents = vec![
+            line("first", "running"),
+            line("second", "running"),
+            line("third", "running"),
+        ];
+        a.reconcile();
+        move_fleet(&mut a, 2);
+        assert_eq!(a.selected_agent().unwrap().id, "third");
+
+        // The first one finishes, so it sorts below the two still running.
+        a.agents[0].status = "completed".into();
+        a.reconcile();
+        assert_eq!(
+            a.selected_agent().unwrap().id,
+            "third",
+            "the cursor followed the run, not the row"
+        );
     }
 
     /// The whole point of delegating is that work continues off screen, so the

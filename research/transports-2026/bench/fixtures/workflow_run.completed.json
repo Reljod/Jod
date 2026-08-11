@@ -1,0 +1,22 @@
+{
+  "action": "completed",
+  "workflow": { "name": "ci", "path": ".github/workflows/ci.yml" },
+  "workflow_run": {
+    "id": 18923400711,
+    "name": "ci",
+    "head_branch": "main",
+    "head_sha": "7e8d9c0b1a2f3e4d5c6b7a8f9e0d1c2b3a4f5e6d",
+    "status": "completed",
+    "conclusion": "failure",
+    "run_number": 412,
+    "run_attempt": 1,
+    "html_url": "https://github.com/Reljod/Jod/actions/runs/18923400711"
+  },
+  "repository": {
+    "full_name": "Reljod/Jod",
+    "default_branch": "main",
+    "private": true,
+    "owner": { "login": "Reljod", "id": 12345678 }
+  },
+  "sender": { "login": "Reljod", "id": 12345678 }
+}

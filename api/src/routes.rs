@@ -254,7 +254,20 @@ pub struct SpawnBody {
     pub cwd: Option<PathBuf>,
     #[serde(default)]
     pub model: Option<String>,
-    #[serde(default)]
+    /// Pinned to `Ask` rather than following [`PermissionPolicy`]'s own
+    /// default, and the difference is the trust boundary.
+    ///
+    /// The process-wide default is `Bypass`, because Jod's whole premise is
+    /// work that happens with nobody watching. That reasoning does not reach
+    /// here: this field is filled in by *whatever is on the other end of a
+    /// socket*, and a caller who omits it has not asked for anything. Letting
+    /// an omission mean "auto-approve everything" would put the most dangerous
+    /// setting one forgotten JSON key away, on the one surface Jod does not
+    /// control the callers of.
+    ///
+    /// A remote caller that genuinely wants it says so, and is still capped by
+    /// its token's ceiling.
+    #[serde(default = "default_permission")]
     pub permission: PermissionPolicy,
     #[serde(default)]
     pub resume: Resume,
@@ -262,6 +275,10 @@ pub struct SpawnBody {
 
 fn default_harness() -> HarnessKind {
     HarnessKind::ClaudeCode
+}
+
+fn default_permission() -> PermissionPolicy {
+    PermissionPolicy::Ask
 }
 
 /// Delegate a prompt to a harness.
@@ -352,10 +369,12 @@ pub async fn spawn_agent(
         name: body.name.unwrap_or_else(|| default_name(&prompt)),
         harness: body.harness,
         prompt,
+        system: None,
         cwd,
         model: body.model,
         permission: body.permission,
         resume: body.resume,
+        tools: None,
     };
 
     let agent = state.jod.spawn_agent(req).await.map_err(|e| {
@@ -399,12 +418,9 @@ fn location(agent: &AgentSummary) -> [(axum::http::HeaderName, String); 1] {
     )]
 }
 
+/// The spelling `parse_permission` reads back, from the one definition of it.
 fn permission_id(p: PermissionPolicy) -> &'static str {
-    match p {
-        PermissionPolicy::Ask => "ask",
-        PermissionPolicy::AcceptEdits => "accept_edits",
-        PermissionPolicy::Bypass => "bypass",
-    }
+    p.as_str()
 }
 
 fn audit_write(

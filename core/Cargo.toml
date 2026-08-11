@@ -9,11 +9,45 @@ description = "Core service for Jod: harness abstraction, agent runner, durable 
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tokio.workspace = true
+# `signal` is additive on top of the workspace features: the scheduler daemon
+# finishes the tick in flight on SIGTERM rather than being killed mid-claim.
+tokio = { workspace = true, features = ["signal"] }
 uuid.workspace = true
 chrono.workspace = true
 rusqlite.workspace = true
 libc.workspace = true
+croner.workspace = true
+chrono-tz.workspace = true
+# Webhook signatures. GitHub signs with HMAC-SHA256 and there is no negotiation
+# to do, so these three are the whole dependency: a MAC, a hash, and a
+# constant-time compare. `subtle` is already what `jod-api` uses for tokens.
+hmac = "0.12"
+sha2 = "0.10"
+subtle = "2"
+# The only HTTP client in the tree, and it exists for Telegram. The Bot API is
+# three JSON endpoints for our purposes (`getUpdates`, `sendMessage`,
+# `editMessageText`); `teloxide` adds a dispatcher, a dialogue state machine and
+# derive macros over the same `reqwest` call, and `frankenstein` adds ~900
+# generated types for methods we never send. Both cost more than they save when
+# the payload structs fit on one screen. `rustls` rather than the system
+# OpenSSL, because Jod ships as one static binary onto a VPS — see the
+# transport note in `telegram.rs`.
+reqwest = { version = "0.13", default-features = false, optional = true, features = [
+  "json",
+  "rustls",
+] }
+
+[features]
+# On by default, because the owner wants Jod on a phone and a default that
+# silently omits it would be a surprise rather than a choice.
+default = ["telegram"]
+# The HTTPS client, and the only reason a TLS stack is in the tree at all.
+# `--no-default-features` builds a Jod with no `rustls`, no `aws-lc-rs` and no
+# vendored C — everything except `HttpBot` is pure and stays compiled either
+# way, including all of its tests.
+telegram = ["dep:reqwest"]
 
 [dev-dependencies]
-tokio = { version = "1", features = ["full"] }
+# `test-util` on top of `full`: the Telegram rate-limit tests run on a paused
+# clock, so a 30-second flood wait is asserted rather than waited out.
+tokio = { version = "1", features = ["full", "test-util"] }

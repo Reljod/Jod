@@ -1,0 +1,981 @@
+==============================================================
+== 0. which build
+==============================================================
+$ cat '/tmp/jod-e2e/bin-wip/COMMIT'
+2e20bdf8ecef9256ee8bb3b281cab479a5c5e110
+
+$ cat '/tmp/jod-e2e/bin-wip/DIRTY'
+ M tests/e2e/jod/out/26-daemon-spawnfail.txt
+?? tests/e2e/jod/27-breaker.sh
+?? tests/e2e/jod/30-goals.sh
+?? tests/e2e/jod/31-goals-real.sh
+?? tests/e2e/jod/32-goal-donewhen.sh
+?? tests/e2e/jod/33-unattended-tools.sh
+?? tests/e2e/jod/40-api.sh
+?? tests/e2e/jod/41-webhook.sh
+?? tests/e2e/jod/42-token-revocation.sh
+?? tests/e2e/jod/50-conversations.sh
+?? tests/e2e/jod/out/27-breaker.txt
+?? tests/e2e/jod/out/30-goals.txt
+?? tests/e2e/jod/out/31-goals-real.txt
+?? tests/e2e/jod/out/32-goal-donewhen.txt
+?? tests/e2e/jod/out/33-unattended-tools.txt
+?? tests/e2e/jod/out/40-api.txt
+?? tests/e2e/jod/out/41-webhook.txt
+?? tests/e2e/jod/out/42-token-revocation.txt
+?? tests/e2e/jod/out/50-conversations.txt
+
+==============================================================
+== 1. seed the store through the CLI
+==============================================================
+$ jod remember reljod uses jod
+remembered #1
+
+$ jod remember reljod prefers linear for tasks
+remembered #2
+
+$ jod remember jod runs-on jod-cloud
+remembered #3
+
+$ jod remember jod-cloud hosted-by hetzner
+remembered #4
+
+$ jod remember hetzner located-in falkenstein
+remembered #5
+
+$ jod remember reljod based-in manila --scope personal
+remembered #6
+
+$ jod remember budget is 50 eur per month --scope finance
+remembered #7
+
+$ jod remember spam claims anything at all --origin untrusted
+remembered #8
+
+$ jod schedule add nightly summarise the day --cron 0 2 * * *
+nightly armed — next Aug 11 02:00 (in 2h39m)
+
+$ jod schedule add manila-brief morning brief --cron 0 7 * * * -z Asia/Manila
+manila-brief armed — next Aug 11 23:00 (in 23h39m)
+
+$ jod schedule add every15 check the queue --cron */15 * * * *
+every15 armed — next Aug 10 23:30 (in 9m10s)
+
+$ jod schedule pause every15
+every15 paused
+
+$ jod goal add inbox-zero keep the inbox empty --budget 5.00 --stall-after 4
+inbox-zero is running
+
+$ jod goal add tidy-repo keep the repo tidy -c 0 */6 * * * --max-iterations 20
+tidy-repo is running
+
+$ jod remember graph-only links another-node
+remembered #9
+
+==============================================================
+== 2. a real run, so the fleet and activity screens have something
+==============================================================
+$ jod run say OK and stop -n seeded-run
+▸ seeded-run (Claude Code) · jod watch 56fbb90a-899f-4190-9456-b8a6abc3f23f
+  model claude-opus-5[1m]
+OK
+✓ done · $0.0856 · 4 out
+
+==============================================================
+== 3. what is in the store
+==============================================================
+$ python3 '/home/reljod/repo/Jod/.claude/worktrees/feat+memory-graph-scheduler-webhooks/tests/e2e/jod/db.py' '/tmp/jod-e2e/tui/jod.db' "SELECT (SELECT count(*) FROM facts) AS facts, (SELECT count(*) FROM entities) AS entities, (SELECT count(*) FROM relations) AS relations, (SELECT count(*) FROM schedules) AS schedules, (SELECT count(*) FROM goals) AS goals, (SELECT count(*) FROM runs) AS runs, (SELECT count(*) FROM conversations) AS conversations"
+facts | entities | relations | schedules | goals | runs | conversations
+------+----------+-----------+-----------+-------+------+--------------
+9 | 14 | 9 | 3 | 2 | 1 | 1
+(1 rows)
+
+==============================================================
+== 4. every workspace at 100x30
+==============================================================
+$ '/tmp/jod-e2e/bin-wip/screens' '/tmp/jod-e2e/tui/jod.db'
+/tmp/jod-e2e/tui/jod.db
+14 memory nodes · 3 schedules · 2 goals · 0 hooks · 0 activity · 0 tasks
+
+── chat ────────────────────────────────────────────────────────────
+┌ jod ─────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌ you ─────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘
+ Ctrl-B delegate · Ctrl-A fleet · Ctrl-K menu · / commands · ? keys       Ctrl-X stop · Ctrl-C quit
+ Claude Code · ready
+
+── fleet ────────────────────────────────────────────────────────────
+┌ fleet ───────────────────────────────────────┐┌ run ─────────────────────────────────────────────┐
+│no agents yet — Ctrl-B delegates one          ││ nothing selected                                 │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+└ ↑↓ pick · ⏎ watch · s stop · r resume · d del┘└ ⏎ watch · s stop · r resume · a attach ──────────┘
+ ⏎ watch · s stop · r resume · d delegate again · a attach · / filter             Esc back · ? keys
+ fleet · nothing delegated yet
+
+── memory · list ────────────────────────────────────────────────────────────
+┌ memory · list ───────────────────────────────┐┌ node ────────────────────────────────────────────┐
+│▸◆ blf  hetzner                1.00    2      ││ hetzner   belief                                 │
+│ ◆ blf  jod-cloud              1.00    2      ││ conf 1.00 · 2 edges · seen 2×                    │
+│ ◆ blf  jod                    1.00    2      ││                                                  │
+│ ◆ blf  reljod                 1.00    2      ││ hetzner located-in falkenstein                   │
+│ ◆ blf  graph-only             1.00    1      ││                                                  │
+│ ● ent  another-node           1.00    1      ││ ▲ linked from (1)                                │
+│ ◇ fact spam                   0.30    1      ││   hosted-by     ◆ jod-cloud                      │
+│ ● ent  anything at all        0.30    1      ││                                                  │
+│ ◆ blf  budget                 1.00    1      ││ ▼ links to (1)                                   │
+│ ● ent  50 eur per month       1.00    1      ││   located-in    ● falkenstein                    │
+│ ◆ blf  reljod                 1.00    1      ││                                                  │
+│ ● ent  manila                 1.00    1      ││ provenance                                       │
+│ ● ent  falkenstein            1.00    1      ││   owner · scope default                          │
+│ ● ent  linear for tasks       1.00    1      ││   1 out, 1 in                                    │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+└ ↑↓ pick · g graph · e edit · n new · l link ─┘└ g local graph · e edit · x forget ───────────────┘
+ g graph · e edit · n new · l link · x forget · t type · / filter                 Esc back · ? keys
+ memory · list · 14 nodes · 9 edges · 0 contradictions
+
+── schedules ────────────────────────────────────────────────────────────
+┌ schedules · 3 · next every15 in 9m04s ───────────────────────────────────────────────────────────┐
+│  name              when                next                in last             ago 7d            │
+│▸‖ every15          every 15 minutes    Aug 10 23:30     9m04s —                  — ▁▁▁▁▁▁▁       │
+│ ● nightly          02:00 every day     Aug 11 02:00     2h39m —                  — ▁▁▁▁▁▁▁       │
+│ ● manila-brief     07:00 every day     Aug 11 23:00    23h39m —                  — ▁▁▁▁▁▁▁       │
+│                                                                                                  │
+│  ──────────────────────────────────────────────────────────────────────────────────────────────  │
+│  every15   cron */15 * * * * · UTC                                                               │
+│                                                                                                  │
+│  prompt    check the queue                                                                       │
+│  runs as   claude_code · /home/reljod/repo/Jod/.claude/worktrees/feat+memory-graph-scheduler-webh│
+│  policy    misfire fire_once · overlap skip · grace 5m00s · 0 consecutive failures               │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+└ ↑↓ pick · ⏎ last run · r run now · p pause/resume · e edit ──────────────────────────────────────┘
+ ⏎ last run · r run now · p pause/resume · e edit · n new · x delete · / filter   Esc back · ? keys
+ schedules · 3 · next every15 in 9m04s
+
+── goals ────────────────────────────────────────────────────────────
+┌ goals · 2 · 0 blocked · 0 needs you ─────────────────────────────────────────────────────────────┐
+│▸○ inbox-zero          every hour… ░░░░░░░░░░   0%    39m04s  waiting   iter    0                 │
+│ ○ tidy-repo           every 6 ho… ░░░░░░░░░░   0%    39m04s  waiting   iter    0                 │
+│                                                                                                  │
+│  ──────────────────────────────────────────────────────────────────────────────────────────────  │
+│  inbox-zero                                                                                      │
+│                                                                                                  │
+│  objective keep the inbox empty                                                                  │
+│  done when                                                                                       │
+│  stop if   4 iterations move nothing · $5.00 is spent                                            │
+│  budget    $0.00 of $5.00  ░░░░░░░░░░                                                            │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+└ ↑↓ pick · ⏎ last iteration · r run now · p pause · e edit ───────────────────────────────────────┘
+ ⏎ last iteration · r run now · p pause · e edit · n new · a answer escalation    Esc back · ? keys
+ goals · 2 · 0 blocked · 0 needs you
+
+── webhooks ────────────────────────────────────────────────────────────
+┌ webhooks · none yet ─────────────────────────────────────────────────────────────────────────────┐
+│  name            repo                event                       runs         24h    last        │
+│  no webhooks yet — n makes one, /new hook too                                                    │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+└ ↑↓ pick · ⏎ open run · t test payload · p pause · e edit ────────────────────────────────────────┘
+ ⏎ open run · t test payload · p pause · e edit · n new · c copy URL · x delete   Esc back · ? keys
+ webhooks · none yet
+
+── tasks ────────────────────────────────────────────────────────────
+┌ tasks · the board is empty ──────────────────────────────────────────────────────────────────────┐
+│  the board is empty — n adds a task, /todo does too                                              │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+└ ↑↓ pick · ⏎ mark done · d delegate · c claim · o open run ───────────────────────────────────────┘
+ ⏎ mark done · d delegate · c claim · o open run · n new · x remove · / filter    Esc back · ? keys
+ tasks · the board is empty
+
+── activity ────────────────────────────────────────────────────────────
+┌ activity · nothing new ──────────────────────────────────────────────────────────────────────────┐
+│  nothing has happened yet — cron, hooks and goals write here                                     │
+│                                                                                                  │
+│  filter  [all]      only unread: off      f cycles · u toggles                                   │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+└ ↑↓ pick · ⏎ jump to it · m mark read · M mark all · u unread only ───────────────────────────────┘
+ ⏎ jump to it · m mark read · M mark all · u unread only · f filter source        Esc back · ? keys
+ activity · nothing new
+
+── team ────────────────────────────────────────────────────────────
+┌ team ────────────────────────────────────────────────────────────────────────────────────────────┐
+│no team — start one with `jod tui --team <name>`                                                  │
+│── board ── empty · /todo <title> adds one                                                        │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+└ ↑↓ pick · ⏎ mark done · /todo adds · Esc back ───────────────────────────────────────────────────┘
+ ⏎ mark done · ↑↓ pick · / filter                                                 Esc back · ? keys
+ team · no team — start one with --team
+
+==============================================================
+== 5. the memory workspace with a filter typed into it
+==============================================================
+$ '/tmp/jod-e2e/bin-wip/screens' '/tmp/jod-e2e/tui/jod.db' prefers
+/tmp/jod-e2e/tui/jod.db
+14 memory nodes · 3 schedules · 2 goals · 0 hooks · 0 activity · 0 tasks
+
+── chat ────────────────────────────────────────────────────────────
+┌ jod ─────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌ you ─────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘
+ Ctrl-B delegate · Ctrl-A fleet · Ctrl-K menu · / commands · ? keys       Ctrl-X stop · Ctrl-C quit
+ Claude Code · ready
+
+── fleet ────────────────────────────────────────────────────────────
+┌ fleet ───────────────────────────────────────┐┌ run ─────────────────────────────────────────────┐
+│no agents yet — Ctrl-B delegates one          ││ nothing selected                                 │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+└ ↑↓ pick · ⏎ watch · s stop · r resume · d del┘└ ⏎ watch · s stop · r resume · a attach ──────────┘
+ ⏎ watch · s stop · r resume · d delegate again · a attach · / filter             Esc back · ? keys
+ fleet · nothing delegated yet
+
+── memory · list ────────────────────────────────────────────────────────────
+┌ memory · list ───────────────────────────────┐┌ node ────────────────────────────────────────────┐
+│▸● ent  linear for tasks       1.00    1      ││ linear for tasks   entity                        │
+│                                              ││ conf 1.00 · 1 edges · seen 1×                    │
+│ /prefers   ▸ filter · 1 match                ││                                                  │
+│                                              ││ reljod prefers linear for tasks                  │
+│                                              ││                                                  │
+│                                              ││ ▲ linked from (1)                                │
+│                                              ││   prefers       ◆ reljod                         │
+│                                              ││                                                  │
+│                                              ││ ▼ links to (0)                                   │
+│                                              ││                                                  │
+│                                              ││ provenance                                       │
+│                                              ││   owner · scope default                          │
+│                                              ││   0 out, 1 in                                    │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+└ ↑↓ pick · g graph · e edit · n new · l link ─┘└ g local graph · e edit · x forget ───────────────┘
+ g graph · e edit · n new · l link · x forget · t type · / filter                 Esc back · ? keys
+ memory · list · 14 nodes · 9 edges · 0 contradictions
+
+── schedules ────────────────────────────────────────────────────────────
+┌ schedules · 3 · next every15 in 9m04s ───────────────────────────────────────────────────────────┐
+│  name              when                next                in last             ago 7d            │
+│▸‖ every15          every 15 minutes    Aug 10 23:30     9m04s —                  — ▁▁▁▁▁▁▁       │
+│ ● nightly          02:00 every day     Aug 11 02:00     2h39m —                  — ▁▁▁▁▁▁▁       │
+│ ● manila-brief     07:00 every day     Aug 11 23:00    23h39m —                  — ▁▁▁▁▁▁▁       │
+│                                                                                                  │
+│  ──────────────────────────────────────────────────────────────────────────────────────────────  │
+│  every15   cron */15 * * * * · UTC                                                               │
+│                                                                                                  │
+│  prompt    check the queue                                                                       │
+│  runs as   claude_code · /home/reljod/repo/Jod/.claude/worktrees/feat+memory-graph-scheduler-webh│
+│  policy    misfire fire_once · overlap skip · grace 5m00s · 0 consecutive failures               │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+└ ↑↓ pick · ⏎ last run · r run now · p pause/resume · e edit ──────────────────────────────────────┘
+ ⏎ last run · r run now · p pause/resume · e edit · n new · x delete · / filter   Esc back · ? keys
+ schedules · 3 · next every15 in 9m04s
+
+── goals ────────────────────────────────────────────────────────────
+┌ goals · 2 · 0 blocked · 0 needs you ─────────────────────────────────────────────────────────────┐
+│▸○ inbox-zero          every hour… ░░░░░░░░░░   0%    39m04s  waiting   iter    0                 │
+│ ○ tidy-repo           every 6 ho… ░░░░░░░░░░   0%    39m04s  waiting   iter    0                 │
+│                                                                                                  │
+│  ──────────────────────────────────────────────────────────────────────────────────────────────  │
+│  inbox-zero                                                                                      │
+│                                                                                                  │
+│  objective keep the inbox empty                                                                  │
+│  done when                                                                                       │
+│  stop if   4 iterations move nothing · $5.00 is spent                                            │
+│  budget    $0.00 of $5.00  ░░░░░░░░░░                                                            │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+└ ↑↓ pick · ⏎ last iteration · r run now · p pause · e edit ───────────────────────────────────────┘
+ ⏎ last iteration · r run now · p pause · e edit · n new · a answer escalation    Esc back · ? keys
+ goals · 2 · 0 blocked · 0 needs you
+
+── webhooks ────────────────────────────────────────────────────────────
+┌ webhooks · none yet ─────────────────────────────────────────────────────────────────────────────┐
+│  name            repo                event                       runs         24h    last        │
+│  no webhooks yet — n makes one, /new hook too                                                    │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+└ ↑↓ pick · ⏎ open run · t test payload · p pause · e edit ────────────────────────────────────────┘
+ ⏎ open run · t test payload · p pause · e edit · n new · c copy URL · x delete   Esc back · ? keys
+ webhooks · none yet
+
+── tasks ────────────────────────────────────────────────────────────
+┌ tasks · the board is empty ──────────────────────────────────────────────────────────────────────┐
+│  the board is empty — n adds a task, /todo does too                                              │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+└ ↑↓ pick · ⏎ mark done · d delegate · c claim · o open run ───────────────────────────────────────┘
+ ⏎ mark done · d delegate · c claim · o open run · n new · x remove · / filter    Esc back · ? keys
+ tasks · the board is empty
+
+── activity ────────────────────────────────────────────────────────────
+┌ activity · nothing new ──────────────────────────────────────────────────────────────────────────┐
+│  nothing has happened yet — cron, hooks and goals write here                                     │
+│                                                                                                  │
+│  filter  [all]      only unread: off      f cycles · u toggles                                   │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+└ ↑↓ pick · ⏎ jump to it · m mark read · M mark all · u unread only ───────────────────────────────┘
+ ⏎ jump to it · m mark read · M mark all · u unread only · f filter source        Esc back · ? keys
+ activity · nothing new
+
+── team ────────────────────────────────────────────────────────────
+┌ team ────────────────────────────────────────────────────────────────────────────────────────────┐
+│no team — start one with `jod tui --team <name>`                                                  │
+│── board ── empty · /todo <title> adds one                                                        │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+└ ↑↓ pick · ⏎ mark done · /todo adds · Esc back ───────────────────────────────────────────────────┘
+ ⏎ mark done · ↑↓ pick · / filter                                                 Esc back · ? keys
+ team · no team — start one with --team
+
+==============================================================
+== 6. and against an empty database, since that is a first run
+==============================================================
+$ rm -rf /tmp/jod-e2e/tui-empty; mkdir -p /tmp/jod-e2e/tui-empty; JOD_HOME=/tmp/jod-e2e/tui-empty '/tmp/jod-e2e/bin-wip/jod' schedule ls >/dev/null 2>&1; ls /tmp/jod-e2e/tui-empty
+jod.db
+
+$ '/tmp/jod-e2e/bin-wip/screens' /tmp/jod-e2e/tui-empty/jod.db
+/tmp/jod-e2e/tui-empty/jod.db
+0 memory nodes · 0 schedules · 0 goals · 0 hooks · 0 activity · 0 tasks
+
+── chat ────────────────────────────────────────────────────────────
+┌ jod ─────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌ you ─────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘
+ Ctrl-B delegate · Ctrl-A fleet · Ctrl-K menu · / commands · ? keys       Ctrl-X stop · Ctrl-C quit
+ Claude Code · ready
+
+── fleet ────────────────────────────────────────────────────────────
+┌ fleet ───────────────────────────────────────┐┌ run ─────────────────────────────────────────────┐
+│no agents yet — Ctrl-B delegates one          ││ nothing selected                                 │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+└ ↑↓ pick · ⏎ watch · s stop · r resume · d del┘└ ⏎ watch · s stop · r resume · a attach ──────────┘
+ ⏎ watch · s stop · r resume · d delegate again · a attach · / filter             Esc back · ? keys
+ fleet · nothing delegated yet
+
+── memory · list ────────────────────────────────────────────────────────────
+┌ memory · list ───────────────────────────────┐┌ node ────────────────────────────────────────────┐
+│nothing remembered yet — /remember writes one ││ nothing selected                                 │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+└ ↑↓ pick · g graph · e edit · n new · l link ─┘└ g local graph · e edit · x forget ───────────────┘
+ g graph · e edit · n new · l link · x forget · t type · / filter                 Esc back · ? keys
+ memory · list · nothing remembered yet
+
+── schedules ────────────────────────────────────────────────────────────
+┌ schedules · none yet ────────────────────────────────────────────────────────────────────────────┐
+│  name              when                next                in last             ago 7d            │
+│  nothing scheduled yet — n makes one, /new schedule too                                          │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+└ ↑↓ pick · ⏎ last run · r run now · p pause/resume · e edit ──────────────────────────────────────┘
+ ⏎ last run · r run now · p pause/resume · e edit · n new · x delete · / filter   Esc back · ? keys
+ schedules · none yet
+
+── goals ────────────────────────────────────────────────────────────
+┌ goals · none yet ────────────────────────────────────────────────────────────────────────────────┐
+│  no goals yet — n makes one, /new goal too                                                       │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+└ ↑↓ pick · ⏎ last iteration · r run now · p pause · e edit ───────────────────────────────────────┘
+ ⏎ last iteration · r run now · p pause · e edit · n new · a answer escalation    Esc back · ? keys
+ goals · none yet
+
+── webhooks ────────────────────────────────────────────────────────────
+┌ webhooks · none yet ─────────────────────────────────────────────────────────────────────────────┐
+│  name            repo                event                       runs         24h    last        │
+│  no webhooks yet — n makes one, /new hook too                                                    │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+└ ↑↓ pick · ⏎ open run · t test payload · p pause · e edit ────────────────────────────────────────┘
+ ⏎ open run · t test payload · p pause · e edit · n new · c copy URL · x delete   Esc back · ? keys
+ webhooks · none yet
+
+── tasks ────────────────────────────────────────────────────────────
+┌ tasks · the board is empty ──────────────────────────────────────────────────────────────────────┐
+│  the board is empty — n adds a task, /todo does too                                              │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+└ ↑↓ pick · ⏎ mark done · d delegate · c claim · o open run ───────────────────────────────────────┘
+ ⏎ mark done · d delegate · c claim · o open run · n new · x remove · / filter    Esc back · ? keys
+ tasks · the board is empty
+
+── activity ────────────────────────────────────────────────────────────
+┌ activity · nothing new ──────────────────────────────────────────────────────────────────────────┐
+│  nothing has happened yet — cron, hooks and goals write here                                     │
+│                                                                                                  │
+│  filter  [all]      only unread: off      f cycles · u toggles                                   │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+└ ↑↓ pick · ⏎ jump to it · m mark read · M mark all · u unread only ───────────────────────────────┘
+ ⏎ jump to it · m mark read · M mark all · u unread only · f filter source        Esc back · ? keys
+ activity · nothing new
+
+── team ────────────────────────────────────────────────────────────
+┌ team ────────────────────────────────────────────────────────────────────────────────────────────┐
+│no team — start one with `jod tui --team <name>`                                                  │
+│── board ── empty · /todo <title> adds one                                                        │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+└ ↑↓ pick · ⏎ mark done · /todo adds · Esc back ───────────────────────────────────────────────────┘
+ ⏎ mark done · ↑↓ pick · / filter                                                 Esc back · ? keys
+ team · no team — start one with --team
+

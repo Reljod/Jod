@@ -59,6 +59,7 @@ async fn main() {
             name: "probe".into(),
             harness,
             prompt,
+            system: None,
             cwd: std::env::var("JOD_EXAMPLE_CWD")
                 .map(PathBuf::from)
                 .unwrap_or_else(|_| jod_core::service::default_cwd()),
@@ -69,6 +70,8 @@ async fn main() {
                 _ => PermissionPolicy::Ask,
             },
             resume: jod_core::Resume::Fresh,
+            // An example, so no access to Jod's own verbs.
+            tools: None,
         })
         .await
         .unwrap_or_else(|e| {

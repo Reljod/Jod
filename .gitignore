@@ -15,6 +15,11 @@ tests/e2e/gaps-report.md
 /target
 apps/ios/src-tauri/target/
 
+# Benchmarks under research/ are standalone cargo crates, so each builds a
+# `target/` the root rule cannot reach — one of them is 141 MB. The bench
+# *source* is tracked, because a measurement nobody can re-run is an anecdote.
+research/**/target/
+
 # Web/desktop app build output and dependencies.
 node_modules/
 apps/desktop/dist/
@@ -28,3 +33,4 @@ apps/desktop/src-tauri/gen/
 # absolute paths) and reproducible from tauri.conf.json, so it is regenerated
 # on the Mac that builds rather than tracked.
 apps/ios/src-tauri/gen/
+.env

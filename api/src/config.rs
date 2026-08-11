@@ -160,21 +160,21 @@ pub enum CwdRejection {
     OutsideAllowlist(PathBuf),
 }
 
-fn rank(p: PermissionPolicy) -> u8 {
-    match p {
-        PermissionPolicy::Ask => 0,
-        PermissionPolicy::AcceptEdits => 1,
-        PermissionPolicy::Bypass => 2,
-    }
+/// How much can happen without anyone being asked, as a number to compare.
+///
+/// Taken from [`PermissionPolicy::ALL`]'s own order rather than restated. This
+/// used to be a hand-written copy of `jod-core`'s ranking, kept in step by
+/// nothing but attention — and a ceiling that disagrees with the thing it is
+/// meant to cap is the one bug in this file that would not look like a bug.
+fn rank(p: PermissionPolicy) -> usize {
+    PermissionPolicy::ALL
+        .iter()
+        .position(|m| *m == p)
+        .expect("PermissionPolicy::ALL is missing a variant")
 }
 
 pub fn parse_permission(s: &str) -> Option<PermissionPolicy> {
-    match s.trim().to_ascii_lowercase().replace('-', "_").as_str() {
-        "ask" => Some(PermissionPolicy::Ask),
-        "accept_edits" => Some(PermissionPolicy::AcceptEdits),
-        "bypass" => Some(PermissionPolicy::Bypass),
-        _ => None,
-    }
+    jod_core::mcp::parse_permission(s)
 }
 
 #[cfg(test)]

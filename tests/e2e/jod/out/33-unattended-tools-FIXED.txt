@@ -1,0 +1,104 @@
+==============================================================
+== 1. a scheduled run asked to write a file
+==============================================================
+$ rm -f /tmp/jod-e2e/tools/WRITTEN_BY_AN_UNATTENDED_RUN
+
+$ jod schedule add writer Write the word hello into the file /tmp/jod-e2e/tools/WRITTEN_BY_AN_UNATTENDED_RUN using a shell command, then stop. --cron @daily
+writer armed — next Aug 11 00:00 (in 11m12s)
+
+$ jod daemon --once
+claimed 1 · started 1 · held 0 · failed 0
+
+$ (waiting for every run to reach a terminal status)
+settled after 25s
+
+==============================================================
+== 2. the tool allowlist the run was actually given
+==============================================================
+$ find /tmp/jod-e2e/tools/runs -name spawn.json | head -1 | xargs python3 -c "
+import json,sys
+d = json.load(open(sys.argv[1]))
+print('program:', d['program'])
+print('args   :', json.dumps(d['args'][2:], indent=2))
+print('cwd    :', d['cwd'])"
+program: /home/reljod/.local/bin/claude
+args   : [
+  "--output-format",
+  "stream-json",
+  "--verbose",
+  "--permission-mode",
+  "plan",
+  "--allowedTools",
+  "Read,Grep,Glob,WebSearch,WebFetch,mcp__jod",
+  "--mcp-config",
+  "/tmp/jod-e2e/tools/mcp/read_only.json",
+  "--strict-mcp-config"
+]
+cwd    : /home/reljod/repo/Jod/.claude/worktrees/feat+memory-graph-scheduler-webhooks
+
+==============================================================
+== 3. did the file get written?
+==============================================================
+$ ls -la '/tmp/jod-e2e/tools/WRITTEN_BY_AN_UNATTENDED_RUN' 2>&1 || echo 'ABSENT — the read-only restriction held'
+ls: cannot access '/tmp/jod-e2e/tools/WRITTEN_BY_AN_UNATTENDED_RUN': No such file or directory
+ABSENT — the read-only restriction held
+
+$ cat '/tmp/jod-e2e/tools/WRITTEN_BY_AN_UNATTENDED_RUN' 2>/dev/null || true
+
+==============================================================
+== 4. what the transcript says the agent did
+==============================================================
+$ q "SELECT seq, kind, substr(payload,1,300) FROM events ORDER BY run_id, seq"
+seq | kind | substr(payload,1,300)
+----+------+----------------------
+0 | raw | {"kind":"raw","line":"Ignoring 10 permissions.allow entries from .claude/settings.json: this workspace has not been trusted. Run Claude Code interactively here once and accept the trust dialog, or set projects[\"/home/reljod/repo/Jod\"].hasTrustDialogAccepted: true in /home/reljod/.claude.json."}
+1 | started | {"kind":"started","session_id":"3e836351-b314-4d3f-bcda-7824c9b589ce","model":"claude-opus-5[1m]"}
+2 | thinking | {"kind":"thinking","text":""}
+3 | tool_call | {"kind":"tool_call","name":"Bash","input":{"command":"ls -la /tmp/jod-e2e/tools/ 2>&1 | head -20","description":"Check if target directory exists"}}
+4 | tool_result | {"kind":"tool_result","name":"Bash","summary":"total 400\ndrwxrwxr-x  4 reljod reljod    140 Aug 10 23:48 .\ndrwxrwxr-x 30 reljod reljod    820 Aug 10 23:48 ..\n-rw-r--r--  1 reljod reljod 319488 Aug 10 23:48 jod.db\n-rw-r--r--  1 reljod reljod  32768 Aug 10 23:48 jod.db-shm\n-rw-r--r--  1 reljod re
+5 | thinking | {"kind":"thinking","text":""}
+6 | tool_call | {"kind":"tool_call","name":"Write","input":{"content":"# Write \"hello\" to an e2e marker file\n\n## Context\n\nThe user asked for a single shell command that writes the word `hello` into\n`/tmp/jod-e2e/tools/WRITTEN_BY_AN_UNATTENDED_RUN`, then stop. The filename\nmatches the e2e fixture layout unde
+7 | tool_result | {"kind":"tool_result","name":"Write","summary":"File created successfully at: /home/reljod/.claude/plans/write-the-word-hello-snug-babbage.md (file state is current in your context — no need to Read it back)","is_error":false}
+8 | tool_call | {"kind":"tool_call","name":"ToolSearch","input":{"max_results":1,"query":"select:ExitPlanMode"}}
+9 | tool_result | {"kind":"tool_result","name":"ToolSearch","summary":"No matching deferred tools found","is_error":false}
+10 | thinking | {"kind":"thinking","text":""}
+11 | message | {"kind":"message","text":"The task is a one-liner, so no exploration was needed. I verified `/tmp/jod-e2e/tools/` already exists and contains no file by that name.\n\nPlan written to `/home/reljod/.claude/plans/write-the-word-hello-snug-babbage.md`:\n\n**Change** — a single Bash call:\n```bash\necho
+12 | finished | {"kind":"finished","text":"The task is a one-liner, so no exploration was needed. I verified `/tmp/jod-e2e/tools/` already exists and contains no file by that name.\n\nPlan written to `/home/reljod/.claude/plans/write-the-word-hello-snug-babbage.md`:\n\n**Change** — a single Bash call:\n```bash\nech
+(13 rows)
+
+==============================================================
+== 5. the run's own verdict
+==============================================================
+$ jod ls
+1722ac0f   done      Claude Code  writer
+
+$ RID=$(python3 "/home/reljod/repo/Jod/.claude/worktrees/feat+memory-graph-scheduler-webhooks/tests/e2e/jod/db.py" "/tmp/jod-e2e/tools/jod.db" 'SELECT id FROM runs LIMIT 1' | sed -n 3p); '/tmp/jod-e2e/bin-fix/jod' watch $RID
+Ignoring 10 permissions.allow entries from .claude/settings.json: this workspace has not been trusted. Run Claude Code interactively here once and accept the trust dialog, or set projects["/home/reljod/repo/Jod"].hasTrustDialogAccepted: true in /home/reljod/.claude.json.
+  model claude-opus-5[1m]
+⚙ Bash
+⚙ Write
+⚙ ToolSearch
+The task is a one-liner, so no exploration was needed. I verified `/tmp/jod-e2e/tools/` already exists and contains no file by that name.
+
+Plan written to `/home/reljod/.claude/plans/write-the-word-hello-snug-babbage.md`:
+
+**Change** — a single Bash call:
+```bash
+echo hello > /tmp/jod-e2e/tools/WRITTEN_BY_AN_UNATTENDED_RUN
+```
+
+**Verify** — `cat` the file, expect exactly `hello`.
+
+Plan mode is active and `ExitPlanMode` isn't available in this session, so I haven't run it. Approve and I'll execute the single command.
+✓ done · $0.1996 · 1114 out
+
+==============================================================
+== 6. and can an unattended run reach Jod itself?
+==============================================================
+-- ToolAccess::unattended exists so a scheduled run cannot create schedules --
+$ q "SELECT name, cron FROM schedules ORDER BY name"
+name | cron
+-----+-----
+writer | @daily
+(1 rows)
+

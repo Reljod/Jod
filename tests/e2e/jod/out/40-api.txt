@@ -1,0 +1,216 @@
+==============================================================
+== 1. mint tokens
+==============================================================
+$ jod-api token issue laptop --scope read
+jod_7ec7ec897d81f61ed69bb4fa2f9c754a7b6a6d5a50b7b951cfca52bbba6c678c
+
+Label: laptop
+Scope: read
+Stored (hashed) in /tmp/jod-e2e/api/api-tokens.json
+
+This is the only time the token is shown. Store it in the
+device's keychain, not in a file or a shell history.
+
+$ jod-api token issue phone --scope write
+jod_2405dc312665d8a82207fbbe0085bd855b44f08771c204f7f6d47aa8f28b178f
+
+Label: phone
+Scope: write
+Stored (hashed) in /tmp/jod-e2e/api/api-tokens.json
+
+This is the only time the token is shown. Store it in the
+device's keychain, not in a file or a shell history.
+
+A write token can spawn agents, which run commands on this
+machine. Treat it like an SSH key.
+
+$ jod-api token list
+LABEL                     SCOPE   ISSUED
+laptop                    read    2026-08-10 23:15
+phone                     write   2026-08-10 23:15
+
+-- capture them again, since a token is printed once --
+read  token: jod_96b45f5d… (68 chars)
+write token: jod_6214d7a9… (68 chars)
+$ jod-api token list
+LABEL                     SCOPE   ISSUED
+laptop                    read    2026-08-10 23:15
+phone                     write   2026-08-10 23:15
+reader                    read    2026-08-10 23:15
+writer                    write   2026-08-10 23:15
+
+==============================================================
+== 2. start the daemon
+==============================================================
+pid 1929503
+$ cat '/tmp/jod-e2e/api/api.log'
+jod-api: allowed_cwd is empty — every spawn will be refused.
+         set allowed_cwd in /tmp/jod-e2e/api/api.toml or JOD_API_ALLOWED_CWD.
+jod-api: listening on http://127.0.0.1:18787
+
+==============================================================
+== 3. health needs no credential
+==============================================================
+$ curl http://127.0.0.1:18787/v1/health
+HTTP 200
+{"status":"ok"}
+
+==============================================================
+== 4. every other route must refuse an anonymous caller
+==============================================================
+$ curl http://127.0.0.1:18787/v1/agents
+HTTP 401
+{"type":"about:blank#unauthorized","title":"Unauthorized","status":401}
+
+$ curl http://127.0.0.1:18787/v1/harnesses
+HTTP 401
+{"type":"about:blank#unauthorized","title":"Unauthorized","status":401}
+
+$ curl http://127.0.0.1:18787/v1/report
+HTTP 401
+{"type":"about:blank#unauthorized","title":"Unauthorized","status":401}
+
+$ curl -H Authorization: Bearer not-a-real-token http://127.0.0.1:18787/v1/agents
+HTTP 401
+{"type":"about:blank#unauthorized","title":"Unauthorized","status":401}
+
+$ curl -H Authorization: Bearer  http://127.0.0.1:18787/v1/agents
+HTTP 401
+{"type":"about:blank#unauthorized","title":"Unauthorized","status":401}
+
+$ curl -H Authorization: Basic jod_96b45f5dfff6c5cee1c2f708cfdc13fef22deef118673e3056fed741c05de086 http://127.0.0.1:18787/v1/agents
+HTTP 401
+{"type":"about:blank#unauthorized","title":"Unauthorized","status":401}
+
+==============================================================
+== 5. a read token reads
+==============================================================
+$ curl -H Authorization: Bearer jod_96b45f5dfff6c5cee1c2f708cfdc13fef22deef118673e3056fed741c05de086 http://127.0.0.1:18787/v1/agents
+HTTP 200
+[]
+
+$ curl -H Authorization: Bearer jod_96b45f5dfff6c5cee1c2f708cfdc13fef22deef118673e3056fed741c05de086 http://127.0.0.1:18787/v1/harnesses
+HTTP 200
+[{"id":"claude_code","label":"Claude Code","available":true,"path":"/home/reljod/.local/bin/claude"},{"id":"open_code","label":"OpenCode","available":true,"path":"/home/reljod/.opencode/bin/opencode"},{"id":"agy","label":"AGY","available":true,"path":"/home/reljod/.local/bin/agy"}]
+
+$ curl -H Authorization: Bearer jod_96b45f5dfff6c5cee1c2f708cfdc13fef22deef118673e3056fed741c05de086 http://127.0.0.1:18787/v1/report
+HTTP 200
+{"running":0,"completed":0,"failed":0,"killed":0,"total_cost_usd":0.0,"agents":[]}
+
+$ curl -H Authorization: Bearer jod_96b45f5dfff6c5cee1c2f708cfdc13fef22deef118673e3056fed741c05de086 http://127.0.0.1:18787/v1/teams
+HTTP 200
+[]
+
+==============================================================
+== 6. a read token must NOT spawn
+==============================================================
+$ curl -X POST -H Authorization: Bearer jod_96b45f5dfff6c5cee1c2f708cfdc13fef22deef118673e3056fed741c05de086 -H content-type: application/json -d {"prompt":"say OK and stop","harness":"claude_code"} http://127.0.0.1:18787/v1/agents
+HTTP 403
+{"type":"about:blank#forbidden","title":"Forbidden","status":403,"detail":"this token is read-only; a write-scoped token is required"}
+
+==============================================================
+== 7. a write token spawning outside allowed_cwd must fail closed
+==============================================================
+-- allowed_cwd defaults to empty, which the config says denies every spawn --
+$ curl -X POST -H Authorization: Bearer jod_6214d7a95fe7e6c1da886dac6dadb76f581fddbbc3d2a6dd775132b37e5dc7ce -H content-type: application/json -d {"prompt":"say OK and stop","harness":"claude_code","cwd":"/tmp/jod-e2e/api"} http://127.0.0.1:18787/v1/agents
+HTTP 403
+{"type":"about:blank#forbidden","title":"Forbidden","status":403,"detail":"no working directory is allowed: set allowed_cwd (or JOD_API_ALLOWED_CWD)"}
+
+==============================================================
+== 8. unknown routes and unknown ids
+==============================================================
+$ curl -H Authorization: Bearer jod_96b45f5dfff6c5cee1c2f708cfdc13fef22deef118673e3056fed741c05de086 http://127.0.0.1:18787/v1/nope
+HTTP 404
+
+
+$ curl -H Authorization: Bearer jod_96b45f5dfff6c5cee1c2f708cfdc13fef22deef118673e3056fed741c05de086 http://127.0.0.1:18787/v1/agents/does-not-exist
+HTTP 404
+{"type":"about:blank#not-found","title":"Not Found","status":404,"detail":"no agent `does-not-exist`"}
+
+$ curl -H Authorization: Bearer jod_96b45f5dfff6c5cee1c2f708cfdc13fef22deef118673e3056fed741c05de086 http://127.0.0.1:18787/v1/agents/does-not-exist/events
+HTTP 200
+{"events":[],"last_seq":null}
+
+$ curl -X DELETE -H Authorization: Bearer jod_6214d7a95fe7e6c1da886dac6dadb76f581fddbbc3d2a6dd775132b37e5dc7ce http://127.0.0.1:18787/v1/agents/does-not-exist
+HTTP 404
+{"type":"about:blank#not-found","title":"Not Found","status":404,"detail":"no agent `does-not-exist`"}
+
+==============================================================
+== 9. revoking a token must take effect
+==============================================================
+$ jod-api token revoke reader
+revoked 1 token(s) labelled reader
+
+$ curl -H Authorization: Bearer jod_96b45f5dfff6c5cee1c2f708cfdc13fef22deef118673e3056fed741c05de086 http://127.0.0.1:18787/v1/agents
+HTTP 200
+[]
+
+$ jod-api token list
+LABEL                     SCOPE   ISSUED
+laptop                    read    2026-08-10 23:15
+phone                     write   2026-08-10 23:15
+writer                    write   2026-08-10 23:15
+
+==============================================================
+== 10. the audit log
+==============================================================
+$ q "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+name
+----
+compactions
+conversations
+delivery_ledger
+entities
+entity_community
+events
+facts
+facts_fts
+facts_fts_config
+facts_fts_data
+facts_fts_docsize
+facts_fts_idx
+goals
+messages
+messages_fts
+messages_fts_config
+messages_fts_data
+messages_fts_docsize
+messages_fts_idx
+migrations
+monitor_checks
+monitors
+relations
+runs
+schedule_fires
+schedules
+tasks
+team_members
+team_messages
+tombstones
+webhook_deliveries
+webhook_rules
+(32 rows)
+
+$ ls -la '/tmp/jod-e2e/api'
+total 560
+drwxrwxr-x  2 reljod reljod    160 Aug 10 23:15 .
+drwxrwxr-x 17 reljod reljod    360 Aug 10 23:15 ..
+-rw-------  1 reljod reljod    561 Aug 10 23:15 api-tokens.json
+-rw-rw-r--  1 reljod reljod    186 Aug 10 23:15 api.log
+-rw-rw-r--  1 reljod reljod    288 Aug 10 23:15 audit.jsonl
+-rw-r--r--  1 reljod reljod   4096 Aug 10 23:15 jod.db
+-rw-r--r--  1 reljod reljod  32768 Aug 10 23:15 jod.db-shm
+-rw-r--r--  1 reljod reljod 523272 Aug 10 23:15 jod.db-wal
+
+$ tail -40 '/tmp/jod-e2e/api/audit.log' 2>/dev/null || echo 'no audit.log at that path'
+no audit.log at that path
+
+==============================================================
+== 11. the daemon's own log
+==============================================================
+$ cat '/tmp/jod-e2e/api/api.log'
+jod-api: allowed_cwd is empty — every spawn will be refused.
+         set allowed_cwd in /tmp/jod-e2e/api/api.toml or JOD_API_ALLOWED_CWD.
+jod-api: listening on http://127.0.0.1:18787
+
+daemon stopped

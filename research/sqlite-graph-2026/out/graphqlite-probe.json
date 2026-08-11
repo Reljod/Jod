@@ -1,0 +1,61 @@
+{
+  "what": "GraphQLite 0.6.0 prebuilt linux-x86_64 .so, loaded via entrypoint sqlite3_graphqlite_init into a file-backed WAL database. Graph: 1,250 nodes / 10,000 edges, imported through cypher().",
+  "extension_bytes": 812352,
+  "entrypoint": "sqlite3_graphqlite_init (the filename does not encode it)",
+  "tables_it_creates": [
+    "nodes",
+    "edges",
+    "property_keys",
+    "node_labels",
+    "node_props_text",
+    "node_props_int",
+    "node_props_real",
+    "node_props_bool",
+    "node_props_json",
+    "edge_props_text",
+    "edge_props_int",
+    "edge_props_real",
+    "edge_props_bool",
+    "edge_props_json"
+  ],
+  "result_shape": "cypher() is a SCALAR function returning a JSON string, e.g. '[{\"p.name\":\"alice\"}]' \u2014 there is no table-valued interface, so a Cypher result cannot be joined against facts_fts by the query planner.",
+  "import": {
+    "nodes_per_second": 20401,
+    "edges_per_second": "6,000-8,500, flat across 10,000 edges",
+    "note": "Import is not the problem."
+  },
+  "cypher_variable_length_khop": {
+    "graph": "1,250 nodes / 10,000 edges",
+    "k1": {
+      "n": 5,
+      "p50_ms": 8783.87,
+      "p95_ms": 9541.98,
+      "timeouts": 0
+    },
+    "k2": {
+      "n": 5,
+      "p50_ms": ">10000",
+      "timeouts": 5,
+      "note": "sqlite3_interrupt fired at 10 s and did abort it"
+    },
+    "k3": {
+      "n": 5,
+      "result": "did not complete; stopped by the operator after several minutes"
+    }
+  },
+  "cost_attribution": {
+    "note": "Three independent runs. The cost is exclusively the variable-length path operator, not DISTINCT and not the property filter \u2014 the identical answer written as a fixed-length pattern is 20,000x faster.",
+    "fixed_1hop_no_distinct_ms": 0.4,
+    "fixed_1hop_distinct_ms": 0.4,
+    "fixed_2hop_explicit_chain_ms": 1.4,
+    "varlen_1to1_ms": 8202.0,
+    "varlen_1to1_ms_repeat": 8578.6,
+    "rows_returned_identical": 5
+  },
+  "sqlite_cte_same_question": {
+    "note": "For scale: the recursive CTE over ordinary tables answers the same 1-hop question over a graph 10x larger (100,000 edges) in 0.069 ms p50 \u2014 see sqlite-100k.json.",
+    "cte_k1_p50_ms_at_100k_edges": 0.069,
+    "cte_k3_p50_ms_at_100k_edges": 0.326,
+    "cte_k3_p50_ms_at_100k_edges_rust_sqlite_3_50_2": 0.181
+  }
+}

@@ -1,0 +1,246 @@
+tests/e2e/jod/11-memory-limits.sh: line 13: related: command not found
+==============================================================
+== A. a chain of 7, to find where  really stops
+==============================================================
+$ jod remember n0 links n1
+remembered #1
+
+$ jod remember n1 links n2
+remembered #2
+
+$ jod remember n2 links n3
+remembered #3
+
+$ jod remember n3 links n4
+remembered #4
+
+$ jod remember n4 links n5
+remembered #5
+
+$ jod remember n5 links n6
+remembered #6
+
+--- related n0 -n 1 ---
+$ jod related n0 -n 1
+ 1 hop  n1
+
+--- related n0 -n 2 ---
+$ jod related n0 -n 2
+ 1 hop  n1
+ 2 hop  n2
+
+--- related n0 -n 3 ---
+$ jod related n0 -n 3
+ 1 hop  n1
+ 2 hop  n2
+ 3 hop  n3
+
+--- related n0 -n 4 ---
+$ jod related n0 -n 4
+ 1 hop  n1
+ 2 hop  n2
+ 3 hop  n3
+
+--- related n0 -n 5 ---
+$ jod related n0 -n 5
+ 1 hop  n1
+ 2 hop  n2
+ 3 hop  n3
+
+--- related n0 -n 6 ---
+$ jod related n0 -n 6
+ 1 hop  n1
+ 2 hop  n2
+ 3 hop  n3
+
+--- related n0 -n 7 ---
+$ jod related n0 -n 7
+ 1 hop  n1
+ 2 hop  n2
+ 3 hop  n3
+
+tests/e2e/jod/11-memory-limits.sh: line 25: path: command not found
+==============================================================
+== B.  over the same chain, past the default and past the flag
+==============================================================
+$ jod path n0 n3
+n0  →  n1  →  n2  →  n3
+
+$ jod path n0 n5
+n0  →  n1  →  n2  →  n3  →  n4  →  n5
+
+$ jod path n0 n6
+no path from n0 to n6 within 5 hops
+
+$ jod path n0 n6 -n 6
+n0  →  n1  →  n2  →  n3  →  n4  →  n5  →  n6
+
+$ jod path n0 n6 -n 10
+n0  →  n1  →  n2  →  n3  →  n4  →  n5  →  n6
+
+$ jod path n0 n6 -n 99
+n0  →  n1  →  n2  →  n3  →  n4  →  n5  →  n6
+
+tests/e2e/jod/11-memory-limits.sh: line 33: path: command not found
+tests/e2e/jod/11-memory-limits.sh: line 33: related: command not found
+==============================================================
+== C. is  directed?  is documented undirected
+==============================================================
+$ jod path n6 n0
+no path from n6 to n0 within 5 hops
+
+$ jod path n6 n0 -n 10
+no path from n6 to n0 within 10 hops
+
+$ jod related n6 -n 3
+ 1 hop  n5
+ 2 hop  n4
+ 3 hop  n3
+
+==============================================================
+== D. TRUST: isolated repro — one untrusted fact, one graph walk
+==============================================================
+$ jod remember reljod owns jod-cloud
+remembered #1
+
+-- an ingested page asserts something. It is marked untrusted. --
+$ jod remember jod-cloud is-controlled-by attacker.example --origin untrusted --source https://evil.example/page
+remembered #2
+
+-- recall correctly refuses it: --
+$ jod recall attacker.example
+nothing remembered about that
+
+$ jod recall jod-cloud
+reljod owns jod-cloud
+
+-- but the graph walks straight into it: --
+$ jod related reljod -n 2
+ 1 hop  jod-cloud
+ 2 hop  attacker.example
+
+$ jod related reljod -n 2 --json
+[
+  {
+    "id": 2,
+    "name": "jod-cloud",
+    "kind": "thing",
+    "hops": 1
+  },
+  {
+    "id": 3,
+    "name": "attacker.example",
+    "kind": "thing",
+    "hops": 2
+  }
+]
+
+-- and it is usable as a starting point: --
+$ jod related attacker.example -n 2
+ 1 hop  jod-cloud
+ 2 hop  reljod
+
+-- and it appears on a path: --
+$ jod path reljod attacker.example
+reljod  →  jod-cloud  →  attacker.example
+
+==============================================================
+== E. re-asserting a fact: does the new value supersede the old?
+==============================================================
+$ jod remember server ip 10.0.0.1
+remembered #1
+
+$ jod remember server ip 10.0.0.2
+remembered #2
+
+$ jod remember server ip 10.0.0.3
+remembered #3
+
+-- what does Jod answer when asked for the server's ip? --
+$ jod recall server ip
+server ip 10.0.0.1
+server ip 10.0.0.2
+server ip 10.0.0.3
+
+-- the schema has state/invalidated_by/valid_to for exactly this: --
+$ q "SELECT id, object, state, invalidated_by, valid_from, valid_to FROM facts WHERE subject='server'"
+id | object | state | invalidated_by | valid_from | valid_to
+---+--------+-------+----------------+------------+---------
+1 | 10.0.0.1 | accepted |  |  | 
+2 | 10.0.0.2 | accepted |  |  | 
+3 | 10.0.0.3 | accepted |  |  | 
+(3 rows)
+
+-- and the graph now has three live edges for one attribute: --
+$ q "SELECT r.id, se.name, r.predicate, de.name, r.valid_to_ms FROM relations r JOIN entities se ON se.id=r.src JOIN entities de ON de.id=r.dst"
+id | name | predicate | name | valid_to_ms
+---+------+-----------+------+------------
+1 | server | ip | 10.0.0.1 | 
+2 | server | ip | 10.0.0.2 | 
+3 | server | ip | 10.0.0.3 | 
+(3 rows)
+
+$ jod related server -n 1
+ 1 hop  10.0.0.1
+ 1 hop  10.0.0.2
+ 1 hop  10.0.0.3
+
+==============================================================
+== F. does forget leave orphan entities behind?
+==============================================================
+$ jod forget server ip
+forgot 3 versions, permanently
+
+$ q "SELECT count(*) AS facts FROM facts"
+facts
+-----
+0
+(1 rows)
+
+$ q "SELECT count(*) AS relations FROM relations"
+relations
+---------
+0
+(1 rows)
+
+$ q "SELECT id, name FROM entities ORDER BY id"
+id | name
+---+-----
+1 | server
+2 | 10.0.0.1
+3 | 10.0.0.2
+4 | 10.0.0.3
+(4 rows)
+
+-- an entity with no facts and no edges is still addressable: --
+$ jod related 10.0.0.2 -n 2
+nothing connected to 10.0.0.2
+
+$ jod path 10.0.0.1 10.0.0.2
+no path from 10.0.0.1 to 10.0.0.2 within 5 hops
+
+==============================================================
+== G. scope names that do not exist, and odd scopes
+==============================================================
+$ jod remember a b c --scope with space
+remembered #1
+
+$ jod recall c --scope with space
+a b c
+
+$ jod related a -n 1 --scope with space
+ 1 hop  c
+
+$ jod recall c --scope 
+nothing remembered about that
+
+$ jod remember d e f --scope 
+remembered #2
+
+$ q "SELECT id, scope, subject FROM facts"
+id | scope | subject
+---+-------+--------
+2 |  | d
+1 | with space | a
+(2 rows)
+

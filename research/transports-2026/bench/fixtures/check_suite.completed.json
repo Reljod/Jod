@@ -1,0 +1,19 @@
+{
+  "action": "completed",
+  "check_suite": {
+    "id": 44120099881,
+    "head_branch": "feat/webhooks",
+    "head_sha": "3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f",
+    "status": "completed",
+    "conclusion": "success",
+    "app": { "slug": "github-actions" },
+    "pull_requests": [{ "number": 61 }]
+  },
+  "repository": {
+    "full_name": "Reljod/Jod",
+    "default_branch": "main",
+    "private": true,
+    "owner": { "login": "Reljod", "id": 12345678 }
+  },
+  "sender": { "login": "Reljod", "id": 12345678 }
+}

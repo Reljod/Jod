@@ -1,0 +1,3134 @@
+[
+ {
+  "name": "00-shipped-scope-blind",
+  "desc": "Control: `recall()` exactly as shipped \u2014 no scope argument, no origin filter. Not one of the ten; measured to show what the default does today.",
+  "total": 0.681,
+  "rubric": {
+   "R1 taxonomy coverage": 0.2,
+   "R2 fidelity to prior findings": 0.5,
+   "R3 no model client in core": 1.0,
+   "R4 schema simplicity": 1.0,
+   "R5 retrieval quality": 0.53,
+   "R6 safety / trust": 0.8,
+   "R7 forgetting correctness": 1.0
+  },
+  "metrics": {
+   "f1": 0.53,
+   "leak": 0.2,
+   "poison": 0.1,
+   "historical": 1.0,
+   "multihop": 0.5,
+   "current": 0.7,
+   "episodic": 0.0,
+   "prospective": 0.0,
+   "stale": 0.0,
+   "tokens": 14
+  },
+  "queries": [
+   {
+    "qid": "Q1",
+    "cls": "current",
+    "n": 4,
+    "returned": [
+     "f2",
+     "f6",
+     "t1",
+     "t2"
+    ],
+    "f1": 0.4,
+    "precision": 0.25,
+    "recall": 1.0,
+    "stale": false,
+    "cross": true,
+    "poison": false,
+    "tokens": 29
+   },
+   {
+    "qid": "Q2",
+    "cls": "current",
+    "n": 1,
+    "returned": [
+     "t7"
+    ],
+    "f1": 1.0,
+    "precision": 1.0,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 10
+   },
+   {
+    "qid": "Q3",
+    "cls": "scope",
+    "n": 4,
+    "returned": [
+     "f2",
+     "f6",
+     "t1",
+     "t2"
+    ],
+    "f1": 0.4,
+    "precision": 0.25,
+    "recall": 1.0,
+    "stale": false,
+    "cross": true,
+    "poison": false,
+    "tokens": 29
+   },
+   {
+    "qid": "Q4",
+    "cls": "multihop",
+    "n": 1,
+    "returned": [
+     "t3"
+    ],
+    "f1": 0.667,
+    "precision": 1.0,
+    "recall": 0.5,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 6
+   },
+   {
+    "qid": "Q5",
+    "cls": "multihop",
+    "n": 4,
+    "returned": [
+     "f2",
+     "f6",
+     "t1",
+     "t2"
+    ],
+    "f1": 0.333,
+    "precision": 0.25,
+    "recall": 0.5,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 29
+   },
+   {
+    "qid": "Q6",
+    "cls": "poison",
+    "n": 3,
+    "returned": [
+     "f5",
+     "p1",
+     "t8"
+    ],
+    "f1": 0.5,
+    "precision": 0.333,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": true,
+    "tokens": 17
+   },
+   {
+    "qid": "Q7",
+    "cls": "stable",
+    "n": 1,
+    "returned": [
+     "f3"
+    ],
+    "f1": 1.0,
+    "precision": 1.0,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 6
+   },
+   {
+    "qid": "Q8",
+    "cls": "stable",
+    "n": 1,
+    "returned": [
+     "t5"
+    ],
+    "f1": 1.0,
+    "precision": 1.0,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 6
+   },
+   {
+    "qid": "Q9",
+    "cls": "episodic",
+    "n": 0,
+    "returned": [],
+    "f1": 0.0,
+    "precision": 0.0,
+    "recall": 0.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 0
+   },
+   {
+    "qid": "Q10",
+    "cls": "episodic",
+    "n": 2,
+    "returned": [
+     "f3",
+     "t5"
+    ],
+    "f1": 0.0,
+    "precision": 0.0,
+    "recall": 0.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 12
+   },
+   {
+    "qid": "Q11",
+    "cls": "historical",
+    "n": 0,
+    "returned": [],
+    "f1": 1.0,
+    "precision": 0.0,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 0
+   },
+   {
+    "qid": "Q12",
+    "cls": "prospective",
+    "n": 0,
+    "returned": [],
+    "f1": 0.0,
+    "precision": 0.0,
+    "recall": 0.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 0
+   }
+  ]
+ },
+ {
+  "name": "01-facts-only",
+  "desc": "The shipped `facts` table used correctly: FTS5, `valid_to IS NULL`, scope passed as a hard partition. The honest baseline.",
+  "total": 0.7509,
+  "rubric": {
+   "R1 taxonomy coverage": 0.2,
+   "R2 fidelity to prior findings": 0.75,
+   "R3 no model client in core": 1.0,
+   "R4 schema simplicity": 1.0,
+   "R5 retrieval quality": 0.617,
+   "R6 safety / trust": 0.9,
+   "R7 forgetting correctness": 1.0
+  },
+  "metrics": {
+   "f1": 0.617,
+   "leak": 0.0,
+   "poison": 0.1,
+   "historical": 1.0,
+   "multihop": 0.5,
+   "current": 0.834,
+   "episodic": 0.0,
+   "prospective": 0.0,
+   "stale": 0.0,
+   "tokens": 8
+  },
+  "queries": [
+   {
+    "qid": "Q1",
+    "cls": "current",
+    "n": 2,
+    "returned": [
+     "f2",
+     "f6"
+    ],
+    "f1": 0.667,
+    "precision": 0.5,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 10
+   },
+   {
+    "qid": "Q2",
+    "cls": "current",
+    "n": 1,
+    "returned": [
+     "t7"
+    ],
+    "f1": 1.0,
+    "precision": 1.0,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 10
+   },
+   {
+    "qid": "Q3",
+    "cls": "scope",
+    "n": 2,
+    "returned": [
+     "t1",
+     "t2"
+    ],
+    "f1": 0.667,
+    "precision": 0.5,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 19
+   },
+   {
+    "qid": "Q4",
+    "cls": "multihop",
+    "n": 1,
+    "returned": [
+     "t3"
+    ],
+    "f1": 0.667,
+    "precision": 1.0,
+    "recall": 0.5,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 6
+   },
+   {
+    "qid": "Q5",
+    "cls": "multihop",
+    "n": 2,
+    "returned": [
+     "f2",
+     "f6"
+    ],
+    "f1": 0.5,
+    "precision": 0.5,
+    "recall": 0.5,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 10
+   },
+   {
+    "qid": "Q6",
+    "cls": "poison",
+    "n": 2,
+    "returned": [
+     "p1",
+     "t8"
+    ],
+    "f1": 0.667,
+    "precision": 0.5,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": true,
+    "tokens": 13
+   },
+   {
+    "qid": "Q7",
+    "cls": "stable",
+    "n": 1,
+    "returned": [
+     "f3"
+    ],
+    "f1": 1.0,
+    "precision": 1.0,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 6
+   },
+   {
+    "qid": "Q8",
+    "cls": "stable",
+    "n": 1,
+    "returned": [
+     "t5"
+    ],
+    "f1": 1.0,
+    "precision": 1.0,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 6
+   },
+   {
+    "qid": "Q9",
+    "cls": "episodic",
+    "n": 0,
+    "returned": [],
+    "f1": 0.0,
+    "precision": 0.0,
+    "recall": 0.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 0
+   },
+   {
+    "qid": "Q10",
+    "cls": "episodic",
+    "n": 1,
+    "returned": [
+     "f3"
+    ],
+    "f1": 0.0,
+    "precision": 0.0,
+    "recall": 0.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 6
+   },
+   {
+    "qid": "Q11",
+    "cls": "historical",
+    "n": 0,
+    "returned": [],
+    "f1": 1.0,
+    "precision": 0.0,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 0
+   },
+   {
+    "qid": "Q12",
+    "cls": "prospective",
+    "n": 0,
+    "returned": [],
+    "f1": 0.0,
+    "precision": 0.0,
+    "recall": 0.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 0
+   }
+  ]
+ },
+ {
+  "name": "02-episodic",
+  "desc": "Adds `episodes` + FTS5 over the existing event stream. The tier Jod entirely lacks.",
+  "total": 0.7392,
+  "rubric": {
+   "R1 taxonomy coverage": 0.3,
+   "R2 fidelity to prior findings": 0.75,
+   "R3 no model client in core": 1.0,
+   "R4 schema simplicity": 0.76,
+   "R5 retrieval quality": 0.604,
+   "R6 safety / trust": 0.9,
+   "R7 forgetting correctness": 1.0
+  },
+  "metrics": {
+   "f1": 0.604,
+   "leak": 0.0,
+   "poison": 0.1,
+   "historical": 1.0,
+   "multihop": 0.5,
+   "current": 0.584,
+   "episodic": 0.834,
+   "prospective": 0.0,
+   "stale": 0.0,
+   "tokens": 43
+  },
+  "queries": [
+   {
+    "qid": "Q1",
+    "cls": "current",
+    "n": 3,
+    "returned": [
+     "e2",
+     "f2",
+     "f6"
+    ],
+    "f1": 0.5,
+    "precision": 0.333,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 46
+   },
+   {
+    "qid": "Q2",
+    "cls": "current",
+    "n": 2,
+    "returned": [
+     "e4",
+     "t7"
+    ],
+    "f1": 0.667,
+    "precision": 0.5,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 34
+   },
+   {
+    "qid": "Q3",
+    "cls": "scope",
+    "n": 2,
+    "returned": [
+     "t1",
+     "t2"
+    ],
+    "f1": 0.667,
+    "precision": 0.5,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 19
+   },
+   {
+    "qid": "Q4",
+    "cls": "multihop",
+    "n": 3,
+    "returned": [
+     "e1",
+     "e4",
+     "t3"
+    ],
+    "f1": 0.4,
+    "precision": 0.333,
+    "recall": 0.5,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 69
+   },
+   {
+    "qid": "Q5",
+    "cls": "multihop",
+    "n": 3,
+    "returned": [
+     "e2",
+     "f2",
+     "f6"
+    ],
+    "f1": 0.4,
+    "precision": 0.333,
+    "recall": 0.5,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 46
+   },
+   {
+    "qid": "Q6",
+    "cls": "poison",
+    "n": 2,
+    "returned": [
+     "p1",
+     "t8"
+    ],
+    "f1": 0.667,
+    "precision": 0.5,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": true,
+    "tokens": 13
+   },
+   {
+    "qid": "Q7",
+    "cls": "stable",
+    "n": 2,
+    "returned": [
+     "e2",
+     "f3"
+    ],
+    "f1": 0.667,
+    "precision": 0.5,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 42
+   },
+   {
+    "qid": "Q8",
+    "cls": "stable",
+    "n": 4,
+    "returned": [
+     "e1",
+     "e3",
+     "e4",
+     "t5"
+    ],
+    "f1": 0.4,
+    "precision": 0.25,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 89
+   },
+   {
+    "qid": "Q9",
+    "cls": "episodic",
+    "n": 1,
+    "returned": [
+     "e1"
+    ],
+    "f1": 1.0,
+    "precision": 1.0,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 39
+   },
+   {
+    "qid": "Q10",
+    "cls": "episodic",
+    "n": 2,
+    "returned": [
+     "e2",
+     "f3"
+    ],
+    "f1": 0.667,
+    "precision": 0.5,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 42
+   },
+   {
+    "qid": "Q11",
+    "cls": "historical",
+    "n": 0,
+    "returned": [],
+    "f1": 1.0,
+    "precision": 0.0,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 0
+   },
+   {
+    "qid": "Q12",
+    "cls": "prospective",
+    "n": 0,
+    "returned": [],
+    "f1": 0.0,
+    "precision": 0.0,
+    "recall": 0.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 0
+   }
+  ]
+ },
+ {
+  "name": "03-trust-admission",
+  "desc": "Excludes `origin='untrusted'` from the answer set at read time, and keeps it out of the hop. Free; closes the poisoning hole.",
+  "total": 0.8134,
+  "rubric": {
+   "R1 taxonomy coverage": 0.4,
+   "R2 fidelity to prior findings": 1.0,
+   "R3 no model client in core": 1.0,
+   "R4 schema simplicity": 0.76,
+   "R5 retrieval quality": 0.637,
+   "R6 safety / trust": 1.0,
+   "R7 forgetting correctness": 1.0
+  },
+  "metrics": {
+   "f1": 0.637,
+   "leak": 0.0,
+   "poison": 0.0,
+   "historical": 1.0,
+   "multihop": 0.5,
+   "current": 0.584,
+   "episodic": 0.834,
+   "prospective": 0.0,
+   "stale": 0.0,
+   "tokens": 43
+  },
+  "queries": [
+   {
+    "qid": "Q1",
+    "cls": "current",
+    "n": 3,
+    "returned": [
+     "e2",
+     "f2",
+     "f6"
+    ],
+    "f1": 0.5,
+    "precision": 0.333,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 46
+   },
+   {
+    "qid": "Q2",
+    "cls": "current",
+    "n": 2,
+    "returned": [
+     "e4",
+     "t7"
+    ],
+    "f1": 0.667,
+    "precision": 0.5,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 34
+   },
+   {
+    "qid": "Q3",
+    "cls": "scope",
+    "n": 2,
+    "returned": [
+     "t1",
+     "t2"
+    ],
+    "f1": 0.667,
+    "precision": 0.5,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 19
+   },
+   {
+    "qid": "Q4",
+    "cls": "multihop",
+    "n": 3,
+    "returned": [
+     "e1",
+     "e4",
+     "t3"
+    ],
+    "f1": 0.4,
+    "precision": 0.333,
+    "recall": 0.5,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 69
+   },
+   {
+    "qid": "Q5",
+    "cls": "multihop",
+    "n": 3,
+    "returned": [
+     "e2",
+     "f2",
+     "f6"
+    ],
+    "f1": 0.4,
+    "precision": 0.333,
+    "recall": 0.5,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 46
+   },
+   {
+    "qid": "Q6",
+    "cls": "poison",
+    "n": 1,
+    "returned": [
+     "t8"
+    ],
+    "f1": 1.0,
+    "precision": 1.0,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 7
+   },
+   {
+    "qid": "Q7",
+    "cls": "stable",
+    "n": 2,
+    "returned": [
+     "e2",
+     "f3"
+    ],
+    "f1": 0.667,
+    "precision": 0.5,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 42
+   },
+   {
+    "qid": "Q8",
+    "cls": "stable",
+    "n": 4,
+    "returned": [
+     "e1",
+     "e3",
+     "e4",
+     "t5"
+    ],
+    "f1": 0.4,
+    "precision": 0.25,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 89
+   },
+   {
+    "qid": "Q9",
+    "cls": "episodic",
+    "n": 1,
+    "returned": [
+     "e1"
+    ],
+    "f1": 1.0,
+    "precision": 1.0,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 39
+   },
+   {
+    "qid": "Q10",
+    "cls": "episodic",
+    "n": 2,
+    "returned": [
+     "e2",
+     "f3"
+    ],
+    "f1": 0.667,
+    "precision": 0.5,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 42
+   },
+   {
+    "qid": "Q11",
+    "cls": "historical",
+    "n": 0,
+    "returned": [],
+    "f1": 1.0,
+    "precision": 0.0,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 0
+   },
+   {
+    "qid": "Q12",
+    "cls": "prospective",
+    "n": 0,
+    "returned": [],
+    "f1": 0.0,
+    "precision": 0.0,
+    "recall": 0.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 0
+   }
+  ]
+ },
+ {
+  "name": "04-entities-mentions",
+  "desc": "Adds `entities` / `entity_aliases` / `mentions`, populated by deterministic alias matching. Index only \u2014 no traversal yet.",
+  "total": 0.8134,
+  "rubric": {
+   "R1 taxonomy coverage": 0.6,
+   "R2 fidelity to prior findings": 1.0,
+   "R3 no model client in core": 1.0,
+   "R4 schema simplicity": 0.46,
+   "R5 retrieval quality": 0.637,
+   "R6 safety / trust": 1.0,
+   "R7 forgetting correctness": 1.0
+  },
+  "metrics": {
+   "f1": 0.637,
+   "leak": 0.0,
+   "poison": 0.0,
+   "historical": 1.0,
+   "multihop": 0.5,
+   "current": 0.584,
+   "episodic": 0.834,
+   "prospective": 0.0,
+   "stale": 0.0,
+   "tokens": 43
+  },
+  "queries": [
+   {
+    "qid": "Q1",
+    "cls": "current",
+    "n": 3,
+    "returned": [
+     "e2",
+     "f2",
+     "f6"
+    ],
+    "f1": 0.5,
+    "precision": 0.333,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 46
+   },
+   {
+    "qid": "Q2",
+    "cls": "current",
+    "n": 2,
+    "returned": [
+     "e4",
+     "t7"
+    ],
+    "f1": 0.667,
+    "precision": 0.5,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 34
+   },
+   {
+    "qid": "Q3",
+    "cls": "scope",
+    "n": 2,
+    "returned": [
+     "t1",
+     "t2"
+    ],
+    "f1": 0.667,
+    "precision": 0.5,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 19
+   },
+   {
+    "qid": "Q4",
+    "cls": "multihop",
+    "n": 3,
+    "returned": [
+     "e1",
+     "e4",
+     "t3"
+    ],
+    "f1": 0.4,
+    "precision": 0.333,
+    "recall": 0.5,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 69
+   },
+   {
+    "qid": "Q5",
+    "cls": "multihop",
+    "n": 3,
+    "returned": [
+     "e2",
+     "f2",
+     "f6"
+    ],
+    "f1": 0.4,
+    "precision": 0.333,
+    "recall": 0.5,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 46
+   },
+   {
+    "qid": "Q6",
+    "cls": "poison",
+    "n": 1,
+    "returned": [
+     "t8"
+    ],
+    "f1": 1.0,
+    "precision": 1.0,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 7
+   },
+   {
+    "qid": "Q7",
+    "cls": "stable",
+    "n": 2,
+    "returned": [
+     "e2",
+     "f3"
+    ],
+    "f1": 0.667,
+    "precision": 0.5,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 42
+   },
+   {
+    "qid": "Q8",
+    "cls": "stable",
+    "n": 4,
+    "returned": [
+     "e1",
+     "e3",
+     "e4",
+     "t5"
+    ],
+    "f1": 0.4,
+    "precision": 0.25,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 89
+   },
+   {
+    "qid": "Q9",
+    "cls": "episodic",
+    "n": 1,
+    "returned": [
+     "e1"
+    ],
+    "f1": 1.0,
+    "precision": 1.0,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 39
+   },
+   {
+    "qid": "Q10",
+    "cls": "episodic",
+    "n": 2,
+    "returned": [
+     "e2",
+     "f3"
+    ],
+    "f1": 0.667,
+    "precision": 0.5,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 42
+   },
+   {
+    "qid": "Q11",
+    "cls": "historical",
+    "n": 0,
+    "returned": [],
+    "f1": 1.0,
+    "precision": 0.0,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 0
+   },
+   {
+    "qid": "Q12",
+    "cls": "prospective",
+    "n": 0,
+    "returned": [],
+    "f1": 0.0,
+    "precision": 0.0,
+    "recall": 0.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 0
+   }
+  ]
+ },
+ {
+  "name": "05-hop-merged",
+  "desc": "One-hop expansion over `mentions`, merged into the same k slots. Deliberately the merge policy FINDINGS.md measured as a net loss.",
+  "total": 0.7579,
+  "rubric": {
+   "R1 taxonomy coverage": 0.6,
+   "R2 fidelity to prior findings": 0.75,
+   "R3 no model client in core": 1.0,
+   "R4 schema simplicity": 0.46,
+   "R5 retrieval quality": 0.547,
+   "R6 safety / trust": 1.0,
+   "R7 forgetting correctness": 1.0
+  },
+  "metrics": {
+   "f1": 0.547,
+   "leak": 0.0,
+   "poison": 0.0,
+   "historical": 1.0,
+   "multihop": 1.0,
+   "current": 0.5,
+   "episodic": 0.416,
+   "prospective": 0.0,
+   "stale": 0.0,
+   "tokens": 50
+  },
+  "queries": [
+   {
+    "qid": "Q1",
+    "cls": "current",
+    "n": 5,
+    "returned": [
+     "e2",
+     "f2",
+     "f3",
+     "f5",
+     "f6"
+    ],
+    "f1": 0.333,
+    "precision": 0.2,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 56
+   },
+   {
+    "qid": "Q2",
+    "cls": "current",
+    "n": 2,
+    "returned": [
+     "e4",
+     "t7"
+    ],
+    "f1": 0.667,
+    "precision": 0.5,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 34
+   },
+   {
+    "qid": "Q3",
+    "cls": "scope",
+    "n": 2,
+    "returned": [
+     "t1",
+     "t2"
+    ],
+    "f1": 0.667,
+    "precision": 0.5,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 19
+   },
+   {
+    "qid": "Q4",
+    "cls": "multihop",
+    "n": 4,
+    "returned": [
+     "e1",
+     "e4",
+     "t3",
+     "t4"
+    ],
+    "f1": 0.667,
+    "precision": 0.5,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 79
+   },
+   {
+    "qid": "Q5",
+    "cls": "multihop",
+    "n": 5,
+    "returned": [
+     "e2",
+     "f2",
+     "f3",
+     "f5",
+     "f6"
+    ],
+    "f1": 0.571,
+    "precision": 0.4,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 56
+   },
+   {
+    "qid": "Q6",
+    "cls": "poison",
+    "n": 1,
+    "returned": [
+     "t8"
+    ],
+    "f1": 1.0,
+    "precision": 1.0,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 7
+   },
+   {
+    "qid": "Q7",
+    "cls": "stable",
+    "n": 5,
+    "returned": [
+     "e2",
+     "f2",
+     "f3",
+     "f5",
+     "f6"
+    ],
+    "f1": 0.333,
+    "precision": 0.2,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 56
+   },
+   {
+    "qid": "Q8",
+    "cls": "stable",
+    "n": 4,
+    "returned": [
+     "e1",
+     "e3",
+     "e4",
+     "t5"
+    ],
+    "f1": 0.4,
+    "precision": 0.25,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 89
+   },
+   {
+    "qid": "Q9",
+    "cls": "episodic",
+    "n": 3,
+    "returned": [
+     "e1",
+     "t3",
+     "t4"
+    ],
+    "f1": 0.5,
+    "precision": 0.333,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 54
+   },
+   {
+    "qid": "Q10",
+    "cls": "episodic",
+    "n": 5,
+    "returned": [
+     "e2",
+     "f2",
+     "f3",
+     "f5",
+     "f6"
+    ],
+    "f1": 0.333,
+    "precision": 0.2,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 56
+   },
+   {
+    "qid": "Q11",
+    "cls": "historical",
+    "n": 0,
+    "returned": [],
+    "f1": 1.0,
+    "precision": 0.0,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 0
+   },
+   {
+    "qid": "Q12",
+    "cls": "prospective",
+    "n": 0,
+    "returned": [],
+    "f1": 0.0,
+    "precision": 0.0,
+    "recall": 0.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 0
+   }
+  ]
+ },
+ {
+  "name": "06-hop-reserved",
+  "desc": "Same hop, into RESERVED extra slots. Round one is never displaced.",
+  "total": 0.7954,
+  "rubric": {
+   "R1 taxonomy coverage": 0.6,
+   "R2 fidelity to prior findings": 1.0,
+   "R3 no model client in core": 1.0,
+   "R4 schema simplicity": 0.46,
+   "R5 retrieval quality": 0.547,
+   "R6 safety / trust": 1.0,
+   "R7 forgetting correctness": 1.0
+  },
+  "metrics": {
+   "f1": 0.547,
+   "leak": 0.0,
+   "poison": 0.0,
+   "historical": 1.0,
+   "multihop": 1.0,
+   "current": 0.5,
+   "episodic": 0.416,
+   "prospective": 0.0,
+   "stale": 0.0,
+   "tokens": 50
+  },
+  "queries": [
+   {
+    "qid": "Q1",
+    "cls": "current",
+    "n": 5,
+    "returned": [
+     "e2",
+     "f2",
+     "f3",
+     "f5",
+     "f6"
+    ],
+    "f1": 0.333,
+    "precision": 0.2,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 56
+   },
+   {
+    "qid": "Q2",
+    "cls": "current",
+    "n": 2,
+    "returned": [
+     "e4",
+     "t7"
+    ],
+    "f1": 0.667,
+    "precision": 0.5,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 34
+   },
+   {
+    "qid": "Q3",
+    "cls": "scope",
+    "n": 2,
+    "returned": [
+     "t1",
+     "t2"
+    ],
+    "f1": 0.667,
+    "precision": 0.5,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 19
+   },
+   {
+    "qid": "Q4",
+    "cls": "multihop",
+    "n": 4,
+    "returned": [
+     "e1",
+     "e4",
+     "t3",
+     "t4"
+    ],
+    "f1": 0.667,
+    "precision": 0.5,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 79
+   },
+   {
+    "qid": "Q5",
+    "cls": "multihop",
+    "n": 5,
+    "returned": [
+     "e2",
+     "f2",
+     "f3",
+     "f5",
+     "f6"
+    ],
+    "f1": 0.571,
+    "precision": 0.4,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 56
+   },
+   {
+    "qid": "Q6",
+    "cls": "poison",
+    "n": 1,
+    "returned": [
+     "t8"
+    ],
+    "f1": 1.0,
+    "precision": 1.0,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 7
+   },
+   {
+    "qid": "Q7",
+    "cls": "stable",
+    "n": 5,
+    "returned": [
+     "e2",
+     "f2",
+     "f3",
+     "f5",
+     "f6"
+    ],
+    "f1": 0.333,
+    "precision": 0.2,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 56
+   },
+   {
+    "qid": "Q8",
+    "cls": "stable",
+    "n": 4,
+    "returned": [
+     "e1",
+     "e3",
+     "e4",
+     "t5"
+    ],
+    "f1": 0.4,
+    "precision": 0.25,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 89
+   },
+   {
+    "qid": "Q9",
+    "cls": "episodic",
+    "n": 3,
+    "returned": [
+     "e1",
+     "t3",
+     "t4"
+    ],
+    "f1": 0.5,
+    "precision": 0.333,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 54
+   },
+   {
+    "qid": "Q10",
+    "cls": "episodic",
+    "n": 5,
+    "returned": [
+     "e2",
+     "f2",
+     "f3",
+     "f5",
+     "f6"
+    ],
+    "f1": 0.333,
+    "precision": 0.2,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 56
+   },
+   {
+    "qid": "Q11",
+    "cls": "historical",
+    "n": 0,
+    "returned": [],
+    "f1": 1.0,
+    "precision": 0.0,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 0
+   },
+   {
+    "qid": "Q12",
+    "cls": "prospective",
+    "n": 0,
+    "returned": [],
+    "f1": 0.0,
+    "precision": 0.0,
+    "recall": 0.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 0
+   }
+  ]
+ },
+ {
+  "name": "07-typed-edges",
+  "desc": "The 'real graph': a separate `edges` table filled by triple extraction, traversed instead of `mentions`. Needs a second delegated extraction pass.",
+  "total": 0.7867,
+  "rubric": {
+   "R1 taxonomy coverage": 0.6,
+   "R2 fidelity to prior findings": 1.0,
+   "R3 no model client in core": 0.85,
+   "R4 schema simplicity": 0.31,
+   "R5 retrieval quality": 0.653,
+   "R6 safety / trust": 1.0,
+   "R7 forgetting correctness": 1.0
+  },
+  "metrics": {
+   "f1": 0.653,
+   "leak": 0.0,
+   "poison": 0.0,
+   "historical": 1.0,
+   "multihop": 0.75,
+   "current": 0.534,
+   "episodic": 0.834,
+   "prospective": 0.0,
+   "stale": 0.0,
+   "tokens": 43
+  },
+  "queries": [
+   {
+    "qid": "Q1",
+    "cls": "current",
+    "n": 4,
+    "returned": [
+     "e2",
+     "f2",
+     "f5",
+     "f6"
+    ],
+    "f1": 0.4,
+    "precision": 0.25,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 49
+   },
+   {
+    "qid": "Q2",
+    "cls": "current",
+    "n": 2,
+    "returned": [
+     "e4",
+     "t7"
+    ],
+    "f1": 0.667,
+    "precision": 0.5,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 34
+   },
+   {
+    "qid": "Q3",
+    "cls": "scope",
+    "n": 2,
+    "returned": [
+     "t1",
+     "t2"
+    ],
+    "f1": 0.667,
+    "precision": 0.5,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 19
+   },
+   {
+    "qid": "Q4",
+    "cls": "multihop",
+    "n": 3,
+    "returned": [
+     "e1",
+     "e4",
+     "t3"
+    ],
+    "f1": 0.4,
+    "precision": 0.333,
+    "recall": 0.5,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 69
+   },
+   {
+    "qid": "Q5",
+    "cls": "multihop",
+    "n": 4,
+    "returned": [
+     "e2",
+     "f2",
+     "f5",
+     "f6"
+    ],
+    "f1": 0.667,
+    "precision": 0.5,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 49
+   },
+   {
+    "qid": "Q6",
+    "cls": "poison",
+    "n": 1,
+    "returned": [
+     "t8"
+    ],
+    "f1": 1.0,
+    "precision": 1.0,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 7
+   },
+   {
+    "qid": "Q7",
+    "cls": "stable",
+    "n": 2,
+    "returned": [
+     "e2",
+     "f3"
+    ],
+    "f1": 0.667,
+    "precision": 0.5,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 42
+   },
+   {
+    "qid": "Q8",
+    "cls": "stable",
+    "n": 4,
+    "returned": [
+     "e1",
+     "e3",
+     "e4",
+     "t5"
+    ],
+    "f1": 0.4,
+    "precision": 0.25,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 89
+   },
+   {
+    "qid": "Q9",
+    "cls": "episodic",
+    "n": 1,
+    "returned": [
+     "e1"
+    ],
+    "f1": 1.0,
+    "precision": 1.0,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 39
+   },
+   {
+    "qid": "Q10",
+    "cls": "episodic",
+    "n": 2,
+    "returned": [
+     "e2",
+     "f3"
+    ],
+    "f1": 0.667,
+    "precision": 0.5,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 42
+   },
+   {
+    "qid": "Q11",
+    "cls": "historical",
+    "n": 0,
+    "returned": [],
+    "f1": 1.0,
+    "precision": 0.0,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 0
+   },
+   {
+    "qid": "Q12",
+    "cls": "prospective",
+    "n": 0,
+    "returned": [],
+    "f1": 0.0,
+    "precision": 0.0,
+    "recall": 0.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 0
+   }
+  ]
+ },
+ {
+  "name": "08-edges-as-facts",
+  "desc": "Drops the `edges` table. `facts.subject_entity` / `object_entity` + a `graph_edges` VIEW, so an edge inherits bi-temporal validity, origin and scope. Hop goes back over `mentions`.",
+  "total": 0.8084,
+  "rubric": {
+   "R1 taxonomy coverage": 0.7,
+   "R2 fidelity to prior findings": 1.0,
+   "R3 no model client in core": 1.0,
+   "R4 schema simplicity": 0.44,
+   "R5 retrieval quality": 0.547,
+   "R6 safety / trust": 1.0,
+   "R7 forgetting correctness": 1.0
+  },
+  "metrics": {
+   "f1": 0.547,
+   "leak": 0.0,
+   "poison": 0.0,
+   "historical": 1.0,
+   "multihop": 1.0,
+   "current": 0.5,
+   "episodic": 0.416,
+   "prospective": 0.0,
+   "stale": 0.0,
+   "tokens": 50
+  },
+  "queries": [
+   {
+    "qid": "Q1",
+    "cls": "current",
+    "n": 5,
+    "returned": [
+     "e2",
+     "f2",
+     "f3",
+     "f5",
+     "f6"
+    ],
+    "f1": 0.333,
+    "precision": 0.2,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 56
+   },
+   {
+    "qid": "Q2",
+    "cls": "current",
+    "n": 2,
+    "returned": [
+     "e4",
+     "t7"
+    ],
+    "f1": 0.667,
+    "precision": 0.5,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 34
+   },
+   {
+    "qid": "Q3",
+    "cls": "scope",
+    "n": 2,
+    "returned": [
+     "t1",
+     "t2"
+    ],
+    "f1": 0.667,
+    "precision": 0.5,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 19
+   },
+   {
+    "qid": "Q4",
+    "cls": "multihop",
+    "n": 4,
+    "returned": [
+     "e1",
+     "e4",
+     "t3",
+     "t4"
+    ],
+    "f1": 0.667,
+    "precision": 0.5,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 79
+   },
+   {
+    "qid": "Q5",
+    "cls": "multihop",
+    "n": 5,
+    "returned": [
+     "e2",
+     "f2",
+     "f3",
+     "f5",
+     "f6"
+    ],
+    "f1": 0.571,
+    "precision": 0.4,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 56
+   },
+   {
+    "qid": "Q6",
+    "cls": "poison",
+    "n": 1,
+    "returned": [
+     "t8"
+    ],
+    "f1": 1.0,
+    "precision": 1.0,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 7
+   },
+   {
+    "qid": "Q7",
+    "cls": "stable",
+    "n": 5,
+    "returned": [
+     "e2",
+     "f2",
+     "f3",
+     "f5",
+     "f6"
+    ],
+    "f1": 0.333,
+    "precision": 0.2,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 56
+   },
+   {
+    "qid": "Q8",
+    "cls": "stable",
+    "n": 4,
+    "returned": [
+     "e1",
+     "e3",
+     "e4",
+     "t5"
+    ],
+    "f1": 0.4,
+    "precision": 0.25,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 89
+   },
+   {
+    "qid": "Q9",
+    "cls": "episodic",
+    "n": 3,
+    "returned": [
+     "e1",
+     "t3",
+     "t4"
+    ],
+    "f1": 0.5,
+    "precision": 0.333,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 54
+   },
+   {
+    "qid": "Q10",
+    "cls": "episodic",
+    "n": 5,
+    "returned": [
+     "e2",
+     "f2",
+     "f3",
+     "f5",
+     "f6"
+    ],
+    "f1": 0.333,
+    "precision": 0.2,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 56
+   },
+   {
+    "qid": "Q11",
+    "cls": "historical",
+    "n": 0,
+    "returned": [],
+    "f1": 1.0,
+    "precision": 0.0,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 0
+   },
+   {
+    "qid": "Q12",
+    "cls": "prospective",
+    "n": 0,
+    "returned": [],
+    "f1": 0.0,
+    "precision": 0.0,
+    "recall": 0.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 0
+   }
+  ]
+ },
+ {
+  "name": "09-prospective",
+  "desc": "Adds `intentions` \u2014 time and event cues, fired by a deterministic tick \u2014 plus the skills tier declared as procedural memory.",
+  "total": 0.8224,
+  "rubric": {
+   "R1 taxonomy coverage": 0.9,
+   "R2 fidelity to prior findings": 1.0,
+   "R3 no model client in core": 1.0,
+   "R4 schema simplicity": 0.28,
+   "R5 retrieval quality": 0.547,
+   "R6 safety / trust": 1.0,
+   "R7 forgetting correctness": 1.0
+  },
+  "metrics": {
+   "f1": 0.547,
+   "leak": 0.0,
+   "poison": 0.0,
+   "historical": 1.0,
+   "multihop": 1.0,
+   "current": 0.5,
+   "episodic": 0.416,
+   "prospective": 1.0,
+   "stale": 0.0,
+   "tokens": 50
+  },
+  "queries": [
+   {
+    "qid": "Q1",
+    "cls": "current",
+    "n": 5,
+    "returned": [
+     "e2",
+     "f2",
+     "f3",
+     "f5",
+     "f6"
+    ],
+    "f1": 0.333,
+    "precision": 0.2,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 56
+   },
+   {
+    "qid": "Q2",
+    "cls": "current",
+    "n": 2,
+    "returned": [
+     "e4",
+     "t7"
+    ],
+    "f1": 0.667,
+    "precision": 0.5,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 34
+   },
+   {
+    "qid": "Q3",
+    "cls": "scope",
+    "n": 2,
+    "returned": [
+     "t1",
+     "t2"
+    ],
+    "f1": 0.667,
+    "precision": 0.5,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 19
+   },
+   {
+    "qid": "Q4",
+    "cls": "multihop",
+    "n": 4,
+    "returned": [
+     "e1",
+     "e4",
+     "t3",
+     "t4"
+    ],
+    "f1": 0.667,
+    "precision": 0.5,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 79
+   },
+   {
+    "qid": "Q5",
+    "cls": "multihop",
+    "n": 5,
+    "returned": [
+     "e2",
+     "f2",
+     "f3",
+     "f5",
+     "f6"
+    ],
+    "f1": 0.571,
+    "precision": 0.4,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 56
+   },
+   {
+    "qid": "Q6",
+    "cls": "poison",
+    "n": 1,
+    "returned": [
+     "t8"
+    ],
+    "f1": 1.0,
+    "precision": 1.0,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 7
+   },
+   {
+    "qid": "Q7",
+    "cls": "stable",
+    "n": 5,
+    "returned": [
+     "e2",
+     "f2",
+     "f3",
+     "f5",
+     "f6"
+    ],
+    "f1": 0.333,
+    "precision": 0.2,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 56
+   },
+   {
+    "qid": "Q8",
+    "cls": "stable",
+    "n": 4,
+    "returned": [
+     "e1",
+     "e3",
+     "e4",
+     "t5"
+    ],
+    "f1": 0.4,
+    "precision": 0.25,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 89
+   },
+   {
+    "qid": "Q9",
+    "cls": "episodic",
+    "n": 3,
+    "returned": [
+     "e1",
+     "t3",
+     "t4"
+    ],
+    "f1": 0.5,
+    "precision": 0.333,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 54
+   },
+   {
+    "qid": "Q10",
+    "cls": "episodic",
+    "n": 5,
+    "returned": [
+     "e2",
+     "f2",
+     "f3",
+     "f5",
+     "f6"
+    ],
+    "f1": 0.333,
+    "precision": 0.2,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 56
+   },
+   {
+    "qid": "Q11",
+    "cls": "historical",
+    "n": 0,
+    "returned": [],
+    "f1": 1.0,
+    "precision": 0.0,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 0
+   },
+   {
+    "qid": "Q12",
+    "cls": "prospective",
+    "n": 1,
+    "returned": [
+     "i1"
+    ],
+    "f1": 1.0,
+    "precision": 1.0,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 11
+   }
+  ]
+ },
+ {
+  "name": "10-final-trimmed",
+  "desc": "Everything that paid, nothing that did not: weighted ranking (origin / salience / evidence / contested), a RELATIVE score floor, reserved hop, identity blocks. No typed edges, no merged hop, no decay.",
+  "total": 0.8328,
+  "rubric": {
+   "R1 taxonomy coverage": 1.0,
+   "R2 fidelity to prior findings": 1.0,
+   "R3 no model client in core": 1.0,
+   "R4 schema simplicity": 0.18,
+   "R5 retrieval quality": 0.574,
+   "R6 safety / trust": 1.0,
+   "R7 forgetting correctness": 1.0
+  },
+  "metrics": {
+   "f1": 0.574,
+   "leak": 0.0,
+   "poison": 0.0,
+   "historical": 1.0,
+   "multihop": 1.0,
+   "current": 0.5,
+   "episodic": 0.416,
+   "prospective": 1.0,
+   "stale": 0.0,
+   "tokens": 44
+  },
+  "queries": [
+   {
+    "qid": "Q1",
+    "cls": "current",
+    "n": 5,
+    "returned": [
+     "e2",
+     "f2",
+     "f3",
+     "f5",
+     "f6"
+    ],
+    "f1": 0.333,
+    "precision": 0.2,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 56
+   },
+   {
+    "qid": "Q2",
+    "cls": "current",
+    "n": 2,
+    "returned": [
+     "e4",
+     "t7"
+    ],
+    "f1": 0.667,
+    "precision": 0.5,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 34
+   },
+   {
+    "qid": "Q3",
+    "cls": "scope",
+    "n": 2,
+    "returned": [
+     "t1",
+     "t2"
+    ],
+    "f1": 0.667,
+    "precision": 0.5,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 19
+   },
+   {
+    "qid": "Q4",
+    "cls": "multihop",
+    "n": 4,
+    "returned": [
+     "e1",
+     "e4",
+     "t3",
+     "t4"
+    ],
+    "f1": 0.667,
+    "precision": 0.5,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 79
+   },
+   {
+    "qid": "Q5",
+    "cls": "multihop",
+    "n": 5,
+    "returned": [
+     "e2",
+     "f2",
+     "f3",
+     "f5",
+     "f6"
+    ],
+    "f1": 0.571,
+    "precision": 0.4,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 56
+   },
+   {
+    "qid": "Q6",
+    "cls": "poison",
+    "n": 1,
+    "returned": [
+     "t8"
+    ],
+    "f1": 1.0,
+    "precision": 1.0,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 7
+   },
+   {
+    "qid": "Q7",
+    "cls": "stable",
+    "n": 5,
+    "returned": [
+     "e2",
+     "f2",
+     "f3",
+     "f5",
+     "f6"
+    ],
+    "f1": 0.333,
+    "precision": 0.2,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 56
+   },
+   {
+    "qid": "Q8",
+    "cls": "stable",
+    "n": 2,
+    "returned": [
+     "e3",
+     "t5"
+    ],
+    "f1": 0.667,
+    "precision": 0.5,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 26
+   },
+   {
+    "qid": "Q9",
+    "cls": "episodic",
+    "n": 3,
+    "returned": [
+     "e1",
+     "t3",
+     "t4"
+    ],
+    "f1": 0.5,
+    "precision": 0.333,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 54
+   },
+   {
+    "qid": "Q10",
+    "cls": "episodic",
+    "n": 5,
+    "returned": [
+     "e2",
+     "f2",
+     "f3",
+     "f5",
+     "f6"
+    ],
+    "f1": 0.333,
+    "precision": 0.2,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 56
+   },
+   {
+    "qid": "Q11",
+    "cls": "historical",
+    "n": 0,
+    "returned": [],
+    "f1": 1.0,
+    "precision": 0.0,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 0
+   },
+   {
+    "qid": "Q12",
+    "cls": "prospective",
+    "n": 1,
+    "returned": [
+     "i1"
+    ],
+    "f1": 1.0,
+    "precision": 1.0,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 11
+   }
+  ]
+ },
+ {
+  "name": "XX-hop-gated",
+  "desc": "Ablation on the winner: the reserved hop fires only when round one returned fewer than 3 results. One untuned trial.",
+  "total": 0.8273,
+  "rubric": {
+   "R1 taxonomy coverage": 1.0,
+   "R2 fidelity to prior findings": 1.0,
+   "R3 no model client in core": 1.0,
+   "R4 schema simplicity": 0.18,
+   "R5 retrieval quality": 0.547,
+   "R6 safety / trust": 1.0,
+   "R7 forgetting correctness": 1.0
+  },
+  "metrics": {
+   "f1": 0.547,
+   "leak": 0.0,
+   "poison": 0.0,
+   "historical": 1.0,
+   "multihop": 0.5,
+   "current": 0.584,
+   "episodic": 0.416,
+   "prospective": 1.0,
+   "stale": 0.0,
+   "tokens": 41
+  },
+  "queries": [
+   {
+    "qid": "Q1",
+    "cls": "current",
+    "n": 3,
+    "returned": [
+     "e2",
+     "f2",
+     "f6"
+    ],
+    "f1": 0.5,
+    "precision": 0.333,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 46
+   },
+   {
+    "qid": "Q2",
+    "cls": "current",
+    "n": 2,
+    "returned": [
+     "e4",
+     "t7"
+    ],
+    "f1": 0.667,
+    "precision": 0.5,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 34
+   },
+   {
+    "qid": "Q3",
+    "cls": "scope",
+    "n": 2,
+    "returned": [
+     "t1",
+     "t2"
+    ],
+    "f1": 0.667,
+    "precision": 0.5,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 19
+   },
+   {
+    "qid": "Q4",
+    "cls": "multihop",
+    "n": 3,
+    "returned": [
+     "e1",
+     "e4",
+     "t3"
+    ],
+    "f1": 0.4,
+    "precision": 0.333,
+    "recall": 0.5,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 69
+   },
+   {
+    "qid": "Q5",
+    "cls": "multihop",
+    "n": 3,
+    "returned": [
+     "e2",
+     "f2",
+     "f6"
+    ],
+    "f1": 0.4,
+    "precision": 0.333,
+    "recall": 0.5,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 46
+   },
+   {
+    "qid": "Q6",
+    "cls": "poison",
+    "n": 1,
+    "returned": [
+     "t8"
+    ],
+    "f1": 1.0,
+    "precision": 1.0,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 7
+   },
+   {
+    "qid": "Q7",
+    "cls": "stable",
+    "n": 5,
+    "returned": [
+     "e2",
+     "f2",
+     "f3",
+     "f5",
+     "f6"
+    ],
+    "f1": 0.333,
+    "precision": 0.2,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 56
+   },
+   {
+    "qid": "Q8",
+    "cls": "stable",
+    "n": 2,
+    "returned": [
+     "e3",
+     "t5"
+    ],
+    "f1": 0.667,
+    "precision": 0.5,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 26
+   },
+   {
+    "qid": "Q9",
+    "cls": "episodic",
+    "n": 3,
+    "returned": [
+     "e1",
+     "t3",
+     "t4"
+    ],
+    "f1": 0.5,
+    "precision": 0.333,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 54
+   },
+   {
+    "qid": "Q10",
+    "cls": "episodic",
+    "n": 5,
+    "returned": [
+     "e2",
+     "f2",
+     "f3",
+     "f5",
+     "f6"
+    ],
+    "f1": 0.333,
+    "precision": 0.2,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 56
+   },
+   {
+    "qid": "Q11",
+    "cls": "historical",
+    "n": 0,
+    "returned": [],
+    "f1": 1.0,
+    "precision": 0.0,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 0
+   },
+   {
+    "qid": "Q12",
+    "cls": "prospective",
+    "n": 1,
+    "returned": [
+     "i1"
+    ],
+    "f1": 1.0,
+    "precision": 1.0,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 11
+   }
+  ]
+ },
+ {
+  "name": "XX-substring-alias",
+  "desc": "Ablation on the winner: entity aliases matched by naive substring instead of token boundary.",
+  "total": 0.7853,
+  "rubric": {
+   "R1 taxonomy coverage": 1.0,
+   "R2 fidelity to prior findings": 0.75,
+   "R3 no model client in core": 1.0,
+   "R4 schema simplicity": 0.18,
+   "R5 retrieval quality": 0.524,
+   "R6 safety / trust": 1.0,
+   "R7 forgetting correctness": 1.0
+  },
+  "metrics": {
+   "f1": 0.524,
+   "leak": 0.0,
+   "poison": 0.0,
+   "historical": 1.0,
+   "multihop": 1.0,
+   "current": 0.416,
+   "episodic": 0.416,
+   "prospective": 1.0,
+   "stale": 0.0,
+   "tokens": 46
+  },
+  "queries": [
+   {
+    "qid": "Q1",
+    "cls": "current",
+    "n": 5,
+    "returned": [
+     "e2",
+     "f2",
+     "f3",
+     "f5",
+     "f6"
+    ],
+    "f1": 0.333,
+    "precision": 0.2,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 56
+   },
+   {
+    "qid": "Q2",
+    "cls": "current",
+    "n": 3,
+    "returned": [
+     "e4",
+     "t7",
+     "t8"
+    ],
+    "f1": 0.5,
+    "precision": 0.333,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 41
+   },
+   {
+    "qid": "Q3",
+    "cls": "scope",
+    "n": 2,
+    "returned": [
+     "t1",
+     "t2"
+    ],
+    "f1": 0.667,
+    "precision": 0.5,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 19
+   },
+   {
+    "qid": "Q4",
+    "cls": "multihop",
+    "n": 4,
+    "returned": [
+     "e1",
+     "e4",
+     "t3",
+     "t4"
+    ],
+    "f1": 0.667,
+    "precision": 0.5,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 79
+   },
+   {
+    "qid": "Q5",
+    "cls": "multihop",
+    "n": 5,
+    "returned": [
+     "e2",
+     "f2",
+     "f3",
+     "f5",
+     "f6"
+    ],
+    "f1": 0.571,
+    "precision": 0.4,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 56
+   },
+   {
+    "qid": "Q6",
+    "cls": "poison",
+    "n": 2,
+    "returned": [
+     "t7",
+     "t8"
+    ],
+    "f1": 0.667,
+    "precision": 0.5,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 17
+   },
+   {
+    "qid": "Q7",
+    "cls": "stable",
+    "n": 5,
+    "returned": [
+     "e2",
+     "f2",
+     "f3",
+     "f5",
+     "f6"
+    ],
+    "f1": 0.333,
+    "precision": 0.2,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 56
+   },
+   {
+    "qid": "Q8",
+    "cls": "stable",
+    "n": 2,
+    "returned": [
+     "e3",
+     "t5"
+    ],
+    "f1": 0.667,
+    "precision": 0.5,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 26
+   },
+   {
+    "qid": "Q9",
+    "cls": "episodic",
+    "n": 3,
+    "returned": [
+     "e1",
+     "t3",
+     "t4"
+    ],
+    "f1": 0.5,
+    "precision": 0.333,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 54
+   },
+   {
+    "qid": "Q10",
+    "cls": "episodic",
+    "n": 5,
+    "returned": [
+     "e2",
+     "f2",
+     "f3",
+     "f5",
+     "f6"
+    ],
+    "f1": 0.333,
+    "precision": 0.2,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 56
+   },
+   {
+    "qid": "Q11",
+    "cls": "historical",
+    "n": 0,
+    "returned": [],
+    "f1": 1.0,
+    "precision": 0.0,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 0
+   },
+   {
+    "qid": "Q12",
+    "cls": "prospective",
+    "n": 1,
+    "returned": [
+     "i1"
+    ],
+    "f1": 1.0,
+    "precision": 1.0,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 11
+   }
+  ]
+ },
+ {
+  "name": "XX-head-only-tombstone",
+  "desc": "Ablation on the winner: retraction closes only the head version instead of purging every one.",
+  "total": 0.6453,
+  "rubric": {
+   "R1 taxonomy coverage": 1.0,
+   "R2 fidelity to prior findings": 0.75,
+   "R3 no model client in core": 1.0,
+   "R4 schema simplicity": 0.18,
+   "R5 retrieval quality": 0.574,
+   "R6 safety / trust": 1.0,
+   "R7 forgetting correctness": 0.0
+  },
+  "metrics": {
+   "f1": 0.574,
+   "leak": 0.0,
+   "poison": 0.0,
+   "historical": 0.0,
+   "multihop": 1.0,
+   "current": 0.5,
+   "episodic": 0.416,
+   "prospective": 1.0,
+   "stale": 0.0,
+   "tokens": 44
+  },
+  "queries": [
+   {
+    "qid": "Q1",
+    "cls": "current",
+    "n": 5,
+    "returned": [
+     "e2",
+     "f2",
+     "f3",
+     "f5",
+     "f6"
+    ],
+    "f1": 0.333,
+    "precision": 0.2,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 56
+   },
+   {
+    "qid": "Q2",
+    "cls": "current",
+    "n": 2,
+    "returned": [
+     "e4",
+     "t7"
+    ],
+    "f1": 0.667,
+    "precision": 0.5,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 34
+   },
+   {
+    "qid": "Q3",
+    "cls": "scope",
+    "n": 2,
+    "returned": [
+     "t1",
+     "t2"
+    ],
+    "f1": 0.667,
+    "precision": 0.5,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 19
+   },
+   {
+    "qid": "Q4",
+    "cls": "multihop",
+    "n": 4,
+    "returned": [
+     "e1",
+     "e4",
+     "t3",
+     "t4"
+    ],
+    "f1": 0.667,
+    "precision": 0.5,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 79
+   },
+   {
+    "qid": "Q5",
+    "cls": "multihop",
+    "n": 5,
+    "returned": [
+     "e2",
+     "f2",
+     "f3",
+     "f5",
+     "f6"
+    ],
+    "f1": 0.571,
+    "precision": 0.4,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 56
+   },
+   {
+    "qid": "Q6",
+    "cls": "poison",
+    "n": 1,
+    "returned": [
+     "t8"
+    ],
+    "f1": 1.0,
+    "precision": 1.0,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 7
+   },
+   {
+    "qid": "Q7",
+    "cls": "stable",
+    "n": 5,
+    "returned": [
+     "e2",
+     "f2",
+     "f3",
+     "f5",
+     "f6"
+    ],
+    "f1": 0.333,
+    "precision": 0.2,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 56
+   },
+   {
+    "qid": "Q8",
+    "cls": "stable",
+    "n": 2,
+    "returned": [
+     "e3",
+     "t5"
+    ],
+    "f1": 0.667,
+    "precision": 0.5,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 26
+   },
+   {
+    "qid": "Q9",
+    "cls": "episodic",
+    "n": 3,
+    "returned": [
+     "e1",
+     "t3",
+     "t4"
+    ],
+    "f1": 0.5,
+    "precision": 0.333,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 54
+   },
+   {
+    "qid": "Q10",
+    "cls": "episodic",
+    "n": 5,
+    "returned": [
+     "e2",
+     "f2",
+     "f3",
+     "f5",
+     "f6"
+    ],
+    "f1": 0.333,
+    "precision": 0.2,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 56
+   },
+   {
+    "qid": "Q11",
+    "cls": "historical",
+    "n": 1,
+    "returned": [
+     "f5"
+    ],
+    "f1": 0.0,
+    "precision": 0.0,
+    "recall": 0.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 0
+   },
+   {
+    "qid": "Q12",
+    "cls": "prospective",
+    "n": 1,
+    "returned": [
+     "i1"
+    ],
+    "f1": 1.0,
+    "precision": 1.0,
+    "recall": 1.0,
+    "stale": false,
+    "cross": false,
+    "poison": false,
+    "tokens": 11
+   }
+  ]
+ }
+]

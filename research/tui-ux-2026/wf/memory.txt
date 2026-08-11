@@ -1,0 +1,30 @@
+┌─ memory · list ──────────────────────────────┐┌─ prefers-spec-first ─────────────────────────────┐
+│  type    name                  conf  deg  age││ prefers-spec-first                     belief    │
+│  ────────────────────────────────────────────││ conf 0.86 · 17 edges · seen 23× · 3d ago         │
+│ ▸◆ blf   prefers-spec-first    0.86   17  3d ││ ──────────────────────────────────────────────── │
+│  ◆ blf   linear-is-truth       0.94    9  3d ││ Non-trivial work starts with a spec, not a plan. │
+│  ◆ blf   reversible-by-default 0.91    6  1w ││ Interview until nothing material is guessed,     │
+│  ○ blf   ship-fast-iterate     0.31    2  6w!││ write SPEC.md, execute it in a fresh session.    │
+│  ● ent   reljod                1.00   41  1w ││                                                  │
+│  ● ent   jod-cloud (vps)       1.00   12  1w ││ ▲ linked from (3)                                │
+│  ● ent   Reljod/Jod (repo)     1.00   28  1w ││   supports     ◆ linear-is-truth                 │
+│  ▤ epi   2026-08-04 spec-retro 1.00    5  6d ││   supports     ● reljod                          │
+│  ▤ epi   2026-07-29 vps-outage 1.00    8  12d││   refines      ▦ how-to-open-a-pr                │
+│  ▦ pro   how-to-open-a-pr      1.00   11  3w ││                                                  │
+│  ▦ pro   how-to-merge-unread   1.00    7  3w ││ ▼ links to (2)                                   │
+│  ◇ fact  tz = Asia/Manila      1.00    3  8w ││   contradicts  ○ ship-fast-iterate          ⚠    │
+│  ◇ fact  budget cap $40/day    1.00    4  2w ││   derived-from ▤ 2026-08-04 spec-retro           │
+│                                              ││                                                  │
+│  ────────────────────────────────────────────││ provenance                                       │
+│  142 memories · 61 beliefs · 38 entities     ││   first  run 2f9c88b1 write-the-spec  06-11      │
+│  1 contradiction unresolved (! marks it)     ││   last   run c0ffee11 spec-review     08-07      │
+│                                              ││   source AGENTS.md §How work runs                │
+│  /spec       ▸ filter · 4 of 142 match       ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+└─ ↑↓ pick · / filter · t type ────────────────┘└─ g local graph · e edit · x forget ──────────────┘
+ g graph · e edit · n new · l link · x forget · / filter · t type · s sort        Esc back · ? keys 
+ memory · 142 nodes · 318 edges · 1 contradiction                                        ⚑ 3 unread 

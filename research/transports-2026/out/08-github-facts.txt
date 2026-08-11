@@ -1,0 +1,25 @@
+
+===== best practices — https://docs.github.com/en/webhooks/using-webhooks/best-practices-for-using-webhooks
+  [10 seconds] Copy as Markdown In this article Subscribe to the minimum number of events Use a webhook secret Use HTTPS and SSL verification Allow GitHub's IP addresses Respond within 10 seconds Check the event type and action before processing the event Redeliver missed deliveries Use the X-GitHub-Delivery header Further reading Subscribe to the minimum number of events You should only subscribe to the webhook
+  [asynchronous] In order to respond in a timely manner, you may want to set up a queue to process webhook payloads asynchronously.
+  [redeliver] Best practices for using webhooks - GitHub Docs (function(){ var MODES=["auto","light","dark"],THEMES=["light","dark","dark_dimmed","dark_high_contrast"],D={"colorMode":"auto","lightTheme":"light","darkTheme":"dark"}; var css=D; try{ var m=document.cookie.match(new RegExp('(?:^|; )'+"color_mode"+'=([^;]*)')); if(m){ var p=JSON.parse(decodeURIComponent(m[1])); var fMode=function(x){return MODES.ind
+  [X-GitHub-Delivery] Copy as Markdown In this article Subscribe to the minimum number of events Use a webhook secret Use HTTPS and SSL verification Allow GitHub's IP addresses Respond within 10 seconds Check the event type and action before processing the event Redeliver missed deliveries Use the X-GitHub-Delivery header Further reading Subscribe to the minimum number of events You should only subscribe to the webhook
+  [order] In order to respond in a timely manner, you may want to set up a queue to process webhook payloads asynchronously.
+
+===== troubleshooting — https://docs.github.com/en/webhooks/testing-and-troubleshooting-webhooks/troubleshooting-webhooks
+  [10 seconds] Timed out The timed out error indicates that GitHub did not receive a response from your server within 10 seconds of delivering a webhook.
+  [timed out] Timed out The timed out error indicates that GitHub did not receive a response from your server within 10 seconds of delivering a webhook.
+  [redeliver] Troubleshooting webhooks - GitHub Docs (function(){ var MODES=["auto","light","dark"],THEMES=["light","dark","dark_dimmed","dark_high_contrast"],D={"colorMode":"auto","lightTheme":"light","darkTheme":"dark"}; var css=D; try{ var m=document.cookie.match(new RegExp('(?:^|; )'+"color_mode"+'=([^;]*)')); if(m){ var p=JSON.parse(decodeURIComponent(m[1])); var fMode=function(x){return MODES.indexOf(x)>-
+
+===== validating deliveries — https://docs.github.com/en/webhooks/using-webhooks/validating-webhook-deliveries
+  [secure_compare] Instead consider using a method like secure_compare or crypto.timingSafeEqual , which performs a "constant time" string comparison to help mitigate certain timing attacks against regular equality operators, or regular loops in JIT-optimized languages.
+  [constant time] Instead consider using a method like secure_compare or crypto.timingSafeEqual , which performs a "constant time" string comparison to help mitigate certain timing attacks against regular equality operators, or regular loops in JIT-optimized languages.
+  [raw] importKey ( "raw" , keyBytes, algorithm, extractable, [ "sign" , "verify" ], ); let sigBytes = hexToBytes (sigHex); let dataBytes = encoder.
+  [sha256=] The hash signature always starts with sha256= .
+
+===== GET https://api.github.com/meta
+  hooks CIDRs: 6  (v4 4, v6 2)
+  distinct IPv4 addresses covered: 10,240
+  v4 list: ['192.30.252.0/22', '185.199.108.0/22', '140.82.112.0/20', '143.55.64.0/20']
+  v6 list: ['2a0a:a440::/29', '2606:50c0::/32']
+  other keys present: ['actions', 'actions_macos', 'api', 'codespaces', 'commit_signing_keys', 'copilot', 'domains', 'git', 'github_enterprise_importer', 'importer', 'packages', 'pages', 'ssh_key_fingerprints', 'ssh_keys', 'verifiable_password_authentication', 'web']

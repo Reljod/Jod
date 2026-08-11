@@ -1,0 +1,30 @@
+┌─ memory · local graph · prefers-spec-first ──────────────────────────────────────────────────────┐
+│                                                                                                  │
+│                                   ▲  linked from — 3                                             │
+│                                                                                                  │
+│         ◆ linear-is-truth ──────────── supports ─────────────┐                                   │
+│         ● reljod ───────────────────── supports ─────────────┤                                   │
+│         ▦ how-to-open-a-pr ─────────── refines ──────────────┤                                   │
+│                                                              │                                   │
+│                                                              ▼                                   │
+│                         ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓                             │
+│                         ┃  ◆  prefers-spec-first                   ┃                             │
+│                         ┃     belief · conf 0.86 · seen 23×        ┃                             │
+│                         ┃     "Non-trivial work starts with a      ┃                             │
+│                         ┃      spec, not a plan."                  ┃                             │
+│                         ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛                             │
+│                                                              │                                   │
+│                                                              ▼                                   │
+│         ○ ship-fast-iterate ◀──────── contradicts ⚠ ─────────┤                                   │
+│         ▤ 2026-08-04 spec-retro ◀──── derived-from ──────────┘                                   │
+│                                                                                                  │
+│                                   ▼  links to — 2                                                │
+│                                                                                                  │
+│   ───────────────────────────────────────────────────────────────────────────────────────────    │
+│   hop 1 shows 5 of 17 edges.  ⇧+↑↓ walks the ranked edge list · ⏎ re-centres on it               │
+│   ⟨  reljod  ⟩  ⟨ linear-is-truth ⟩  ⟨ prefers-spec-first ⟩         ← where you have been        │
+│                                                                                                  │
+│                                                                                                  │
+└─  ↑↓ neighbour · ⏎ re-centre · Backspace back · h hops 1|2 · l list  ────────────────────────────┘
+ ⏎ re-centre · ↑↓ neighbour · Backspace back · h hops · f edge kind · g list      Esc back · ? keys 
+ memory · 142 nodes · 318 edges · focus prefers-spec-first (17 edges)                    ⚑ 3 unread 

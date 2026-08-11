@@ -1,0 +1,30 @@
+┌─ chat · port the parser · a3f91c22 · running ────────────────────────────────────────────────────┐
+│   Rebased cleanly — no conflicts. 214 tests pass and the three ignored ones                      │
+│   were already ignored on main. Pushed with --force-with-lease.                                  │
+│                                                                                                  │
+│ ✓ done · 4m12s · $0.31                                                                           │
+│                                                                                                  │
+│      ┌─ Ctrl-K ───────────────────────────────────────────────────────┐                          │
+│      │  c  chat            the conversation                           │                          │
+│      │  f  fleet           14 runs · 3 running · 2 failed             │                          │
+│      │  m  memory          142 nodes · 318 edges · 1 contradiction    │                          │
+│      │  s  schedules       8 · next vps-healthcheck in 13s            │                          │
+│      │  g  goals           5 · 1 blocked · 1 needs you                │                          │
+│      │  h  hooks           6 webhooks · 1 failing                     │                          │
+│      │  t  tasks           12 open · 3 claimed · 1 blocked            │                          │
+│      │  a  activity        3 unread                                   │                          │
+│      │  w  team            crew · 4 members · 2 busy                  │                          │
+│      │                                                                │                          │
+│      │  n  new…            n s sched · n g goal · n h hook · n t task │                          │
+│      │  e  editor          the input in $EDITOR                       │                          │
+│      │  ?  keys            the whole keymap                           │                          │
+│      └─ Esc cancels · any other key is ignored ───────────────────────┘                          │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘
+ Ctrl-K … waiting for a key                                                             Esc cancels 
+ Claude Code · claude-opus-5 · $0.42 · ⠹ 4m12s · 2 running                               ⚑ 3 unread 

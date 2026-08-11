@@ -1,0 +1,75 @@
+
+## markdownv2 escape rule
+In all other places characters '_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!' must be escaped with the preceding character '\'. 
+ In case of ambiguity between italic and underline entities __ is always greedily treated
+
+## markdownv2 backslash
+Any character with code between 1 and 126 inclusively can be escaped anywhere with a preceding '\' character, in which case it is treated as an ordinary character and not a part of the markup. This implies that '\' character usually must be escaped with a preceding '\' character. 
+ Inside pre and co
+
+## markdownv2 pre/code
+Inside pre and code entities, all '`' and '\' characters must be escaped with a preceding '\' character. 
+ Inside the (...) part of the inline link and custom e
+
+## markdownv2 link
+Inside the (...) part of the inline link and custom emoji definition, all ')' and '\' must be escaped with a preceding '\' character. 
+ In all other places characters '_', '*', '['
+
+## sendMessage length
+1-4096 characters after entities parsing 
+ 
+ 
+ parse_mode
+
+## entity offsets
+UTF-16 code units to the start of the entity 
+ 
+ 
+ length 
+ Integer 
+ Length of the entity in UTF-16 code units 
+ 
+ 
+ url 
+ String 
+ Optional . For “text_link” only, URL that will be opened after user
+
+## retry_after
+In case of exceeding flood control, the number of seconds left to wait before the request can be repeated 
+ 
+ 
+ 
+ InputMedia 
+ Thi
+
+## getUpdates offset
+Must be greater by one than the highest among the identifiers of previously received updates. By default, updates starting with the earliest unconfirmed update are returned. An update is considered confirmed as soon as g
+
+## getUpdates vs webhook
+This method will not work if an outgoing webhook is set up. 2. In order to avoid getting d
+
+## update retention
+they will not be kept longer than 24 hours. 
+ Regardless of
+
+## webhook secret_token
+A secret token to be sent in a header “X-Telegram-Bot-Api-Secret-Token” in every webhook request, 1-256 characters. Only characters A-Z , a-z , 0-9 , _ and - are allowed. The header is useful to ensur
+
+## webhook ports
+Ports currently supported for webhooks : 443, 80, 88, 8443 .
+
+## callback_data
+Data to be sent in a callback query to the bot when the button is pressed, 1-64 bytes 
+ 
+ 
+ web_app 
+ WebAppInfo 
+ Optional . Desc
+
+## editMessageText
+NOT FOUND — the page changed
+
+## sendChatAction
+when a message arrives from your bot, Telegram clients clear its typing status). Returns True on success. 
+ 
+ Example: The ImageBot needs some time to process a request and upload the image. Instead o

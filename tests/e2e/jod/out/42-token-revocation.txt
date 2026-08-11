@@ -1,0 +1,44 @@
+==============================================================
+== 1. issue a token BEFORE the daemon starts
+==============================================================
+token: jod_36a99eb9f78b…
+$ jod-api token list
+LABEL                     SCOPE   ISSUED
+victim                    read    2026-08-10 23:16
+
+==============================================================
+== 2. start the daemon
+==============================================================
+$ try 'while valid' 'jod_36a99eb9f78b7bc20b3a37acd602128b7035a188a6ed5139860d1616801444ab'
+while valid: HTTP 200
+
+==============================================================
+== 3. revoke it. The device is compromised; this is the emergency lever.
+==============================================================
+$ jod-api token revoke victim
+revoked 1 token(s) labelled victim
+
+$ jod-api token list
+no tokens issued
+
+-- the token store no longer contains it. Does the daemon care? --
+$ try 'after revoke, daemon still running' 'jod_36a99eb9f78b7bc20b3a37acd602128b7035a188a6ed5139860d1616801444ab'
+after revoke, daemon still running: HTTP 200
+
+==============================================================
+== 4. a token issued while the daemon runs
+==============================================================
+token: jod_578ea7cf6223…
+$ try 'newly issued, daemon still running' 'jod_578ea7cf62234560350c658287daabcd5e05a91ab491ea08a9c95d3eacbbf5f2'
+newly issued, daemon still running: HTTP 401
+
+==============================================================
+== 5. restart the daemon
+==============================================================
+$ try 'revoked token, after restart' 'jod_36a99eb9f78b7bc20b3a37acd602128b7035a188a6ed5139860d1616801444ab'
+revoked token, after restart: HTTP 401
+
+$ try 'latecomer token, after restart' 'jod_578ea7cf62234560350c658287daabcd5e05a91ab491ea08a9c95d3eacbbf5f2'
+latecomer token, after restart: HTTP 200
+
+daemon stopped

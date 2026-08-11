@@ -4,14 +4,21 @@
 //! OpenCode, AGY), runs that harness inside its own tmux session, and turns the
 //! harness's output into one event stream that every command here renders.
 
+mod mcp_cmd;
 mod render;
+mod render_time;
 mod tui;
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
-use jod_core::store::{NewFact, Origin};
+use jod_core::consolidate::{Consolidation, Provenance};
+use jod_core::conversation::PortableMessage;
+use jod_core::service::RunConversation;
+use jod_core::store::{NewFact, Origin, Store};
 use jod_core::team::MemberStatus;
-use jod_core::{HarnessKind, Jod, PermissionPolicy, Resume, SpawnRequest};
+use jod_core::{
+    AgentEnvelope, AgentEvent, HarnessKind, Jod, PermissionPolicy, Resume, SpawnRequest,
+};
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -41,8 +48,8 @@ enum Command {
         cwd: Option<PathBuf>,
         #[arg(short, long)]
         model: Option<String>,
-        #[arg(short, long, value_enum, default_value_t = PermissionArg::Ask)]
-        permission: PermissionArg,
+        #[arg(short, long, value_parser = parse_permission_arg, default_value = "auto")]
+        permission: PermissionPolicy,
         /// Continue the most recent conversation instead of starting one.
         #[arg(short = 'C', long = "continue", conflicts_with = "session")]
         continue_last: bool,
@@ -125,6 +132,34 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Read a conversation and write what it established into memory.
+    ///
+    /// Jod has no model client, so the reading is itself an agent run: the
+    /// material goes out as a prompt, the answer comes back as JSON lines, and
+    /// every trust decision — which scope, which origin, what may supersede
+    /// what — is made here rather than by the agent. Without this, `facts` has
+    /// no writer but a person typing `jod remember`.
+    Consolidate {
+        /// The conversation to read. A prefix of its id is enough.
+        conversation: Option<String>,
+        /// Read a run's event stream instead of a conversation.
+        #[arg(long, conflicts_with = "conversation")]
+        run: Option<String>,
+        /// Where this material came from. Required, and never inferred: by the
+        /// time Reljod's own chat and a page Jod fetched are both a string of
+        /// text they look identical, so the caller — which does know — says.
+        #[arg(long, value_enum)]
+        provenance: ProvenanceArg,
+        /// Which domain the facts belong to. Scopes are hard partitions, and a
+        /// line naming another one is discarded rather than filed.
+        #[arg(long, default_value = jod_core::store::DEFAULT_SCOPE)]
+        scope: String,
+        #[arg(short = 'H', long, value_enum, default_value_t = HarnessArg::Claude)]
+        harness: HarnessArg,
+        /// Run the extraction and print what it would write, writing nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Permanently destroy a fact — every version of it, not just the current.
     Forget {
         subject: String,
@@ -134,18 +169,30 @@ enum Command {
     },
     /// The full-screen interface: conversation, live agents, status.
     Tui {
-        #[arg(short = 'H', long, value_enum, default_value_t = HarnessArg::Claude)]
-        harness: HarnessArg,
+        /// Which harness to open on. Defaults to your stored preference.
+        //
+        // The `Option` is load-bearing rather than decorative: the TUI stores a
+        // preferred harness, and can only defer to it if it can tell "not
+        // given" from "given the value that happens to be the default". Clap
+        // collapses those two the moment a flag has a `default_value`, so the
+        // flag has none and the default lives at the point of use.
+        #[arg(short = 'H', long, value_enum)]
+        harness: Option<HarnessArg>,
         #[arg(short, long)]
         cwd: Option<PathBuf>,
         #[arg(short, long)]
         model: Option<String>,
-        #[arg(short, long, value_enum, default_value_t = PermissionArg::Ask)]
-        permission: PermissionArg,
+        /// plan, ask, edits or auto. Also the ceiling Tab may not raise past.
+        //
+        // `Option` for the same reason as `--harness`, with more at stake: an
+        // explicit flag is a ceiling and saying nothing is not, so "the user
+        // said auto" and "the user said nothing" must not be one value.
+        #[arg(short, long, value_parser = parse_permission_arg)]
+        permission: Option<PermissionPolicy>,
         /// Pick up the last conversation instead of starting a new one.
         #[arg(short = 'C', long = "continue")]
         continue_last: bool,
-        /// Watch a team: Ctrl-G shows its members and its task board.
+        /// Watch a team: Alt-G shows its members and its task board.
         #[arg(long)]
         team: Option<String>,
     },
@@ -157,6 +204,140 @@ enum Command {
         #[command(subcommand)]
         what: TeamCommand,
     },
+    /// Run the scheduler: fire due schedules and advance goals, for ever.
+    ///
+    /// This is the process that makes a schedule mean anything. Without it the
+    /// tick exists and is tested and nothing calls it, so `jod schedule ls`
+    /// describes work that will never happen. Install it with
+    /// `deploy/jod-daemon.service`.
+    Daemon {
+        /// Tick once and exit, rather than staying resident. For a systemd
+        /// timer, or for checking the thing works before enabling the unit.
+        #[arg(long)]
+        once: bool,
+    },
+    /// The main chat — the one conversation that is always there.
+    ///
+    /// Send it an instruction and it decides who does the work: an agent
+    /// already running, a fresh one, a schedule, or a goal. It never does the
+    /// work itself, so it comes back to you immediately rather than when the
+    /// job is finished — which is the point, because the moment you most want
+    /// to ask for something else is while something is already running.
+    ///
+    /// With no instruction it shows the chat: what you last said, what it
+    /// decided, and what that set in motion.
+    Main {
+        /// What you want done. Omit to read the chat instead.
+        instruction: Vec<String>,
+        /// Wait for the orchestrator's reply instead of returning at once.
+        /// It still does not wait for the work it delegates.
+        #[arg(long)]
+        wait: bool,
+        #[arg(short = 'H', long, value_enum, default_value_t = HarnessArg::Claude)]
+        harness: HarnessArg,
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+        /// How many exchanges to show when reading the chat.
+        #[arg(short, long, default_value_t = 20)]
+        limit: usize,
+    },
+    /// Conversations Jod owns: list them, fork one, take one back.
+    ///
+    /// A conversation here is a tree, not a line. Two of the three harnesses
+    /// can fork themselves and none can hand a thread to another, so the
+    /// transcript that survives a harness switch has to be Jod's.
+    Conv {
+        #[command(subcommand)]
+        what: ConvCommand,
+    },
+    /// Work that fires on the clock.
+    ///
+    /// A schedule is a prompt, a cron expression and a timezone. Everything
+    /// else — what to do about a run that overran, or instants missed while
+    /// Jod was down — is policy with a default that was chosen by measuring
+    /// what happens without it.
+    Schedule {
+        #[command(subcommand)]
+        what: ScheduleCommand,
+    },
+    /// Work that fires when GitHub says something happened.
+    ///
+    /// A rule is a match — source, repo, event, optional action and conditions
+    /// — and a prompt template to run when it matches. The receiver, the
+    /// signature check, the delivery ledger and the TUI's rule list were all
+    /// built before anything could *create* one, so the table stayed empty and
+    /// the whole path was unreachable. This is that missing verb.
+    Webhook {
+        #[command(subcommand)]
+        what: WebhookCommand,
+    },
+    /// Jod on a phone.
+    ///
+    /// `HttpBot`, the poller, the rate-limit backoff, the allowlist and the
+    /// refusal record were all built and tested, and `Bridge` — the piece that
+    /// joins them to Jod — was never constructed anywhere. This is that
+    /// missing entry point.
+    Telegram {
+        #[command(subcommand)]
+        what: TelegramCommand,
+    },
+    /// Let a schedule decide for itself whether it is worth waking a model.
+    ///
+    /// A monitor is a probe and a hash attached to one schedule. Unchanged
+    /// bytes suppress the run entirely; changed bytes run it with a diff in
+    /// front of the prompt. `--no-agent` inverts the deal: the script *is* the
+    /// job, its stdout is the result, and no model runs at all.
+    ///
+    /// The tick has asked the monitor since it was written. Nothing could
+    /// write one — the same missing verb `jod webhook` was, one table over.
+    Monitor {
+        #[command(subcommand)]
+        what: MonitorCommand,
+    },
+    /// Proof of what Jod owed people, and whether they got it.
+    ///
+    /// A run that finished and a reply that arrived are two different facts,
+    /// and until this command the second was answerable only by opening
+    /// SQLite. The ledger has recorded it all along.
+    Ledger {
+        #[command(subcommand)]
+        what: LedgerCommand,
+    },
+    /// Standing objectives, pursued until they are met.
+    ///
+    /// A goal differs from a schedule in having an end: it stops when it is
+    /// satisfied, when it runs out of budget or iterations, or when it stops
+    /// making progress. That last one matters most — a loop that keeps running
+    /// while nothing changes looks exactly like a loop doing useful work.
+    Goal {
+        #[command(subcommand)]
+        what: GoalCommand,
+    },
+    /// What Jod's memory connects to a thing.
+    ///
+    /// Recall answers "what do I know about X". This answers "what is X
+    /// connected to", which no list of facts can — it walks the graph.
+    Related {
+        /// The entity to start from.
+        subject: String,
+        /// How many hops out. Capped: four undirected hops from a
+        /// well-connected thing returns a fifth of everything Jod knows.
+        #[arg(short = 'n', long, default_value_t = 2)]
+        hops: u32,
+        #[arg(long, default_value = "default")]
+        scope: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// How two things in memory are connected, if they are.
+    Path {
+        from: String,
+        to: String,
+        #[arg(long, default_value = "default")]
+        scope: String,
+        #[arg(short = 'n', long, default_value_t = 5)]
+        max: u32,
+    },
     /// Hold a conversation on a plain terminal, without the full-screen UI.
     Chat {
         #[arg(short = 'H', long, value_enum, default_value_t = HarnessArg::Claude)]
@@ -165,11 +346,358 @@ enum Command {
         cwd: Option<PathBuf>,
         #[arg(short, long)]
         model: Option<String>,
-        #[arg(short, long, value_enum, default_value_t = PermissionArg::Ask)]
-        permission: PermissionArg,
+        #[arg(short, long, value_parser = parse_permission_arg, default_value = "auto")]
+        permission: PermissionPolicy,
         /// Pick up the last conversation instead of starting a new one.
         #[arg(short = 'C', long = "continue")]
         continue_last: bool,
+    },
+    /// Serve Jod's own tools to a harness, as an MCP server over stdio.
+    ///
+    /// This is the seam the system turns on. Jod has no model client and never
+    /// will; what it has is effects — delegating, scheduling, remembering,
+    /// saying what is running. Both Claude Code (`--mcp-config`) and OpenCode
+    /// (`opencode mcp add`) already speak MCP, so a run wired to this thinks
+    /// *and* acts in one loop, with the harness supplying every judgement.
+    ///
+    /// Not a command to type: stdin and stdout carry the protocol. A harness is
+    /// pointed at it by config, and `--access` says how much of Jod that
+    /// particular agent gets.
+    Mcp {
+        /// How much of Jod the agent on the other end may reach. Fail-closed:
+        /// an unset flag gets the read-only set, never the full one.
+        /// Parsed by `jod_core::mcp::parse_access`, not by a `value_enum`, so
+        /// there is exactly one spelling of a level in the system.
+        ///
+        /// Found the hard way. A derived enum accepts only `read-only`, while
+        /// `ToolAccess::as_str()` writes `read_only` — so the MCP config Jod
+        /// generated for a harness invoked the server with a flag the server
+        /// rejected. It exited 2, the harness reported no tools, and the agent
+        /// truthfully said Jod had none. Every layer was correct and the seam
+        /// was closed by two spellings of one word.
+        #[arg(long, default_value = "read_only", value_parser = parse_access_arg)]
+        access: jod_core::harness::ToolAccess,
+        /// The most permissive policy `delegate` may ask for — the same ceiling
+        /// `jod-api` applies to a remote caller, and the same default.
+        #[arg(long, value_parser = parse_permission_arg, default_value = "accept_edits")]
+        max_permission: PermissionPolicy,
+    },
+}
+
+#[derive(Subcommand)]
+enum ConvCommand {
+    /// Every conversation, newest first.
+    Ls {
+        #[arg(short, long, default_value_t = 20)]
+        limit: usize,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Read one, from its root to wherever its head currently points.
+    Show {
+        id: String,
+        /// Only what a harness would still be sent, after compaction.
+        #[arg(long)]
+        live: bool,
+    },
+    /// Copy a conversation from a point, leaving the original untouched.
+    ///
+    /// Without `--at`, forks from the current head.
+    Fork {
+        id: String,
+        #[arg(long)]
+        at: Option<i64>,
+        #[arg(long)]
+        title: Option<String>,
+    },
+    /// Move the head back to an earlier message.
+    ///
+    /// Non-destructive: the abandoned tail stays on disk and stays reachable,
+    /// which is what makes this recoverable rather than a deletion.
+    Revert { id: String, message: i64 },
+    /// Point the head at any message sharing this conversation's root —
+    /// including a branch abandoned earlier, which revert cannot reach because
+    /// it is a cousin of the head rather than an ancestor.
+    Goto { id: String, message: i64 },
+    /// Search every conversation. Returns the match with the conversation's
+    /// opening and closing around it, so a hit reads without the transcript.
+    Search {
+        query: Vec<String>,
+        #[arg(short, long, default_value_t = 5)]
+        limit: usize,
+    },
+    /// Summarise a span out of the live window, keeping it on disk.
+    Compact {
+        id: String,
+        /// The summary. Jod has no model client, so the text comes from
+        /// whoever ran the summarising agent.
+        summary: String,
+    },
+    /// What this conversation would be handed to another harness as.
+    ///
+    /// Prints the carrier rather than moving anything, because seeing what
+    /// survives is the point — and for AGY the honest answer is that it
+    /// becomes prompt text.
+    Handoff {
+        id: String,
+        #[arg(short = 'H', long, value_enum)]
+        to: HarnessArg,
+    },
+}
+
+#[derive(Subcommand)]
+enum WebhookCommand {
+    /// Every rule, and whether it is armed.
+    Ls {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Add a rule.
+    Add {
+        /// A short name, used everywhere else to refer to it.
+        name: String,
+        /// What to ask the agent to do. `{{placeholders}}` — `{{title}}`,
+        /// `{{body}}`, `{{author}}`, `{{branch}}`, `{{number}}` — are filled
+        /// from the payload as *quoted JSON data*, never as bare text.
+        prompt: String,
+        /// `owner/repo`, or `*` for every repository the receiver hears from.
+        #[arg(short, long, default_value = jod_core::webhook::ANY_REPO)]
+        repo: String,
+        /// The GitHub event name: `pull_request`, `issues`, `push`.
+        #[arg(short, long)]
+        event: String,
+        /// One action of that event — `opened`, `closed`. Omitted matches all.
+        #[arg(short, long)]
+        action: Option<String>,
+        /// Require *all* of these labels. Repeat the flag for each.
+        #[arg(long = "label")]
+        labels: Vec<String>,
+        #[arg(long)]
+        branch: Option<String>,
+        #[arg(long)]
+        author: Option<String>,
+        /// Match only drafts (`true`) or only non-drafts (`false`).
+        #[arg(long)]
+        draft: Option<bool>,
+        #[arg(short = 'H', long, value_enum, default_value_t = HarnessArg::Claude)]
+        harness: HarnessArg,
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+        #[arg(short, long)]
+        model: Option<String>,
+        /// Add it disarmed, to check what it would match first.
+        #[arg(long)]
+        paused: bool,
+    },
+    /// Arm a rule.
+    Enable { name: String },
+    /// Disarm a rule without deleting it.
+    Disable { name: String },
+    /// Delete a rule. Its past deliveries survive, with the rule id cleared.
+    Rm { name: String },
+    /// What has arrived, newest first.
+    Deliveries {
+        #[arg(short, long, default_value_t = 20)]
+        limit: usize,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum TelegramCommand {
+    /// Poll Telegram and delegate what arrives. Runs until stopped.
+    Serve {
+        /// Where an agent launched from a chat runs.
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+        #[arg(short = 'H', long, value_enum, default_value_t = HarnessArg::Claude)]
+        harness: HarnessArg,
+    },
+    /// Who the bot is, and who has tried to talk to it.
+    ///
+    /// Works *before* an allowlist exists, which is the only reason it can be
+    /// used to build one: `serve` refuses to start without
+    /// `JOD_TELEGRAM_ALLOWED_USERS`, and nothing else tells you the numeric id
+    /// that belongs in it. Message the bot, run this, copy the id.
+    Whoami,
+}
+
+/// The three questions a person actually has about a message Jod owed.
+#[derive(Subcommand)]
+enum LedgerCommand {
+    /// What is still owed. Everything, with `--all`.
+    Ls {
+        /// Settled rows too — delivered and given up on.
+        #[arg(long)]
+        all: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// One message in full: what it said, who holds it, what became of it.
+    Show {
+        /// The `message_key` a listing prints, or the row id.
+        what: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// What was given up on — the record that somebody was owed something
+    /// they never got.
+    Failed {
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum MonitorCommand {
+    /// Every monitor, and what it has seen.
+    Ls {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Attach a monitor to a schedule, replacing any it already had.
+    Set {
+        /// The schedule's name, as `jod schedule ls` shows it.
+        schedule: String,
+        /// A shell command whose stdout is what gets watched.
+        #[arg(long, conflicts_with = "url")]
+        command: Option<String>,
+        /// A URL whose response body is what gets watched.
+        #[arg(long)]
+        url: Option<String>,
+        /// Where a command runs. Defaults to the schedule's own directory, so
+        /// a probe and the run it gates see the same tree.
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+        /// The script is the whole job: its stdout is the result and no model
+        /// is ever woken. Empty stdout means stay quiet.
+        #[arg(long)]
+        no_agent: bool,
+    },
+    /// Detach the monitor, leaving the schedule to fire the ordinary way.
+    Rm { schedule: String },
+    /// Run the probe now and say what a tick would make of it.
+    ///
+    /// Records nothing and starts nothing, so the baseline a real tick compares
+    /// against is left exactly where it was.
+    Check {
+        schedule: String,
+        /// Keep what this check saw, making it the baseline the next one is
+        /// compared against — "start watching from here".
+        ///
+        /// Without it an operator has no way to arm a baseline deliberately;
+        /// they must wait for the daemon's first tick to set one. It still
+        /// starts no agent: this records what was seen, never acts on it.
+        #[arg(long)]
+        record: bool,
+    },
+    /// What a monitor has actually seen, newest first.
+    Log {
+        schedule: String,
+        #[arg(short, long, default_value_t = 20)]
+        limit: usize,
+    },
+}
+
+#[derive(Subcommand)]
+enum ScheduleCommand {
+    /// Every schedule, with when it next fires.
+    Ls {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Arm a new one.
+    Add {
+        /// A short name, used everywhere else to refer to it.
+        name: String,
+        /// What to ask the agent to do.
+        prompt: String,
+        /// A cron expression: `0 2 * * *`, `@daily`, `*/15 * * * *`.
+        #[arg(short, long)]
+        cron: String,
+        /// An IANA zone name — `Asia/Manila`, not `+08:00`. An offset is only
+        /// correct until the next daylight-saving transition.
+        #[arg(short = 'z', long, default_value = "UTC")]
+        timezone: String,
+        #[arg(short = 'H', long, value_enum, default_value_t = HarnessArg::Claude)]
+        harness: HarnessArg,
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+        #[arg(short, long)]
+        model: Option<String>,
+        /// What to do about instants missed while Jod was not running.
+        #[arg(long, default_value = "fire_once")]
+        misfire: String,
+        /// What to do when it comes due and the last run is still going.
+        #[arg(long, default_value = "skip")]
+        overlap: String,
+    },
+    /// Stop a schedule firing, without forgetting it.
+    Pause { name: String },
+    /// Arm it again. Also clears whatever failure count stopped it.
+    Resume { name: String },
+    /// Fire it now, through the ordinary tick so every policy still applies.
+    Run { name: String },
+    /// Forget a schedule and its history.
+    Rm { name: String },
+    /// What a schedule has done lately.
+    Log {
+        name: String,
+        #[arg(short, long, default_value_t = 10)]
+        limit: usize,
+    },
+}
+
+#[derive(Subcommand)]
+enum GoalCommand {
+    Ls {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Set a standing objective.
+    Add {
+        name: String,
+        /// What the goal is, in a sentence.
+        objective: String,
+        /// How often to work on it.
+        #[arg(short, long, default_value = "0 * * * *")]
+        cron: String,
+        #[arg(short = 'z', long, default_value = "UTC")]
+        timezone: String,
+        #[arg(short = 'H', long, value_enum, default_value_t = HarnessArg::Claude)]
+        harness: HarnessArg,
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+        /// A command that decides "done". Deterministic, and consulted before
+        /// anything is asked to judge progress.
+        #[arg(long)]
+        done_when: Option<String>,
+        /// Stop after this many iterations, whatever the state.
+        #[arg(long)]
+        max_iterations: Option<i64>,
+        /// Stop once this much has been spent.
+        #[arg(long)]
+        budget: Option<f64>,
+        /// How many iterations may finish without progress before it is called
+        /// stalled rather than left running.
+        #[arg(long, default_value_t = 6)]
+        stall_after: i64,
+    },
+    Pause { name: String },
+    Resume { name: String },
+    /// Run one iteration now.
+    Run { name: String },
+    Rm { name: String },
+    /// What this goal has done, out of its own memory.
+    ///
+    /// A goal's progress lives in the fact store rather than in its columns,
+    /// under a scope keyed by its id — which nobody can be expected to type.
+    /// This is the way in.
+    Log {
+        name: String,
+        #[arg(short, long, default_value_t = 10)]
+        limit: usize,
     },
 }
 
@@ -219,8 +747,8 @@ enum TeamCommand {
         team: String,
         #[arg(short, long)]
         cwd: Option<PathBuf>,
-        #[arg(short, long, value_enum, default_value_t = PermissionArg::Ask)]
-        permission: PermissionArg,
+        #[arg(short, long, value_parser = parse_permission_arg, default_value = "auto")]
+        permission: PermissionPolicy,
         /// Say what would happen without spawning anything.
         #[arg(long)]
         dry_run: bool,
@@ -238,8 +766,8 @@ enum TeamCommand {
         prompt: Vec<String>,
         #[arg(short, long)]
         cwd: Option<PathBuf>,
-        #[arg(short, long, value_enum, default_value_t = PermissionArg::Ask)]
-        permission: PermissionArg,
+        #[arg(short, long, value_parser = parse_permission_arg, default_value = "auto")]
+        permission: PermissionPolicy,
         /// Return as soon as the agent is launched, instead of waiting for it.
         #[arg(short, long)]
         detach: bool,
@@ -290,29 +818,103 @@ impl From<OriginArg> for Origin {
     }
 }
 
+/// Where consolidated material came from.
+///
+/// Deliberately not a superset of `OriginArg`: no provenance yields
+/// `Origin::Owner`. An agent reading a transcript *concludes* things; only
+/// Reljod asserts them, by typing `jod remember`.
 #[derive(Copy, Clone, PartialEq, Eq, ValueEnum)]
-enum PermissionArg {
-    /// Let the agent read — files and the web — and refuse everything that
-    /// could change something.
-    Ask,
-    /// Let file edits through; still prompt for anything else.
-    AcceptEdits,
-    /// Auto-approve everything. Only sane in a throwaway directory.
-    Bypass,
+enum ProvenanceArg {
+    /// A conversation between Reljod and Jod.
+    OwnerChat,
+    /// Anything Jod ingested — a fetched page, a payload, an email. Untrusted,
+    /// and excluded from recall by default.
+    Ingested,
 }
 
-impl From<PermissionArg> for PermissionPolicy {
-    fn from(a: PermissionArg) -> Self {
+impl From<ProvenanceArg> for Provenance {
+    fn from(a: ProvenanceArg) -> Self {
         match a {
-            PermissionArg::Ask => PermissionPolicy::Ask,
-            PermissionArg::AcceptEdits => PermissionPolicy::AcceptEdits,
-            PermissionArg::Bypass => PermissionPolicy::Bypass,
+            ProvenanceArg::OwnerChat => Provenance::OwnerChat,
+            ProvenanceArg::Ingested => Provenance::Ingested,
+        }
+    }
+}
+
+/// How much an agent may do to the *machine*, parsed by core rather than
+/// re-declared here.
+///
+/// This used to be a `ValueEnum` listing the levels a second time, and it
+/// drifted exactly as the note on `parse_access_arg` below predicts its
+/// neighbour would. A fourth mode was added to `PermissionPolicy` and this copy
+/// never heard about it: `--permission plan` was not something you could ask
+/// for, and the default stayed on the old `ask` after the real default had
+/// moved to `auto`. So every `jod run` went out asking for an approval nobody
+/// was there to give, and reported back that it was waiting for one.
+///
+/// One parser, in core, accepting every spelling — including the harnesses' own
+/// (`manual`, `auto`, `bypass_permissions`).
+fn parse_permission_arg(s: &str) -> Result<PermissionPolicy, String> {
+    jod_core::mcp::parse_permission(s).ok_or_else(|| {
+        let names: Vec<&str> = PermissionPolicy::ALL.iter().map(|m| m.label()).collect();
+        format!("`{s}` is not a permission mode — {}", names.join(", "))
+    })
+}
+
+/// How much of Jod itself an agent may reach over MCP.
+///
+/// A separate axis from `PermissionPolicy`, which bounds what the agent may do to
+/// the *machine*. An agent can be trusted to edit files and still have no
+/// business arming a schedule that spends money every night at 2am.
+///
+/// Deliberately not a `ValueEnum`. The derive would define a second spelling of
+/// every level beside `ToolAccess::as_str()`, and the two drifting apart is not
+/// hypothetical — it silently disconnected Jod from every harness it had just
+/// been wired to. One parser, in core, accepting both hyphen and underscore.
+fn parse_access_arg(s: &str) -> Result<jod_core::harness::ToolAccess, String> {
+    jod_core::mcp::parse_access(s).ok_or_else(|| {
+        format!("`{s}` is not an access level — read_only, delegate or orchestrate")
+    })
+}
+
+/// Read `.env` into the process environment, without overriding anything the
+/// caller actually exported.
+///
+/// A real environment variable always wins. A file that could silently replace
+/// what an operator typed on the command line would make `JOD_TELEGRAM_TOKEN=… jod …`
+/// a lie, and the failure would look like the wrong token rather than the wrong
+/// precedence.
+///
+/// Deliberately not a dependency. The format Jod needs is `KEY=value` lines with
+/// `#` comments — `dotenvy` brings variable interpolation, multi-line values and
+/// export syntax that nothing here uses, for a file that holds two secrets.
+fn load_dotenv() {
+    let Ok(text) = std::fs::read_to_string(".env") else {
+        return;
+    };
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let key = key.trim().strip_prefix("export ").unwrap_or(key.trim());
+        // Quotes are stripped because writing a token bare and writing it
+        // quoted are both ordinary, and a token carrying a literal `"` fails
+        // authentication with a message that blames the token.
+        let value = value.trim().trim_matches('"').trim_matches('\'');
+        if std::env::var_os(key).is_none() {
+            // SAFETY: single-threaded, before any task is spawned.
+            unsafe { std::env::set_var(key, value) };
         }
     }
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    load_dotenv();
     let cli = Cli::parse();
     // Persistent by default: an assistant that forgets every run when the
     // process exits is a task runner, not an assistant.
@@ -354,6 +956,7 @@ async fn main() -> Result<()> {
                 name: name.unwrap_or_else(|| default_name(&prompt)),
                 harness: harness.into(),
                 prompt,
+                system: None,
                 cwd: cwd.unwrap_or_else(jod_core::service::default_cwd),
                 model,
                 permission: permission.into(),
@@ -362,6 +965,11 @@ async fn main() -> Result<()> {
                     None if continue_last => Resume::Last,
                     None => Resume::Fresh,
                 },
+                // `jod run` is one task, not an orchestrator. Handing it Jod's
+                // own verbs would let a one-liner create schedules that spend
+                // money nightly, which is a decision that should be made on
+                // purpose rather than inherited from a default.
+                tools: None,
             };
 
             // Subscribe *before* spawning, so no early event is missed.
@@ -393,6 +1001,7 @@ async fn main() -> Result<()> {
             // produce the live events, and one that fired first would be lost.
             let events = jod.subscribe();
             jod.rehydrate(200).await?;
+            let id = resolve_run(&jod, &id).await?;
             let agent = jod.agent(&id).await?;
 
             // Everything that already happened, then everything that follows,
@@ -413,6 +1022,7 @@ async fn main() -> Result<()> {
 
         Command::Kill { id } => {
             jod.rehydrate(200).await?;
+            let id = resolve_run(&jod, &id).await?;
             jod.kill_agent(&id).await?;
             println!("killed {id}");
         }
@@ -457,6 +1067,79 @@ async fn main() -> Result<()> {
             println!("remembered #{id}");
         }
 
+        Command::Related {
+            subject,
+            hops,
+            scope,
+            json,
+        } => {
+            let store = jod.store().context("this command needs the database")?;
+            let now = chrono::Utc::now().timestamp_millis();
+            let found = store.neighbourhood(&scope, &subject, hops, now)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&found)?);
+            } else if found.is_empty() {
+                println!("nothing connected to {subject}");
+            } else {
+                for n in &found {
+                    // The hop count is the point: a thing two steps away is
+                    // related differently from one Jod was told about directly.
+                    println!("{:>2} hop  {}", n.hops, n.name);
+                }
+            }
+        }
+
+        Command::Path {
+            from,
+            to,
+            scope,
+            max,
+        } => {
+            let store = jod.store().context("this command needs the database")?;
+            match store.path_between(&scope, &from, &to, max)? {
+                Some(route) => println!("{}", route.join("  →  ")),
+                None => println!("no path from {from} to {to} within {max} hops"),
+            }
+        }
+
+        Command::Daemon { once } => {
+            let daemon = jod_core::daemon::Daemon::persistent().await?;
+            if once {
+                let report = daemon.run_once().await?;
+                println!(
+                    "claimed {} · started {} · held {} · failed {}",
+                    report.claimed, report.started, report.held, report.failed
+                );
+            } else {
+                // Runs until SIGTERM, finishing the tick in flight rather than
+                // being killed mid-claim — an abandoned claim is exactly the
+                // case the lease exists to recover, and not creating one is
+                // better than recovering from it.
+                let report = daemon.run(jod_core::daemon::shutdown_signal()).await;
+                println!(
+                    "stopped after {} ticks · {} runs started · {} failed",
+                    report.ticks, report.started, report.failed
+                );
+            }
+        }
+
+        Command::Main {
+            instruction,
+            wait,
+            harness,
+            cwd,
+            limit,
+        } => {
+            main_chat(&jod, instruction.join(" "), wait, harness, cwd, limit).await?;
+        }
+        Command::Conv { what } => conv_command(&jod, what)?,
+        Command::Schedule { what } => schedule_command(&jod, what)?,
+        Command::Webhook { what } => webhook_command(&jod, what)?,
+        Command::Monitor { what } => monitor_command(&jod, what)?,
+        Command::Ledger { what } => ledger_command(&jod, what)?,
+        Command::Telegram { what } => telegram_command(jod, what).await?,
+        Command::Goal { what } => goal_command(&jod, what)?,
+
         Command::Forget {
             subject,
             predicate,
@@ -469,6 +1152,18 @@ async fn main() -> Result<()> {
                 1 => println!("forgot 1 version, permanently"),
                 n => println!("forgot {n} versions, permanently"),
             }
+        }
+
+        Command::Consolidate {
+            conversation,
+            run,
+            provenance,
+            scope,
+            harness,
+            dry_run,
+        } => {
+            consolidate_command(&jod, conversation, run, provenance, scope, harness, dry_run)
+                .await?;
         }
 
         Command::Recall {
@@ -499,11 +1194,11 @@ async fn main() -> Result<()> {
             tui::run(
                 jod,
                 tui::Options {
-                    harness: harness.into(),
+                    harness: harness.map(Into::into),
                     team,
                     cwd: cwd.unwrap_or_else(jod_core::service::default_cwd),
                     model,
-                    permission: permission.into(),
+                    permission,
                     resume: if continue_last {
                         Resume::Last
                     } else {
@@ -649,10 +1344,12 @@ async fn main() -> Result<()> {
                                 name: format!("{team}-{}", order.member),
                                 harness: order.harness,
                                 prompt: order.prompt,
+                                system: None,
                                 cwd: cwd.clone(),
                                 model: None,
                                 permission: permission.into(),
                                 resume: Resume::Session(order.session_id),
+                                tools: None,
                             })
                             .await?;
                         // Drain only once the spawn succeeded, so a failure
@@ -706,10 +1403,12 @@ async fn main() -> Result<()> {
                             name: format!("{team}-{member}"),
                             harness: who.harness,
                             prompt: prompt.join(" "),
+                            system: None,
                             cwd: cwd.unwrap_or_else(jod_core::service::default_cwd),
                             model: None,
                             permission: permission.into(),
                             resume: Resume::Fresh,
+                            tools: None,
                         })
                         .await?;
                     store.set_member_status(&team, &member, MemberStatus::Busy)?;
@@ -752,8 +1451,1252 @@ async fn main() -> Result<()> {
             require_supervisor(&jod)?;
             chat(jod, harness, cwd, model, permission, continue_last).await?;
         }
+
+        Command::Mcp {
+            access,
+            max_permission,
+        } => {
+            mcp_cmd::run(jod, access, max_permission.into()).await?;
+        }
     }
 
+    Ok(())
+}
+
+/// Send an instruction to the main chat, or read it.
+///
+/// Non-blocking by default, and that is the feature rather than an
+/// optimisation: a main chat that waited for the work would be unusable
+/// exactly when you most want it. It returns as soon as the orchestrator has
+/// been *handed* the instruction.
+async fn main_chat(
+    jod: &Jod,
+    instruction: String,
+    wait: bool,
+    harness: HarnessArg,
+    cwd: Option<PathBuf>,
+    limit: usize,
+) -> Result<()> {
+    let store = jod.store().context("this command needs the database")?;
+    let kind: HarnessKind = harness.into();
+    let cwd = cwd.unwrap_or_else(jod_core::service::default_cwd);
+    let id = store.main_conversation(kind, &cwd.display().to_string())?;
+    let now = chrono::Utc::now().timestamp_millis();
+
+    if instruction.trim().is_empty() {
+        return show_main_chat(jod, &id, limit, now);
+    }
+
+    let handed = hand_to_orchestrator(jod, &instruction, kind, cwd).await?;
+    if let Some((reason, chars)) = handed.compaction_due {
+        println!("· the chat is due for compaction ({reason}) — {chars} chars in the live window");
+        println!("  `jod conv compact {}` summarises it", &id[..8.min(id.len())]);
+    }
+    let agent = handed.agent;
+
+    if !wait {
+        println!("→ {} · {}", short_id(&agent.id), "handed to the orchestrator");
+        println!("  `jod main` reads the chat · `jod watch {}` follows it", short_id(&agent.id));
+        return Ok(());
+    }
+    wait_for_orchestrator(jod, &agent.id).await
+}
+
+/// What [`hand_to_orchestrator`] did, for a caller that has its own way of
+/// saying so. The CLI prints; the TUI pushes a notice.
+struct Handed {
+    agent: jod_core::service::AgentSummary,
+    /// `(reason, chars)` when the live window has grown past a threshold.
+    compaction_due: Option<(&'static str, usize)>,
+}
+
+/// Give an instruction to the pinned main chat.
+///
+/// Shared by `jod main` and the TUI's `/main`, because two copies of "which
+/// conversation, which tools, which permission mode" is two things to keep in
+/// step, and the TUI is the interface that matters most — a divergence there
+/// would mean the tested path is not the used one.
+async fn hand_to_orchestrator(
+    jod: &Jod,
+    instruction: &str,
+    kind: HarnessKind,
+    cwd: PathBuf,
+) -> Result<Handed> {
+    let store = jod.store().context("this command needs the database")?;
+    let id = store.main_conversation(kind, &cwd.display().to_string())?;
+    let now = chrono::Utc::now().timestamp_millis();
+
+    // Compaction is checked before the instruction goes out, not after: the
+    // right moment to summarise is *between* things, and doing it mid-turn
+    // would mean the turn that triggered it ran against the old window anyway.
+    let live = store.live_window(&id)?;
+    let chars: usize = live.iter().map(|m| m.text.len()).sum();
+    let compaction_due =
+        jod_core::orchestrator::should_compact(chars, store.last_human_ms(&id)?, now)
+            .map(|reason| (reason.as_str(), chars));
+
+    let instruction = instruction.to_string();
+
+    // The orchestrator is a harness run holding Jod's own tools, so it
+    // delegates by calling them rather than by describing what it would do.
+    // `Resume` keeps it one conversation across restarts.
+    //
+    // `spawn_agent_in(.., Existing)` and not `spawn_agent`: the plain form
+    // binds `RunConversation::New`, which minted a *second* conversation per
+    // instruction — unpinned, titled with the first line of the preamble, and
+    // holding the entire transcript, while the pinned `main` conversation this
+    // function had just fetched stayed empty. `jod main` read the pinned one
+    // and truthfully reported nothing there. A main chat that does not
+    // accumulate is not a chat.
+    let agent = jod
+        .spawn_agent_in(SpawnRequest {
+            name: "main".into(),
+            harness: kind,
+            prompt: instruction.clone(),
+            system: Some(jod_core::orchestrator::orchestrator_preamble().to_string()),
+            cwd,
+            model: None,
+            // Not `Ask`. `Ask` is plan mode, and plan mode refuses every
+            // mutation — including the MCP tool calls that *are* this run's
+            // entire job. Caught by running it: the orchestrator dutifully
+            // called `schedule_list`, `list_agents` and `recall`, then reached
+            // for `ExitPlanMode`, could not find it, and wrote a plan file
+            // instead of arming the schedule it had been asked for.
+            //
+            // Its confinement is `ToolAccess`, not the permission mode. The
+            // mutations that matter here are Jod's own verbs, and those are
+            // already scoped by the access level; the permission axis bounds
+            // what it may do to the *machine*, which for a chat that only
+            // delegates should be little — but it cannot be nothing, or it
+            // cannot delegate at all.
+            permission: PermissionPolicy::AcceptEdits,
+            resume: store.resume_for(&id)?,
+            tools: Some(jod_core::harness::ToolAccess::Orchestrate),
+        },
+            RunConversation::Existing(id.clone()),
+        )
+        .await?;
+
+    // The spawn already recorded the instruction as this conversation's user
+    // turn; this call is what returns its id, and appending is keyed to the run
+    // so the second call finds the first row rather than writing a duplicate.
+    let message = store.append_prompt(&id, &agent.id, &instruction)?;
+    store.touch_human(&id, now)?;
+    store.record_delegation(&jod_core::orchestrator::Delegation {
+        id: 0,
+        conversation_id: id.clone(),
+        message_id: message,
+        kind: "orchestrate".into(),
+        run_id: Some(agent.id.clone()),
+        schedule_name: None,
+        goal_name: None,
+        // What it decided goes here once the run reports; this row exists from
+        // the moment the instruction is handed over, so a chat that was
+        // interrupted still shows what it was doing.
+        reason: String::new(),
+        at_ms: now,
+    })?;
+
+    Ok(Handed {
+        agent,
+        compaction_due,
+    })
+}
+
+/// Follow an orchestrator run to its end, for `jod main --wait`.
+async fn wait_for_orchestrator(jod: &Jod, run_id: &str) -> Result<()> {
+    let mut events = jod.subscribe();
+    while let Ok(envelope) = events.recv().await {
+        if envelope.agent_id != run_id {
+            continue;
+        }
+        match &envelope.event {
+            jod_core::AgentEvent::Message { text } => println!("{text}"),
+            jod_core::AgentEvent::ToolCall { name, .. } => println!("  · {name}"),
+            jod_core::AgentEvent::Finished { .. } => break,
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// Read the main chat: what was said, and what it set in motion.
+fn show_main_chat(jod: &Jod, id: &str, limit: usize, now: i64) -> Result<()> {
+    let store = jod.store().context("this command needs the database")?;
+    let thread = store.live_window(id)?;
+    if thread.is_empty() {
+        println!("the main chat is empty — `jod main \"<instruction>\"` starts it");
+        return Ok(());
+    }
+    render_time::thread(&thread[thread.len().saturating_sub(limit)..]);
+
+    // What the chat actually caused, which is the question a transcript alone
+    // does not answer.
+    let done = store.delegations(id, 10)?;
+    if !done.is_empty() {
+        println!("\nset in motion:");
+        for d in done {
+            // A run is named by its short id everywhere else in Jod, and this
+            // column sat next to a schedule name — so a bare UUID here was both
+            // inconsistent and the widest thing on the screen.
+            let what = match (d.run_id, d.schedule_name, d.goal_name) {
+                (Some(run), _, _) => short_id(&run),
+                (_, Some(name), _) | (_, _, Some(name)) => name,
+                _ => "—".into(),
+            };
+            println!(
+                "  {} {:<12} {}",
+                render_time::when(d.at_ms, now),
+                d.kind,
+                what
+            );
+        }
+    }
+    Ok(())
+}
+
+fn short_id(id: &str) -> String {
+    id.chars().take(8).collect()
+}
+
+/// Carry out a `jod conv …` subcommand.
+///
+/// An id prefix is enough everywhere one is taken — see
+/// [`resolve_conversation`].
+fn conv_command(jod: &Jod, what: ConvCommand) -> Result<()> {
+    let store = jod.store().context("this command needs the database")?;
+    let resolve = |typed: &str| resolve_conversation(store, typed);
+
+    match what {
+        ConvCommand::Ls { limit, json } => {
+            let all = store.conversations(limit)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&all)?);
+            } else if all.is_empty() {
+                println!("no conversations yet");
+            } else {
+                render_time::conversations(&all, chrono::Utc::now().timestamp_millis());
+            }
+        }
+        ConvCommand::Show { id, live } => {
+            let id = resolve(&id)?;
+            let thread = if live {
+                store.live_window(&id)?
+            } else {
+                store.thread(&id)?
+            };
+            render_time::thread(&thread);
+        }
+        ConvCommand::Fork { id, at, title } => {
+            let id = resolve(&id)?;
+            let at = match at {
+                Some(m) => m,
+                None => store
+                    .conversation(&id)?
+                    .and_then(|c| c.head_id)
+                    .context("that conversation has no messages to fork from")?,
+            };
+            let forked = store.fork_conversation(&id, at, title.as_deref())?;
+            println!("forked to {}", forked.id);
+            println!("the original is untouched — `jod conv ls` shows both");
+        }
+        ConvCommand::Revert { id, message } => {
+            let id = resolve(&id)?;
+            store.revert_to(&id, message)?;
+            println!("head is back at message {message}");
+            println!("nothing was deleted; `jod conv goto` returns to what was abandoned");
+        }
+        ConvCommand::Goto { id, message } => {
+            let id = resolve(&id)?;
+            store.move_head(&id, message)?;
+            println!("head is now at message {message}");
+        }
+        ConvCommand::Search { query, limit } => {
+            let hits = store.search_messages(&query.join(" "), limit)?;
+            if hits.is_empty() {
+                println!("nothing matched");
+            } else {
+                render_time::search(&hits);
+            }
+        }
+        ConvCommand::Compact { id, summary } => {
+            let id = resolve(&id)?;
+            let live = store.live_window(&id)?;
+            let (Some(first), Some(last)) = (live.first(), live.last()) else {
+                bail!("nothing to compact");
+            };
+            let done = store.compact(&id, first.id, last.id, &summary, "manual")?;
+            // Both numbers, because a compaction that freed nothing is a real
+            // outcome and should be visible rather than repeated forever.
+            println!(
+                "compacted {} chars to {} — the originals stay on disk and stay searchable",
+                done.before_chars, done.after_chars
+            );
+        }
+        ConvCommand::Handoff { id, to } => {
+            let id = resolve(&id)?;
+            let carrier = store.handoff(&id, HarnessKind::from(to))?;
+            if carrier.is_lossy() {
+                // Said before the move, because that is when the loss is still
+                // a decision rather than a discovery.
+                eprintln!(
+                    "note: this harness accepts no transcript, so the prior \
+                     conversation travels as prompt text — structure is lost"
+                );
+            }
+            // Printed in exactly the form the receiving harness takes, so this
+            // is pipeable rather than merely informative: stream-json lines go
+            // to `claude --input-format stream-json`, the document to
+            // `opencode import`, the prefix into a prompt.
+            match carrier {
+                jod_core::conversation::Handoff::StreamJson { lines } => {
+                    for line in lines {
+                        println!("{line}");
+                    }
+                }
+                jod_core::conversation::Handoff::Import { document } => {
+                    println!("{}", serde_json::to_string_pretty(&document)?);
+                }
+                jod_core::conversation::Handoff::PromptPrefix { text } => println!("{text}"),
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Resolve a typed id prefix against the conversations that exist.
+///
+/// An ambiguous prefix is refused rather than guessed: reverting or
+/// consolidating the wrong conversation is not undoable by the person who did
+/// it.
+fn resolve_conversation(store: &Store, typed: &str) -> Result<String> {
+    let all = store.conversations(500)?;
+    let hits: Vec<_> = all.iter().filter(|c| c.id.starts_with(typed)).collect();
+    match hits.as_slice() {
+        [only] => Ok(only.id.clone()),
+        [] => bail!("no conversation starts with {typed}"),
+        many => bail!(
+            "{typed} matches {} conversations — type more of it",
+            many.len()
+        ),
+    }
+}
+
+/// Resolve a typed run-id prefix against the runs Jod knows about.
+///
+/// Every surface *shows* an eight-character id — `jod ls`, `jod main`, the run
+/// summary printed after a spawn — and `jod watch` and `jod kill` then demanded
+/// the full uuid. `jod main` printed ``jod watch 1f0fc870`` as a hint and that
+/// hint did not work, which is the kind of detail that teaches someone the tool
+/// is lying to them.
+///
+/// Ambiguity is refused rather than guessed, for the same reason as
+/// [`resolve_conversation`]: `jod kill` on the wrong agent is not undoable.
+/// An exact match wins outright, so a full uuid never has to be disambiguated
+/// against itself.
+async fn resolve_run(jod: &Jod, typed: &str) -> Result<String> {
+    if jod.agent(typed).await.is_ok() {
+        return Ok(typed.to_string());
+    }
+    let all = jod.agents().await;
+    let hits: Vec<_> = all.iter().filter(|a| a.id.starts_with(typed)).collect();
+    match hits.as_slice() {
+        [only] => Ok(only.id.clone()),
+        [] => bail!("no agent with id `{typed}`"),
+        many => bail!("{typed} matches {} agents — type more of it", many.len()),
+    }
+}
+
+/// Turn a conversation, or a run, into memory.
+///
+/// The shape of this command follows the module it drives: Jod builds the
+/// prompt, an agent does the reading, and Jod reads the answer back under rules
+/// the agent cannot reach. So the flow is spawn → wait → parse → write, and the
+/// only thing the caller decides is *where the material came from*, which is
+/// the one input that cannot be recovered from the text.
+async fn consolidate_command(
+    jod: &std::sync::Arc<Jod>,
+    conversation: Option<String>,
+    run: Option<String>,
+    provenance: ProvenanceArg,
+    scope: String,
+    harness: HarnessArg,
+    dry_run: bool,
+) -> Result<()> {
+    let store = jod.store().context("this command needs the database")?;
+
+    let (material, source) = match (conversation, run) {
+        (Some(typed), _) => {
+            let id = resolve_conversation(store, &typed)?;
+            (
+                transcript_material(&store.transcript(&id)?),
+                format!("conversation:{id}"),
+            )
+        }
+        (None, Some(id)) => {
+            // Straight from the event log, so a run that was never placed in a
+            // conversation — anything launched before this existed, or by a
+            // process that has since gone — can still be read.
+            let events = jod.events_since(&id, None).await?;
+            (run_material(&id, &events), format!("run:{id}"))
+        }
+        (None, None) => bail!(
+            "say which conversation to consolidate — `jod conv ls` lists them — \
+             or pass --run <id>"
+        ),
+    };
+    if material.trim().is_empty() {
+        bail!("{source} has nothing in it to read");
+    }
+
+    let consolidation = Consolidation::new(scope, provenance.into(), material)
+        .from(source.clone())
+        .with_harness(harness.into());
+
+    require_supervisor(jod)?;
+    // Subscribe before spawning, so no early event is missed.
+    let events = jod.subscribe();
+    let agent = jod
+        // Detached: the extraction's prompt *is* a transcript, and recording it
+        // as a conversation would store the same text twice and index it twice
+        // for search.
+        .spawn_agent_in(consolidation.extraction_request(), RunConversation::Detached)
+        .await?;
+    eprintln!(
+        "reading {source} with {} as {} …",
+        agent.harness_label,
+        &agent.id[..agent.id.len().min(8)]
+    );
+    let output = collect_output(events, &agent.id).await;
+
+    settle_consolidation(store, &consolidation, &output, dry_run)
+}
+
+/// Read an extraction's output, report it, and write it unless this is a dry
+/// run.
+///
+/// Split out from the command because "did the dry run write anything" is the
+/// question worth a test here, and a test cannot spawn an agent.
+fn settle_consolidation(
+    store: &Store,
+    consolidation: &Consolidation,
+    output: &str,
+    dry_run: bool,
+) -> Result<()> {
+    if dry_run {
+        let batch = consolidation.parse(output);
+        if batch.facts.is_empty() && batch.dropped.is_empty() {
+            println!("nothing durable in that material — a correct and common answer");
+            return Ok(());
+        }
+        for fact in &batch.facts {
+            println!(
+                "would write  {} | {} | {}   ({})",
+                fact.subject,
+                fact.predicate,
+                fact.object,
+                would_do(store, fact)?
+            );
+        }
+        report_dropped(&batch.dropped);
+        if batch.truncated {
+            println!("the agent offered more lines than the cap allows; the rest were not read");
+        }
+        println!(
+            "nothing was written. The trust and loss rules are applied at write \
+             time, so a real run may still refuse some of this."
+        );
+        return Ok(());
+    }
+
+    let outcome = consolidation.apply(store, output);
+    if let Some(refusal) = &outcome.refused {
+        // Nothing was written at all — a consolidation that would lose most of
+        // what was known about a subject is not partially right.
+        println!(
+            "refused: this would retire {} of the {} things known about {} ({:.0}%, limit {:.0}%)",
+            refusal.retiring,
+            refusal.prior,
+            refusal.subject,
+            refusal.fraction * 100.0,
+            refusal.limit * 100.0
+        );
+        println!("nothing was written");
+        return Ok(());
+    }
+    println!(
+        "wrote {} fact(s) · {} superseded a belief · {} already known",
+        outcome.written.len(),
+        outcome.superseded,
+        outcome.restated
+    );
+    report_dropped(&outcome.dropped);
+    if outcome.truncated {
+        println!("the agent offered more lines than the cap allows; the rest were not read");
+    }
+    if let Some(error) = &outcome.error {
+        // Reported, not raised: the conversation still happened.
+        println!("the store stopped part-way through: {error}");
+    }
+    Ok(())
+}
+
+/// What writing one extracted line would do to what Jod already believes.
+///
+/// The same question `Consolidation::apply` asks — the current belief on this
+/// subject, predicate and scope — asked read-only, so a dry run says something
+/// more useful than "it parsed". It stops short of the trust ranking and the
+/// loss guard, which are the store's to apply and are stated as such.
+fn would_do(store: &Store, fact: &NewFact) -> Result<String> {
+    let current = store
+        .facts_about(&fact.subject)?
+        .into_iter()
+        .find(|f| f.scope == fact.scope && f.predicate == fact.predicate);
+    Ok(match current {
+        Some(f) if f.object.trim().eq_ignore_ascii_case(fact.object.trim()) => {
+            "already known".to_string()
+        }
+        Some(f) => format!("supersedes “{}”", f.object),
+        None => "new".to_string(),
+    })
+}
+
+fn report_dropped(dropped: &[jod_core::consolidate::Dropped]) {
+    if dropped.is_empty() {
+        return;
+    }
+    println!("{} line(s) dropped:", dropped.len());
+    for d in dropped {
+        // The reason as the parser named it. Rendered debug rather than
+        // translated, so a reason added later shows up here rather than
+        // vanishing into a catch-all arm.
+        println!("  {:?}  {}", d.reason, d.line);
+    }
+}
+
+/// A conversation as the text an extraction reads.
+///
+/// Thinking is left out. It is one model's private reasoning — speculation,
+/// options weighed and dropped — and a fact extracted from it is something
+/// nobody ever asserted.
+fn transcript_material(transcript: &[PortableMessage]) -> String {
+    transcript
+        .iter()
+        .filter(|m| m.role != "thinking")
+        .map(|m| match m.role.as_str() {
+            "tool_call" => format!(
+                "{} call: {}",
+                m.tool_name.as_deref().unwrap_or("tool"),
+                m.text
+            ),
+            "tool_result" => format!(
+                "{} result: {}",
+                m.tool_name.as_deref().unwrap_or("tool"),
+                m.text
+            ),
+            role => format!("{role}: {}", m.text),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// A run as the text an extraction reads.
+///
+/// The prompt comes off disk rather than out of the events, because no harness
+/// reports its own prompt back — and the prompt is usually the densest thing in
+/// the run, since it is the part a person wrote.
+fn run_material(run_id: &str, events: &[AgentEnvelope]) -> String {
+    let mut lines = Vec::new();
+    if let Ok(prompt) = std::fs::read_to_string(jod_core::paths::prompt_path(run_id)) {
+        lines.push(format!("user: {}", prompt.trim()));
+    }
+    for envelope in events {
+        match &envelope.event {
+            AgentEvent::Message { text } => lines.push(format!("assistant: {text}")),
+            AgentEvent::ToolResult {
+                name,
+                summary: Some(summary),
+                ..
+            } => lines.push(format!("{name} result: {summary}")),
+            _ => {}
+        }
+    }
+    lines.join("\n")
+}
+
+/// Wait for one run to finish, and return everything it said.
+///
+/// Every assistant message, not only the last: an agent asked for JSON lines
+/// will preface them, apologise, or wrap them in a fence, and the parser passes
+/// over prose in silence anyway — so keeping the lot costs nothing and loses no
+/// facts to a stray "here you go".
+async fn collect_output(
+    mut events: jod_core::broadcast::Receiver<AgentEnvelope>,
+    agent_id: &str,
+) -> String {
+    use jod_core::broadcast::error::RecvError;
+    let mut said = String::new();
+    loop {
+        match events.recv().await {
+            Ok(envelope) if envelope.agent_id == agent_id => match envelope.event {
+                AgentEvent::Message { text } => {
+                    said.push_str(&text);
+                    said.push('\n');
+                }
+                // `Finished.text` repeats the last message, so it is not added.
+                AgentEvent::Finished { .. } => return said,
+                AgentEvent::Error { message } => eprintln!("[jod] {message}"),
+                _ => {}
+            },
+            Ok(_) => {}
+            // Nothing more is coming. Whatever was said is still worth reading.
+            Err(RecvError::Closed) => return said,
+            Err(RecvError::Lagged(_)) => continue,
+        }
+    }
+}
+
+/// Carry out a `jod schedule …` subcommand.
+///
+/// Every path here goes through the store rather than spawning anything: a
+/// schedule is armed by writing a row, and the tick is what fires it. Even
+/// `run` only brings the next instant forward, so a hand-started run picks up
+/// the same overlap policy, failure count and fire record as a timed one.
+/// Carry out a `jod webhook …` subcommand.
+///
+/// The verbs a rule needs to exist at all. Everything downstream of a rule —
+/// the receiver, the HMAC check, the delivery ledger, the TUI's list with its
+/// enable/disable/delete keys — was already built and tested against rules that
+/// only ever existed inside test functions.
+fn webhook_command(jod: &Jod, what: WebhookCommand) -> Result<()> {
+    use jod_core::webhook::{Conditions, Rule};
+    let store = jod.store().context("this command needs the database")?;
+    let now = chrono::Utc::now().timestamp_millis();
+    match what {
+        WebhookCommand::Ls { json } => {
+            let all = store.webhook_rules()?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&all)?);
+            } else if all.is_empty() {
+                println!("no webhook rules — `jod webhook add` writes one");
+            } else {
+                render_time::webhook_rules(&all);
+            }
+        }
+        WebhookCommand::Add {
+            name,
+            prompt,
+            repo,
+            event,
+            action,
+            labels,
+            branch,
+            author,
+            draft,
+            harness,
+            cwd,
+            model,
+            paused,
+        } => {
+            if store.webhook_rule(&name)?.is_some() {
+                bail!("a rule named `{name}` already exists — `jod webhook rm {name}` first");
+            }
+            let rule = Rule {
+                id: uuid::Uuid::new_v4().to_string(),
+                name: name.clone(),
+                source: "github".into(),
+                repo,
+                event,
+                action,
+                conditions: Conditions {
+                    labels,
+                    branch,
+                    author,
+                    draft,
+                },
+                prompt,
+                harness: HarnessKind::from(harness).id().to_string(),
+                cwd: cwd.unwrap_or(std::env::current_dir()?).display().to_string(),
+                model,
+                enabled: !paused,
+                created_at_ms: now,
+            };
+            store.add_webhook_rule(&rule)?;
+            println!(
+                "{} {name} · {} {}",
+                if paused { "○" } else { "●" },
+                rule.event,
+                rule.repo
+            );
+            if paused {
+                println!("  disarmed — `jod webhook enable {name}` arms it");
+            }
+        }
+        WebhookCommand::Enable { name } => set_rule_armed(&store, &name, true)?,
+        WebhookCommand::Disable { name } => set_rule_armed(&store, &name, false)?,
+        WebhookCommand::Rm { name } => {
+            if store.delete_webhook_rule(&name)? {
+                println!("deleted {name}");
+            } else {
+                bail!("no rule named `{name}`");
+            }
+        }
+        WebhookCommand::Deliveries { limit, json } => {
+            let all = store.deliveries(limit)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&all)?);
+            } else if all.is_empty() {
+                println!("nothing has arrived yet");
+            } else {
+                render_time::deliveries(&all, now);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Arm or disarm a rule, reporting the name back rather than a silent success.
+///
+/// A missing name is an error and not a no-op: `jod webhook enable ci-faild` is
+/// a typo, and a cheerful nothing would read as "armed".
+fn set_rule_armed(store: &jod_core::store::Store, name: &str, armed: bool) -> Result<()> {
+    if store.set_webhook_rule_enabled(name, armed)? {
+        println!("{} {name}", if armed { "●" } else { "○" });
+        Ok(())
+    } else {
+        bail!("no rule named `{name}`")
+    }
+}
+
+/// The bot token, from the one name Jod documents or the one people write.
+///
+/// `JOD_TELEGRAM_TOKEN` is canonical and always wins. `TELEGRAM_BOT_API_KEY` is
+/// accepted because it is what a person writes into a `.env` without consulting
+/// anything, and refusing it teaches nothing — the alternative is a bot that is
+/// silent for the one reason its own error message does not mention.
+fn telegram_token() -> Result<String> {
+    for name in ["JOD_TELEGRAM_TOKEN", "TELEGRAM_BOT_API_KEY"] {
+        if let Ok(t) = std::env::var(name) {
+            if !t.trim().is_empty() {
+                return Ok(t.trim().to_string());
+            }
+        }
+    }
+    bail!("JOD_TELEGRAM_TOKEN is not set — a `.env` in this directory is read automatically")
+}
+
+/// Carry out a `jod telegram …` subcommand.
+async fn telegram_command(jod: std::sync::Arc<Jod>, what: TelegramCommand) -> Result<()> {
+    use jod_core::telegram::{Allowlist, Bridge, Config, HttpBot, Poller};
+    match what {
+        TelegramCommand::Whoami => {
+            let bot = HttpBot::new(&telegram_token()?)?;
+            // An empty allowlist refuses everybody, which is precisely what
+            // makes this a bootstrap: every pending message becomes a Refusal
+            // carrying the id that belongs in JOD_TELEGRAM_ALLOWED_USERS.
+            // Reusing the real poller rather than curl means the ids printed
+            // here are the ids `serve` will actually compare against.
+            let poller = Poller::new(bot, Allowlist::default());
+            let batch = poller
+                .poll_once()
+                .await
+                .map_err(|e| anyhow::anyhow!("Telegram refused the poll: {e}"))?;
+            println!("the token works — Telegram answered ({} update(s))", batch.len());
+            let refusals = poller.refusals();
+            if refusals.is_empty() {
+                println!("nobody has messaged the bot yet — send it anything, then re-run");
+                return Ok(());
+            }
+            // By person, not by message: somebody who sent three messages is
+            // still one id to allow, and printing them three times reads as
+            // three different people at a glance.
+            println!("\nwho has messaged it:");
+            let mut ids: Vec<i64> = Vec::new();
+            for r in &refusals {
+                if ids.contains(&r.user_id) {
+                    continue;
+                }
+                ids.push(r.user_id);
+                let who = r.username.as_deref().unwrap_or("(no username)");
+                println!("  {} @{}", r.user_id, who);
+            }
+            let list = ids
+                .iter()
+                .map(|i| i.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            println!("\nto let them in:\n  JOD_TELEGRAM_ALLOWED_USERS={list}");
+            // Said out loud because this command consumes the backlog: the
+            // messages just counted will not be redelivered to `serve`, and
+            // silently eating the first thing somebody sent is the kind of
+            // thing that reads as a broken bot.
+            println!("\n\x1b[2m(these updates are now acknowledged and will not reach `serve`)\x1b[0m");
+        }
+        TelegramCommand::Serve { cwd, harness } => {
+            // `from_parts` rather than `from_env`, purely so the token comes
+            // from the same lookup `whoami` uses. Routing one of the two
+            // through the alias and not the other is how this first shipped,
+            // and the symptom was `whoami` proving the token while `serve`
+            // insisted it was unset.
+            //
+            // Everything else `from_env` does is kept, including the refusal
+            // of an empty allowlist at startup rather than at the first
+            // message: a bot that silently answers nobody looks exactly like
+            // a bot with a bad token.
+            let mut config = Config::from_parts(
+                Some(telegram_token()?),
+                std::env::var("JOD_TELEGRAM_ALLOWED_USERS").ok(),
+                jod_core::service::default_cwd(),
+            )?;
+            if let Some(dir) = cwd {
+                config.cwd = dir;
+            }
+            config.harness = HarnessKind::from(harness);
+            let bot = HttpBot::new(&config.token)?;
+            let bridge = Bridge::new(bot, jod, &config);
+            println!(
+                "listening as a {} bridge in {} — Ctrl-C stops it",
+                config.harness.label(),
+                config.cwd.display()
+            );
+            bridge
+                .run()
+                .await
+                .map_err(|e| anyhow::anyhow!("the bridge stopped: {e}"))?;
+        }
+    }
+    Ok(())
+}
+
+/// Carry out a `jod monitor …` subcommand.
+fn monitor_command(jod: &Jod, what: MonitorCommand) -> Result<()> {
+    use jod_core::monitor::{Decision, LocalProbes, Mode, Monitor, Probe};
+    let store = jod.store().context("this command needs the database")?;
+    let now = chrono::Utc::now().timestamp_millis();
+    match what {
+        MonitorCommand::Ls { json } => {
+            let all = store.monitors()?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&all)?);
+            } else if all.is_empty() {
+                println!("no monitors — `jod monitor set <schedule> --command …` attaches one");
+            } else {
+                // Every monitor is shown against its schedule's *name*. A
+                // monitor whose schedule has been deleted falls back to the id
+                // rather than vanishing: an orphan row is exactly the thing a
+                // listing exists to reveal.
+                let named: std::collections::HashMap<String, String> = store
+                    .schedules()?
+                    .into_iter()
+                    .map(|s| (s.id, s.name))
+                    .collect();
+                let rows: Vec<_> = all
+                    .into_iter()
+                    .map(|m| {
+                        let name = named
+                            .get(&m.schedule_id)
+                            .cloned()
+                            .unwrap_or_else(|| format!("{} (no such schedule)", m.schedule_id));
+                        (m, name)
+                    })
+                    .collect();
+                render_time::monitors(&rows, now);
+            }
+        }
+        MonitorCommand::Set {
+            schedule,
+            command,
+            url,
+            cwd,
+            no_agent,
+        } => {
+            let s = store
+                .schedule_named(&schedule)?
+                .with_context(|| format!("no schedule named `{schedule}`"))?;
+            let probe = match (command, url) {
+                (Some(c), None) => Probe::Command(c),
+                (None, Some(u)) => Probe::Url(u),
+                // Refused rather than defaulted. Guessing which one was meant
+                // would attach a monitor nobody described, and a monitor that
+                // watches the wrong thing reports "unchanged" for ever.
+                _ => bail!("give exactly one of --command or --url"),
+            };
+            if no_agent && matches!(probe, Probe::Url(_)) {
+                // `no_agent` means "stdout is the result". For a URL that is
+                // the whole page, reported in full on every single tick — a
+                // notification firehose rather than a watchdog. Watch mode is
+                // what a URL wants, and it is one flag away.
+                bail!(
+                    "--no-agent reports the probe's whole output every tick, which for a URL is \
+                     the entire page — drop --no-agent to be told only when it changes"
+                );
+            }
+            let mode = if no_agent { Mode::NoAgent } else { Mode::Watch };
+            // The schedule's own directory by default, so the probe and the run
+            // it gates look at the same tree. A monitor watching `git log` in
+            // some other checkout is a bug that reads as a working monitor.
+            let dir = cwd.map(|p| p.display().to_string()).unwrap_or(s.cwd.clone());
+            let m = Monitor::new(&s.id, probe).in_dir(dir).with_mode(mode);
+            let replacing = store.monitor(&s.id)?.is_some();
+            store.set_monitor(&m)?;
+            println!(
+                "{} {schedule} · {} {}",
+                if replacing { "↻" } else { "●" },
+                m.probe.kind(),
+                m.probe.target()
+            );
+            println!(
+                "  {}",
+                match mode {
+                    Mode::NoAgent => "no agent runs — the script's stdout is the result",
+                    Mode::Watch => "the next check sets a baseline and wakes nothing",
+                }
+            );
+        }
+        MonitorCommand::Rm { schedule } => {
+            let s = store
+                .schedule_named(&schedule)?
+                .with_context(|| format!("no schedule named `{schedule}`"))?;
+            if store.delete_monitor(&s.id)? {
+                println!("{schedule} now fires on its cron alone");
+            } else {
+                bail!("{schedule} has no monitor");
+            }
+        }
+        MonitorCommand::Check { schedule, record } => {
+            let s = store
+                .schedule_named(&schedule)?
+                .with_context(|| format!("no schedule named `{schedule}`"))?;
+            let m = store
+                .monitor(&s.id)?
+                .with_context(|| format!("{schedule} has no monitor"))?;
+            // Dry by default, and `check` rather than `observe` for it: a dry
+            // run that moved the baseline would consume the very change the
+            // next real tick exists to notice, and "I tested it and then it
+            // never fired" is the least debuggable outcome available.
+            let decision = if record {
+                let now = chrono::Utc::now().timestamp_millis();
+                let (seen, decision) = jod_core::monitor::observe(&m, &LocalProbes);
+                store.record_check(&s.id, &seen, &decision, now)?;
+                decision
+            } else {
+                jod_core::monitor::check(&m, &LocalProbes)
+            };
+            match decision {
+                Decision::Baseline => println!("baseline — nothing to compare against yet"),
+                Decision::Suppress => println!("unchanged — a tick now would run nothing"),
+                Decision::Run { diff } => {
+                    println!("changed — a tick now would run the schedule with:");
+                    println!("{diff}");
+                }
+                Decision::Report { text } => {
+                    println!("reported — a tick now would deliver this and wake no model:");
+                    println!("{text}");
+                }
+                Decision::Silent => println!("silent — the script said nothing, so nothing happens"),
+                Decision::Failed { detail } => {
+                    println!("failed — {detail}");
+                }
+            }
+            println!(
+                "\x1b[2m({})\x1b[0m",
+                if record {
+                    "recorded — the next check compares against this"
+                } else {
+                    "nothing was recorded; the baseline is where it was"
+                }
+            );
+        }
+        MonitorCommand::Log { schedule, limit } => {
+            let s = store
+                .schedule_named(&schedule)?
+                .with_context(|| format!("no schedule named `{schedule}`"))?;
+            let checks = store.monitor_checks(&s.id, limit)?;
+            if checks.is_empty() {
+                println!("{schedule}'s monitor has not been checked yet");
+            } else {
+                render_time::checks(&checks, now);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `jod ledger …` — the reader the delivery ledger never had.
+///
+/// The module has recorded every owed message since it was wired, and nothing
+/// could show one. A ledger nobody can read proves things to nobody, which is a
+/// slower version of not keeping one.
+fn ledger_command(jod: &Jod, what: LedgerCommand) -> Result<()> {
+    use jod_core::ledger::DeliveryState;
+    let store = jod.store().context("this command needs the database")?;
+    let now = chrono::Utc::now().timestamp_millis();
+    // The ledger prunes itself to `MAX_ROWS`, so asking for that many is asking
+    // for all of it. A smaller page would be a lie in the one view whose whole
+    // job is "is anything outstanding" — an answer that silently omitted the
+    // oldest unsettled row would be worse than no answer.
+    let everything = jod_core::ledger::MAX_ROWS as usize;
+    match what {
+        LedgerCommand::Ls { all, json } => {
+            let rows: Vec<_> = store
+                .obligations(everything)?
+                .into_iter()
+                .filter(|o| all || !o.state.is_settled())
+                .collect();
+            if json {
+                println!("{}", serde_json::to_string_pretty(&rows)?);
+            } else if rows.is_empty() {
+                // Two different silences, and conflating them is the failure
+                // this command exists to end: "nothing is owed" is the good
+                // news, "nothing was ever recorded" means the ledger is not
+                // running and the good news would look identical.
+                let recorded = store.obligations(1)?.len();
+                if all || recorded == 0 {
+                    println!("nothing in the ledger — no message has been owed yet");
+                } else {
+                    println!("nothing outstanding — every message Jod owed has been settled");
+                    println!("`jod ledger ls --all` shows the settled ones");
+                }
+            } else {
+                render_time::obligations(&rows, now);
+            }
+        }
+        LedgerCommand::Show { what, json } => {
+            // By key first, then by row id. The key is what every listing
+            // prints and what a person will have in hand; the id is what a
+            // `--json` consumer has.
+            let found = match store.obligation_by_key(&what)? {
+                Some(o) => Some(o),
+                None => match what.parse::<i64>() {
+                    Ok(id) => store.obligation(id)?,
+                    Err(_) => None,
+                },
+            };
+            let o = found.with_context(|| format!("nothing in the ledger matches `{what}`"))?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&o)?);
+            } else {
+                render_time::obligation(&o, now);
+            }
+        }
+        LedgerCommand::Failed { json } => {
+            let rows: Vec<_> = store
+                .obligations(everything)?
+                .into_iter()
+                .filter(|o| o.state == DeliveryState::Failed)
+                .collect();
+            if json {
+                println!("{}", serde_json::to_string_pretty(&rows)?);
+            } else if rows.is_empty() {
+                println!("nothing has been given up on");
+            } else {
+                render_time::obligations(&rows, now);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn schedule_command(jod: &Jod, what: ScheduleCommand) -> Result<()> {
+    let store = jod.store().context("this command needs the database")?;
+    let now = chrono::Utc::now().timestamp_millis();
+    match what {
+        ScheduleCommand::Ls { json } => {
+            let all = store.schedules()?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&all)?);
+            } else if all.is_empty() {
+                println!("no schedules — `jod schedule add` arms one");
+            } else {
+                render_time::schedules(&all, now);
+            }
+        }
+        ScheduleCommand::Add {
+            name,
+            prompt,
+            cron,
+            timezone,
+            harness,
+            cwd,
+            model,
+            misfire,
+            overlap,
+        } => {
+            let s = jod_core::schedule::Schedule {
+                id: uuid::Uuid::new_v4().to_string(),
+                name: name.clone(),
+                prompt,
+                harness: HarnessKind::from(harness).id().to_string(),
+                cwd: cwd.unwrap_or(std::env::current_dir()?).display().to_string(),
+                model,
+                cron,
+                timezone,
+                state: jod_core::schedule::ScheduleState::Armed,
+                misfire: misfire.parse().map_err(|e| anyhow::anyhow!("{e}"))?,
+                overlap: overlap.parse().map_err(|e| anyhow::anyhow!("{e}"))?,
+                grace_ms: 300_000,
+                jitter_ms: 0,
+                next_fire_at_ms: None,
+                last_fire_at_ms: None,
+                consecutive_failures: 0,
+                created_at_ms: now,
+            };
+            store.add_schedule(&s)?;
+            let armed = store.schedule_named(&name)?.and_then(|s| s.next_fire_at_ms);
+            match armed {
+                Some(at) => println!("{name} armed — next {}", render_time::when(at, now)),
+                None => println!("{name} armed"),
+            }
+        }
+        ScheduleCommand::Pause { name } => {
+            let changed =
+                store.set_schedule_state(&name, jod_core::schedule::ScheduleState::Paused)?;
+            println!("{}", if changed { format!("{name} paused") } else { format!("no schedule {name}") });
+        }
+        ScheduleCommand::Resume { name } => {
+            let changed =
+                store.set_schedule_state(&name, jod_core::schedule::ScheduleState::Armed)?;
+            println!("{}", if changed { format!("{name} armed") } else { format!("no schedule {name}") });
+        }
+        ScheduleCommand::Run { name } => {
+            if store.run_schedule_now(&name, now)? {
+                println!("{name} is due now — the next tick will fire it");
+            } else {
+                // Refused rather than forced: firing something paused or broken
+                // silently would defeat the reason it was stopped.
+                println!("{name} is not armed, so it was not brought forward");
+            }
+        }
+        ScheduleCommand::Rm { name } => {
+            let gone = store.delete_schedule(&name)?;
+            println!("{}", if gone { format!("{name} forgotten") } else { format!("no schedule {name}") });
+        }
+        ScheduleCommand::Log { name, limit } => {
+            let Some(s) = store.schedule_named(&name)? else {
+                bail!("no schedule {name}");
+            };
+            let fires = store.fires(&s.id, limit)?;
+            if fires.is_empty() {
+                println!("{name} has not fired yet");
+            } else {
+                // A fire's outcome is decided when the run is *started*, so a
+                // run that then failed still reads `ran`. Judged alone, a
+                // schedule whose every run has failed shows a column of ticks —
+                // in the one place you look to ask whether it works. So each
+                // fire is paired with how its run actually ended.
+                let outcomes: Vec<(jod_core::schedule::Fire, Option<String>)> = fires
+                    .into_iter()
+                    .map(|f| {
+                        let ended = f
+                            .run_id
+                            .as_deref()
+                            .and_then(|id| store.run(id).ok().flatten())
+                            .map(|r| r.status);
+                        (f, ended)
+                    })
+                    .collect();
+                render_time::fires(&outcomes, now);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Carry out a `jod goal …` subcommand.
+fn goal_command(jod: &Jod, what: GoalCommand) -> Result<()> {
+    let store = jod.store().context("this command needs the database")?;
+    let now = chrono::Utc::now().timestamp_millis();
+    match what {
+        GoalCommand::Ls { json } => {
+            let all = store.goals()?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&all)?);
+            } else if all.is_empty() {
+                println!("no goals — `jod goal add` sets one");
+            } else {
+                render_time::goals(&all, now);
+            }
+        }
+        GoalCommand::Add {
+            name,
+            objective,
+            cron,
+            timezone,
+            harness,
+            cwd,
+            done_when,
+            max_iterations,
+            budget,
+            stall_after,
+        } => {
+            let g = jod_core::schedule::Goal {
+                id: uuid::Uuid::new_v4().to_string(),
+                name: name.clone(),
+                objective,
+                done_when,
+                harness: HarnessKind::from(harness).id().to_string(),
+                cwd: cwd.unwrap_or(std::env::current_dir()?).display().to_string(),
+                model: None,
+                cron,
+                timezone,
+                state: jod_core::schedule::GoalState::Running,
+                iteration: 0,
+                max_iterations,
+                budget_usd: budget,
+                spent_usd: 0.0,
+                stall_after,
+                no_progress: 0,
+                next_fire_at_ms: None,
+                created_at_ms: now,
+            };
+            store.add_goal(&g)?;
+            println!("{name} is running");
+        }
+        GoalCommand::Pause { name } => {
+            let changed = store.set_goal_state(&name, jod_core::schedule::GoalState::Paused)?;
+            println!("{}", if changed { format!("{name} paused") } else { format!("no goal {name}") });
+        }
+        GoalCommand::Resume { name } => {
+            let changed = store.set_goal_state(&name, jod_core::schedule::GoalState::Running)?;
+            println!("{}", if changed { format!("{name} running") } else { format!("no goal {name}") });
+        }
+        GoalCommand::Run { name } => {
+            if store.run_goal_now(&name, now)? {
+                println!("{name} will iterate on the next tick");
+            } else {
+                println!("{name} is not running, so it was not brought forward");
+            }
+        }
+        GoalCommand::Rm { name } => {
+            let gone = store.delete_goal(&name)?;
+            println!("{}", if gone { format!("{name} forgotten") } else { format!("no goal {name}") });
+        }
+        GoalCommand::Log { name, limit } => {
+            if store.goal_named(&name)?.is_none() {
+                bail!("no goal {name}");
+            }
+            // Keyed on the subject, which is derived from the name, precisely
+            // so this does not need the id the scope is keyed on.
+            let facts = store.facts_about(&format!("goal/{name}"))?;
+            if facts.is_empty() {
+                println!("{name} has not iterated yet");
+                return Ok(());
+            }
+            for f in facts.iter().filter(|f| f.predicate == "pursuing") {
+                println!("pursuing  {}", f.object);
+            }
+            for f in facts.iter().filter(|f| f.predicate == "ended") {
+                println!("ended     {}", f.object);
+            }
+            let history: Vec<_> = facts.iter().filter(|f| f.predicate == "iteration").collect();
+            if history.is_empty() {
+                println!("no iteration has finished yet");
+            }
+            for f in history.iter().take(limit) {
+                println!("  {}", f.object);
+            }
+        }
+    }
     Ok(())
 }
 
@@ -775,14 +2718,16 @@ fn require_supervisor(jod: &Jod) -> Result<()> {
 /// One conversation, many turns.
 ///
 /// Every turn after the first resumes the harness session the previous turn
-/// reported, so context carries across turns without Jod storing any of it —
-/// the harness owns the transcript, which is the whole point of the seam.
+/// reported, so context carries across turns — and every turn is recorded into
+/// the *same* Jod conversation, which is a separate thing from the harness
+/// session and outlives it. Both are needed: the session is what makes the next
+/// turn cheap, the conversation is what survives the harness being swapped.
 async fn chat(
     jod: std::sync::Arc<Jod>,
     harness: HarnessArg,
     cwd: Option<PathBuf>,
     model: Option<String>,
-    permission: PermissionArg,
+    permission: PermissionPolicy,
     continue_last: bool,
 ) -> Result<()> {
     use std::io::Write;
@@ -794,6 +2739,7 @@ async fn chat(
     } else {
         Resume::Fresh
     };
+    let mut conversation = RunConversation::New;
 
     eprintln!("jod chat · {} · Ctrl-D to leave", kind.label());
     loop {
@@ -815,17 +2761,29 @@ async fn chat(
 
         let events = jod.subscribe();
         let agent = jod
-            .spawn_agent(SpawnRequest {
-                name: default_name(&prompt),
-                harness: kind,
-                prompt,
-                cwd: cwd.clone(),
-                model: model.clone(),
-                permission: permission.into(),
-                resume: resume.clone(),
-            })
+            .spawn_agent_in(
+                SpawnRequest {
+                    name: default_name(&prompt),
+                    harness: kind,
+                    prompt,
+                    system: None,
+                    cwd: cwd.clone(),
+                    model: model.clone(),
+                    permission: permission.into(),
+                    resume: resume.clone(),
+                    tools: None,
+                },
+                conversation.clone(),
+            )
             .await?;
         render::stream(events, &agent.id, false, false).await;
+
+        // The rest of the chat lands in the conversation the first turn opened,
+        // so `jod conv show` reads back as the conversation it was rather than
+        // as one thread per line typed.
+        if let Some(id) = jod.conversation_of(&agent.id).await {
+            conversation = RunConversation::Existing(id);
+        }
 
         // Prefer the id the harness reported; fall back to "continue the most
         // recent", which every harness also supports.
@@ -940,5 +2898,83 @@ mod tests {
     fn the_cli_definition_is_valid() {
         use clap::CommandFactory;
         Cli::command().debug_assert();
+    }
+
+    fn extraction() -> Consolidation {
+        Consolidation::new("work", Provenance::OwnerChat, "…the conversation…")
+    }
+
+    const ONE_FACT: &str =
+        r#"{"scope":"work","subject":"reljod","predicate":"prefers","object":"linear for tasks"}"#;
+
+    #[test]
+    fn a_dry_run_writes_nothing_at_all() {
+        let store = Store::in_memory().unwrap();
+        settle_consolidation(&store, &extraction(), ONE_FACT, true).unwrap();
+        assert!(
+            store.facts_about("reljod").unwrap().is_empty(),
+            "a dry run that wrote anything would be the worst bug this command has"
+        );
+    }
+
+    #[test]
+    fn dropping_the_dry_run_flag_is_what_writes_the_facts() {
+        let store = Store::in_memory().unwrap();
+        settle_consolidation(&store, &extraction(), ONE_FACT, false).unwrap();
+        let believed = store.facts_about("reljod").unwrap();
+        assert_eq!(believed.len(), 1);
+        assert_eq!(believed[0].object, "linear for tasks");
+        // Read from a conversation, so it is an agent's conclusion — never the
+        // owner's own word, whatever the transcript said.
+        assert_eq!(believed[0].origin, Origin::Agent);
+    }
+
+    #[test]
+    fn a_dry_run_says_which_lines_would_replace_a_belief_and_which_are_new() {
+        let store = Store::in_memory().unwrap();
+        store
+            .remember(NewFact::new("reljod", "prefers", "notion for tasks").in_scope("work"))
+            .unwrap();
+        let batch = extraction().parse(ONE_FACT);
+        assert_eq!(
+            would_do(&store, &batch.facts[0]).unwrap(),
+            "supersedes “notion for tasks”"
+        );
+        assert_eq!(
+            would_do(&store, &NewFact::new("jod", "runs", "on a vps").in_scope("work")).unwrap(),
+            "new"
+        );
+    }
+
+    #[test]
+    fn an_extraction_never_reads_another_models_thinking() {
+        let material = transcript_material(&[
+            PortableMessage {
+                role: "user".into(),
+                text: "where do tasks go?".into(),
+                tool_name: None,
+                tool_input: None,
+                at_ms: 1,
+            },
+            PortableMessage {
+                role: "thinking".into(),
+                text: "maybe he uses notion".into(),
+                tool_name: None,
+                tool_input: None,
+                at_ms: 2,
+            },
+            PortableMessage {
+                role: "assistant".into(),
+                text: "linear".into(),
+                tool_name: None,
+                tool_input: None,
+                at_ms: 3,
+            },
+        ]);
+        assert!(
+            !material.contains("maybe he uses notion"),
+            "reasoning is speculation, and a fact extracted from it was never asserted"
+        );
+        assert_eq!(material, "user: where do tasks go?\nassistant: linear");
     }
 }

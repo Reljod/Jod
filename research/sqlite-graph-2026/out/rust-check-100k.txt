@@ -1,0 +1,9 @@
+sqlite 3.50.2  edges 100000  nodes 12500
+directed.k1: p50 0.026 ms  p95 0.065 ms  mean_rows 6.0
+directed.k2: p50 0.064 ms  p95 0.11 ms  mean_rows 34.5
+directed.k3: p50 0.181 ms  p95 0.35 ms  mean_rows 96.0
+directed.k4: p50 0.442 ms  p95 1.095 ms  mean_rows 198.1
+undirected.k1: p50 0.027 ms  p95 0.05 ms  mean_rows 13.7
+undirected.k2: p50 0.314 ms  p95 1.07 ms  mean_rows 265.3
+undirected.k3: p50 4.269 ms  p95 11.961 ms  mean_rows 1558.9
+undirected.k4: p50 21.474 ms  p95 40.532 ms  mean_rows 4210.9

@@ -848,3 +848,475 @@ reclaiming it costs a rebuild and nothing else — but the sweep has to recur, o
 for cargo's lock serialising builds across concurrent agents. The sweep is the
 cheaper trade while agents run in parallel; it is also the one that gets
 forgotten, so it belongs in the box's notes, not in somebody's memory.
+
+## Jod owns the transcript now
+
+This reverses a claim made in [`jod-system.md`](jod-system.md): *"Jod needs no
+memory of the transcript: the harness owns it."*
+
+That was right while a conversation was a line you could only continue. Session
+resume was normalised behind one `Resume` field, each harness spelled it
+differently, and the seam hid it. Nothing above the seam had to know what a turn
+contained.
+
+It stops being right the moment you want to **fork, revert, or move a thread to
+a different harness**. A session id issued by Claude Code means nothing to
+OpenCode. Probing the three binaries directly:
+
+| | Claude Code | OpenCode | AGY |
+|---|---|---|---|
+| fork | `--fork-session` | `--fork` | **none** |
+| assign a session id | `--session-id <uuid>` | none | none |
+| export a transcript | — | `opencode export` | none |
+| accept one back | `--input-format stream-json` | `opencode import` | none |
+
+So two of the three can fork themselves and Jod should let them. **No two of
+them can hand a thread to each other**, and AGY can do none of it. Cross-harness
+handoff has no owner unless Jod is the owner.
+
+The shape is the one ChatGPT, LangGraph and git converged on and the harnesses
+did not: **one DAG with a moving head pointer**. Claude Code and OpenCode both
+fork by copying a prefix into a new container with no parent edge — verified by
+forking a real session and reading both files. That is cheap to read, and it
+makes branch topology recoverable only by intersecting message ids, so a
+"‹ 2/3 ›" sibling pager cannot be drawn from it at all. `leafUuid`,
+`current_node` and `HEAD` are the same construct; Jod keeps one.
+
+Two consequences worth stating. The event stream is **not** sufficient as a
+transcript: `ToolResult` carried only a truncated `summary`, which is enough to
+watch a run and not enough to replay one. And revert is **non-destructive** —
+the head moves, the abandoned tail stays reachable — because git's reflog and
+OpenCode's `unrevert` both concluded that the recovery window is worth more than
+the tidiness.
+
+## The scheduler's claim is one statement, and the lease is not enough
+
+Sixteen processes racing for four due schedules, measured: a read-then-write
+claim handed the **same** schedule to two winners **41.26%** of the time. The
+guarded single-statement claim under `BEGIN IMMEDIATE` produced **0 duplicates
+in 5,408 claims**. This is the same result the database benchmark found for
+contended updates, arriving a second time in a different costume.
+
+The part that was *not* obvious is what happens when a claimant dies. A lease
+alone looks sufficient — it expires, someone else takes over, the schedule keeps
+running. But the next claimant overwrites the lease, and the original claim then
+exists nowhere: **52 of 255 claims, one in five, were accounted for in no record
+at all.** Whoever displaces a dead lease is the last process that can still see
+it existed, so the claim writes the abandonment down *before* taking it. That
+brought it to 0 of 270.
+
+Every firing decision gets a row, including the ones where nothing ran. "It
+never fired" and "it fired and was skipped" are different bugs with the same
+symptom, and a skip nobody recorded is a silent failure.
+
+Jobs are rows rather than a JSON file. Hermes keeps its cron in
+`~/.hermes/cron/jobs.json` behind an advisory `flock` and its own source carries
+a note about a root-owned copy that failed every tick for fourteen hours. Jod
+already had the store that makes this a non-question.
+
+## Jitter sounded prudent and measured worse
+
+Spreading fires to avoid a thundering herd is the obvious move, and it is the
+one addition in ten graded scheduler iterations that made things *worse*: a
+300 s spread against a 150 s grace window **lost 34 of 72 fires** outright,
+because jitter pushed them past the point where they still counted as that fire,
+and operator predictability fell from 5 to 3.
+
+It ships defaulting to zero, and a jitter wider than the grace window is
+**refused at the boundary** rather than silently losing fires.
+
+The general rule this is an instance of: a safety feature that has not been
+measured against the failure it claims to prevent is a guess, and guesses in a
+scheduler are paid at 3am.
+
+## A goal that stops moving has to say so
+
+The characteristic failure of an autonomous loop is not crashing. It is
+completing iterations for ever while nothing changes — and from outside, a goal
+making no progress looks exactly like a goal working hard.
+
+So progress is counted rather than assumed. Every iteration reports whether it
+moved; enough that did not, and the goal **stalls itself** instead of running
+for weeks. Alongside it sit the two bounds that need no judgement: an iteration
+cap and a spend cap, both re-checked immediately *after* an iteration is
+recorded, so a goal that has just spent the last of its budget stops there
+rather than spending more proving it has run out.
+
+A goal's progress lives in the memory layer rather than in its own columns — the
+brief as a prospective fact superseded each iteration, so bitemporal validity
+can answer what it thought it was doing last month, and what happened as
+episodic facts in a `goal:<id>` scope, because an hourly loop writes far more
+than a person does and scope is a hard filter. Only the counters the claim reads
+on every tick stay as columns: a claim must not depend on a text index.
+
+## The graph is an index, and the extension was not worth buying
+
+The request was for "the SQLite extension for graph". The benchmark says there
+is nothing worth buying: no extension is simultaneously maintained in 2026,
+permissively licensed, **and** statically linkable into a single binary — and
+Jod ships as one binary onto a VPS. Plain tables plus a recursive CTE answer a
+three-hop walk over a million edges fast enough that an extension would buy
+nothing.
+
+Two findings shaped the code rather than merely justifying it.
+
+**A recursive CTE has no statistics, and SQLite guesses the join order wrong.**
+Written the obvious way it made `relations` the outer loop matched on `scope`
+alone — which selects every row — and scanned the frontier inside it, a cross
+product per step, using the in-edge index for both directions so the out-edge
+index was never touched. `CROSS JOIN` pins the order: **903 ms → 14 ms**, same
+schema, same indexes. It fails *silently*, staying correct while going
+quadratic, which is the worst way for a performance bug to behave.
+
+**The headline number described a query we do not run.** 0.37 ms for three hops
+at a million edges is the *directed* traversal. "What is related to this" is
+undirected, needs two recursive terms, and measures 92 ms at 100k. Both are
+correct; only one is ours. The conclusion survived the correction, but it had to
+be made on the real figure.
+
+The graph stays derived: it rebuilds from `facts` alone, and `ON DELETE CASCADE`
+carries `forget` through to the edges — otherwise a forgotten fact stays
+walkable, and "Jod forgot that" stops meaning "Jod says it forgot that".
+
+## Origin was stored for months and never consulted
+
+`facts` has carried an `origin` column since the first migration — owner, agent,
+untrusted, system — deliberately outside the fact text so ingested content
+cannot forge its own trust level. Recall never looked at it. A page Jod merely
+*fetched* answered exactly as readily as something Reljod said, and a
+hand-labelled corpus put the poisoned fact in the answer set on 10% of queries.
+
+The lesson is not "add a WHERE clause". It is that **a trust boundary nothing
+enforces is decoration**, and the way to find out is to measure the shipped
+behaviour rather than re-read the design. The column, the doc comment and the
+migration comment all described a control that did not exist.
+
+Untrusted material is now excluded by default from answers *and* from seeding a
+graph expansion — a page that cannot answer directly must not be able to steer
+which part of the graph gets walked. It is excluded, not deleted: "what did that
+page claim" stays answerable through an explicit call, where the decision to
+believe it is visible at the call site.
+
+## MCP is the seam, and it is what Jod *is*
+
+The charter says `jod-core` has no model client, no prompt templates and no
+tools. That was read too narrowly for a while — as though it meant Jod could
+only ever ask an agent a question and parse an answer out of its prose.
+
+The harnesses already have a tool mechanism, and all Jod had to do was speak it.
+Verified by running them: Claude Code takes `--mcp-config <files...>` and
+`--strict-mcp-config`; OpenCode has `opencode mcp add`.
+
+So **Jod is an MCP server**. `jod mcp` exposes what Jod can do — list what is
+running, delegate, continue an agent, stop one, schedule, set a goal, remember,
+recall, walk the memory graph — and a harness pointed at it thinks *and* acts in
+one loop.
+
+This does not weaken the charter, it is the sharpest expression of it yet:
+
+- **The harness supplies judgement.** Whether "fix the CI failure" belongs to the
+  agent already looking at CI is a call Jod is not equipped to make and should
+  not try to.
+- **Jod supplies effects.** Spawning a process group, claiming a schedule,
+  superseding a fact. Things with consequences, done under rules the agent
+  cannot argue with.
+
+Neither has to become the other, which is what the rule was protecting.
+
+**It belongs on `SpawnRequest`, not on the orchestrator.** Putting it on one
+special conversation would have made it a feature; on the spawn it is the seam,
+and a scheduled run, a goal iteration, a webhook-triggered agent and a teammate
+all get the same tools as the main chat. An agent that can see what else is
+running can hand work sideways instead of duplicating it — which is as much of
+agent-to-agent as Jod needs to have an opinion about.
+
+**Access is a capability set, not a boolean.** "Can see what is running" and "can
+start another agent" are different amounts of trust, and an agent triggered by a
+stranger's pull request should get the first and not the second. Three levels:
+read-only, delegate, orchestrate. The line that matters is between delegating and
+orchestrating: delegating spends money now and is visible, while a schedule
+spends it at 2am whether or not anyone is watching, and a goal spends it until
+something stops it.
+
+Default is read-only and it is opt-in, because the failure mode of getting this
+wrong is an agent that can give itself more agents.
+
+### What this replaces
+
+An earlier design had the orchestrator ask a harness for a JSON decision and
+parse it — propose-and-dispose. It works, and it survives as the fallback for
+any harness with no MCP support, but it is a weaker version of the same idea: it
+allows exactly one decision per turn, cannot ask a follow-up question before
+deciding, and turns every capability into a new line in a prompt and a new arm
+in a parser. With tools, adding a capability is adding a tool.
+
+## A grant that depends on the permission mode is not a grant
+
+`SpawnRequest::tools` is the seam the whole system turns on, and it took four
+runs of the main chat to get one tool call through it. Each failure looked like
+a different bug and all four were the same shape: a decision recorded in one
+place and consulted in another.
+
+The last two are the instructive pair.
+
+**Plan mode refuses the tools it was given.** `PermissionPolicy::Ask` maps to
+`--permission-mode plan`, which is correct — it is what actually confines a run
+that must not change anything, as opposed to an allowlist that grants without
+denying. But the orchestrator's entire job is calling tools that change
+something, and plan mode does not distinguish "writes to the filesystem" from
+"writes to Jod's own schedule table". Given `Ask`, the orchestrator dutifully
+called `list_agents`, `schedule_list` and `recall`, reached for `ExitPlanMode`,
+could not find it, and wrote a plan file instead of arming the schedule it had
+been asked for. It looked like a model that would not commit. It was a mode that
+would not let it.
+
+**So the confinement axis and the grant axis are separate, and the code has to
+say so.** The permission mode bounds what a run may do to the *machine*.
+`ToolAccess` bounds what it may do to *Jod*. Neither substitutes for the other,
+and an orchestrator wants little of the first and a lot of the second.
+
+Which exposed the fourth bug immediately: the `mcp__jod` entry in `--allowedTools`
+had been written inside the `Ask` arm of the permission match. Moving off plan
+mode therefore revoked every Jod tool, silently, and the run came back with four
+consecutive *"requested permissions to use `mcp__jod__schedule_create`, but you
+haven't granted it yet"*. The grant now hangs off `req.tools`, which is the thing
+that actually decides whether a run has Jod tools.
+
+The test that missed it is more interesting than the bug. It asserted the grant
+appears — under `Ask`, the only mode it ever passed. A test that fixes one value
+of the variable your bug lives in will pass forever. It now loops over every
+permission mode, because "the grant survives a mode change" is the property, and
+the single-mode version was asserting a coincidence.
+
+### The general shape
+
+All four failures were components that were complete, tested, and connected to
+nothing: `tools` reached no command line; the allowlist denied what the config
+granted; `read_only` on one side met `read-only` on the other; the grant lived
+in the wrong branch. Unit tests were green throughout, and each failure produced
+a *plausible* symptom — an agent saying it has no tools reads like a missing
+feature, not like three broken layers.
+
+Nothing here was found by a unit test. All of it was found by running `jod main`
+and reading what the run actually did.
+
+## One byte made a whole module invisible to every audit
+
+`core/src/webhook.rs` contained a literal NUL inside a doc comment — in a line
+explaining, of all things, how control bytes are escaped. It is valid UTF-8 and
+rustc accepted it, so the file compiled and its 39 tests passed for as long as it
+had existed.
+
+`grep` classifies a file containing NUL as binary and silently skips it. Not a
+warning, not a partial result — no output and exit 0. So for that whole module:
+
+- every `grep -rn` in this branch returned nothing, including the ones that
+  concluded a function had no callers;
+- `wiring.py`, the audit that measured "44 of 278 core pub fns have no
+  production caller", never saw 1,234 lines of it;
+- `match_rules` appeared to be called from `api/` and defined nowhere, which is
+  what finally exposed it.
+
+The lesson is not about NUL bytes. It is that a *silent* zero result and a true
+zero result are indistinguishable, and every conclusion of the form "nothing
+calls this" had been resting on that ambiguity. The audit that reported the
+sharpest finding of the branch was running with one file missing and had no way
+to say so.
+
+Where a tool can decline to answer, it must be made to say which inputs it
+skipped, or its zeroes cannot be read as evidence.
+
+### The same shape again, with the tool skipping everything
+
+Checking whether a change had introduced any `rustfmt` diffs, the working copy
+of `cli/src/tui/mod.rs` reported six and the question was how many of those
+already existed. So `HEAD`'s copy of the file was extracted to a scratch path
+and `rustfmt --check` run against it. It printed no diffs. That was read as a
+baseline of zero, and therefore as "all six are mine".
+
+It had not run at all. A standalone `mod.rs` cannot resolve the children it
+declares, so `rustfmt` had failed —
+
+```text
+Error writing files: failed to resolve mod `app`: …/app.rs does not exist
+```
+
+— and exited non-zero having formatted nothing. Every one of the six hunks was
+in fact present verbatim in `HEAD`; none of them were new. Checking that, by
+grepping `HEAD`'s content for the exact lines, is what settled it.
+
+The NUL byte above is a tool that silently skipped *one input*. This is a tool
+that silently skipped *the entire job*, and both produce the same clean zero.
+The habit that catches it is small: **check that the check happened, not just
+what it said.** An empty result and a failed run are the same text, so a tool's
+exit code is part of its answer and a zero is only evidence once you know it was
+reached. The same technique was sound for the sibling files in that change —
+they declare no child modules — which is the other half of the trap: it works
+often enough to be trusted the once it does not.
+
+## Asking and planning were the same mode, so nothing ever acted
+
+`PermissionPolicy` had three levels, and the least of them was `Ask`. It mapped
+to Claude Code's `--permission-mode plan`, for a reason that was sound when it
+was written: under `-p` there is nobody to answer a prompt, so "ask" would
+otherwise mean "deny", and a bare `claude -p` refused even to search the web.
+Plan mode grants reading and refuses every write path, which is a better answer
+than silent denial.
+
+The trouble is that `Ask` was also `#[default]`. So the default for every spawn
+Jod made — the TUI's chat box, a schedule at 2am, a goal iteration, a webhook
+run — was *plan mode*. Jod could describe work in any amount of detail and could
+not do any of it. That reads as a model being unhelpful, not as a flag, which is
+why it survived so long.
+
+Four levels now, and the split is the fix:
+
+| | claude | opencode | agy |
+|---|---|---|---|
+| `Plan` | `--permission-mode plan` | — | `--mode plan` |
+| `Ask` | `--permission-mode manual` | — | — (its default is ask) |
+| `AcceptEdits` | `--permission-mode acceptEdits` | — | `--mode accept-edits` |
+| `Bypass` ("auto") | `--dangerously-skip-permissions` | `--auto` | `--dangerously-skip-permissions` |
+
+Two things worth keeping:
+
+**The flag names were read off the binaries, not assumed.** `claude --help`
+prints exactly six modes; an earlier attempt at this seam had designed around
+`--permission-prompt-tool`, which this build does not have. A mode name a
+harness does not recognise is not a compile error, not a spawn error, and not
+visible until an agent quietly does the wrong amount — so `claude.rs` now has a
+test pinning every mode it emits against that list of six.
+
+**OpenCode cannot express three of the four**, and says so rather than
+pretending. It has one auto-approve switch and no mode flag at all, so `Plan`,
+`Ask` and `AcceptEdits` all collapse to "leave `--auto` off". Emitting a
+`--mode plan` OpenCode ignores would have looked like a working plan mode right
+up until something got written.
+
+The default is now `Bypass`. That is what Jod is for — a mode that stops to ask
+an empty room is a mode that never finishes. The one place that does *not*
+follow the new default is `jod-api`'s `SpawnBody`, which pins `Ask`
+explicitly: that field is filled in by whatever is on the other end of a socket,
+and a caller who omits it has not asked for anything. The dangerous setting
+should not be one forgotten JSON key away on the only surface whose callers Jod
+does not control.
+
+### The mode belongs to the conversation, not the process
+
+It was set once, at `jod tui` launch, and could never be changed — you quit the
+program to change your mind. But it was never a process property to begin with:
+Jod respawns the harness once per turn against a resumed session, so
+`--permission-mode` is decided afresh at every spawn. The only place the answer
+can live and survive a restart is the row the spawn is for.
+
+Two clocks, and the screen has to be honest about both. Jod's own MCP tools are
+checked per call and change immediately; the harness's native tools are bounded
+by the flag chosen when its process started, so a turn already in flight keeps
+the mode it began with. There is no way to tell a running harness otherwise.
+
+The launch flag survives as a *ceiling* rather than a default. `jod tui
+--permission plan` is somebody saying "not on this machine, not today", and a
+Tab press inside the program must not be able to talk them out of it. Downward
+is always allowed: asking for less needs no permission.
+
+## A chat you are watching may schedule; one that wandered off may not
+
+The TUI passed `tools: None` on every spawn from the chat box, with a comment
+explaining that "an agent started from the chat box is doing a task, not
+orchestrating" — giving it Jod's verbs would let a prompt typed in a hurry
+create schedules and spend money every night.
+
+That reasoning is right about delegations and wrong about turns, and the two
+were reaching it through one function. This codebase already states the rule:
+the main chat gets the full set because it is "you, present, watching". A turn
+you just typed into the TUI, whose output is filling your screen, meets that
+condition by definition. Withholding the grant there did not make anything
+safer; it made "schedule this for me" a request Jod could acknowledge and had no
+verb to carry out.
+
+So `tools` became a parameter, and the two call sites are named for the only
+thing that separates them — whether anybody is looking. `WATCHED` gets
+`Orchestrate`; `DELEGATED` gets `ToolAccess::unattended()`, deferring to the
+codebase's own answer rather than a copy of it. A background agent that can
+create background agents has no bound at all, and it multiplies while nobody is
+reading.
+
+## Six guards were green, and none of them were guarding
+
+Every one of these passed. Every one would have kept passing through the change
+it existed to catch.
+
+- **A budget test that measured its own arithmetic.** `keys::keybar` budgets the
+  verbs; the test rendered a bar and checked it fitted. Self-consistent by
+  construction, and green however wrong the padding constant shared with
+  `ui::two_ends` was — until the one screen whose verbs ended exactly on the
+  boundary, which would have lost its entire left half rather than one verb.
+- **A collision test that could only fail from its own fixture.** "Every row the
+  sweep claims is `telegram`" fires only if somebody adds a `cli` row *to that
+  test*. Writing `cli` rows in production would not have tripped it. A comment
+  wearing a test's clothes: found, not finding.
+- **A helper whose doc claimed a job it did not do.** `Verdict::is_trouble`
+  included `Owed` and said it was "the line the passive marker would be drawn
+  from". Anyone who believed the doc would have drawn a glyph on every Telegram
+  run for the seconds a reply is in flight, and a routine marker is one nobody
+  sees.
+- **A test that enumerated the wrong answers instead of naming the right one.**
+  `a_run_that_owed_nobody_anything_wears_no_mark` asserted the row carried
+  neither `⊘` nor `♻`. Swapping the predicate for a wrong one *passed*, because
+  the wrong predicate draws `○` — a third glyph the list had never heard of.
+- **A green suite reported as a statement about a window it never measured.**
+  A call site was added in one edit and the function it called in the next; in
+  between, the file did not compile, and somebody else's `cargo test` caught
+  exactly that window. The author ran the suite *after* both edits, saw green,
+  and said "the tree was never red" — a claim about an interval backed by a
+  reading taken at one later instant.
+- **An assertion pointed at the wrong half of the screen.**
+  `text_that_was_shortened_says_that_it_was` checked `!row.contains(name)` — but
+  past ninety columns the detail pane shares the rendered line and prints the
+  name in full, so it was reading the *other* pane's copy and would have passed
+  through any amount of silent clipping in the pane under test.
+
+The shape is one thing, and it is not carelessness — all six were written
+deliberately, by people who had just been arguing about correctness:
+
+**A guard has to name the property, not enumerate the ways of violating it.**
+
+"The gutter is blank" is a property. "It is not `⊘` and not `♻`" is a list, and
+a list goes stale the moment a third possibility exists — silently, because the
+test still passes. Likewise "the exit hint is present" is a property; "the bar
+is under N columns" is arithmetic the code already did. Likewise "a foreign row
+comes back untouched" is a property; "no `cli` row appears" is a statement about
+a fixture.
+
+The habit that found all four is cheap and mechanical: **break the thing on
+purpose and watch the test fail.** Not once at the end — at the moment you write
+the assertion, before you believe it. Report both directions. Three of the four
+above were caught by someone swapping in a deliberately wrong implementation to
+see what happened, and being surprised.
+
+The fifth is the one to expect. The first four are clever mistakes — a
+tautology, a fixture-bound assertion, a doc that overreached, a list that went
+stale. The fifth is none of those: the property was named correctly and the
+instrument was simply aimed past the thing under test, because two panes render
+onto one line and `contains` does not care which. It needed no ingenuity to
+write and it will recur, in any suite where the fixture is larger than the
+subject. A sibling test in the same file had already hit it, which is the tell
+that the shape is structural rather than a slip.
+
+So: **assert against the smallest region that can hold the answer.** A whole
+rendered screen is not a unit; it is several, and `contains` will find your
+string in any of them.
+
+The sixth is the one that does not look like a testing mistake at all — it
+looks like reporting a result, which is why it reached two people in one
+exchange. One read a compiler *note* about what else was in scope and inferred
+what the author had meant to call; the other read a green suite and inferred
+what had been true five minutes earlier. Both outputs were accurate. Both
+conclusions were false, and neither was checkable from the thing that had been
+read.
+
+In a shared checkout, **"green" is a statement about the instant you ran it.**
+Asserting anything about a window means measuring the window — and if you cannot,
+say when you looked rather than what has been true.
+
+A test you have never seen fail is a test you have never seen.

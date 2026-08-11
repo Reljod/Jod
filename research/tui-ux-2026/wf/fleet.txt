@@ -1,0 +1,30 @@
+┌─ fleet ──────────────────────────────────────┐┌─ run · port-the-parser ──────────────────────────┐
+│ ▸ ● a3f91c22 running   4m12s cc  port-the-par││ port-the-parser                                  │
+│   ● 77b02e10 running  11m40s agy audit-the-de││ a3f91c22-8e40-4b19-9a71-2c6df0e18aa3             │
+│   ● 1d9f0034 running  26m03s cc  triage-ci ⚑ ││                                                  │
+│   ✓ 5c18aa93 done      2h05m cc  write-the-do││ harness  Claude Code · claude-opus-5             │
+│   ✓ 3b7e6612 done      2h44m oc  bump-version││ cwd      ~/repo/Jod                              │
+│   ✗ 0e4471bd failed    3h11m oc  migrate-stor││ started  16:40:12 (4m12s ago)   spend  $0.31     │
+│   ✓ c0ffee11 done      5h20m cc  spec-review ││ session  sess-7f3a91c2 · pid 40118 / pgid 40118  │
+│   ■ 91ac7752 killed   1d04h  cc  refactor-run││ source   you, 16:40 (chat)                       │
+│   ✓ 8ab31d09 done     1d06h  cc  nightly-inbo││                                                  │
+│   ✓ 44de1c7a done     2d01h  agy shepherd-prs││ last     Rebased cleanly — no conflicts. 214     │
+│   ✓ 2f9c88b1 done     2d09h  cc  write-the-sp││          tests pass and the three ignored ones   │
+│   ✗ 6e1a0d55 failed   3d14h  oc  port-the-api││          were already ignored on main.           │
+│   ✓ b7c2e340 done     4d02h  cc  deps-audit  ││                                                  │
+│   ✓ 19f4aa88 done     5d11h  cc  weekly-revie││ tools    ⚙ Bash  git rebase origin/main    ok    │
+│                                              ││          ⚙ Read  core/src/parser.rs        ok    │
+│ ─────────────────────────────────────────────││          ⚙ Bash  cargo test -p jod-core    ok    │
+│ 14 runs · 3 running · 2 failed · $4.18 today ││          ⚙ Edit  core/src/parser.rs        ok    │
+│                                              ││          ⚙ Bash  git push --force-w-lease  ok    │
+│ /port         ▸ filter (2 of 14 match)       ││                                                  │
+│                                              ││ memory   wrote 2 · read 7                        │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+│                                              ││                                                  │
+└─ ↑↓ pick · / filter ─────────────────────────┘└─ ⏎ watch · s stop · r resume · w attach ─────────┘
+ ⏎ watch · s stop · r resume · d delegate again · w attach · / filter             Esc back · ? keys 
+ fleet · 3 running · 2 failed · $4.18 today                                              ⚑ 3 unread 

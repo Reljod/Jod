@@ -1,0 +1,463 @@
+==============================================================
+== 1. arm one, and read it back
+==============================================================
+$ jod schedule add nightly summarise the day --cron 0 2 * * *
+nightly armed — next Aug 11 02:00 (in 3h07m)
+
+$ jod schedule ls
+[32m●[0m [1mnightly             [0m [2m0 2 * * *       [0m Aug 11 02:00 (in 3h07m)
+
+$ jod schedule ls --json
+[
+  {
+    "id": "6d7dc37f-a8a9-4c44-a756-6e8f9cf24fbd",
+    "name": "nightly",
+    "prompt": "summarise the day",
+    "harness": "claude_code",
+    "cwd": "/home/reljod/repo/Jod/.claude/worktrees/feat+memory-graph-scheduler-webhooks",
+    "model": null,
+    "cron": "0 2 * * *",
+    "timezone": "UTC",
+    "state": "armed",
+    "misfire": "fire_once",
+    "overlap": "skip",
+    "grace_ms": 300000,
+    "jitter_ms": 0,
+    "next_fire_at_ms": 1786413600000,
+    "last_fire_at_ms": null,
+    "consecutive_failures": 0,
+    "created_at_ms": 1786402347133
+  }
+]
+
+==============================================================
+== 2. TIMEZONE: 02:00 Asia/Manila must be 18:00 UTC, not 02:00 UTC
+==============================================================
+$ jod schedule add manila morning brief --cron 0 2 * * * -z Asia/Manila
+manila armed — next Aug 11 18:00 (in 19h07m)
+
+$ jod schedule add newyork morning brief --cron 0 2 * * * -z America/New_York
+newyork armed — next Aug 11 06:00 (in 7h07m)
+
+$ jod schedule ls
+[32m●[0m [1mmanila              [0m [2m0 2 * * *       [0m Aug 11 18:00 (in 19h07m)
+[32m●[0m [1mnewyork             [0m [2m0 2 * * *       [0m Aug 11 06:00 (in 7h07m)
+[32m●[0m [1mnightly             [0m [2m0 2 * * *       [0m Aug 11 02:00 (in 3h07m)
+
+-- the stored instant, rendered in UTC and in its own zone --
+$ python3 - <<'PY'
+import sqlite3, datetime, zoneinfo
+con = sqlite3.connect('file:/tmp/jod-e2e/schedules/jod.db?mode=ro', uri=True)
+for name, tz, ms in con.execute(
+    'SELECT name, timezone, next_fire_at_ms FROM schedules ORDER BY name'):
+    u = datetime.datetime.fromtimestamp(ms/1000, datetime.timezone.utc)
+    l = u.astimezone(zoneinfo.ZoneInfo(tz))
+    print(f'{name:10} tz={tz:18} utc={u:%Y-%m-%d %H:%M} local={l:%Y-%m-%d %H:%M %Z}')
+PY
+manila     tz=Asia/Manila        utc=2026-08-11 18:00 local=2026-08-12 02:00 PST
+newyork    tz=America/New_York   utc=2026-08-11 06:00 local=2026-08-11 02:00 EDT
+nightly    tz=UTC                utc=2026-08-11 02:00 local=2026-08-11 02:00 UTC
+
+==============================================================
+== 3. a bad zone and a bad cron must be refused at the boundary
+==============================================================
+$ jod schedule add badzone x --cron 0 2 * * * -z +08:00
+Error: unknown timezone +08:00
+[exit 1]
+
+$ jod schedule add badzone2 x --cron 0 2 * * * -z Mars/Olympus
+Error: unknown timezone Mars/Olympus
+[exit 1]
+
+$ jod schedule add badcron x --cron not a cron
+Error: not a cron is not a cron expression: Invalid pattern: Pattern must have between 5 and 7 fields.
+[exit 1]
+
+$ jod schedule add badcron2 x --cron 99 99 99 99 99
+Error: 99 99 99 99 99 is not a cron expression: Component error: Number out of bounds.
+[exit 1]
+
+$ jod schedule add badcron3 x --cron 
+Error:  is not a cron expression: CronPattern cannot be an empty string.
+[exit 1]
+
+-- none of those should have been stored --
+$ jod schedule ls
+[32m●[0m [1mmanila              [0m [2m0 2 * * *       [0m Aug 11 18:00 (in 19h07m)
+[32m●[0m [1mnewyork             [0m [2m0 2 * * *       [0m Aug 11 06:00 (in 7h07m)
+[32m●[0m [1mnightly             [0m [2m0 2 * * *       [0m Aug 11 02:00 (in 3h07m)
+
+==============================================================
+== 4. cron dialects the help advertises
+==============================================================
+$ jod schedule add daily-at x --cron @daily
+daily-at armed — next Aug 11 00:00 (in 1h07m)
+
+$ jod schedule add every15 x --cron */15 * * * *
+every15 armed — next Aug 10 23:00 (in 7m32s)
+
+$ jod schedule add withsecs x --cron 0 0 2 * * *
+withsecs armed — next Aug 11 02:00 (in 3h07m)
+
+$ jod schedule add weekdays x --cron 0 9 * * 1-5
+weekdays armed — next Aug 11 09:00 (in 10h07m)
+
+$ jod schedule ls
+[32m●[0m [1mdaily-at            [0m [2m@daily          [0m Aug 11 00:00 (in 1h07m)
+[32m●[0m [1mevery15             [0m [2m*/15 * * * *    [0m Aug 10 23:00 (in 7m32s)
+[32m●[0m [1mmanila              [0m [2m0 2 * * *       [0m Aug 11 18:00 (in 19h07m)
+[32m●[0m [1mnewyork             [0m [2m0 2 * * *       [0m Aug 11 06:00 (in 7h07m)
+[32m●[0m [1mnightly             [0m [2m0 2 * * *       [0m Aug 11 02:00 (in 3h07m)
+[32m●[0m [1mweekdays            [0m [2m0 9 * * 1-5     [0m Aug 11 09:00 (in 10h07m)
+[32m●[0m [1mwithsecs            [0m [2m0 0 2 * * *     [0m Aug 11 02:00 (in 3h07m)
+
+==============================================================
+== 5. duplicate name
+==============================================================
+$ jod schedule add nightly a different prompt --cron 0 3 * * *
+Error: database: UNIQUE constraint failed: schedules.name
+
+Caused by:
+    0: UNIQUE constraint failed: schedules.name
+    1: Error code 2067: A UNIQUE constraint failed
+[exit 1]
+
+$ jod schedule ls --json
+[
+  {
+    "id": "cb39c259-4327-4217-b133-e435d5652593",
+    "name": "daily-at",
+    "prompt": "x",
+    "harness": "claude_code",
+    "cwd": "/home/reljod/repo/Jod/.claude/worktrees/feat+memory-graph-scheduler-webhooks",
+    "model": null,
+    "cron": "@daily",
+    "timezone": "UTC",
+    "state": "armed",
+    "misfire": "fire_once",
+    "overlap": "skip",
+    "grace_ms": 300000,
+    "jitter_ms": 0,
+    "next_fire_at_ms": 1786406400000,
+    "last_fire_at_ms": null,
+    "consecutive_failures": 0,
+    "created_at_ms": 1786402347278
+  },
+  {
+    "id": "2fda316a-7262-4406-bd15-2721a9ab629b",
+    "name": "every15",
+    "prompt": "x",
+    "harness": "claude_code",
+    "cwd": "/home/reljod/repo/Jod/.claude/worktrees/feat+memory-graph-scheduler-webhooks",
+    "model": null,
+    "cron": "*/15 * * * *",
+    "timezone": "UTC",
+    "state": "armed",
+    "misfire": "fire_once",
+    "overlap": "skip",
+    "grace_ms": 300000,
+    "jitter_ms": 0,
+    "next_fire_at_ms": 1786402800000,
+    "last_fire_at_ms": null,
+    "consecutive_failures": 0,
+    "created_at_ms": 1786402347285
+  },
+  {
+    "id": "81320726-228e-44f6-99c1-10d097db290d",
+    "name": "manila",
+    "prompt": "morning brief",
+    "harness": "claude_code",
+    "cwd": "/home/reljod/repo/Jod/.claude/worktrees/feat+memory-graph-scheduler-webhooks",
+    "model": null,
+    "cron": "0 2 * * *",
+    "timezone": "Asia/Manila",
+    "state": "armed",
+    "misfire": "fire_once",
+    "overlap": "skip",
+    "grace_ms": 300000,
+    "jitter_ms": 0,
+    "next_fire_at_ms": 1786471200000,
+    "last_fire_at_ms": null,
+    "consecutive_failures": 0,
+    "created_at_ms": 1786402347156
+  },
+  {
+    "id": "c8da7b3c-41be-46d7-971c-c9ec6d7d6990",
+    "name": "newyork",
+    "prompt": "morning brief",
+    "harness": "claude_code",
+    "cwd": "/home/reljod/repo/Jod/.claude/worktrees/feat+memory-graph-scheduler-webhooks",
+    "model": null,
+    "cron": "0 2 * * *",
+    "timezone": "America/New_York",
+    "state": "armed",
+    "misfire": "fire_once",
+    "overlap": "skip",
+    "grace_ms": 300000,
+    "jitter_ms": 0,
+    "next_fire_at_ms": 1786428000000,
+    "last_fire_at_ms": null,
+    "consecutive_failures": 0,
+    "created_at_ms": 1786402347163
+  },
+  {
+    "id": "6d7dc37f-a8a9-4c44-a756-6e8f9cf24fbd",
+    "name": "nightly",
+    "prompt": "summarise the day",
+    "harness": "claude_code",
+    "cwd": "/home/reljod/repo/Jod/.claude/worktrees/feat+memory-graph-scheduler-webhooks",
+    "model": null,
+    "cron": "0 2 * * *",
+    "timezone": "UTC",
+    "state": "armed",
+    "misfire": "fire_once",
+    "overlap": "skip",
+    "grace_ms": 300000,
+    "jitter_ms": 0,
+    "next_fire_at_ms": 1786413600000,
+    "last_fire_at_ms": null,
+    "consecutive_failures": 0,
+    "created_at_ms": 1786402347133
+  },
+  {
+    "id": "d0180e0b-0f44-4aaa-91ab-8fffae50f900",
+    "name": "weekdays",
+    "prompt": "x",
+    "harness": "claude_code",
+    "cwd": "/home/reljod/repo/Jod/.claude/worktrees/feat+memory-graph-scheduler-webhooks",
+    "model": null,
+    "cron": "0 9 * * 1-5",
+    "timezone": "UTC",
+    "state": "armed",
+    "misfire": "fire_once",
+    "overlap": "skip",
+    "grace_ms": 300000,
+    "jitter_ms": 0,
+    "next_fire_at_ms": 1786438800000,
+    "last_fire_at_ms": null,
+    "consecutive_failures": 0,
+    "created_at_ms": 1786402347302
+  },
+  {
+    "id": "8cf5735e-bb19-461b-bf48-32ad00b3370a",
+    "name": "withsecs",
+    "prompt": "x",
+    "harness": "claude_code",
+    "cwd": "/home/reljod/repo/Jod/.claude/worktrees/feat+memory-graph-scheduler-webhooks",
+    "model": null,
+    "cron": "0 0 2 * * *",
+    "timezone": "UTC",
+    "state": "armed",
+    "misfire": "fire_once",
+    "overlap": "skip",
+    "grace_ms": 300000,
+    "jitter_ms": 0,
+    "next_fire_at_ms": 1786413600000,
+    "last_fire_at_ms": null,
+    "consecutive_failures": 0,
+    "created_at_ms": 1786402347292
+  }
+]
+
+==============================================================
+== 6. pause must make run refuse, not fire silently
+==============================================================
+$ jod schedule pause nightly
+nightly paused
+
+$ jod schedule ls
+[32m●[0m [1mdaily-at            [0m [2m@daily          [0m Aug 11 00:00 (in 1h07m)
+[32m●[0m [1mevery15             [0m [2m*/15 * * * *    [0m Aug 10 23:00 (in 7m32s)
+[32m●[0m [1mmanila              [0m [2m0 2 * * *       [0m Aug 11 18:00 (in 19h07m)
+[32m●[0m [1mnewyork             [0m [2m0 2 * * *       [0m Aug 11 06:00 (in 7h07m)
+[2m‖[0m [1mnightly             [0m [2m0 2 * * *       [0m —
+[32m●[0m [1mweekdays            [0m [2m0 9 * * 1-5     [0m Aug 11 09:00 (in 10h07m)
+[32m●[0m [1mwithsecs            [0m [2m0 0 2 * * *     [0m Aug 11 02:00 (in 3h07m)
+
+$ jod schedule run nightly
+nightly is not armed, so it was not brought forward
+
+-- and the daemon must not claim it either --
+$ jod daemon --once
+claimed 0 · started 0 · held 0 · failed 0
+
+$ q "SELECT name, state FROM schedules ORDER BY name"
+name | state
+-----+------
+daily-at | armed
+every15 | armed
+manila | armed
+newyork | armed
+nightly | paused
+weekdays | armed
+withsecs | armed
+(7 rows)
+
+==============================================================
+== 7. resume re-arms it
+==============================================================
+$ jod schedule resume nightly
+nightly armed
+
+$ jod schedule ls
+[32m●[0m [1mdaily-at            [0m [2m@daily          [0m Aug 11 00:00 (in 1h07m)
+[32m●[0m [1mevery15             [0m [2m*/15 * * * *    [0m Aug 10 23:00 (in 7m32s)
+[32m●[0m [1mmanila              [0m [2m0 2 * * *       [0m Aug 11 18:00 (in 19h07m)
+[32m●[0m [1mnewyork             [0m [2m0 2 * * *       [0m Aug 11 06:00 (in 7h07m)
+[32m●[0m [1mnightly             [0m [2m0 2 * * *       [0m Aug 11 02:00 (in 3h07m)
+[32m●[0m [1mweekdays            [0m [2m0 9 * * 1-5     [0m Aug 11 09:00 (in 10h07m)
+[32m●[0m [1mwithsecs            [0m [2m0 0 2 * * *     [0m Aug 11 02:00 (in 3h07m)
+
+$ q "SELECT name, state, consecutive_failures FROM schedules WHERE name='nightly'"
+name | state | consecutive_failures
+-----+-------+---------------------
+nightly | armed | 0
+(1 rows)
+
+==============================================================
+== 8. operations on a schedule that does not exist
+==============================================================
+$ jod schedule pause ghost
+no schedule ghost
+
+$ jod schedule resume ghost
+no schedule ghost
+
+$ jod schedule run ghost
+ghost is not armed, so it was not brought forward
+
+$ jod schedule rm ghost
+no schedule ghost
+
+$ jod schedule log ghost
+Error: no schedule ghost
+[exit 1]
+
+==============================================================
+== 9. log of a schedule that has never fired
+==============================================================
+$ jod schedule log nightly
+nightly has not fired yet
+
+==============================================================
+== 10. policy flags
+==============================================================
+$ jod schedule add pol1 x --cron @daily --misfire fire_once
+pol1 armed — next Aug 11 00:00 (in 1h07m)
+
+$ jod schedule add pol2 x --cron @daily --misfire skip
+pol2 armed — next Aug 11 00:00 (in 1h07m)
+
+$ jod schedule add pol3 x --cron @daily --misfire fire_all
+pol3 armed — next Aug 11 00:00 (in 1h07m)
+
+$ jod schedule add pol4 x --cron @daily --overlap skip
+pol4 armed — next Aug 11 00:00 (in 1h07m)
+
+$ jod schedule add pol5 x --cron @daily --overlap queue
+Error: unknown overlap policy queue
+[exit 1]
+
+$ jod schedule add pol6 x --cron @daily --overlap kill
+Error: unknown overlap policy kill
+[exit 1]
+
+$ jod schedule add polbad x --cron @daily --misfire nonsense
+Error: unknown misfire policy nonsense
+[exit 1]
+
+$ jod schedule add polbad2 x --cron @daily --overlap nonsense
+Error: unknown overlap policy nonsense
+[exit 1]
+
+$ q "SELECT name, misfire, overlap FROM schedules WHERE name LIKE 'pol%' ORDER BY name"
+name | misfire | overlap
+-----+---------+--------
+pol1 | fire_once | skip
+pol2 | skip | skip
+pol3 | fire_all | skip
+pol4 | fire_once | skip
+(4 rows)
+
+==============================================================
+== 11. harness selection
+==============================================================
+$ jod schedule add hc x --cron @daily -H claude
+hc armed — next Aug 11 00:00 (in 1h07m)
+
+$ jod schedule add ho x --cron @daily -H opencode
+ho armed — next Aug 11 00:00 (in 1h07m)
+
+$ jod schedule add ha x --cron @daily -H agy
+ha armed — next Aug 11 00:00 (in 1h07m)
+
+$ jod schedule add hbad x --cron @daily -H nosuch
+error: invalid value 'nosuch' for '--harness <HARNESS>'
+  [possible values: claude, opencode, agy]
+
+For more information, try '--help'.
+[exit 2]
+
+$ q "SELECT name, harness FROM schedules WHERE name LIKE 'h%' ORDER BY name"
+name | harness
+-----+--------
+ha | agy
+hc | claude_code
+ho | open_code
+(3 rows)
+
+==============================================================
+== 12. rm forgets the schedule and its history
+==============================================================
+$ q "SELECT count(*) AS before FROM schedules"
+before
+------
+14
+(1 rows)
+
+$ jod schedule rm pol1
+pol1 forgotten
+
+$ jod schedule rm pol2
+pol2 forgotten
+
+$ q "SELECT count(*) AS after FROM schedules"
+after
+-----
+12
+(1 rows)
+
+$ jod schedule ls
+[32m●[0m [1mdaily-at            [0m [2m@daily          [0m Aug 11 00:00 (in 1h07m)
+[32m●[0m [1mevery15             [0m [2m*/15 * * * *    [0m Aug 10 23:00 (in 7m32s)
+[32m●[0m [1mha                  [0m [2m@daily          [0m Aug 11 00:00 (in 1h07m)
+[32m●[0m [1mhc                  [0m [2m@daily          [0m Aug 11 00:00 (in 1h07m)
+[32m●[0m [1mho                  [0m [2m@daily          [0m Aug 11 00:00 (in 1h07m)
+[32m●[0m [1mmanila              [0m [2m0 2 * * *       [0m Aug 11 18:00 (in 19h07m)
+[32m●[0m [1mnewyork             [0m [2m0 2 * * *       [0m Aug 11 06:00 (in 7h07m)
+[32m●[0m [1mnightly             [0m [2m0 2 * * *       [0m Aug 11 02:00 (in 3h07m)
+[32m●[0m [1mpol3                [0m [2m@daily          [0m Aug 11 00:00 (in 1h07m)
+[32m●[0m [1mpol4                [0m [2m@daily          [0m Aug 11 00:00 (in 1h07m)
+[32m●[0m [1mweekdays            [0m [2m0 9 * * 1-5     [0m Aug 11 09:00 (in 10h07m)
+[32m●[0m [1mwithsecs            [0m [2m0 0 2 * * *     [0m Aug 11 02:00 (in 3h07m)
+
+==============================================================
+== 13. the full stored row, for the record
+==============================================================
+$ q "SELECT id, name, cron, timezone, harness, state, misfire, overlap, consecutive_failures, next_fire_at_ms FROM schedules ORDER BY id"
+id | name | cron | timezone | harness | state | misfire | overlap | consecutive_failures | next_fire_at_ms
+---+------+------+----------+---------+-------+---------+---------+----------------------+----------------
+2dd2e2df-5a2f-470c-ac25-c34f6652301b | pol3 | @daily | UTC | claude_code | armed | fire_all | skip | 0 | 1786406400000
+2fda316a-7262-4406-bd15-2721a9ab629b | every15 | */15 * * * * | UTC | claude_code | armed | fire_once | skip | 0 | 1786402800000
+43227747-73bf-493d-8750-e3e5b29d0a05 | ho | @daily | UTC | open_code | armed | fire_once | skip | 0 | 1786406400000
+6d7dc37f-a8a9-4c44-a756-6e8f9cf24fbd | nightly | 0 2 * * * | UTC | claude_code | armed | fire_once | skip | 0 | 1786413600000
+81320726-228e-44f6-99c1-10d097db290d | manila | 0 2 * * * | Asia/Manila | claude_code | armed | fire_once | skip | 0 | 1786471200000
+8cf5735e-bb19-461b-bf48-32ad00b3370a | withsecs | 0 0 2 * * * | UTC | claude_code | armed | fire_once | skip | 0 | 1786413600000
+96e48db5-b2b3-43c2-9335-763d01d13a16 | pol4 | @daily | UTC | claude_code | armed | fire_once | skip | 0 | 1786406400000
+aa940b22-9986-4b91-a90d-0c2c3c5b669a | ha | @daily | UTC | agy | armed | fire_once | skip | 0 | 1786406400000
+c8da7b3c-41be-46d7-971c-c9ec6d7d6990 | newyork | 0 2 * * * | America/New_York | claude_code | armed | fire_once | skip | 0 | 1786428000000
+cb39c259-4327-4217-b133-e435d5652593 | daily-at | @daily | UTC | claude_code | armed | fire_once | skip | 0 | 1786406400000
+d0180e0b-0f44-4aaa-91ab-8fffae50f900 | weekdays | 0 9 * * 1-5 | UTC | claude_code | armed | fire_once | skip | 0 | 1786438800000
+d8b3b27f-0128-4f98-9bee-c8dbd880aeba | hc | @daily | UTC | claude_code | armed | fire_once | skip | 0 | 1786406400000
+(12 rows)
+

@@ -1,0 +1,183 @@
+jod mcp · read_only access · permission ceiling accept_edits · 7 tools
+==============================================================
+== 0. does  speak the protocol at all?
+==============================================================
+-- an initialize + tools/list handshake straight down stdin --
+$ printf '%s\n%s\n'   '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"e2e","version":"0"}}}'   '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'   | JOD_HOME='/tmp/jod-e2e/mcp' '/tmp/jod-e2e/bin/jod' mcp --access read_only 2>&1 | head -4 | cut -c1-400
+jod mcp · read_only access · permission ceiling accept_edits · 7 tools
+{"id":1,"jsonrpc":"2.0","result":{"capabilities":{"tools":{}},"protocolVersion":"2024-11-05","serverInfo":{"name":"jod","title":"Jod (read_only access)","version":"0.1.0"}}}
+{"id":2,"jsonrpc":"2.0","result":{"tools":[{"description":"Every agent Jod knows about, running or finished, each with its last message. Check this before delegating: continuing a warm agent that already has the context beats starting a cold one that has to rediscover it.","inputSchema":{"properties":{"limit":{"description":"How many to return. Default 20.","type":"integer"},"running_only":{"descr
+
+==============================================================
+== 1. the tool set really differs by access level
+==============================================================
+--- read_only ---
+$ printf '%s\n%s\n'     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"e2e","version":"0"}}}'     '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'     | JOD_HOME='/tmp/jod-e2e/mcp' '/tmp/jod-e2e/bin/jod' mcp --access read_only 2>/dev/null     | python3 -c "
+import sys, json
+for line in sys.stdin:
+    try: d = json.loads(line)
+    except Exception: continue
+    if d.get('id') == 2:
+        print(', '.join(t['name'] for t in d['result']['tools']))"
+list_agents, schedule_list, goal_list, recall, related, conversations, conversation_search
+
+--- delegate ---
+$ printf '%s\n%s\n'     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"e2e","version":"0"}}}'     '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'     | JOD_HOME='/tmp/jod-e2e/mcp' '/tmp/jod-e2e/bin/jod' mcp --access delegate 2>/dev/null     | python3 -c "
+import sys, json
+for line in sys.stdin:
+    try: d = json.loads(line)
+    except Exception: continue
+    if d.get('id') == 2:
+        print(', '.join(t['name'] for t in d['result']['tools']))"
+list_agents, delegate, continue_agent, stop_agent, schedule_list, goal_list, recall, related, conversations, conversation_search
+
+--- orchestrate ---
+$ printf '%s\n%s\n'     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"e2e","version":"0"}}}'     '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'     | JOD_HOME='/tmp/jod-e2e/mcp' '/tmp/jod-e2e/bin/jod' mcp --access orchestrate 2>/dev/null     | python3 -c "
+import sys, json
+for line in sys.stdin:
+    try: d = json.loads(line)
+    except Exception: continue
+    if d.get('id') == 2:
+        print(', '.join(t['name'] for t in d['result']['tools']))"
+list_agents, delegate, continue_agent, stop_agent, schedule_create, schedule_list, schedule_pause, schedule_run_now, goal_create, goal_list, remember, recall, related, conversations, conversation_search
+
+==============================================================
+== 2. seed a fact the agent can only learn by calling recall
+==============================================================
+$ jod remember cerulean-widget serial-number QX-7741-ZULU
+remembered #1
+
+$ q "SELECT id, subject, predicate, object FROM facts"
+id | subject | predicate | object
+---+---------+-----------+-------
+1 | cerulean-widget | serial-number | QX-7741-ZULU
+(1 rows)
+
+==============================================================
+== 3. a scheduled run told to use the tool, not to guess
+==============================================================
+$ jod schedule add ask Use your jod MCP tools to recall what you know about cerulean-widget, then reply with just its serial number. Do not guess. --cron @daily
+ask armed — next Aug 11 00:00 (in 15m27s)
+
+$ jod daemon --once
+claimed 1 · started 1 · held 0 · failed 0
+
+$ (waiting for every run to reach a terminal status)
+settled after 10s
+
+==============================================================
+== 4. did an mcp__jod tool call actually happen?
+==============================================================
+$ q "SELECT seq, kind, substr(payload,1,300) FROM events ORDER BY seq"
+seq | kind | substr(payload,1,300)
+----+------+----------------------
+0 | raw | {"kind":"raw","line":"Ignoring 10 permissions.allow entries from .claude/settings.json: this workspace has not been trusted. Run Claude Code interactively here once and accept the trust dialog, or set projects[\"/home/reljod/repo/Jod\"].hasTrustDialogAccepted: true in /home/reljod/.claude.json."}
+1 | started | {"kind":"started","session_id":"1a9b291e-c568-4eb2-89e7-9bfd22daba36","model":"claude-opus-5[1m]"}
+2 | message | {"kind":"message","text":"I'll load the memory recall tools first."}
+3 | tool_call | {"kind":"tool_call","name":"ToolSearch","input":{"max_results":5,"query":"select:mcp__jod__recall,mcp__jod__related,mcp__jod__conversation_search"}}
+4 | tool_result | {"kind":"tool_result","name":"ToolSearch","summary":"[{\"tool_name\":\"mcp__jod__recall\",\"type\":\"tool_reference\"},{\"tool_name\":\"mcp__jod__related\",\"type\":\"tool_reference\"},{\"tool_name\":\"mcp__jod__conversation_search\",\"type\":\"tool_reference\"}]","is_error":false}
+5 | tool_call | {"kind":"tool_call","name":"mcp__jod__recall","input":{"limit":10,"query":"cerulean-widget serial number"}}
+6 | tool_result | {"kind":"tool_result","name":"mcp__jod__recall","summary":"[{\"text\":\"[\\n  {\\n    \\\"id\\\": 1,\\n    \\\"scope\\\": \\\"default\\\",\\n    \\\"subject\\\": \\\"cerulean-widget\\\",\\n    \\\"predicate\\\": \\\"serial-number\\\",\\n    \\\"object\\\": \\\"QX-7741-ZULU\\\",\\n    \\\"origin\\\":
+7 | tool_call | {"kind":"tool_call","name":"mcp__jod__related","input":{"hops":2,"subject":"cerulean-widget"}}
+8 | tool_result | {"kind":"tool_result","name":"mcp__jod__related","summary":"[{\"text\":\"[\\n  {\\n    \\\"id\\\": 2,\\n    \\\"name\\\": \\\"QX-7741-ZULU\\\",\\n    \\\"kind\\\": \\\"thing\\\",\\n    \\\"hops\\\": 1\\n  }\\n]\",\"type\":\"text\"}]","is_error":false}
+9 | message | {"kind":"message","text":"QX-7741-ZULU"}
+10 | finished | {"kind":"finished","text":"QX-7741-ZULU","exit_code":0,"is_error":false,"usage":{"input_tokens":6,"output_tokens":293,"cache_read_tokens":71947,"cache_write_tokens":10248,"cost_usd":0.1458085}}
+(11 rows)
+
+
+== the test ==
+$ q "SELECT count(*) AS mcp_tool_calls FROM events WHERE kind='tool_call' AND payload LIKE '%mcp__jod%'"
+mcp_tool_calls
+--------------
+3
+(1 rows)
+
+$ q "SELECT count(*) AS answered_with_the_serial FROM events WHERE kind='finished' AND payload LIKE '%QX-7741-ZULU%'"
+answered_with_the_serial
+------------------------
+1
+(1 rows)
+
+==============================================================
+== 5. what the run finally said
+==============================================================
+$ RID=$(python3 "/home/reljod/repo/Jod/.claude/worktrees/feat+memory-graph-scheduler-webhooks/tests/e2e/jod/db.py" "/tmp/jod-e2e/mcp/jod.db" 'SELECT id FROM runs LIMIT 1' | sed -n 3p); '/tmp/jod-e2e/bin/jod' watch $RID
+Ignoring 10 permissions.allow entries from .claude/settings.json: this workspace has not been trusted. Run Claude Code interactively here once and accept the trust dialog, or set projects["/home/reljod/repo/Jod"].hasTrustDialogAccepted: true in /home/reljod/.claude.json.
+  model claude-opus-5[1m]
+I'll load the memory recall tools first.
+⚙ ToolSearch
+⚙ mcp__jod__recall
+⚙ mcp__jod__related
+QX-7741-ZULU
+✓ done · $0.1458 · 293 out
+
+==============================================================
+== 6. and can that read_only run WRITE through the tools?
+==============================================================
+-- remember/schedule_create must not be in a read_only tool set --
+$ jod schedule rm ask
+ask forgotten
+
+$ jod schedule add trywrite Use your jod MCP tools to remember that sky is green, then say what tools you were given. --cron @daily
+trywrite armed — next Aug 11 00:00 (in 15m17s)
+
+$ jod daemon --once
+[jod/daemon] reloaded 1 prior run(s)
+claimed 1 · started 1 · held 0 · failed 0
+
+$ (waiting for every run to reach a terminal status)
+settled after 55s
+
+$ q "SELECT seq, kind, substr(payload,1,300) FROM events ORDER BY run_id, seq"
+seq | kind | substr(payload,1,300)
+----+------+----------------------
+0 | raw | {"kind":"raw","line":"Ignoring 10 permissions.allow entries from .claude/settings.json: this workspace has not been trusted. Run Claude Code interactively here once and accept the trust dialog, or set projects[\"/home/reljod/repo/Jod\"].hasTrustDialogAccepted: true in /home/reljod/.claude.json."}
+1 | started | {"kind":"started","session_id":"84ac06c7-5f43-418f-87ca-909dd28fcfb7","model":"claude-opus-5[1m]"}
+2 | message | {"kind":"message","text":"I'll load the memory tool schema first."}
+3 | tool_call | {"kind":"tool_call","name":"ToolSearch","input":{"max_results":10,"query":"+jod remember memory write store"}}
+4 | tool_result | {"kind":"tool_result","name":"ToolSearch","summary":"[{\"tool_name\":\"mcp__jod__related\",\"type\":\"tool_reference\"},{\"tool_name\":\"mcp__jod__conversations\",\"type\":\"tool_reference\"},{\"tool_name\":\"mcp__jod__list_agents\",\"type\":\"tool_reference\"},{\"tool_name\":\"mcp__jod__recall\",\"
+5 | thinking | {"kind":"thinking","text":""}
+6 | tool_call | {"kind":"tool_call","name":"ToolSearch","input":{"max_results":15,"query":"+jod remember fact add note save"}}
+7 | tool_result | {"kind":"tool_result","name":"ToolSearch","summary":"[{\"tool_name\":\"mcp__jod__conversations\",\"type\":\"tool_reference\"},{\"tool_name\":\"mcp__jod__list_agents\",\"type\":\"tool_reference\"},{\"tool_name\":\"mcp__jod__recall\",\"type\":\"tool_reference\"},{\"tool_name\":\"mcp__jod__related\",\"
+8 | thinking | {"kind":"thinking","text":""}
+9 | tool_call | {"kind":"tool_call","name":"Grep","input":{"glob":"*.{ts,js,py,rs,go}","head_limit":20,"output_mode":"files_with_matches","pattern":"mcp__jod__|\\\"recall\\\"|name: \\\"recall\\\""}}
+10 | tool_result | {"kind":"tool_result","name":"Grep","summary":"Found 3 files\ncore/src/mcp.rs\nresearch/memory-types-2026/scripts/run_iterations.py\nresearch/sqlite-graph-2026/bench/gen.py","is_error":false}
+11 | tool_call | {"kind":"tool_call","name":"Grep","input":{"-n":true,"head_limit":60,"output_mode":"content","path":"core/src/mcp.rs","pattern":"Tool \\{|name: \"[a-z_]+\"|fn tools|remember|write|insert"}}
+12 | tool_result | {"kind":"tool_result","name":"Grep","summary":"5://! delegating, scheduling, remembering, saying what is running. MCP is the\n25://! 2. **Nothing here writes [`Origin::Owner`].** A fact an agent concluded is\n27://!    person typing `jod remember` is the owner.\n72:pub struct Tool {\n111:        Too
+13 | thinking | {"kind":"thinking","text":""}
+14 | tool_call | {"kind":"tool_call","name":"ToolSearch","input":{"max_results":5,"query":"select:mcp__jod__remember,mcp__jod__delegate,mcp__jod__goal_create"}}
+15 | tool_result | {"kind":"tool_result","name":"ToolSearch","summary":"No matching deferred tools found","is_error":false}
+16 | thinking | {"kind":"thinking","text":""}
+17 | tool_call | {"kind":"tool_call","name":"Read","input":{"file_path":"/home/reljod/repo/Jod/.claude/worktrees/feat+memory-graph-scheduler-webhooks/core/src/mcp.rs","limit":50,"offset":440}}
+18 | tool_result | {"kind":"tool_result","name":"Read","summary":"440\t\n441\t    pub fn access(&self) -> ToolAccess {\n442\t        self.access\n443\t    }\n444\t\n445\t    /// The tools this server will advertise — exactly those it will dispatch.\n446\t    pub fn tools(&self) -> Vec<Tool> {\n447\t        catalogue()
+19 | thinking | {"kind":"thinking","text":""}
+20 | tool_call | {"kind":"tool_call","name":"Grep","input":{"-n":true,"glob":"*.rs","head_limit":40,"output_mode":"content","pattern":"ToolAccess|fn allows|Observe|Orchestrate"}}
+21 | tool_result | {"kind":"tool_result","name":"Grep","summary":"api/src/auth.rs:34:    pub fn allows(self, required: Scope) -> bool {\ncore/src/harness/mod.rs:172:    /// See [`ToolAccess::unattended`].\ncore/src/harness/mod.rs:177:    pub tools: Option<ToolAccess>,\ncore/src/harness/mod.rs:188:pub enum ToolAccess {
+22 | thinking | {"kind":"thinking","text":""}
+23 | tool_call | {"kind":"tool_call","name":"Read","input":{"file_path":"/home/reljod/repo/Jod/.claude/worktrees/feat+memory-graph-scheduler-webhooks/core/src/mcp.rs","limit":20,"offset":250}}
+24 | tool_result | {"kind":"tool_result","name":"Read","summary":"250\t        Tool {\n251\t            name: \"remember\",\n252\t            description:\n253\t                \"Write something durable into Jod's memory, as a subject–predicate–object triple. \\\n254\t                 Recorded as an agent's conclusion
+25 | message | {"kind":"message","text":"I couldn't do it — and the reason is worth more than the fact.\n\n## What happened\n\n`remember` exists and works, but it isn't reachable from this session. `core/src/mcp.rs:255` gates it behind `ToolAccess::Orchestrate`, and the jod MCP server attached here is running at `
+26 | finished | {"kind":"finished","text":"I couldn't do it — and the reason is worth more than the fact.\n\n## What happened\n\n`remember` exists and works, but it isn't reachable from this session. `core/src/mcp.rs:255` gates it behind `ToolAccess::Orchestrate`, and the jod MCP server attached here is running at 
+0 | raw | {"kind":"raw","line":"Ignoring 10 permissions.allow entries from .claude/settings.json: this workspace has not been trusted. Run Claude Code interactively here once and accept the trust dialog, or set projects[\"/home/reljod/repo/Jod\"].hasTrustDialogAccepted: true in /home/reljod/.claude.json."}
+1 | started | {"kind":"started","session_id":"1a9b291e-c568-4eb2-89e7-9bfd22daba36","model":"claude-opus-5[1m]"}
+2 | message | {"kind":"message","text":"I'll load the memory recall tools first."}
+3 | tool_call | {"kind":"tool_call","name":"ToolSearch","input":{"max_results":5,"query":"select:mcp__jod__recall,mcp__jod__related,mcp__jod__conversation_search"}}
+4 | tool_result | {"kind":"tool_result","name":"ToolSearch","summary":"[{\"tool_name\":\"mcp__jod__recall\",\"type\":\"tool_reference\"},{\"tool_name\":\"mcp__jod__related\",\"type\":\"tool_reference\"},{\"tool_name\":\"mcp__jod__conversation_search\",\"type\":\"tool_reference\"}]","is_error":false}
+5 | tool_call | {"kind":"tool_call","name":"mcp__jod__recall","input":{"limit":10,"query":"cerulean-widget serial number"}}
+6 | tool_result | {"kind":"tool_result","name":"mcp__jod__recall","summary":"[{\"text\":\"[\\n  {\\n    \\\"id\\\": 1,\\n    \\\"scope\\\": \\\"default\\\",\\n    \\\"subject\\\": \\\"cerulean-widget\\\",\\n    \\\"predicate\\\": \\\"serial-number\\\",\\n    \\\"object\\\": \\\"QX-7741-ZULU\\\",\\n    \\\"origin\\\":
+7 | tool_call | {"kind":"tool_call","name":"mcp__jod__related","input":{"hops":2,"subject":"cerulean-widget"}}
+8 | tool_result | {"kind":"tool_result","name":"mcp__jod__related","summary":"[{\"text\":\"[\\n  {\\n    \\\"id\\\": 2,\\n    \\\"name\\\": \\\"QX-7741-ZULU\\\",\\n    \\\"kind\\\": \\\"thing\\\",\\n    \\\"hops\\\": 1\\n  }\\n]\",\"type\":\"text\"}]","is_error":false}
+9 | message | {"kind":"message","text":"QX-7741-ZULU"}
+10 | finished | {"kind":"finished","text":"QX-7741-ZULU","exit_code":0,"is_error":false,"usage":{"input_tokens":6,"output_tokens":293,"cache_read_tokens":71947,"cache_write_tokens":10248,"cost_usd":0.1458085}}
+(38 rows)
+
+-- the fact must NOT have been written --
+$ jod recall sky
+nothing remembered about that
+
+$ q "SELECT id, subject, predicate, object, origin FROM facts ORDER BY id"
+id | subject | predicate | object | origin
+---+---------+-----------+--------+-------
+1 | cerulean-widget | serial-number | QX-7741-ZULU | owner
+(1 rows)
+

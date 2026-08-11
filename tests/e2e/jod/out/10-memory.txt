@@ -1,0 +1,436 @@
+==============================================================
+== 1. remember and recall round-trip
+==============================================================
+$ jod remember reljod uses jod
+remembered #1
+
+$ jod remember reljod prefers linear for tasks
+remembered #2
+
+$ jod recall reljod
+reljod uses jod
+reljod prefers linear for tasks
+
+$ jod recall linear
+reljod prefers linear for tasks
+
+==============================================================
+== 2. recall --json shape
+==============================================================
+$ jod recall reljod --json
+[
+  {
+    "id": 1,
+    "scope": "default",
+    "subject": "reljod",
+    "predicate": "uses",
+    "object": "jod",
+    "origin": "owner",
+    "source": null,
+    "valid_from": null,
+    "valid_to": null,
+    "recorded_at_ms": 1786401624307,
+    "state": "accepted"
+  },
+  {
+    "id": 2,
+    "scope": "default",
+    "subject": "reljod",
+    "predicate": "prefers",
+    "object": "linear for tasks",
+    "origin": "owner",
+    "source": null,
+    "valid_from": null,
+    "valid_to": null,
+    "recorded_at_ms": 1786401624315,
+    "state": "accepted"
+  }
+]
+
+==============================================================
+== 3. versioning: the same subject+predicate asserted twice
+==============================================================
+$ jod remember reljod uses jod on a vps
+remembered #3
+
+-- recall should show the current value --
+$ jod recall reljod uses
+reljod uses jod
+reljod uses jod on a vps
+reljod prefers linear for tasks
+
+-- but both versions should still be on disk --
+$ q "SELECT id, subject, predicate, object, origin, state FROM facts WHERE subject='reljod' AND predicate='uses' ORDER BY id"
+id | subject | predicate | object | origin | state
+---+---------+-----------+--------+--------+------
+1 | reljod | uses | jod | owner | accepted
+3 | reljod | uses | jod on a vps | owner | accepted
+(2 rows)
+
+==============================================================
+== 4. THE TRUST BOUNDARY: an untrusted fact must not answer
+==============================================================
+$ jod remember zenith ships a quantum blockchain --origin untrusted --source https://spam.example/page
+remembered #4
+
+-- the fact is stored --
+$ q "SELECT id, subject, predicate, object, origin FROM facts WHERE subject='zenith'"
+id | subject | predicate | object | origin
+---+---------+-----------+--------+-------
+4 | zenith | ships | a quantum blockchain | untrusted
+(1 rows)
+
+-- ...but recall must not surface it --
+$ jod recall zenith
+nothing remembered about that
+
+$ jod recall quantum
+nothing remembered about that
+
+$ jod recall a quantum blockchain
+reljod uses jod on a vps
+
+==============================================================
+== 4b. the other three origins SHOULD answer
+==============================================================
+$ jod remember alpha statedby agent-origin --origin agent
+remembered #5
+
+$ jod remember beta statedby system-origin --origin system
+remembered #6
+
+$ jod remember gamma statedby owner-origin --origin owner
+remembered #7
+
+$ jod recall agent-origin
+alpha statedby agent-origin [agent]
+beta statedby system-origin [system]
+gamma statedby owner-origin
+
+$ jod recall system-origin
+beta statedby system-origin [system]
+alpha statedby agent-origin [agent]
+gamma statedby owner-origin
+
+$ jod recall owner-origin
+gamma statedby owner-origin
+alpha statedby agent-origin [agent]
+beta statedby system-origin [system]
+
+==============================================================
+== 5. scope partitioning
+==============================================================
+$ jod remember budget is 50 eur --scope finance
+remembered #8
+
+$ jod remember budget is 10 story points --scope work
+remembered #9
+
+-- restricted to one scope --
+$ jod recall budget --scope finance
+budget is 50 eur
+
+$ jod recall budget --scope work
+budget is 10 story points
+
+-- --scope with a scope that has no such fact --
+$ jod recall budget --scope health
+nothing remembered about that
+
+-- omitting --scope: help says it searches every scope --
+$ jod recall budget
+budget is 50 eur
+budget is 10 story points
+
+==============================================================
+== 6. forget destroys every version, and tombstones the deletion
+==============================================================
+-- before --
+$ q "SELECT count(*) AS versions FROM facts WHERE subject='reljod' AND predicate='uses'"
+versions
+--------
+2
+(1 rows)
+
+$ jod forget reljod uses
+forgot 2 versions, permanently
+
+-- after: zero rows of any version --
+$ q "SELECT id, object, state FROM facts WHERE subject='reljod' AND predicate='uses'"
+id | object | state
+---+--------+------
+(0 rows)
+
+-- the FTS index must not keep a ghost --
+$ jod recall jod on a vps
+nothing remembered about that
+
+-- a tombstone records that it happened, and how many versions died --
+$ q "SELECT scope, subject, predicate, versions FROM tombstones"
+scope | subject | predicate | versions
+------+---------+-----------+---------
+default | reljod | uses | 2
+(1 rows)
+
+==============================================================
+== 7. forget on something that was never there
+==============================================================
+$ jod forget nosuch thing
+nothing to forget
+
+==============================================================
+== 8. the graph: three facts written one at a time
+==============================================================
+$ jod remember jod runs-on jod-cloud
+remembered #10
+
+$ jod remember jod-cloud hosted-by hetzner
+remembered #11
+
+$ jod remember hetzner located-in falkenstein
+remembered #12
+
+-- entities and relations are derived --
+$ q "SELECT id, scope, kind, name FROM entities ORDER BY id"
+id | scope | kind | name
+---+-------+------+-----
+1 | default | thing | reljod
+2 | default | thing | jod
+3 | default | thing | linear for tasks
+4 | default | thing | jod on a vps
+5 | default | thing | zenith
+6 | default | thing | a quantum blockchain
+7 | default | thing | alpha
+8 | default | thing | agent-origin
+9 | default | thing | beta
+10 | default | thing | system-origin
+11 | default | thing | gamma
+12 | default | thing | owner-origin
+13 | finance | thing | budget
+14 | finance | thing | 50 eur
+15 | work | thing | budget
+16 | work | thing | 10 story points
+17 | default | thing | jod-cloud
+18 | default | thing | hetzner
+19 | default | thing | falkenstein
+(19 rows)
+
+$ q "SELECT r.id, se.name AS src, r.predicate, de.name AS dst, r.fact_id FROM relations r JOIN entities se ON se.id=r.src JOIN entities de ON de.id=r.dst ORDER BY r.id"
+id | src | predicate | dst | fact_id
+---+-----+-----------+-----+--------
+2 | reljod | prefers | linear for tasks | 2
+4 | zenith | ships | a quantum blockchain | 4
+5 | alpha | statedby | agent-origin | 5
+6 | beta | statedby | system-origin | 6
+7 | gamma | statedby | owner-origin | 7
+8 | budget | is | 50 eur | 8
+9 | budget | is | 10 story points | 9
+10 | jod | runs-on | jod-cloud | 10
+11 | jod-cloud | hosted-by | hetzner | 11
+12 | hetzner | located-in | falkenstein | 12
+(10 rows)
+
+==============================================================
+== 9. jod related — walking out from a node
+==============================================================
+$ jod related jod -n 1
+ 1 hop  jod-cloud
+
+$ jod related jod -n 2
+ 1 hop  jod-cloud
+ 2 hop  hetzner
+
+$ jod related jod -n 3
+ 1 hop  jod-cloud
+ 2 hop  hetzner
+ 3 hop  falkenstein
+
+$ jod related jod -n 3 --json
+[
+  {
+    "id": 17,
+    "name": "jod-cloud",
+    "kind": "thing",
+    "hops": 1
+  },
+  {
+    "id": 18,
+    "name": "hetzner",
+    "kind": "thing",
+    "hops": 2
+  },
+  {
+    "id": 19,
+    "name": "falkenstein",
+    "kind": "thing",
+    "hops": 3
+  }
+]
+
+==============================================================
+== 9b. the documented hop cap
+==============================================================
+$ jod related jod -n 4
+ 1 hop  jod-cloud
+ 2 hop  hetzner
+ 3 hop  falkenstein
+
+$ jod related jod -n 99
+ 1 hop  jod-cloud
+ 2 hop  hetzner
+ 3 hop  falkenstein
+
+$ jod related jod -n 0
+ 1 hop  jod-cloud
+
+==============================================================
+== 10. jod path
+==============================================================
+$ jod path jod falkenstein
+jod  →  jod-cloud  →  hetzner  →  falkenstein
+
+$ jod path jod hetzner
+jod  →  jod-cloud  →  hetzner
+
+$ jod path falkenstein jod
+no path from falkenstein to jod within 5 hops
+
+-- two things that are not connected --
+$ jod path jod gamma
+no path from jod to gamma within 5 hops
+
+-- something that does not exist at all --
+$ jod path jod nonexistent-thing
+no path from jod to nonexistent-thing within 5 hops
+
+==============================================================
+== 11. untrusted must be excluded from graph SEEDING too
+==============================================================
+$ jod remember jod-cloud compromised-by evil corp --origin untrusted
+remembered #13
+
+-- the edge exists in the derived index? --
+$ q "SELECT r.id, se.name AS src, r.predicate, de.name AS dst, f.origin FROM relations r JOIN entities se ON se.id=r.src JOIN entities de ON de.id=r.dst JOIN facts f ON f.id=r.fact_id WHERE f.origin='untrusted'"
+id | src | predicate | dst | origin
+---+-----+-----------+-----+-------
+4 | zenith | ships | a quantum blockchain | untrusted
+13 | jod-cloud | compromised-by | evil corp | untrusted
+(2 rows)
+
+-- can an untrusted name be used as a starting point? --
+$ jod related evil corp -n 2
+ 1 hop  jod-cloud
+ 2 hop  hetzner
+ 2 hop  jod
+
+-- does an untrusted edge get traversed from a trusted seed? --
+$ jod related jod -n 2
+ 1 hop  jod-cloud
+ 2 hop  evil corp
+ 2 hop  hetzner
+
+==============================================================
+== 12. forget cascades to the graph
+==============================================================
+-- before: edges touching hetzner --
+$ q "SELECT count(*) AS edges FROM relations WHERE fact_id IN (SELECT id FROM facts WHERE subject='hetzner' AND predicate='located-in')"
+edges
+-----
+1
+(1 rows)
+
+$ jod forget hetzner located-in
+forgot 1 version, permanently
+
+-- after --
+$ q "SELECT count(*) AS edges FROM relations WHERE fact_id IN (SELECT id FROM facts WHERE subject='hetzner' AND predicate='located-in')"
+edges
+-----
+0
+(1 rows)
+
+$ q "SELECT count(*) AS orphan_edges FROM relations WHERE fact_id NOT IN (SELECT id FROM facts)"
+orphan_edges
+------------
+0
+(1 rows)
+
+$ jod path jod falkenstein
+no path from jod to falkenstein within 5 hops
+
+$ jod related jod -n 3
+ 1 hop  jod-cloud
+ 2 hop  evil corp
+ 2 hop  hetzner
+
+==============================================================
+== 13. graph is scope-partitioned too
+==============================================================
+$ jod remember jod runs-on a secret box --scope private
+remembered #14
+
+$ jod related jod -n 2 --scope private
+ 1 hop  a secret box
+
+$ jod related jod -n 2 --scope default
+ 1 hop  jod-cloud
+ 2 hop  evil corp
+ 2 hop  hetzner
+
+==============================================================
+== 14. hostile input: quoting, unicode, very long values
+==============================================================
+$ jod remember sub'ject pred"icate obj; DROP TABLE facts;--
+remembered #15
+
+$ jod recall DROP TABLE
+sub'ject pred"icate obj; DROP TABLE facts;--
+
+$ q "SELECT count(*) AS facts_table_still_here FROM facts"
+facts_table_still_here
+----------------------
+12
+(1 rows)
+
+$ jod remember emoji means 🎉 café 日本語
+remembered #16
+
+$ jod recall café
+emoji means 🎉 café 日本語
+
+$ jod recall 日本語
+emoji means 🎉 café 日本語
+
+==============================================================
+== 15. recall limit
+==============================================================
+$ jod recall reljod -l 1
+reljod prefers linear for tasks
+
+$ jod recall  -l 3
+nothing remembered about that
+
+$ jod recall
+nothing remembered about that
+
+==============================================================
+== final state
+==============================================================
+$ q "SELECT id, scope, subject, predicate, object, origin, state FROM facts ORDER BY id"
+id | scope | subject | predicate | object | origin | state
+---+-------+---------+-----------+--------+--------+------
+2 | default | reljod | prefers | linear for tasks | owner | accepted
+4 | default | zenith | ships | a quantum blockchain | untrusted | accepted
+5 | default | alpha | statedby | agent-origin | agent | accepted
+6 | default | beta | statedby | system-origin | system | accepted
+7 | default | gamma | statedby | owner-origin | owner | accepted
+8 | finance | budget | is | 50 eur | owner | accepted
+9 | work | budget | is | 10 story points | owner | accepted
+10 | default | jod | runs-on | jod-cloud | owner | accepted
+11 | default | jod-cloud | hosted-by | hetzner | owner | accepted
+13 | default | jod-cloud | compromised-by | evil corp | untrusted | accepted
+14 | private | jod | runs-on | a secret box | owner | accepted
+15 | default | sub'ject | pred"icate | obj; DROP TABLE facts;-- | owner | accepted
+16 | default | emoji | means | 🎉 café 日本語 | owner | accepted
+(13 rows)
+
