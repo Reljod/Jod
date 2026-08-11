@@ -35,3 +35,38 @@ Reusable teammate roles live in `.claude/agents/`:
 
 Spawn 3–5. Scale by whether the work genuinely splits into disjoint paths, not
 by how big it feels.
+
+## A shared checkout is not a shared source of truth
+
+Teammates own disjoint *paths*, but they run `cargo test` against the *whole
+tree*. That gap produced two wrong claims in one session, from two different
+agents, in opposite directions:
+
+- One agent ran the suite inside the window where a peer had added something,
+  watched it fail, and reverted. It read the failure and the peer's twelve-entry
+  table, and reported the change to me as landed. `git status` on that file was
+  clean the entire time.
+- I did the reverse. I read a peer's `Request::Restore(String)`, assumed the
+  `String` could name a branch, wired a key to it and shipped. It is a
+  *conversation* needle. Conversation ids are uuids, uuids are hex, so a typed
+  message number like `57` can genuinely prefix-match a real conversation — and
+  the key would have silently moved the head of an entirely different thread.
+
+Both are the same mistake: treating something read out of a shared working tree
+as a fact about the project. So:
+
+- **A red test in a file you do not own is evidence about a moment, not about
+  the tree.** Run `git status` and `git diff --stat` on that path before
+  reporting anything about it. Uncommitted and reverted look identical to
+  `cargo test` and completely different to `git`.
+- **A teammate's function is not an API until you have read its signature.**
+  Not its name, not its call sites — the signature and its doc comment. "I
+  wired it assuming it can" belongs in a message *before* the code, and it is
+  the sentence that caught the second failure here.
+- **Ask about the assumption, not the outcome.** "Does `Restore` take a branch
+  id?" gets answered in a minute. "Here is a key that restores branches" gets
+  reviewed as a feature, and the wrong premise inside it travels.
+
+The general rule: in a shared checkout, `git` is the source of truth about what
+exists and the author is the source of truth about what it means. The test
+runner is neither.
