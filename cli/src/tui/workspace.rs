@@ -42,7 +42,7 @@ impl Workspace {
     ];
 
     /// The which-key menu, in the order it is drawn. This is also the order the
-    /// digits follow, so `Ctrl-K s` and `4` are visibly the same destination.
+    /// digits follow, so `Alt-K s` and `4` are visibly the same destination.
     pub const MENU: [Workspace; 9] = [
         Chat, Fleet, Memory, Schedules, Goals, Hooks, Tasks, Activity, Team,
     ];

@@ -7,6 +7,34 @@
 //! an escalation in goals), a screen whose verbs are *not* printed would be a
 //! trap rather than a shortcut. That is the condition on the whole design, not
 //! an afterthought.
+//!
+//! ## Why the verbs are on Alt and the editing keys are not
+//!
+//! Every global chord used to be Ctrl, which put Jod in a fight it cannot win:
+//! a multiplexer sits between the terminal and this process and takes Ctrl
+//! chords first — tmux's own prefix is `Ctrl-B`, which was Jod's delegate key,
+//! so the binding simply never arrived. Alt is not contended that way, so the
+//! *screen and verb* chords live there now.
+//!
+//! What did **not** move is the handful of Ctrl chords the terminal itself has
+//! taught everyone: `Ctrl-C`/`Ctrl-D` quit, `Ctrl-U` clears the line, `Ctrl-W`
+//! deletes a word, `Ctrl-A`/`Ctrl-E` go to the ends of it. Moving those would
+//! break muscle memory that predates Jod by forty years to solve a problem
+//! nobody has — no multiplexer steals them, because every shell needs them.
+//! `Ctrl-A` in fact comes *back* to readline here: it used to open the fleet,
+//! which was the one Ctrl collision Jod inflicted on itself.
+//!
+//! Where Ctrl had no readline meaning, the old spelling still works but is no
+//! longer printed — `Ctrl-T` still toggles reasoning. Keeping the alias costs
+//! nothing and stops the move being a re-learning tax; printing it would
+//! advertise the chord tmux eats. Where Ctrl *does* have a readline meaning the
+//! Alt spelling is the only one, so that `Ctrl-A` can never again be ambiguous.
+//!
+//! On macOS, Option only reaches this process as Alt when the terminal is told
+//! to send it: iTerm2's "Esc+" for the left Option key, Terminal.app's "Use
+//! Option as Meta key". Without that the terminal eats it to type `å`.
+
+use crossterm::event::{KeyCode, KeyModifiers};
 
 use super::workspace::Workspace;
 
@@ -38,26 +66,35 @@ pub const SPINE: &[Key] = &[
 ];
 
 /// The chords that work everywhere, including in the middle of typing.
+///
+/// Alt for Jod's own verbs, Ctrl for the line editing every terminal already
+/// does — see the module header for why the split falls exactly there. Only one
+/// spelling per binding is printed: the Ctrl aliases still fire, but a keybar
+/// that advertised them would be advertising the chords tmux intercepts.
 pub const GLOBAL: &[Key] = &[
-    k("Ctrl-K", "the workspace menu"),
-    k("Ctrl-A", "fleet"),
-    k("Ctrl-G", "team"),
-    k("Ctrl-B", "delegate the typed line"),
-    k("Ctrl-X", "stop the run being watched"),
-    k("Ctrl-T", "show or hide reasoning"),
-    k("Ctrl-O", "show or hide tool output"),
-    k("Ctrl-L", "clear the transcript"),
+    k("Alt-K", "the workspace menu"),
+    k("Alt-A", "fleet"),
+    k("Alt-G", "team"),
+    k("Alt-N", "the oldest thing unread"),
+    k("Alt-B", "delegate the typed line"),
+    k("Alt-X", "stop the run being watched"),
+    k("Alt-F", "the typed line in $EDITOR"),
+    k("Alt-T", "show or hide reasoning"),
+    k("Alt-O", "show or hide tool output"),
+    k("Alt-L", "clear the transcript"),
+    k("Alt-↑↓", "scroll the transcript"),
+    k("Ctrl-A/Home", "start of the line"),
+    k("Ctrl-E/End", "end of the line"),
     k("Ctrl-U", "clear the input line"),
     k("Ctrl-W", "delete the previous word"),
-    k("Ctrl-↑↓", "scroll the transcript"),
-    k("Ctrl-C", "quit — twice while agents run"),
+    k("Ctrl-C/D", "quit — twice while agents run"),
 ];
 
 
 const CHAT: &[Key] = &[
-    k("Ctrl-B", "delegate"),
-    k("Ctrl-A", "fleet"),
-    k("Ctrl-K", "menu"),
+    k("Alt-B", "delegate"),
+    k("Alt-A", "fleet"),
+    k("Alt-K", "menu"),
     k("/", "commands"),
     k("?", "keys"),
 ];
@@ -174,7 +211,7 @@ pub fn keybar(ws: Workspace) -> String {
 /// The keybar's right half: the way out, which never changes.
 pub fn keybar_exit(ws: Workspace) -> &'static str {
     match ws {
-        Workspace::Chat => "Ctrl-X stop · Ctrl-C quit",
+        Workspace::Chat => "Alt-X stop · Ctrl-C quit",
         _ => "Esc back · ? keys",
     }
 }
@@ -204,6 +241,116 @@ pub fn keymap(ws: Workspace) -> Vec<(String, &'static [Key])> {
     }
     sections.push(("anywhere".to_string(), GLOBAL));
     sections
+}
+
+// ---- keeping the printed keymap and the dispatch honest -------------------
+//
+// This table is display-only; the `match` in `mod.rs` is what actually runs.
+// Nothing but attention has ever kept the two in step, and the failure is
+// silent in the worst possible way — the keybar keeps promising a chord that
+// stopped working. So the labels are made *machine-readable* here, and
+// `mod.rs`'s tests press every one of them. A binding added to either side
+// alone now fails the build instead of shipping.
+
+/// Does this label name a chord, rather than a bare key like `⏎` or `n`?
+pub fn is_chord(label: &str) -> bool {
+    label.starts_with("Ctrl-") || label.starts_with("Alt-")
+}
+
+/// The chords named inside a line of on-screen prose.
+///
+/// Exit hints are sentences (`"Alt-X stop · Ctrl-C quit"`), not table rows, so
+/// a chord can arrive there as a substring nobody registered anywhere.
+pub fn chords_in(text: &str) -> Vec<String> {
+    text.split_whitespace()
+        .filter(|token| is_chord(token))
+        .map(|token| token.to_string())
+        .collect()
+}
+
+/// Every chord this module puts on a screen, once each.
+///
+/// `keymap` already folds in each workspace's own verbs, the shared spine and
+/// the global chords, and the keybar and footer are rendered from that same
+/// data — so this plus the exit hints is genuinely everything.
+pub fn all_documented_chords() -> Vec<String> {
+    let mut found: Vec<String> = Vec::new();
+    for ws in Workspace::ALL {
+        for (_, bindings) in keymap(ws) {
+            found.extend(
+                bindings
+                    .iter()
+                    .filter(|b| is_chord(b.key))
+                    .map(|b| b.key.to_string()),
+            );
+        }
+        found.extend(chords_in(keybar_exit(ws)));
+    }
+    found.sort();
+    found.dedup();
+    found
+}
+
+/// The keypresses a printed label stands for — the whole point being that a
+/// test can press what the screen says.
+///
+/// Two shorthands the labels use, because the overlay has twelve columns for a
+/// key and a row per binding is a row the reader has to scan:
+///
+/// - `↑↓` means both arrows, so `Alt-↑↓` is two presses.
+/// - a `/` continuation inherits the modifier to its left, so `Ctrl-A/Home` is
+///   `Ctrl-A` and `Ctrl-Home` — not `Ctrl-A` and a bare `Home`.
+///
+/// An empty result means the label is not pressable, which the drift test
+/// treats as a bug in the label rather than as a row to skip. Silently
+/// skipping is how a table drifts.
+pub fn press_of(label: &str) -> Vec<(KeyCode, KeyModifiers)> {
+    let mut presses = Vec::new();
+    let mut carried: Option<KeyModifiers> = None;
+    for part in label.split('/') {
+        let part = part.trim();
+        let (modifier, rest) = if let Some(rest) = part.strip_prefix("Ctrl-") {
+            (KeyModifiers::CONTROL, rest)
+        } else if let Some(rest) = part.strip_prefix("Alt-") {
+            (KeyModifiers::ALT, rest)
+        } else {
+            match carried {
+                Some(modifier) => (modifier, part),
+                // A label that starts with a continuation names no modifier at
+                // all, so there is nothing to press.
+                None => return Vec::new(),
+            }
+        };
+        carried = Some(modifier);
+        let codes = codes_of(rest);
+        if codes.is_empty() {
+            return Vec::new();
+        }
+        presses.extend(codes.into_iter().map(|code| (code, modifier)));
+    }
+    presses
+}
+
+/// The key codes a label's tail names, once the modifier is stripped off.
+fn codes_of(rest: &str) -> Vec<KeyCode> {
+    match rest {
+        "↑↓" => vec![KeyCode::Up, KeyCode::Down],
+        "↑" => vec![KeyCode::Up],
+        "↓" => vec![KeyCode::Down],
+        "Home" => vec![KeyCode::Home],
+        "End" => vec![KeyCode::End],
+        _ => {
+            let mut chars = rest.chars();
+            match (chars.next(), chars.next()) {
+                // Printed in capitals because that is how a chord reads; sent
+                // by the terminal in lowercase, which is what must be matched.
+                (Some(c), None) if c.is_ascii_alphanumeric() => {
+                    vec![KeyCode::Char(c.to_ascii_lowercase())]
+                }
+                _ => Vec::new(),
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -274,17 +421,81 @@ mod tests {
     /// The chords the terminal owns must never appear as a binding: `Ctrl-S`
     /// and `Ctrl-Q` are XON/XOFF, `Ctrl-Z` is job control, and `Ctrl-H`,
     /// `Ctrl-I`, `Ctrl-J`, `Ctrl-M` are aliases of Backspace, Tab and Enter.
+    ///
+    /// Checked against the *parsed* press rather than the label, so a chord
+    /// smuggled in as the tail of a `/` continuation is caught too.
     #[test]
     fn no_documented_chord_is_one_the_terminal_owns() {
-        let stolen = [
-            "Ctrl-S", "Ctrl-Q", "Ctrl-Z", "Ctrl-H", "Ctrl-I", "Ctrl-J", "Ctrl-M",
-        ];
-        for binding in GLOBAL {
+        let stolen = ['s', 'q', 'z', 'h', 'i', 'j', 'm'];
+        for label in all_documented_chords() {
+            for (code, modifier) in press_of(&label) {
+                if modifier != KeyModifiers::CONTROL {
+                    continue;
+                }
+                if let KeyCode::Char(c) = code {
+                    assert!(!stolen.contains(&c), "Ctrl-{c} in {label} is the terminal's, not ours");
+                }
+            }
+        }
+    }
+
+    /// Nothing may be printed that cannot be pressed — a label the parser
+    /// cannot read is a label the drift test would silently skip, which is
+    /// exactly how the two tables came apart in the first place.
+    #[test]
+    fn every_printed_chord_parses_into_a_press() {
+        let chords = all_documented_chords();
+        assert!(!chords.is_empty(), "no chords found at all — the scan is broken");
+        for label in chords {
+            assert!(!press_of(&label).is_empty(), "{label} is printed but cannot be pressed");
+        }
+    }
+
+    /// The two shorthands the overlay's twelve-column key field forces on us.
+    #[test]
+    fn a_label_expands_both_arrows_and_inherits_across_a_slash() {
+        assert_eq!(
+            press_of("Alt-↑↓"),
+            vec![
+                (KeyCode::Up, KeyModifiers::ALT),
+                (KeyCode::Down, KeyModifiers::ALT)
+            ]
+        );
+        assert_eq!(
+            press_of("Ctrl-A/Home"),
+            vec![
+                (KeyCode::Char('a'), KeyModifiers::CONTROL),
+                (KeyCode::Home, KeyModifiers::CONTROL)
+            ],
+            "the tail inherits Ctrl rather than becoming a bare Home"
+        );
+        assert!(press_of("Home/End").is_empty(), "no modifier means no chord");
+    }
+
+    /// Exit hints are sentences, so a chord can hide in them as a substring.
+    #[test]
+    fn a_chord_named_only_inside_an_exit_hint_is_still_found() {
+        assert!(all_documented_chords().iter().any(|c| c == "Alt-X"));
+        assert!(all_documented_chords().iter().any(|c| c == "Ctrl-C/D"));
+    }
+
+    /// The move off Ctrl exists to stop a multiplexer eating Jod's verbs, and
+    /// it is only half done if the keybar still teaches the old spelling.
+    #[test]
+    fn the_verbs_are_advertised_on_alt_and_the_editing_keys_on_ctrl() {
+        let printed: Vec<&str> = GLOBAL.iter().map(|b| b.key).collect();
+        for verb in ["Alt-K", "Alt-A", "Alt-G", "Alt-B", "Alt-X", "Alt-L"] {
+            assert!(printed.contains(&verb), "{verb} is not on the global list");
+        }
+        for stale in ["Ctrl-K", "Ctrl-G", "Ctrl-B", "Ctrl-X", "Ctrl-T", "Ctrl-O", "Ctrl-L"] {
             assert!(
-                !stolen.contains(&binding.key),
-                "{} is the terminal's, not ours",
-                binding.key
+                !printed.contains(&stale),
+                "{stale} still works, but printing it advertises the chord tmux takes"
             );
+        }
+        // Readline's, not ours to move.
+        for kept in ["Ctrl-U", "Ctrl-W"] {
+            assert!(printed.contains(&kept), "{kept} must stay where every shell puts it");
         }
     }
 }

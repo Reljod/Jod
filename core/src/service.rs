@@ -12,7 +12,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc, RwLock};
 
-use crate::conversation::NewMessage;
+use crate::conversation::{Conversation, NewMessage};
 use crate::error::{JodError, Result};
 use crate::event::{AgentEnvelope, AgentEvent, Usage};
 use crate::harness::{HarnessKind, PermissionPolicy, SpawnRequest};
@@ -157,7 +157,10 @@ const TITLE_CHARS: usize = 60;
 fn title_from(prompt: &str) -> String {
     let line: String = prompt.split_whitespace().collect::<Vec<_>>().join(" ");
     if line.chars().count() > TITLE_CHARS {
-        format!("{}…", line.chars().take(TITLE_CHARS - 1).collect::<String>())
+        format!(
+            "{}…",
+            line.chars().take(TITLE_CHARS - 1).collect::<String>()
+        )
     } else {
         line
     }
@@ -170,12 +173,16 @@ fn title_from(prompt: &str) -> String {
 /// failure: a detached run, a conversation id that names nothing, or a store
 /// that would not take the write. The run happens either way — see
 /// [`record_in_conversation`] for why that direction is never reversed.
+///
+/// Returns the row and not just its id, because the row is what
+/// [`Jod::spawn_agent_in`] has to read the model and the mode off before it
+/// launches anything.
 fn open_conversation(
     store: &Store,
     req: &SpawnRequest,
     run_id: &str,
     binding: &RunConversation,
-) -> Option<String> {
+) -> Option<Conversation> {
     let conversation = match binding {
         RunConversation::Detached => return None,
         RunConversation::Existing(id) => match store.conversation(id) {
@@ -228,7 +235,43 @@ fn open_conversation(
         );
     }
 
-    Some(conversation.id)
+    Some(conversation)
+}
+
+/// Let the conversation overrule the request on the two settings it owns.
+///
+/// **Why the stored value wins outright.** Neither the model nor the permission
+/// mode was ever a property of a process. Jod respawns the harness once per turn
+/// against a resumed session, so `--model` and `--permission-mode` are decided
+/// afresh at every spawn — a choice held in the caller lasts exactly one turn.
+/// That is the bug: the TUI's `/model` set a field on the next request, and
+/// reopening the conversation came back on whatever the client happened to
+/// default to. The only place an answer can live and survive a restart is the
+/// row the spawn is for, and once it lives there, deferring to the request would
+/// mean every client had to remember to read the row first.
+///
+/// Changing either of them on a live thread is therefore a write —
+/// [`Store::set_conversation_model`], [`Store::set_conversation_permission`] —
+/// not a different argument on the next spawn.
+///
+/// `None` on the row is not a value; it means "no opinion", which is what every
+/// conversation older than `0011_settings_and_modes` says, and it leaves the
+/// caller's choice exactly where it was.
+///
+/// **`harness` is deliberately not treated this way.** Moving a thread to
+/// another harness has consequences — a session id that means nothing on the
+/// other side, a transcript that has to be replayed, context that has to be
+/// compacted first ([`Store::switch_harness`]) — and none of that can be done by
+/// a spawn quietly reading a column. A handoff lands here as
+/// [`RunConversation::Existing`] naming the *new* conversation, whose harness is
+/// already the one the caller asked for.
+fn prefer_conversation_settings(req: &mut SpawnRequest, conversation: &Conversation) {
+    if let Some(model) = &conversation.model {
+        req.model = Some(model.clone());
+    }
+    if let Some(permission) = conversation.permission {
+        req.permission = permission;
+    }
 }
 
 /// Fold one of a run's events into the conversation the run belongs to.
@@ -618,7 +661,7 @@ impl Jod {
     /// a `resume` of its own choosing, or reads [`Store::resume_for`] first.
     pub async fn spawn_agent_in(
         &self,
-        req: SpawnRequest,
+        mut req: SpawnRequest,
         conversation: RunConversation,
     ) -> Result<AgentSummary> {
         let store = self.store.clone().ok_or(JodError::StoreRequired)?;
@@ -628,6 +671,20 @@ impl Jod {
             .ok_or_else(|| JodError::HarnessNotFound(req.harness.label().to_string()))?;
 
         let id = uuid::Uuid::new_v4().to_string();
+
+        // Open the conversation before the launch for the same reason the agent
+        // is registered before it: an event that arrived first would find no
+        // binding and be dropped from the transcript. It costs a conversation
+        // holding only a prompt if the launch then fails, which is the truthful
+        // record of an attempt rather than a leak.
+        let conversation = open_conversation(&store, &req, &id, &conversation);
+
+        // ...and before the summary is built, because the conversation outranks
+        // the request on two of its fields. See `prefer_conversation_settings`.
+        if let Some(open) = &conversation {
+            prefer_conversation_settings(&mut req, open);
+        }
+
         let summary = AgentSummary {
             id: id.clone(),
             name: req.name.clone(),
@@ -648,13 +705,6 @@ impl Jod {
             last_message: None,
         };
 
-        // Open the conversation before the launch for the same reason the agent
-        // is registered before it: an event that arrived first would find no
-        // binding and be dropped from the transcript. It costs a conversation
-        // holding only a prompt if the launch then fails, which is the truthful
-        // record of an attempt rather than a leak.
-        let conversation = open_conversation(&store, &req, &id, &conversation);
-
         // Register before launching, so no event can arrive before its agent.
         {
             let mut guard = self.state.write().await;
@@ -667,7 +717,7 @@ impl Jod {
                 },
             );
             if let Some(conversation) = conversation {
-                guard.conversations.insert(id.clone(), conversation);
+                guard.conversations.insert(id.clone(), conversation.id);
             }
         }
 
@@ -776,9 +826,9 @@ impl Jod {
         };
 
         if let Some(pgid) = pgid {
-            proc::terminate_group(pgid, KILL_GRACE)
-                .await
-                .map_err(|e| JodError::Spawn(format!("could not stop process group {pgid}: {e}")))?;
+            proc::terminate_group(pgid, KILL_GRACE).await.map_err(|e| {
+                JodError::Spawn(format!("could not stop process group {pgid}: {e}"))
+            })?;
         }
 
         let mut guard = self.state.write().await;
@@ -918,9 +968,8 @@ mod tests {
     #[test]
     fn capping_an_ungranted_spawn_does_not_hand_it_tools() {
         let none: Option<crate::harness::ToolAccess> = None;
-        let capped = none.map(|g: crate::harness::ToolAccess| {
-            g.capped_for(crate::store::Origin::Untrusted)
-        });
+        let capped =
+            none.map(|g: crate::harness::ToolAccess| g.capped_for(crate::store::Origin::Untrusted));
         assert_eq!(capped, None);
     }
 
@@ -1399,7 +1448,8 @@ mod tests {
             "run-1",
             &RunConversation::New,
         )
-        .expect("a run belongs to a conversation");
+        .expect("a run belongs to a conversation")
+        .id;
 
         let all = store.conversations(10).unwrap();
         assert_eq!(all.len(), 1, "one run, one conversation");
@@ -1415,15 +1465,17 @@ mod tests {
     #[test]
     fn a_second_run_in_the_same_conversation_extends_it_rather_than_forking() {
         let store = Store::in_memory().unwrap();
-        let first =
-            open_conversation(&store, &request("first"), "run-1", &RunConversation::New).unwrap();
+        let first = open_conversation(&store, &request("first"), "run-1", &RunConversation::New)
+            .unwrap()
+            .id;
         let second = open_conversation(
             &store,
             &request("second"),
             "run-2",
             &RunConversation::Existing(first.clone()),
         )
-        .unwrap();
+        .unwrap()
+        .id;
 
         assert_eq!(second, first, "the caller's conversation is the one used");
         assert_eq!(
@@ -1437,15 +1489,23 @@ mod tests {
             vec!["first", "second"]
         );
         assert_eq!(thread[1].parent_id, Some(thread[0].id), "one line, not two");
-        assert!(store.conversation(&first).unwrap().unwrap().forked_from.is_none());
+        assert!(store
+            .conversation(&first)
+            .unwrap()
+            .unwrap()
+            .forked_from
+            .is_none());
     }
 
     #[test]
     fn a_conversation_that_is_already_named_keeps_the_name_it_has() {
         let store = Store::in_memory().unwrap();
         let id = open_conversation(&store, &request("first"), "run-1", &RunConversation::New)
+            .unwrap()
+            .id;
+        store
+            .set_conversation_title(&id, "the inbox sweep")
             .unwrap();
-        store.set_conversation_title(&id, "the inbox sweep").unwrap();
         open_conversation(
             &store,
             &request("second"),
@@ -1456,6 +1516,97 @@ mod tests {
             store.conversation(&id).unwrap().unwrap().title,
             "the inbox sweep"
         );
+    }
+
+    /// The failure this closes: `/model` in the TUI set a field passed at spawn
+    /// time and nothing persisted it, so resuming a conversation the next day
+    /// came back on the client's default. The harness is respawned once per
+    /// turn, so "the model I chose" has to be re-answered at every single spawn
+    /// — and the conversation row is the only thing that is still around to
+    /// answer it.
+    #[test]
+    fn a_resumed_conversation_comes_back_on_the_model_it_was_left_in() {
+        let store = Store::in_memory().unwrap();
+        let opened =
+            open_conversation(&store, &request("go"), "run-1", &RunConversation::New).unwrap();
+        store
+            .set_conversation_model(&opened.id, Some("sonnet"))
+            .unwrap();
+
+        // A later turn, from a caller carrying the default it was built with.
+        let mut later = request("and again");
+        assert_eq!(later.model.as_deref(), Some("opus"), "the client's default");
+        let reopened = open_conversation(
+            &store,
+            &later,
+            "run-2",
+            &RunConversation::Existing(opened.id.clone()),
+        )
+        .unwrap();
+        prefer_conversation_settings(&mut later, &reopened);
+
+        assert_eq!(later.model.as_deref(), Some("sonnet"));
+    }
+
+    /// Same argument for the permission mode, which before this was fixed once
+    /// at `jod tui` launch and could never be changed — not per conversation,
+    /// not at all.
+    #[test]
+    fn a_resumed_conversation_comes_back_in_the_mode_it_was_left_in() {
+        let store = Store::in_memory().unwrap();
+        let opened =
+            open_conversation(&store, &request("go"), "run-1", &RunConversation::New).unwrap();
+        store
+            .set_conversation_permission(&opened.id, Some(PermissionPolicy::Plan))
+            .unwrap();
+
+        let mut later = request("and again");
+        assert_eq!(later.permission, PermissionPolicy::Ask);
+        let reopened = open_conversation(
+            &store,
+            &later,
+            "run-2",
+            &RunConversation::Existing(opened.id.clone()),
+        )
+        .unwrap();
+        prefer_conversation_settings(&mut later, &reopened);
+
+        assert_eq!(later.permission, PermissionPolicy::Plan);
+        assert!(!later.permission.may_act(), "plan means plan");
+    }
+
+    /// `None` is the absence of an opinion, not a value. Every conversation
+    /// older than `0011_settings_and_modes` reads back this way, and one of them
+    /// resuming must not silently change what the caller asked for.
+    #[test]
+    fn a_conversation_with_no_opinion_leaves_the_callers_model_and_mode_alone() {
+        let store = Store::in_memory().unwrap();
+        let mut req = request("go");
+        let opened = open_conversation(&store, &req, "run-1", &RunConversation::New).unwrap();
+        store.set_conversation_model(&opened.id, None).unwrap();
+        let opened = store.conversation(&opened.id).unwrap().unwrap();
+        assert_eq!(opened.model, None);
+        assert_eq!(opened.permission, None);
+
+        prefer_conversation_settings(&mut req, &opened);
+
+        assert_eq!(req.model.as_deref(), Some("opus"));
+        assert_eq!(req.permission, PermissionPolicy::Ask);
+    }
+
+    /// A new conversation takes the model it was opened with, so the very next
+    /// turn already resumes into the same one without anybody setting it.
+    #[test]
+    fn a_new_conversation_remembers_the_model_the_run_that_opened_it_used() {
+        let store = Store::in_memory().unwrap();
+        let opened =
+            open_conversation(&store, &request("go"), "run-1", &RunConversation::New).unwrap();
+        assert_eq!(opened.model.as_deref(), Some("opus"));
+
+        let mut later = request("again");
+        later.model = None;
+        prefer_conversation_settings(&mut later, &opened);
+        assert_eq!(later.model.as_deref(), Some("opus"));
     }
 
     #[test]
@@ -1494,7 +1645,9 @@ mod tests {
     #[test]
     fn the_events_of_a_run_become_messages_in_the_order_they_arrived() {
         let store = Store::in_memory().unwrap();
-        let id = open_conversation(&store, &request("go"), "run-1", &RunConversation::New).unwrap();
+        let id = open_conversation(&store, &request("go"), "run-1", &RunConversation::New)
+            .unwrap()
+            .id;
 
         for (seq, event) in [
             AgentEvent::Started {
@@ -1546,13 +1699,17 @@ mod tests {
             "metadata and unclassifiable lines are not turns"
         );
         assert_eq!(thread[2].tool_name.as_deref(), Some("Bash"));
-        assert!(thread[1..].iter().all(|m| m.run_id.as_deref() == Some("run-1")));
+        assert!(thread[1..]
+            .iter()
+            .all(|m| m.run_id.as_deref() == Some("run-1")));
     }
 
     #[test]
     fn the_session_the_harness_reports_lands_on_the_conversation_so_it_can_resume() {
         let store = Store::in_memory().unwrap();
-        let id = open_conversation(&store, &request("go"), "run-1", &RunConversation::New).unwrap();
+        let id = open_conversation(&store, &request("go"), "run-1", &RunConversation::New)
+            .unwrap()
+            .id;
         record_in_conversation(
             &store,
             &id,
@@ -1578,7 +1735,9 @@ mod tests {
     #[test]
     fn the_same_event_recorded_twice_leaves_one_message() {
         let store = Store::in_memory().unwrap();
-        let id = open_conversation(&store, &request("go"), "run-1", &RunConversation::New).unwrap();
+        let id = open_conversation(&store, &request("go"), "run-1", &RunConversation::New)
+            .unwrap()
+            .id;
         let event = envelope(
             "run-1",
             0,

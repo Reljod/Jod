@@ -43,19 +43,34 @@
 //! binary onto a VPS, where every transitive crate is weight in the image and
 //! another thing to audit. `rustls` rather than the system OpenSSL for the same
 //! reason.
+//!
+//! # A chat is one conversation, and it survives a restart
+//!
+//! To the person holding the phone there is one thread with Jod in it, going
+//! back weeks. So every message in a chat resumes the same harness session,
+//! and the mapping lives in `channel_sessions` rather than in this process:
+//! this was a `HashMap` on the bridge first, and the symptom was that a daemon
+//! restart silently started every chat over — you carried on typing and the
+//! agent had forgotten the morning, with nothing on screen to say why.
+//!
+//! Starting over is therefore something you ask for, with `/new` or `/clear`.
+//! Those are the only two ways a chat forgets, which is what makes the default
+//! trustworthy: nothing else in here drops a session.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::future::Future;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{JodError, Result};
 use crate::event::AgentEvent;
 use crate::harness::{HarnessKind, PermissionPolicy, Resume, SpawnRequest};
 use crate::service::Jod;
+use crate::store::Store;
 
 // ---------------------------------------------------------------------------
 // Length
@@ -359,6 +374,178 @@ pub fn session_key(
         (k, Some(thread)) => format!("telegram:{}:{chat}:t{thread}", k.as_str()),
         (k, None) => format!("telegram:{}:{chat}:u{user_id}", k.as_str()),
     }
+}
+
+/// What one chat was in the middle of, as the database remembers it.
+///
+/// Keyed by [`session_key`], because the question this table is asked is always
+/// "a message just arrived from here — what was I saying?". `session_id` is the
+/// harness's own cursor and `None` means the next message starts a run with no
+/// history, which is exactly the state `/new` restores.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChannelSession {
+    pub key: String,
+    pub conversation_id: Option<String>,
+    pub session_id: Option<String>,
+    pub updated_at_ms: i64,
+}
+
+/// The columns, in the order [`row_to_channel_session`] reads them.
+const CHANNEL_SESSION_COLUMNS: &str =
+    "SELECT key, conversation_id, session_id, updated_at_ms FROM channel_sessions";
+
+/// The store's channel-session surface lives here rather than in `store.rs`,
+/// beside the only feature that has ever needed it — the same arrangement
+/// conversations, webhooks and schedules use.
+impl Store {
+    /// What this chat was saying, if anything. `None` for a chat that has never
+    /// spoken, which reads the same as one that has just been cleared.
+    pub fn channel_session(&self, key: &str) -> Result<Option<ChannelSession>> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        Ok(conn
+            .query_row(
+                &format!("{CHANNEL_SESSION_COLUMNS} WHERE key = ?1"),
+                params![key],
+                row_to_channel_session,
+            )
+            .optional()?)
+    }
+
+    /// Record the harness session this chat resumes from now on.
+    ///
+    /// An upsert, and one that names `session_id` alone: a harness reports a
+    /// session id at the start of *every* run, so this is written far more
+    /// often than it is inserted, and an `INSERT OR REPLACE` would quietly
+    /// blank the `conversation_id` somebody else's code put there.
+    pub fn set_channel_session(&self, key: &str, session_id: &str) -> Result<()> {
+        self.write(|tx| {
+            tx.execute(
+                "INSERT INTO channel_sessions (key, session_id, updated_at_ms)
+                   VALUES (?1, ?2, ?3)
+                 ON CONFLICT(key) DO UPDATE SET
+                   session_id    = excluded.session_id,
+                   updated_at_ms = excluded.updated_at_ms",
+                params![key, session_id, chrono::Utc::now().timestamp_millis()],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Forget what this chat was saying. Returns whether there was anything to
+    /// forget, so `/clear` can say "already fresh" instead of implying it threw
+    /// something away.
+    ///
+    /// Nulled rather than deleted: "this chat starts fresh next time" is a
+    /// state the schema already has a spelling for, and keeping the row keeps
+    /// `updated_at_ms` — the answer to "when did this chat last do anything" —
+    /// rather than making a cleared chat indistinguishable from one that has
+    /// never existed.
+    pub fn clear_channel_session(&self, key: &str) -> Result<bool> {
+        self.write(|tx| {
+            let cleared = tx.execute(
+                "UPDATE channel_sessions
+                    SET session_id = NULL, conversation_id = NULL, updated_at_ms = ?2
+                  WHERE key = ?1
+                    AND (session_id IS NOT NULL OR conversation_id IS NOT NULL)",
+                params![key, chrono::Utc::now().timestamp_millis()],
+            )?;
+            Ok(cleared == 1)
+        })
+    }
+}
+
+fn row_to_channel_session(row: &rusqlite::Row) -> rusqlite::Result<ChannelSession> {
+    Ok(ChannelSession {
+        key: row.get(0)?,
+        conversation_id: row.get(1)?,
+        session_id: row.get(2)?,
+        updated_at_ms: row.get(3)?,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Commands
+// ---------------------------------------------------------------------------
+
+/// What a leading `/word` asked for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Command {
+    /// Forget this chat's session, so the next message starts a conversation
+    /// with no history. `/new` and `/clear` both, because both are what a
+    /// person reaches for and a bot that knows only one of them looks broken to
+    /// whoever typed the other.
+    New,
+    /// List what the bot understands.
+    Help,
+    /// A `/word` nobody here knows.
+    Unknown(String),
+}
+
+/// Every command, and what `/help` says about it. One list, so the parser and
+/// the help text cannot drift apart.
+pub const COMMANDS: &[(&str, &str)] = &[
+    ("/new", "forget this chat's history and start over"),
+    ("/clear", "the same thing, by its other name"),
+    ("/help", "this list"),
+];
+
+/// The whole of `/help`.
+pub fn help_text() -> String {
+    let mut out = String::from(
+        "Send me anything and I'll work on it. A chat is one conversation — I \
+         pick up where we left off, including after a restart.\n",
+    );
+    for (name, gloss) in COMMANDS {
+        out.push('\n');
+        out.push_str(name);
+        out.push_str(" — ");
+        out.push_str(gloss);
+    }
+    out
+}
+
+/// What `/new` and `/clear` say back.
+const FRESH_START: &str = "🆕 Fresh start. I've forgotten what we were doing here — the next message begins a new conversation.";
+
+/// Read `text` as a command. `None` means "this is an ordinary message", and
+/// ordinary messages are the only thing that ever reaches a harness.
+///
+/// The rules are lifted from the TUI's `command::parse`, which solved this
+/// first and whose behaviour this deliberately matches:
+///
+/// - **The whole first word decides.** `/newsletter` is not `/new`.
+/// - **Leading whitespace means it is not a command,** so a prompt can always
+///   be forced through by typing a space first.
+/// - **A bare `/` is a typo, not a command**, and reaches nobody as one.
+/// - **A first word containing a second `/` is a path, not a command.**
+///   "/usr/bin/foo is missing" is a sentence somebody typed about their
+///   machine, and answering it with "I don't know that command" would be
+///   answering the wrong question. This is the rule that costs something
+///   elsewhere — it means `/new/thing` reaches the agent — and it is still the
+///   right trade on a phone, where paths are pasted constantly.
+/// - **Anything else beginning with `/` is reported, never forwarded.** A
+///   mistyped command that reaches a harness arrives as a *prompt*, and a
+///   prompt here starts a process that can run a shell.
+///
+/// One rule the TUI has no need for: Telegram appends `@thebotsname` to
+/// commands sent in a group, so `/new@jod_bot` has to mean `/new`.
+pub fn parse_command(text: &str) -> Option<Command> {
+    let rest = text.strip_prefix('/')?;
+    let word = rest.split_whitespace().next()?;
+    if word.contains('/') {
+        return None;
+    }
+    let name = word.split('@').next().unwrap_or(word).to_ascii_lowercase();
+    if name.is_empty() {
+        return None;
+    }
+    Some(match name.as_str() {
+        "new" | "clear" | "reset" => Command::New,
+        // `/start` is what Telegram's own Start button sends, so a bot that
+        // calls it unknown makes its very first reply an error message.
+        "help" | "start" | "?" => Command::Help,
+        other => Command::Unknown(format!("/{other}")),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1167,13 +1354,6 @@ pub struct Bridge<B: BotApi> {
     cwd: PathBuf,
     harness: HarnessKind,
     permission: PermissionPolicy,
-    /// Session key → the harness session id to resume next time.
-    ///
-    /// **In memory only.** Persisting it needs a migration and a `store.rs`
-    /// this change does not own, so a restart currently starts every chat
-    /// fresh. The mapping is deterministic ([`session_key`]), so making it
-    /// durable later is a table, not a redesign.
-    sessions: Mutex<HashMap<String, String>>,
 }
 
 impl<B: BotApi + 'static> Bridge<B> {
@@ -1184,12 +1364,56 @@ impl<B: BotApi + 'static> Bridge<B> {
             cwd: config.cwd.clone(),
             harness: config.harness,
             permission: config.permission,
-            sessions: Mutex::new(HashMap::new()),
         })
     }
 
     pub fn poller(&self) -> &Poller<B> {
         &self.poller
+    }
+
+    /// Where this chat picks up from.
+    ///
+    /// A store that will not answer is reported and read as "nothing
+    /// remembered". Losing the thread is bad; refusing to answer the message at
+    /// all because of a bookkeeping failure is worse, and the person in the
+    /// chat can say `/new` and carry on either way.
+    fn resume_for(&self, key: &str) -> Resume {
+        // A `Jod` built without a store keeps nothing — no runs, no
+        // transcripts — so a bridge on one cannot remember a conversation
+        // either. Every way the daemon actually starts passes one.
+        let Some(store) = self.jod.store() else {
+            return Resume::Fresh;
+        };
+        match store.channel_session(key) {
+            Ok(Some(ChannelSession {
+                session_id: Some(id),
+                ..
+            })) => Resume::Session(id),
+            Ok(_) => Resume::Fresh,
+            Err(e) => {
+                eprintln!("[jod/telegram] could not read the session for {key}: {e}");
+                Resume::Fresh
+            }
+        }
+    }
+
+    /// Remember the session a run just reported, so the next message in this
+    /// chat continues it rather than starting over.
+    fn remember_session(&self, key: &str, session_id: &str) {
+        let Some(store) = self.jod.store() else {
+            return;
+        };
+        if let Err(e) = store.set_channel_session(key, session_id) {
+            eprintln!("[jod/telegram] could not record the session for {key}: {e}");
+        }
+    }
+
+    /// Drop this chat's session. `Ok(false)` means there was none to drop.
+    fn forget_session(&self, key: &str) -> Result<bool> {
+        match self.jod.store() {
+            Some(store) => store.clear_channel_session(key),
+            None => Ok(false),
+        }
     }
 
     /// Poll until something fatal happens.
@@ -1234,19 +1458,26 @@ impl<B: BotApi + 'static> Bridge<B> {
 
     /// Turn one message into a run, and report that run back into the chat.
     ///
-    /// Untested: it needs a `Jod` with a store and an installed harness
-    /// binary. The decisions it makes are all delegated to functions that are
-    /// tested — [`step_for`], [`progress_due`], [`progress_text`],
+    /// The command path is tested end to end, because that is the half that
+    /// decides whether anything is spawned at all. The rest needs an installed
+    /// harness binary, so its decisions are all delegated to functions that are
+    /// tested on their own — [`step_for`], [`progress_due`], [`progress_text`],
     /// [`deliver`], [`session_key`].
     pub async fn handle(self: Arc<Self>, msg: IncomingMessage) -> BotResult<()> {
+        // Commands are answered here and never reach a harness. This is the
+        // first thing that happens to a message on purpose: a `/word` forwarded
+        // to an agent arrives as a prompt, and a prompt starts a process that
+        // can run a shell — so a mistyped `/claer` has to come back as "I don't
+        // know that" rather than as an instruction to somebody's terminal.
+        if let Some(command) = parse_command(&msg.text) {
+            return self.obey(command, &msg).await;
+        }
+
         // Subscribe before spawning, or a run that finishes quickly finishes
         // into a channel nobody is listening to.
         let mut events = self.jod.subscribe();
 
-        let resume = match self.sessions.lock().expect("session lock").get(&msg.session) {
-            Some(id) => Resume::Session(id.clone()),
-            None => Resume::Fresh,
-        };
+        let resume = self.resume_for(&msg.session);
         let request = SpawnRequest {
             name: msg.session.clone(),
             harness: self.harness,
@@ -1302,10 +1533,7 @@ impl<B: BotApi + 'static> Bridge<B> {
                             continue;
                         }
                         if let AgentEvent::Started { session_id: Some(sid), .. } = &envelope.event {
-                            self.sessions
-                                .lock()
-                                .expect("session lock")
-                                .insert(msg.session.clone(), sid.clone());
+                            self.remember_session(&msg.session, sid);
                         }
                         match step_for(&envelope.event) {
                             Step::Quiet => continue,
@@ -1360,6 +1588,40 @@ impl<B: BotApi + 'static> Bridge<B> {
             )
             .await?;
         }
+        Ok(())
+    }
+
+    /// Answer a command in the chat it came from, without starting anything.
+    ///
+    /// Every branch replies. A command that did nothing visible would be
+    /// indistinguishable from a message that never arrived, and `/clear` is
+    /// exactly the one where "did that work?" has to have an answer — the
+    /// evidence otherwise arrives a turn later, as an agent that either does or
+    /// does not remember.
+    async fn obey(&self, command: Command, msg: &IncomingMessage) -> BotResult<()> {
+        let reply = match command {
+            Command::New => match self.forget_session(&msg.session) {
+                Ok(true) => FRESH_START.to_string(),
+                Ok(false) => format!("{FRESH_START}\n\n(There was nothing to forget.)"),
+                // Said out loud rather than swallowed: a `/clear` that silently
+                // failed would leave the next reply carrying history the person
+                // believes they deleted.
+                Err(e) => format!("❌ Could not forget this chat's session: {e}"),
+            },
+            Command::Help => help_text(),
+            Command::Unknown(name) => format!(
+                "I don't know {name}. Send /help for what I do understand — \
+                 anything without a leading slash is a prompt."
+            ),
+        };
+        deliver(
+            self.poller.bot(),
+            msg.chat_id,
+            msg.thread_id,
+            &reply,
+            Formatting::Plain,
+        )
+        .await?;
         Ok(())
     }
 }
@@ -2044,5 +2306,281 @@ mod tests {
         ));
         // A failed poll must not acknowledge anything.
         assert_eq!(poller.offset(), None);
+    }
+
+    // -- commands ----------------------------------------------------------
+
+    #[test]
+    fn both_words_for_starting_over_are_understood() {
+        // The user asked for this in two sittings and used a different word
+        // each time. Whichever one they reach for has to work.
+        assert_eq!(parse_command("/new"), Some(Command::New));
+        assert_eq!(parse_command("/clear"), Some(Command::New));
+        assert_eq!(parse_command("/reset"), Some(Command::New));
+        assert_eq!(parse_command("/NEW"), Some(Command::New));
+    }
+
+    #[test]
+    fn help_is_reachable_and_lists_every_command_the_parser_takes() {
+        assert_eq!(parse_command("/help"), Some(Command::Help));
+        // Telegram's own Start button sends this before a person has typed
+        // anything, so it must not be the bot's first error message.
+        assert_eq!(parse_command("/start"), Some(Command::Help));
+
+        let text = help_text();
+        for (name, gloss) in COMMANDS {
+            assert!(text.contains(name), "{name} is missing from /help");
+            assert!(text.contains(gloss), "{name}'s gloss is missing");
+            assert!(
+                !matches!(parse_command(name), None | Some(Command::Unknown(_))),
+                "{name} is documented but the parser does not take it"
+            );
+        }
+    }
+
+    /// The rule with teeth. A phone is where paths get pasted, and
+    /// "/usr/bin/foo is missing" is a sentence about a machine, not a command —
+    /// answering it with "I don't know that" answers the wrong question.
+    #[test]
+    fn a_message_that_merely_starts_with_a_path_still_reaches_the_agent() {
+        assert_eq!(parse_command("/usr/bin/foo is missing"), None);
+        assert_eq!(parse_command("/etc/hosts has the wrong entry"), None);
+        assert_eq!(parse_command("/home/reljod/repo/Jod"), None);
+    }
+
+    #[test]
+    fn only_the_whole_first_word_counts_as_a_command() {
+        // A command is the first word entire, not a prefix of it.
+        assert_eq!(
+            parse_command("/newsletter"),
+            Some(Command::Unknown("/newsletter".into()))
+        );
+        // Leading whitespace is the escape hatch: a space in front sends the
+        // line to the agent verbatim.
+        assert_eq!(parse_command(" /clear"), None);
+        // A bare slash is a typo, not a command.
+        assert_eq!(parse_command("/"), None);
+        assert_eq!(parse_command("/   "), None);
+        // And a slash in the middle of a sentence is just a slash.
+        assert_eq!(parse_command("run /clear when you are done"), None);
+    }
+
+    /// Telegram appends the bot's name to commands sent in a group. Without
+    /// this, `/new` works in a private chat and is an unknown command in the
+    /// group the user actually shares with the bot.
+    #[test]
+    fn a_command_addressed_to_the_bot_by_name_is_the_same_command() {
+        assert_eq!(parse_command("/new@jod_bot"), Some(Command::New));
+        assert_eq!(parse_command("/help@Jod_Bot please"), Some(Command::Help));
+    }
+
+    #[test]
+    fn an_unknown_command_is_named_back_rather_than_sent_to_the_agent() {
+        assert_eq!(
+            parse_command("/wibble"),
+            Some(Command::Unknown("/wibble".into()))
+        );
+        // The near-misses that matter: a typo of a real command must not be
+        // forwarded to something that can run a shell.
+        for typo in ["/claer", "/nwe", "/compact", "/status"] {
+            assert_eq!(
+                parse_command(typo),
+                Some(Command::Unknown(typo.into())),
+                "{typo}"
+            );
+        }
+    }
+
+    // -- durable sessions --------------------------------------------------
+
+    fn store() -> Arc<Store> {
+        Arc::new(Store::in_memory().expect("an in-memory store"))
+    }
+
+    fn bridge_on(jod: Arc<Jod>) -> Arc<Bridge<FakeBot>> {
+        let config = Config {
+            token: "not-a-token".to_string(),
+            allow: Allowlist::new([42]),
+            // Nowhere, deliberately: no test here intends to start a process,
+            // so if one ever does the cwd is a second thing standing in its way.
+            cwd: PathBuf::from("/nonexistent/jod/telegram/test"),
+            harness: HarnessKind::ClaudeCode,
+            permission: PermissionPolicy::Ask,
+        };
+        Bridge::new(FakeBot::default(), jod, &config)
+    }
+
+    /// A bridge over a real store and a fake transport.
+    fn bridge(store: Arc<Store>) -> Arc<Bridge<FakeBot>> {
+        bridge_on(Jod::with_store(store))
+    }
+
+    /// A bridge whose service has no store — the fixture for the two tests
+    /// that need "was this forwarded?" answered out loud.
+    ///
+    /// A run on a storeless `Jod` is refused by its first line, before a
+    /// harness binary is even looked for, so anything that reaches
+    /// `spawn_agent` says "Could not start" in the chat and nothing is ever
+    /// launched on the machine running the tests. That turns "it was
+    /// forwarded" into an assertion rather than a hope.
+    fn storeless_bridge() -> Arc<Bridge<FakeBot>> {
+        bridge_on(Jod::new())
+    }
+
+    fn incoming(text: &str) -> IncomingMessage {
+        match classify(&update(1, 42, 7, text), &Allowlist::new([42])) {
+            Inbound::Handle(m) => m,
+            other => panic!("the fixture message was not handled: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_session_is_remembered_until_it_is_cleared() {
+        let s = store();
+        let key = "telegram:private:7:42";
+        assert_eq!(s.channel_session(key).unwrap(), None);
+
+        s.set_channel_session(key, "ses-1").unwrap();
+        assert_eq!(
+            s.channel_session(key).unwrap().unwrap().session_id.as_deref(),
+            Some("ses-1")
+        );
+
+        // Written again, not inserted again: a harness reports a session id on
+        // every run, so the second write is the common case.
+        s.set_channel_session(key, "ses-2").unwrap();
+        assert_eq!(
+            s.channel_session(key).unwrap().unwrap().session_id.as_deref(),
+            Some("ses-2")
+        );
+
+        assert!(s.clear_channel_session(key).unwrap());
+        let cleared = s.channel_session(key).unwrap().expect("the row survives");
+        assert_eq!(cleared.session_id, None);
+        // Nothing left to forget, and the row is still there to say so.
+        assert!(!s.clear_channel_session(key).unwrap());
+    }
+
+    /// The whole point of the table. A restart used to start every chat over
+    /// with nothing on screen to explain it: you carried on typing and the
+    /// agent had forgotten the morning.
+    #[tokio::test]
+    async fn a_restart_keeps_the_conversation_the_chat_was_already_having() {
+        let s = store();
+        let msg = incoming("what were we doing?");
+        let before = bridge(Arc::clone(&s));
+        assert_eq!(
+            before.resume_for(&msg.session),
+            Resume::Fresh,
+            "a chat that has never spoken has nothing to resume"
+        );
+        before.remember_session(&msg.session, "ses-1");
+
+        // The process dies here. A wholly new bridge, a new service and a new
+        // transport — everything except the file on disk.
+        let after = bridge(Arc::clone(&s));
+        assert_eq!(
+            after.resume_for(&msg.session),
+            Resume::Session("ses-1".to_string()),
+            "the restart started the chat over"
+        );
+    }
+
+    /// Two chats must not share a session across a restart either — the
+    /// durable version of the same isolation `session_key` gives in memory.
+    #[tokio::test]
+    async fn one_chat_resuming_does_not_resume_another() {
+        let s = store();
+        let mine = bridge(Arc::clone(&s));
+        mine.remember_session("telegram:private:7:42", "ses-mine");
+        assert_eq!(
+            bridge(Arc::clone(&s)).resume_for("telegram:private:9:99"),
+            Resume::Fresh
+        );
+    }
+
+    #[tokio::test]
+    async fn both_new_and_clear_drop_the_session_and_say_so() {
+        for word in ["/new", "/clear"] {
+            let s = store();
+            let b = bridge(Arc::clone(&s));
+            let msg = incoming(word);
+            b.remember_session(&msg.session, "ses-1");
+
+            Arc::clone(&b).handle(msg.clone()).await.unwrap();
+
+            assert_eq!(
+                b.resume_for(&msg.session),
+                Resume::Fresh,
+                "{word} left the session in place"
+            );
+            let sent = b.poller().bot().sent_texts();
+            assert_eq!(sent.len(), 1, "{word} sent {sent:?}");
+            assert!(sent[0].starts_with(FRESH_START), "{word} said {:?}", sent[0]);
+            assert!(
+                !sent[0].contains("nothing to forget"),
+                "{word} claimed there was nothing to forget"
+            );
+        }
+    }
+
+    /// Clearing a chat that was already fresh is not an error, but it must not
+    /// pretend to have thrown something away either.
+    #[tokio::test]
+    async fn clearing_an_already_fresh_chat_says_there_was_nothing_to_forget() {
+        let b = bridge(store());
+        let msg = incoming("/clear");
+        Arc::clone(&b).handle(msg).await.unwrap();
+        assert!(b.poller().bot().sent_texts()[0].contains("nothing to forget"));
+    }
+
+    /// A `/word` that reached a harness would arrive as a prompt, and a prompt
+    /// here starts a process that can run a shell. So an unknown command comes
+    /// back as text, and nothing is spawned — which the reply itself proves:
+    /// on this bridge a forwarded message answers "Could not start" instead.
+    #[tokio::test]
+    async fn an_unknown_command_is_reported_in_the_chat_and_never_forwarded() {
+        let b = storeless_bridge();
+        Arc::clone(&b).handle(incoming("/claer")).await.unwrap();
+        let sent = b.poller().bot().sent_texts();
+        assert_eq!(sent.len(), 1);
+        assert!(sent[0].contains("/claer"), "{:?}", sent[0]);
+        assert!(sent[0].contains("/help"), "{:?}", sent[0]);
+        assert!(
+            !sent[0].contains("Could not start"),
+            "the command was forwarded to a harness: {:?}",
+            sent[0]
+        );
+    }
+
+    /// The other side of the path rule, through the whole bridge: a message
+    /// that only looks like a command is a prompt, and a prompt is handed on to
+    /// be run. Handing it on is what fails here — the bridge has no store — and
+    /// that failure is precisely the evidence that it was not intercepted.
+    #[tokio::test]
+    async fn a_path_shaped_message_is_sent_on_to_the_agent() {
+        let b = storeless_bridge();
+        Arc::clone(&b)
+            .handle(incoming("/usr/bin/claude is missing, can you check?"))
+            .await
+            .unwrap();
+        let sent = b.poller().bot().sent_texts();
+        assert_eq!(sent.len(), 1, "{sent:?}");
+        assert!(
+            sent[0].contains("Could not start"),
+            "a path was answered as a command: {:?}",
+            sent[0]
+        );
+    }
+
+    #[tokio::test]
+    async fn help_is_answered_in_the_chat() {
+        let b = bridge(store());
+        Arc::clone(&b).handle(incoming("/help")).await.unwrap();
+        let sent = b.poller().bot().sent_texts();
+        assert_eq!(sent.len(), 1);
+        for (name, _) in COMMANDS {
+            assert!(sent[0].contains(name), "/help did not mention {name}");
+        }
     }
 }

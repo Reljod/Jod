@@ -48,8 +48,8 @@ enum Command {
         cwd: Option<PathBuf>,
         #[arg(short, long)]
         model: Option<String>,
-        #[arg(short, long, value_enum, default_value_t = PermissionArg::Ask)]
-        permission: PermissionArg,
+        #[arg(short, long, value_parser = parse_permission_arg, default_value = "auto")]
+        permission: PermissionPolicy,
         /// Continue the most recent conversation instead of starting one.
         #[arg(short = 'C', long = "continue", conflicts_with = "session")]
         continue_last: bool,
@@ -175,12 +175,12 @@ enum Command {
         cwd: Option<PathBuf>,
         #[arg(short, long)]
         model: Option<String>,
-        #[arg(short, long, value_enum, default_value_t = PermissionArg::Ask)]
-        permission: PermissionArg,
+        #[arg(short, long, value_parser = parse_permission_arg, default_value = "auto")]
+        permission: PermissionPolicy,
         /// Pick up the last conversation instead of starting a new one.
         #[arg(short = 'C', long = "continue")]
         continue_last: bool,
-        /// Watch a team: Ctrl-G shows its members and its task board.
+        /// Watch a team: Alt-G shows its members and its task board.
         #[arg(long)]
         team: Option<String>,
     },
@@ -325,8 +325,8 @@ enum Command {
         cwd: Option<PathBuf>,
         #[arg(short, long)]
         model: Option<String>,
-        #[arg(short, long, value_enum, default_value_t = PermissionArg::Ask)]
-        permission: PermissionArg,
+        #[arg(short, long, value_parser = parse_permission_arg, default_value = "auto")]
+        permission: PermissionPolicy,
         /// Pick up the last conversation instead of starting a new one.
         #[arg(short = 'C', long = "continue")]
         continue_last: bool,
@@ -358,8 +358,8 @@ enum Command {
         access: jod_core::harness::ToolAccess,
         /// The most permissive policy `delegate` may ask for — the same ceiling
         /// `jod-api` applies to a remote caller, and the same default.
-        #[arg(long, value_enum, default_value_t = PermissionArg::AcceptEdits)]
-        max_permission: PermissionArg,
+        #[arg(long, value_parser = parse_permission_arg, default_value = "accept_edits")]
+        max_permission: PermissionPolicy,
     },
 }
 
@@ -700,8 +700,8 @@ enum TeamCommand {
         team: String,
         #[arg(short, long)]
         cwd: Option<PathBuf>,
-        #[arg(short, long, value_enum, default_value_t = PermissionArg::Ask)]
-        permission: PermissionArg,
+        #[arg(short, long, value_parser = parse_permission_arg, default_value = "auto")]
+        permission: PermissionPolicy,
         /// Say what would happen without spawning anything.
         #[arg(long)]
         dry_run: bool,
@@ -719,8 +719,8 @@ enum TeamCommand {
         prompt: Vec<String>,
         #[arg(short, long)]
         cwd: Option<PathBuf>,
-        #[arg(short, long, value_enum, default_value_t = PermissionArg::Ask)]
-        permission: PermissionArg,
+        #[arg(short, long, value_parser = parse_permission_arg, default_value = "auto")]
+        permission: PermissionPolicy,
         /// Return as soon as the agent is launched, instead of waiting for it.
         #[arg(short, long)]
         detach: bool,
@@ -794,20 +794,29 @@ impl From<ProvenanceArg> for Provenance {
     }
 }
 
-#[derive(Copy, Clone, PartialEq, Eq, ValueEnum)]
-enum PermissionArg {
-    /// Let the agent read — files and the web — and refuse everything that
-    /// could change something.
-    Ask,
-    /// Let file edits through; still prompt for anything else.
-    AcceptEdits,
-    /// Auto-approve everything. Only sane in a throwaway directory.
-    Bypass,
+/// How much an agent may do to the *machine*, parsed by core rather than
+/// re-declared here.
+///
+/// This used to be a `ValueEnum` listing the levels a second time, and it
+/// drifted exactly as the note on `parse_access_arg` below predicts its
+/// neighbour would. A fourth mode was added to `PermissionPolicy` and this copy
+/// never heard about it: `--permission plan` was not something you could ask
+/// for, and the default stayed on the old `ask` after the real default had
+/// moved to `auto`. So every `jod run` went out asking for an approval nobody
+/// was there to give, and reported back that it was waiting for one.
+///
+/// One parser, in core, accepting every spelling — including the harnesses' own
+/// (`manual`, `auto`, `bypass_permissions`).
+fn parse_permission_arg(s: &str) -> Result<PermissionPolicy, String> {
+    jod_core::mcp::parse_permission(s).ok_or_else(|| {
+        let names: Vec<&str> = PermissionPolicy::ALL.iter().map(|m| m.label()).collect();
+        format!("`{s}` is not a permission mode — {}", names.join(", "))
+    })
 }
 
 /// How much of Jod itself an agent may reach over MCP.
 ///
-/// A separate axis from `PermissionArg`, which bounds what the agent may do to
+/// A separate axis from `PermissionPolicy`, which bounds what the agent may do to
 /// the *machine*. An agent can be trusted to edit files and still have no
 /// business arming a schedule that spends money every night at 2am.
 ///
@@ -819,16 +828,6 @@ fn parse_access_arg(s: &str) -> Result<jod_core::harness::ToolAccess, String> {
     jod_core::mcp::parse_access(s).ok_or_else(|| {
         format!("`{s}` is not an access level — read_only, delegate or orchestrate")
     })
-}
-
-impl From<PermissionArg> for PermissionPolicy {
-    fn from(a: PermissionArg) -> Self {
-        match a {
-            PermissionArg::Ask => PermissionPolicy::Ask,
-            PermissionArg::AcceptEdits => PermissionPolicy::AcceptEdits,
-            PermissionArg::Bypass => PermissionPolicy::Bypass,
-        }
-    }
 }
 
 /// Read `.env` into the process environment, without overriding anything the
@@ -2605,7 +2604,7 @@ async fn chat(
     harness: HarnessArg,
     cwd: Option<PathBuf>,
     model: Option<String>,
-    permission: PermissionArg,
+    permission: PermissionPolicy,
     continue_last: bool,
 ) -> Result<()> {
     use std::io::Write;

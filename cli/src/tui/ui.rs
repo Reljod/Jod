@@ -11,13 +11,14 @@
 
 use std::sync::LazyLock;
 
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
 
 use jod_core::team::MemberStatus;
+use jod_core::PermissionPolicy;
 
 use super::app::{absolute, since, until, App, Entry, Overlay};
 use super::data::{Outcome, Source};
@@ -53,42 +54,474 @@ fn bold(colour: Color) -> Style {
     fg(colour).add_modifier(Modifier::BOLD)
 }
 
+/// The widest a chat column is allowed to get.
+///
+/// Prose stops being readable somewhere past a hundred columns — the eye loses
+/// its place coming back to the left edge — and Jod is run full-screen on
+/// 200-column terminals. Tables are the opposite: a workspace wants every
+/// column it can get, so the cap is chat's alone.
+const MEASURE: u16 = 96;
+
+/// The side gutter. One column reads as a rendering slip; two reads as a margin.
+const GUTTER: u16 = 2;
+
+/// The right-hand panel's width, and the narrowest body that can hold it
+/// *beside* a chat column rather than on top of one.
+const PANEL: u16 = 34;
+const PANEL_BESIDE: u16 = 88;
+
 pub fn draw(f: &mut Frame, app: &App) -> usize {
-    let chunks = Layout::default()
+    let rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints(if app.workspace == Workspace::Chat {
-            [
-                Constraint::Min(3),    // transcript
-                Constraint::Length(3), // input
-                Constraint::Length(1), // keybar
-                Constraint::Length(1), // status
-            ]
-        } else {
-            [
-                Constraint::Min(3),    // the workspace itself
-                Constraint::Length(0), // no input box outside chat
-                Constraint::Length(1), // keybar
-                Constraint::Length(1), // status
-            ]
-        })
+        .constraints([
+            Constraint::Min(3),    // everything with a box round it
+            Constraint::Length(1), // keybar
+            Constraint::Length(1), // status
+        ])
         .split(f.area());
 
+    // The two bars stay flush with the screen edge: they are chrome, and an
+    // inset chrome row reads as content that has lost its border.
+    let (body, side) = beside(app, pad(rows[0]));
+
+    // The completion popup is positioned against the input box, which is no
+    // longer at a fixed place — the splash moves it — so the rect travels back
+    // out rather than being recomputed from the layout.
+    let mut input = Rect::new(0, 0, 0, 0);
     let height = if app.workspace == Workspace::Chat {
-        let height = draw_transcript(f, app, chunks[0]);
-        draw_input(f, app, chunks[1]);
-        height
+        let column = measure(body);
+        if fresh(app) {
+            let (height, box_) = draw_splash(f, app, column);
+            input = box_;
+            height
+        } else {
+            let parts = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(3), Constraint::Length(3)])
+                .split(column);
+            input = parts[1];
+            let height = draw_transcript(f, app, parts[0]);
+            draw_input(f, app, parts[1]);
+            height
+        }
     } else {
-        draw_workspace(f, app, chunks[0]);
+        draw_workspace(f, app, body);
         // A workspace list pages by its own height, not the transcript's.
-        chunks[0].height.saturating_sub(4).max(1) as usize
+        body.height.saturating_sub(4).max(1) as usize
     };
-    draw_keybar(f, app, chunks[2]);
-    draw_status(f, app, chunks[3]);
+
+    if let Some(side) = side {
+        draw_panel(f, app, side);
+    }
+    draw_keybar(f, app, rows[1]);
+    draw_status(f, app, rows[2]);
 
     // Last, so they float over everything.
-    draw_completions(f, app, chunks[1]);
+    if app.panel && side.is_none() {
+        draw_floating_panel(f, app);
+    }
+    draw_completions(f, app, input);
     draw_overlay(f, app);
     height
+}
+
+// ---- layout ------------------------------------------------------------
+
+/// Insets an area by the gutter and by one row at the top.
+///
+/// Skipped whole on a small terminal: at forty columns the margin costs more
+/// than the breathing room buys, and a list that has already dropped three
+/// columns to fit should not lose a fourth to whitespace.
+fn pad(area: Rect) -> Rect {
+    if area.width < 40 || area.height < 6 {
+        return area;
+    }
+    Rect {
+        x: area.x + GUTTER,
+        y: area.y + 1,
+        width: area.width - GUTTER * 2,
+        height: area.height - 1,
+    }
+}
+
+/// Caps a chat column at a readable measure and centres what is left over.
+fn measure(area: Rect) -> Rect {
+    if area.width <= MEASURE {
+        return area;
+    }
+    Rect {
+        x: area.x + (area.width - MEASURE) / 2,
+        width: MEASURE,
+        ..area
+    }
+}
+
+/// Splits the panel off the right of the body, or says it will not fit.
+///
+/// Below `PANEL_BESIDE` there is no honest side-by-side: taking 34 columns off
+/// an 80-column terminal leaves a chat column narrower than the panel. The
+/// caller floats the panel over the body instead, so Shift-Tab always does
+/// something visible rather than appearing broken on a laptop.
+fn beside(app: &App, area: Rect) -> (Rect, Option<Rect>) {
+    if !app.panel || area.width < PANEL_BESIDE {
+        return (area, None);
+    }
+    let halves = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Min(30), Constraint::Length(PANEL)])
+        .split(area);
+    // One column of air between the two boxes, so their borders do not touch.
+    let body = Rect {
+        width: halves[0].width.saturating_sub(1),
+        ..halves[0]
+    };
+    (body, Some(halves[1]))
+}
+
+// ---- the splash --------------------------------------------------------
+
+/// One letter of the wordmark, six columns wide and five rows tall.
+///
+/// Assembled from per-letter blocks rather than written out as five 37-column
+/// string literals: a glyph can then be fixed without recounting the spaces on
+/// either side of it, which is how block lettering usually ends up crooked.
+type Glyph = [&'static str; 5];
+
+const BIG_J: Glyph = ["    ██", "    ██", "    ██", "██  ██", " ████ "];
+const BIG_O: Glyph = ["      ", "      ", " ████ ", "██  ██", " ████ "];
+const BIG_D: Glyph = ["    ██", "    ██", " █████", "██  ██", " █████"];
+const BIG_SPACE: Glyph = ["  ", "  ", "  ", "  ", "  "];
+const BIG_A: Glyph = [" ████ ", "██  ██", "██████", "██  ██", "██  ██"];
+const BIG_I: Glyph = ["██████", "  ██  ", "  ██  ", "  ██  ", "██████"];
+
+const WORDMARK: [Glyph; 6] = [BIG_J, BIG_O, BIG_D, BIG_SPACE, BIG_A, BIG_I];
+
+/// How wide the assembled wordmark is: six blocks and five single-column gaps.
+const BANNER_WIDTH: u16 = 6 + 1 + 6 + 1 + 6 + 1 + 2 + 1 + 6 + 1 + 6;
+
+fn banner() -> Vec<String> {
+    (0..5)
+        .map(|row| {
+            WORDMARK
+                .iter()
+                .map(|glyph| glyph[row])
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .collect()
+}
+
+/// The line under the wordmark, in the longest form that fits.
+///
+/// It always contains the program's name in the same lowercase the transcript
+/// box uses, because on a fresh session that title bar is not on screen and a
+/// full-screen program that never says what it is is a program you have to
+/// remember you launched.
+fn caption(width: usize) -> &'static str {
+    const LINES: [&str; 3] = [
+        "jod · an orchestrator, not a chat window · Ctrl-K opens every screen",
+        "jod · an orchestrator, not a chat window",
+        "jod",
+    ];
+    LINES
+        .into_iter()
+        .find(|line| line.chars().count() <= width)
+        .unwrap_or("jod")
+}
+
+/// Whether this counts as a new session for rendering.
+///
+/// It cannot be "the transcript is empty": `event_loop` pushes a hint notice at
+/// startup and `/new` pushes "new conversation", so the transcript is never
+/// literally empty and the splash would never appear at all. A session is new
+/// while *nothing but notices* has happened — which is true at startup, true
+/// again after `/new`, and false the instant the first prompt is sent. Watching
+/// another run is excluded outright: that transcript belongs to somebody else's
+/// conversation, and its emptiness says the run has not spoken yet, not that
+/// you are starting fresh.
+fn fresh(app: &App) -> bool {
+    app.watching.is_none()
+        && !app
+            .transcript
+            .iter()
+            .any(|entry| !matches!(entry, Entry::Notice(_)))
+}
+
+/// The new-session screen: the wordmark, large and centred, with the input box
+/// under it. Returns the viewport height and where the input box ended up.
+fn draw_splash(f: &mut Frame, app: &App, area: Rect) -> (usize, Rect) {
+    // Too short for a wordmark and a box both: the input wins, because a screen
+    // with no way to type into it is not a screen.
+    if area.height < 6 {
+        draw_input(f, app, area);
+        return (1, area);
+    }
+
+    // The completion popup grows *upwards* out of the input box and the command
+    // list is thirty-odd rows, so a vertically centred input leaves it half a
+    // screen and the list comes out cut in half. While the popup is open the
+    // input drops back to the bottom of the column and the wordmark keeps the
+    // space above it: a logo that moves beats a list that is truncated.
+    let anchored = !crate::tui::command::completions(&app.input, app).is_empty();
+
+    // Big lettering is the first thing to go. Below its width it would be
+    // truncated mid-glyph, which reads as a broken screen rather than a logo.
+    let art = area.width >= BANNER_WIDTH && area.height >= 11;
+    let mut head: Vec<Line> = if art {
+        banner()
+            .into_iter()
+            .map(|row| Line::from(Span::styled(row, bold(USER))))
+            .collect()
+    } else {
+        vec![Line::from(Span::styled("Jod AI", bold(USER)))]
+    };
+    if area.height >= head.len() as u16 + 5 {
+        head.push(Line::from(""));
+        head.push(Line::from(Span::styled(
+            caption(area.width as usize),
+            fg(MUTED),
+        )));
+    }
+    let head_height = head.len() as u16;
+
+    let (top, box_) = if anchored {
+        let parts = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(1), Constraint::Length(3)])
+            .split(area);
+        (parts[0], parts[1])
+    } else {
+        let block = (head_height + 1 + 3).min(area.height);
+        let parts = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Min(1),
+                Constraint::Length(1), // air between the wordmark and the box
+                Constraint::Length(3),
+            ])
+            .split(Rect {
+                y: area.y + area.height.saturating_sub(block) / 2,
+                height: block,
+                ..area
+            });
+        (parts[0], parts[2])
+    };
+
+    // Centred in whatever vertical space it was given, so the wordmark sits in
+    // the middle of the empty screen rather than jammed against the input box.
+    let top = Rect {
+        y: top.y + top.height.saturating_sub(head_height) / 2,
+        height: head_height.min(top.height),
+        ..top
+    };
+    f.render_widget(Paragraph::new(head).alignment(Alignment::Center), top);
+
+    // A full-width input box under a centred wordmark reads as two unrelated
+    // screens, so the box is centred on the same axis.
+    let box_ = narrow(box_, 72);
+    draw_input(f, app, box_);
+    (top.height.max(1) as usize, box_)
+}
+
+/// At most `width` columns, centred in `area`.
+fn narrow(area: Rect, width: u16) -> Rect {
+    let width = width.min(area.width);
+    Rect {
+        x: area.x + (area.width - width) / 2,
+        width,
+        ..area
+    }
+}
+
+// ---- the right-hand panel ----------------------------------------------
+
+/// How tall the context box is: two borders, the bar, the count, and two rows
+/// for the recommendation.
+const CONTEXT_HEIGHT: u16 = 7;
+
+/// Sessions above, context below — the two questions a panel that costs a
+/// third of the screen has to be worth answering: what else is running, and how
+/// much of the window this conversation has eaten.
+fn draw_panel(f: &mut Frame, app: &App, area: Rect) {
+    let parts = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(3), Constraint::Length(CONTEXT_HEIGHT)])
+        .split(area);
+    draw_sessions(f, app, parts[0]);
+    draw_context(f, app, parts[1]);
+}
+
+/// The panel when the terminal is too narrow to put it beside anything.
+fn draw_floating_panel(f: &mut Frame, app: &App) {
+    let area = centred(f.area(), PANEL, f.area().height.saturating_sub(2));
+    f.render_widget(Clear, area);
+    draw_panel(f, app, area);
+}
+
+/// Every conversation this process knows about, two rows each.
+///
+/// Two rather than one because the panel is thirty-odd columns: an id, an age
+/// and a name on one row would truncate the name to nothing, and the name is
+/// the only part that says what the run was *for*.
+fn draw_sessions(f: &mut Frame, app: &App, area: Rect) {
+    let inner = area.width.saturating_sub(2) as usize;
+    let mut items: Vec<ListItem> = vec![
+        ListItem::new(Line::from(vec![
+            Span::styled(" mode    ", fg(MUTED)),
+            mode_span(app.mode),
+            Span::styled("   Tab cycles", fg(MUTED)),
+        ])),
+        ListItem::new(Line::from(vec![
+            Span::styled(" harness ", fg(MUTED)),
+            Span::styled(app.harness.label().to_string(), fg(AGENT)),
+        ])),
+        ListItem::new(Line::from(Span::styled(
+            format!(" spend   ${:.4}", app.cost_usd),
+            fg(MUTED),
+        ))),
+        ListItem::new(Line::from(Span::styled(
+            format!(" {}", "─".repeat(inner.saturating_sub(2))),
+            fg(MUTED),
+        ))),
+    ];
+
+    if app.agents.is_empty() {
+        for chunk in wrap("no runs yet — Ctrl-B delegates one", inner, 1) {
+            items.push(ListItem::new(Span::styled(format!(" {chunk}"), fg(MUTED))));
+        }
+    }
+    for a in &app.agents {
+        let watched = app.watching.as_deref() == Some(a.id.as_str());
+        items.push(ListItem::new(Line::from(vec![
+            Span::styled(if watched { " ▸ " } else { "   " }, fg(USER)),
+            Span::styled(format!("{} ", run_glyph(&a.status)), fg(status_colour(&a.status))),
+            Span::styled(format!("{:<9}", short(&a.id)), fg(MUTED)),
+            Span::styled(
+                super::app::short_duration(app.now_ms.saturating_sub(a.created_at_ms)),
+                fg(MUTED),
+            ),
+        ])));
+        items.push(ListItem::new(Span::styled(
+            format!("     {}", cut(&a.name, inner.saturating_sub(5))),
+            if watched { bold(USER) } else { fg(AGENT) },
+        )));
+    }
+
+    f.render_widget(
+        List::new(items).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(fg(MUTED))
+                .title(" sessions ")
+                .title_bottom(" Shift-Tab closes "),
+        ),
+        area,
+    );
+}
+
+/// How full the context window is, as a bar.
+///
+/// Every number here is hedged with `≈` and the box says so twice, because
+/// `CONTEXT_WINDOW` is one assumed figure for every model and `context_tokens`
+/// is the last turn's input as the harness reported it. The question the box
+/// answers is "am I near the point where I should compact", and a precise-
+/// looking percentage would answer a different question dishonestly.
+fn draw_context(f: &mut Frame, app: &App, area: Rect) {
+    if area.height == 0 {
+        return;
+    }
+    let inner = area.width.saturating_sub(2) as usize;
+    let percent = (app.context_fraction() * 100.0).round() as u16;
+    let width = inner.saturating_sub(9).clamp(4, 22);
+    let colour = if app.should_compact() {
+        WARN
+    } else {
+        GOOD
+    };
+
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled(format!(" {}", bar(percent, width)), fg(colour)),
+            Span::styled(format!(" ≈{percent}%"), fg(AGENT)),
+        ]),
+        Line::from(Span::styled(
+            format!(
+                " ≈{} of an assumed {}",
+                tokens(app.context_tokens),
+                tokens(super::app::CONTEXT_WINDOW)
+            ),
+            fg(MUTED),
+        )),
+        Line::from(""),
+    ];
+    // `⚠` as well as the colour, so the advice survives NO_COLOR — it is the
+    // one line in this box that asks you to do something.
+    if app.should_compact() {
+        lines.push(Line::from(Span::styled(
+            " ⚠ compact recommended",
+            bold(WARN),
+        )));
+    } else {
+        lines.push(Line::from(Span::styled(" room to keep going", fg(MUTED))));
+    }
+
+    f.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(fg(if app.should_compact() { WARN } else { MUTED }))
+                .title(" context ")
+                .title_bottom(" estimated, not measured "),
+        ),
+        area,
+    );
+}
+
+/// Tokens as a short human number — `104k` — because the exact figure is not
+/// knowable and printing it to the unit would claim that it is.
+fn tokens(n: u64) -> String {
+    if n >= 1_000 {
+        format!("{}k", n / 1_000)
+    } else {
+        format!("{n}")
+    }
+}
+
+// ---- the permission mode -----------------------------------------------
+
+/// The mode as a glyph and a word, coloured by how much it lets through.
+fn mode_span(mode: PermissionPolicy) -> Span<'static> {
+    Span::styled(
+        format!("{} {}", mode_glyph(mode), mode.label()),
+        bold(mode_colour(mode)),
+    )
+}
+
+/// A circle that fills as the mode lets more through, so the four are ordered
+/// by shape and not only by hue. `may_act` draws the one line that matters:
+/// plan is the only mode that cannot change anything, and it gets the hollow
+/// glyph.
+fn mode_glyph(mode: PermissionPolicy) -> &'static str {
+    if !mode.may_act() {
+        return "○";
+    }
+    match mode {
+        PermissionPolicy::Ask => "◔",
+        PermissionPolicy::AcceptEdits => "◑",
+        _ => "●",
+    }
+}
+
+/// Green for the mode that cannot break anything, red for the one that
+/// approves everything unattended — the word is always printed beside it, so
+/// the colour is emphasis rather than the message.
+fn mode_colour(mode: PermissionPolicy) -> Color {
+    match mode {
+        PermissionPolicy::Plan => GOOD,
+        PermissionPolicy::Ask => USER,
+        PermissionPolicy::AcceptEdits => WARN,
+        PermissionPolicy::Bypass => BAD,
+    }
 }
 
 // ---- chrome ------------------------------------------------------------
@@ -119,6 +552,10 @@ fn draw_keybar(f: &mut Frame, app: &App, area: Rect) {
 }
 
 /// The status bar: where you are on the left, what is waiting on the right.
+///
+/// The permission mode leads it on every screen. What the next turn may do
+/// without asking changes while you are talking, and a setting you have to
+/// press a key to see is one you will be wrong about exactly when it matters.
 fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     if area.height == 0 {
         return;
@@ -129,21 +566,37 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     } else {
         format!("{} · {}", ws.title(), app.count_for(ws))
     };
+    let mut badge = String::new();
+    // The panel holds the context bar, but the panel is shut most of the time
+    // and advice nobody can see is not advice — so the recommendation itself
+    // rides the one row that is always on screen.
+    if app.should_compact() {
+        badge.push_str("⚠ compact");
+    }
     // Endings that arrive while you are away have to survive until you look.
-    let badge = match app.unread() {
-        0 => String::new(),
-        n => format!("⚑ {n} unread"),
-    };
+    if app.unread() > 0 {
+        if !badge.is_empty() {
+            badge.push_str(" · ");
+        }
+        badge.push_str(&format!("⚑ {} unread", app.unread()));
+    }
     let style = if app.busy && ws == Workspace::Chat {
         fg(WARN)
     } else {
         fg(MUTED)
     };
-    let mut spans = vec![Span::raw(" "), Span::styled(left.clone(), style)];
+    let mode = mode_span(app.mode);
+    let mode_width = mode.content.chars().count();
+    let mut spans = vec![
+        Span::raw(" "),
+        mode,
+        Span::styled(" · ", fg(MUTED)),
+        Span::styled(left.clone(), style),
+    ];
     // The status grows — a spinner, a clock, a background count, a queue — so
     // the badge has to yield rather than collide with it. Running them together
     // produced `1 queuedCtrl-X stop`, which reads as neither.
-    let used = left.chars().count() + 2;
+    let used = mode_width + 3 + left.chars().count() + 2;
     let room = (area.width as usize).saturating_sub(used);
     if !badge.is_empty() && room >= badge.chars().count() + 2 {
         spans.push(Span::raw(" ".repeat(room - badge.chars().count())));
@@ -2290,6 +2743,296 @@ mod tests {
         assert!(rendered(&a, 100, 12).contains("1 in background"));
     }
 
+    // ---- the new-session splash ----
+
+    /// A fresh session is a wordmark and somewhere to type, not an empty box
+    /// with a title bar — OpenCode's move, and the right one: the first thing
+    /// on screen should say what you launched.
+    #[test]
+    fn a_new_session_shows_the_wordmark_over_a_centred_input_box() {
+        let screen = rendered(&app(), 100, 24);
+        for row in banner() {
+            assert!(
+                screen.contains(row.trim_end()),
+                "wordmark row missing {row:?}:\n{screen}"
+            );
+        }
+        assert!(screen.contains("an orchestrator"), "the caption:\n{screen}");
+        assert!(screen.contains("you"), "and somewhere to type:\n{screen}");
+    }
+
+    /// The event loop pushes a hint notice at startup and `/new` pushes one of
+    /// its own, so "the transcript is empty" would never be true and the splash
+    /// would never appear. The first real turn is what ends it.
+    #[test]
+    fn the_wordmark_survives_a_notice_and_goes_when_the_conversation_starts() {
+        let mut a = app();
+        a.push(Entry::Notice("Ctrl-K opens every screen".into()));
+        assert!(rendered(&a, 100, 24).contains("an orchestrator"));
+
+        a.push(Entry::You("summarise my inbox".into()));
+        let screen = rendered(&a, 100, 24);
+        assert!(!screen.contains("an orchestrator"), "{screen}");
+        assert!(screen.contains("summarise my inbox"), "{screen}");
+    }
+
+    /// Watching a delegated run is not a new session: that transcript is
+    /// somebody else's conversation, and it is empty because the run has not
+    /// said anything yet.
+    #[test]
+    fn watching_a_run_shows_its_transcript_rather_than_the_splash() {
+        let mut a = app();
+        a.agents = vec![agent_line("aaa11111", "port the parser", "running")];
+        a.watching = Some("aaa11111".into());
+        let screen = rendered(&a, 100, 24);
+        assert!(!screen.contains("an orchestrator"), "{screen}");
+        assert!(screen.contains("port the parser"), "{screen}");
+    }
+
+    /// Below the wordmark's width the block letters would be truncated
+    /// mid-glyph, which reads as a broken screen rather than as a logo.
+    #[test]
+    fn the_splash_falls_back_to_plain_lettering_on_a_narrow_terminal() {
+        let screen = rendered(&app(), 30, 14);
+        assert!(screen.contains("Jod AI"), "{screen}");
+        assert!(screen.lines().all(|l| l.chars().count() <= 30), "{screen}");
+    }
+
+    /// The completion popup grows upwards out of the input box and the command
+    /// list is thirty-odd rows, so a centred input would leave it half a screen
+    /// and the list would come out cut in half.
+    #[test]
+    fn the_splash_yields_to_the_completion_popup_rather_than_clipping_it() {
+        let mut a = app();
+        a.input = "/".into();
+        let screen = rendered(&a, 100, 40);
+        assert!(screen.contains("this list"), "/help:\n{screen}");
+        assert!(
+            screen.contains("the team panel"),
+            "/team, thirty rows further down:\n{screen}"
+        );
+    }
+
+    // ---- padding and the readable measure ----
+
+    #[test]
+    fn the_screen_has_a_margin_rather_than_starting_in_the_corner() {
+        let mut a = app();
+        a.push(Entry::Agent("here is the summary".into()));
+        let screen = rendered(&a, 100, 20);
+        let rows: Vec<&str> = screen.lines().collect();
+        assert!(rows[0].trim().is_empty(), "a row of air on top: {:?}", rows[0]);
+        assert!(rows[1].starts_with("  ┌"), "a gutter to the left: {:?}", rows[1]);
+        assert!(rows[1].ends_with("┐  "), "and to the right: {:?}", rows[1]);
+    }
+
+    /// A chat column that runs edge to edge on a 200-column terminal is a
+    /// column nobody can read a paragraph in.
+    #[test]
+    fn the_chat_column_is_capped_and_centred_on_a_wide_terminal() {
+        let mut a = app();
+        a.push(Entry::Agent("here is the summary".into()));
+        let screen = rendered(&a, 200, 24);
+        let top = screen.lines().find(|l| l.contains("jod")).unwrap();
+        let left = top.chars().position(|c| c == '┌').unwrap();
+        let right = top.chars().position(|c| c == '┐').unwrap();
+        assert!(left > GUTTER as usize, "the box must be inset: {left}");
+        assert!(
+            right - left + 1 <= MEASURE as usize,
+            "capped at the measure: {left}..{right}"
+        );
+        assert_eq!(left, 199 - right, "and centred in what is left");
+    }
+
+    /// A workspace is the opposite of chat: its table wants every column it can
+    /// get, so the measure must not follow it there.
+    #[test]
+    fn a_workspace_table_is_not_capped_at_the_chat_measure() {
+        let a = schedules_app();
+        let screen = rendered(&a, 200, 30);
+        let top = screen.lines().find(|l| l.contains("schedules")).unwrap();
+        let left = top.chars().position(|c| c == '┌').unwrap();
+        let right = top.chars().position(|c| c == '┐').unwrap();
+        assert!(
+            right - left + 1 > MEASURE as usize,
+            "the table gets the whole width: {left}..{right}"
+        );
+    }
+
+    // ---- the permission mode ----
+
+    /// What the next turn may do without asking changes while you are talking,
+    /// and a setting you have to press a key to see is one you will be wrong
+    /// about exactly when it matters.
+    #[test]
+    fn the_mode_is_named_on_every_screen() {
+        for ws in [Workspace::Chat, Workspace::Fleet, Workspace::Schedules] {
+            let mut a = app();
+            a.mode = PermissionPolicy::AcceptEdits;
+            a.go(ws);
+            let screen = rendered(&a, 120, 20);
+            let status = screen.lines().last().unwrap();
+            assert!(status.contains("edits"), "{ws:?}: {status}");
+        }
+    }
+
+    /// Colour is decoration here, never the message: each mode carries its own
+    /// glyph *and* its own word, so `NO_COLOR` loses neither.
+    #[test]
+    fn every_mode_has_its_own_glyph_and_its_own_word() {
+        let mut glyphs = std::collections::HashSet::new();
+        let mut words = std::collections::HashSet::new();
+        for mode in PermissionPolicy::ALL {
+            let mut a = app();
+            a.mode = mode;
+            let screen = rendered(&a, 120, 20);
+            let status = screen.lines().last().unwrap().to_string();
+            assert!(status.contains(mode.label()), "{mode:?}: {status}");
+            assert!(status.contains(mode_glyph(mode)), "{mode:?}: {status}");
+            glyphs.insert(mode_glyph(mode));
+            words.insert(mode.label());
+        }
+        assert_eq!(glyphs.len(), 4, "the glyphs must differ: {glyphs:?}");
+        assert_eq!(words.len(), 4, "and so must the words: {words:?}");
+    }
+
+    /// The mode that auto-approves everything is the one that can do damage
+    /// unattended, so it is the one that reads as dangerous.
+    #[test]
+    fn the_mode_that_approves_everything_reads_as_the_dangerous_one() {
+        assert_eq!(mode_colour(PermissionPolicy::Bypass), BAD);
+        assert_eq!(mode_colour(PermissionPolicy::Plan), GOOD);
+        assert_eq!(
+            mode_glyph(PermissionPolicy::Plan),
+            "○",
+            "the hollow glyph belongs to the one mode that cannot act"
+        );
+    }
+
+    // ---- the right-hand panel ----
+
+    #[test]
+    fn the_panel_is_drawn_only_when_it_is_open() {
+        let mut a = app();
+        a.agents = vec![agent_line("aaa11111", "port the parser", "running")];
+        assert!(!rendered(&a, 140, 24).contains("sessions"), "shut by default");
+
+        a.panel = true;
+        let screen = rendered(&a, 140, 24);
+        assert!(screen.contains("sessions"), "{screen}");
+        assert!(screen.contains("Shift-Tab closes"), "the way out:\n{screen}");
+        assert!(screen.contains("port the parser"), "what is running:\n{screen}");
+        assert!(screen.contains("aaa11111"), "and its id:\n{screen}");
+    }
+
+    /// An empty panel has to say what would fill it rather than show a box with
+    /// nothing in it, which reads as a bug.
+    #[test]
+    fn an_empty_panel_says_how_to_start_a_run() {
+        let mut a = app();
+        a.panel = true;
+        assert!(rendered(&a, 140, 24).contains("no runs yet"));
+    }
+
+    #[test]
+    fn the_panel_names_the_mode_and_the_key_that_cycles_it() {
+        let mut a = app();
+        a.panel = true;
+        a.mode = PermissionPolicy::Plan;
+        let screen = rendered(&a, 140, 24);
+        assert!(screen.contains("Tab cycles"), "{screen}");
+        assert!(screen.contains("○ plan"), "{screen}");
+    }
+
+    // ---- the context box ----
+
+    /// `CONTEXT_WINDOW` is one assumed figure for every model and
+    /// `context_tokens` is the last turn as the harness reported it, so the box
+    /// hedges every number rather than printing one that looks measured.
+    #[test]
+    fn the_context_box_reads_as_an_estimate_not_a_measurement() {
+        let mut a = app();
+        a.panel = true;
+        a.context_tokens = 40_000;
+        let screen = rendered(&a, 140, 24);
+        assert!(screen.contains("context"), "{screen}");
+        assert!(screen.contains("≈20%"), "{screen}");
+        assert!(screen.contains("≈40k of an assumed 200k"), "{screen}");
+        assert!(screen.contains("estimated, not measured"), "{screen}");
+        assert!(screen.contains('▓'), "a bar, not only a number:\n{screen}");
+    }
+
+    /// Compaction is cheap and losing a conversation to a hard context error is
+    /// not, so the advice arrives before the wall — and not a moment earlier,
+    /// or it is noise.
+    #[test]
+    fn the_context_box_recommends_compaction_past_the_threshold_and_not_before() {
+        use super::super::app::{COMPACT_AT, CONTEXT_WINDOW};
+        let mut a = app();
+        a.panel = true;
+
+        a.context_tokens = (CONTEXT_WINDOW as f64 * (COMPACT_AT - 0.1)) as u64;
+        let quiet = rendered(&a, 140, 24);
+        assert!(!quiet.contains("compact"), "too early to say so:\n{quiet}");
+
+        a.context_tokens = (CONTEXT_WINDOW as f64 * COMPACT_AT) as u64;
+        let screen = rendered(&a, 140, 24);
+        assert!(screen.contains("⚠ compact recommended"), "{screen}");
+    }
+
+    /// The panel is shut most of the time, and advice nobody can see is not
+    /// advice — so the recommendation itself rides the row that is always on.
+    #[test]
+    fn the_compaction_advice_reaches_the_status_bar_with_the_panel_shut() {
+        use super::super::app::CONTEXT_WINDOW;
+        let mut a = app();
+        a.context_tokens = CONTEXT_WINDOW;
+        let screen = rendered(&a, 140, 24);
+        assert!(!screen.contains("estimated"), "the panel is shut:\n{screen}");
+        assert!(
+            screen.lines().last().unwrap().contains("⚠ compact"),
+            "{screen}"
+        );
+    }
+
+    // ---- the panel on a small terminal ----
+
+    /// Taking 34 columns off an 80-column terminal leaves a chat column
+    /// narrower than the panel, so below the threshold the panel floats instead
+    /// — Shift-Tab must never look broken.
+    #[test]
+    fn the_panel_floats_rather_than_starving_the_chat_on_a_narrow_terminal() {
+        let mut a = app();
+        a.panel = true;
+        a.agents = vec![agent_line("aaa11111", "port the parser", "running")];
+        let screen = rendered(&a, 60, 20);
+        assert!(
+            screen.contains("sessions"),
+            "Shift-Tab must still do something:\n{screen}"
+        );
+        assert!(screen.lines().all(|l| l.chars().count() <= 60), "{screen}");
+    }
+
+    /// `centred` exists because clamping to a comfortable minimum alone
+    /// produced rects outside the buffer on a narrow window. The panel, the
+    /// splash and the measure must not reintroduce that.
+    #[test]
+    fn nothing_overflows_a_small_terminal_with_the_panel_open() {
+        let mut a = app();
+        a.panel = true;
+        a.context_tokens = 190_000;
+        a.agents = (0..12)
+            .map(|i| agent_line(&format!("id{i}"), &format!("job {i}"), "running"))
+            .collect();
+        for (w, h) in [(60, 20), (40, 12), (30, 10), (20, 6), (12, 5), (200, 60)] {
+            let screen = rendered(&a, w, h);
+            assert!(
+                screen.lines().all(|l| l.chars().count() <= w as usize),
+                "{w}×{h} overflowed:\n{screen}"
+            );
+        }
+    }
+
     // ---- the keybar and the status bar ----
 
     /// Nielsen #6: the four keys you need right now are on screen, so you never
@@ -2297,7 +3040,10 @@ mod tests {
     #[test]
     fn every_screen_prints_its_own_keys_above_the_status_bar() {
         for (ws, expected) in [
-            (Workspace::Chat, "Ctrl-K menu"),
+            // Alt, not Ctrl: Jod's own verbs moved off the chords tmux
+            // intercepts. The property here is unchanged — every screen prints
+            // its own keys — only the chord it prints them under.
+            (Workspace::Chat, "Alt-K menu"),
             (Workspace::Fleet, "s stop"),
             (Workspace::Memory, "g graph"),
             (Workspace::Schedules, "r run now"),
@@ -2345,10 +3091,12 @@ mod tests {
         assert!(bar.contains("1 queued"), "the status wins: {bar}");
         assert!(!bar.contains("queuedCtrl"), "they must not run together: {bar}");
 
-        // With room for both, the keybar carries the exits again.
+        // With room for both, the keybar carries the exits again. `Alt-X`
+        // since the keymap moved off the chords tmux takes; `Ctrl-C` stayed
+        // where every terminal already puts it.
         let wide = rendered(&a, 150, 12);
         let rows: Vec<&str> = wide.lines().collect();
-        assert!(rows[rows.len() - 2].contains("Ctrl-X stop"), "{wide}");
+        assert!(rows[rows.len() - 2].contains("Alt-X stop"), "{wide}");
     }
 
     /// Endings that arrive while you are away have to survive until you look.
@@ -3306,5 +4054,27 @@ mod tests {
     fn cutting_a_long_string_says_it_was_cut() {
         assert_eq!(cut("short", 10), "short");
         assert_eq!(cut("a-very-long-name", 8), "a-very-…");
+    }
+
+    #[test]
+    fn scratch_dump() {
+        let mut a = app();
+        a.panel = true;
+        a.context_tokens = 158_000;
+        a.cost_usd = 0.0412;
+        a.agents = vec![
+            agent_line("a3f91c22aa", "port the parser to the new AST", "running"),
+            agent_line("b1c2d3e4ff", "write the docs", "completed"),
+        ];
+        a.advance(125_000);
+        println!("=== splash + panel, 130x28 ===\n{}", rendered(&a, 130, 28));
+        let mut b = app();
+        b.panel = true;
+        b.context_tokens = 158_000;
+        b.agents = a.agents.clone();
+        b.push(Entry::You("summarise my inbox".into()));
+        b.push(Entry::Agent("Three items need you.".into()));
+        println!("=== talking, 130x28 ===\n{}", rendered(&b, 130, 28));
+        println!("=== narrow 70x20, panel open ===\n{}", rendered(&a, 70, 20));
     }
 }

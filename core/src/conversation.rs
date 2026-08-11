@@ -47,7 +47,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{JodError, Result};
 use crate::event::{summarize, AgentEnvelope, AgentEvent};
-use crate::harness::{HarnessKind, Resume};
+use crate::harness::{HarnessKind, PermissionPolicy, Resume};
+use crate::mcp::parse_permission;
 use crate::store::{fts_query, Store};
 
 // ---- types ------------------------------------------------------------
@@ -254,7 +255,21 @@ pub struct Conversation {
     /// listing — see [`Conversation::harness_kind`].
     pub harness: String,
     pub cwd: String,
+    /// Which model this thread runs on, in the target harness's own spelling.
+    ///
+    /// Here rather than on the run, because it is not a property of a process.
+    /// Jod respawns the harness once per turn against a resumed session, so
+    /// `--model` is decided afresh at every spawn; a choice held only in the
+    /// caller lasts exactly one turn and is gone the next time the conversation
+    /// is opened. `None` means the harness picks.
     pub model: Option<String>,
+    /// How much this thread's agent may do without asking.
+    ///
+    /// `None` is not a mode — it is the absence of one, and it means "whatever
+    /// the caller passed". Every conversation that predates
+    /// `0011_settings_and_modes` reads back this way, and an old row must not
+    /// suddenly acquire an opinion it never had.
+    pub permission: Option<PermissionPolicy>,
     /// The harness-side session to resume, when there is one. It changes
     /// whenever the thread moves to another harness, which is exactly why it
     /// is not the identity of the conversation.
@@ -385,6 +400,7 @@ impl Store {
             harness: harness.id().to_string(),
             cwd: cwd.to_string(),
             model: model.map(str::to_string),
+            permission: None,
             session_id: None,
             head_id: None,
             forked_from: None,
@@ -485,6 +501,47 @@ impl Store {
             Ok(tx.execute(
                 "UPDATE conversations SET session_id = ?2, updated_at_ms = ?3 WHERE id = ?1",
                 params![id, session_id, now_ms()],
+            )? > 0)
+        })
+    }
+
+    /// Choose the model this conversation runs on from now on, or hand the
+    /// choice back to the caller with `None`.
+    ///
+    /// The write half of [`Conversation::model`]. `/model` in a UI is this
+    /// call, not a field on the next spawn: a request's model lasts one turn,
+    /// and the complaint that motivated this was that resuming a conversation
+    /// came back on whatever the client happened to default to.
+    ///
+    /// Unvalidated on purpose. Model names are the harness's vocabulary and
+    /// they change faster than Jod ships — an allow-list here would reject a
+    /// model released last week, which is worse than passing through a typo the
+    /// harness itself will reject with a better message.
+    pub fn set_conversation_model(&self, id: &str, model: Option<&str>) -> Result<bool> {
+        self.write(|tx| {
+            Ok(tx.execute(
+                "UPDATE conversations SET model = ?2, updated_at_ms = ?3 WHERE id = ?1",
+                params![id, model, now_ms()],
+            )? > 0)
+        })
+    }
+
+    /// Set how much this conversation's agent may do without asking, or drop
+    /// back to "whatever the caller passed" with `None`.
+    ///
+    /// `None` is a first-class argument for the same reason it is on
+    /// [`Store::set_conversation_session`]: "this thread has no opinion" is a
+    /// real state, distinct from every mode, and a UI that offers a mode has to
+    /// be able to take it back.
+    pub fn set_conversation_permission(
+        &self,
+        id: &str,
+        permission: Option<PermissionPolicy>,
+    ) -> Result<bool> {
+        self.write(|tx| {
+            Ok(tx.execute(
+                "UPDATE conversations SET permission = ?2, updated_at_ms = ?3 WHERE id = ?1",
+                params![id, permission.map(|p| p.as_str()), now_ms()],
             )? > 0)
         })
     }
@@ -772,15 +829,21 @@ impl Store {
                 .unwrap_or_else(|| fork_title(&source.title));
             tx.execute(
                 "INSERT INTO conversations
-                   (id, title, harness, cwd, model, session_id, head_id,
-                    forked_from, forked_at_id, created_at_ms, updated_at_ms)
-                 VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6, ?7, ?6, ?8, ?8)",
+                   (id, title, harness, cwd, model, permission, session_id,
+                    head_id, forked_from, forked_at_id, created_at_ms,
+                    updated_at_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, ?8, ?7, ?9, ?9)",
                 params![
                     new_id,
                     title,
                     source.harness,
                     source.cwd,
                     source.model,
+                    // Inherited alongside the model: a fork is the same thread
+                    // continuing from an earlier point, on the same harness, and
+                    // coming back in a stricter or looser mode than the branch
+                    // it came from would be a surprise nobody asked for.
+                    source.permission.map(|p| p.as_str()),
                     at_message_id,
                     conversation_id,
                     at
@@ -1177,6 +1240,202 @@ impl Store {
             },
         })
     }
+
+    /// Move a thread to another harness: compact what it has said into one
+    /// summary, and open a *new* conversation on the target seeded with it.
+    ///
+    /// [`Store::handoff`] answers "what would this transcript look like to that
+    /// program". This is the verb on top of it — the one `/harness` in a UI
+    /// should call — and the difference is that this one writes. Before it, the
+    /// only thing switching harness could do was throw the conversation away:
+    /// fresh resume, no session, no model. The context was right there in the
+    /// graph and simply went unused.
+    ///
+    /// A *new* conversation rather than a mutated row, because the old one is
+    /// still resumable on its own harness and its `session_id` still names a
+    /// live transcript there. Rewriting `harness` in place would leave that
+    /// session id pointing at a program that has never heard of it.
+    ///
+    /// # Why the caller supplies the summary
+    ///
+    /// Jod has no model client and never will — see [`crate::mcp`]. So there is
+    /// no honest way for this function to *write* a summary; the only thing it
+    /// can do is refuse to invent one. The text has to come from somewhere that
+    /// has a model: a harness run asked to summarise the thread, or whatever a
+    /// caller already holds. [`Store::compact`] is fed exactly this way for the
+    /// same reason, and this reuses it rather than inventing a second path.
+    ///
+    /// A thread with live messages and an empty summary is therefore an error,
+    /// not a silent truncation. Compacting a whole thread into nothing is how
+    /// you lose a conversation.
+    ///
+    /// # What is lost
+    ///
+    /// Three things, and [`HarnessSwitch`] reports all of them rather than
+    /// letting a screen claim the move was free:
+    ///
+    /// - **The transcript**, replaced by the summary — [`HarnessSwitch::compaction`]
+    ///   carries the before/after character counts.
+    /// - **Thinking**, always: reasoning blocks are signed by the model that
+    ///   produced them, so another model's cannot be replayed. Dropped by
+    ///   [`Store::handoff`] before it ever reaches a carrier.
+    /// - **Structure**, when the target is AGY —
+    ///   [`HarnessSwitch::is_lossy`].
+    ///
+    /// The compaction is authorised at a loss fraction of `1.0`, which is the
+    /// deliberate continue-as-new [`Store::compact_with_limit`] documents. A
+    /// guard against a runaway automatic pass is not a guard against a person
+    /// asking for exactly this.
+    pub fn switch_harness(
+        &self,
+        conversation_id: &str,
+        to: HarnessKind,
+        summary: &str,
+        reason: &str,
+    ) -> Result<HarnessSwitch> {
+        let source = self
+            .conversation(conversation_id)?
+            .ok_or_else(|| JodError::Invalid(format!("no conversation `{conversation_id}`")))?;
+        if source.harness_kind() == Some(to) {
+            return Err(JodError::Invalid(format!(
+                "conversation `{conversation_id}` is already on {}",
+                to.label()
+            )));
+        }
+
+        let live = self.live_window(conversation_id)?;
+        if !live.is_empty() && summary.trim().is_empty() {
+            return Err(JodError::Invalid(format!(
+                "handing {} live messages to {} needs a summary, and Jod has no \
+                 model to write one — run one and pass what it said",
+                live.len(),
+                to.label()
+            )));
+        }
+
+        // Compacted first and in its own transaction, because `write` takes the
+        // store's lock and does not nest. A crash between the two leaves a
+        // compacted source and no new conversation: the summary is on the row
+        // it summarises, which is recoverable and readable. The other order
+        // would leave a new conversation seeded from a thread still claiming to
+        // be live.
+        let compaction = match (live.first(), live.last()) {
+            (Some(first), Some(last)) => Some(self.compact_with_limit(
+                conversation_id,
+                first.id,
+                last.id,
+                summary,
+                reason,
+                1.0,
+            )?),
+            // Nothing said yet. Switching harness before the first turn is the
+            // most ordinary moment to do it, so it is not an error — there is
+            // simply nothing to carry.
+            _ => None,
+        };
+
+        let new_id = uuid::Uuid::new_v4().to_string();
+        let at = now_ms();
+        let from_label = source
+            .harness_kind()
+            .map(|k| k.label().to_string())
+            .unwrap_or_else(|| source.harness.clone());
+        let title = handoff_title(&source.title, to);
+        self.write(|tx| {
+            tx.execute(
+                "INSERT INTO conversations
+                   (id, title, harness, cwd, model, permission, session_id,
+                    head_id, forked_from, forked_at_id, created_at_ms,
+                    updated_at_ms)
+                 VALUES (?1, ?2, ?3, ?4, NULL, ?5, NULL, ?6, ?7, ?6, ?8, ?8)",
+                params![
+                    new_id,
+                    title,
+                    to.id(),
+                    source.cwd,
+                    // The mode crosses; the model does not. `PermissionPolicy`
+                    // is Jod's own vocabulary and every harness maps it, so it
+                    // means the same thing on the other side. A model *name* is
+                    // the harness's vocabulary — the string Claude Code wants is
+                    // not the string OpenCode wants — so carrying it over would
+                    // hand the new harness a model it has never heard of. `NULL`
+                    // lets the target pick its default until someone chooses.
+                    source.permission.map(|p| p.as_str()),
+                    // `forked_from`/`forked_at_id` fit, and this is why: the
+                    // columns record "this conversation began at that message of
+                    // that conversation", which is exactly what happened. The
+                    // new head *is* the old head — one shared DAG, one more row
+                    // pointing into it, no messages copied. Nothing about them
+                    // says "same harness"; that was only ever true of the one
+                    // caller they had. A separate `handed_off_from` column would
+                    // duplicate the edge and split every reader that walks
+                    // ancestry into two cases.
+                    source.head_id,
+                    conversation_id,
+                    at
+                ],
+            )?;
+            Ok(())
+        })?;
+
+        // The summary as a real message rather than a second `compactions` row.
+        // A compaction is invisible to `thread` and `live_window` — it surfaces
+        // only in `transcript` — so a screen rendering the new conversation
+        // would show an empty chat that nonetheless replays a full context. The
+        // seed is the one thing this conversation actually contains; it should
+        // be something you can see.
+        if !summary.trim().is_empty() {
+            self.append_message(
+                &new_id,
+                NewMessage::new(
+                    Role::System,
+                    framed(&format!("context handed over from {from_label}"), summary),
+                ),
+            )?;
+        }
+
+        Ok(HarnessSwitch {
+            conversation: self
+                .conversation(&new_id)?
+                .expect("the conversation just inserted"),
+            compaction,
+            // Computed from the *new* conversation, not the old one: what the
+            // target harness has to be handed on its first spawn is the summary
+            // it is starting from, and the old thread is inactive by now anyway.
+            carrier: self.handoff(&new_id, to)?,
+        })
+    }
+}
+
+/// The result of moving a thread to another harness — what it became, what it
+/// cost, and how it gets there.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HarnessSwitch {
+    /// The new conversation, on the target harness, with no session of its own
+    /// yet. [`Store::resume_for`] therefore answers [`Resume::Fresh`] for it,
+    /// which is right: the thread is replayed into the new harness through
+    /// [`HarnessSwitch::carrier`], and it earns a session id the moment that
+    /// run reports one.
+    pub conversation: Conversation,
+    /// What the old thread was compressed into, or `None` when there was
+    /// nothing to compress. `before_chars`/`after_chars` are the honest size of
+    /// what the move cost.
+    pub compaction: Option<Compaction>,
+    /// How the target harness is handed the summary.
+    pub carrier: Handoff,
+}
+
+impl HarnessSwitch {
+    /// Whether the carrier loses structure on the way in — true only for AGY,
+    /// which has no import path at all.
+    ///
+    /// Separate from the compaction, which loses detail on *every* switch. This
+    /// is the loss a user can still avoid by picking a different target, which
+    /// is why it is worth putting in front of them before the move rather than
+    /// after it.
+    pub fn is_lossy(&self) -> bool {
+        self.carrier.is_lossy()
+    }
 }
 
 /// What a harness will accept as prior context.
@@ -1272,8 +1531,12 @@ const MAX_SEARCH_HITS: usize = 50;
 const MESSAGE_COLUMNS: &str = "m.id, m.conversation_id, m.parent_id, m.role, m.text,
      m.tool_name, m.tool_input, m.run_id, m.run_seq, m.at_ms, m.active";
 
+/// `permission` is last rather than beside `model`, where it belongs by
+/// meaning, because these are positional reads: putting a column added by
+/// `0011_settings_and_modes` in the middle would renumber every index in
+/// [`row_to_conversation`] for nothing.
 const CONVERSATION_COLUMNS: &str = "id, title, harness, cwd, model, session_id, head_id,
-     forked_from, forked_at_id, created_at_ms, updated_at_ms";
+     forked_from, forked_at_id, created_at_ms, updated_at_ms, permission";
 
 // ---- helpers -----------------------------------------------------------
 
@@ -1315,6 +1578,15 @@ fn row_to_conversation(r: &rusqlite::Row) -> rusqlite::Result<Conversation> {
         forked_at_id: r.get(8)?,
         created_at_ms: r.get(9)?,
         updated_at_ms: r.get(10)?,
+        // A mode nobody defined reads back as `None` — "no opinion" — rather
+        // than failing the query, the same call `Role::parse` makes. The
+        // alternative is that one row written by a newer build makes the
+        // conversation unopenable, and the failure mode of guessing wrong here
+        // is that the caller's mode applies, which is where we started.
+        permission: r
+            .get::<_, Option<String>>(11)?
+            .as_deref()
+            .and_then(parse_permission),
     })
 }
 
@@ -1681,6 +1953,21 @@ fn fork_title(source: &str) -> String {
     }
 }
 
+/// A handed-over conversation's name: the same subject, plus where it went.
+///
+/// Named after the target rather than "(fork)" because in a listing the two are
+/// the same row shape and the question a reader has is which one is on which
+/// harness. The `conversations` fallback cannot answer it — the opening user
+/// message of a handoff is a summary Jod wrote.
+fn handoff_title(source: &str, to: HarnessKind) -> String {
+    let label = to.label();
+    if source.is_empty() {
+        format!("handed to {label}")
+    } else {
+        format!("{source} → {label}")
+    }
+}
+
 /// `radius` messages either side of `id`, plus `id` itself, oldest first.
 ///
 /// Ordered by id rather than by ancestry: within one conversation ids are
@@ -1872,6 +2159,73 @@ mod tests {
         // The opening message is out of the live window, but the conversation
         // does not become unfindable because it was compacted.
         assert_eq!(s.conversations(10).unwrap()[0].title, "find the flaky test");
+    }
+
+    // ---- the model and the mode ------------------------------------------
+
+    /// The failure that motivated the column: the model was passed at spawn
+    /// time and stored nowhere, so a conversation reopened tomorrow came back on
+    /// whatever the client defaulted to. Jod respawns the harness once per turn,
+    /// so this question is asked again at every single spawn — the row is the
+    /// only thing still around to answer it.
+    #[test]
+    fn the_model_a_conversation_was_left_on_is_still_there_when_it_reopens() {
+        let s = store();
+        let (id, _) = conversation_with(&s, &["go"]);
+        assert_eq!(
+            s.conversation(&id).unwrap().unwrap().model.as_deref(),
+            Some("opus")
+        );
+
+        assert!(s.set_conversation_model(&id, Some("sonnet")).unwrap());
+        assert_eq!(
+            s.conversation(&id).unwrap().unwrap().model.as_deref(),
+            Some("sonnet")
+        );
+    }
+
+    /// Same for the permission mode, which before `0011_settings_and_modes` was
+    /// fixed once at launch and could not be changed at all.
+    #[test]
+    fn the_mode_a_conversation_was_left_in_is_still_there_when_it_reopens() {
+        let s = store();
+        let (id, _) = conversation_with(&s, &["go"]);
+        for mode in PermissionPolicy::ALL {
+            assert!(s.set_conversation_permission(&id, Some(mode)).unwrap());
+            assert_eq!(s.conversation(&id).unwrap().unwrap().permission, Some(mode));
+        }
+    }
+
+    /// `None` is not a mode; it is the absence of one, and it has to be
+    /// reachable in both directions. Every row older than the migration reads
+    /// back this way, and a UI that offers a mode must be able to take it back.
+    #[test]
+    fn a_conversation_can_hand_the_choice_of_model_and_mode_back_to_the_caller() {
+        let s = store();
+        let (id, _) = conversation_with(&s, &["go"]);
+        assert_eq!(
+            s.conversation(&id).unwrap().unwrap().permission,
+            None,
+            "a new conversation starts with no opinion"
+        );
+
+        s.set_conversation_permission(&id, Some(PermissionPolicy::Bypass))
+            .unwrap();
+        s.set_conversation_permission(&id, None).unwrap();
+        s.set_conversation_model(&id, None).unwrap();
+
+        let back = s.conversation(&id).unwrap().unwrap();
+        assert_eq!(back.permission, None);
+        assert_eq!(back.model, None);
+    }
+
+    #[test]
+    fn setting_the_model_or_the_mode_of_a_conversation_that_does_not_exist_reports_it() {
+        let s = store();
+        assert!(!s.set_conversation_model("ghost", Some("opus")).unwrap());
+        assert!(!s
+            .set_conversation_permission("ghost", Some(PermissionPolicy::Plan))
+            .unwrap());
     }
 
     // ---- appending -----------------------------------------------------
@@ -2317,6 +2671,20 @@ mod tests {
         assert_eq!(fork.harness_kind(), Some(HarnessKind::ClaudeCode));
         assert_eq!(fork.cwd, "/tmp/work");
         assert_eq!(fork.model.as_deref(), Some("opus"));
+    }
+
+    /// A fork is the same thread continuing from an earlier point. Coming back
+    /// in a stricter or looser mode than the branch it came from would be a
+    /// surprise nobody asked for.
+    #[test]
+    fn a_fork_inherits_the_mode_its_original_was_running_in() {
+        let s = store();
+        let (id, ids) = conversation_with(&s, &["one"]);
+        s.set_conversation_permission(&id, Some(PermissionPolicy::Plan))
+            .unwrap();
+
+        let fork = s.fork_conversation(&id, ids[0], None).unwrap();
+        assert_eq!(fork.permission, Some(PermissionPolicy::Plan));
     }
 
     #[test]
@@ -3095,5 +3463,268 @@ mod tests {
         }
         let seen: Vec<Role> = s.thread(&c.id).unwrap().iter().map(|m| m.role).collect();
         assert_eq!(seen, all);
+    }
+
+    // ---- switching harness -----------------------------------------------
+
+    /// What `/harness` used to do was throw the conversation away — fresh
+    /// resume, no session, no model — while the whole thread sat in the graph
+    /// unused. This is the opposite: compact what was said, and open the new
+    /// conversation holding it.
+    #[test]
+    fn switching_harness_opens_a_new_conversation_on_it_carrying_the_summary() {
+        let s = store();
+        let (id, _) = conversation_with(&s, &["port the parser", "ported, tests green"]);
+
+        let switch = s
+            .switch_harness(
+                &id,
+                HarnessKind::OpenCode,
+                "the parser is ported",
+                "harness",
+            )
+            .unwrap();
+
+        assert_ne!(switch.conversation.id, id, "a new conversation, not a move");
+        assert_eq!(
+            switch.conversation.harness_kind(),
+            Some(HarnessKind::OpenCode)
+        );
+        assert_eq!(
+            switch.conversation.cwd, "/tmp/work",
+            "same work, same place"
+        );
+
+        // The summary is a message you can actually see, not a record only the
+        // replay path knows about.
+        let live = texts(&s.live_window(&switch.conversation.id).unwrap());
+        assert_eq!(live.len(), 1, "the whole thread became one turn: {live:?}");
+        assert!(live[0].contains("the parser is ported"));
+        assert!(
+            live[0].contains("Claude Code"),
+            "and says where from: {live:?}"
+        );
+    }
+
+    /// The old conversation is still resumable on its own harness, and its
+    /// session id still names a live transcript there. That is why this mints a
+    /// row instead of rewriting `harness` in place.
+    #[test]
+    fn switching_harness_leaves_the_original_where_it_was() {
+        let s = store();
+        let (id, ids) = conversation_with(&s, &["one", "two"]);
+        s.set_conversation_session(&id, Some("claude-session-1"))
+            .unwrap();
+
+        let switch = s
+            .switch_harness(&id, HarnessKind::Agy, "one and two happened", "harness")
+            .unwrap();
+
+        let source = s.conversation(&id).unwrap().unwrap();
+        assert_eq!(source.harness_kind(), Some(HarnessKind::ClaudeCode));
+        assert_eq!(
+            s.resume_for(&id).unwrap(),
+            Resume::Session("claude-session-1".into()),
+            "the original still resumes where it always did"
+        );
+        assert_eq!(source.head_id, Some(ids[1]), "nothing moved");
+        // ...and the new one starts fresh, because a Claude Code session id
+        // means nothing to AGY. It is replayed through the carrier instead.
+        assert_eq!(switch.conversation.session_id, None);
+        assert_eq!(
+            s.resume_for(&switch.conversation.id).unwrap(),
+            Resume::Fresh
+        );
+    }
+
+    /// The link is recorded rather than left as an id coincidence — the same
+    /// reason the module keeps a graph at all. The new head *is* the old head:
+    /// one shared DAG, no messages copied.
+    #[test]
+    fn a_switched_conversation_records_where_it_came_from() {
+        let s = store();
+        let (id, ids) = conversation_with(&s, &["one", "two"]);
+
+        let switch = s
+            .switch_harness(&id, HarnessKind::OpenCode, "one and two", "harness")
+            .unwrap();
+
+        let new = &switch.conversation;
+        assert_eq!(new.forked_from.as_deref(), Some(id.as_str()));
+        assert_eq!(new.forked_at_id, Some(ids[1]), "handed over at the head");
+        // The seed hangs off the old head, so the graph still knows the order
+        // things happened in even though the transcript no longer replays them.
+        let thread = s.thread(&new.id).unwrap();
+        assert_eq!(texts(&thread[..2]), ["one", "two"]);
+        assert_eq!(thread[2].parent_id, Some(ids[1]));
+        assert!(thread[..2].iter().all(|m| !m.active), "compacted away");
+    }
+
+    /// Compacted, not truncated: the messages keep their rows and stay
+    /// searchable, and the compaction says what the move cost.
+    #[test]
+    fn switching_harness_compacts_the_thread_it_leaves_behind() {
+        let s = store();
+        let (id, _) = conversation_with(&s, &["the long question", "the long answer"]);
+
+        let switch = s
+            .switch_harness(&id, HarnessKind::OpenCode, "short", "harness")
+            .unwrap();
+
+        let compaction = switch.compaction.expect("a thread was carried over");
+        assert_eq!(compaction.conversation_id, id, "recorded on the source");
+        assert_eq!(compaction.summary, "short");
+        assert_eq!(
+            compaction.before_chars,
+            "the long question".len() as i64 + "the long answer".len() as i64
+        );
+        assert_eq!(compaction.after_chars, "short".len() as i64);
+        assert!(s.live_window(&id).unwrap().is_empty(), "nothing live left");
+        assert_eq!(s.thread(&id).unwrap().len(), 2, "and nothing deleted");
+        assert_eq!(s.search_messages("question", 10).unwrap().len(), 1);
+    }
+
+    /// Jod has no model client and never will, so a summary can only come from
+    /// a caller that has one. Compacting a whole thread into nothing is how you
+    /// lose a conversation, so the empty case is refused rather than silently
+    /// truncating — and nothing is written on the way out.
+    #[test]
+    fn handing_over_a_live_thread_with_no_summary_is_refused() {
+        let s = store();
+        let (id, _) = conversation_with(&s, &["one", "two"]);
+
+        let err = s.switch_harness(&id, HarnessKind::OpenCode, "   ", "harness");
+        assert!(matches!(err, Err(JodError::Invalid(_))), "got {err:?}");
+
+        assert_eq!(s.conversations(10).unwrap().len(), 1, "nothing was minted");
+        assert_eq!(
+            s.live_window(&id).unwrap().len(),
+            2,
+            "nothing was compacted"
+        );
+        assert!(s.compactions(&id).unwrap().is_empty());
+    }
+
+    /// Switching before the first turn is the most ordinary moment to do it, so
+    /// it is not an error — there is simply nothing to carry.
+    #[test]
+    fn switching_harness_before_anything_was_said_carries_nothing() {
+        let s = store();
+        let c = s
+            .new_conversation(HarnessKind::ClaudeCode, "/tmp/work", Some("opus"))
+            .unwrap();
+
+        let switch = s
+            .switch_harness(&c.id, HarnessKind::Agy, "", "harness")
+            .unwrap();
+
+        assert!(switch.compaction.is_none());
+        assert_eq!(switch.conversation.harness_kind(), Some(HarnessKind::Agy));
+        assert_eq!(switch.conversation.head_id, None);
+        assert!(s.thread(&switch.conversation.id).unwrap().is_empty());
+    }
+
+    /// The mode is Jod's own vocabulary and every harness maps it, so it means
+    /// the same thing on the other side. A model *name* is the harness's
+    /// vocabulary — the string Claude Code wants is not the string OpenCode
+    /// wants — so carrying it over would hand the new harness a model it has
+    /// never heard of.
+    #[test]
+    fn the_mode_crosses_a_harness_switch_and_the_model_does_not() {
+        let s = store();
+        let (id, _) = conversation_with(&s, &["one"]);
+        s.set_conversation_permission(&id, Some(PermissionPolicy::Plan))
+            .unwrap();
+
+        let switch = s
+            .switch_harness(&id, HarnessKind::OpenCode, "one happened", "harness")
+            .unwrap();
+
+        assert_eq!(switch.conversation.permission, Some(PermissionPolicy::Plan));
+        assert_eq!(switch.conversation.model, None, "opus means nothing here");
+    }
+
+    /// The loss a user can still avoid by picking a different target, which is
+    /// why it belongs in front of them before the move rather than after it.
+    #[test]
+    fn a_switch_to_agy_reports_itself_as_lossy_and_carries_the_summary_in_its_prompt() {
+        let s = store();
+        let (id, _) = conversation_with(&s, &["one", "two"]);
+
+        let switch = s
+            .switch_harness(&id, HarnessKind::Agy, "one and two happened", "harness")
+            .unwrap();
+
+        assert!(switch.is_lossy(), "AGY has no import path");
+        let Handoff::PromptPrefix { text } = &switch.carrier else {
+            panic!("expected a prompt prefix, got {:?}", switch.carrier);
+        };
+        assert!(text.contains("one and two happened"));
+        assert!(
+            !text.contains("user: one"),
+            "the old turns were compacted, not replayed: {text}"
+        );
+    }
+
+    /// Every other target keeps its structure, so the same move to Claude Code
+    /// or OpenCode must not be reported as lossy — a warning shown every time is
+    /// a warning nobody reads.
+    #[test]
+    fn a_switch_to_a_harness_with_an_import_path_is_not_lossy() {
+        let s = store();
+        for (from, to) in [
+            (HarnessKind::OpenCode, HarnessKind::ClaudeCode),
+            (HarnessKind::ClaudeCode, HarnessKind::OpenCode),
+        ] {
+            let c = s.new_conversation(from, "/tmp/work", None).unwrap();
+            s.append_message(&c.id, NewMessage::user("do the thing"))
+                .unwrap();
+
+            let switch = s
+                .switch_harness(&c.id, to, "the thing was done", "harness")
+                .unwrap();
+            assert!(!switch.is_lossy(), "{from:?} → {to:?}");
+            let carried = serde_json::to_string(&switch.carrier).unwrap();
+            assert!(carried.contains("the thing was done"), "{carried}");
+        }
+    }
+
+    /// A no-op that compacts a live thread would be a destructive no-op.
+    #[test]
+    fn switching_to_the_harness_it_is_already_on_is_refused() {
+        let s = store();
+        let (id, _) = conversation_with(&s, &["one"]);
+
+        let err = s.switch_harness(&id, HarnessKind::ClaudeCode, "one happened", "harness");
+        assert!(matches!(err, Err(JodError::Invalid(_))), "got {err:?}");
+        assert!(s.compactions(&id).unwrap().is_empty());
+        assert_eq!(s.live_window(&id).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn switching_a_conversation_that_does_not_exist_is_refused() {
+        let s = store();
+        let err = s.switch_harness("ghost", HarnessKind::Agy, "nothing", "harness");
+        assert!(matches!(err, Err(JodError::Invalid(_))), "got {err:?}");
+        assert!(s.conversations(10).unwrap().is_empty());
+    }
+
+    /// Compaction is guarded by `MAX_PRIOR_LOSS_FRACTION` against a runaway
+    /// automatic pass. A handoff is the deliberate continue-as-new that guard
+    /// exempts by design — it must not be refused for taking the whole thread,
+    /// because taking the whole thread is the entire operation.
+    #[test]
+    fn a_handoff_may_take_the_whole_thread_where_an_automatic_compaction_may_not() {
+        let s = store();
+        let (id, ids) = conversation_with(&s, &["one", "two"]);
+
+        let refused = s.compact(&id, ids[0], ids[1], "everything", "automatic");
+        assert!(
+            matches!(refused, Err(JodError::Invalid(_))),
+            "got {refused:?}"
+        );
+
+        s.switch_harness(&id, HarnessKind::OpenCode, "everything", "harness")
+            .unwrap();
     }
 }

@@ -12,6 +12,7 @@
 
 use jod_core::{HarnessKind, PermissionPolicy};
 
+use super::config;
 use super::workspace::Workspace;
 
 /// What a `/…` line asked for.
@@ -28,6 +29,8 @@ pub enum Slash {
     Thinking,
     /// Show or hide what tools gave back.
     Details,
+    /// Read or change a preference that outlives the session.
+    Config(config::Request),
     /// Start a fresh conversation, forgetting the session cursor.
     New,
     /// List conversations that can be resumed.
@@ -48,7 +51,14 @@ pub enum Slash {
     Unpause(String),
     /// Fire a schedule, or run one iteration of a goal, now.
     Run(String),
-    Remember(String),
+    /// Assert one fact. A triple rather than a sentence, because that is what
+    /// `Store::remember` stores and splitting a sentence into three would be
+    /// Jod guessing which word is the relation.
+    Remember {
+        subject: String,
+        predicate: String,
+        object: String,
+    },
     Forget(String),
     /// Start an agent that runs without taking over the screen.
     Delegate(String),
@@ -76,6 +86,15 @@ pub enum Slash {
     Unknown(String),
     /// A known command missing its argument.
     NeedsArgument(&'static str),
+    /// A command understood, and not carried out, with the reason already
+    /// written — a preference asked for a value it does not take, say.
+    ///
+    /// Distinct from [`Slash::Unknown`], which is a command nobody has heard
+    /// of, and from [`Slash::NeedsArgument`], which is one whose argument is
+    /// simply absent. Here the argument was present and wrong, and the useful
+    /// sentence names what *would* have worked — which only the thing that
+    /// rejected it knows.
+    Refused(String),
 }
 
 /// Parse a line as a slash command.
@@ -93,7 +112,7 @@ pub fn parse(line: &str) -> Option<Slash> {
 
     Some(match name.as_str() {
         "help" | "?" => Slash::Help,
-        "harness" | "agent" => match harness_from(arg) {
+        "harness" | "agent" => match harness_named(arg) {
             Some(kind) => Slash::Harness(kind),
             None if arg.is_empty() => Slash::NeedsArgument("/harness <claude|opencode|agy>"),
             None => Slash::Unknown(format!("/harness {arg}")),
@@ -115,6 +134,14 @@ pub fn parse(line: &str) -> Option<Slash> {
         },
         "thinking" | "reasoning" => Slash::Thinking,
         "details" | "output" => Slash::Details,
+        // The whole argument is handed to `config`, which owns what a
+        // preference is called and what it takes. A refusal comes back as the
+        // sentence to show rather than as a bare "no", because the useful part
+        // is which values *are* accepted.
+        "config" | "prefs" | "preferences" | "settings" => match config::request(arg) {
+            Ok(request) => Slash::Config(request),
+            Err(said) => Slash::Refused(said),
+        },
         // `/new` alone is still a fresh conversation, which is what it has
         // always meant; `/new schedule` is the form ladder's front door.
         "new" => match kind_from(arg) {
@@ -178,13 +205,17 @@ pub fn parse(line: &str) -> Option<Slash> {
                 Slash::Run(arg.to_string())
             }
         }
-        "remember" => {
-            if arg.is_empty() {
-                Slash::NeedsArgument("/remember <text>")
-            } else {
-                Slash::Remember(arg.to_string())
-            }
-        }
+        "remember" => match triple(arg) {
+            Some((subject, predicate, object)) => Slash::Remember {
+                subject,
+                predicate,
+                object,
+            },
+            None if arg.is_empty() => Slash::NeedsArgument(REMEMBER_USAGE),
+            None => Slash::Refused(format!(
+                "“{arg}” is a sentence, and memory holds triples — {REMEMBER_USAGE}"
+            )),
+        },
         "forget" => {
             if arg.is_empty() {
                 Slash::NeedsArgument("/forget <name>")
@@ -258,6 +289,27 @@ pub fn parse(line: &str) -> Option<Slash> {
     })
 }
 
+/// How a fact is typed. Shown in `/help`, in the refusal and in the overlay, so
+/// there is one spelling of the shape to learn.
+pub const REMEMBER_USAGE: &str = "/remember <subject> | <predicate> | <object>";
+
+/// Split a typed fact into its three parts.
+///
+/// A pipe rather than whitespace, because every part is a phrase: `reljod |
+/// prefers | linear for tasks` is three fields and `reljod prefers linear for
+/// tasks` is a sentence that only a model could split. `None` for anything that
+/// is not exactly three non-empty parts — refused, never guessed at, because a
+/// fact filed under the wrong subject is worse than one never filed.
+pub(super) fn triple(arg: &str) -> Option<(String, String, String)> {
+    let parts: Vec<&str> = arg.split('|').map(str::trim).collect();
+    match parts.as_slice() {
+        [subject, predicate, object] if !subject.is_empty() && !predicate.is_empty() && !object.is_empty() => {
+            Some((subject.to_string(), predicate.to_string(), object.to_string()))
+        }
+        _ => None,
+    }
+}
+
 /// What `/new <kind>` is asking to make. Named after the singular of the
 /// screen, because that is the word on the screen you just came from.
 fn kind_from(name: &str) -> Option<Workspace> {
@@ -271,7 +323,12 @@ fn kind_from(name: &str) -> Option<Workspace> {
     })
 }
 
-fn harness_from(name: &str) -> Option<HarnessKind> {
+/// The harness a typed word names, in every spelling `/harness` accepts —
+/// including each kind's stored `id()`, so a value read back out of the
+/// database parses here too. `pub(super)` because [`super::config`] must accept
+/// exactly the same words: two parsers for one setting is how `claude-code`
+/// ends up working in one place and not the other.
+pub(super) fn harness_named(name: &str) -> Option<HarnessKind> {
     match name.to_ascii_lowercase().as_str() {
         "claude" | "claude-code" | "claude_code" | "cc" => Some(HarnessKind::ClaudeCode),
         "opencode" | "open-code" | "open_code" | "oc" => Some(HarnessKind::OpenCode),
@@ -287,8 +344,9 @@ pub const HELP: &[(&str, &str)] = &[
     ("/harness <name>", "claude, opencode or agy — takes effect next turn"),
     ("/model <name>", "set the model; no argument restores the default"),
     ("/mode [name]", "plan, ask, edits or auto; no argument cycles (Tab)"),
-    ("/thinking", "show or hide reasoning"),
-    ("/details", "show or hide what tools returned"),
+    ("/thinking", "show or hide reasoning — remembered"),
+    ("/details", "show or hide what tools returned — remembered"),
+    ("/config [key] [value]", "preferences that outlive the session"),
     ("/new [kind]", "a fresh conversation, or a new schedule/goal/hook/task"),
     ("/sessions", "conversations you can pick up"),
     ("/resume <id>", "continue one of them"),
@@ -310,7 +368,7 @@ pub const HELP: &[(&str, &str)] = &[
     ("/run <name>", "fire a schedule or a goal iteration now"),
     ("/pause <name>", "stop a schedule or goal firing"),
     ("/unpause <name>", "arm it again"),
-    ("/remember <text>", "write something to memory"),
+    ("/remember <s> | <p> | <o>", "assert one fact — subject, relation, value"),
     ("/forget <name>", "drop a memory node"),
     ("/team", "the team panel (Ctrl-G)"),
     ("/todo <title>", "put a task on the team's board"),
@@ -425,6 +483,7 @@ pub fn completions(input: &str, app: &crate::tui::App) -> Vec<Completion> {
             .filter(|kind| kind.starts_with(&typed))
             .map(|kind| Completion::new(format!("/new {kind}"), format!("a new {kind}")))
             .collect(),
+        "config" | "prefs" | "preferences" | "settings" => config_completions(&name, &typed),
         // The same reasoning as the agent ids: retyping a name off the screen
         // above is not a user interface. A schedule and a goal are both things
         // you pause, run and un-pause, so both are offered on those verbs.
@@ -438,6 +497,36 @@ pub fn completions(input: &str, app: &crate::tui::App) -> Vec<Completion> {
             named(&name, &typed, schedules.chain(goals))
         }
         _ => vec![],
+    }
+}
+
+/// Preference names, and then that preference's values once one is named.
+///
+/// The values matter more than the names here. `on`/`off` is guessable and
+/// `plan | ask | edits | auto` is not, and a preference whose spelling you
+/// cannot recall is one that stays at its default for ever.
+fn config_completions(command: &str, typed: &str) -> Vec<Completion> {
+    match typed.split_once(char::is_whitespace) {
+        // Still on the key. A trailing space, because every preference takes a
+        // value and the cursor should land where it goes.
+        None => config::Pref::ALL
+            .into_iter()
+            .filter(|p| p.name().starts_with(typed))
+            .map(|p| Completion::new(format!("/{command} {} ", p.name()), p.what()))
+            .collect(),
+        Some((name, value)) => {
+            let Some(pref) = config::Pref::named(name) else {
+                return vec![];
+            };
+            let value = value.trim_start();
+            pref.choices()
+                .into_iter()
+                .filter(|choice| choice.starts_with(value))
+                .map(|choice| {
+                    Completion::new(format!("/{command} {} {choice}", pref.name()), pref.what())
+                })
+                .collect()
+        }
     }
 }
 
@@ -820,6 +909,120 @@ mod tests {
     #[test]
     fn naming_an_agent_completes_to_nothing_when_there_are_none() {
         assert!(completions("/stop ", &fleet(&[])).is_empty());
+    }
+
+    // ---- /config ----
+
+    use crate::tui::config::{Pref, Request, Value};
+
+    #[test]
+    fn config_with_no_argument_asks_for_the_whole_list() {
+        assert_eq!(parse("/config"), Some(Slash::Config(Request::List)));
+        assert_eq!(parse("/settings"), Some(Slash::Config(Request::List)));
+        assert_eq!(parse("/prefs"), Some(Slash::Config(Request::List)));
+    }
+
+    #[test]
+    fn config_shows_one_preference_and_sets_one() {
+        assert_eq!(
+            parse("/config thinking"),
+            Some(Slash::Config(Request::Show(Pref::Thinking)))
+        );
+        assert_eq!(
+            parse("/config thinking off"),
+            Some(Slash::Config(Request::Set(Pref::Thinking, Value::Flag(false))))
+        );
+        assert_eq!(
+            parse("/config mode plan"),
+            Some(Slash::Config(Request::Set(
+                Pref::Mode,
+                Value::Mode(PermissionPolicy::Plan)
+            )))
+        );
+    }
+
+    /// The rule the module doc states at the top of this file: never silently
+    /// accepted. A preference that looks set and is not is the worst outcome.
+    #[test]
+    fn an_unknown_preference_is_refused_with_the_real_ones_named() {
+        let Some(Slash::Refused(said)) = parse("/config colour green") else {
+            panic!("an unknown key was not refused: {:?}", parse("/config colour green"));
+        };
+        assert!(said.contains("colour"), "{said}");
+        assert!(said.contains("thinking"), "{said}");
+    }
+
+    #[test]
+    fn a_value_a_preference_does_not_take_is_refused_rather_than_stored() {
+        let Some(Slash::Refused(said)) = parse("/config mode yolo") else {
+            panic!("a bad value was not refused");
+        };
+        assert!(said.contains("yolo") && said.contains("plan"), "{said}");
+    }
+
+    /// Offering a preference or a value the parser then rejects would be a
+    /// popup that teaches a mistake — the same rule `/harness` and `/mode` keep.
+    #[test]
+    fn every_suggested_preference_and_value_parses() {
+        let keys = completions("/config ", &fleet(&[]));
+        assert_eq!(keys.len(), Pref::ALL.len());
+        for c in keys {
+            let parsed = parse(c.line.trim());
+            assert!(
+                matches!(parsed, Some(Slash::Config(_))),
+                "{} was suggested but parses as {parsed:?}",
+                c.line
+            );
+        }
+        for pref in Pref::ALL {
+            let offered = completions(&format!("/config {} ", pref.name()), &fleet(&[]));
+            assert!(!offered.is_empty(), "{} offers no values", pref.name());
+            for c in offered {
+                assert!(
+                    matches!(parse(&c.line), Some(Slash::Config(Request::Set(_, _)))),
+                    "{} was suggested but does not set anything",
+                    c.line
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn typing_narrows_the_preferences_and_their_values() {
+        assert_eq!(lines("/config th"), vec!["/config thinking "]);
+        assert_eq!(lines("/config thinking o"), vec!["/config thinking on", "/config thinking off"]);
+        assert!(completions("/config nonsense ", &fleet(&[])).is_empty());
+    }
+
+    // ---- /remember ----
+
+    /// A fact is three fields. Typing a sentence and having Jod pick the
+    /// relation out of it is a guess, and a fact filed under the wrong subject
+    /// is worse than one never filed.
+    #[test]
+    fn remember_takes_a_triple() {
+        assert_eq!(
+            parse("/remember reljod | prefers | linear for tasks"),
+            Some(Slash::Remember {
+                subject: "reljod".into(),
+                predicate: "prefers".into(),
+                object: "linear for tasks".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn remember_refuses_a_sentence_and_says_what_it_wants() {
+        let Some(Slash::Refused(said)) = parse("/remember linear is the system of record") else {
+            panic!("a sentence was accepted as a fact");
+        };
+        assert!(said.contains(REMEMBER_USAGE), "{said}");
+
+        // Two fields is the near miss, and it must not become subject-predicate
+        // with an empty value.
+        assert!(matches!(parse("/remember reljod | prefers"), Some(Slash::Refused(_))));
+        assert!(matches!(parse("/remember reljod |  | linear"), Some(Slash::Refused(_))));
+        assert_eq!(parse("/remember"), Some(Slash::NeedsArgument(REMEMBER_USAGE)));
     }
 
     /// `/help` must not list a command the parser rejects.

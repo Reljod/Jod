@@ -1,13 +1,13 @@
 //! `jod tui` — the full-screen interface.
 //!
 //! Layout, top to bottom: a scrolling transcript, an input box, a status bar.
-//! `Ctrl-A` reveals a panel listing every delegation this process knows about,
+//! `Alt-A` reveals a panel listing every delegation this process knows about,
 //! which is the part that makes this an orchestrator's UI rather than a chat
 //! window — Jod's job is watching several agents, not talking to one.
 //!
 //! That panel is where unattended work is actually managed: it is a cursor over
 //! the live fleet, and from it a run can be watched, stopped, resumed or
-//! attached to. Sending a prompt with `Ctrl-B` (or `/delegate`) starts an agent
+//! attached to. Sending a prompt with `Alt-B` (or `/delegate`) starts an agent
 //! that never takes over the screen, so a long job can be left running while the
 //! conversation carries on — and its ending arrives as a notice rather than
 //! being missed.
@@ -19,6 +19,7 @@
 
 mod app;
 mod command;
+mod config;
 // `data` and `ui` are public so `examples/screens.rs` can build the app from
 // the real loaders and render it against a `TestBackend`. That example is how
 // "the screens show what is in the database" is demonstrated without a TTY, and
@@ -93,6 +94,18 @@ pub enum Action {
     DeleteHook(String),
     /// Destroy everything Jod believes about one subject.
     Forget(String),
+    /// Assert one fact — subject, relation, value.
+    Remember {
+        subject: String,
+        predicate: String,
+        object: String,
+    },
+    /// Read or change a preference that outlives the session.
+    ///
+    /// Parsed and checked before it gets here, so this only ever carries
+    /// something the store can be asked for; the writing needs the database and
+    /// so belongs to the loop.
+    Config(config::Request),
     /// Open the typed line in `$EDITOR`. The TUI has to be suspended and
     /// restored around it, which only the loop can do.
     Editor,
@@ -166,7 +179,7 @@ async fn event_loop(
     // the harness would leave a stale claim on screen the moment `/harness`
     // switches. The status bar is the one place that tracks it.
     app.push(Entry::Notice(
-        "Ctrl-K opens every screen · / for commands · Enter send · Ctrl-B delegate in the background · ? for keys · Ctrl-C quit"
+        "Alt-K opens every screen · / for commands · Enter send · Alt-B delegate in the background · ? for keys · Ctrl-C quit"
             .to_string(),
     ));
 
@@ -272,7 +285,7 @@ fn announce(app: &mut App, id: &str) {
     };
     let took = app::short_duration(app.now_ms.saturating_sub(agent.created_at_ms));
     app.push(Entry::Notice(format!(
-        "{mark} {} {} after {took} — Ctrl-A to open it",
+        "{mark} {} {} after {took} — Alt-A to open it",
         agent.name, agent.status
     )));
 }
@@ -324,7 +337,7 @@ async fn perform(jod: &Arc<Jod>, app: &mut App, opts: &Options, action: Action) 
             match spawn(jod, app, opts, prompt.clone(), Resume::Fresh, DELEGATED).await {
                 Ok(id) => {
                     app.push(Entry::Notice(format!(
-                        "delegated {} — {} · runs in the background, Ctrl-A to watch",
+                        "delegated {} — {} · runs in the background, Alt-A to watch",
                         short(&id),
                         crate::default_name(&prompt)
                     )));
@@ -422,6 +435,25 @@ async fn perform(jod: &Arc<Jod>, app: &mut App, opts: &Options, action: Action) 
         Action::ToggleHook(name) => on_store(jod, app, |store| toggle_hook(store, &name)),
         Action::DeleteHook(name) => on_store(jod, app, |store| delete_hook(store, &name)),
         Action::Forget(subject) => on_store(jod, app, |store| forget_about(store, &subject)),
+        Action::Remember {
+            subject,
+            predicate,
+            object,
+        } => on_store(jod, app, |store| {
+            remember_fact(store, &subject, &predicate, &object)
+        }),
+        // The only action that answers in more than one sentence: `/config`
+        // with no argument is a table, and folding it into one notice would
+        // wrap four preferences into a paragraph.
+        Action::Config(request) => {
+            let lines = match jod.store() {
+                Some(store) => config::apply(store, &request),
+                None => vec![format!("{NO_STORE} — this preference lasts the session only")],
+            };
+            for line in lines {
+                app.push(Entry::Notice(line));
+            }
+        }
         Action::OpenScheduleRun(name) => {
             let found = match jod.store() {
                 Some(store) => last_run_of(store, &name),
@@ -438,7 +470,7 @@ async fn perform(jod: &Arc<Jod>, app: &mut App, opts: &Options, action: Action) 
         // Suspending and restoring the terminal is the loop's job, so this is
         // handled there rather than here. Reaching it means the loop did not.
         Action::Editor => app.push(Entry::Notice(
-            "no $EDITOR handoff from here — set $EDITOR and try Ctrl-F in chat".into(),
+            "no $EDITOR handoff from here — set $EDITOR and try Alt-F in chat".into(),
         )),
         // Named rather than silently ignored: a key that appears to do nothing
         // is worse than one that says what it is waiting for.
@@ -740,6 +772,7 @@ fn short(id: &str) -> String {
 /// ahead of all three, because a key that cannot always leave is a trap.
 fn on_key(app: &mut App, key: KeyEvent, viewport: usize) -> Option<Action> {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let alt = key.modifiers.contains(KeyModifiers::ALT);
 
     if ctrl && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('d')) {
         return on_quit(app);
@@ -750,10 +783,18 @@ fn on_key(app: &mut App, key: KeyEvent, viewport: usize) -> Option<Action> {
     if app.overlay.is_open() {
         return on_overlay_key(app, key);
     }
-    if ctrl {
+    if ctrl || alt {
         if let Some(action) = on_chord(app, key) {
             return action;
         }
+    }
+    // An Alt chord nobody claimed is still a chord, not a keystroke. Falling
+    // through would reach the `KeyCode::Char(c)` arm at the bottom of chat and
+    // type `d` into the prompt when the user pressed Alt-D — a stray letter in
+    // a line they are about to send. Ctrl is left falling through as it always
+    // has: changing it is a separate question from moving the keymap.
+    if alt && matches!(key.code, KeyCode::Char(_)) {
+        return None;
     }
     // Tab and Shift-Tab, on every screen, because they answer two questions you
     // have everywhere: how much may this thing do, and what else is running.
@@ -804,16 +845,46 @@ fn on_quit(app: &mut App) -> Option<Action> {
 }
 
 /// The chords that work in every layer. `Some` means the chord was handled.
+///
+/// **Alt for Jod's verbs, Ctrl for line editing.** A multiplexer takes Ctrl
+/// chords before this process sees them — tmux's own prefix is `Ctrl-B`, which
+/// was the delegate key, so it never arrived at all. Alt is uncontended.
+///
+/// Three groups, and which one a chord is in is a decision, not a pattern:
+///
+/// - **`either`** — no readline verb sits on the Ctrl spelling, so both work.
+///   Alt is what the keybar prints; Ctrl keeps firing so the move is not a
+///   re-learning tax. `Ctrl-K`, `Ctrl-N`, `Ctrl-T` and friends have readline
+///   meanings on paper (kill-to-end, next-history, transpose) that Jod has
+///   never implemented and does not intend to — the whole input is one prompt
+///   that `Ctrl-U` clears, and history is on the bare arrows.
+/// - **`alt` only** — the Ctrl spelling means something to readline, so
+///   claiming it would be re-making the mistake this change undoes. Only the
+///   fleet is here, and it is the reason `Ctrl-A` was ambiguous before.
+/// - **`ctrl` only** — readline's own keys, which no multiplexer steals
+///   because every shell needs them. `Ctrl-A`/`Ctrl-E` to the ends of the
+///   line, `Ctrl-U` to clear it, `Ctrl-W` to eat a word. `Ctrl-C`/`Ctrl-D`
+///   quit, ahead of all of this in `on_key`.
+///
+/// Note that `Alt-B` and `Alt-F` are readline's word motions. Jod binds no
+/// word motion at all, so the chords are free — but if one is ever wanted it
+/// has to find another key, because delegate and `$EDITOR` are printed here.
 fn on_chord(app: &mut App, key: KeyEvent) -> Option<Option<Action>> {
     let handled = |a: Option<Action>| Some(a);
+    let alt = key.modifiers.contains(KeyModifiers::ALT);
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let either = alt || ctrl;
     match key.code {
         // The leader. One free chord reaches nine screens, which is the whole
         // reason this is a menu rather than five more chords.
-        KeyCode::Char('k') => {
+        KeyCode::Char('k') if either => {
             app.overlay = Overlay::WhichKey;
             handled(None)
         }
-        KeyCode::Char('a') => {
+        // Alt only. `Ctrl-A` is readline's start-of-line and goes back to
+        // meaning that below — Jod taking it for the fleet was the one Ctrl
+        // collision Jod inflicted on itself rather than inherited.
+        KeyCode::Char('a') if alt => {
             app.go(if app.workspace == Workspace::Fleet {
                 Workspace::Chat
             } else {
@@ -821,7 +892,7 @@ fn on_chord(app: &mut App, key: KeyEvent) -> Option<Option<Action>> {
             });
             handled(None)
         }
-        KeyCode::Char('g') => {
+        KeyCode::Char('g') if either => {
             app.go(if app.workspace == Workspace::Team {
                 Workspace::Chat
             } else {
@@ -831,15 +902,15 @@ fn on_chord(app: &mut App, key: KeyEvent) -> Option<Option<Action>> {
         }
         // Only meaningful once cron, goals and webhooks report endings while
         // nobody is at the terminal.
-        KeyCode::Char('n') => {
+        KeyCode::Char('n') if either => {
             jump_to_oldest_unread(app);
             handled(None)
         }
         // `$EDITOR` on the input. Claude Code spells this `Ctrl+G`, which is
-        // Jod's team panel and is documented — so `Ctrl-F`, with `Ctrl-K e` as
+        // Jod's team panel and is documented — so `Alt-F`, with `Alt-K e` as
         // the discoverable alias.
-        KeyCode::Char('f') => handled(Some(Action::Editor)),
-        KeyCode::Char('t') => {
+        KeyCode::Char('f') if either => handled(Some(Action::Editor)),
+        KeyCode::Char('t') if either => {
             app.show_thinking = !app.show_thinking;
             app.push(Entry::Notice(format!(
                 "thinking {}",
@@ -847,7 +918,7 @@ fn on_chord(app: &mut App, key: KeyEvent) -> Option<Option<Action>> {
             )));
             handled(None)
         }
-        KeyCode::Char('o') => {
+        KeyCode::Char('o') if either => {
             app.show_details = !app.show_details;
             app.push(Entry::Notice(format!(
                 "tool output {}",
@@ -857,48 +928,66 @@ fn on_chord(app: &mut App, key: KeyEvent) -> Option<Option<Action>> {
         }
         // Delegate: the typed line becomes an agent that runs without taking
         // the screen. This is the key that makes several jobs at once possible
-        // without leaving the UI.
-        KeyCode::Char('b') => handled(app.take_input().map(Action::Delegate)),
+        // without leaving the UI — and the one the move to Alt was really for,
+        // because `Ctrl-B` is tmux's default prefix and never reached us under
+        // a multiplexer at all.
+        KeyCode::Char('b') if either => handled(app.take_input().map(Action::Delegate)),
         // Stop what is being watched. Ctrl-C is quit, so interrupting a run
         // needs a key of its own or the only way out is to leave.
-        KeyCode::Char('x') => handled(match app.watching.clone() {
+        KeyCode::Char('x') if either => handled(match app.watching.clone() {
             Some(id) if app.busy => Some(Action::Stop(id)),
             _ => {
                 app.push(Entry::Notice("nothing running to stop here".into()));
                 None
             }
         }),
-        KeyCode::Char('l') => {
+        // Clearing the transcript is what `Ctrl-L` clears the screen for in
+        // every shell, so the Ctrl spelling stays as well as the Alt one.
+        KeyCode::Char('l') if either => {
             app.transcript.clear();
             app.scroll_to_bottom();
             handled(None)
         }
-        KeyCode::Char('u') => {
+        // Ctrl only, both of them: these *are* readline's verbs, not Jod verbs
+        // that happen to sit on readline's keys. An Alt spelling would be a
+        // second way to press a key nobody is having trouble pressing.
+        KeyCode::Char('u') if ctrl => {
             app.clear_line();
             handled(None)
         }
-        KeyCode::Char('w') => {
+        KeyCode::Char('w') if ctrl => {
             app.delete_word();
             handled(None)
         }
-        // Scrolling keeps a Ctrl form, because the bare arrows now walk back
-        // through what has been sent.
-        KeyCode::Up => {
+        // Scrolling keeps a modifier at all because the bare arrows now walk
+        // back through what has been sent.
+        KeyCode::Up if either => {
             let max = app.transcript.len();
             app.scroll_up(1, max);
             handled(None)
         }
-        KeyCode::Down => {
+        KeyCode::Down if either => {
             app.scroll_down(1);
             handled(None)
         }
-        // Ctrl-A is the fleet, so start-of-line is Home rather than the
-        // readline binding.
-        KeyCode::Home => {
+        // Start and end of the line. `Ctrl-A` means this again now that the
+        // fleet has moved to `Alt-A`; `Ctrl-Home`/`Ctrl-End` stay because on a
+        // list screen the bare Home and End are the first and last *row*, so
+        // without them there is no way to reach the ends of the typed line
+        // from there at all.
+        KeyCode::Char('a') if ctrl => {
             app.home();
             handled(None)
         }
-        KeyCode::Char('e') | KeyCode::End => {
+        KeyCode::Home if either => {
+            app.home();
+            handled(None)
+        }
+        KeyCode::Char('e') if ctrl => {
+            app.end();
+            handled(None)
+        }
+        KeyCode::End if either => {
             app.end();
             handled(None)
         }
@@ -1232,7 +1321,9 @@ fn selected_label(app: &App, ws: Workspace) -> Option<String> {
 /// value, and a named to-do for the kinds that need the editor.
 fn begin_new(app: &mut App, ws: Workspace) -> Option<Action> {
     let label = match ws {
-        Workspace::Memory => "remember",
+        // The shape is in the label because it is the only place to put it: a
+        // box saying "remember" invites a sentence, and a fact is three fields.
+        Workspace::Memory => "remember  subject | relation | value",
         Workspace::Tasks | Workspace::Team => "task",
         Workspace::Schedules => "schedule",
         Workspace::Goals => "goal",
@@ -1265,11 +1356,25 @@ fn accept_prompt(
         }
         // `Store::remember` takes a triple — subject, predicate, object — and
         // splitting one typed line into three would be Jod guessing at which
-        // word is the relation. That guess belongs in a form, not here.
-        PromptIntent::New(Workspace::Memory) => Some(Action::Pending {
-            verb: format!("remember “{typed}”"),
-            needs: "a three-field form — Store::remember wants a triple, not a sentence",
-        }),
+        // word is the relation. The pipe is the form: three fields on one line,
+        // the same shape `/remember` takes, so there is one thing to learn.
+        PromptIntent::New(Workspace::Memory) => match command::triple(&typed) {
+            Some((subject, predicate, object)) => Some(Action::Remember {
+                subject,
+                predicate,
+                object,
+            }),
+            // Returned early rather than falling through: the `or_else` below
+            // would add "nothing to do" on top of a refusal that has already
+            // said what to type instead.
+            None => {
+                app.push(Entry::Notice(format!(
+                    "“{typed}” is a sentence, and memory holds triples — {}",
+                    command::REMEMBER_USAGE
+                )));
+                return None;
+            }
+        },
         PromptIntent::New(ws) => Some(Action::Pending {
             verb: format!("new {} “{typed}”", ws.menu_name()),
             needs: "the $EDITOR form ladder — tier 3 of the report's §5.4",
@@ -1867,19 +1972,34 @@ fn apply_slash(app: &mut App, slash: command::Slash) -> Option<Action> {
             };
             app.push(Entry::Notice(said));
         }
+        // The two toggles apply now and are recorded as a choice, so the answer
+        // to "do I want to watch it think" is given once rather than at every
+        // launch. Nothing is said here: the sentence comes back from the write,
+        // which is the only place that knows whether it stuck.
         Slash::Thinking => {
             app.show_thinking = !app.show_thinking;
-            app.push(Entry::Notice(format!(
-                "thinking {}",
-                if app.show_thinking { "shown" } else { "hidden" }
-            )));
+            return Some(remember_flag(config::Pref::Thinking, app.show_thinking));
         }
         Slash::Details => {
             app.show_details = !app.show_details;
-            app.push(Entry::Notice(format!(
-                "tool output {}",
-                if app.show_details { "shown" } else { "hidden" }
-            )));
+            return Some(remember_flag(config::Pref::Details, app.show_details));
+        }
+        // Setting a preference that has a live twin on the app changes the live
+        // one too, or `/config thinking off` would take effect at the *next*
+        // launch and look broken at this one.
+        Slash::Config(request) => {
+            if let config::Request::Set(pref, value) = &request {
+                match (pref, value.flag()) {
+                    (config::Pref::Thinking, Some(on)) => app.show_thinking = on,
+                    (config::Pref::Details, Some(on)) => app.show_details = on,
+                    // `harness` and `mode` are deliberately not applied to this
+                    // session: they are what a *new* session starts with, and
+                    // `/harness` and `/mode` are how you change the one you are
+                    // in. Two commands, two scopes, both said out loud.
+                    _ => {}
+                }
+            }
+            return Some(Action::Config(request));
         }
         Slash::New => {
             app.resume = Resume::Fresh;
@@ -1971,10 +2091,15 @@ fn apply_slash(app: &mut App, slash: command::Slash) -> Option<Action> {
                 Named::Neither | Named::Both => None,
             }
         }
-        Slash::Remember(text) => {
-            return Some(Action::Pending {
-                verb: format!("remember “{text}”"),
-                needs: "a three-field form — Store::remember wants a triple, not a sentence",
+        Slash::Remember {
+            subject,
+            predicate,
+            object,
+        } => {
+            return Some(Action::Remember {
+                subject,
+                predicate,
+                object,
             })
         }
         // Typed rather than pointed at, and still destructive, so it goes
@@ -2009,8 +2134,100 @@ fn apply_slash(app: &mut App, slash: command::Slash) -> Option<Action> {
         Slash::Unknown(what) => {
             app.push(Entry::Notice(format!("{what} is not a command — /help lists them")));
         }
+        // The reason was written by whoever refused it, and it already names
+        // what would have worked. Repeating "/help lists them" here would bury
+        // that under advice the user does not need.
+        Slash::Refused(said) => app.push(Entry::Notice(said)),
     }
     None
+}
+
+/// Record a flag preference the user just toggled.
+///
+/// Its own function so `/thinking`, `/details` and `/config thinking off` all
+/// end at one place: two toggles that write the same setting through two paths
+/// is how one of them ends up not persisting.
+fn remember_flag(pref: config::Pref, on: bool) -> Action {
+    Action::Config(config::Request::Set(pref, config::Value::Flag(on)))
+}
+
+/// Read the stored preferences onto a freshly built app.
+///
+/// Called once at startup, before the first draw, so the opening frame already
+/// obeys what the user chose last time rather than flickering to it. An unset
+/// preference leaves the built-in default in place — `App::new` has already put
+/// it there — which is why this only writes what `Current::chosen` says
+/// somebody actually decided.
+///
+/// The two `default.*` preferences are applied only when the launch flags say
+/// nothing new, and clap cannot tell "not given" from "given the default": both
+/// arrive as `HarnessArg::Claude` and `PermissionArg::Ask`. So a preference is
+/// allowed to win only over exactly those two values. Making `--harness` and
+/// `--permission` `Option` in `main.rs` would remove the guess; until then, a
+/// person who types `-H claude` explicitly and has stored `opencode` gets
+/// OpenCode, which is the one case this gets wrong.
+fn load_preferences(app: &mut App, store: &Store, opts: &Options) {
+    let all = match config::read_all(store) {
+        Ok(all) => all,
+        // A preference that cannot be read is not worth losing the session
+        // over, but it must not pass silently either.
+        Err(e) => {
+            app.push(Entry::Notice(format!("could not read your preferences: {e}")));
+            return;
+        }
+    };
+    for current in all {
+        if !current.chosen {
+            if let Some(junk) = current.unreadable {
+                app.push(Entry::Notice(format!(
+                    "{} is set to “{junk}”, which I cannot read — using {}",
+                    current.pref.name(),
+                    current.value.label()
+                )));
+            }
+            continue;
+        }
+        match (current.pref, &current.value) {
+            (config::Pref::Thinking, config::Value::Flag(on)) => app.show_thinking = *on,
+            (config::Pref::Details, config::Value::Flag(on)) => app.show_details = *on,
+            (config::Pref::Harness, config::Value::Harness(kind))
+                if opts.harness == HarnessKind::ClaudeCode =>
+            {
+                app.harness = *kind;
+            }
+            (config::Pref::Mode, config::Value::Mode(mode))
+                if opts.permission == PermissionPolicy::Ask =>
+            {
+                app.mode = *mode;
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Write one fact, and say what was written.
+///
+/// The trust decisions are Jod's, not the typist's: a fact typed at this
+/// terminal is [`Origin::Owner`] in the default scope, because the person at
+/// the keyboard is Reljod. `/remember` deliberately offers no way to assert
+/// something *as* an agent or as untrusted material — that is what
+/// `jod consolidate` is for, and letting the chat box choose its own origin
+/// would put the graph's trust boundary in the hands of whatever pasted a line
+/// into it.
+fn remember_fact(store: &Store, subject: &str, predicate: &str, object: &str) -> String {
+    let fact = jod_core::store::NewFact {
+        scope: jod_core::store::DEFAULT_SCOPE.to_string(),
+        subject: subject.to_string(),
+        predicate: predicate.to_string(),
+        object: object.to_string(),
+        origin: jod_core::store::Origin::Owner,
+        source: Some("jod tui".to_string()),
+        valid_from: None,
+    };
+    match store.remember(fact) {
+        Ok(id) => format!("remembered #{id}: {subject} {predicate} {object}"),
+        Err(e) => format!("could not remember that: {e}"),
+    }
 }
 
 /// What kind of thing a name typed at `/pause`, `/unpause` or `/run` is.
@@ -2075,7 +2292,7 @@ fn resolve_agent(app: &mut App, typed: &str) -> Option<String> {
         [only] => Some(only.id.clone()),
         [] => {
             app.push(Entry::Notice(format!(
-                "no agent starts with {typed} — Ctrl-A lists them"
+                "no agent starts with {typed} — Alt-A lists them"
             )));
             None
         }
@@ -2214,7 +2431,7 @@ fn refresh_workspaces(jod: &Arc<Jod>, app: &mut App) {
 fn edit_in_editor(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) {
     let Some(editor) = std::env::var("EDITOR").ok().filter(|e| !e.trim().is_empty()) else {
         app.push(Entry::Notice(
-            "no $EDITOR set — export one and press Ctrl-F again".into(),
+            "no $EDITOR set — export one and press Alt-F again".into(),
         ));
         return;
     };
@@ -2609,6 +2826,10 @@ mod tests {
 
     fn ctrl(app: &mut App, code: KeyCode) -> Option<Action> {
         on_key(app, KeyEvent::new(code, KeyModifiers::CONTROL), 20)
+    }
+
+    fn alt(app: &mut App, code: KeyCode) -> Option<Action> {
+        on_key(app, KeyEvent::new(code, KeyModifiers::ALT), 20)
     }
 
     fn running(id: &str, name: &str) -> AgentLine {
@@ -3123,20 +3344,168 @@ mod tests {
         assert_eq!(app.overlay, Overlay::Keymap);
     }
 
-    /// `Ctrl-A` and `Ctrl-G` keep exactly the meanings they have today, and
-    /// pressing them again comes home.
+    /// `Alt-A` and `Alt-G` toggle their screens, and pressing them again comes
+    /// home.
     #[test]
-    fn the_old_chords_still_toggle_their_screens() {
+    fn the_screen_chords_toggle_their_screens() {
         let mut app = app_on(HarnessKind::ClaudeCode);
-        ctrl(&mut app, KeyCode::Char('a'));
+        alt(&mut app, KeyCode::Char('a'));
         assert_eq!(app.workspace, Workspace::Fleet);
-        ctrl(&mut app, KeyCode::Char('a'));
+        alt(&mut app, KeyCode::Char('a'));
         assert_eq!(app.workspace, Workspace::Chat);
 
-        ctrl(&mut app, KeyCode::Char('g'));
+        alt(&mut app, KeyCode::Char('g'));
         assert_eq!(app.workspace, Workspace::Team);
-        ctrl(&mut app, KeyCode::Char('g'));
+        alt(&mut app, KeyCode::Char('g'));
         assert_eq!(app.workspace, Workspace::Chat);
+    }
+
+    /// The move to Alt is only worth anything if the old finger memory still
+    /// lands somewhere sensible. Where Ctrl meant nothing to readline it keeps
+    /// meaning what it meant; where it meant something to readline, readline
+    /// gets it back.
+    #[test]
+    fn a_ctrl_chord_with_no_readline_meaning_still_fires() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        ctrl(&mut app, KeyCode::Char('k'));
+        assert_eq!(app.overlay, Overlay::WhichKey, "Ctrl-K is unadvertised, not removed");
+    }
+
+    /// The one binding that had to be taken away rather than doubled up:
+    /// `Ctrl-A` was the fleet, which is the collision Jod inflicted on itself.
+    #[test]
+    fn ctrl_a_is_the_start_of_the_line_again_and_not_the_fleet() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        type_line(&mut app, "hello");
+        assert_eq!(app.cursor, 5);
+
+        ctrl(&mut app, KeyCode::Char('a'));
+        assert_eq!(app.workspace, Workspace::Chat, "it must not open the fleet");
+        assert_eq!(app.cursor, 0, "it is readline's start-of-line again");
+
+        ctrl(&mut app, KeyCode::Char('e'));
+        assert_eq!(app.cursor, 5, "and Ctrl-E is still the end of it");
+    }
+
+    /// Alt-D is nobody's binding here. Falling through to the chat handler
+    /// would have typed a `d` into a line the user was about to send, which is
+    /// worse than the key doing nothing.
+    #[test]
+    fn an_alt_chord_nothing_claims_does_not_become_typed_text() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        type_line(&mut app, "ship it");
+        alt(&mut app, KeyCode::Char('d'));
+        assert_eq!(app.input, "ship it");
+    }
+
+    // ---- the printed keymap and the dispatch cannot disagree ----
+    //
+    // `keys.rs` is a display table and `on_chord` is a hand-written `match`.
+    // Nothing but attention has ever held them together, and the failure is
+    // silent: the keybar keeps promising a chord that quietly stopped working,
+    // and the person at the terminal concludes the key is broken rather than
+    // the docs. These two tests make that a build failure in both directions.
+
+    /// Did this press reach a handler at all?
+    ///
+    /// `on_chord` answers for everything except quitting, which `on_key` takes
+    /// ahead of every layer so that a key which cannot always leave is never a
+    /// trap — so quitting is spelled out here rather than left looking
+    /// unhandled.
+    fn dispatches(app: &mut App, code: KeyCode, modifier: KeyModifiers) -> bool {
+        if modifier == KeyModifiers::CONTROL
+            && matches!(code, KeyCode::Char('c') | KeyCode::Char('d'))
+        {
+            return true;
+        }
+        on_chord(app, KeyEvent::new(code, modifier)).is_some()
+    }
+
+    /// Every press this crate could plausibly bind, so the reverse direction
+    /// has something to sweep.
+    fn every_candidate_press() -> Vec<(KeyCode, KeyModifiers)> {
+        let mut codes: Vec<KeyCode> = ('a'..='z').map(KeyCode::Char).collect();
+        codes.extend(('0'..='9').map(KeyCode::Char));
+        codes.extend([
+            KeyCode::Up,
+            KeyCode::Down,
+            KeyCode::Left,
+            KeyCode::Right,
+            KeyCode::Home,
+            KeyCode::End,
+            KeyCode::PageUp,
+            KeyCode::PageDown,
+            KeyCode::Enter,
+            KeyCode::Backspace,
+            KeyCode::Delete,
+            KeyCode::Tab,
+            KeyCode::BackTab,
+        ]);
+        codes
+            .into_iter()
+            .flat_map(|code| [(code, KeyModifiers::CONTROL), (code, KeyModifiers::ALT)])
+            .collect()
+    }
+
+    /// Forwards: a chord on the keybar or in the `?` overlay that nothing
+    /// dispatches is a lie printed on screen at all times.
+    #[test]
+    fn every_chord_the_screens_advertise_is_one_the_dispatch_answers() {
+        let advertised = keys::all_documented_chords();
+        assert!(!advertised.is_empty(), "the scan found nothing to check");
+        for label in advertised {
+            let presses = keys::press_of(&label);
+            assert!(!presses.is_empty(), "{label} is printed but does not parse as a press");
+            for (code, modifier) in presses {
+                let mut app = app_on(HarnessKind::ClaudeCode);
+                assert!(
+                    dispatches(&mut app, code, modifier),
+                    "{label} is printed on screen but {modifier:?} {code:?} reaches no handler"
+                );
+            }
+        }
+    }
+
+    /// Backwards: a chord that works but no screen ever names is a feature
+    /// only its author can find.
+    ///
+    /// The deliberate exception is the *spelling*, not the binding — `Ctrl-T`
+    /// still toggles reasoning while only `Alt-T` is printed, because
+    /// advertising the Ctrl form would advertise the chord tmux eats. So the
+    /// requirement is that the same key is named in one spelling or the other,
+    /// which still fails the moment a binding exists in neither.
+    #[test]
+    fn every_chord_the_dispatch_answers_is_one_some_screen_names() {
+        let named: std::collections::HashSet<(KeyCode, KeyModifiers)> = keys::all_documented_chords()
+            .iter()
+            .flat_map(|label| keys::press_of(label))
+            .collect();
+        for (code, modifier) in every_candidate_press() {
+            let mut app = app_on(HarnessKind::ClaudeCode);
+            if !dispatches(&mut app, code, modifier) {
+                continue;
+            }
+            let other = if modifier == KeyModifiers::CONTROL {
+                KeyModifiers::ALT
+            } else {
+                KeyModifiers::CONTROL
+            };
+            assert!(
+                named.contains(&(code, modifier)) || named.contains(&(code, other)),
+                "{modifier:?} {code:?} is dispatched but no screen names it in either spelling"
+            );
+        }
+    }
+
+    /// `on_chord` is only ever reached through `on_key`, so a keymap that is
+    /// perfect inside `on_chord` and unreachable from the router is the same
+    /// bug wearing a disguise — and the router is where the Ctrl-only gate
+    /// used to be.
+    #[test]
+    fn an_alt_chord_reaches_the_dispatch_through_the_router() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        alt(&mut app, KeyCode::Char('k'));
+        assert_eq!(app.overlay, Overlay::WhichKey);
     }
 
     // ---- Esc goes back exactly one level ----
@@ -4430,5 +4799,264 @@ mod tests {
             assert!(last.contains(NO_STORE), "{last}");
         }
         assert!(!app.should_quit, "and the session is still up");
+    }
+
+    // ---- preferences ----
+
+    /// The gap the whole config layer was written to close: `/thinking` used
+    /// to flip a bool and nothing else, so the choice was made again at every
+    /// launch.
+    #[test]
+    fn toggling_thinking_changes_the_screen_and_asks_for_the_choice_to_be_kept() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        assert!(app.show_thinking, "shown by default");
+
+        let action = apply_slash(&mut app, command::Slash::Thinking);
+        assert!(!app.show_thinking, "the screen changed now");
+        assert_eq!(
+            action,
+            Some(Action::Config(config::Request::Set(
+                config::Pref::Thinking,
+                config::Value::Flag(false)
+            ))),
+            "and the choice went to the store"
+        );
+
+        // Back on again, and that is a choice too.
+        let action = apply_slash(&mut app, command::Slash::Thinking);
+        assert!(app.show_thinking);
+        assert_eq!(
+            action,
+            Some(Action::Config(config::Request::Set(
+                config::Pref::Thinking,
+                config::Value::Flag(true)
+            )))
+        );
+    }
+
+    #[test]
+    fn toggling_tool_output_records_its_choice_too() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        let action = apply_slash(&mut app, command::Slash::Details);
+        assert!(!app.show_details);
+        assert_eq!(
+            action,
+            Some(Action::Config(config::Request::Set(
+                config::Pref::Details,
+                config::Value::Flag(false)
+            )))
+        );
+    }
+
+    /// The end-to-end claim: turn it off, close the TUI, open it again, and it
+    /// is still off. The restart is a second `App` over the same store.
+    #[tokio::test]
+    async fn a_toggle_survives_a_restart() {
+        let jod = jod_with(store());
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        let action = apply_slash(&mut app, command::Slash::Thinking).unwrap();
+        perform(&jod, &mut app, &options(), action).await;
+
+        let mut next = app_on(HarnessKind::ClaudeCode);
+        assert!(next.show_thinking, "a fresh app starts at the default");
+        load_preferences(&mut next, jod.store().unwrap(), &options());
+        assert!(!next.show_thinking, "the stored choice won");
+    }
+
+    /// `None` from `Store::setting` means "no opinion", which has to leave the
+    /// built-in default standing rather than becoming false, empty or unset.
+    #[test]
+    fn an_unset_preference_falls_back_to_the_default_rather_than_to_nothing() {
+        let store = store();
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        load_preferences(&mut app, &store, &options());
+
+        assert!(app.show_thinking, "still shown");
+        assert!(app.show_details, "still shown");
+        assert_eq!(app.harness, HarnessKind::ClaudeCode);
+        assert!(
+            app.transcript.is_empty(),
+            "and nothing was said about settings nobody has touched"
+        );
+    }
+
+    /// A launch flag is about this session; a preference is about every one
+    /// that follows. Naming the harness on the command line has to win.
+    #[test]
+    fn a_stored_harness_yields_to_the_harness_named_at_launch() {
+        let store = store();
+        config::write(
+            &store,
+            config::Pref::Harness,
+            &config::Value::Harness(HarnessKind::Agy),
+        )
+        .unwrap();
+
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        load_preferences(&mut app, &store, &options());
+        assert_eq!(app.harness, HarnessKind::Agy, "nothing was asked for, so the choice wins");
+
+        let launched_on = Options {
+            harness: HarnessKind::OpenCode,
+            ..options()
+        };
+        let mut app = app_on(HarnessKind::OpenCode);
+        load_preferences(&mut app, &store, &launched_on);
+        assert_eq!(app.harness, HarnessKind::OpenCode, "-H opencode wins over the choice");
+    }
+
+    /// A preference the build cannot read must not pass as "never set", or a
+    /// setting silently stops applying and nobody is told.
+    #[test]
+    fn a_preference_this_build_cannot_read_is_said_out_loud_at_startup() {
+        let store = store();
+        store.set_setting(config::Pref::Mode.key(), "yolo").unwrap();
+
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        load_preferences(&mut app, &store, &options());
+
+        let said = format!("{:?}", app.transcript);
+        assert!(said.contains("yolo"), "{said}");
+    }
+
+    #[tokio::test]
+    async fn config_lists_every_preference_and_says_which_were_chosen() {
+        let jod = jod_with(store());
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        apply_slash(&mut app, command::Slash::Thinking);
+        perform(
+            &jod,
+            &mut app,
+            &options(),
+            Action::Config(config::Request::Set(
+                config::Pref::Thinking,
+                config::Value::Flag(false),
+            )),
+        )
+        .await;
+        app.transcript.clear();
+
+        perform(&jod, &mut app, &options(), Action::Config(config::Request::List)).await;
+        assert_eq!(app.transcript.len(), config::Pref::ALL.len());
+        let listed = format!("{:?}", app.transcript);
+        for pref in config::Pref::ALL {
+            assert!(listed.contains(pref.name()), "{} is missing: {listed}", pref.name());
+        }
+        assert!(listed.contains("chosen"), "{listed}");
+        assert!(listed.contains("default"), "{listed}");
+    }
+
+    /// A preference set through `/config` has to bite now as well as next time,
+    /// or the command looks like it did nothing.
+    #[test]
+    fn setting_a_visible_preference_changes_the_screen_immediately() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        let action = apply_slash(
+            &mut app,
+            command::Slash::Config(config::Request::Set(
+                config::Pref::Details,
+                config::Value::Flag(false),
+            )),
+        );
+        assert!(!app.show_details, "the transcript stops showing tool output now");
+        assert!(matches!(action, Some(Action::Config(_))), "and it is recorded");
+    }
+
+    /// `/config harness agy` is about the *next* session; `/harness agy` is
+    /// about this one. Confusing the two would silently switch harness
+    /// mid-conversation.
+    #[test]
+    fn setting_the_default_harness_does_not_switch_the_conversation_you_are_in() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        apply_slash(
+            &mut app,
+            command::Slash::Config(config::Request::Set(
+                config::Pref::Harness,
+                config::Value::Harness(HarnessKind::Agy),
+            )),
+        );
+        assert_eq!(app.harness, HarnessKind::ClaudeCode);
+    }
+
+    #[test]
+    fn a_refused_command_says_why_rather_than_help_lists_them() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        apply_slash(
+            &mut app,
+            command::Slash::Refused("mode does not take “yolo”".into()),
+        );
+        let said = format!("{:?}", app.transcript.last().unwrap());
+        assert!(said.contains("yolo"), "{said}");
+        assert!(!said.contains("/help"), "{said}");
+    }
+
+    #[tokio::test]
+    async fn a_preference_with_no_database_behind_it_lasts_the_session_only() {
+        let jod = Jod::new();
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        perform(
+            &jod,
+            &mut app,
+            &options(),
+            Action::Config(config::Request::List),
+        )
+        .await;
+        let said = format!("{:?}", app.transcript.last().unwrap());
+        assert!(said.contains(NO_STORE), "{said}");
+    }
+
+    // ---- /remember ----
+
+    /// It used to be an `Action::Pending` — an admission that the command did
+    /// nothing. A triple is what the store takes, so a triple is what the
+    /// command asks for.
+    #[test]
+    fn remembering_a_fact_writes_it_and_says_what_was_written() {
+        let store = store();
+        let said = remember_fact(&store, "reljod", "prefers", "linear for tasks");
+        assert!(said.contains("reljod prefers linear for tasks"), "{said}");
+
+        let facts = store.facts_about("reljod").unwrap();
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].predicate, "prefers");
+        assert_eq!(facts[0].object, "linear for tasks");
+        assert_eq!(
+            facts[0].origin,
+            jod_core::store::Origin::Owner,
+            "typed at this terminal means Reljod said it"
+        );
+    }
+
+    /// Written, and then findable — a fact that lands in a scope nothing
+    /// searches is one that was not really remembered.
+    #[test]
+    fn a_fact_typed_at_the_tui_can_be_recalled_afterwards() {
+        let store = store();
+        remember_fact(&store, "reljod", "prefers", "linear for tasks");
+        let found = store.recall("linear", 10).unwrap();
+        assert!(
+            found.iter().any(|f| f.subject == "reljod"),
+            "recall found {found:?}"
+        );
+    }
+
+    #[test]
+    fn remember_reaches_the_store_rather_than_a_to_do() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        assert_eq!(
+            apply_slash(
+                &mut app,
+                command::Slash::Remember {
+                    subject: "reljod".into(),
+                    predicate: "prefers".into(),
+                    object: "linear".into(),
+                }
+            ),
+            Some(Action::Remember {
+                subject: "reljod".into(),
+                predicate: "prefers".into(),
+                object: "linear".into(),
+            })
+        );
     }
 }

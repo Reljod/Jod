@@ -34,6 +34,7 @@ pub mod monitor;
 pub mod orchestrator;
 pub mod paths;
 pub mod proc;
+pub mod recall;
 pub mod runner;
 pub mod schedule;
 pub mod service;

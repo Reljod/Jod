@@ -129,10 +129,16 @@ impl Provenance {
 
 /// How far a belief outranks another when the two disagree.
 ///
-/// Used for one decision only: whether incoming material may retire a belief
-/// already held. A fetched page must not be able to close something Reljod
-/// said, however confidently it contradicts him.
-fn trust(origin: Origin) -> u8 {
+/// Two decisions turn on this, and they are the write and the read of the same
+/// question. Here: whether incoming material may retire a belief already held —
+/// a fetched page must not be able to close something Reljod said, however
+/// confidently it contradicts him. In [`crate::recall`]: which beliefs are put
+/// in front of a model when there is only room for a dozen.
+///
+/// Shared rather than restated, because two trust ladders that drift apart is
+/// how a fact ends up admissible to write and ranked as if nobody had asserted
+/// it — or worse, the reverse.
+pub(crate) fn trust(origin: Origin) -> u8 {
     match origin {
         Origin::Owner => 3,
         Origin::Agent | Origin::System => 2,
