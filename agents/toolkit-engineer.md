@@ -2,7 +2,6 @@
 name: toolkit-engineer
 description: Works on the installer and CLI — install.sh, bin/jod, bin/lib/, and their test suites. Use as an agent-team teammate for distribution and versioning work.
 tools: Read, Write, Edit, Grep, Glob, Bash
-model: sonnet
 color: orange
 ---
 
