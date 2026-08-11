@@ -243,10 +243,34 @@ pub trait Processes {
     fn is_alive(&self, owner: &Owner) -> bool;
 }
 
+/// This machine's name, as it is written into `owner_machine`.
+///
+/// One function so that the name a row is *written* with and the name the sweep
+/// *judges* it against cannot drift. They have to be the same string or
+/// [`LocalProcesses::is_alive`] silently reports every local row as belonging to
+/// another machine, and the sweep then recovers nothing at all — a failure that
+/// looks exactly like having no orphaned rows.
+///
+/// Deliberately not shared with `ticker`'s own hostname helper even though the
+/// two agree today. That one builds a schedule lease owner, `pid@host`, which is
+/// compared only against other lease owners; this one is half of an identity the
+/// sweep makes life-and-death decisions with. Merging them would make a change
+/// to either format a change to both.
+pub fn machine() -> String {
+    std::env::var("HOSTNAME").unwrap_or_else(|_| "local".into())
+}
+
 /// Liveness as this machine can actually observe it.
 pub struct LocalProcesses {
-    /// This machine's name, as it is written into `owner_machine`.
+    /// This machine's name, as it is written into `owner_machine`. Use
+    /// [`machine`], and the same value the rows were written with.
     pub machine: String,
+}
+
+impl Default for LocalProcesses {
+    fn default() -> LocalProcesses {
+        LocalProcesses { machine: machine() }
+    }
 }
 
 impl Processes for LocalProcesses {
@@ -406,19 +430,35 @@ impl Store {
     /// `pending`, marked for `attempting`. The caller sends `body` and never
     /// `obligation.body`; the distinction between the two is the reason this
     /// module exists.
+    ///
+    /// `channel` is not a convenience filter — it is a safety one, and the
+    /// sweep is unsound without it. Claiming is a write: a row this caller takes
+    /// belongs to this caller, and this caller is alive, so every later sweep
+    /// correctly leaves it alone. A process that claims a row it has no
+    /// transport for therefore strands it permanently, which is the exact
+    /// failure the ledger exists to prevent, arrived at by the machinery meant
+    /// to prevent it. Rows for other channels are left unclaimed and still
+    /// orphaned, so whichever process can actually address them finds them.
+    ///
+    /// It cannot be handled after the fact. `mark_failed` means "this attempt
+    /// failed, try again" and returns the row to `pending`; there is no verb for
+    /// "I can never send this", and inventing one would be a worse answer than
+    /// not taking the row.
     pub fn sweep_recoverable(
         &self,
         me: &Owner,
         processes: &dyn Processes,
+        channel: &str,
         at_ms: i64,
     ) -> Result<Vec<Recovered>> {
         let open: Vec<Obligation> = {
             let conn = self.conn.lock().expect("store lock poisoned");
             let mut stmt = conn.prepare(&format!(
                 "{LEDGER_COLUMNS} WHERE state IN ('pending', 'attempting')
+                   AND channel = ?1
                  ORDER BY created_at_ms, id"
             ))?;
-            let rows = stmt.query_map([], row_to_obligation)?;
+            let rows = stmt.query_map(params![channel], row_to_obligation)?;
             rows.collect::<std::result::Result<Vec<_>, _>>()?
         };
 
@@ -649,7 +689,9 @@ mod tests {
     fn a_pending_row_left_by_a_dead_process_is_redelivered_plainly() {
         let (s, id) = ledger_with("run-1", &dead());
 
-        let taken = s.sweep_recoverable(&me(), &Fake::nobody(), 5_000).unwrap();
+        let taken = s
+            .sweep_recoverable(&me(), &Fake::nobody(), "telegram", 5_000)
+            .unwrap();
         assert_eq!(taken.len(), 1);
         assert_eq!(taken[0].obligation.id, id);
         assert!(!taken[0].may_be_a_duplicate);
@@ -663,7 +705,9 @@ mod tests {
         let (s, id) = ledger_with("run-1", &dead());
         s.mark_attempting(id, &dead(), 2_000).unwrap();
 
-        let taken = s.sweep_recoverable(&me(), &Fake::nobody(), 5_000).unwrap();
+        let taken = s
+            .sweep_recoverable(&me(), &Fake::nobody(), "telegram", 5_000)
+            .unwrap();
         assert_eq!(taken.len(), 1);
         assert!(taken[0].may_be_a_duplicate);
         assert!(
@@ -684,7 +728,7 @@ mod tests {
         assert!(s.mark_delivered(id, 3_000).unwrap());
 
         assert!(s
-            .sweep_recoverable(&me(), &Fake::nobody(), 5_000)
+            .sweep_recoverable(&me(), &Fake::nobody(), "telegram", 5_000)
             .unwrap()
             .is_empty());
         assert_eq!(
@@ -705,7 +749,7 @@ mod tests {
             DeliveryState::Failed
         );
         assert!(s
-            .sweep_recoverable(&me(), &Fake::nobody(), 5_000)
+            .sweep_recoverable(&me(), &Fake::nobody(), "telegram", 5_000)
             .unwrap()
             .is_empty());
     }
@@ -724,7 +768,7 @@ mod tests {
             .unwrap();
 
         let taken = s
-            .sweep_recoverable(&me(), &Fake::only(&[&live]), 5_000)
+            .sweep_recoverable(&me(), &Fake::only(&[&live]), "telegram", 5_000)
             .unwrap();
         assert_eq!(
             taken.iter().map(|r| r.obligation.id).collect::<Vec<_>>(),
@@ -747,7 +791,9 @@ mod tests {
         let processes = LocalProcesses {
             machine: "jod-cloud".to_string(),
         };
-        let taken = s.sweep_recoverable(&me(), &processes, 5_000).unwrap();
+        let taken = s
+            .sweep_recoverable(&me(), &processes, "telegram", 5_000)
+            .unwrap();
         assert!(taken.is_empty());
         assert_eq!(s.obligation(id).unwrap().unwrap().owner, elsewhere);
     }
@@ -758,7 +804,7 @@ mod tests {
     fn a_swept_row_belongs_to_the_process_that_swept_it() {
         let (s, id) = ledger_with("run-1", &dead());
         assert_eq!(
-            s.sweep_recoverable(&me(), &Fake::nobody(), 5_000)
+            s.sweep_recoverable(&me(), &Fake::nobody(), "telegram", 5_000)
                 .unwrap()
                 .len(),
             1
@@ -769,7 +815,7 @@ mod tests {
         assert_eq!(o.updated_at_ms, 5_000);
         // A second sweep by the same process finds nothing left to take.
         assert!(s
-            .sweep_recoverable(&me(), &Fake::nobody(), 6_000)
+            .sweep_recoverable(&me(), &Fake::nobody(), "telegram", 6_000)
             .unwrap()
             .is_empty());
     }
@@ -787,7 +833,7 @@ mod tests {
         assert_eq!(s.obligation(id).unwrap().unwrap().attempts, MAX_ATTEMPTS);
 
         assert!(s
-            .sweep_recoverable(&me(), &Fake::nobody(), 5_000)
+            .sweep_recoverable(&me(), &Fake::nobody(), "telegram", 5_000)
             .unwrap()
             .is_empty());
         let o = s.obligation(id).unwrap().unwrap();
@@ -803,7 +849,7 @@ mod tests {
         let much_later = 1_000 + STALE_AFTER_MS;
 
         assert!(s
-            .sweep_recoverable(&me(), &Fake::nobody(), much_later)
+            .sweep_recoverable(&me(), &Fake::nobody(), "telegram", much_later)
             .unwrap()
             .is_empty());
         assert_eq!(

@@ -1014,6 +1014,57 @@ pub trait BotApi: Send + Sync {
 /// How many times a send is retried before the message is given up on.
 const MAX_SEND_ATTEMPTS: u32 = 4;
 
+/// What this transport is called in [`crate::ledger::NewMessage::channel`].
+const CHANNEL: &str = "telegram";
+
+fn now_ms() -> i64 {
+    chrono::Utc::now().timestamp_millis()
+}
+
+/// The ledger's idempotency key for the reply owed to one incoming message.
+///
+/// **Both halves are load-bearing.** Telegram's `message_id` is unique *within a
+/// chat* and nowhere else — two different chats each hold a message 42, and a
+/// group and a DM will collide within a day of each other. `message_key` is
+/// `UNIQUE` in the schema, so a key that collided would mean the second chat's
+/// reply silently reusing the first chat's row: `record_obligation` does
+/// `ON CONFLICT DO NOTHING`, so nothing would be recorded, and the sweep would
+/// one day redeliver one chat's answer into the other. The chat id is what makes
+/// the pair an identity.
+///
+/// One key per incoming message rather than per outgoing one, because exactly
+/// one reply is ever owed for a message: `handle` either refuses to start and
+/// returns, or runs and answers. Keying it this way is also what makes a
+/// redelivered Telegram update — the same message arriving twice because the
+/// offset was never acknowledged — queue one reply instead of two.
+fn reply_key(msg: &IncomingMessage) -> String {
+    format!("telegram:{}:{}", msg.chat_id, msg.message_id)
+}
+
+/// Where a reply goes, as the one string [`crate::ledger::NewMessage::target`]
+/// holds — *"a chat id, a thread"*.
+///
+/// The thread is in there because a redelivery has to land where the
+/// conversation is. In a forum group the chat id alone reaches the General
+/// topic, so a recovered answer would surface days later in front of everyone,
+/// detached from the thread that asked for it. A message worth keeping a ledger
+/// for is worth putting back in the right place.
+fn target_of(msg: &IncomingMessage) -> String {
+    match msg.thread_id {
+        Some(thread) => format!("{}:{}", msg.chat_id, thread),
+        None => msg.chat_id.to_string(),
+    }
+}
+
+/// The inverse. `None` for anything this transport cannot address, which the
+/// sweep settles as failed rather than guessing at.
+fn parse_target(target: &str) -> Option<(i64, Option<i64>)> {
+    match target.split_once(':') {
+        Some((chat, thread)) => Some((chat.parse().ok()?, Some(thread.parse().ok()?))),
+        None => Some((target.parse().ok()?, None)),
+    }
+}
+
 /// Send `text` as however many messages it takes, honouring flood waits.
 ///
 /// Chunks go out in order and each is retried independently, so a flood wait
@@ -1404,6 +1455,209 @@ impl<B: BotApi + 'static> Bridge<B> {
         &self.poller
     }
 
+    /// Send something Jod owes somebody, with the ledger bracketing the send.
+    ///
+    /// **Not every outbound message is an obligation, and treating them alike
+    /// would make the ledger useless.** Two are owed and go through here: the
+    /// answer a run produced, and the refusal when a run could not be started.
+    /// Both are the failure `ledger`'s header names — *"the run finished, the
+    /// store says `done`, and the person it was for heard nothing"* — and both
+    /// represent something the person cannot get back by asking again, because
+    /// the work has already happened.
+    ///
+    /// Three deliberately do not: the progress bubble, which is edited in place
+    /// and superseded seconds later; the completion edit, which is the same
+    /// bubble; and command replies, which have no run behind them and can be
+    /// had again by retyping the command. Redelivering any of those after a
+    /// restart would put yesterday's `⏳ working, 2m` in front of somebody,
+    /// which is the archaeology [`ledger::STALE_AFTER_MS`] exists to prevent.
+    ///
+    /// The order is the guarantee and it is the whole reason this wrapper
+    /// exists: the row is written **before** the transport is touched, because
+    /// the crash the ledger is for happens between the two. A row written after
+    /// a successful send records only the sends that succeeded.
+    ///
+    /// `run_id` ties the row to the run it reports, which is what makes the
+    /// ledger answer the question its header poses: the store says a run is
+    /// `done`, so did the person it was for ever hear about it? Without the
+    /// join that is two tables and a guess. `None` for the refusal, because
+    /// there is no run — that is what is being reported.
+    async fn deliver_owed(
+        &self,
+        key: &str,
+        msg: &IncomingMessage,
+        run_id: Option<&str>,
+        body: &str,
+    ) -> BotResult<()> {
+        // A `Jod` with no store keeps nothing — no runs, no transcripts — so it
+        // cannot keep a ledger either. The message still goes: refusing to
+        // answer somebody because the bookkeeping is unavailable would be a
+        // worse failure than the one being bookkept, and it is the same call
+        // `resume_for` makes one function down.
+        let Some(store) = self.jod.store() else {
+            return self.send_now(msg, body).await;
+        };
+        let owner = crate::ledger::Owner::here(crate::ledger::machine());
+        let at_ms = now_ms();
+
+        let mut owed = crate::ledger::NewMessage::new(key, CHANNEL, target_of(msg), body);
+        if let Some(run) = run_id {
+            owed = owed.about_run(run);
+        }
+        let id = match store.record_obligation(&owed, &owner, at_ms) {
+            Ok(id) => id,
+            // Same call again: an unwritable ledger loses the proof, not the
+            // message.
+            Err(e) => {
+                eprintln!("[jod/telegram] could not record what was owed: {e}");
+                return self.send_now(msg, body).await;
+            }
+        };
+
+        // The guard, and the reason this is not just "insert then send".
+        // `mark_attempting` only takes a row that is `pending`, in one statement
+        // — so a row another process is mid-send on, or one already delivered,
+        // stops here instead of being sent twice.
+        match store.mark_attempting(id, &owner, at_ms) {
+            Ok(true) => {}
+            Ok(false) => {
+                eprintln!("[jod/telegram] {key} is already in hand elsewhere — not sending again");
+                return Ok(());
+            }
+            Err(e) => {
+                eprintln!("[jod/telegram] could not claim what was owed: {e}");
+                return self.send_now(msg, body).await;
+            }
+        }
+
+        match self.send_now(msg, body).await {
+            Ok(()) => {
+                if let Err(e) = store.mark_delivered(id, now_ms()) {
+                    eprintln!("[jod/telegram] delivered {key}, but could not record it: {e}");
+                }
+                Ok(())
+            }
+            // A *known* failure, which is the good case: nothing arrived, so
+            // `mark_failed` returns the row to `pending` and the next attempt
+            // goes out plainly. Only once it is out of attempts or too old does
+            // it settle as `failed` — and either way the row survives as the
+            // record that somebody was owed something they did not get.
+            Err(e) => {
+                if let Err(oops) = store.mark_failed(id, &e.to_string(), now_ms()) {
+                    eprintln!("[jod/telegram] {key} failed, and so did recording it: {oops}");
+                }
+                Err(e)
+            }
+        }
+    }
+
+    /// The transport call itself, with nothing recorded around it.
+    async fn send_now(&self, msg: &IncomingMessage, body: &str) -> BotResult<()> {
+        self.send_to(msg.chat_id, msg.thread_id, body).await
+    }
+
+    async fn send_to(&self, chat_id: i64, thread_id: Option<i64>, body: &str) -> BotResult<()> {
+        deliver(
+            self.poller.bot(),
+            chat_id,
+            thread_id,
+            body,
+            Formatting::Plain,
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Send anything a previous Jod died owing, before taking any new work.
+    ///
+    /// Here rather than in `Daemon::persistent`, and the difference is not
+    /// cosmetic. `jod daemon` and `jod telegram serve` are separate processes;
+    /// the daemon holds no transport. `Store::sweep_recoverable` **claims as it
+    /// reads** — it rewrites the owner in the same transaction that selects the
+    /// row — so a sweep in a process that cannot send would take every orphaned
+    /// row, fail to deliver any of them, and then be *alive*, which makes every
+    /// later sweep correctly skip those rows for as long as that process runs.
+    /// It would turn recoverable messages into permanently stranded ones and
+    /// leave the ledger asserting that somebody is answerable for them. The
+    /// sweep belongs in the process holding the transport, which is this one.
+    ///
+    /// Before the poll loop, not beside it: a message owed since yesterday
+    /// should go out ahead of whatever arrived this second.
+    ///
+    /// Nothing here is fatal. A ledger that cannot be read is a reason to get on
+    /// with answering people, not a reason to refuse to start — the same call
+    /// `Daemon::persistent` makes about a history it cannot rehydrate.
+    async fn redeliver_owed(&self) {
+        let Some(store) = self.jod.store() else {
+            return;
+        };
+        let me = crate::ledger::Owner::here(crate::ledger::machine());
+        let processes = crate::ledger::LocalProcesses::default();
+        let recovered = match store.sweep_recoverable(&me, &processes, CHANNEL, now_ms()) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("[jod/telegram] could not read the delivery ledger: {e}");
+                return;
+            }
+        };
+        if recovered.is_empty() {
+            return;
+        }
+        eprintln!(
+            "[jod/telegram] {} message(s) were owed when Jod last stopped",
+            recovered.len()
+        );
+
+        for r in recovered {
+            let id = r.obligation.id;
+
+            // `pending` → `attempting`, spending an attempt. A row that was
+            // already `attempting` when Jod died is refused here and that is
+            // correct twice over: it is already in the state it should be in,
+            // and its attempt was spent by the process that died holding it.
+            //
+            // Before the address is parsed, not after, so that a row with a
+            // target this build cannot read still burns an attempt and settles
+            // after `MAX_ATTEMPTS` restarts. Failing it without spending one
+            // would return it to `pending` forever — `mark_failed` means "try
+            // again" — and a row retried forever by a process that will never
+            // manage it is the strand this whole function is arranged to avoid.
+            let _ = store.mark_attempting(id, &me, now_ms());
+
+            // Only a malformed target reaches this now that the sweep filters
+            // by channel. It is a bug rather than a routine event, so it is
+            // recorded as a failure with the reason kept rather than skipped.
+            let Some((chat_id, thread_id)) = parse_target(&r.obligation.target) else {
+                let why = format!(
+                    "`{}` is not an address this {CHANNEL} bridge can send to",
+                    r.obligation.target
+                );
+                eprintln!("[jod/telegram] {why}");
+                if let Err(e) = store.mark_failed(id, &why, now_ms()) {
+                    eprintln!("[jod/telegram] could not record that either: {e}");
+                }
+                continue;
+            };
+
+            // `r.body`, never `r.obligation.body` — the sweep has already put
+            // `RECOVERED_MARKER` in front of anything that was in flight, and
+            // that distinction is the reason this module exists.
+            match self.send_to(chat_id, thread_id, &r.body).await {
+                Ok(()) => {
+                    if let Err(e) = store.mark_delivered(id, now_ms()) {
+                        eprintln!("[jod/telegram] redelivered {id}, but could not record it: {e}");
+                    }
+                }
+                Err(e) => {
+                    eprintln!("[jod/telegram] could not redeliver {id}: {e}");
+                    if let Err(oops) = store.mark_failed(id, &e.to_string(), now_ms()) {
+                        eprintln!("[jod/telegram] and could not record that either: {oops}");
+                    }
+                }
+            }
+        }
+    }
+
     /// Where this chat picks up from.
     ///
     /// A store that will not answer is reported and read as "nothing
@@ -1454,6 +1708,10 @@ impl<B: BotApi + 'static> Bridge<B> {
     /// Retryable failures back off and continue; a conflict or a bad token
     /// stops the loop, because neither one gets better by asking again.
     pub async fn run(self: Arc<Self>) -> BotResult<()> {
+        // What a previous Jod died owing goes out before anything new is taken
+        // on. See `redeliver_owed` for why this is here and not in the daemon.
+        self.redeliver_owed().await;
+
         let mut attempt = 0u32;
         loop {
             let batch = match self.poller.poll_once().await {
@@ -1529,13 +1787,16 @@ impl<B: BotApi + 'static> Bridge<B> {
         };
         let agent = match self.jod.spawn_agent(request).await {
             Ok(a) => a,
+            // Owed, and through the ledger. Somebody asked for something and
+            // got nothing at all — silence after a request is the same failure
+            // as a lost answer, and it is the one where they cannot tell
+            // whether Jod is thinking or dead.
             Err(e) => {
-                deliver(
-                    self.poller.bot(),
-                    msg.chat_id,
-                    msg.thread_id,
+                self.deliver_owed(
+                    &reply_key(&msg),
+                    &msg,
+                    None,
                     &format!("❌ Could not start: {e}"),
-                    Formatting::Plain,
                 )
                 .await?;
                 return Ok(());
@@ -1612,14 +1873,19 @@ impl<B: BotApi + 'static> Bridge<B> {
                 .await;
         }
         if let Some(answer) = text.filter(|t| !t.trim().is_empty()) {
-            deliver(
-                self.poller.bot(),
-                msg.chat_id,
-                msg.thread_id,
-                &answer,
-                Formatting::Plain,
-            )
-            .await?;
+            // The message this whole module exists for. The run is over, the
+            // store says so, and until this lands the person who asked has
+            // nothing — which is the failure `ledger` was written to stop being
+            // invisible.
+            //
+            // The obligation is recorded here, once the answer exists, and not
+            // when the run was spawned: before this point there is no message,
+            // only a hope of one. A crash mid-run loses the run, and that is
+            // `Jod::rehydrate`'s problem rather than the ledger's — recording an
+            // empty obligation up front would mean redelivering a blank on
+            // restart and calling it a delivery.
+            self.deliver_owed(&reply_key(&msg), &msg, Some(&agent.id), &answer)
+                .await?;
         }
         Ok(())
     }
@@ -2650,5 +2916,466 @@ mod tests {
         for (name, _) in COMMANDS {
             assert!(sent[0].contains(name), "/help did not mention {name}");
         }
+    }
+
+    // -- the delivery ledger -----------------------------------------------
+
+    use crate::ledger::{
+        DeliveryState, LocalProcesses, NewMessage as Owed, Owner, Processes, MAX_ATTEMPTS,
+        RECOVERED_MARKER,
+    };
+
+    fn bridge_with<B: BotApi + 'static>(bot: B, store: Arc<Store>) -> Arc<Bridge<B>> {
+        let config = Config {
+            token: "not-a-token".to_string(),
+            allow: Allowlist::new([42]),
+            cwd: PathBuf::from("/nonexistent/jod/telegram/test"),
+            harness: HarnessKind::ClaudeCode,
+            permission: PermissionPolicy::Ask,
+        };
+        Bridge::new(bot, Jod::with_store(store), &config)
+    }
+
+    /// An owner on this machine whose process is certainly gone.
+    ///
+    /// Pid 1 rather than a large number: `proc::group_alive` answers `false` for
+    /// anything `<= 1` without consulting the kernel, so this is dead by
+    /// definition rather than dead because the test host happens not to have
+    /// that pid today.
+    fn crashed() -> Owner {
+        Owner::new(crate::ledger::machine(), 1)
+    }
+
+    /// A transport that reads the ledger at the exact moment it is called.
+    ///
+    /// The ordering the whole module rests on — the row is written *before* the
+    /// transport is touched — cannot be observed from outside the send: by the
+    /// time `deliver_owed` returns, both halves have happened and the evidence
+    /// is identical either way. The only code that runs in between is the
+    /// transport, so the assertion has to be made from inside it.
+    struct PeekingBot {
+        store: Arc<Store>,
+        key: String,
+        /// What the row looked like when the send was made, one per send.
+        seen: Mutex<Vec<Option<DeliveryState>>>,
+        sent: Mutex<Vec<String>>,
+    }
+
+    impl PeekingBot {
+        fn watching(store: Arc<Store>, key: &str) -> PeekingBot {
+            PeekingBot {
+                store,
+                key: key.to_string(),
+                seen: Mutex::new(Vec::new()),
+                sent: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl BotApi for PeekingBot {
+        fn get_updates(
+            &self,
+            _offset: Option<i64>,
+            _timeout_s: u64,
+        ) -> impl Future<Output = BotResult<Vec<Update>>> + Send {
+            async { Ok(Vec::new()) }
+        }
+
+        fn send_message(
+            &self,
+            _chat_id: i64,
+            _thread_id: Option<i64>,
+            text: &str,
+            _formatting: Formatting,
+        ) -> impl Future<Output = BotResult<i64>> + Send {
+            let state = self
+                .store
+                .obligation_by_key(&self.key)
+                .expect("the ledger is readable")
+                .map(|o| o.state);
+            self.seen.lock().unwrap().push(state);
+            self.sent.lock().unwrap().push(text.to_string());
+            async { Ok(1) }
+        }
+
+        fn edit_message_text(
+            &self,
+            _chat_id: i64,
+            _message_id: i64,
+            _text: &str,
+            _formatting: Formatting,
+        ) -> impl Future<Output = BotResult<()>> + Send {
+            async { Ok(()) }
+        }
+    }
+
+    /// The guarantee the module is built on, asserted from the one place it is
+    /// observable. A row written *after* a successful send would record only
+    /// the sends that succeeded, which is precisely the set nobody needs.
+    #[tokio::test]
+    async fn an_obligation_is_written_before_the_transport_is_touched() {
+        let s = store();
+        let msg = incoming("what is on my plate?");
+        let key = reply_key(&msg);
+        let b = bridge_with(PeekingBot::watching(Arc::clone(&s), &key), Arc::clone(&s));
+
+        b.deliver_owed(&key, &msg, Some("run-7"), "three things")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            b.poller().bot().seen.lock().unwrap().as_slice(),
+            &[Some(DeliveryState::Attempting)],
+            "the transport ran with the obligation already recorded and claimed"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_message_that_arrives_closes_its_row() {
+        let s = store();
+        let msg = incoming("what is on my plate?");
+        let key = reply_key(&msg);
+        let b = bridge(Arc::clone(&s));
+
+        b.deliver_owed(&key, &msg, Some("run-7"), "three things")
+            .await
+            .unwrap();
+
+        let row = s.obligation_by_key(&key).unwrap().expect("a row");
+        assert_eq!(row.state, DeliveryState::Delivered);
+        assert_eq!(row.attempts, 1);
+        assert_eq!(row.detail, None);
+        assert_eq!(
+            row.run_id.as_deref(),
+            Some("run-7"),
+            "the row names the run it reports, so `done` and `heard about it` can be joined"
+        );
+        assert_eq!(
+            b.poller().bot().sent_texts(),
+            vec!["three things".to_string()]
+        );
+    }
+
+    /// A failure that the transport *knows* about is the good case: nothing
+    /// arrived, so the row goes back to `pending` and the next attempt is plain.
+    /// What must never happen is the row disappearing — a message nobody got
+    /// and nothing recorded is the exact failure the ledger exists to end.
+    #[tokio::test]
+    async fn a_send_that_failed_is_written_down_rather_than_dropped() {
+        let s = store();
+        let msg = incoming("what is on my plate?");
+        let key = reply_key(&msg);
+        let b = bridge_with(
+            FakeBot::failing_sends(vec![BotError::Unauthorized("nope".into())]),
+            Arc::clone(&s),
+        );
+
+        let said = b
+            .deliver_owed(&key, &msg, Some("run-7"), "three things")
+            .await;
+
+        assert!(said.is_err(), "the caller is told, not just the ledger");
+        let row = s
+            .obligation_by_key(&key)
+            .unwrap()
+            .expect("the row survives");
+        assert_eq!(
+            row.state,
+            DeliveryState::Pending,
+            "a known failure sent nothing, so the retry goes out plainly"
+        );
+        assert_eq!(row.attempts, 1);
+        assert!(
+            row.detail.as_deref().unwrap_or_default().contains("nope"),
+            "the reason is kept: {:?}",
+            row.detail
+        );
+    }
+
+    #[tokio::test]
+    async fn a_message_that_keeps_failing_is_given_up_on_in_writing() {
+        let s = store();
+        let msg = incoming("what is on my plate?");
+        let key = reply_key(&msg);
+        let b = bridge_with(
+            FakeBot::failing_sends(
+                (0..MAX_ATTEMPTS)
+                    .map(|_| BotError::Unauthorized("nope".into()))
+                    .collect(),
+            ),
+            Arc::clone(&s),
+        );
+
+        for _ in 0..MAX_ATTEMPTS {
+            assert!(b
+                .deliver_owed(&key, &msg, Some("run-7"), "three things")
+                .await
+                .is_err());
+        }
+
+        let row = s.obligation_by_key(&key).unwrap().expect("a row");
+        assert_eq!(
+            row.state,
+            DeliveryState::Failed,
+            "terminal, after {MAX_ATTEMPTS}"
+        );
+        assert_eq!(row.attempts, MAX_ATTEMPTS);
+        assert!(
+            !row.state.is_settled() || row.detail.is_some(),
+            "a failed row says why"
+        );
+    }
+
+    /// Telegram redelivers an update whose offset was never acknowledged, which
+    /// is exactly what happens when Jod dies mid-reply. The second pass must not
+    /// queue a second answer.
+    #[tokio::test]
+    async fn the_same_reply_owed_twice_is_one_row_and_one_message() {
+        let s = store();
+        let msg = incoming("what is on my plate?");
+        let key = reply_key(&msg);
+        let b = bridge(Arc::clone(&s));
+
+        b.deliver_owed(&key, &msg, Some("run-7"), "three things")
+            .await
+            .unwrap();
+        b.deliver_owed(&key, &msg, Some("run-7"), "three things")
+            .await
+            .unwrap();
+
+        assert_eq!(s.obligations(10).unwrap().len(), 1, "one row");
+        assert_eq!(
+            b.poller().bot().sent_texts().len(),
+            1,
+            "and one message — the second attempt found the row already delivered"
+        );
+    }
+
+    // -- recovery ----------------------------------------------------------
+
+    /// A `pending` row never reached the transport, so nothing was sent and a
+    /// duplicate is impossible. It goes out exactly as it was written.
+    #[tokio::test]
+    async fn a_message_that_never_left_is_resent_plainly() {
+        let s = store();
+        let owed = Owed::new("telegram:7:1", CHANNEL, "7", "the nightly digest is ready");
+        s.record_obligation(&owed, &crashed(), now_ms()).unwrap();
+
+        let b = bridge(Arc::clone(&s));
+        b.redeliver_owed().await;
+
+        assert_eq!(
+            b.poller().bot().sent_texts(),
+            vec!["the nightly digest is ready".to_string()],
+            "no marker: nothing was ever sent, so there is nothing to warn about"
+        );
+        assert_eq!(
+            s.obligation_by_key("telegram:7:1").unwrap().unwrap().state,
+            DeliveryState::Delivered
+        );
+    }
+
+    /// An `attempting` row was in flight when Jod died. It may have arrived and
+    /// nothing Jod can inspect will say which — so it is resent *labelled*.
+    /// Dropping it would be a lie of omission and resending it silently would be
+    /// a lie of commission.
+    #[tokio::test]
+    async fn a_message_that_may_already_have_arrived_says_so_when_it_is_resent() {
+        let s = store();
+        let owed = Owed::new("telegram:7:1", CHANNEL, "7", "the nightly digest is ready");
+        let id = s.record_obligation(&owed, &crashed(), now_ms()).unwrap();
+        // The process got as far as the transport and then died holding it.
+        s.mark_attempting(id, &crashed(), now_ms()).unwrap();
+
+        let b = bridge(Arc::clone(&s));
+        b.redeliver_owed().await;
+
+        let sent = b.poller().bot().sent_texts();
+        assert_eq!(sent.len(), 1);
+        assert!(
+            sent[0].starts_with(RECOVERED_MARKER),
+            "the ambiguity is labelled rather than hidden: {:?}",
+            sent[0]
+        );
+        assert!(sent[0].contains("the nightly digest is ready"));
+    }
+
+    /// The sweep may only touch rows nobody is answerable for. A row whose owner
+    /// is still running is being sent by that process at this moment, and
+    /// claiming it would deliver the message twice.
+    #[tokio::test]
+    async fn a_row_a_living_process_owns_is_left_exactly_where_it_is() {
+        let s = store();
+        let alive = Owner::here(crate::ledger::machine());
+        let owed = Owed::new("telegram:7:1", CHANNEL, "7", "mine, and I am still here");
+        s.record_obligation(&owed, &alive, now_ms()).unwrap();
+
+        let b = bridge(Arc::clone(&s));
+        b.redeliver_owed().await;
+
+        assert!(
+            b.poller().bot().sent_texts().is_empty(),
+            "nothing was resent"
+        );
+        let row = s.obligation_by_key("telegram:7:1").unwrap().unwrap();
+        assert_eq!(row.state, DeliveryState::Pending, "and nothing was settled");
+        assert_eq!(row.owner, alive, "and it still belongs to whoever had it");
+        assert!(
+            LocalProcesses::default().is_alive(&alive),
+            "the premise: this process is the live owner"
+        );
+    }
+
+    /// A redelivery has to land where the conversation is. In a forum group the
+    /// chat id alone reaches the General topic, so an answer recovered days
+    /// later would surface in front of everyone, detached from the thread that
+    /// asked for it.
+    #[tokio::test]
+    async fn a_recovered_reply_goes_back_to_the_thread_it_came_from() {
+        let s = store();
+        let owed = Owed::new("telegram:7:1", CHANNEL, "7:99", "in the thread, please");
+        s.record_obligation(&owed, &crashed(), now_ms()).unwrap();
+
+        let b = bridge(Arc::clone(&s));
+        b.redeliver_owed().await;
+
+        let chats: Vec<i64> = b
+            .poller()
+            .bot()
+            .sent
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|s| s.chat_id)
+            .collect();
+        assert_eq!(chats, vec![7], "the chat half of `7:99` was addressed");
+    }
+
+    /// A day-old "your build broke" is not a notification, it is archaeology.
+    ///
+    /// Found while writing the tests above, which recorded their fixtures at
+    /// timestamp 1000 and were therefore fifty-six years stale: every one of
+    /// them was failed instead of sent, and the sweep was right. Worth pinning
+    /// deliberately rather than leaving as an accident of the fixtures.
+    #[tokio::test]
+    async fn a_message_too_old_to_be_news_is_failed_instead_of_sent() {
+        let s = store();
+        let owed = Owed::new("telegram:7:1", CHANNEL, "7", "your build broke");
+        let long_ago = now_ms() - crate::ledger::STALE_AFTER_MS - 1;
+        s.record_obligation(&owed, &crashed(), long_ago).unwrap();
+
+        let b = bridge(Arc::clone(&s));
+        b.redeliver_owed().await;
+
+        assert!(
+            b.poller().bot().sent_texts().is_empty(),
+            "yesterday's alert is not delivered to prove the ledger works"
+        );
+        let row = s.obligation_by_key("telegram:7:1").unwrap().unwrap();
+        assert_eq!(row.state, DeliveryState::Failed);
+        assert!(
+            row.detail
+                .as_deref()
+                .unwrap_or_default()
+                .contains("past saving"),
+            "and the row still records that somebody was owed it: {:?}",
+            row.detail
+        );
+    }
+
+    /// A row for another transport is left **unclaimed**, not claimed and
+    /// skipped.
+    ///
+    /// This is why `sweep_recoverable` takes a channel. Claiming is a write, and
+    /// a claimed row belongs to a live process, so every later sweep correctly
+    /// leaves it alone — meaning a bridge that took a `cli` row would strand it
+    /// for as long as it ran. There is no way to hand one back either:
+    /// `mark_failed` means "try again" and returns it to `pending`. Left
+    /// untouched, it stays orphaned and the process that *can* send it finds it.
+    #[tokio::test]
+    async fn a_row_for_another_transport_is_left_for_the_one_that_can_send_it() {
+        let s = store();
+        let elsewhere = Owed::new("cli:1", "cli", "stdout", "not mine to send");
+        s.record_obligation(&elsewhere, &crashed(), now_ms())
+            .unwrap();
+
+        let b = bridge(Arc::clone(&s));
+        b.redeliver_owed().await;
+
+        assert!(b.poller().bot().sent_texts().is_empty());
+        let row = s.obligation_by_key("cli:1").unwrap().unwrap();
+        assert_eq!(row.state, DeliveryState::Pending, "still owed");
+        assert_eq!(
+            row.owner,
+            crashed(),
+            "and still orphaned, so a cli sweeper will find it"
+        );
+    }
+
+    /// A telegram row whose target this build cannot read spends an attempt
+    /// rather than being skipped, so it settles after `MAX_ATTEMPTS` restarts
+    /// instead of being retried forever by a process that will never manage it.
+    ///
+    /// One sweep, not three: a second sweep in the same test would find the row
+    /// owned by *this* process, which is alive, and correctly leave it — the
+    /// attempts only accumulate across real restarts, and `mark_failed`'s own
+    /// tests in `ledger` cover the settling. What is asserted here is the half
+    /// this function is responsible for: the attempt was spent and the reason
+    /// was written down.
+    #[tokio::test]
+    async fn a_target_that_cannot_be_read_spends_an_attempt_and_says_why() {
+        let s = store();
+        let owed = Owed::new("telegram:x", CHANNEL, "not-a-chat", "nowhere to send this");
+        s.record_obligation(&owed, &crashed(), now_ms()).unwrap();
+
+        bridge(Arc::clone(&s)).redeliver_owed().await;
+
+        let row = s.obligation_by_key("telegram:x").unwrap().unwrap();
+        assert_eq!(row.attempts, 1, "the restart spent one");
+        assert_eq!(
+            row.state,
+            DeliveryState::Pending,
+            "not settled yet, but counting down rather than stuck at zero"
+        );
+        assert!(
+            row.detail
+                .as_deref()
+                .unwrap_or_default()
+                .contains("not an address"),
+            "and it says why: {:?}",
+            row.detail
+        );
+    }
+
+    // -- addressing --------------------------------------------------------
+
+    /// Telegram message ids are unique per *chat*, so the chat id is what makes
+    /// the key an identity. Without it two chats collide on `message_key`, which
+    /// is `UNIQUE`, and one chat's answer would eventually be redelivered into
+    /// the other.
+    #[test]
+    fn a_reply_key_cannot_collide_across_chats() {
+        let mut a = incoming("same message id, different chat");
+        let mut b = a.clone();
+        a.chat_id = 7;
+        b.chat_id = 8;
+        a.message_id = 42;
+        b.message_id = 42;
+        assert_ne!(reply_key(&a), reply_key(&b));
+    }
+
+    #[test]
+    fn a_target_survives_the_round_trip_with_and_without_a_thread() {
+        let mut msg = incoming("hello");
+        msg.chat_id = -100_123;
+        msg.thread_id = None;
+        assert_eq!(parse_target(&target_of(&msg)), Some((-100_123, None)));
+
+        msg.thread_id = Some(99);
+        assert_eq!(parse_target(&target_of(&msg)), Some((-100_123, Some(99))));
+
+        // Anything this transport cannot address, rather than a guess.
+        assert_eq!(parse_target("stdout"), None);
+        assert_eq!(parse_target("7:not-a-thread"), None);
     }
 }
