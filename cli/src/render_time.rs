@@ -300,9 +300,256 @@ pub fn fires(list: &[(Fire, Option<String>)], now_ms: i64) {
     }
 }
 
+// ---- the delivery ledger --------------------------------------------------
+
+/// A glyph and a colour per delivery state, arranged so that **settled and
+/// unsettled cannot be confused at a glance** — which is the whole product.
+///
+/// The glyphs are graded by how much is still owed rather than by how the news
+/// feels: hollow `○` is owed and untouched, half-filled `◐` is owed and in
+/// flight, filled `●` is done. `✗` is the odd one out on purpose — a failure is
+/// settled, but settling it is not an outcome anybody wanted, and giving it a
+/// filled circle would file it beside `delivered` in a column somebody is
+/// scanning for trouble.
+///
+/// Colour is never the only carrier, for the reason the rest of this file gives:
+/// `NO_COLOR`, eight-colour terminals and colour-blind readers all have to get
+/// the same answer.
+fn delivery_mark(state: jod_core::ledger::DeliveryState) -> (&'static str, &'static str) {
+    use jod_core::ledger::DeliveryState;
+    match state {
+        DeliveryState::Pending => ("○", YELLOW),
+        DeliveryState::Attempting => ("◐", YELLOW),
+        DeliveryState::Delivered => ("●", GREEN),
+        DeliveryState::Failed => ("✗", RED),
+    }
+}
+
+/// The ledger as a list, newest first.
+///
+/// Unsettled rows are bold and settled ones are dim, on top of the glyph. That
+/// is deliberate redundancy: this list is read for one question — *is anybody
+/// still owed anything?* — and the answer has to survive being skimmed.
+pub fn obligations(list: &[jod_core::ledger::Obligation], now_ms: i64) {
+    for o in list {
+        for line in obligation_lines(o, now_ms) {
+            println!("{line}");
+        }
+    }
+}
+
+/// One list row, as the lines it prints.
+///
+/// Pure and returning strings rather than printing, so the two properties this
+/// view exists for — that settled and unsettled differ, and that a possible
+/// duplicate says so — are assertions in a test rather than something somebody
+/// has to eyeball on a real database.
+fn obligation_lines(o: &jod_core::ledger::Obligation, now_ms: i64) -> Vec<String> {
+    let (mark, colour) = delivery_mark(o.state);
+    // `is_settled` drives the emphasis rather than a second match on the state,
+    // so a fifth state added later is loud by default rather than quietly
+    // formatted as though it were finished.
+    let emphasis = if o.state.is_settled() { DIM } else { BOLD };
+    let mut lines = vec![format!(
+        "{colour}{mark}{RESET} {DIM}{:<9}{RESET} {emphasis}{}{RESET}",
+        o.state.as_str(),
+        one_line(&o.body)
+    )];
+
+    let mut facts = vec![
+        format!("{}→{}", o.channel, o.target),
+        when(o.updated_at_ms, now_ms),
+    ];
+    if o.attempts > 0 {
+        facts.push(format!(
+            "{} attempt{}",
+            o.attempts,
+            if o.attempts == 1 { "" } else { "s" }
+        ));
+    }
+    facts.push(o.message_key.clone());
+    lines.push(format!("  {DIM}{}{RESET}", facts.join(" · ")));
+
+    // The reason belongs in the *list*, not only in `show`. `jod ledger failed`
+    // is read to answer "why did these not go", and a list that made you open
+    // each row to find out would send you back to SQLite by another route —
+    // which is the thing this command exists to stop.
+    if let Some(detail) = &o.detail {
+        lines.push(format!("  {RED}{}{RESET}", one_line(detail)));
+    }
+    if let Some(note) = duplicate_warning(o) {
+        lines.push(format!("  {YELLOW}{note}{RESET}"));
+    }
+    lines
+}
+
+/// One obligation in full: what was owed, to whom, and what became of it.
+pub fn obligation(o: &jod_core::ledger::Obligation, now_ms: i64) {
+    let (mark, colour) = delivery_mark(o.state);
+    println!(
+        "{colour}{mark} {BOLD}{}{RESET}  {DIM}{}{RESET}",
+        o.state.as_str(),
+        o.message_key
+    );
+    println!("  {DIM}to{RESET}        {}→{}", o.channel, o.target);
+    println!("  {DIM}owed{RESET}      {}", when(o.created_at_ms, now_ms));
+    println!("  {DIM}last{RESET}      {}", when(o.updated_at_ms, now_ms));
+    println!(
+        "  {DIM}attempts{RESET}  {} of {}",
+        o.attempts,
+        jod_core::ledger::MAX_ATTEMPTS
+    );
+    // The process, because "why has this not gone" is answered by it more often
+    // than by anything else: a row held by a machine that is not this one is
+    // waiting for that box to come back, not for anything here.
+    println!(
+        "  {DIM}held by{RESET}   {} pid {}",
+        o.owner.machine, o.owner.pid
+    );
+    if let Some(run) = &o.run_id {
+        println!("  {DIM}run{RESET}       {run}");
+    }
+    if let Some(detail) = &o.detail {
+        println!("  {DIM}why{RESET}       {RED}{detail}{RESET}");
+    }
+    if let Some(note) = duplicate_warning(o) {
+        println!("  {YELLOW}{note}{RESET}");
+    }
+    println!("\n{}", o.body);
+}
+
+/// What to say about a message that may reach its recipient twice.
+///
+/// Only an `attempting` row can say it, and that is a limit of the record
+/// rather than a choice: `Obligation::may_be_a_duplicate` reads the *current*
+/// state, and once a recovered message lands the row is `delivered` like any
+/// other. Nothing in the schema remembers that `RECOVERED_MARKER` was ever
+/// prefixed. So this warns about the duplicates that are still ahead and cannot
+/// speak for the ones already sent — which is worth knowing when reading it.
+fn duplicate_warning(o: &jod_core::ledger::Obligation) -> Option<String> {
+    o.may_be_a_duplicate().then(|| {
+        "in flight — if the process holding it died, this is resent labelled as a possible \
+         duplicate"
+            .to_string()
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    mod delivery_ledger {
+        use super::*;
+        use jod_core::ledger::{DeliveryState, Obligation, Owner};
+
+        fn row(state: DeliveryState, attempts: i64, detail: Option<&str>) -> Obligation {
+            Obligation {
+                id: 1,
+                message_key: "telegram:7:42".into(),
+                channel: "telegram".into(),
+                target: "7".into(),
+                body: "Deploy finished.".into(),
+                state,
+                attempts,
+                owner: Owner::new("jod-cloud", 4821),
+                run_id: Some("run-b2".into()),
+                detail: detail.map(str::to_string),
+                created_at_ms: 1_000,
+                updated_at_ms: 2_000,
+            }
+        }
+
+        /// The distinction the whole command exists to draw. Asserted on the
+        /// glyphs alone, with no colour, because that is what a `NO_COLOR`
+        /// terminal and a colour-blind reader are left with — and if the answer
+        /// only survives in the escape codes it is not an answer.
+        #[test]
+        fn a_settled_row_and_an_owed_one_never_share_a_glyph() {
+            let owed: Vec<&str> = [DeliveryState::Pending, DeliveryState::Attempting]
+                .iter()
+                .map(|s| delivery_mark(*s).0)
+                .collect();
+            let done: Vec<&str> = [DeliveryState::Delivered, DeliveryState::Failed]
+                .iter()
+                .map(|s| delivery_mark(*s).0)
+                .collect();
+
+            for a in &owed {
+                assert!(
+                    !done.contains(a),
+                    "`{a}` marks both an owed row and a settled one"
+                );
+            }
+            // And all four differ from each other, so the state is readable
+            // without the word beside it.
+            let mut all: Vec<&str> = owed.into_iter().chain(done).collect();
+            all.sort_unstable();
+            all.dedup();
+            assert_eq!(all.len(), 4, "two states share a glyph");
+        }
+
+        /// Emphasis carries the same distinction a second time, on purpose:
+        /// this list is skimmed, and one signal is one signal to miss.
+        #[test]
+        fn an_owed_row_is_emphasised_and_a_settled_one_is_dimmed() {
+            let owed = obligation_lines(&row(DeliveryState::Pending, 0, None), 3_000);
+            let done = obligation_lines(&row(DeliveryState::Delivered, 1, None), 3_000);
+            assert!(owed[0].contains(BOLD), "an owed row is not emphasised");
+            assert!(!done[0].contains(BOLD), "a settled row is emphasised");
+        }
+
+        /// `RECOVERED_MARKER` is the module's stated ethic — ambiguity labelled
+        /// rather than hidden — and a reader that quietly dropped it would undo
+        /// the honesty the sender paid for.
+        #[test]
+        fn only_a_message_still_in_flight_is_called_a_possible_duplicate() {
+            let in_flight = obligation_lines(&row(DeliveryState::Attempting, 1, None), 3_000);
+            assert!(
+                in_flight.iter().any(|l| l.contains("possible duplicate")),
+                "an in-flight message does not warn: {in_flight:?}"
+            );
+
+            for quiet in [
+                DeliveryState::Pending,
+                DeliveryState::Delivered,
+                DeliveryState::Failed,
+            ] {
+                let lines = obligation_lines(&row(quiet, 1, None), 3_000);
+                assert!(
+                    !lines.iter().any(|l| l.contains("duplicate")),
+                    "{quiet:?} claims it may be a duplicate: {lines:?}"
+                );
+            }
+        }
+
+        /// `jod ledger failed` is read to find out *why*. A list that made you
+        /// open each row would send you back to SQLite by another route.
+        #[test]
+        fn a_row_that_failed_says_why_in_the_list_itself() {
+            let lines = obligation_lines(
+                &row(
+                    DeliveryState::Failed,
+                    3,
+                    Some("Unauthorized: bot was removed from the chat"),
+                ),
+                3_000,
+            );
+            assert!(
+                lines.iter().any(|l| l.contains("bot was removed")),
+                "the reason is not in the list: {lines:?}"
+            );
+        }
+
+        /// A row nobody has tried yet says nothing about attempts rather than
+        /// "0 attempts", which reads as a failure count.
+        #[test]
+        fn an_untried_message_does_not_advertise_a_count_of_nothing() {
+            let fresh = obligation_lines(&row(DeliveryState::Pending, 0, None), 3_000);
+            assert!(!fresh[1].contains("attempt"), "{}", fresh[1]);
+            let tried = obligation_lines(&row(DeliveryState::Pending, 1, None), 3_000);
+            assert!(tried[1].contains("1 attempt ·"), "{}", tried[1]);
+        }
+    }
 
     /// The strings below are copied out of a real `jod main` run's `messages`
     /// rows, not invented, because the bug was that plausible-looking rendering

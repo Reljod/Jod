@@ -294,6 +294,15 @@ enum Command {
         #[command(subcommand)]
         what: MonitorCommand,
     },
+    /// Proof of what Jod owed people, and whether they got it.
+    ///
+    /// A run that finished and a reply that arrived are two different facts,
+    /// and until this command the second was answerable only by opening
+    /// SQLite. The ledger has recorded it all along.
+    Ledger {
+        #[command(subcommand)]
+        what: LedgerCommand,
+    },
     /// Standing objectives, pursued until they are met.
     ///
     /// A goal differs from a schedule in having an end: it stops when it is
@@ -512,6 +521,32 @@ enum TelegramCommand {
     /// `JOD_TELEGRAM_ALLOWED_USERS`, and nothing else tells you the numeric id
     /// that belongs in it. Message the bot, run this, copy the id.
     Whoami,
+}
+
+/// The three questions a person actually has about a message Jod owed.
+#[derive(Subcommand)]
+enum LedgerCommand {
+    /// What is still owed. Everything, with `--all`.
+    Ls {
+        /// Settled rows too — delivered and given up on.
+        #[arg(long)]
+        all: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// One message in full: what it said, who holds it, what became of it.
+    Show {
+        /// The `message_key` a listing prints, or the row id.
+        what: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// What was given up on — the record that somebody was owed something
+    /// they never got.
+    Failed {
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1101,6 +1136,7 @@ async fn main() -> Result<()> {
         Command::Schedule { what } => schedule_command(&jod, what)?,
         Command::Webhook { what } => webhook_command(&jod, what)?,
         Command::Monitor { what } => monitor_command(&jod, what)?,
+        Command::Ledger { what } => ledger_command(&jod, what)?,
         Command::Telegram { what } => telegram_command(jod, what).await?,
         Command::Goal { what } => goal_command(&jod, what)?,
 
@@ -2380,6 +2416,81 @@ fn monitor_command(jod: &Jod, what: MonitorCommand) -> Result<()> {
                 println!("{schedule}'s monitor has not been checked yet");
             } else {
                 render_time::checks(&checks, now);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `jod ledger …` — the reader the delivery ledger never had.
+///
+/// The module has recorded every owed message since it was wired, and nothing
+/// could show one. A ledger nobody can read proves things to nobody, which is a
+/// slower version of not keeping one.
+fn ledger_command(jod: &Jod, what: LedgerCommand) -> Result<()> {
+    use jod_core::ledger::DeliveryState;
+    let store = jod.store().context("this command needs the database")?;
+    let now = chrono::Utc::now().timestamp_millis();
+    // The ledger prunes itself to `MAX_ROWS`, so asking for that many is asking
+    // for all of it. A smaller page would be a lie in the one view whose whole
+    // job is "is anything outstanding" — an answer that silently omitted the
+    // oldest unsettled row would be worse than no answer.
+    let everything = jod_core::ledger::MAX_ROWS as usize;
+    match what {
+        LedgerCommand::Ls { all, json } => {
+            let rows: Vec<_> = store
+                .obligations(everything)?
+                .into_iter()
+                .filter(|o| all || !o.state.is_settled())
+                .collect();
+            if json {
+                println!("{}", serde_json::to_string_pretty(&rows)?);
+            } else if rows.is_empty() {
+                // Two different silences, and conflating them is the failure
+                // this command exists to end: "nothing is owed" is the good
+                // news, "nothing was ever recorded" means the ledger is not
+                // running and the good news would look identical.
+                let recorded = store.obligations(1)?.len();
+                if all || recorded == 0 {
+                    println!("nothing in the ledger — no message has been owed yet");
+                } else {
+                    println!("nothing outstanding — every message Jod owed has been settled");
+                    println!("`jod ledger ls --all` shows the settled ones");
+                }
+            } else {
+                render_time::obligations(&rows, now);
+            }
+        }
+        LedgerCommand::Show { what, json } => {
+            // By key first, then by row id. The key is what every listing
+            // prints and what a person will have in hand; the id is what a
+            // `--json` consumer has.
+            let found = match store.obligation_by_key(&what)? {
+                Some(o) => Some(o),
+                None => match what.parse::<i64>() {
+                    Ok(id) => store.obligation(id)?,
+                    Err(_) => None,
+                },
+            };
+            let o = found.with_context(|| format!("nothing in the ledger matches `{what}`"))?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&o)?);
+            } else {
+                render_time::obligation(&o, now);
+            }
+        }
+        LedgerCommand::Failed { json } => {
+            let rows: Vec<_> = store
+                .obligations(everything)?
+                .into_iter()
+                .filter(|o| o.state == DeliveryState::Failed)
+                .collect();
+            if json {
+                println!("{}", serde_json::to_string_pretty(&rows)?);
+            } else if rows.is_empty() {
+                println!("nothing has been given up on");
+            } else {
+                render_time::obligations(&rows, now);
             }
         }
     }
