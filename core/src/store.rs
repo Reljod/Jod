@@ -751,6 +751,34 @@ const MIGRATIONS: &[(&str, &str)] = &[
     );
     "#,
     ),
+    (
+        "0012_recovered_deliveries",
+        r#"
+    -- When a message was resent after a crash, and therefore may have arrived
+    -- twice.
+    --
+    -- A property of the row's *history*, which is why it cannot live anywhere
+    -- that already exists. `state` is where the row is now, and a recovered
+    -- message ends `delivered` like any other; `detail` is cleared by
+    -- `mark_delivered` on the way past. So the one fact a person needs was
+    -- being erased at exactly the moment it became useful — "why did I get this
+    -- twice" is a question asked *after* delivery, always.
+    --
+    -- Without it `may_be_a_duplicate` can only mean "is in flight right now",
+    -- and the reader has to stay silent about every message it has already
+    -- resent — silence a reader cannot distinguish from "this was fine".
+    --
+    -- The instant rather than a flag, because "when" is most of the answer when
+    -- somebody is holding two copies and trying to work out what happened. A
+    -- row recovered more than once keeps the latest: the fact being recorded is
+    -- "this may be a duplicate", which does not become truer with repetition,
+    -- and a count would be the attempt history this deliberately is not.
+    --
+    -- Null means never recovered, which is what every row written before this
+    -- migration honestly was.
+    ALTER TABLE delivery_ledger ADD COLUMN recovered_at_ms INTEGER;
+    "#,
+    ),
 ];
 
 /// Who asserted a fact. Kept out of the fact's text so that content Jod

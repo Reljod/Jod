@@ -29,6 +29,13 @@
 //! Dropping the message would be a lie of omission; resending it unmarked would
 //! be a lie of commission; saying "this may be a duplicate" is neither.
 //!
+//! The same honesty has to outlive the send, which is what
+//! [`Obligation::recovered_at_ms`] is for. A recovered message ends `delivered`
+//! like any other, so for a while the ledger could label a duplicate on its way
+//! out and had no answer at all for the person who asked afterwards — and
+//! afterwards is when people ask, because holding two copies is how they find
+//! out. The row now remembers that it was resent, in every state it can reach.
+//!
 //! ## Which process may recover a row
 //!
 //! [`Store::sweep_recoverable`] runs at startup and claims only rows whose
@@ -225,6 +232,15 @@ pub struct Obligation {
     pub owner: Owner,
     pub run_id: Option<String>,
     pub detail: Option<String>,
+    /// When this row was last resent after a crash, if it ever was.
+    ///
+    /// The row's *history*, not its state, which is the whole reason it needs a
+    /// column of its own: a recovered message ends `delivered` like any other
+    /// and `mark_delivered` clears `detail` on the way past, so before
+    /// `0012_recovered_deliveries` the one fact somebody needs was erased at the
+    /// moment it became useful. "Why did I get this twice" is asked after
+    /// delivery, always.
+    pub recovered_at_ms: Option<i64>,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
 }
@@ -235,21 +251,36 @@ impl Obligation {
     /// The one place the crash semantics are expressed, and pure so that they
     /// can be argued with in a test rather than in production.
     pub fn redelivery_body(&self) -> String {
-        redelivery_body(self.state, &self.body)
+        redelivery_body(self.may_be_a_duplicate(), &self.body)
     }
 
-    /// Whether the recipient is being warned this may be a second copy.
+    /// Whether this message may reach its recipient twice.
+    ///
+    /// Two ways, and the second is why [`Obligation::recovered_at_ms`] exists.
+    /// A row that is **`attempting`** was in flight and may have landed. A row
+    /// that has **been recovered before** may have landed on that earlier pass,
+    /// and stays a possible duplicate for the rest of its life however it is
+    /// sent afterwards — a later known failure proves the *last* attempt sent
+    /// nothing, and says nothing about the one that was interrupted.
+    ///
+    /// So this reads true after delivery too, which is the point: it is what a
+    /// reader shows somebody holding two copies and asking why.
     pub fn may_be_a_duplicate(&self) -> bool {
-        self.state == DeliveryState::Attempting
+        self.state == DeliveryState::Attempting || self.recovered_at_ms.is_some()
     }
 }
 
-/// A `pending` message never left, so it goes plainly. An `attempting` one may
-/// have arrived, so it is marked. Nothing else is ever redelivered.
-pub fn redelivery_body(state: DeliveryState, body: &str) -> String {
-    match state {
-        DeliveryState::Attempting => format!("{RECOVERED_MARKER}{body}"),
-        _ => body.to_string(),
+/// A message that may already have arrived is marked; one that certainly has
+/// not goes plainly. Nothing else is ever redelivered.
+///
+/// Takes the answer rather than the state because there are now two ways to
+/// reach it — see [`Obligation::may_be_a_duplicate`] — and a second copy of
+/// that rule living here is a second copy to get wrong.
+pub fn redelivery_body(may_be_a_duplicate: bool, body: &str) -> String {
+    if may_be_a_duplicate {
+        format!("{RECOVERED_MARKER}{body}")
+    } else {
+        body.to_string()
     }
 }
 
@@ -329,7 +360,7 @@ pub struct Recovered {
 
 const LEDGER_COLUMNS: &str = "SELECT id, message_key, channel, target, body, state, attempts,
                                      owner_machine, owner_pid, run_id, detail,
-                                     created_at_ms, updated_at_ms
+                                     recovered_at_ms, created_at_ms, updated_at_ms
                                 FROM delivery_ledger";
 
 impl Store {
@@ -528,18 +559,36 @@ impl Store {
                     )?;
                     continue;
                 }
+                // Recorded here rather than by the transport, in the same
+                // statement that claims the row, because this is the only place
+                // that knows it. By the time the caller has sent the message the
+                // row is `delivered` and the interruption is no longer visible
+                // in any column — which is precisely how this fact used to get
+                // lost.
+                //
+                // Only for a row that may actually be a duplicate. A `pending`
+                // row never reached a transport, so resending it is not a second
+                // copy and recording one would make the reader cry wolf on every
+                // clean recovery.
+                let duplicate = o.may_be_a_duplicate();
+                let recovered_at_ms = duplicate.then_some(at_ms).or(o.recovered_at_ms);
                 tx.execute(
                     "UPDATE delivery_ledger
-                        SET owner_machine = ?2, owner_pid = ?3, updated_at_ms = ?4
+                        SET owner_machine = ?2, owner_pid = ?3, updated_at_ms = ?4,
+                            recovered_at_ms = ?5
                       WHERE id = ?1",
-                    params![o.id, me.machine, me.pid, at_ms],
+                    params![o.id, me.machine, me.pid, at_ms, recovered_at_ms],
                 )?;
                 taken.push(Recovered {
                     body: o.redelivery_body(),
-                    may_be_a_duplicate: o.may_be_a_duplicate(),
+                    may_be_a_duplicate: duplicate,
                     obligation: Obligation {
                         owner: me.clone(),
                         updated_at_ms: at_ms,
+                        // The returned row has to match what was just written,
+                        // or a caller that trusts it reports the message as
+                        // never recovered while the database says otherwise.
+                        recovered_at_ms,
                         ..o
                     },
                 });
@@ -622,8 +671,9 @@ fn row_to_obligation(r: &rusqlite::Row) -> rusqlite::Result<Obligation> {
         },
         run_id: r.get(9)?,
         detail: r.get(10)?,
-        created_at_ms: r.get(11)?,
-        updated_at_ms: r.get(12)?,
+        recovered_at_ms: r.get(11)?,
+        created_at_ms: r.get(12)?,
+        updated_at_ms: r.get(13)?,
     })
 }
 
@@ -991,17 +1041,101 @@ mod tests {
 
     #[test]
     fn only_an_interrupted_send_is_labelled_a_possible_duplicate() {
-        for state in [
-            DeliveryState::Pending,
-            DeliveryState::Delivered,
-            DeliveryState::Failed,
-        ] {
-            assert_eq!(redelivery_body(state, "hello"), "hello");
-        }
+        assert_eq!(redelivery_body(false, "hello"), "hello");
         assert_eq!(
-            redelivery_body(DeliveryState::Attempting, "hello"),
+            redelivery_body(true, "hello"),
             format!("{RECOVERED_MARKER}hello")
         );
+
+        // And through the row, which is where the rule is decided.
+        let (s, id) = ledger_with("run-1", &dead());
+        let plain = s.obligation(id).unwrap().unwrap();
+        assert!(
+            !plain.may_be_a_duplicate(),
+            "a message that never reached a transport cannot be a second copy"
+        );
+        assert_eq!(plain.redelivery_body(), plain.body);
+
+        s.mark_attempting(id, &dead(), 2_000).unwrap();
+        let in_flight = s.obligation(id).unwrap().unwrap();
+        assert!(in_flight.may_be_a_duplicate());
+        assert!(in_flight.redelivery_body().starts_with(RECOVERED_MARKER));
+    }
+
+    /// The fact `0012_recovered_deliveries` exists for: it has to outlive the
+    /// delivery, because "why did I get this twice" is asked afterwards.
+    ///
+    /// Before the column this was unanswerable — a recovered message ends
+    /// `delivered` like any other and `mark_delivered` clears `detail` on the
+    /// way past, so the interruption left no trace anywhere in the row.
+    #[test]
+    fn a_message_resent_after_a_crash_still_says_so_once_it_has_landed() {
+        let (s, id) = ledger_with("run-1", &dead());
+        s.mark_attempting(id, &dead(), 2_000).unwrap();
+
+        let taken = s
+            .sweep_recoverable(&me(), &Fake::nobody(), "telegram", 5_000)
+            .unwrap();
+        assert_eq!(taken.len(), 1);
+        assert!(taken[0].may_be_a_duplicate);
+        assert_eq!(
+            taken[0].obligation.recovered_at_ms,
+            Some(5_000),
+            "the row handed back matches what was written"
+        );
+
+        // It goes out, and the row settles like any other.
+        s.mark_delivered(id, 6_000).unwrap();
+
+        let landed = s.obligation(id).unwrap().unwrap();
+        assert_eq!(landed.state, DeliveryState::Delivered);
+        assert_eq!(landed.detail, None, "delivery clears the failure reason");
+        assert_eq!(
+            landed.recovered_at_ms,
+            Some(5_000),
+            "and does not clear the one fact the recipient needs"
+        );
+        assert!(
+            landed.may_be_a_duplicate(),
+            "a delivered row that was recovered still warns"
+        );
+    }
+
+    /// A `pending` row never reached a transport, so resending it is not a
+    /// second copy. Recording one would make every clean recovery cry wolf.
+    #[test]
+    fn a_message_that_never_left_is_not_recorded_as_a_possible_duplicate() {
+        let (s, id) = ledger_with("run-1", &dead());
+
+        let taken = s
+            .sweep_recoverable(&me(), &Fake::nobody(), "telegram", 5_000)
+            .unwrap();
+        assert_eq!(taken.len(), 1);
+        assert!(!taken[0].may_be_a_duplicate);
+        assert_eq!(s.obligation(id).unwrap().unwrap().recovered_at_ms, None);
+    }
+
+    /// Once a message may have arrived, it may have arrived — a later *known*
+    /// failure proves the last attempt sent nothing and says nothing about the
+    /// one that was interrupted. So the warning survives, and a second recovery
+    /// keeps the latest instant rather than counting.
+    #[test]
+    fn a_known_failure_afterwards_does_not_clear_the_warning() {
+        let (s, id) = ledger_with("run-1", &dead());
+        s.mark_attempting(id, &dead(), 2_000).unwrap();
+        s.sweep_recoverable(&me(), &Fake::nobody(), "telegram", 5_000)
+            .unwrap();
+
+        // The redelivery itself fails, cleanly, and the row goes back to
+        // pending for another go.
+        s.mark_failed(id, "transport refused", 6_000).unwrap();
+        let retried = s.obligation(id).unwrap().unwrap();
+        assert_eq!(retried.state, DeliveryState::Pending);
+        assert!(
+            retried.may_be_a_duplicate(),
+            "the interrupted first attempt is still unaccounted for"
+        );
+        assert!(retried.redelivery_body().starts_with(RECOVERED_MARKER));
     }
 
     #[test]

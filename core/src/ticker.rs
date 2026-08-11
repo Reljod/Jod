@@ -48,6 +48,14 @@ fn one_line(text: &str) -> String {
 /// How often the scheduler looks for work.
 pub const TICK: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// How often the delivery ledger is trimmed. See [`Ticker::trim_ledger`].
+const PRUNE_EVERY_MS: i64 = 60 * 60 * 1_000;
+
+/// Where the last trim is remembered. In `settings` and not in this struct,
+/// because a field would reset on every restart and turn "hourly" into "every
+/// startup".
+const PRUNED_AT_KEY: &str = "ledger.pruned_at_ms";
+
 /// How long a claim is believed before another process may take it.
 ///
 /// Comfortably longer than a tick, so an ordinary slow tick never loses its own
@@ -407,7 +415,70 @@ impl Ticker {
 
             store.release_schedule(&s.id, now_ms, failed)?;
         }
+
+        // Last, and unable to affect anything above it. Housekeeping that could
+        // delay a fire would be a scheduler that misses its window to tidy up,
+        // which is the wrong way round.
+        self.trim_ledger(&store, now_ms);
         Ok(report)
+    }
+
+    /// Trim the delivery ledger back to the bound it advertises, at most once
+    /// an hour.
+    ///
+    /// `MAX_ROWS` and `RETENTION_MS` were promises nothing kept: `prune_ledger`
+    /// had no caller, so the table grew without limit on the box Jod shares with
+    /// the work.
+    ///
+    /// **Hourly**, and the number comes from which bound can be crossed
+    /// quickly. Retention is a week, so it would be served by a daily pass.
+    /// `MAX_ROWS` is 500 and a chatty day can cross it, so the interval decides
+    /// how far over the bound the table is allowed to sit — an hour of traffic
+    /// rather than a day of it. Against that, the cost is one write transaction
+    /// every sixtieth tick, on the same database the tick needs.
+    ///
+    /// **Nothing here is fatal and nothing here is returned.** A ledger that
+    /// cannot be trimmed is a reason to get on with firing schedules, exactly as
+    /// an unreadable history is a reason for the daemon to carry on starting
+    /// runs. The alternative is a full disk stopping the scheduler, which
+    /// trades a bounded problem for an unbounded one.
+    fn trim_ledger(&self, store: &Store, now_ms: i64) {
+        let last = store
+            .setting(PRUNED_AT_KEY)
+            .ok()
+            .flatten()
+            .and_then(|v| v.parse::<i64>().ok());
+        let due = match last {
+            // A clock that went backwards — a VM restored from a snapshot, an
+            // NTP correction — must not lock pruning out until it catches up.
+            Some(at) => now_ms.saturating_sub(at) >= PRUNE_EVERY_MS || at > now_ms,
+            None => true,
+        };
+        if !due {
+            return;
+        }
+
+        // Stamped **before** the work, and persisted rather than held in
+        // memory. Both halves matter and for different reasons.
+        //
+        // Persisted, because a field on this struct is reset by every restart:
+        // "hourly" would silently become "every startup", and a crash-looping
+        // daemon would prune every minute — the failure mode the interval
+        // exists to prevent, reached by the mechanism meant to prevent it.
+        //
+        // Before, because a prune that throws must wait its hour like any
+        // other. Stamping afterwards would retry a failing delete every minute
+        // for as long as it kept failing. It is the same shape as a schedule
+        // lease: claim the slot, then do the work.
+        if let Err(e) = store.set_setting(PRUNED_AT_KEY, &now_ms.to_string()) {
+            eprintln!("[jod/tick] could not record a ledger trim, so skipping it: {e}");
+            return;
+        }
+        match store.prune_ledger(now_ms) {
+            Ok(0) => {}
+            Ok(gone) => eprintln!("[jod/tick] trimmed {gone} settled row(s) from the ledger"),
+            Err(e) => eprintln!("[jod/tick] could not trim the delivery ledger: {e}"),
+        }
     }
 
     /// Run this schedule's monitor, if it has one and this tick would otherwise
@@ -1585,6 +1656,175 @@ mod tests {
                 store.monitor("s1").unwrap().unwrap().last_digest,
                 Some(monitor::digest(b"version 4\n")),
                 "a change nobody was told about must be reported again next tick"
+            );
+        }
+    }
+
+    // ---- trimming the delivery ledger --------------------------------------
+
+    mod ledger_retention {
+        use super::*;
+        use crate::ledger::{DeliveryState, NewMessage as Owed, Owner};
+
+        /// A settled row old enough to be past `RETENTION_MS`.
+        fn stale_row(store: &Store, key: &str, now_ms: i64) {
+            let owner = Owner::new("jod-cloud", 4821);
+            let long_ago = now_ms - crate::ledger::RETENTION_MS - 60_000;
+            let id = store
+                .record_obligation(
+                    &Owed::new(key, "telegram", "7", "old news"),
+                    &owner,
+                    long_ago,
+                )
+                .unwrap();
+            store.mark_delivered(id, long_ago).unwrap();
+        }
+
+        fn ticker_over(store: &Arc<Store>) -> Ticker {
+            Ticker::new(Jod::with_store(store.clone())).as_owner("t")
+        }
+
+        /// The promise `MAX_ROWS` and `RETENTION_MS` make and nothing kept:
+        /// `prune_ledger` had no caller at all, so the table grew without bound.
+        #[tokio::test]
+        async fn a_tick_trims_settled_rows_that_are_past_their_retention() {
+            let store = Arc::new(Store::in_memory().unwrap());
+            let now = 10_000_000_000;
+            stale_row(&store, "telegram:7:1", now);
+            assert_eq!(store.obligations(10).unwrap().len(), 1);
+
+            ticker_over(&store).tick(now).await.unwrap();
+
+            assert!(
+                store.obligations(10).unwrap().is_empty(),
+                "the tick left the ledger untrimmed"
+            );
+        }
+
+        /// An unsettled row is somebody still waiting to hear something.
+        /// Deleting one to save space is the exact failure the ledger exists to
+        /// prevent, committed silently and with the evidence gone.
+        #[tokio::test]
+        async fn a_tick_never_trims_a_message_somebody_is_still_owed() {
+            let store = Arc::new(Store::in_memory().unwrap());
+            let now = 10_000_000_000;
+            let owner = Owner::new("jod-cloud", 4821);
+            // As old as the stale one above, and still owed.
+            let long_ago = now - crate::ledger::RETENTION_MS - 60_000;
+            store
+                .record_obligation(
+                    &Owed::new("telegram:7:2", "telegram", "7", "still owed"),
+                    &owner,
+                    long_ago,
+                )
+                .unwrap();
+
+            ticker_over(&store).tick(now).await.unwrap();
+
+            let left = store.obligations(10).unwrap();
+            assert_eq!(left.len(), 1, "an unsettled row was deleted");
+            assert_eq!(left[0].state, DeliveryState::Pending);
+        }
+
+        /// Not every minute. The interval is what keeps a housekeeping write off
+        /// the database the tick needs sixty times an hour.
+        #[tokio::test]
+        async fn a_second_tick_inside_the_hour_does_not_trim_again() {
+            let store = Arc::new(Store::in_memory().unwrap());
+            let now = 10_000_000_000;
+            ticker_over(&store).tick(now).await.unwrap();
+            let stamped = store.setting(PRUNED_AT_KEY).unwrap();
+            assert_eq!(stamped.as_deref(), Some(now.to_string().as_str()));
+
+            // A row that would be trimmed, and a tick a minute later.
+            stale_row(&store, "telegram:7:3", now);
+            ticker_over(&store).tick(now + 60_000).await.unwrap();
+            assert_eq!(
+                store.obligations(10).unwrap().len(),
+                1,
+                "trimmed again inside the hour"
+            );
+
+            // And an hour later it goes.
+            ticker_over(&store)
+                .tick(now + PRUNE_EVERY_MS)
+                .await
+                .unwrap();
+            assert!(store.obligations(10).unwrap().is_empty(), "never trimmed");
+        }
+
+        /// The reason the stamp is in `settings` and not in the struct. A field
+        /// resets on every restart, so "hourly" becomes "every startup" — and a
+        /// crash-looping daemon would prune every minute, which is the failure
+        /// the interval exists to prevent.
+        #[tokio::test]
+        async fn a_restart_does_not_earn_a_fresh_trim() {
+            let store = Arc::new(Store::in_memory().unwrap());
+            let now = 10_000_000_000;
+            ticker_over(&store).tick(now).await.unwrap();
+
+            stale_row(&store, "telegram:7:4", now);
+            // A wholly new Ticker — a new process, as far as anything in memory
+            // is concerned — one minute later.
+            let restarted = Ticker::new(Jod::with_store(store.clone())).as_owner("t2");
+            restarted.tick(now + 60_000).await.unwrap();
+
+            assert_eq!(
+                store.obligations(10).unwrap().len(),
+                1,
+                "a restart trimmed inside the hour"
+            );
+        }
+
+        /// The constraint that decides where this call goes: housekeeping must
+        /// not be able to disturb a fire.
+        ///
+        /// Structurally it cannot — `trim_ledger` returns nothing, so there is
+        /// no error for `tick` to propagate — but the placement is the other
+        /// half, and this pins it: a tick that does real scheduler work *and*
+        /// trims reports exactly what it would have reported without the trim.
+        #[tokio::test]
+        async fn a_trim_does_not_change_what_the_tick_reports() {
+            let now = chrono::Utc::now().timestamp_millis();
+
+            let untrimmed = due_and_watched(watching("version 4\n"));
+            let plain = tick_seeing(&untrimmed, Observation::ok("version 4\n")).await;
+
+            let trimmed = due_and_watched(watching("version 4\n"));
+            stale_row(&trimmed, "telegram:7:6", now);
+            let alongside = tick_seeing(&trimmed, Observation::ok("version 4\n")).await;
+
+            assert_eq!(
+                alongside, plain,
+                "the trim changed what the scheduler reported"
+            );
+            assert!(
+                trimmed.obligations(10).unwrap().is_empty(),
+                "and it did happen"
+            );
+            assert_eq!(
+                trimmed.monitor_checks("s1", 10).unwrap().len(),
+                1,
+                "the schedule's own work still landed"
+            );
+        }
+
+        /// A clock that went backwards — a snapshot restore, an NTP correction —
+        /// must not lock trimming out until wall time catches up.
+        #[tokio::test]
+        async fn a_stamp_from_the_future_does_not_wedge_the_trim_for_ever() {
+            let store = Arc::new(Store::in_memory().unwrap());
+            let now = 10_000_000_000;
+            store
+                .set_setting(PRUNED_AT_KEY, &(now + 86_400_000).to_string())
+                .unwrap();
+            stale_row(&store, "telegram:7:5", now);
+
+            ticker_over(&store).tick(now).await.unwrap();
+
+            assert!(
+                store.obligations(10).unwrap().is_empty(),
+                "a future stamp wedged the trim"
             );
         }
     }

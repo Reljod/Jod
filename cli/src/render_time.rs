@@ -377,7 +377,7 @@ fn obligation_lines(o: &jod_core::ledger::Obligation, now_ms: i64) -> Vec<String
     if let Some(detail) = &o.detail {
         lines.push(format!("  {RED}{}{RESET}", one_line(detail)));
     }
-    if let Some(note) = duplicate_warning(o) {
+    if let Some(note) = duplicate_warning(o, now_ms) {
         lines.push(format!("  {YELLOW}{note}{RESET}"));
     }
     lines
@@ -412,7 +412,7 @@ pub fn obligation(o: &jod_core::ledger::Obligation, now_ms: i64) {
     if let Some(detail) = &o.detail {
         println!("  {DIM}why{RESET}       {RED}{detail}{RESET}");
     }
-    if let Some(note) = duplicate_warning(o) {
+    if let Some(note) = duplicate_warning(o, now_ms) {
         println!("  {YELLOW}{note}{RESET}");
     }
     println!("\n{}", o.body);
@@ -420,14 +420,24 @@ pub fn obligation(o: &jod_core::ledger::Obligation, now_ms: i64) {
 
 /// What to say about a message that may reach its recipient twice.
 ///
-/// Only an `attempting` row can say it, and that is a limit of the record
-/// rather than a choice: `Obligation::may_be_a_duplicate` reads the *current*
-/// state, and once a recovered message lands the row is `delivered` like any
-/// other. Nothing in the schema remembers that `RECOVERED_MARKER` was ever
-/// prefixed. So this warns about the duplicates that are still ahead and cannot
-/// speak for the ones already sent — which is worth knowing when reading it.
-fn duplicate_warning(o: &jod_core::ledger::Obligation) -> Option<String> {
-    o.may_be_a_duplicate().then(|| {
+/// Two different warnings for two different facts, and collapsing them would
+/// waste the column. A row still **in flight** may become a duplicate if the
+/// process holding it dies — that is a risk. A row carrying
+/// `recovered_at_ms` **was already resent after a crash** — that is history,
+/// and it is the one somebody is holding two copies and asking about.
+///
+/// The second survives delivery, which is the whole point of
+/// `0012_recovered_deliveries`: before that column this function could only
+/// speak about messages that had not gone yet, and went silent at the moment a
+/// reader needed it.
+fn duplicate_warning(o: &jod_core::ledger::Obligation, now_ms: i64) -> Option<String> {
+    if let Some(at) = o.recovered_at_ms {
+        return Some(format!(
+            "resent after a crash {} — the recipient may hold two copies",
+            when(at, now_ms)
+        ));
+    }
+    (o.state == jod_core::ledger::DeliveryState::Attempting).then(|| {
         "in flight — if the process holding it died, this is resent labelled as a possible \
          duplicate"
             .to_string()
@@ -454,6 +464,7 @@ mod tests {
                 owner: Owner::new("jod-cloud", 4821),
                 run_id: Some("run-b2".into()),
                 detail: detail.map(str::to_string),
+                recovered_at_ms: None,
                 created_at_ms: 1_000,
                 updated_at_ms: 2_000,
             }
@@ -502,7 +513,7 @@ mod tests {
         /// rather than hidden — and a reader that quietly dropped it would undo
         /// the honesty the sender paid for.
         #[test]
-        fn only_a_message_still_in_flight_is_called_a_possible_duplicate() {
+        fn a_message_still_in_flight_says_it_might_yet_become_a_duplicate() {
             let in_flight = obligation_lines(&row(DeliveryState::Attempting, 1, None), 3_000);
             assert!(
                 in_flight.iter().any(|l| l.contains("possible duplicate")),
@@ -520,6 +531,49 @@ mod tests {
                     "{quiet:?} claims it may be a duplicate: {lines:?}"
                 );
             }
+        }
+
+        /// The question this reader could not answer until
+        /// `0012_recovered_deliveries`: somebody is holding two copies, and the
+        /// message went days ago. A row that was recovered has to say so for the
+        /// rest of its life, in every state it can be in.
+        #[test]
+        fn a_message_already_resent_after_a_crash_says_so_even_once_delivered() {
+            for state in [
+                DeliveryState::Pending,
+                DeliveryState::Attempting,
+                DeliveryState::Delivered,
+                DeliveryState::Failed,
+            ] {
+                let mut o = row(state, 2, None);
+                o.recovered_at_ms = Some(1_500);
+                let lines = obligation_lines(&o, 3_000);
+                assert!(
+                    lines.iter().any(|l| l.contains("may hold two copies")),
+                    "{state:?} hides that it was recovered: {lines:?}"
+                );
+            }
+        }
+
+        /// The history wins over the risk. A row that is both in flight *and*
+        /// previously recovered gets one line, and it is the one about what has
+        /// already happened — somebody chasing a duplicate they are holding does
+        /// not need to be told another might follow.
+        #[test]
+        fn a_row_that_is_both_says_what_happened_rather_than_what_might() {
+            let mut o = row(DeliveryState::Attempting, 2, None);
+            o.recovered_at_ms = Some(1_500);
+            let lines = obligation_lines(&o, 3_000);
+            let warnings: Vec<&String> = lines
+                .iter()
+                .filter(|l| l.contains("duplicate") || l.contains("two copies"))
+                .collect();
+            assert_eq!(warnings.len(), 1, "two warnings for one row: {warnings:?}");
+            assert!(
+                warnings[0].contains("may hold two copies"),
+                "{:?}",
+                warnings[0]
+            );
         }
 
         /// `jod ledger failed` is read to find out *why*. A list that made you
