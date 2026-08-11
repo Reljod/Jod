@@ -132,3 +132,18 @@ each felt exactly like verifying. So:
 The general rule: reading the function you were handed feels identical to
 verifying and is not. The difference is whether you went looking for the caller
 before you agreed.
+
+There is a fourth instance, and it is the one that explains why the shape keeps
+recurring between careful people. The comment naming the wrong mechanism was
+written by a teammate, reviewed by the lead, and committed — with the measured
+output already in the same thread. It went in because **the lead recognised his
+own reasoning rather than checking it**: he had told the teammate the staleness
+story an hour earlier, so the sentence read as confirmed the moment it arrived.
+
+That is worth separating from the other three. Those were checks aimed at the
+wrong place; this one was a check that never happened, because agreement felt
+like evidence. A claim that matches what you already told someone is the claim
+you are least equipped to review — you are reading your own argument back and
+grading it. Treat your own prior reasoning arriving in someone else's words as
+unverified, not as corroboration: two people believing something is one belief
+when one of them got it from the other.
