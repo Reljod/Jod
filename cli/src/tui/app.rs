@@ -51,10 +51,10 @@ pub enum Entry {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Overlay {
     None,
-    /// `Ctrl-K` — the which-key menu, waiting for one letter. Any key it does
+    /// `Alt-K` — the which-key menu, waiting for one letter. Any key it does
     /// not know cancels silently rather than doing something surprising.
     WhichKey,
-    /// `Ctrl-K n` — waiting for the kind of thing to make.
+    /// `Alt-K n` — waiting for the kind of thing to make.
     WhichKeyNew,
     /// `?` — the keymap, showing the current screen's verbs first.
     Keymap,
@@ -129,7 +129,7 @@ pub struct App {
     pub cost_usd: f64,
     /// Whether reasoning is shown. On by default, for the same reason tool
     /// output is: watching a harness think is most of why you sit in front of
-    /// it. `/thinking` and `Ctrl-T` turn it off when the noise wins.
+    /// it. `/thinking` and `Alt-T` turn it off when the noise wins.
     pub show_thinking: bool,
     /// Whether tool output is shown. On by default: the reason to watch a
     /// harness work is to see what it is doing.
@@ -645,7 +645,7 @@ impl App {
         self.list_mut(ws)
     }
 
-    /// Go to a workspace from the top: `Ctrl-K`, a digit, or a slash command.
+    /// Go to a workspace from the top: `Alt-K`, a digit, or a slash command.
     ///
     /// Top-level travel forgets the way back on purpose. Jumping from the local
     /// graph to schedules and then pressing `Esc` twice to end up in a memory
