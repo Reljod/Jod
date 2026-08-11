@@ -1,15 +1,39 @@
 name: Release
 
-# Manual only — cutting a release is a deliberate act, not a side effect of
-# every push. Semantic Versioning (semver.org): tags are vMAJOR.MINOR.PATCH.
-# install.sh installs the newest tag by default; `jod update` only ever
-# moves within the installed MAJOR.MINOR (latest patch), so a minor/major
-# bump here never yanks the rug out from under an existing install.
+# Two halves, and the split is the point.
+#
+#   1. PREPARE — automatic. Creating a `release/vX.Y.Z` branch runs the tests,
+#      resolves the version, stamps it into the manifests, and opens the release
+#      PR. Nothing here is visible outside the repo and nothing is irreversible:
+#      delete the branch and it never happened.
+#
+#   2. PUBLISH — manual. Tagging and cutting a GitHub release is what
+#      `install.sh` and `jod update` actually serve to users, so it happens when
+#      a human runs the workflow, never as a side effect of a push. It runs in
+#      the `release` environment, so adding a required reviewer there adds an
+#      approval step without touching this file.
+#
+# Semantic Versioning (semver.org): tags are vMAJOR.MINOR.PATCH. The branch name
+# decides the version; the one exception is a branch naming a version that has
+# already shipped, which is patch-bumped rather than left to fail at `git tag`
+# after the whole suite has run. `jod update` only ever moves within the
+# installed MAJOR.MINOR, so a minor or major bump never yanks the rug out from
+# under an existing install.
+# → .github/scripts/release_version.sh, tests/release-version.test.sh
+
 on:
+  # Fires when any branch or tag is created; the jobs filter to `release/*`
+  # branches. The `create` event carries no ref filter of its own.
+  create:
+
   workflow_dispatch:
     inputs:
+      version:
+        description: "Version to publish, e.g. v1.2.0 (blank: read it from the release branch, or bump the latest tag)"
+        required: false
+        type: string
       bump:
-        description: "Version part to bump"
+        description: "Part to bump when no version is given and the ref is not a release branch"
         required: true
         type: choice
         options: [patch, minor, major]
@@ -17,67 +41,290 @@ on:
 
 permissions:
   contents: write
+  pull-requests: write
+
+concurrency:
+  # One release at a time per ref. Two publishes racing would resolve the same
+  # version from the same tag list and one would lose at `git push`.
+  group: release-${{ github.event.ref || github.ref }}
+  cancel-in-progress: false
 
 jobs:
   test:
+    # Every other `create` event — a plain feature branch, the tag this workflow
+    # pushes itself — is none of this workflow's business.
+    if: >-
+      github.event_name == 'workflow_dispatch'
+      || (github.event.ref_type == 'branch'
+          && startsWith(github.event.ref, 'release/'))
     uses: ./.github/workflows/tests.yml
 
   # Expensive, exploratory scaffold-fitness check — worth the cost at release
-  # time (not on every push), so it rides along here instead of tests.yml.
+  # time, not on every branch cut.
   e2e:
+    if: github.event_name == 'workflow_dispatch'
     uses: ./.github/workflows/e2e.yml
 
-  release:
+  # ---------------------------------------------------------------- prepare --
+  prepare:
+    name: Prepare release branch
+    if: >-
+      github.event_name == 'create'
+      && github.event.ref_type == 'branch'
+      && startsWith(github.event.ref, 'release/')
+    needs: [test]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout the release branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.ref }}
+          fetch-depth: 0
+
+      - name: Resolve the version
+        id: version
+        env:
+          BRANCH: ${{ github.event.ref }}
+        run: |
+          set -euo pipefail
+          source .github/scripts/release_version.sh
+
+          requested="$(branch_version "$BRANCH")" || {
+            echo "::error::branch '$BRANCH' is not release/vMAJOR.MINOR.PATCH — nothing to release"
+            exit 1
+          }
+
+          # Assigned, not read from a process substitution: a `read < <(…)`
+          # would report success even when the resolver refused, and the refusal
+          # is the whole reason this step exists.
+          resolved="$(git tag --list 'v*' | resolve_release_version "$requested" patch)" || {
+            echo "::error::cannot cut $requested from '$BRANCH' — see the refusal above"
+            exit 1
+          }
+          read -r next reason <<<"$resolved"
+          latest="$(git tag --list 'v*' | highest_semver_tag)"
+
+          {
+            echo "next=$next"
+            echo "reason=$reason"
+            echo "previous=${latest:-}"
+            echo "requested=$requested"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Stamp the version into the manifests
+        env:
+          NEXT: ${{ steps.version.outputs.next }}
+        run: .github/scripts/stamp_version.sh "$NEXT"
+
+      - name: Commit and push the bump
+        env:
+          NEXT: ${{ steps.version.outputs.next }}
+          BRANCH: ${{ github.event.ref }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet; then
+            # Re-run on an already-stamped branch, or one cut by hand with the
+            # bump already in it. Either way there is nothing to push.
+            echo "manifests already at $NEXT"
+            exit 0
+          fi
+          git add -A
+          git commit -q -m "chore: release $NEXT"
+          git push origin "HEAD:$BRANCH"
+
+      - name: Open the release PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NEXT: ${{ steps.version.outputs.next }}
+          REASON: ${{ steps.version.outputs.reason }}
+          REQUESTED: ${{ steps.version.outputs.requested }}
+          PREVIOUS: ${{ steps.version.outputs.previous }}
+          BRANCH: ${{ github.event.ref }}
+          BASE: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          existing="$(gh pr list --head "$BRANCH" --state open --json number \
+            --jq '.[0].number // empty')"
+          if [ -n "$existing" ]; then
+            gh pr view "$existing" --json url --jq '"PR already open: \(.url)"'
+            exit 0
+          fi
+
+          # A branch cut from an already-stamped base has nothing to review, and
+          # `gh pr create` refuses an empty diff outright. Not an error — the
+          # version still resolved, and publishing reads the tag list, not a PR.
+          if [ "$(git rev-list --count "origin/$BASE..HEAD")" -eq 0 ]; then
+            echo "::notice::$BRANCH is level with $BASE (already stamped $NEXT) — no PR to open"
+            exit 0
+          fi
+
+          note="\`$REQUESTED\` is free — no tag holds it yet"
+          if [ "$REASON" = "auto-bumped" ]; then
+            note="\`$REQUESTED\` is **already the latest tag**, so the patch was bumped"
+          fi
+
+          # The delimiter sits at this block's own indentation, which YAML
+          # strips, so it lands in column 0 of the script that actually runs.
+          cat > /tmp/release-pr-body.md <<EOF
+          Release **$NEXT**, cut from \`$BRANCH\`.
+
+          | | |
+          |---|---|
+          | Previous tag | \`${PREVIOUS:-none}\` |
+          | This release | \`$NEXT\` |
+          | Decided by | \`$REASON\` — $note |
+
+          The version is stamped into \`.claude-plugin/plugin.json\`, \`Cargo.toml\`
+          and \`Cargo.lock\` by the commit on this branch. Nothing has been tagged
+          and nothing has been published.
+
+          **To publish**, once this has merged:
+
+          \`\`\`sh
+          gh workflow run release.yml --ref $BASE -f version=$NEXT
+          \`\`\`
+
+          That run repeats the suite and the e2e check, tags \`$NEXT\`, and creates
+          the GitHub release. It is the only step visible outside this repo, which
+          is why it is never automatic.
+          EOF
+
+          # The version is resolved, stamped and pushed by now; the PR is how it
+          # gets reviewed, not how it gets published. So a repo with "Allow
+          # GitHub Actions to create and approve pull requests" switched off
+          # (the default) gets told exactly what to run, rather than a red X on
+          # a branch that is in fact correctly prepared.
+          if ! gh pr create --draft --base "$BASE" --head "$BRANCH" \
+            --title "release: $NEXT" --body-file /tmp/release-pr-body.md; then
+            echo "::warning::could not open the PR — check Settings → Actions → General → 'Allow GitHub Actions to create and approve pull requests'. The branch is prepared; open it by hand:"
+            {
+              echo "### PR not opened"
+              echo
+              echo "\`$BRANCH\` is prepared and pushed at \`$NEXT\`. Open the PR with:"
+              echo
+              echo '```sh'
+              echo "gh pr create --draft --base $BASE --head $BRANCH --title 'release: $NEXT'"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Summarise
+        env:
+          NEXT: ${{ steps.version.outputs.next }}
+          REASON: ${{ steps.version.outputs.reason }}
+          REQUESTED: ${{ steps.version.outputs.requested }}
+          BASE: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          {
+            echo "## Prepared \`$NEXT\`"
+            echo
+            echo "Branch asked for \`$REQUESTED\`; resolved as \`$REASON\`."
+            echo "Nothing is tagged yet. Publish with:"
+            echo
+            echo '```sh'
+            echo "gh workflow run release.yml --ref $BASE -f version=$NEXT"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------- publish --
+  publish:
+    name: Publish release
+    if: github.event_name == 'workflow_dispatch'
     needs: [test, e2e]
     runs-on: ubuntu-latest
-    if: github.ref_name == github.event.repository.default_branch
+    # Deliberate: an environment can carry required reviewers and a deployment
+    # log. Referencing one with no protection rules costs nothing today and
+    # means requiring an approval later is a repo setting, not a code change.
+    environment: release
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Compute next version
-        id: version
+      - name: Refuse to publish from an arbitrary branch
+        env:
+          REF: ${{ github.ref_name }}
+          BASE: ${{ github.event.repository.default_branch }}
         run: |
           set -euo pipefail
-          # shellcheck source=bin/lib/semver.sh
-          source bin/lib/semver.sh
-          latest="$(git tag --list 'v*.*.*' | highest_semver_tag)"
-          ver="${latest:-v0.0.0}"; ver="${ver#v}"
-          major="${ver%%.*}"; rest="${ver#*.}"
-          minor="${rest%%.*}"; patch="${rest#*.}"
-          case "${{ inputs.bump }}" in
-            major) major=$((major + 1)); minor=0; patch=0 ;;
-            minor) minor=$((minor + 1)); patch=0 ;;
-            patch) patch=$((patch + 1)) ;;
+          case "$REF" in
+            "$BASE" | release/*) ;;
+            *)
+              echo "::error::refusing to tag from '$REF' — dispatch this from $BASE or a release/* branch"
+              exit 1
+              ;;
           esac
-          next="v${major}.${minor}.${patch}"
-          echo "previous=$latest" >> "$GITHUB_OUTPUT"
-          echo "next=$next" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve the version
+        id: version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          BUMP: ${{ inputs.bump }}
+          REF: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          source .github/scripts/release_version.sh
+
+          # Precedence: what the dispatcher typed, then what the branch is
+          # named, then a bump of the latest tag.
+          requested="${INPUT_VERSION:-}"
+          if [ -z "$requested" ]; then
+            requested="$(branch_version "$REF")" || requested=""
+          fi
+
+          resolved="$(git tag --list 'v*' | resolve_release_version "$requested" "$BUMP")" || {
+            echo "::error::cannot publish '${requested:-a $BUMP bump}' from '$REF' — see the refusal above"
+            exit 1
+          }
+          read -r next reason <<<"$resolved"
+          latest="$(git tag --list 'v*' | highest_semver_tag)"
+
+          # A typed version is an instruction, not a request. Publishing
+          # something else because a tag moved underneath would be a surprise on
+          # the one step that cannot be taken back.
+          if [ -n "${INPUT_VERSION:-}" ] && [ "$next" != "v${INPUT_VERSION#v}" ]; then
+            echo "::error::asked to publish $INPUT_VERSION but it resolves to $next ($reason) — re-dispatch deliberately"
+            exit 1
+          fi
+
+          {
+            echo "next=$next"
+            echo "reason=$reason"
+            echo "previous=${latest:-}"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Tag and push
         env:
           NEXT: ${{ steps.version.outputs.next }}
+          REASON: ${{ steps.version.outputs.reason }}
+          PREVIOUS: ${{ steps.version.outputs.previous }}
         run: |
           set -euo pipefail
+          if git rev-parse -q --verify "refs/tags/$NEXT" >/dev/null; then
+            echo "::error::tag $NEXT already exists"
+            exit 1
+          fi
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          # Stamp the plugin manifest onto the tagged commit. Claude Code only
-          # offers a plugin update when `version` in plugin.json *changes*, so
-          # a release that left it alone would be invisible to everyone who
-          # installed the plugin — the tag would move and nobody would be told.
-          #
-          # Committed onto the tag only, never pushed to main: tags are already
-          # this repo's source of truth for versions (install.sh resolves the
-          # newest tag), so the released artifact carrying its own version needs
-          # no write access to the default branch.
-          sed -i "s/\"version\": \"[^\"]*\"/\"version\": \"${NEXT#v}\"/" \
-            .claude-plugin/plugin.json
-          git add .claude-plugin/plugin.json
-          git commit -q -m "chore: stamp the plugin manifest $NEXT"
-          git tag -a "$NEXT" \
-            -m "$NEXT (${{ inputs.bump }} bump from ${{ steps.version.outputs.previous }})"
+
+          # Usually a no-op: prepare already stamped these on the release branch
+          # and the PR carried them in. It matters on the other path — a dispatch
+          # straight from the default branch — where the tagged commit would
+          # otherwise claim the previous version. Committed onto the tag only,
+          # never pushed to a branch: tags are this repo's source of truth for
+          # versions, so the released artifact carrying its own version needs no
+          # write access to the default branch.
+          .github/scripts/stamp_version.sh "$NEXT"
+          if ! git diff --quiet; then
+            git add -A
+            git commit -q -m "chore: stamp the manifests $NEXT"
+          fi
+
+          git tag -a "$NEXT" -m "$NEXT ($REASON, from ${PREVIOUS:-no previous tag})"
           git push origin "$NEXT"
 
       - name: Create GitHub release
@@ -88,7 +335,12 @@ jobs:
         run: |
           set -euo pipefail
           args=(--title "$NEXT" --generate-notes)
-          # No previous tag on the very first release — --notes-start-tag
-          # would reference a tag that doesn't exist.
+          # No previous tag on the very first release — --notes-start-tag would
+          # reference a tag that doesn't exist.
           [ -n "$PREVIOUS" ] && args+=(--notes-start-tag "$PREVIOUS")
-          gh release create "$NEXT" "${args[@]}"
+          gh release create "$NEXT" ${args[@]+"${args[@]}"}
+          {
+            echo "## Published \`$NEXT\`"
+            echo
+            gh release view "$NEXT" --json url --jq .url
+          } >> "$GITHUB_STEP_SUMMARY"
