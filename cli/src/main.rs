@@ -259,6 +259,19 @@ enum Command {
         #[command(subcommand)]
         what: WebhookCommand,
     },
+    /// Let a schedule decide for itself whether it is worth waking a model.
+    ///
+    /// A monitor is a probe and a hash attached to one schedule. Unchanged
+    /// bytes suppress the run entirely; changed bytes run it with a diff in
+    /// front of the prompt. `--no-agent` inverts the deal: the script *is* the
+    /// job, its stdout is the result, and no model runs at all.
+    ///
+    /// The tick has asked the monitor since it was written. Nothing could
+    /// write one — the same missing verb `jod webhook` was, one table over.
+    Monitor {
+        #[command(subcommand)]
+        what: MonitorCommand,
+    },
     /// Standing objectives, pursued until they are met.
     ///
     /// A goal differs from a schedule in having an end: it stops when it is
@@ -457,6 +470,57 @@ enum WebhookCommand {
         limit: usize,
         #[arg(long)]
         json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum MonitorCommand {
+    /// Every monitor, and what it has seen.
+    Ls {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Attach a monitor to a schedule, replacing any it already had.
+    Set {
+        /// The schedule's name, as `jod schedule ls` shows it.
+        schedule: String,
+        /// A shell command whose stdout is what gets watched.
+        #[arg(long, conflicts_with = "url")]
+        command: Option<String>,
+        /// A URL whose response body is what gets watched.
+        #[arg(long)]
+        url: Option<String>,
+        /// Where a command runs. Defaults to the schedule's own directory, so
+        /// a probe and the run it gates see the same tree.
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+        /// The script is the whole job: its stdout is the result and no model
+        /// is ever woken. Empty stdout means stay quiet.
+        #[arg(long)]
+        no_agent: bool,
+    },
+    /// Detach the monitor, leaving the schedule to fire the ordinary way.
+    Rm { schedule: String },
+    /// Run the probe now and say what a tick would make of it.
+    ///
+    /// Records nothing and starts nothing, so the baseline a real tick compares
+    /// against is left exactly where it was.
+    Check {
+        schedule: String,
+        /// Keep what this check saw, making it the baseline the next one is
+        /// compared against — "start watching from here".
+        ///
+        /// Without it an operator has no way to arm a baseline deliberately;
+        /// they must wait for the daemon's first tick to set one. It still
+        /// starts no agent: this records what was seen, never acts on it.
+        #[arg(long)]
+        record: bool,
+    },
+    /// What a monitor has actually seen, newest first.
+    Log {
+        schedule: String,
+        #[arg(short, long, default_value_t = 20)]
+        limit: usize,
     },
 }
 
@@ -960,6 +1024,7 @@ async fn main() -> Result<()> {
         Command::Conv { what } => conv_command(&jod, what)?,
         Command::Schedule { what } => schedule_command(&jod, what)?,
         Command::Webhook { what } => webhook_command(&jod, what)?,
+        Command::Monitor { what } => monitor_command(&jod, what)?,
         Command::Goal { what } => goal_command(&jod, what)?,
 
         Command::Forget {
@@ -1988,6 +2053,160 @@ fn set_rule_armed(store: &jod_core::store::Store, name: &str, armed: bool) -> Re
     } else {
         bail!("no rule named `{name}`")
     }
+}
+
+/// Carry out a `jod monitor …` subcommand.
+fn monitor_command(jod: &Jod, what: MonitorCommand) -> Result<()> {
+    use jod_core::monitor::{Decision, LocalProbes, Mode, Monitor, Probe};
+    let store = jod.store().context("this command needs the database")?;
+    let now = chrono::Utc::now().timestamp_millis();
+    match what {
+        MonitorCommand::Ls { json } => {
+            let all = store.monitors()?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&all)?);
+            } else if all.is_empty() {
+                println!("no monitors — `jod monitor set <schedule> --command …` attaches one");
+            } else {
+                // Every monitor is shown against its schedule's *name*. A
+                // monitor whose schedule has been deleted falls back to the id
+                // rather than vanishing: an orphan row is exactly the thing a
+                // listing exists to reveal.
+                let named: std::collections::HashMap<String, String> = store
+                    .schedules()?
+                    .into_iter()
+                    .map(|s| (s.id, s.name))
+                    .collect();
+                let rows: Vec<_> = all
+                    .into_iter()
+                    .map(|m| {
+                        let name = named
+                            .get(&m.schedule_id)
+                            .cloned()
+                            .unwrap_or_else(|| format!("{} (no such schedule)", m.schedule_id));
+                        (m, name)
+                    })
+                    .collect();
+                render_time::monitors(&rows, now);
+            }
+        }
+        MonitorCommand::Set {
+            schedule,
+            command,
+            url,
+            cwd,
+            no_agent,
+        } => {
+            let s = store
+                .schedule_named(&schedule)?
+                .with_context(|| format!("no schedule named `{schedule}`"))?;
+            let probe = match (command, url) {
+                (Some(c), None) => Probe::Command(c),
+                (None, Some(u)) => Probe::Url(u),
+                // Refused rather than defaulted. Guessing which one was meant
+                // would attach a monitor nobody described, and a monitor that
+                // watches the wrong thing reports "unchanged" for ever.
+                _ => bail!("give exactly one of --command or --url"),
+            };
+            if no_agent && matches!(probe, Probe::Url(_)) {
+                // `no_agent` means "stdout is the result". For a URL that is
+                // the whole page, reported in full on every single tick — a
+                // notification firehose rather than a watchdog. Watch mode is
+                // what a URL wants, and it is one flag away.
+                bail!(
+                    "--no-agent reports the probe's whole output every tick, which for a URL is \
+                     the entire page — drop --no-agent to be told only when it changes"
+                );
+            }
+            let mode = if no_agent { Mode::NoAgent } else { Mode::Watch };
+            // The schedule's own directory by default, so the probe and the run
+            // it gates look at the same tree. A monitor watching `git log` in
+            // some other checkout is a bug that reads as a working monitor.
+            let dir = cwd.map(|p| p.display().to_string()).unwrap_or(s.cwd.clone());
+            let m = Monitor::new(&s.id, probe).in_dir(dir).with_mode(mode);
+            let replacing = store.monitor(&s.id)?.is_some();
+            store.set_monitor(&m)?;
+            println!(
+                "{} {schedule} · {} {}",
+                if replacing { "↻" } else { "●" },
+                m.probe.kind(),
+                m.probe.target()
+            );
+            println!(
+                "  {}",
+                match mode {
+                    Mode::NoAgent => "no agent runs — the script's stdout is the result",
+                    Mode::Watch => "the next check sets a baseline and wakes nothing",
+                }
+            );
+        }
+        MonitorCommand::Rm { schedule } => {
+            let s = store
+                .schedule_named(&schedule)?
+                .with_context(|| format!("no schedule named `{schedule}`"))?;
+            if store.delete_monitor(&s.id)? {
+                println!("{schedule} now fires on its cron alone");
+            } else {
+                bail!("{schedule} has no monitor");
+            }
+        }
+        MonitorCommand::Check { schedule, record } => {
+            let s = store
+                .schedule_named(&schedule)?
+                .with_context(|| format!("no schedule named `{schedule}`"))?;
+            let m = store
+                .monitor(&s.id)?
+                .with_context(|| format!("{schedule} has no monitor"))?;
+            // Dry by default, and `check` rather than `observe` for it: a dry
+            // run that moved the baseline would consume the very change the
+            // next real tick exists to notice, and "I tested it and then it
+            // never fired" is the least debuggable outcome available.
+            let decision = if record {
+                let now = chrono::Utc::now().timestamp_millis();
+                let (seen, decision) = jod_core::monitor::observe(&m, &LocalProbes);
+                store.record_check(&s.id, &seen, &decision, now)?;
+                decision
+            } else {
+                jod_core::monitor::check(&m, &LocalProbes)
+            };
+            match decision {
+                Decision::Baseline => println!("baseline — nothing to compare against yet"),
+                Decision::Suppress => println!("unchanged — a tick now would run nothing"),
+                Decision::Run { diff } => {
+                    println!("changed — a tick now would run the schedule with:");
+                    println!("{diff}");
+                }
+                Decision::Report { text } => {
+                    println!("reported — a tick now would deliver this and wake no model:");
+                    println!("{text}");
+                }
+                Decision::Silent => println!("silent — the script said nothing, so nothing happens"),
+                Decision::Failed { detail } => {
+                    println!("failed — {detail}");
+                }
+            }
+            println!(
+                "\x1b[2m({})\x1b[0m",
+                if record {
+                    "recorded — the next check compares against this"
+                } else {
+                    "nothing was recorded; the baseline is where it was"
+                }
+            );
+        }
+        MonitorCommand::Log { schedule, limit } => {
+            let s = store
+                .schedule_named(&schedule)?
+                .with_context(|| format!("no schedule named `{schedule}`"))?;
+            let checks = store.monitor_checks(&s.id, limit)?;
+            if checks.is_empty() {
+                println!("{schedule}'s monitor has not been checked yet");
+            } else {
+                render_time::checks(&checks, now);
+            }
+        }
+    }
+    Ok(())
 }
 
 fn schedule_command(jod: &Jod, what: ScheduleCommand) -> Result<()> {

@@ -110,6 +110,83 @@ pub fn deliveries(list: &[jod_core::webhook::Delivery], now_ms: i64) {
     }
 }
 
+/// Every monitor, against the schedule whose spending it decides.
+///
+/// Named by its schedule rather than keyed by its id: a monitor is only ever
+/// talked about as "the monitor on nightly-sweep", and printing an id here
+/// would make every read of this list start with a lookup somewhere else.
+pub fn monitors(list: &[(jod_core::monitor::Monitor, String)], now_ms: i64) {
+    for (m, name) in list {
+        // Whether a baseline exists, not whether the schedule is armed — the
+        // schedule list already answers that one. A monitor with no digest
+        // suppresses nothing and wakes nothing on its next tick, and "why did
+        // my monitor not fire" is answered here more often than anywhere else.
+        let (mark, colour) = match m.last_digest {
+            Some(_) => ("●", GREEN),
+            None => ("○", DIM),
+        };
+        println!(
+            "{colour}{mark}{RESET} {BOLD}{:<20}{RESET} {DIM}{:<9}{:<8}{RESET} {}",
+            name,
+            m.mode.as_str(),
+            m.probe.kind(),
+            m.probe.target()
+        );
+        let mut facts = vec![match m.last_checked_at_ms {
+            Some(at) => format!("checked {}", when(at, now_ms)),
+            None => "never checked".to_string(),
+        }];
+        if let Some(at) = m.last_changed_at_ms {
+            facts.push(format!("changed {}", when(at, now_ms)));
+        }
+        if m.last_digest.is_none() {
+            facts.push("no baseline — the first check sets one and wakes nothing".into());
+        }
+        println!("  {DIM}{}{RESET}", facts.join(" · "));
+    }
+}
+
+/// What a monitor has seen, newest first.
+///
+/// `unchanged` is the outcome this whole feature exists to produce, so it is
+/// dimmed rather than hidden: a column of quiet ticks is the evidence that a
+/// watchdog is working, and a list that showed only the exciting rows would
+/// look identical to one that had not run at all.
+pub fn checks(list: &[jod_core::monitor::Check], now_ms: i64) {
+    for c in list {
+        let colour = match c.outcome.as_str() {
+            "changed" | "reported" => GREEN,
+            "failed" => RED,
+            "baseline" => YELLOW,
+            _ => DIM,
+        };
+        let detail = match &c.detail {
+            Some(d) => format!(" {}", one_line(d)),
+            None => String::new(),
+        };
+        println!(
+            "{DIM}{}{RESET} {colour}{:<9}{RESET}{detail}",
+            when(c.at_ms, now_ms),
+            c.outcome
+        );
+    }
+}
+
+/// A detail collapsed onto the one line a list row has for it.
+///
+/// A failing probe's detail is often a multi-line stderr, and letting it wrap
+/// freely turns a ten-row history into a screenful where the timestamps no
+/// longer line up — which is the only thing the list is read for.
+fn one_line(s: &str) -> String {
+    const WIDTH: usize = 72;
+    let flat = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() > WIDTH {
+        format!("{}…", flat.chars().take(WIDTH - 1).collect::<String>())
+    } else {
+        flat
+    }
+}
+
 pub fn schedules(list: &[Schedule], now_ms: i64) {
     for s in list {
         let (mark, colour) = schedule_mark(s.state);

@@ -33,3 +33,4 @@ apps/desktop/src-tauri/gen/
 # absolute paths) and reproducible from tauri.conf.json, so it is regenerated
 # on the Mac that builds rather than tracked.
 apps/ios/src-tauri/gen/
+.env
