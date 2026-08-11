@@ -151,6 +151,10 @@ async fn event_loop(
     opts: Options,
 ) -> Result<()> {
     let mut app = App::new(opts.harness, opts.model.clone(), opts.resume.clone());
+    // Start where the launch flag put us. It is also the ceiling — see
+    // `bounded` — so starting anywhere else would show a mode the first spawn
+    // would silently clamp.
+    app.mode = opts.permission;
     app.team = opts.team.clone();
     app.now_ms = now_ms();
     app.agents = list_agents(&jod).await;
@@ -728,6 +732,26 @@ fn on_key(app: &mut App, key: KeyEvent, viewport: usize) -> Option<Action> {
         if let Some(action) = on_chord(app, key) {
             return action;
         }
+    }
+    // Tab and Shift-Tab, on every screen, because they answer two questions you
+    // have everywhere: how much may this thing do, and what else is running.
+    //
+    // Tab defers to the completion popup, which owns it while it is up — one
+    // key doing two jobs is only safe while the layer that has it is visible,
+    // and the popup is. Shift-Tab has no such contender.
+    match key.code {
+        KeyCode::BackTab => {
+            app.panel = !app.panel;
+            return None;
+        }
+        KeyCode::Tab if command::completions(&app.input, app).is_empty() => {
+            let said = app.cycle_mode();
+            if app.workspace == Workspace::Chat {
+                app.push(Entry::Notice(said));
+            }
+            return None;
+        }
+        _ => {}
     }
     if app.workspace.is_list() {
         return on_workspace_key(app, key, viewport);
@@ -1809,6 +1833,18 @@ fn apply_slash(app: &mut App, slash: command::Slash) -> Option<Action> {
             app.model = model;
             app.push(Entry::Notice(said));
         }
+        // Naming a mode sets it; naming none moves to the next, so `/mode` and
+        // the Tab key are one setting reached two ways rather than two.
+        Slash::Mode(mode) => {
+            let said = match mode {
+                Some(m) => {
+                    app.mode = m;
+                    format!("mode: {}", m.label())
+                }
+                None => app.cycle_mode(),
+            };
+            app.push(Entry::Notice(said));
+        }
         Slash::Thinking => {
             app.show_thinking = !app.show_thinking;
             app.push(Entry::Notice(format!(
@@ -2031,6 +2067,19 @@ fn resolve_agent(app: &mut App, typed: &str) -> Option<String> {
     }
 }
 
+/// The stricter of the launch ceiling and what is asked for.
+///
+/// `jod_core::mcp::permits` already knows the ordering, so this asks it rather
+/// than restating it — a second copy of "how much is more" is exactly the kind
+/// of duplicate that drifts and turns a ceiling into a suggestion.
+fn bounded(ceiling: PermissionPolicy, wanted: PermissionPolicy) -> PermissionPolicy {
+    if jod_core::mcp::permits(ceiling, wanted) {
+        wanted
+    } else {
+        ceiling
+    }
+}
+
 async fn spawn(
     jod: &Arc<Jod>,
     app: &App,
@@ -2048,7 +2097,14 @@ async fn spawn(
             system: None,
             cwd: opts.cwd.clone(),
             model: app.model.clone(),
-            permission: opts.permission,
+            // The live mode, clamped by the one the process was launched with.
+            //
+            // A ceiling rather than a default, and the asymmetry is the point:
+            // `jod tui --permission plan` is somebody saying "not on this
+            // machine, not today", and a Tab press inside the program must not
+            // be able to talk them out of it. Downwards is always allowed —
+            // asking for *less* needs no permission.
+            permission: bounded(opts.permission, app.mode),
             // App owns the conversation cursor: it advances to the exact
             // session the harness reported on the previous turn. A background
             // delegation passes its own, because it is not part of this
@@ -2241,6 +2297,126 @@ mod tests {
         for c in text.chars() {
             press(app, KeyCode::Char(c));
         }
+    }
+
+    /// Tab is the mode key, and it works on every screen because "how much may
+    /// this do" is a question you have everywhere, not only in the chat box.
+    #[test]
+    fn tab_moves_to_the_next_permission_mode() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.mode = PermissionPolicy::Plan;
+        press(&mut app, KeyCode::Tab);
+        assert_eq!(app.mode, PermissionPolicy::Ask);
+
+        // And on a list screen too, without a transcript to write into.
+        app.go(Workspace::Schedules);
+        press(&mut app, KeyCode::Tab);
+        assert_eq!(app.mode, PermissionPolicy::AcceptEdits);
+    }
+
+    /// Tab still finishes a half-typed command. One key doing two jobs is only
+    /// safe while the layer that owns it is on screen — and the popup is.
+    #[test]
+    fn tab_completes_a_command_rather_than_changing_the_mode() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        let before = app.mode;
+        type_line(&mut app, "/harn");
+        press(&mut app, KeyCode::Tab);
+        assert_eq!(app.input, "/harness ", "the popup still owns Tab");
+        assert_eq!(app.mode, before, "and the mode was left alone");
+    }
+
+    #[test]
+    fn shift_tab_opens_and_closes_the_side_panel() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        assert!(!app.panel);
+        press(&mut app, KeyCode::BackTab);
+        assert!(app.panel);
+        press(&mut app, KeyCode::BackTab);
+        assert!(!app.panel, "the same key closes it");
+    }
+
+    /// Cycling has to reach every mode and come back, or Tab would be a way to
+    /// leave a mode and not return to it.
+    #[test]
+    fn cycling_with_tab_reaches_every_mode() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.mode = PermissionPolicy::Plan;
+        let mut seen = vec![app.mode];
+        for _ in 0..PermissionPolicy::ALL.len() {
+            press(&mut app, KeyCode::Tab);
+            seen.push(app.mode);
+        }
+        for mode in PermissionPolicy::ALL {
+            assert!(seen.contains(&mode), "{mode:?} is unreachable by Tab");
+        }
+        assert_eq!(app.mode, PermissionPolicy::Plan, "and it wraps");
+    }
+
+    #[test]
+    fn slash_mode_names_a_mode_or_cycles_without_one() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        apply_slash(&mut app, command::Slash::Mode(Some(PermissionPolicy::Plan)));
+        assert_eq!(app.mode, PermissionPolicy::Plan);
+
+        apply_slash(&mut app, command::Slash::Mode(None));
+        assert_eq!(app.mode, PermissionPolicy::Ask, "no argument cycles");
+    }
+
+    /// The launch flag is a ceiling, not a starting point that can be argued
+    /// with. `jod tui --permission plan` is somebody saying "not on this
+    /// machine"; a Tab press must not be able to talk them out of it.
+    #[test]
+    fn the_launch_mode_is_a_ceiling_the_tui_cannot_exceed() {
+        assert_eq!(
+            bounded(PermissionPolicy::Plan, PermissionPolicy::Bypass),
+            PermissionPolicy::Plan,
+            "the TUI escalated past its own ceiling"
+        );
+        // Downwards needs no permission at all.
+        assert_eq!(
+            bounded(PermissionPolicy::Bypass, PermissionPolicy::Plan),
+            PermissionPolicy::Plan
+        );
+        for mode in PermissionPolicy::ALL {
+            assert_eq!(bounded(mode, mode), mode);
+        }
+    }
+
+    /// What occupies the window is everything the model was shown, cache reads
+    /// included — and it is *this turn's* total, not a running sum. Adding them
+    /// up counts the same history once per turn and reports a full window after
+    /// about four turns.
+    #[test]
+    fn context_is_the_last_turns_total_rather_than_a_running_sum() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        let turn = |input: u64, cached: u64| AgentEvent::Finished {
+            text: None,
+            exit_code: Some(0),
+            is_error: false,
+            usage: jod_core::Usage {
+                input_tokens: Some(input),
+                cache_read_tokens: Some(cached),
+                ..Default::default()
+            },
+        };
+        app.apply(&turn(1_000, 9_000));
+        assert_eq!(app.context_tokens, 10_000);
+        app.apply(&turn(1_200, 14_000));
+        assert_eq!(app.context_tokens, 15_200, "replaced, not accumulated");
+    }
+
+    #[test]
+    fn compaction_is_recommended_before_the_window_is_full() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.context_tokens = 0;
+        assert!(!app.should_compact());
+        app.context_tokens = (app::CONTEXT_WINDOW as f64 * app::COMPACT_AT) as u64 + 1;
+        assert!(app.should_compact());
+        assert!(
+            app.context_fraction() < 1.0,
+            "the advice must arrive while there is still room to write a summary"
+        );
     }
 
     /// Enter on a command that still needs an argument must say so, not

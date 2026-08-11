@@ -8,7 +8,7 @@
 use std::cmp::Reverse;
 
 use jod_core::team::{Member, TeamTask};
-use jod_core::{AgentEvent, HarnessKind, Resume};
+use jod_core::{AgentEvent, HarnessKind, PermissionPolicy, Resume};
 
 use super::data::{
     ActivityItem, GoalRow, HookRow, MemoryKind, MemoryNode, ScheduleRow, Source, TaskRow, TaskState,
@@ -201,7 +201,43 @@ pub struct App {
     /// running and reports in through the panel and a notice when it ends —
     /// which is what makes this an orchestrator rather than a chat window.
     pub watching: Option<String>,
+    /// How much the next turn may do without asking.
+    ///
+    /// On the app rather than only on `Options`, because it has to be
+    /// changeable *while you are talking*: the mode you want depends on what
+    /// you are about to ask for, and a setting fixed at launch means quitting
+    /// the program to change your mind. Read at every spawn, so a change takes
+    /// effect on the next turn and never mid-run.
+    pub mode: PermissionPolicy,
+    /// Whether the right-hand panel is showing. Shift-Tab opens and closes it.
+    pub panel: bool,
+    /// Tokens the watched conversation is carrying, as best the harness has
+    /// reported them.
+    ///
+    /// "As best" is the honest framing: this is the last turn's input plus
+    /// cache reads, which is what a harness reports and what actually occupies
+    /// the window. It is an estimate and the screen must say so rather than
+    /// print a precise-looking number nobody can check.
+    pub context_tokens: u64,
 }
+
+/// Where the context bar turns from information into advice.
+///
+/// Compaction is cheap and losing a conversation to a hard context error is
+/// not, so the recommendation comes well before the wall. Claude Code compacts
+/// around here too, for the same reason: the summary is better when there is
+/// still room to write it.
+pub const COMPACT_AT: f64 = 0.75;
+
+/// The window to measure `context_tokens` against.
+///
+/// A single number for every harness and model, which is a deliberate
+/// simplification: Jod cannot know the real limit — it varies by model, the
+/// harness does not report it, and guessing per model would be a table that is
+/// wrong the week a model ships. What the bar is for is "am I near the point
+/// where I should compact", and a fixed generous denominator answers that
+/// honestly as long as the screen calls it an estimate.
+pub const CONTEXT_WINDOW: u64 = 200_000;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct AgentLine {
@@ -429,7 +465,41 @@ impl App {
             should_quit: false,
             confirm_quit: false,
             watching: None,
+            mode: PermissionPolicy::default(),
+            panel: false,
+            context_tokens: 0,
         }
+    }
+
+    /// Move to the next permission mode, and say what happened.
+    ///
+    /// Returns the notice rather than pushing it, so the caller decides where
+    /// it goes — the same call serves the chat transcript and the status line.
+    ///
+    /// Two clocks, and the wording has to be honest about both: Jod's own MCP
+    /// tools are checked per call and change immediately, while the harness's
+    /// native tools are bounded by the `--permission-mode` flag chosen when the
+    /// process was spawned. A turn already in flight keeps the mode it started
+    /// in; there is no way to tell a running harness otherwise.
+    pub fn cycle_mode(&mut self) -> String {
+        self.mode = self.mode.next();
+        let when = if self.busy {
+            " — from the next turn; this one keeps the mode it started in"
+        } else {
+            ""
+        };
+        format!("mode: {}{when}", self.mode.label())
+    }
+
+    /// How full the context window is, as a fraction — capped at 1.0 so a bar
+    /// drawn from it cannot overflow its box.
+    pub fn context_fraction(&self) -> f64 {
+        (self.context_tokens as f64 / CONTEXT_WINDOW as f64).min(1.0)
+    }
+
+    /// Whether it is worth compacting yet.
+    pub fn should_compact(&self) -> bool {
+        self.context_fraction() >= COMPACT_AT
     }
 
     /// Replace the input with a chosen completion, cursor at the end.
@@ -1181,6 +1251,15 @@ impl App {
             } => {
                 if let Some(c) = usage.cost_usd {
                     self.cost_usd += c;
+                }
+                // What actually occupies the window: everything the model was
+                // shown this turn, whether it was sent fresh or read from
+                // cache. Assigned rather than accumulated — each turn resends
+                // the whole conversation, so adding them up would count the
+                // same history once per turn and hit the wall almost at once.
+                let shown = usage.input_tokens.unwrap_or(0) + usage.cache_read_tokens.unwrap_or(0);
+                if shown > 0 {
+                    self.context_tokens = shown;
                 }
                 let mut bits = vec![];
                 if let Some(t) = usage.output_tokens {

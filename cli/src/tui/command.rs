@@ -10,7 +10,7 @@
 //! because a `/compact` that silently does nothing is worse than no `/compact`.
 //! Unrecognised input is reported, never swallowed.
 
-use jod_core::HarnessKind;
+use jod_core::{HarnessKind, PermissionPolicy};
 
 use super::workspace::Workspace;
 
@@ -22,6 +22,9 @@ pub enum Slash {
     Harness(HarnessKind),
     /// Set the model, or clear it back to the harness default.
     Model(Option<String>),
+    /// Set how much the agent may do without asking, or — with no argument —
+    /// move to the next mode, which is what Tab does.
+    Mode(Option<PermissionPolicy>),
     Thinking,
     /// Show or hide what tools gave back.
     Details,
@@ -102,6 +105,14 @@ pub fn parse(line: &str) -> Option<Slash> {
                 Slash::Model(Some(arg.to_string()))
             }
         }
+        // `/mode` with no argument cycles, so the command and the Tab key mean
+        // the same thing rather than being two ways to reach one setting that
+        // disagree about what "no argument" means.
+        "mode" | "permission" | "permissions" => match jod_core::mcp::parse_permission(arg) {
+            Some(mode) => Slash::Mode(Some(mode)),
+            None if arg.is_empty() => Slash::Mode(None),
+            None => Slash::Unknown(format!("/mode {arg}")),
+        },
         "thinking" | "reasoning" => Slash::Thinking,
         "details" | "output" => Slash::Details,
         // `/new` alone is still a fresh conversation, which is what it has
@@ -275,6 +286,7 @@ pub const HELP: &[(&str, &str)] = &[
     ("/help", "this list"),
     ("/harness <name>", "claude, opencode or agy — takes effect next turn"),
     ("/model <name>", "set the model; no argument restores the default"),
+    ("/mode [name]", "plan, ask, edits or auto; no argument cycles (Tab)"),
     ("/thinking", "show or hide reasoning"),
     ("/details", "show or hide what tools returned"),
     ("/new [kind]", "a fresh conversation, or a new schedule/goal/hook/task"),
@@ -391,6 +403,21 @@ pub fn completions(input: &str, app: &crate::tui::App) -> Vec<Completion> {
                     format!("/{name} {id}"),
                     format!("{} · {}", a.status, a.name),
                 )
+            })
+            .collect(),
+        // Four spellings nobody should have to remember, offered with what
+        // each one actually costs you.
+        "mode" | "permission" | "permissions" => PermissionPolicy::ALL
+            .into_iter()
+            .filter(|m| m.label().starts_with(&typed))
+            .map(|m| {
+                let what = match m {
+                    PermissionPolicy::Plan => "read and reason; change nothing",
+                    PermissionPolicy::Ask => "check with me first — denies when nobody answers",
+                    PermissionPolicy::AcceptEdits => "edits go through; the rest asks",
+                    PermissionPolicy::Bypass => "everything auto-approved",
+                };
+                Completion::new(format!("/{name} {}", m.label()), what)
             })
             .collect(),
         "new" => KINDS
@@ -622,6 +649,47 @@ mod tests {
         assert_eq!(parse("/model"), Some(Slash::Model(None)));
         assert_eq!(parse("/model default"), Some(Slash::Model(None)));
         assert_eq!(parse("/model clear"), Some(Slash::Model(None)));
+    }
+
+    /// Every mode has to be nameable, or a mode would exist that Tab can reach
+    /// and nobody can ask for directly.
+    #[test]
+    fn every_mode_can_be_named_and_no_argument_means_cycle() {
+        for mode in PermissionPolicy::ALL {
+            assert_eq!(
+                parse(&format!("/mode {}", mode.label())),
+                Some(Slash::Mode(Some(mode))),
+                "{} is not accepted",
+                mode.label()
+            );
+        }
+        assert_eq!(parse("/mode"), Some(Slash::Mode(None)), "bare /mode cycles");
+        // The harnesses' own spellings, since that is what a person has read.
+        assert_eq!(parse("/mode manual"), Some(Slash::Mode(Some(PermissionPolicy::Ask))));
+        assert_eq!(
+            parse("/mode bypass"),
+            Some(Slash::Mode(Some(PermissionPolicy::Bypass)))
+        );
+    }
+
+    #[test]
+    fn an_unknown_mode_is_reported_rather_than_guessed() {
+        assert_eq!(parse("/mode yolo"), Some(Slash::Unknown("/mode yolo".into())));
+    }
+
+    /// Offering a mode the parser rejects would be a popup that suggests a
+    /// mistake.
+    #[test]
+    fn every_suggested_mode_parses() {
+        let offered = completions("/mode ", &fleet(&[]));
+        assert_eq!(offered.len(), PermissionPolicy::ALL.len());
+        for c in offered {
+            assert!(
+                matches!(parse(&c.line), Some(Slash::Mode(Some(_)))),
+                "{} was suggested but does not parse",
+                c.line
+            );
+        }
     }
 
     #[test]
