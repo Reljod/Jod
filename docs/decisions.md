@@ -1125,3 +1125,90 @@ to say so.
 
 Where a tool can decline to answer, it must be made to say which inputs it
 skipped, or its zeroes cannot be read as evidence.
+
+## Asking and planning were the same mode, so nothing ever acted
+
+`PermissionPolicy` had three levels, and the least of them was `Ask`. It mapped
+to Claude Code's `--permission-mode plan`, for a reason that was sound when it
+was written: under `-p` there is nobody to answer a prompt, so "ask" would
+otherwise mean "deny", and a bare `claude -p` refused even to search the web.
+Plan mode grants reading and refuses every write path, which is a better answer
+than silent denial.
+
+The trouble is that `Ask` was also `#[default]`. So the default for every spawn
+Jod made — the TUI's chat box, a schedule at 2am, a goal iteration, a webhook
+run — was *plan mode*. Jod could describe work in any amount of detail and could
+not do any of it. That reads as a model being unhelpful, not as a flag, which is
+why it survived so long.
+
+Four levels now, and the split is the fix:
+
+| | claude | opencode | agy |
+|---|---|---|---|
+| `Plan` | `--permission-mode plan` | — | `--mode plan` |
+| `Ask` | `--permission-mode manual` | — | — (its default is ask) |
+| `AcceptEdits` | `--permission-mode acceptEdits` | — | `--mode accept-edits` |
+| `Bypass` ("auto") | `--dangerously-skip-permissions` | `--auto` | `--dangerously-skip-permissions` |
+
+Two things worth keeping:
+
+**The flag names were read off the binaries, not assumed.** `claude --help`
+prints exactly six modes; an earlier attempt at this seam had designed around
+`--permission-prompt-tool`, which this build does not have. A mode name a
+harness does not recognise is not a compile error, not a spawn error, and not
+visible until an agent quietly does the wrong amount — so `claude.rs` now has a
+test pinning every mode it emits against that list of six.
+
+**OpenCode cannot express three of the four**, and says so rather than
+pretending. It has one auto-approve switch and no mode flag at all, so `Plan`,
+`Ask` and `AcceptEdits` all collapse to "leave `--auto` off". Emitting a
+`--mode plan` OpenCode ignores would have looked like a working plan mode right
+up until something got written.
+
+The default is now `Bypass`. That is what Jod is for — a mode that stops to ask
+an empty room is a mode that never finishes. The one place that does *not*
+follow the new default is `jod-api`'s `SpawnBody`, which pins `Ask`
+explicitly: that field is filled in by whatever is on the other end of a socket,
+and a caller who omits it has not asked for anything. The dangerous setting
+should not be one forgotten JSON key away on the only surface whose callers Jod
+does not control.
+
+### The mode belongs to the conversation, not the process
+
+It was set once, at `jod tui` launch, and could never be changed — you quit the
+program to change your mind. But it was never a process property to begin with:
+Jod respawns the harness once per turn against a resumed session, so
+`--permission-mode` is decided afresh at every spawn. The only place the answer
+can live and survive a restart is the row the spawn is for.
+
+Two clocks, and the screen has to be honest about both. Jod's own MCP tools are
+checked per call and change immediately; the harness's native tools are bounded
+by the flag chosen when its process started, so a turn already in flight keeps
+the mode it began with. There is no way to tell a running harness otherwise.
+
+The launch flag survives as a *ceiling* rather than a default. `jod tui
+--permission plan` is somebody saying "not on this machine, not today", and a
+Tab press inside the program must not be able to talk them out of it. Downward
+is always allowed: asking for less needs no permission.
+
+## A chat you are watching may schedule; one that wandered off may not
+
+The TUI passed `tools: None` on every spawn from the chat box, with a comment
+explaining that "an agent started from the chat box is doing a task, not
+orchestrating" — giving it Jod's verbs would let a prompt typed in a hurry
+create schedules and spend money every night.
+
+That reasoning is right about delegations and wrong about turns, and the two
+were reaching it through one function. This codebase already states the rule:
+the main chat gets the full set because it is "you, present, watching". A turn
+you just typed into the TUI, whose output is filling your screen, meets that
+condition by definition. Withholding the grant there did not make anything
+safer; it made "schedule this for me" a request Jod could acknowledge and had no
+verb to carry out.
+
+So `tools` became a parameter, and the two call sites are named for the only
+thing that separates them — whether anybody is looking. `WATCHED` gets
+`Orchestrate`; `DELEGATED` gets `ToolAccess::unattended()`, deferring to the
+codebase's own answer rather than a copy of it. A background agent that can
+create background agents has no bound at all, and it multiplies while nobody is
+reading.
