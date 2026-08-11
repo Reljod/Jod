@@ -259,6 +259,16 @@ enum Command {
         #[command(subcommand)]
         what: WebhookCommand,
     },
+    /// Jod on a phone.
+    ///
+    /// `HttpBot`, the poller, the rate-limit backoff, the allowlist and the
+    /// refusal record were all built and tested, and `Bridge` — the piece that
+    /// joins them to Jod — was never constructed anywhere. This is that
+    /// missing entry point.
+    Telegram {
+        #[command(subcommand)]
+        what: TelegramCommand,
+    },
     /// Let a schedule decide for itself whether it is worth waking a model.
     ///
     /// A monitor is a probe and a hash attached to one schedule. Unchanged
@@ -471,6 +481,25 @@ enum WebhookCommand {
         #[arg(long)]
         json: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum TelegramCommand {
+    /// Poll Telegram and delegate what arrives. Runs until stopped.
+    Serve {
+        /// Where an agent launched from a chat runs.
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+        #[arg(short = 'H', long, value_enum, default_value_t = HarnessArg::Claude)]
+        harness: HarnessArg,
+    },
+    /// Who the bot is, and who has tried to talk to it.
+    ///
+    /// Works *before* an allowlist exists, which is the only reason it can be
+    /// used to build one: `serve` refuses to start without
+    /// `JOD_TELEGRAM_ALLOWED_USERS`, and nothing else tells you the numeric id
+    /// that belongs in it. Message the bot, run this, copy the id.
+    Whoami,
 }
 
 #[derive(Subcommand)]
@@ -802,8 +831,44 @@ impl From<PermissionArg> for PermissionPolicy {
     }
 }
 
+/// Read `.env` into the process environment, without overriding anything the
+/// caller actually exported.
+///
+/// A real environment variable always wins. A file that could silently replace
+/// what an operator typed on the command line would make `JOD_TELEGRAM_TOKEN=… jod …`
+/// a lie, and the failure would look like the wrong token rather than the wrong
+/// precedence.
+///
+/// Deliberately not a dependency. The format Jod needs is `KEY=value` lines with
+/// `#` comments — `dotenvy` brings variable interpolation, multi-line values and
+/// export syntax that nothing here uses, for a file that holds two secrets.
+fn load_dotenv() {
+    let Ok(text) = std::fs::read_to_string(".env") else {
+        return;
+    };
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let key = key.trim().strip_prefix("export ").unwrap_or(key.trim());
+        // Quotes are stripped because writing a token bare and writing it
+        // quoted are both ordinary, and a token carrying a literal `"` fails
+        // authentication with a message that blames the token.
+        let value = value.trim().trim_matches('"').trim_matches('\'');
+        if std::env::var_os(key).is_none() {
+            // SAFETY: single-threaded, before any task is spawned.
+            unsafe { std::env::set_var(key, value) };
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    load_dotenv();
     let cli = Cli::parse();
     // Persistent by default: an assistant that forgets every run when the
     // process exits is a task runner, not an assistant.
@@ -1025,6 +1090,7 @@ async fn main() -> Result<()> {
         Command::Schedule { what } => schedule_command(&jod, what)?,
         Command::Webhook { what } => webhook_command(&jod, what)?,
         Command::Monitor { what } => monitor_command(&jod, what)?,
+        Command::Telegram { what } => telegram_command(jod, what).await?,
         Command::Goal { what } => goal_command(&jod, what)?,
 
         Command::Forget {
@@ -2053,6 +2119,106 @@ fn set_rule_armed(store: &jod_core::store::Store, name: &str, armed: bool) -> Re
     } else {
         bail!("no rule named `{name}`")
     }
+}
+
+/// The bot token, from the one name Jod documents or the one people write.
+///
+/// `JOD_TELEGRAM_TOKEN` is canonical and always wins. `TELEGRAM_BOT_API_KEY` is
+/// accepted because it is what a person writes into a `.env` without consulting
+/// anything, and refusing it teaches nothing — the alternative is a bot that is
+/// silent for the one reason its own error message does not mention.
+fn telegram_token() -> Result<String> {
+    for name in ["JOD_TELEGRAM_TOKEN", "TELEGRAM_BOT_API_KEY"] {
+        if let Ok(t) = std::env::var(name) {
+            if !t.trim().is_empty() {
+                return Ok(t.trim().to_string());
+            }
+        }
+    }
+    bail!("JOD_TELEGRAM_TOKEN is not set — a `.env` in this directory is read automatically")
+}
+
+/// Carry out a `jod telegram …` subcommand.
+async fn telegram_command(jod: std::sync::Arc<Jod>, what: TelegramCommand) -> Result<()> {
+    use jod_core::telegram::{Allowlist, Bridge, Config, HttpBot, Poller};
+    match what {
+        TelegramCommand::Whoami => {
+            let bot = HttpBot::new(&telegram_token()?)?;
+            // An empty allowlist refuses everybody, which is precisely what
+            // makes this a bootstrap: every pending message becomes a Refusal
+            // carrying the id that belongs in JOD_TELEGRAM_ALLOWED_USERS.
+            // Reusing the real poller rather than curl means the ids printed
+            // here are the ids `serve` will actually compare against.
+            let poller = Poller::new(bot, Allowlist::default());
+            let batch = poller
+                .poll_once()
+                .await
+                .map_err(|e| anyhow::anyhow!("Telegram refused the poll: {e}"))?;
+            println!("the token works — Telegram answered ({} update(s))", batch.len());
+            let refusals = poller.refusals();
+            if refusals.is_empty() {
+                println!("nobody has messaged the bot yet — send it anything, then re-run");
+                return Ok(());
+            }
+            // By person, not by message: somebody who sent three messages is
+            // still one id to allow, and printing them three times reads as
+            // three different people at a glance.
+            println!("\nwho has messaged it:");
+            let mut ids: Vec<i64> = Vec::new();
+            for r in &refusals {
+                if ids.contains(&r.user_id) {
+                    continue;
+                }
+                ids.push(r.user_id);
+                let who = r.username.as_deref().unwrap_or("(no username)");
+                println!("  {} @{}", r.user_id, who);
+            }
+            let list = ids
+                .iter()
+                .map(|i| i.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            println!("\nto let them in:\n  JOD_TELEGRAM_ALLOWED_USERS={list}");
+            // Said out loud because this command consumes the backlog: the
+            // messages just counted will not be redelivered to `serve`, and
+            // silently eating the first thing somebody sent is the kind of
+            // thing that reads as a broken bot.
+            println!("\n\x1b[2m(these updates are now acknowledged and will not reach `serve`)\x1b[0m");
+        }
+        TelegramCommand::Serve { cwd, harness } => {
+            // `from_parts` rather than `from_env`, purely so the token comes
+            // from the same lookup `whoami` uses. Routing one of the two
+            // through the alias and not the other is how this first shipped,
+            // and the symptom was `whoami` proving the token while `serve`
+            // insisted it was unset.
+            //
+            // Everything else `from_env` does is kept, including the refusal
+            // of an empty allowlist at startup rather than at the first
+            // message: a bot that silently answers nobody looks exactly like
+            // a bot with a bad token.
+            let mut config = Config::from_parts(
+                Some(telegram_token()?),
+                std::env::var("JOD_TELEGRAM_ALLOWED_USERS").ok(),
+                jod_core::service::default_cwd(),
+            )?;
+            if let Some(dir) = cwd {
+                config.cwd = dir;
+            }
+            config.harness = HarnessKind::from(harness);
+            let bot = HttpBot::new(&config.token)?;
+            let bridge = Bridge::new(bot, jod, &config);
+            println!(
+                "listening as a {} bridge in {} — Ctrl-C stops it",
+                config.harness.label(),
+                config.cwd.display()
+            );
+            bridge
+                .run()
+                .await
+                .map_err(|e| anyhow::anyhow!("the bridge stopped: {e}"))?;
+        }
+    }
+    Ok(())
 }
 
 /// Carry out a `jod monitor …` subcommand.
