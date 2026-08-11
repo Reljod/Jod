@@ -2347,11 +2347,16 @@ impl Store {
             tx.execute("DELETE FROM relations", [])?;
             tx.execute("DELETE FROM entities", [])?;
             let facts: Vec<(i64, String, String, String, String, Option<String>, Option<String>)> = {
+                // `origin <> 'untrusted'` for the same reason `insert_fact`
+                // skips the link: a rebuild that seeded everything would undo
+                // the boundary wholesale, and a rebuild is exactly when nobody
+                // is watching. This is also the promotion path — a fact whose
+                // origin is corrected joins the graph on the next rebuild.
                 let mut stmt = tx.prepare(
                     "SELECT id, scope, subject, predicate, object, valid_from, valid_to
-                       FROM facts ORDER BY id",
+                       FROM facts WHERE origin <> ?1 ORDER BY id",
                 )?;
-                let rows = stmt.query_map([], |r| {
+                let rows = stmt.query_map(params![Origin::Untrusted.as_str()], |r| {
                     Ok((
                         r.get(0)?,
                         r.get(1)?,
@@ -2596,16 +2601,29 @@ fn insert_fact(tx: &rusqlite::Transaction, fact: &NewFact) -> Result<i64> {
     let id = tx.last_insert_rowid();
     // In the same transaction as the fact, so the graph can never be missing an
     // edge for a fact that committed.
-    link(
-        tx,
-        id,
-        &fact.scope,
-        &fact.subject,
-        &fact.predicate,
-        &fact.object,
-        fact.valid_from.as_deref(),
-        None,
-    )?;
+    //
+    // Untrusted material is not linked at all, which is the only version of
+    // this boundary that holds. `recall` learned to exclude it and `recall_expanded`
+    // learned to exclude it, and neither helped: `jod related` and `jod path`
+    // walk the graph directly, so anything an ingested page asserted was one
+    // hop from a real entity and reachable. Filtering at read means every read
+    // has to remember; not building the edge means none of them do.
+    //
+    // The fact itself is still stored, still searchable with an explicit
+    // `--include-untrusted`, and still promotable — `rebuild_graph` exists for
+    // exactly the case where something's trust changes.
+    if fact.origin != Origin::Untrusted {
+        link(
+            tx,
+            id,
+            &fact.scope,
+            &fact.subject,
+            &fact.predicate,
+            &fact.object,
+            fact.valid_from.as_deref(),
+            None,
+        )?;
+    }
     Ok(id)
 }
 
@@ -4474,6 +4492,64 @@ mod tests {
             .map(|n| n.name)
             .collect();
         assert!(found.is_empty(), "an untrusted seed reached the graph: {found:?}");
+    }
+
+    /// The test above passed while the boundary leaked, because it went through
+    /// `recall_expanded` — the one path that filtered, and the one path nothing
+    /// in production called. `jod related` calls `neighbourhood`, which walks
+    /// the edges directly, so an ingested page's claim sat one hop from a real
+    /// entity and came back.
+    ///
+    /// The fix is not another filter: untrusted facts are never linked, so
+    /// there is no edge to walk. Asserted here through the traversal a person
+    /// actually reaches.
+    #[test]
+    fn untrusted_material_is_not_reachable_by_traversal() {
+        let s = store();
+        s.remember(NewFact::new("payroll", "pays", "reljod")).unwrap();
+        s.remember(NewFact::new("payroll", "controlled-by", "attacker").from(Origin::Untrusted))
+            .unwrap();
+
+        let around: Vec<String> = s
+            .neighbourhood(DEFAULT_SCOPE, "payroll", 2, 50)
+            .unwrap()
+            .into_iter()
+            .map(|n| n.name)
+            .collect();
+        assert!(
+            !around.iter().any(|n| n == "attacker"),
+            "untrusted material is one hop from a real entity: {around:?}"
+        );
+        assert!(around.iter().any(|n| n == "reljod"), "{around:?}");
+
+        // And no path exists to it, which is the other verb that walks edges.
+        assert!(
+            s.path_between(DEFAULT_SCOPE, "reljod", "attacker", 3).unwrap().is_none(),
+            "a path led to untrusted material"
+        );
+    }
+
+    /// A rebuild is when nobody is watching, so seeding everything there would
+    /// have undone the boundary wholesale and silently.
+    #[test]
+    fn a_rebuild_does_not_readmit_untrusted_material() {
+        let s = store();
+        s.remember(NewFact::new("payroll", "pays", "reljod")).unwrap();
+        s.remember(NewFact::new("payroll", "controlled-by", "attacker").from(Origin::Untrusted))
+            .unwrap();
+
+        s.rebuild_graph().unwrap();
+
+        let around: Vec<String> = s
+            .neighbourhood(DEFAULT_SCOPE, "payroll", 2, 50)
+            .unwrap()
+            .into_iter()
+            .map(|n| n.name)
+            .collect();
+        assert!(
+            !around.iter().any(|n| n == "attacker"),
+            "the rebuild readmitted untrusted material: {around:?}"
+        );
     }
 
     /// The fallback used to be `Ran`, so an outcome written by a newer build
