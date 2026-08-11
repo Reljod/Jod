@@ -285,6 +285,11 @@ tag is refused: that tag would install on nobody's machine.
 → [`.github/scripts/release_version.sh`](./.github/scripts/release_version.sh),
 [`tests/release-version.test.sh`](./tests/release-version.test.sh)
 
+Opening that PR needs **Settings → Actions → General → "Allow GitHub Actions to
+create and approve pull requests"** switched on (it is off by default). Without
+it the branch is still resolved, stamped and pushed — the job prints the
+`gh pr create` line to run by hand instead of failing.
+
 **2. Publish — this part is manual, always.**
 
 ```sh

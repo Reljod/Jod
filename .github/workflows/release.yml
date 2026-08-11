@@ -191,8 +191,24 @@ jobs:
           is why it is never automatic.
           EOF
 
-          gh pr create --draft --base "$BASE" --head "$BRANCH" \
-            --title "release: $NEXT" --body-file /tmp/release-pr-body.md
+          # The version is resolved, stamped and pushed by now; the PR is how it
+          # gets reviewed, not how it gets published. So a repo with "Allow
+          # GitHub Actions to create and approve pull requests" switched off
+          # (the default) gets told exactly what to run, rather than a red X on
+          # a branch that is in fact correctly prepared.
+          if ! gh pr create --draft --base "$BASE" --head "$BRANCH" \
+            --title "release: $NEXT" --body-file /tmp/release-pr-body.md; then
+            echo "::warning::could not open the PR — check Settings → Actions → General → 'Allow GitHub Actions to create and approve pull requests'. The branch is prepared; open it by hand:"
+            {
+              echo "### PR not opened"
+              echo
+              echo "\`$BRANCH\` is prepared and pushed at \`$NEXT\`. Open the PR with:"
+              echo
+              echo '```sh'
+              echo "gh pr create --draft --base $BASE --head $BRANCH --title 'release: $NEXT'"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Summarise
         env:
