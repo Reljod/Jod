@@ -1240,3 +1240,47 @@ thing that separates them — whether anybody is looking. `WATCHED` gets
 codebase's own answer rather than a copy of it. A background agent that can
 create background agents has no bound at all, and it multiplies while nobody is
 reading.
+
+## Four guards were green, and none of them were guarding
+
+Every one of these passed. Every one would have kept passing through the change
+it existed to catch.
+
+- **A budget test that measured its own arithmetic.** `keys::keybar` budgets the
+  verbs; the test rendered a bar and checked it fitted. Self-consistent by
+  construction, and green however wrong the padding constant shared with
+  `ui::two_ends` was — until the one screen whose verbs ended exactly on the
+  boundary, which would have lost its entire left half rather than one verb.
+- **A collision test that could only fail from its own fixture.** "Every row the
+  sweep claims is `telegram`" fires only if somebody adds a `cli` row *to that
+  test*. Writing `cli` rows in production would not have tripped it. A comment
+  wearing a test's clothes: found, not finding.
+- **A helper whose doc claimed a job it did not do.** `Verdict::is_trouble`
+  included `Owed` and said it was "the line the passive marker would be drawn
+  from". Anyone who believed the doc would have drawn a glyph on every Telegram
+  run for the seconds a reply is in flight, and a routine marker is one nobody
+  sees.
+- **A test that enumerated the wrong answers instead of naming the right one.**
+  `a_run_that_owed_nobody_anything_wears_no_mark` asserted the row carried
+  neither `⊘` nor `♻`. Swapping the predicate for a wrong one *passed*, because
+  the wrong predicate draws `○` — a third glyph the list had never heard of.
+
+The shape is one thing, and it is not carelessness — all four were written
+deliberately, by people who had just been arguing about correctness:
+
+**A guard has to name the property, not enumerate the ways of violating it.**
+
+"The gutter is blank" is a property. "It is not `⊘` and not `♻`" is a list, and
+a list goes stale the moment a third possibility exists — silently, because the
+test still passes. Likewise "the exit hint is present" is a property; "the bar
+is under N columns" is arithmetic the code already did. Likewise "a foreign row
+comes back untouched" is a property; "no `cli` row appears" is a statement about
+a fixture.
+
+The habit that found all four is cheap and mechanical: **break the thing on
+purpose and watch the test fail.** Not once at the end — at the moment you write
+the assertion, before you believe it. Report both directions. Three of the four
+above were caught by someone swapping in a deliberately wrong implementation to
+see what happened, and being surprised.
+
+A test you have never seen fail is a test you have never seen.
