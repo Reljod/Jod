@@ -410,7 +410,10 @@ fn draw_sessions(f: &mut Frame, app: &App, area: Rect) {
         let watched = app.watching.as_deref() == Some(a.id.as_str());
         items.push(ListItem::new(Line::from(vec![
             Span::styled(if watched { " ▸ " } else { "   " }, fg(USER)),
-            Span::styled(format!("{} ", run_glyph(&a.status)), fg(status_colour(&a.status))),
+            Span::styled(
+                format!("{} ", run_glyph(&a.status)),
+                fg(status_colour(&a.status)),
+            ),
             Span::styled(format!("{:<9}", short(&a.id)), fg(MUTED)),
             Span::styled(
                 super::app::short_duration(app.now_ms.saturating_sub(a.created_at_ms)),
@@ -449,11 +452,7 @@ fn draw_context(f: &mut Frame, app: &App, area: Rect) {
     let inner = area.width.saturating_sub(2) as usize;
     let percent = (app.context_fraction() * 100.0).round() as u16;
     let width = inner.saturating_sub(9).clamp(4, 22);
-    let colour = if app.should_compact() {
-        WARN
-    } else {
-        GOOD
-    };
+    let colour = if app.should_compact() { WARN } else { GOOD };
 
     let mut lines = vec![
         Line::from(vec![
@@ -560,14 +559,21 @@ fn draw_keybar(f: &mut Frame, app: &App, area: Rect) {
         Overlay::WhichKey => (keys::which_key_hint(false), "Esc cancels"),
         Overlay::WhichKeyNew => (keys::which_key_hint(true), "Esc cancels"),
         Overlay::Keymap => ("the keymap — any key closes it".to_string(), "Esc closes"),
-        Overlay::Confirm { .. } => ("y confirms · anything else cancels".to_string(), "Esc cancels"),
+        Overlay::Confirm { .. } => (
+            "y confirms · anything else cancels".to_string(),
+            "Esc cancels",
+        ),
         Overlay::Prompt { .. } => ("⏎ accepts · Esc cancels".to_string(), "Esc cancels"),
-        Overlay::None if app.here().editing_filter => {
-            ("typing filters this list".to_string(), "⏎ keeps it · Esc clears it")
-        }
+        Overlay::None if app.here().editing_filter => (
+            "typing filters this list".to_string(),
+            "⏎ keeps it · Esc clears it",
+        ),
         Overlay::None => (keys::keybar(ws), keys::keybar_exit(ws)),
     };
-    f.render_widget(Paragraph::new(two_ends(&left, right, area.width, MUTED)), area);
+    f.render_widget(
+        Paragraph::new(two_ends(&left, right, area.width, MUTED)),
+        area,
+    );
 }
 
 /// The status bar: where you are on the left, what is waiting on the right.
@@ -765,7 +771,11 @@ fn draw_which_key(f: &mut Frame, app: &App) {
         rows.push(("?".into(), "keys        the whole keymap".into()));
     }
 
-    let widest = rows.iter().map(|(_, t)| t.chars().count()).max().unwrap_or(0);
+    let widest = rows
+        .iter()
+        .map(|(_, t)| t.chars().count())
+        .max()
+        .unwrap_or(0);
     let items: Vec<ListItem> = rows
         .iter()
         .map(|(letter, text)| {
@@ -812,7 +822,12 @@ fn draw_keymap(f: &mut Frame, app: &App) {
     }
     let widest = lines
         .iter()
-        .map(|l| l.spans.iter().map(|s| s.content.chars().count()).sum::<usize>())
+        .map(|l| {
+            l.spans
+                .iter()
+                .map(|s| s.content.chars().count())
+                .sum::<usize>()
+        })
         .max()
         .unwrap_or(20);
     let panel = centred(f.area(), (widest + 6) as u16, (lines.len() + 2) as u16);
@@ -978,7 +993,9 @@ fn empty(what: &str) -> Vec<ListItem<'static>> {
 fn draw_fleet(f: &mut Frame, app: &App, area: Rect) {
     let (left, right) = split(area);
     let rows = app.fleet_rows();
-    let selected = app.list(Workspace::Fleet).index(&app.row_ids(Workspace::Fleet));
+    let selected = app
+        .list(Workspace::Fleet)
+        .index(&app.row_ids(Workspace::Fleet));
     let (first, height) = window(left, selected, rows.len());
     // Declared drop order: detail pane → harness → id, name last.
     let inner = left.width.saturating_sub(2) as usize;
@@ -1177,9 +1194,7 @@ fn draw_memory(f: &mut Frame, app: &App, area: Rect) {
                 Line::from(Span::styled(
                     format!(
                         " conf {:.2} · {} edges · seen {}×",
-                        n.confidence,
-                        n.degree,
-                        n.seen
+                        n.confidence, n.degree, n.seen
                     ),
                     fg(MUTED),
                 )),
@@ -1399,17 +1414,26 @@ fn draw_schedules(f: &mut Frame, app: &App, area: Rect) {
         let chosen = i == selected;
         let mut spans = vec![
             Span::styled(if chosen { "▸" } else { " " }, fg(USER)),
-            Span::styled(format!("{} ", s.state.glyph()), fg(schedule_colour(s.state))),
+            Span::styled(
+                format!("{} ", s.state.glyph()),
+                fg(schedule_colour(s.state)),
+            ),
             Span::styled(
                 format!("{:<17}", cut(&s.name, 17)),
                 if chosen { bold(USER) } else { fg(AGENT) },
             ),
         ];
         if show_gloss {
-            spans.push(Span::styled(format!("{:<20}", cut(&s.gloss, 19)), fg(AGENT)));
+            spans.push(Span::styled(
+                format!("{:<20}", cut(&s.gloss, 19)),
+                fg(AGENT),
+            ));
         }
         spans.push(Span::styled(
-            format!("{:<14}", s.next_ms.map(absolute).unwrap_or_else(|| "— paused".into())),
+            format!(
+                "{:<14}",
+                s.next_ms.map(absolute).unwrap_or_else(|| "— paused".into())
+            ),
             fg(MUTED),
         ));
         spans.push(Span::styled(
@@ -1461,7 +1485,11 @@ fn draw_schedules(f: &mut Frame, app: &App, area: Rect) {
                         run.cost_usd,
                         run.note
                     ),
-                    fg(if run.outcome == Outcome::Failed { BAD } else { MUTED }),
+                    fg(if run.outcome == Outcome::Failed {
+                        BAD
+                    } else {
+                        MUTED
+                    }),
                 )));
             }
         }
@@ -1503,7 +1531,10 @@ fn draw_goals(f: &mut Frame, app: &App, area: Rect) {
             ),
         ];
         if show_cadence {
-            spans.push(Span::styled(format!("{:<12}", cut(&g.cadence, 11)), fg(MUTED)));
+            spans.push(Span::styled(
+                format!("{:<12}", cut(&g.cadence, 11)),
+                fg(MUTED),
+            ));
         }
         if show_bar {
             spans.push(Span::styled(bar(g.percent(), 10), fg(GOOD)));
@@ -1532,7 +1563,10 @@ fn draw_goals(f: &mut Frame, app: &App, area: Rect) {
     if let Some(g) = app.selected_goal() {
         lines.push(Line::from(""));
         lines.push(rule(width));
-        lines.push(Line::from(Span::styled(format!("  {}", g.name), bold(AGENT))));
+        lines.push(Line::from(Span::styled(
+            format!("  {}", g.name),
+            bold(AGENT),
+        )));
         lines.push(Line::from(""));
         lines.push(detail("objective", &g.objective));
         lines.push(Line::from(Span::styled("  done when", fg(MUTED))));
@@ -1544,7 +1578,11 @@ fn draw_goals(f: &mut Frame, app: &App, area: Rect) {
                     fg(if check.done { GOOD } else { AGENT }),
                 ),
                 Span::styled(
-                    check.note.as_ref().map(|n| format!("   ← {n}")).unwrap_or_default(),
+                    check
+                        .note
+                        .as_ref()
+                        .map(|n| format!("   ← {n}"))
+                        .unwrap_or_default(),
                     fg(WARN),
                 ),
             ]));
@@ -1582,7 +1620,11 @@ fn draw_goals(f: &mut Frame, app: &App, area: Rect) {
                         it.cost_usd,
                         it.outcome.mark()
                     ),
-                    fg(if it.outcome == Outcome::Failed { BAD } else { MUTED }),
+                    fg(if it.outcome == Outcome::Failed {
+                        BAD
+                    } else {
+                        MUTED
+                    }),
                 )));
             }
         }
@@ -1643,16 +1685,27 @@ fn draw_hooks(f: &mut Frame, app: &App, area: Rect) {
         if show_repo {
             spans.push(Span::styled(format!("{:<20}", cut(&h.repo, 19)), fg(MUTED)));
         }
-        spans.push(Span::styled(format!("{:<28}", cut(&h.event, 27)), fg(AGENT)));
+        spans.push(Span::styled(
+            format!("{:<28}", cut(&h.event, 27)),
+            fg(AGENT),
+        ));
         spans.push(Span::styled(format!("{:<12}", cut(&h.runs, 11)), fg(MUTED)));
         if show_24h {
             spans.push(Span::styled(
-                format!("{:>4}  {:>6} ", h.deliveries_24h, since(app.now_ms, h.last_ms)),
+                format!(
+                    "{:>4}  {:>6} ",
+                    h.deliveries_24h,
+                    since(app.now_ms, h.last_ms)
+                ),
                 fg(MUTED),
             ));
             spans.push(Span::styled(
                 h.last_outcome.mark(),
-                fg(if h.last_outcome == Outcome::Failed { BAD } else { GOOD }),
+                fg(if h.last_outcome == Outcome::Failed {
+                    BAD
+                } else {
+                    GOOD
+                }),
             ));
         }
         lines.push(Line::from(spans));
@@ -1752,7 +1805,10 @@ fn draw_tasks(f: &mut Frame, app: &App, area: Rect) {
         ));
         if show_run {
             spans.push(Span::styled(
-                format!("{:<10}", t.run.as_deref().map(short).unwrap_or_else(|| "—".into())),
+                format!(
+                    "{:<10}",
+                    t.run.as_deref().map(short).unwrap_or_else(|| "—".into())
+                ),
                 fg(MUTED),
             ));
         }
@@ -1776,7 +1832,11 @@ fn draw_tasks(f: &mut Frame, app: &App, area: Rect) {
         lines.push(Line::from(vec![
             Span::styled(format!("  {}", t.id), bold(AGENT)),
             Span::styled(
-                format!("   {} · {}", t.state.label(), t.owner.clone().unwrap_or_else(|| "unclaimed".into())),
+                format!(
+                    "   {} · {}",
+                    t.state.label(),
+                    t.owner.clone().unwrap_or_else(|| "unclaimed".into())
+                ),
                 fg(MUTED),
             ),
         ]));
@@ -1940,7 +2000,10 @@ fn draw_team(f: &mut Frame, app: &App, area: Rect) {
                     },
                 ),
                 Span::styled(
-                    t.owner.as_ref().map(|o| format!("  ({o})")).unwrap_or_default(),
+                    t.owner
+                        .as_ref()
+                        .map(|o| format!("  ({o})"))
+                        .unwrap_or_default(),
                     fg(MUTED),
                 ),
             ])));
@@ -1992,7 +2055,13 @@ fn rule(width: usize) -> Line<'static> {
 /// A run-history strip: seven glyphs that say "healthy / flaky / dead" faster
 /// than seven timestamps, with `✗` for failure so colour is never load-bearing.
 fn strip_span(history: &[Outcome]) -> Span<'static> {
-    let cells: String = history.iter().rev().take(7).collect::<Vec<_>>().into_iter().rev()
+    let cells: String = history
+        .iter()
+        .rev()
+        .take(7)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
         .map(|o| o.cell())
         .collect();
     let failing = history.iter().rev().take(7).any(|o| *o == Outcome::Failed);
@@ -2018,7 +2087,10 @@ fn cut(s: &str, width: usize) -> String {
     if s.chars().count() <= width {
         return s.to_string();
     }
-    format!("{}…", s.chars().take(width.saturating_sub(1)).collect::<String>())
+    format!(
+        "{}…",
+        s.chars().take(width.saturating_sub(1)).collect::<String>()
+    )
 }
 
 /// A harness as a two- or three-letter code, so the column costs four cells
@@ -2077,7 +2149,9 @@ fn draw_transcript(f: &mut Frame, app: &App, area: Rect) -> usize {
         .title(title);
 
     f.render_widget(
-        Paragraph::new(lines).block(block).scroll((offset as u16, 0)),
+        Paragraph::new(lines)
+            .block(block)
+            .scroll((offset as u16, 0)),
         area,
     );
     viewport
@@ -2088,11 +2162,7 @@ fn render(entry: &Entry, width: u16) -> Vec<Line<'static>> {
     let (prefix, style, body) = match entry {
         Entry::You(t) => ("› ", bold(USER), t.clone()),
         Entry::Agent(t) => ("", fg(AGENT), t.clone()),
-        Entry::Thinking(t) => (
-            "  ",
-            fg(MUTED).add_modifier(Modifier::ITALIC),
-            t.clone(),
-        ),
+        Entry::Thinking(t) => ("  ", fg(MUTED).add_modifier(Modifier::ITALIC), t.clone()),
         Entry::Tool {
             name,
             detail,
@@ -2613,7 +2683,10 @@ mod tests {
         a.input = "/th".into();
         let screen = rendered(&a, 100, 20);
         assert!(screen.contains("/thinking"));
-        assert!(screen.contains("show or hide reasoning"), "the hint is shown");
+        assert!(
+            screen.contains("show or hide reasoning"),
+            "the hint is shown"
+        );
         assert!(!screen.contains("/help"));
     }
 
@@ -2731,7 +2804,10 @@ mod tests {
         a.push(Entry::Agent("word ".repeat(60).trim().to_string()));
         let out = rendered(&a, 40, 20);
         assert!(out.lines().all(|l| l.chars().count() <= 40));
-        assert!(out.matches("word").count() > 10, "text must survive:\n{out}");
+        assert!(
+            out.matches("word").count() > 10,
+            "text must survive:\n{out}"
+        );
     }
 
     #[test]
@@ -2852,8 +2928,16 @@ mod tests {
         a.push(Entry::Agent("here is the summary".into()));
         let screen = rendered(&a, 100, 20);
         let rows: Vec<&str> = screen.lines().collect();
-        assert!(rows[0].trim().is_empty(), "a row of air on top: {:?}", rows[0]);
-        assert!(rows[1].starts_with("  ┌"), "a gutter to the left: {:?}", rows[1]);
+        assert!(
+            rows[0].trim().is_empty(),
+            "a row of air on top: {:?}",
+            rows[0]
+        );
+        assert!(
+            rows[1].starts_with("  ┌"),
+            "a gutter to the left: {:?}",
+            rows[1]
+        );
         assert!(rows[1].ends_with("┐  "), "and to the right: {:?}", rows[1]);
     }
 
@@ -2946,13 +3030,22 @@ mod tests {
     fn the_panel_is_drawn_only_when_it_is_open() {
         let mut a = app();
         a.agents = vec![agent_line("aaa11111", "port the parser", "running")];
-        assert!(!rendered(&a, 140, 24).contains("sessions"), "shut by default");
+        assert!(
+            !rendered(&a, 140, 24).contains("sessions"),
+            "shut by default"
+        );
 
         a.panel = true;
         let screen = rendered(&a, 140, 24);
         assert!(screen.contains("sessions"), "{screen}");
-        assert!(screen.contains("Shift-Tab closes"), "the way out:\n{screen}");
-        assert!(screen.contains("port the parser"), "what is running:\n{screen}");
+        assert!(
+            screen.contains("Shift-Tab closes"),
+            "the way out:\n{screen}"
+        );
+        assert!(
+            screen.contains("port the parser"),
+            "what is running:\n{screen}"
+        );
         assert!(screen.contains("aaa11111"), "and its id:\n{screen}");
     }
 
@@ -3019,7 +3112,10 @@ mod tests {
         let mut a = app();
         a.context_tokens = CONTEXT_WINDOW;
         let screen = rendered(&a, 140, 24);
-        assert!(!screen.contains("estimated"), "the panel is shut:\n{screen}");
+        assert!(
+            !screen.contains("estimated"),
+            "the panel is shut:\n{screen}"
+        );
         assert!(
             screen.lines().last().unwrap().contains("⚠ compact"),
             "{screen}"
@@ -3203,7 +3299,10 @@ mod tests {
         let screen = rendered(&a, 60, 12);
         let bar = screen.lines().last().unwrap();
         assert!(bar.contains("1 queued"), "the status wins: {bar}");
-        assert!(!bar.contains("queuedCtrl"), "they must not run together: {bar}");
+        assert!(
+            !bar.contains("queuedCtrl"),
+            "they must not run together: {bar}"
+        );
 
         // With room for both, the keybar carries the exits again. `Alt-X`
         // since the keymap moved off the chords tmux takes; `Ctrl-C` stayed
@@ -3305,7 +3404,10 @@ mod tests {
         let screen = rendered(&a, 100, 45);
         assert!(screen.contains("schedules — this screen"), "{screen}");
         assert!(screen.contains("run now"));
-        assert!(screen.contains("anywhere"), "the global chords are there too");
+        assert!(
+            screen.contains("anywhere"),
+            "the global chords are there too"
+        );
     }
 
     #[test]
@@ -3398,8 +3500,14 @@ mod tests {
         let ids = a.row_ids(Workspace::Fleet);
         a.list_mut(Workspace::Fleet).step(1, &ids);
         let screen = rendered(&a, 100, 20);
-        assert!(screen.contains("▸"), "the selection must be visible:\n{screen}");
-        assert!(screen.contains("⏎ watch"), "the keys must be stated:\n{screen}");
+        assert!(
+            screen.contains("▸"),
+            "the selection must be visible:\n{screen}"
+        );
+        assert!(
+            screen.contains("⏎ watch"),
+            "the keys must be stated:\n{screen}"
+        );
         assert!(screen.contains("s stop"));
         assert!(screen.contains("1 running"), "{screen}");
     }
@@ -3452,7 +3560,10 @@ mod tests {
         a.go(Workspace::Fleet);
         a.list_mut(Workspace::Fleet).selected = Some("id000039".into());
         let screen = rendered(&a, 100, 16);
-        assert!(screen.contains("job 39"), "the selected row must show:\n{screen}");
+        assert!(
+            screen.contains("job 39"),
+            "the selected row must show:\n{screen}"
+        );
         assert!(!screen.contains("job 0 "), "the top must have scrolled off");
     }
 
@@ -3468,11 +3579,20 @@ mod tests {
         a.go(Workspace::Fleet);
 
         let wide = rendered(&a, 120, 24);
-        assert!(wide.contains("rebased cleanly"), "the detail shows when it fits");
+        assert!(
+            wide.contains("rebased cleanly"),
+            "the detail shows when it fits"
+        );
 
         let narrow = rendered(&a, 80, 24);
-        assert!(narrow.contains("port the parser"), "the list survives:\n{narrow}");
-        assert!(!narrow.contains("rebased cleanly"), "the detail went:\n{narrow}");
+        assert!(
+            narrow.contains("port the parser"),
+            "the list survives:\n{narrow}"
+        );
+        assert!(
+            !narrow.contains("rebased cleanly"),
+            "the detail went:\n{narrow}"
+        );
         assert!(narrow.lines().all(|l| l.chars().count() <= 80));
     }
 
@@ -3668,7 +3788,10 @@ mod tests {
             narrow.contains("nightly-inbox"),
             "the name always stays:\n{narrow}"
         );
-        assert!(!narrow.contains("7d"), "the strip is the first to go:\n{narrow}");
+        assert!(
+            !narrow.contains("7d"),
+            "the strip is the first to go:\n{narrow}"
+        );
         assert!(narrow.lines().all(|l| l.chars().count() <= 80));
     }
 
@@ -3753,7 +3876,12 @@ mod tests {
     fn the_tasks_screen_shows_the_board_that_already_exists() {
         let mut a = app();
         a.tasks = vec![
-            task("port-the-parser", "Port the parser to the new AST", None, "open"),
+            task(
+                "port-the-parser",
+                "Port the parser to the new AST",
+                None,
+                "open",
+            ),
             task("write-the-docs", "Write the docs", Some("scout"), "open"),
         ];
         a.go(Workspace::Tasks);
@@ -3812,7 +3940,10 @@ mod tests {
             .lines()
             .find(|l| l.contains("pr-shepherd ran"))
             .unwrap();
-        assert!(unread.contains('●'), "an unread dot in the gutter: {unread}");
+        assert!(
+            unread.contains('●'),
+            "an unread dot in the gutter: {unread}"
+        );
         assert!(!read.contains('●'), "and none once read: {read}");
     }
 
@@ -3954,7 +4085,10 @@ mod tests {
         a.go(Workspace::Team);
         let screen = rendered(&a, 100, 20);
         assert!(screen.contains("mark done"), "{screen}");
-        assert!(screen.contains('▸'), "the selection must be visible:\n{screen}");
+        assert!(
+            screen.contains('▸'),
+            "the selection must be visible:\n{screen}"
+        );
     }
 
     #[test]
@@ -4050,7 +4184,13 @@ mod tests {
         let mut a = app();
         a.team = Some("crew".into());
         a.members = (0..40)
-            .map(|i| member(&format!("m{i}"), HarnessKind::ClaudeCode, MemberStatus::Ready))
+            .map(|i| {
+                member(
+                    &format!("m{i}"),
+                    HarnessKind::ClaudeCode,
+                    MemberStatus::Ready,
+                )
+            })
             .collect();
         a.go(Workspace::Team);
         let _ = rendered(&a, 30, 8);

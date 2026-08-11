@@ -47,10 +47,10 @@ use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use futures::StreamExt;
+use jod_core::harness::ToolAccess;
 use jod_core::schedule::{GoalState, ScheduleState};
 use jod_core::service::RunConversation;
 use jod_core::store::Store;
-use jod_core::harness::ToolAccess;
 use jod_core::{AgentEvent, HarnessKind, Jod, PermissionPolicy, Resume, SpawnRequest};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
@@ -641,7 +641,9 @@ async fn perform(
         Action::Config(request) => {
             let lines = match jod.store() {
                 Some(store) => config::apply(store, &request),
-                None => vec![format!("{NO_STORE} — this preference lasts the session only")],
+                None => vec![format!(
+                    "{NO_STORE} — this preference lasts the session only"
+                )],
             };
             for line in lines {
                 app.push(Entry::Notice(line));
@@ -679,7 +681,9 @@ async fn perform(
         // Named rather than silently ignored: a key that appears to do nothing
         // is worse than one that says what it is waiting for.
         Action::Pending { verb, needs } => {
-            app.push(Entry::Notice(format!("{verb} — not wired yet: needs {needs}")));
+            app.push(Entry::Notice(format!(
+                "{verb} — not wired yet: needs {needs}"
+            )));
         }
     }
 }
@@ -716,7 +720,12 @@ async fn watch(jod: &Arc<Jod>, app: &mut App, id: String) {
             app.watching = Some(id.clone());
             app.busy = running;
             app.turn_started_ms = running
-                .then(|| app.agents.iter().find(|a| a.id == id).map(|a| a.created_at_ms))
+                .then(|| {
+                    app.agents
+                        .iter()
+                        .find(|a| a.id == id)
+                        .map(|a| a.created_at_ms)
+                })
                 .flatten();
             // The session cursor follows the eye: typing next continues the
             // conversation being read, not the one that scrolled away.
@@ -859,6 +868,16 @@ async fn begin_crossing(
     thread: &mut Thread,
     to: HarnessKind,
 ) {
+    // One at a time. A second `/harness` while the first summariser is still
+    // running would overwrite the pending switch, and the abandoned run would
+    // then finish into a switch nobody is waiting for.
+    if let Some(under_way) = &thread.switching {
+        app.push(Entry::Notice(format!(
+            "already handing this conversation to {} — wait for the summary",
+            under_way.to.label()
+        )));
+        return;
+    }
     let store = jod.store();
     match crossing(store.map(Arc::as_ref), app, thread, to) {
         // Said rather than silently done. `/harness claude` on Claude Code used
@@ -993,7 +1012,10 @@ fn finish_crossing(
         "handed over to {} — a new conversation carrying the summary, {}",
         to.label(),
         match &compaction {
-            Some(c) => format!("{} chars of transcript became {}", c.before_chars, c.after_chars),
+            Some(c) => format!(
+                "{} chars of transcript became {}",
+                c.before_chars, c.after_chars
+            ),
             None => "nothing needed compacting".to_string(),
         }
     )));
@@ -1079,7 +1101,11 @@ fn toggle_schedule(store: &Store, name: &str) -> String {
         Err(e) => return format!("could not read {name}: {e}"),
     };
     let armed = state == ScheduleState::Armed;
-    let next = if armed { ScheduleState::Paused } else { ScheduleState::Armed };
+    let next = if armed {
+        ScheduleState::Paused
+    } else {
+        ScheduleState::Armed
+    };
     match store.set_schedule_state(name, next) {
         Ok(true) if armed => format!("{name} is paused — it will not fire until you arm it"),
         Ok(true) => match store.schedule_named(name) {
@@ -1151,7 +1177,11 @@ fn toggle_goal(store: &Store, name: &str) -> String {
         Err(e) => return format!("could not read {name}: {e}"),
     };
     let running = state == GoalState::Running;
-    let next = if running { GoalState::Paused } else { GoalState::Running };
+    let next = if running {
+        GoalState::Paused
+    } else {
+        GoalState::Running
+    };
     match store.set_goal_state(name, next) {
         Ok(true) if running => format!("{name} is paused — no further iterations"),
         Ok(true) => format!("{name} is running again, from {}", state.as_str()),
@@ -1240,7 +1270,11 @@ fn forget_about(store: &Store, subject: &str) -> String {
 /// compared rather than confused.
 fn clock(at_ms: i64) -> String {
     chrono::DateTime::from_timestamp_millis(at_ms)
-        .map(|t| t.with_timezone(&chrono::Local).format("%a %d %b %H:%M").to_string())
+        .map(|t| {
+            t.with_timezone(&chrono::Local)
+                .format("%a %d %b %H:%M")
+                .to_string()
+        })
         .unwrap_or_else(|| "—".to_string())
 }
 
@@ -1253,14 +1287,24 @@ fn clock(at_ms: i64) -> String {
 fn task_id(title: &str, existing: &[jod_core::team::TeamTask]) -> String {
     let slug: String = title
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
         .collect::<String>()
         .split('-')
         .filter(|s| !s.is_empty())
         .take(4)
         .collect::<Vec<_>>()
         .join("-");
-    let base = if slug.is_empty() { "task".to_string() } else { slug };
+    let base = if slug.is_empty() {
+        "task".to_string()
+    } else {
+        slug
+    };
     if !existing.iter().any(|t| t.id == base) {
         return base;
     }
@@ -1918,7 +1962,8 @@ fn on_fleet_key(app: &mut App, key: KeyEvent) -> Option<Action> {
         }
         KeyCode::Char('s') => {
             let agent = app.selected_agent()?;
-            let (id, running, status) = (agent.id.clone(), agent.is_running(), agent.status.clone());
+            let (id, running, status) =
+                (agent.id.clone(), agent.is_running(), agent.status.clone());
             if !running {
                 // Killing a finished run only reclaims its tmux session, which
                 // is not what "s" looks like it does. Say so instead.
@@ -2644,7 +2689,11 @@ fn apply_slash(app: &mut App, slash: command::Slash) -> Option<Action> {
         // question is asked.
         Slash::Forget(name) => {
             app.go(Workspace::Memory);
-            if let Some(id) = app.row_ids(Workspace::Memory).into_iter().find(|id| *id == name) {
+            if let Some(id) = app
+                .row_ids(Workspace::Memory)
+                .into_iter()
+                .find(|id| *id == name)
+            {
                 app.list_mut(Workspace::Memory).selected = Some(id);
             }
             app.overlay = Overlay::Confirm {
@@ -2668,7 +2717,9 @@ fn apply_slash(app: &mut App, slash: command::Slash) -> Option<Action> {
             app.push(Entry::Notice(format!("usage: {usage}")));
         }
         Slash::Unknown(what) => {
-            app.push(Entry::Notice(format!("{what} is not a command — /help lists them")));
+            app.push(Entry::Notice(format!(
+                "{what} is not a command — /help lists them"
+            )));
         }
         // The reason was written by whoever refused it, and it already names
         // what would have worked. Repeating "/help lists them" here would bury
@@ -2708,7 +2759,9 @@ fn load_preferences(app: &mut App, store: &Store, opts: &Options) {
         // A preference that cannot be read is not worth losing the session
         // over, but it must not pass silently either.
         Err(e) => {
-            app.push(Entry::Notice(format!("could not read your preferences: {e}")));
+            app.push(Entry::Notice(format!(
+                "could not read your preferences: {e}"
+            )));
             return;
         }
     };
@@ -2894,36 +2947,37 @@ async fn spawn(
     system: Option<String>,
 ) -> Result<String> {
     let agent = jod
-        .spawn_agent_in(SpawnRequest {
-            name: crate::default_name(&prompt),
-            // From the app, not the options: `/harness` and `/model` change
-            // these mid-session, and a spawn must use what is current.
-            harness: app.harness,
-            prompt,
-            // A handed-over transcript is framing, not something anybody said.
-            // Folded into the prompt it would become the opening *user* turn of
-            // the new conversation — the exact bug `SpawnRequest::system` was
-            // added to fix.
-            system,
-            cwd: opts.cwd.clone(),
-            model: app.model.clone(),
-            // The live mode, clamped by the one the process was launched with.
-            //
-            // A ceiling rather than a default, and the asymmetry is the point:
-            // `jod tui --permission plan` is somebody saying "not on this
-            // machine, not today", and a Tab press inside the program must not
-            // be able to talk them out of it. Downwards is always allowed —
-            // asking for *less* needs no permission.
-            permission: bounded(opts.permission, app.mode),
-            // App owns the conversation cursor: it advances to the exact
-            // session the harness reported on the previous turn. A background
-            // delegation passes its own, because it is not part of this
-            // conversation at all.
-            resume,
-            // Decided by the caller — see the parameter's own doc. Each of the
-            // two call sites says which situation it is in and why.
-            tools,
-        },
+        .spawn_agent_in(
+            SpawnRequest {
+                name: crate::default_name(&prompt),
+                // From the app, not the options: `/harness` and `/model` change
+                // these mid-session, and a spawn must use what is current.
+                harness: app.harness,
+                prompt,
+                // A handed-over transcript is framing, not something anybody said.
+                // Folded into the prompt it would become the opening *user* turn of
+                // the new conversation — the exact bug `SpawnRequest::system` was
+                // added to fix.
+                system,
+                cwd: opts.cwd.clone(),
+                model: app.model.clone(),
+                // The live mode, clamped by the one the process was launched with.
+                //
+                // A ceiling rather than a default, and the asymmetry is the point:
+                // `jod tui --permission plan` is somebody saying "not on this
+                // machine, not today", and a Tab press inside the program must not
+                // be able to talk them out of it. Downwards is always allowed —
+                // asking for *less* needs no permission.
+                permission: bounded(opts.permission, app.mode),
+                // App owns the conversation cursor: it advances to the exact
+                // session the harness reported on the previous turn. A background
+                // delegation passes its own, because it is not part of this
+                // conversation at all.
+                resume,
+                // Decided by the caller — see the parameter's own doc. Each of the
+                // two call sites says which situation it is in and why.
+                tools,
+            },
             conversation,
         )
         .await?;
@@ -2980,7 +3034,10 @@ fn refresh_workspaces(jod: &Arc<Jod>, app: &mut App) {
 /// retaken around the child, with the same discipline as `enter`/`restore` —
 /// including the panic hook, which `enter` reinstalls.
 fn edit_in_editor(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) {
-    let Some(editor) = std::env::var("EDITOR").ok().filter(|e| !e.trim().is_empty()) else {
+    let Some(editor) = std::env::var("EDITOR")
+        .ok()
+        .filter(|e| !e.trim().is_empty())
+    else {
         app.push(Entry::Notice(
             "no $EDITOR set — export one and press Alt-F again".into(),
         ));
@@ -2999,7 +3056,9 @@ fn edit_in_editor(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &m
     match re_entered {
         Ok(fresh) => *terminal = fresh,
         Err(e) => {
-            app.push(Entry::Notice(format!("could not take the terminal back: {e}")));
+            app.push(Entry::Notice(format!(
+                "could not take the terminal back: {e}"
+            )));
             return;
         }
     }
@@ -3009,7 +3068,9 @@ fn edit_in_editor(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &m
         // A failed edit must not throw the work away — that is the one thing a
         // form must never do.
         Ok(code) if !code.success() => {
-            app.push(Entry::Notice(format!("{editor} exited {code} — nothing changed")));
+            app.push(Entry::Notice(format!(
+                "{editor} exited {code} — nothing changed"
+            )));
         }
         Err(e) => app.push(Entry::Notice(format!("could not run {editor}: {e}"))),
         Ok(_) => match std::fs::read_to_string(&path) {
@@ -3174,11 +3235,12 @@ mod tests {
         let (mut app, mut thread) = talking_into(&s, HarnessKind::ClaudeCode);
         let was = thread.conversation.clone().unwrap();
 
+        let switch = pending(&thread, HarnessKind::OpenCode);
         finish_crossing(
             &s,
             &mut app,
             &mut thread,
-            &pending(&thread, HarnessKind::OpenCode),
+            &switch,
             "the parser is ported; tests are green",
         );
 
@@ -3208,11 +3270,12 @@ mod tests {
         let s = store();
         let (mut app, mut thread) = talking_into(&s, HarnessKind::ClaudeCode);
 
+        let switch = pending(&thread, HarnessKind::OpenCode);
         finish_crossing(
             &s,
             &mut app,
             &mut thread,
-            &pending(&thread, HarnessKind::OpenCode),
+            &switch,
             "the parser is ported; tests are green",
         );
 
@@ -3263,13 +3326,8 @@ mod tests {
         let (mut app, mut thread) = talking_into(&s, HarnessKind::ClaudeCode);
         let was = thread.conversation.clone().unwrap();
 
-        finish_crossing(
-            &s,
-            &mut app,
-            &mut thread,
-            &pending(&thread, HarnessKind::OpenCode),
-            "   \n  ",
-        );
+        let switch = pending(&thread, HarnessKind::OpenCode);
+        finish_crossing(&s, &mut app, &mut thread, &switch, "   \n  ");
 
         assert_eq!(app.harness, HarnessKind::ClaudeCode, "still where it was");
         assert_eq!(app.session.as_deref(), Some("session-1"), "still resumable");
@@ -3387,7 +3445,10 @@ mod tests {
     #[test]
     fn a_turn_you_are_watching_may_schedule_and_a_delegation_may_not() {
         let watched = WATCHED.expect("a watched turn gets Jod's tools");
-        assert!(watched.may_orchestrate(), "cannot create a schedule or a goal");
+        assert!(
+            watched.may_orchestrate(),
+            "cannot create a schedule or a goal"
+        );
         assert!(watched.may_delegate());
 
         // The compounding failure `ToolAccess::unattended` exists to prevent: a
@@ -3539,7 +3600,10 @@ mod tests {
 
         assert_eq!(app.input, "", "the line must be consumed");
         let last = format!("{:?}", app.transcript.last().unwrap());
-        assert!(last.contains("usage"), "expected a usage notice, got {last}");
+        assert!(
+            last.contains("usage"),
+            "expected a usage notice, got {last}"
+        );
     }
 
     /// The next command typed must not inherit the previous one's text.
@@ -3841,7 +3905,9 @@ mod tests {
 
     /// The id the fleet cursor is on, which is what every key acts on.
     fn fleet_at(app: &App) -> String {
-        app.selected_agent().map(|a| a.id.clone()).unwrap_or_default()
+        app.selected_agent()
+            .map(|a| a.id.clone())
+            .unwrap_or_default()
     }
 
     #[test]
@@ -3991,14 +4057,20 @@ mod tests {
     fn an_ambiguous_prefix_stops_nothing() {
         let mut app = app_on(HarnessKind::ClaudeCode);
         app.agents = vec![running("ab111111", "one"), running("ab222222", "two")];
-        assert_eq!(apply_slash(&mut app, command::Slash::Stop("ab".into())), None);
+        assert_eq!(
+            apply_slash(&mut app, command::Slash::Stop("ab".into())),
+            None
+        );
         assert!(format!("{:?}", app.transcript.last().unwrap()).contains("matches 2"));
     }
 
     #[test]
     fn naming_an_agent_that_does_not_exist_says_so() {
         let mut app = app_on(HarnessKind::ClaudeCode);
-        assert_eq!(apply_slash(&mut app, command::Slash::Watch("zz".into())), None);
+        assert_eq!(
+            apply_slash(&mut app, command::Slash::Watch("zz".into())),
+            None
+        );
         assert!(format!("{:?}", app.transcript.last().unwrap()).contains("no agent"));
     }
 
@@ -4040,7 +4112,10 @@ mod tests {
     /// command line, where `task-7` tells you nothing.
     #[test]
     fn a_board_id_is_derived_from_the_title() {
-        assert_eq!(task_id("Port the parser to Rust", &[]), "port-the-parser-to");
+        assert_eq!(
+            task_id("Port the parser to Rust", &[]),
+            "port-the-parser-to"
+        );
         assert_eq!(task_id("Ship it!", &[]), "ship-it");
     }
 
@@ -4157,7 +4232,11 @@ mod tests {
         assert_eq!(app.overlay, Overlay::WhichKeyNew);
         press(&mut app, KeyCode::Char('s'));
         assert_eq!(app.workspace, Workspace::Schedules);
-        assert!(matches!(app.overlay, Overlay::Prompt { .. }), "{:?}", app.overlay);
+        assert!(
+            matches!(app.overlay, Overlay::Prompt { .. }),
+            "{:?}",
+            app.overlay
+        );
     }
 
     #[test]
@@ -4192,7 +4271,11 @@ mod tests {
     fn a_ctrl_chord_with_no_readline_meaning_still_fires() {
         let mut app = app_on(HarnessKind::ClaudeCode);
         ctrl(&mut app, KeyCode::Char('k'));
-        assert_eq!(app.overlay, Overlay::WhichKey, "Ctrl-K is unadvertised, not removed");
+        assert_eq!(
+            app.overlay,
+            Overlay::WhichKey,
+            "Ctrl-K is unadvertised, not removed"
+        );
     }
 
     /// The one binding that had to be taken away rather than doubled up:
@@ -4279,7 +4362,10 @@ mod tests {
         assert!(!advertised.is_empty(), "the scan found nothing to check");
         for label in advertised {
             let presses = keys::press_of(&label);
-            assert!(!presses.is_empty(), "{label} is printed but does not parse as a press");
+            assert!(
+                !presses.is_empty(),
+                "{label} is printed but does not parse as a press"
+            );
             for (code, modifier) in presses {
                 let mut app = app_on(HarnessKind::ClaudeCode);
                 assert!(
@@ -4300,10 +4386,11 @@ mod tests {
     /// which still fails the moment a binding exists in neither.
     #[test]
     fn every_chord_the_dispatch_answers_is_one_some_screen_names() {
-        let named: std::collections::HashSet<(KeyCode, KeyModifiers)> = keys::all_documented_chords()
-            .iter()
-            .flat_map(|label| keys::press_of(label))
-            .collect();
+        let named: std::collections::HashSet<(KeyCode, KeyModifiers)> =
+            keys::all_documented_chords()
+                .iter()
+                .flat_map(|label| keys::press_of(label))
+                .collect();
         for (code, modifier) in every_candidate_press() {
             let mut app = app_on(HarnessKind::ClaudeCode);
             if !dispatches(&mut app, code, modifier) {
@@ -4336,7 +4423,10 @@ mod tests {
 
     fn with_memory() -> App {
         let mut app = app_on(HarnessKind::ClaudeCode);
-        app.memory = vec![memory_node("prefers-spec-first"), memory_node("linear-is-truth")];
+        app.memory = vec![
+            memory_node("prefers-spec-first"),
+            memory_node("linear-is-truth"),
+        ];
         app.go(Workspace::Memory);
         app
     }
@@ -4463,7 +4553,11 @@ mod tests {
         press(&mut app, KeyCode::Esc);
 
         type_line(&mut app, "what?");
-        assert_eq!(app.overlay, Overlay::None, "with text typed it is a character");
+        assert_eq!(
+            app.overlay,
+            Overlay::None,
+            "with text typed it is a character"
+        );
         assert_eq!(app.input, "what?");
 
         // Backspacing down to a lone `?` leaves it as text, not as a command:
@@ -4649,7 +4743,11 @@ mod tests {
         assert_eq!(press(&mut app, KeyCode::Char('e')), None);
         assert_eq!(app.overlay, Overlay::None);
         assert_eq!(press(&mut app, KeyCode::Char('x')), None);
-        assert_eq!(app.overlay, Overlay::None, "and nothing asked to delete a run");
+        assert_eq!(
+            app.overlay,
+            Overlay::None,
+            "and nothing asked to delete a run"
+        );
 
         let mut app = with_activity();
         press(&mut app, KeyCode::Char('x'));
@@ -4734,7 +4832,12 @@ mod tests {
         let mut app = app_on(HarnessKind::ClaudeCode);
         app.activity = vec![
             activity_item("newest", 100, true, None),
-            activity_item("oldest", 1, true, Some((Workspace::Fleet, "aaa11111".into()))),
+            activity_item(
+                "oldest",
+                1,
+                true,
+                Some((Workspace::Fleet, "aaa11111".into())),
+            ),
         ];
         app.go(Workspace::Activity);
         app
@@ -4834,7 +4937,10 @@ mod tests {
         let mut app = with_board();
         match press(&mut app, KeyCode::Char('d')) {
             Some(Action::Delegate(prompt)) => {
-                assert!(prompt.contains("Port the parser to the new AST"), "{prompt}");
+                assert!(
+                    prompt.contains("Port the parser to the new AST"),
+                    "{prompt}"
+                );
             }
             other => panic!("expected a delegation, got {other:?}"),
         }
@@ -4964,7 +5070,9 @@ mod tests {
             &mut app,
             command::Slash::OpenNamed(Workspace::Schedules, "nope".into()),
         );
-        assert!(format!("{:?}", app.transcript.last().unwrap()).contains("no schedules called nope"));
+        assert!(
+            format!("{:?}", app.transcript.last().unwrap()).contains("no schedules called nope")
+        );
     }
 
     /// A verb the store cannot carry out yet is named, not silently ignored:
@@ -5142,7 +5250,10 @@ mod tests {
     #[test]
     fn enter_on_a_webhook_opens_the_run_its_last_delivery_started() {
         let mut app = with_hooks(Some("run-77"));
-        assert_eq!(press(&mut app, KeyCode::Enter), Some(Action::Watch("run-77".into())));
+        assert_eq!(
+            press(&mut app, KeyCode::Enter),
+            Some(Action::Watch("run-77".into()))
+        );
     }
 
     #[test]
@@ -5163,7 +5274,10 @@ mod tests {
             (with_memory(), Action::Forget("prefers-spec-first".into())),
         ] {
             press(&mut app, KeyCode::Char('x'));
-            assert!(matches!(app.overlay, Overlay::Confirm { .. }), "it must ask first");
+            assert!(
+                matches!(app.overlay, Overlay::Confirm { .. }),
+                "it must ask first"
+            );
             assert_eq!(press(&mut app, KeyCode::Char('y')), Some(expected));
         }
     }
@@ -5217,7 +5331,10 @@ mod tests {
     #[test]
     fn pausing_a_name_that_is_neither_a_schedule_nor_a_goal_says_so() {
         let mut app = with_both_screens();
-        assert_eq!(apply_slash(&mut app, command::Slash::Pause("nope".into())), None);
+        assert_eq!(
+            apply_slash(&mut app, command::Slash::Pause("nope".into())),
+            None
+        );
         let last = format!("{:?}", app.transcript.last().unwrap());
         assert!(last.contains("no schedule or goal called nope"), "{last}");
     }
@@ -5245,7 +5362,11 @@ mod tests {
             apply_slash(&mut app, command::Slash::Forget("linear-is-truth".into())),
             None
         );
-        assert_eq!(app.workspace, Workspace::Memory, "and it shows you what it means");
+        assert_eq!(
+            app.workspace,
+            Workspace::Memory,
+            "and it shows you what it means"
+        );
         match &app.overlay {
             Overlay::Confirm { verb, what, .. } => {
                 assert_eq!(verb, "forget");
@@ -5346,7 +5467,10 @@ mod tests {
         assert!(said.contains("armed"), "{said}");
         let armed = store.schedule_named("nightly-inbox").unwrap().unwrap();
         assert_eq!(armed.state, ScheduleState::Armed);
-        assert!(armed.next_fire_at_ms.is_some(), "and it knows when it fires next");
+        assert!(
+            armed.next_fire_at_ms.is_some(),
+            "and it knows when it fires next"
+        );
     }
 
     /// A broken schedule is what a person is most likely to be pressing `p` at,
@@ -5363,7 +5487,10 @@ mod tests {
         assert!(said.contains("armed"), "{said}");
         let armed = store.schedule_named("nightly-inbox").unwrap().unwrap();
         assert_eq!(armed.state, ScheduleState::Armed);
-        assert_eq!(armed.consecutive_failures, 0, "arming believes it will work now");
+        assert_eq!(
+            armed.consecutive_failures, 0,
+            "arming believes it will work now"
+        );
     }
 
     #[test]
@@ -5393,7 +5520,10 @@ mod tests {
         assert!(said.contains("nightly-inbox"), "{said}");
 
         let after = store.schedule_named("nightly-inbox").unwrap().unwrap();
-        assert_eq!(after.next_fire_at_ms, before.next_fire_at_ms, "nothing moved");
+        assert_eq!(
+            after.next_fire_at_ms, before.next_fire_at_ms,
+            "nothing moved"
+        );
     }
 
     #[test]
@@ -5418,7 +5548,10 @@ mod tests {
         assert!(delete_goal(&store, "ghost").contains("no goal called ghost"));
         assert!(toggle_hook(&store, "ghost").contains("no webhook called ghost"));
         assert!(delete_hook(&store, "ghost").contains("no webhook called ghost"));
-        assert_eq!(last_run_of(&store, "ghost"), Err("no schedule called ghost".into()));
+        assert_eq!(
+            last_run_of(&store, "ghost"),
+            Err("no schedule called ghost".into())
+        );
     }
 
     #[test]
@@ -5432,7 +5565,9 @@ mod tests {
             GoalState::Paused
         );
 
-        store.set_goal_state("ship-the-tui", GoalState::Stalled).unwrap();
+        store
+            .set_goal_state("ship-the-tui", GoalState::Stalled)
+            .unwrap();
         let said = toggle_goal(&store, "ship-the-tui");
         assert!(said.contains("running again"), "{said}");
         assert_eq!(
@@ -5445,13 +5580,19 @@ mod tests {
     fn running_a_paused_goal_reports_the_refusal_and_changes_nothing() {
         let store = store();
         store.add_goal(&a_goal("ship-the-tui")).unwrap();
-        store.set_goal_state("ship-the-tui", GoalState::Paused).unwrap();
+        store
+            .set_goal_state("ship-the-tui", GoalState::Paused)
+            .unwrap();
         let before = store.goal_named("ship-the-tui").unwrap().unwrap();
 
         let said = run_goal(&store, "ship-the-tui", 1_700_000_000_000);
         assert!(said.contains("paused"), "{said}");
         assert_eq!(
-            store.goal_named("ship-the-tui").unwrap().unwrap().next_fire_at_ms,
+            store
+                .goal_named("ship-the-tui")
+                .unwrap()
+                .unwrap()
+                .next_fire_at_ms,
             before.next_fire_at_ms
         );
     }
@@ -5720,7 +5861,11 @@ mod tests {
 
         let mut app = app_on(HarnessKind::ClaudeCode);
         load_preferences(&mut app, &store, &options());
-        assert_eq!(app.harness, HarnessKind::Agy, "nothing was asked for, so the choice wins");
+        assert_eq!(
+            app.harness,
+            HarnessKind::Agy,
+            "nothing was asked for, so the choice wins"
+        );
 
         let launched_on = Options {
             harness: HarnessKind::OpenCode,
@@ -5728,7 +5873,11 @@ mod tests {
         };
         let mut app = app_on(HarnessKind::OpenCode);
         load_preferences(&mut app, &store, &launched_on);
-        assert_eq!(app.harness, HarnessKind::OpenCode, "-H opencode wins over the choice");
+        assert_eq!(
+            app.harness,
+            HarnessKind::OpenCode,
+            "-H opencode wins over the choice"
+        );
     }
 
     /// A preference the build cannot read must not pass as "never set", or a
@@ -5774,7 +5923,11 @@ mod tests {
         assert_eq!(app.transcript.len(), config::Pref::ALL.len());
         let listed = format!("{:?}", app.transcript);
         for pref in config::Pref::ALL {
-            assert!(listed.contains(pref.name()), "{} is missing: {listed}", pref.name());
+            assert!(
+                listed.contains(pref.name()),
+                "{} is missing: {listed}",
+                pref.name()
+            );
         }
         assert!(listed.contains("chosen"), "{listed}");
         assert!(listed.contains("default"), "{listed}");
@@ -5792,8 +5945,14 @@ mod tests {
                 config::Value::Flag(false),
             )),
         );
-        assert!(!app.show_details, "the transcript stops showing tool output now");
-        assert!(matches!(action, Some(Action::Config(_))), "and it is recorded");
+        assert!(
+            !app.show_details,
+            "the transcript stops showing tool output now"
+        );
+        assert!(
+            matches!(action, Some(Action::Config(_))),
+            "and it is recorded"
+        );
     }
 
     /// `/config harness agy` is about the *next* session; `/harness agy` is

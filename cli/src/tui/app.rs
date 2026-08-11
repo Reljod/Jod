@@ -59,7 +59,10 @@ pub enum Overlay {
     /// `?` — the keymap, showing the current screen's verbs first.
     Keymap,
     /// `x` — deleting something that cannot be undone, so the prompt names it.
-    Confirm { verb: String, what: String },
+    Confirm {
+        verb: String,
+        what: String,
+    },
     /// Tier 1 of the form ladder: one value, typed on a line where the keybar
     /// was, with no screen change and no context lost.
     Prompt {
@@ -383,7 +386,10 @@ pub fn plural(n: usize, noun: &str) -> String {
 /// alone never gives you.
 pub fn absolute(at_ms: i64) -> String {
     match chrono::DateTime::from_timestamp_millis(at_ms) {
-        Some(t) => t.with_timezone(&chrono::Local).format("%b %d %H:%M").to_string(),
+        Some(t) => t
+            .with_timezone(&chrono::Local)
+            .format("%b %d %H:%M")
+            .to_string(),
         None => "—".to_string(),
     }
 }
@@ -696,7 +702,11 @@ impl App {
         match ws {
             Workspace::Fleet => self.fleet_rows().iter().map(|a| a.id.clone()).collect(),
             Workspace::Memory => self.memory_rows().iter().map(|n| n.id.clone()).collect(),
-            Workspace::Schedules => self.schedule_rows().iter().map(|s| s.name.clone()).collect(),
+            Workspace::Schedules => self
+                .schedule_rows()
+                .iter()
+                .map(|s| s.name.clone())
+                .collect(),
             Workspace::Goals => self.goal_rows().iter().map(|g| g.name.clone()).collect(),
             Workspace::Hooks => self.hook_rows().iter().map(|h| h.name.clone()).collect(),
             Workspace::Tasks => self.task_rows().iter().map(|t| t.id.clone()).collect(),
@@ -733,7 +743,12 @@ impl App {
         let mut rows: Vec<&AgentLine> = self
             .agents
             .iter()
-            .filter(|a| self.keep(Workspace::Fleet, &format!("{} {} {}", a.name, a.id, a.status)))
+            .filter(|a| {
+                self.keep(
+                    Workspace::Fleet,
+                    &format!("{} {} {}", a.name, a.id, a.status),
+                )
+            })
             .collect();
         match self.list(Workspace::Fleet).sort % 4 {
             1 => rows.sort_by_key(|a| Reverse(a.created_at_ms)),
@@ -995,7 +1010,10 @@ impl App {
                     .iter()
                     .filter(|h| h.state == crate::tui::data::HookState::Failing)
                     .count();
-                format!("{} · {failing} failing", plural(self.hooks.len(), "webhook"))
+                format!(
+                    "{} · {failing} failing",
+                    plural(self.hooks.len(), "webhook")
+                )
             }
             Workspace::Tasks => {
                 let rows = self.task_rows();
@@ -1386,12 +1404,18 @@ mod tests {
         a.graph_size = (2, 1);
         let whole = a.count_for(Workspace::Memory);
         assert!(whole.starts_with("2 nodes"), "{whole}");
-        assert!(!whole.contains(" of "), "nothing is hidden, so say nothing: {whole}");
+        assert!(
+            !whole.contains(" of "),
+            "nothing is hidden, so say nothing: {whole}"
+        );
 
         a.graph_size = (142, 96);
         let part = a.count_for(Workspace::Memory);
         assert!(part.starts_with("2 of 142 nodes"), "{part}");
-        assert!(part.contains("96 edges"), "the edges are the graph's too: {part}");
+        assert!(
+            part.contains("96 edges"),
+            "the edges are the graph's too: {part}"
+        );
     }
 
     fn memory_node(name: &str) -> MemoryNode {
@@ -1642,10 +1666,7 @@ mod tests {
             is_error: true,
         });
         assert_eq!(a.transcript.len(), 2);
-        assert!(matches!(
-            a.transcript[1],
-            Entry::Tool { failed: true, .. }
-        ));
+        assert!(matches!(a.transcript[1], Entry::Tool { failed: true, .. }));
     }
 
     /// OpenCode reports a fast tool as already `completed`, so no call is ever
@@ -1801,13 +1822,19 @@ mod tests {
             is_error: true,
         });
         assert_eq!(a.transcript.len(), 2, "the failed tool and its output");
-        assert!(matches!(a.transcript[1], Entry::ToolOut { failed: true, .. }));
+        assert!(matches!(
+            a.transcript[1],
+            Entry::ToolOut { failed: true, .. }
+        ));
     }
 
     #[test]
     fn long_tool_output_is_cut_down_with_a_count() {
         let mut a = app();
-        let long = (0..40).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        let long = (0..40)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         a.apply(&AgentEvent::ToolCall {
             name: "Bash".into(),
             input: None,
@@ -2072,7 +2099,11 @@ mod tests {
     #[test]
     fn the_cursor_is_pulled_back_when_the_list_shrinks() {
         let mut a = app();
-        a.agents = vec![line("a", "running"), line("b", "running"), line("c", "running")];
+        a.agents = vec![
+            line("a", "running"),
+            line("b", "running"),
+            line("c", "running"),
+        ];
         a.reconcile();
         move_fleet(&mut a, 2);
         assert_eq!(a.selected_agent().unwrap().id, "c");

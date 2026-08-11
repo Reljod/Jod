@@ -688,8 +688,16 @@ fn memory_from(store: &Store) -> Vec<MemoryNode> {
                 // with a `contradicts` edge is in a contradiction, whichever
                 // end of it this is.
                 contradicted: mine.iter().any(|e| e.predicate == "contradicts"),
-                in_edges: mine.iter().filter(|e| !e.outgoing).map(|e| edge(e, kind_at)).collect(),
-                out_edges: mine.iter().filter(|e| e.outgoing).map(|e| edge(e, kind_at)).collect(),
+                in_edges: mine
+                    .iter()
+                    .filter(|e| !e.outgoing)
+                    .map(|e| edge(e, kind_at))
+                    .collect(),
+                out_edges: mine
+                    .iter()
+                    .filter(|e| e.outgoing)
+                    .map(|e| edge(e, kind_at))
+                    .collect(),
                 provenance: provenance(describing, in_edges.len(), out_edges.len()),
             }
         })
@@ -820,7 +828,10 @@ fn schedule_row(store: &Store, s: Schedule) -> ScheduleRow {
     let judged: Vec<(&Fire, Outcome, Option<StoredRun>)> = fires
         .iter()
         .map(|f| {
-            let run = f.run_id.as_deref().and_then(|id| store.run(id).ok().flatten());
+            let run = f
+                .run_id
+                .as_deref()
+                .and_then(|id| store.run(id).ok().flatten());
             (f, fire_outcome(f, run.as_ref()), run)
         })
         .collect();
@@ -960,7 +971,9 @@ fn goal_row(store: &Store, g: Goal) -> GoalRow {
     // A goal's progress is in the fact store rather than in its own columns —
     // that is what makes it memory rather than a job queue — so its history is
     // read the same way `Ticker::spawn_iteration` reads it.
-    let facts = store.facts_about(&format!("goal/{}", g.name)).unwrap_or_default();
+    let facts = store
+        .facts_about(&format!("goal/{}", g.name))
+        .unwrap_or_default();
     let mut iterations: Vec<Iteration> = facts
         .iter()
         .filter(|f| f.predicate == "iteration")
@@ -1016,9 +1029,10 @@ fn goal_row(store: &Store, g: Goal) -> GoalRow {
         // for: an autonomous loop that quietly needs a person and never says so
         // is worse than no goal at all.
         escalation: match g.state {
-            StoredGoalState::Stalled => {
-                Some(format!("stalled — {} iterations moved nothing", g.no_progress))
-            }
+            StoredGoalState::Stalled => Some(format!(
+                "stalled — {} iterations moved nothing",
+                g.no_progress
+            )),
             StoredGoalState::Exhausted => Some("out of budget or out of iterations".to_string()),
             StoredGoalState::Blocked => Some("blocked — waiting on an answer".to_string()),
             _ => None,
@@ -1091,7 +1105,9 @@ fn hook_row(rule: Rule, deliveries: &[StoredDelivery], now: i64) -> HookRow {
         .filter(|d| d.rule_id.as_deref() == Some(rule.id.as_str()))
         .collect();
     let last = mine.first();
-    let last_outcome = last.map(|d| delivery_outcome(d.status)).unwrap_or(Outcome::Missing);
+    let last_outcome = last
+        .map(|d| delivery_outcome(d.status))
+        .unwrap_or(Outcome::Missing);
 
     HookRow {
         event: match &rule.action {
@@ -1195,7 +1211,11 @@ fn delivery_outcome(status: DeliveryStatus) -> Outcome {
 /// A day, for the fields that want a date rather than a clock.
 fn day(at_ms: i64) -> String {
     chrono::DateTime::from_timestamp_millis(at_ms)
-        .map(|t| t.with_timezone(&chrono::Local).format("%Y-%m-%d").to_string())
+        .map(|t| {
+            t.with_timezone(&chrono::Local)
+                .format("%Y-%m-%d")
+                .to_string()
+        })
         .unwrap_or_else(|| "—".to_string())
 }
 
@@ -1231,17 +1251,17 @@ fn activity_from(store: &Store) -> Vec<ActivityItem> {
                 unread: false,
                 // A schedule Jod could not start, or one whose claimant died,
                 // is silence that nothing else will report.
-                needs_you: matches!(
-                    f.outcome,
-                    FireOutcome::SpawnFailed | FireOutcome::Abandoned
-                ),
+                needs_you: matches!(f.outcome, FireOutcome::SpawnFailed | FireOutcome::Abandoned),
                 jump_to: Some((Workspace::Schedules, s.name.clone())),
             });
         }
     }
 
     for g in store.goals().unwrap_or_default() {
-        for f in store.facts_about(&format!("goal/{}", g.name)).unwrap_or_default() {
+        for f in store
+            .facts_about(&format!("goal/{}", g.name))
+            .unwrap_or_default()
+        {
             let ended = f.predicate == "ended";
             if !ended && f.predicate != "iteration" {
                 continue;
@@ -1284,10 +1304,7 @@ fn activity_from(store: &Store) -> Vec<ActivityItem> {
             unread: false,
             // A rejected delivery is a secret that stopped verifying; a failed
             // one is a rule that matched and could not run.
-            needs_you: matches!(
-                d.status,
-                DeliveryStatus::Rejected | DeliveryStatus::Failed
-            ),
+            needs_you: matches!(d.status, DeliveryStatus::Rejected | DeliveryStatus::Failed),
             jump_to: d
                 .rule_id
                 .as_deref()
@@ -1451,7 +1468,9 @@ mod tests {
         let store = store();
         let s = schedule("shepherd");
         store.add_schedule(&s).unwrap();
-        store.record_fire(&fire(&s.id, AT - 3_600_000, FireOutcome::Ran)).unwrap();
+        store
+            .record_fire(&fire(&s.id, AT - 3_600_000, FireOutcome::Ran))
+            .unwrap();
         store
             .record_fire(&fire(&s.id, AT - 7_200_000, FireOutcome::SpawnFailed))
             .unwrap();
@@ -1470,7 +1489,11 @@ mod tests {
             "oldest first, and the two that happened sit at the right-hand end"
         );
         assert_eq!(row.recent.len(), 2);
-        assert_eq!(row.recent[0].outcome, Outcome::Ok, "newest first in the detail pane");
+        assert_eq!(
+            row.recent[0].outcome,
+            Outcome::Ok,
+            "newest first in the detail pane"
+        );
     }
 
     /// The breaker only trips after several failures, so a schedule can be
@@ -1524,7 +1547,10 @@ mod tests {
             fire_outcome(&fire("s", AT, FireOutcome::SpawnFailed), None),
             Outcome::Failed
         );
-        assert_eq!(fire_outcome(&fire("s", AT, FireOutcome::Ran), None), Outcome::Ok);
+        assert_eq!(
+            fire_outcome(&fire("s", AT, FireOutcome::Ran), None),
+            Outcome::Ok
+        );
     }
 
     // ---- goals ----
@@ -1563,13 +1589,21 @@ mod tests {
         let store = store();
         let g = goal("inbox-to-zero");
         store.add_goal(&g).unwrap();
-        store.remember(iteration_fact(&g, "1: filed 12 messages")).unwrap();
-        store.remember(iteration_fact(&g, "2: filed 3 messages")).unwrap();
+        store
+            .remember(iteration_fact(&g, "1: filed 12 messages"))
+            .unwrap();
+        store
+            .remember(iteration_fact(&g, "2: filed 3 messages"))
+            .unwrap();
         store.remember(iteration_fact(&g, "3: failed")).unwrap();
 
         let row = goal_row(&store, g);
         assert_eq!(row.iteration, 3, "the count is the goal's own column");
-        assert_eq!(row.iterations.len(), 3, "and every one of them is in the log");
+        assert_eq!(
+            row.iterations.len(),
+            3,
+            "and every one of them is in the log"
+        );
         assert_eq!(row.cadence, "09:00 Mon–Fri");
         assert_eq!(row.iterations[0].n, 3, "newest first");
         assert_eq!(row.iterations[0].note, "failed");
@@ -1595,7 +1629,11 @@ mod tests {
     fn a_goals_done_when_check_is_its_whole_checklist() {
         let store = store();
         let mut g = goal("inbox-to-zero");
-        assert_eq!(goal_row(&store, g.clone()).percent(), 0, "not satisfied yet");
+        assert_eq!(
+            goal_row(&store, g.clone()).percent(),
+            0,
+            "not satisfied yet"
+        );
         g.state = StoredGoalState::Satisfied;
         let row = goal_row(&store, g);
         assert_eq!(row.checks.len(), 1);
@@ -1706,7 +1744,10 @@ mod tests {
         assert_eq!(row.last_ms, Some(AT - 60_000));
         assert_eq!(row.last_outcome, Outcome::Ok);
         assert_eq!(row.state, HookState::Armed);
-        assert!(row.match_rule.contains("agent"), "conditions belong in the rule line");
+        assert!(
+            row.match_rule.contains("agent"),
+            "conditions belong in the rule line"
+        );
     }
 
     /// Understood and wanted by nobody is the hook *working*. Recording a
@@ -1741,10 +1782,14 @@ mod tests {
         let store = store();
         let s = schedule("shepherd");
         store.add_schedule(&s).unwrap();
-        store.record_fire(&fire(&s.id, AT, FireOutcome::Ran)).unwrap();
+        store
+            .record_fire(&fire(&s.id, AT, FireOutcome::Ran))
+            .unwrap();
         let g = goal("inbox-to-zero");
         store.add_goal(&g).unwrap();
-        store.remember(iteration_fact(&g, "1: filed 12 messages")).unwrap();
+        store
+            .remember(iteration_fact(&g, "1: filed 12 messages"))
+            .unwrap();
         let r = rule("pr-review");
         store.add_webhook_rule(&r).unwrap();
         store
@@ -1787,7 +1832,9 @@ mod tests {
         let store = store();
         let g = goal("inbox-to-zero");
         store.add_goal(&g).unwrap();
-        store.remember(iteration_fact(&g, "1: filed 12 messages")).unwrap();
+        store
+            .remember(iteration_fact(&g, "1: filed 12 messages"))
+            .unwrap();
 
         let rows = memory_from(&store);
         let subject = rows
@@ -1858,7 +1905,10 @@ mod tests {
         let rows = memory_from(&store);
         for name in ["spec first", "ship fast"] {
             let node = rows.iter().find(|n| n.name == name).expect(name);
-            assert!(node.contradicted, "{name} is in an unresolved contradiction");
+            assert!(
+                node.contradicted,
+                "{name} is in an unresolved contradiction"
+            );
         }
         let untouched = rows.iter().find(|n| n.name == "reljod").unwrap();
         assert!(!untouched.contradicted, "a node with no such edge is not");
@@ -1903,7 +1953,10 @@ mod tests {
 
         let concluded = rows.iter().find(|n| n.name == "linear").unwrap();
         assert_eq!(concluded.kind, MemoryKind::Fact);
-        assert!(concluded.confidence < said.confidence, "an agent is not the owner");
+        assert!(
+            concluded.confidence < said.confidence,
+            "an agent is not the owner"
+        );
     }
 
     // ---- empty states ----
@@ -2000,7 +2053,11 @@ mod tests {
     fn every_memory_kind_has_a_tag_and_a_glyph_of_its_own() {
         let mut tags = Vec::new();
         for kind in MemoryKind::ALL {
-            assert!(!tags.contains(&kind.tag()), "{} is claimed twice", kind.tag());
+            assert!(
+                !tags.contains(&kind.tag()),
+                "{} is claimed twice",
+                kind.tag()
+            );
             tags.push(kind.tag());
             assert!(kind.tag().len() <= 4);
         }

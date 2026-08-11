@@ -257,7 +257,15 @@ pub fn tip_rows(store: &Store, conversation_id: &str) -> Vec<TipRow> {
         .into_iter()
         .map(|tip| tip_row(store, &tip, &live_ids, live_tip))
         .collect();
-    rows.sort_by_key(|r| (!r.live, std::cmp::Reverse(r.at_ms), r.id));
+    // The tie-break is `Reverse(id)`, not `id`, and it is the difference
+    // between an undo/redo pair that works and one that does not. Two tips
+    // abandoned in the same millisecond sort by insertion order, so ascending
+    // ids made `u` offer back the *oldest* branch immediately after `v` had set
+    // aside the newest — pressing undo then redo landed somewhere the user had
+    // never been. `Store::conversations` breaks its own tie the same way and
+    // says why: at millisecond resolution, insertion order is the only truth
+    // available.
+    rows.sort_by_key(|r| (!r.live, std::cmp::Reverse(r.at_ms), std::cmp::Reverse(r.id)));
     rows
 }
 
@@ -320,7 +328,9 @@ pub fn rewind_target(store: &Store, conversation_id: &str) -> Option<i64> {
 
 /// The abandoned leaf to offer back first — the most recent one.
 pub fn restore_target(store: &Store, conversation_id: &str) -> Option<TipRow> {
-    tip_rows(store, conversation_id).into_iter().find(|t| !t.live)
+    tip_rows(store, conversation_id)
+        .into_iter()
+        .find(|t| !t.live)
 }
 
 /// Turn whatever the caller has into a conversation id.
@@ -457,10 +467,22 @@ fn rewind(store: &Store, id: &str) -> Vec<String> {
 
 fn restore(store: &Store, id: &str) -> Vec<String> {
     let Some(tip) = restore_target(store, id) else {
-        return vec![format!("{} has no abandoned branch to go back to", short(id))];
+        return vec![format!(
+            "{} has no abandoned branch to go back to",
+            short(id)
+        )];
     };
+    // Not `tip.label()`: that line calls the branch abandoned, which stops
+    // being true the instant this succeeds.
     match store.move_head(id, tip.id) {
-        Ok(()) => vec![format!("{} back on {}", short(id), tip.label())],
+        Ok(()) => vec![format!(
+            "{} back on “{}” — #{}, {} turn{}",
+            short(id),
+            tip.opener,
+            tip.id,
+            tip.turns,
+            if tip.turns == 1 { "" } else { "s" }
+        )],
         Err(e) => vec![format!("could not restore #{}: {e}", tip.id)],
     }
 }
@@ -482,7 +504,12 @@ fn branch_at(store: &Store, id: &str, message: i64, prompt: &str) -> Vec<String>
 /// further back is [`Request::MoveTo`] followed by this, which is two keys and
 /// no new vocabulary.
 fn fork(store: &Store, id: &str) -> Vec<String> {
-    let Some(head) = store.conversation(id).ok().flatten().and_then(|c| c.head_id) else {
+    let Some(head) = store
+        .conversation(id)
+        .ok()
+        .flatten()
+        .and_then(|c| c.head_id)
+    else {
         return vec![format!("{} has no messages to fork from", short(id))];
     };
     match store.fork_conversation(id, head, None) {
@@ -525,10 +552,7 @@ pub fn render_list(rows: &[SessionRow], now_ms: i64) -> Vec<String> {
         // different message from "two things were", and the second is the one
         // that makes you open the thread.
         if row.abandoned > 0 {
-            line.push_str(&format!(
-                "  ⚑ {} abandoned",
-                row.abandoned
-            ));
+            line.push_str(&format!("  ⚑ {} abandoned", row.abandoned));
         }
         out.push(line);
     }
@@ -558,6 +582,13 @@ pub fn render_open(store: &Store, id: &str) -> Vec<String> {
                 None => String::new(),
             }
         ));
+        // Drawn under the turn it hangs off, so a fork reads as something that
+        // happened *here* rather than as a property of the branch you happen to
+        // be on. Only when there is more than one, because "1 branch" is just
+        // "a conversation".
+        if row.branches > 1 {
+            out.push(format!("         ⑂ {} lines leave this turn", row.branches));
+        }
     }
     out.extend(render_tips(&tip_rows(store, id)));
     out
@@ -608,9 +639,7 @@ mod tests {
         let c = store
             .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
             .expect("a conversation");
-        store
-            .set_conversation_title(&c.id, title)
-            .expect("a title");
+        store.set_conversation_title(&c.id, title).expect("a title");
         c.id
     }
 
@@ -649,7 +678,10 @@ mod tests {
 
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].id, id);
-        assert_eq!(rows[0].title, "(untitled)", "a blank row cannot be aimed at");
+        assert_eq!(
+            rows[0].title, "(untitled)",
+            "a blank row cannot be aimed at"
+        );
     }
 
     /// The failure this whole module exists to prevent: reverting, and then
@@ -737,7 +769,10 @@ mod tests {
 
         let said = apply(&store, &Request::Rewind(id.clone()), 0);
 
-        assert!(said[0].contains("nothing before its first question"), "{said:?}");
+        assert!(
+            said[0].contains("nothing before its first question"),
+            "{said:?}"
+        );
     }
 
     #[test]
@@ -785,6 +820,18 @@ mod tests {
             render_open(&store, &id).join("\n").contains("‹3/3›"),
             "the pager reaches the screen"
         );
+
+        // The turn the three attempts hang off says so, which is what you are
+        // looking at when you are hunting for a fork you half-remember making.
+        let fork_row = rows.iter().find(|r| r.id == point).expect("the fork point");
+        assert_eq!(fork_row.branches, 3);
+        assert_eq!(fork_row.pager, None, "the fork point itself has no rivals");
+        assert!(
+            render_open(&store, &id)
+                .join("\n")
+                .contains("3 lines leave this turn"),
+            "the fork is announced on the turn it happened at"
+        );
     }
 
     /// `Store::siblings` warns that parallel tool results are siblings too. A
@@ -808,6 +855,17 @@ mod tests {
             last.pager, None,
             "two results of one turn are a fan-out, not two answers to a question"
         );
+        let called = rows
+            .iter()
+            .find(|r| r.id == call)
+            .expect("the calling turn");
+        assert_eq!(
+            called.branches, 1,
+            "and the turn above them is not marked as a fork either"
+        );
+        assert!(!render_open(&store, &id)
+            .join("\n")
+            .contains("lines leave this turn"));
     }
 
     #[test]
@@ -869,7 +927,9 @@ mod tests {
         store
             .append_message(
                 &id,
-                NewMessage::user("fix the parser").from_run("run-7").at_seq(1),
+                NewMessage::user("fix the parser")
+                    .from_run("run-7")
+                    .at_seq(1),
             )
             .expect("a message from a run");
 
@@ -887,11 +947,9 @@ mod tests {
         conversation(&store, "two");
 
         assert!(resolve(&store, "  ").is_err(), "an empty needle is refused");
-        assert!(
-            resolve(&store, "definitely-not-an-id")
-                .expect_err("no match")
-                .contains("no conversation matches")
-        );
+        assert!(resolve(&store, "definitely-not-an-id")
+            .expect_err("no match")
+            .contains("no conversation matches"));
     }
 
     #[test]

@@ -192,7 +192,10 @@ mod tests {
             seen: 23,
             body: "Non-trivial work starts with a spec.".into(),
             contradicted: false,
-            in_edges: vec![edge("supports", "linear-is-truth"), edge("refines", "how-to-open-a-pr")],
+            in_edges: vec![
+                edge("supports", "linear-is-truth"),
+                edge("refines", "how-to-open-a-pr"),
+            ],
             out_edges: vec![edge("contradicts", "ship-fast-iterate")],
             provenance: vec![],
         }

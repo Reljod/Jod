@@ -90,7 +90,6 @@ pub const GLOBAL: &[Key] = &[
     k("Ctrl-C/D", "quit — twice while agents run"),
 ];
 
-
 const CHAT: &[Key] = &[
     k("Alt-B", "delegate"),
     k("Alt-A", "fleet"),
@@ -174,11 +173,7 @@ const ACTIVITY: &[Key] = &[
     k("f", "filter source"),
 ];
 
-const TEAM: &[Key] = &[
-    k("⏎", "mark done"),
-    k("↑↓", "pick"),
-    k("/", "filter"),
-];
+const TEAM: &[Key] = &[k("⏎", "mark done"), k("↑↓", "pick"), k("/", "filter")];
 
 /// This screen's own verbs, in keybar order.
 ///
@@ -472,7 +467,10 @@ mod tests {
                     continue;
                 }
                 if let KeyCode::Char(c) = code {
-                    assert!(!stolen.contains(&c), "Ctrl-{c} in {label} is the terminal's, not ours");
+                    assert!(
+                        !stolen.contains(&c),
+                        "Ctrl-{c} in {label} is the terminal's, not ours"
+                    );
                 }
             }
         }
@@ -484,9 +482,15 @@ mod tests {
     #[test]
     fn every_printed_chord_parses_into_a_press() {
         let chords = all_documented_chords();
-        assert!(!chords.is_empty(), "no chords found at all — the scan is broken");
+        assert!(
+            !chords.is_empty(),
+            "no chords found at all — the scan is broken"
+        );
         for label in chords {
-            assert!(!press_of(&label).is_empty(), "{label} is printed but cannot be pressed");
+            assert!(
+                !press_of(&label).is_empty(),
+                "{label} is printed but cannot be pressed"
+            );
         }
     }
 
@@ -508,7 +512,10 @@ mod tests {
             ],
             "the tail inherits Ctrl rather than becoming a bare Home"
         );
-        assert!(press_of("Home/End").is_empty(), "no modifier means no chord");
+        assert!(
+            press_of("Home/End").is_empty(),
+            "no modifier means no chord"
+        );
     }
 
     /// Exit hints are sentences, so a chord can hide in them as a substring.
@@ -524,8 +531,14 @@ mod tests {
     #[test]
     fn the_which_key_overlay_names_the_leader_that_opened_it() {
         for making in [false, true] {
-            assert!(which_key_hint(making).contains("Alt-K"), "hint, making={making}");
-            assert!(which_key_title(making).contains("Alt-K"), "title, making={making}");
+            assert!(
+                which_key_hint(making).contains("Alt-K"),
+                "hint, making={making}"
+            );
+            assert!(
+                which_key_title(making).contains("Alt-K"),
+                "title, making={making}"
+            );
         }
     }
 
@@ -571,7 +584,9 @@ mod tests {
         for verb in ["Alt-K", "Alt-A", "Alt-G", "Alt-B", "Alt-X", "Alt-L"] {
             assert!(printed.contains(&verb), "{verb} is not on the global list");
         }
-        for stale in ["Ctrl-K", "Ctrl-G", "Ctrl-B", "Ctrl-X", "Ctrl-T", "Ctrl-O", "Ctrl-L"] {
+        for stale in [
+            "Ctrl-K", "Ctrl-G", "Ctrl-B", "Ctrl-X", "Ctrl-T", "Ctrl-O", "Ctrl-L",
+        ] {
             assert!(
                 !printed.contains(&stale),
                 "{stale} still works, but printing it advertises the chord tmux takes"
@@ -579,7 +594,10 @@ mod tests {
         }
         // Readline's, not ours to move.
         for kept in ["Ctrl-U", "Ctrl-W"] {
-            assert!(printed.contains(&kept), "{kept} must stay where every shell puts it");
+            assert!(
+                printed.contains(&kept),
+                "{kept} must stay where every shell puts it"
+            );
         }
     }
 }

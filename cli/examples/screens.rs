@@ -137,6 +137,31 @@ async fn main() -> anyhow::Result<()> {
         println!("── {} {}", workspace.title(), "─".repeat(60));
         println!("{}", render(&app));
     }
+
+    // A chat mid-turn, with the side panel open.
+    //
+    // Worth a screen of its own because it is the only state in which three
+    // things appear at once — the transcript, the panel Shift-Tab opens, and
+    // the context box that says when to compact — and none of them are visible
+    // on the empty chat above. A reference that only ever shows the resting
+    // state is a reference that cannot be checked against the interesting one.
+    app.go(Workspace::Chat);
+    app.panel = true;
+    app.busy = true;
+    app.turn_started_ms = Some(app.now_ms - 42_000);
+    app.push(tui::Entry::You("what is on my plate this week?".into()));
+    app.push(tui::Entry::Agent(
+        "Three things are live: the PR sweep, the Linear backlog triage, and \
+         the monitor you armed on the deploy log."
+            .into(),
+    ));
+    // Past the threshold, so the recommendation is on screen rather than
+    // merely reachable.
+    app.context_tokens = 164_000;
+    println!();
+    println!("── {} {}", "chat · working, panel open", "─".repeat(45));
+    println!("{}", render(&app));
+
     Ok(())
 }
 

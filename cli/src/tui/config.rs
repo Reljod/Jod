@@ -393,7 +393,11 @@ mod tests {
     fn a_preference_nobody_set_falls_back_to_the_built_in() {
         let store = store();
         let current = read(&store, Pref::Thinking).unwrap();
-        assert_eq!(current.value, Value::Flag(true), "thinking is on by default");
+        assert_eq!(
+            current.value,
+            Value::Flag(true),
+            "thinking is on by default"
+        );
         assert!(!current.chosen, "and nobody chose it");
         assert_eq!(current.unreadable, None);
     }
@@ -406,7 +410,10 @@ mod tests {
         write(&store, Pref::Thinking, &Value::Flag(true)).unwrap();
         let current = read(&store, Pref::Thinking).unwrap();
         assert_eq!(current.value, Value::Flag(true));
-        assert!(current.chosen, "the value matches the default but was chosen");
+        assert!(
+            current.chosen,
+            "the value matches the default but was chosen"
+        );
     }
 
     #[test]
@@ -420,7 +427,12 @@ mod tests {
         ] {
             write(&store, pref, &value).unwrap();
             let back = read(&store, pref).unwrap();
-            assert_eq!(back.value, value, "{} did not survive the store", pref.name());
+            assert_eq!(
+                back.value,
+                value,
+                "{} did not survive the store",
+                pref.name()
+            );
             assert!(back.chosen, "{} came back as unchosen", pref.name());
         }
     }
@@ -433,7 +445,11 @@ mod tests {
         for kind in HarnessKind::ALL {
             let value = Value::Harness(kind);
             write(&store, Pref::Harness, &value).unwrap();
-            assert_eq!(read(&store, Pref::Harness).unwrap().value, value, "{kind:?}");
+            assert_eq!(
+                read(&store, Pref::Harness).unwrap().value,
+                value,
+                "{kind:?}"
+            );
         }
         for mode in PermissionPolicy::ALL {
             let value = Value::Mode(mode);
@@ -481,7 +497,10 @@ mod tests {
 
         let current = read(&store, Pref::Details).unwrap();
         assert_eq!(current.value, Value::Flag(true));
-        assert!(!current.chosen, "and it is no opinion again, not a chosen true");
+        assert!(
+            !current.chosen,
+            "and it is no opinion again, not a chosen true"
+        );
     }
 
     /// A value from a newer build must not read as "never set". The screen has
@@ -492,7 +511,11 @@ mod tests {
         store.set_setting(Pref::Mode.key(), "yolo").unwrap();
 
         let current = read(&store, Pref::Mode).unwrap();
-        assert_eq!(current.value, Pref::Mode.fallback(), "the default is in force");
+        assert_eq!(
+            current.value,
+            Pref::Mode.fallback(),
+            "the default is in force"
+        );
         assert!(!current.chosen);
         assert_eq!(current.unreadable.as_deref(), Some("yolo"));
         assert!(current.line().contains("yolo"), "{}", current.line());
@@ -518,11 +541,17 @@ mod tests {
         );
         assert_eq!(
             request("harness opencode"),
-            Ok(Request::Set(Pref::Harness, Value::Harness(HarnessKind::OpenCode)))
+            Ok(Request::Set(
+                Pref::Harness,
+                Value::Harness(HarnessKind::OpenCode)
+            ))
         );
         assert_eq!(
             request("mode auto"),
-            Ok(Request::Set(Pref::Mode, Value::Mode(PermissionPolicy::Bypass)))
+            Ok(Request::Set(
+                Pref::Mode,
+                Value::Mode(PermissionPolicy::Bypass)
+            ))
         );
     }
 
@@ -543,7 +572,11 @@ mod tests {
         let said = request("colour green").unwrap_err();
         assert!(said.contains("colour is not a preference"), "{said}");
         for pref in Pref::ALL {
-            assert!(said.contains(pref.name()), "{said} does not mention {}", pref.name());
+            assert!(
+                said.contains(pref.name()),
+                "{said} does not mention {}",
+                pref.name()
+            );
         }
     }
 
@@ -564,7 +597,10 @@ mod tests {
         let said = apply(&store, &Request::Set(Pref::Thinking, Value::Flag(false)));
         assert_eq!(said.len(), 1);
         assert!(said[0].contains("thinking is off"), "{}", said[0]);
-        assert_eq!(store.setting("tui.show_thinking").unwrap().as_deref(), Some("off"));
+        assert_eq!(
+            store.setting("tui.show_thinking").unwrap().as_deref(),
+            Some("off")
+        );
     }
 
     #[test]
@@ -574,8 +610,16 @@ mod tests {
 
         let lines = apply(&store, &Request::List);
         assert_eq!(lines.len(), Pref::ALL.len());
-        assert!(lines[0].contains("thinking") && lines[0].contains("chosen"), "{}", lines[0]);
-        assert!(lines[1].contains("details") && lines[1].contains("default"), "{}", lines[1]);
+        assert!(
+            lines[0].contains("thinking") && lines[0].contains("chosen"),
+            "{}",
+            lines[0]
+        );
+        assert!(
+            lines[1].contains("details") && lines[1].contains("default"),
+            "{}",
+            lines[1]
+        );
     }
 
     #[test]
@@ -583,7 +627,11 @@ mod tests {
         let store = store();
         let lines = apply(&store, &Request::Show(Pref::Harness));
         assert_eq!(lines.len(), 1);
-        assert!(lines[0].contains("harness") && lines[0].contains("claude"), "{}", lines[0]);
+        assert!(
+            lines[0].contains("harness") && lines[0].contains("claude"),
+            "{}",
+            lines[0]
+        );
     }
 
     /// Two preferences must not share a key, or setting one would silently

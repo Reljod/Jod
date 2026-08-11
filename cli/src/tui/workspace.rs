@@ -287,7 +287,10 @@ mod tests {
     fn every_workspace_names_at_least_one_sort_order() {
         for w in Workspace::ALL {
             assert!(!w.sorts().is_empty(), "{w:?}");
-            assert!(!w.sort_name(99).is_empty(), "{w:?} wraps rather than panics");
+            assert!(
+                !w.sort_name(99).is_empty(),
+                "{w:?} wraps rather than panics"
+            );
         }
     }
 
@@ -295,7 +298,10 @@ mod tests {
     fn a_filter_matches_a_subsequence_whatever_the_case() {
         assert!(matches("prsr", "port-the-parser"));
         assert!(matches("PORT", "port-the-parser"));
-        assert!(matches("", "anything at all"), "an empty filter hides nothing");
+        assert!(
+            matches("", "anything at all"),
+            "an empty filter hides nothing"
+        );
         assert!(!matches("zzz", "port-the-parser"));
     }
 
@@ -317,7 +323,11 @@ mod tests {
 
         let after = ids(&["c", "b", "a"]);
         list.reconcile(&after);
-        assert_eq!(list.selected.as_deref(), Some("b"), "still on the same item");
+        assert_eq!(
+            list.selected.as_deref(),
+            Some("b"),
+            "still on the same item"
+        );
         assert_eq!(list.index(&after), 1);
     }
 
