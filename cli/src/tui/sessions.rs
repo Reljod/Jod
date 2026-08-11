@@ -638,7 +638,7 @@ pub fn render_tips(tips: &[TipRow]) -> Vec<String> {
         }
         out.push(line);
     }
-    out.push("    u goes back to the newest of these".to_string());
+    out.push("    U goes back to the newest of these".to_string());
     out
 }
 

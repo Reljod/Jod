@@ -2021,6 +2021,12 @@ fn accept_prompt(
         PromptIntent::New(Workspace::Tasks) | PromptIntent::New(Workspace::Team) => {
             Some(Action::AddTask(typed))
         }
+        // A branch named by the `#id` printed beside it. The leading `#` is
+        // optional because it is on the screen the number was read off, and
+        // making people retype punctuation they can see is not a form.
+        PromptIntent::Branch => Some(Action::Sessions(sessions::Request::Restore(
+            typed.trim_start_matches('#').to_string(),
+        ))),
         // `Store::remember` takes a triple — subject, predicate, object — and
         // splitting one typed line into three would be Jod guessing at which
         // word is the relation. The pipe is the form: three fields on one line,
@@ -2132,8 +2138,18 @@ fn on_fleet_key(app: &mut App, key: KeyEvent) -> Option<Action> {
         KeyCode::Char('b') => Some(Action::Sessions(sessions::Request::Open(
             app.selected_agent()?.id.clone(),
         ))),
-        // `v` undoes the last turn and `u` puts it back — the pair OpenCode
+        // `u` undoes the last turn and `U` puts it back — the pair OpenCode
         // ships as `revert`/`unrevert`.
+        //
+        // Lowercase is *undo*, and the capital is the inverse, because
+        // `on_memory_key` already spells undo `u`. The usual defence for a
+        // letter meaning two things — `a` attaches here and answers an
+        // escalation in goals — does not cover this pair: those are unrelated
+        // verbs, so nothing transfers, while undo and redo are one verb
+        // inverted and the muscle memory transfers exactly. Reaching for `u` on
+        // a screen of destructive-looking verbs and getting redo is the one
+        // collision worth spending a capital on, and `S` for sort and `M` for
+        // mark-all already set that pattern.
         //
         // Neither is behind `Overlay::Confirm`, and that is a decision rather
         // than an omission. That overlay's frame reads "this cannot be undone",
@@ -2143,12 +2159,29 @@ fn on_fleet_key(app: &mut App, key: KeyEvent) -> Option<Action> {
         // reversible act wear an irreversible warning teaches the user to click
         // through the warning that matters. What these do instead is name the
         // way back in the same breath — see `sessions::rewind`.
-        KeyCode::Char('v') => Some(Action::Sessions(sessions::Request::Rewind(
+        KeyCode::Char('u') => Some(Action::Sessions(sessions::Request::Rewind(
             app.selected_agent()?.id.clone(),
         ))),
-        KeyCode::Char('u') => Some(Action::Sessions(sessions::Request::Restore(
+        KeyCode::Char('U') => Some(Action::Sessions(sessions::Request::Restore(
             app.selected_agent()?.id.clone(),
         ))),
+        // `g` — go to a branch by the `#id` printed beside it.
+        //
+        // `U` takes the newest tip, which is the only case most people ever
+        // have: undo, then change your mind. This is for the rest — three or
+        // more branches set aside, and the one you want is not the last one you
+        // left. Without it those branches are listed, numbered, and
+        // unreachable, which is worse than not listing them: it shows you
+        // something and gives you no way to get to it.
+        KeyCode::Char('g') => {
+            app.selected_agent()?;
+            app.overlay = Overlay::Prompt {
+                label: "go to branch #".to_string(),
+                value: String::new(),
+                intent: PromptIntent::Branch,
+            };
+            None
+        }
         // `f` forks at the head: a second conversation from this point, sharing
         // the prefix rather than copying it. It writes one row and destroys
         // nothing, so it asks nothing either.
@@ -6531,8 +6564,8 @@ mod tests {
         for (key, expected) in [
             ('c', sessions::Request::List),
             ('b', sessions::Request::Open("run-7".into())),
-            ('v', sessions::Request::Rewind("run-7".into())),
-            ('u', sessions::Request::Restore("run-7".into())),
+            ('u', sessions::Request::Rewind("run-7".into())),
+            ('U', sessions::Request::Restore("run-7".into())),
             ('f', sessions::Request::Fork("run-7".into())),
             ('t', sessions::Request::Retry("run-7".into())),
         ] {
@@ -6545,12 +6578,44 @@ mod tests {
         }
     }
 
+    /// `u` is undo on every screen that has one.
+    ///
+    /// This shipped inverted for a while — `v` undid and `u` redid — which put
+    /// `u` on undo in memory and on *redo* in the fleet. The usual defence for
+    /// one letter meaning two things does not apply to a verb and its inverse:
+    /// `a` attaching here and answering an escalation in goals are unrelated,
+    /// so nothing transfers, while undo and redo are one verb inverted and the
+    /// habit transfers exactly — onto a screen where the neighbouring keys stop
+    /// and fork things.
+    #[test]
+    fn undo_is_the_lower_case_key_on_every_screen_that_has_one() {
+        let mut app = on_fleet_with_a_run();
+        assert_eq!(
+            press(&mut app, KeyCode::Char('u')),
+            Some(Action::Sessions(sessions::Request::Rewind("run-7".into()))),
+            "lower-case `u` undoes"
+        );
+
+        // The binding this pair had to agree with. It is still a named to-do
+        // rather than a store call, but the *letter* is already spoken for and
+        // that is what the fleet had to match.
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.memory = vec![memory_node("linear")];
+        app.go(Workspace::Memory);
+        app.reconcile();
+        let said = press(&mut app, KeyCode::Char('u'));
+        assert!(
+            matches!(said, Some(Action::Pending { ref verb, .. }) if verb.contains("undo")),
+            "memory's `u` is an undo too, got {said:?}"
+        );
+    }
+
     /// The run under the cursor is what these act on, so with no cursor they
     /// must do nothing — not act on a thread the user cannot see. `c` is the
     /// exception by design: the list is the way *out* of an empty fleet.
     #[test]
     fn a_conversation_verb_with_no_run_selected_does_nothing_at_all() {
-        for key in ['b', 'v', 'u', 'f', 't'] {
+        for key in ['b', 'u', 'U', 'f', 't'] {
             let mut app = app_on(HarnessKind::ClaudeCode);
             app.go(Workspace::Fleet);
             assert_eq!(press(&mut app, KeyCode::Char(key)), None, "`{key}`");

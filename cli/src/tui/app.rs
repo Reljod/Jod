@@ -82,6 +82,15 @@ pub enum PromptIntent {
     New(Workspace),
     /// Link the selected memory node to another, named here.
     Link(String),
+    /// Go to one specific abandoned branch, named by the `#id` printed beside
+    /// it.
+    ///
+    /// The redo key takes the newest tip, which covers undo-then-changed-my-mind
+    /// — the only case most people ever have. This is for the rest: three or
+    /// more branches set aside, and the one you want is not the last one you
+    /// left. Without it those branches are listed, numbered, and unreachable,
+    /// which is a worse state than not listing them at all.
+    Branch,
 }
 
 impl Overlay {
