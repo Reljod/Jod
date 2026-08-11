@@ -442,6 +442,18 @@ impl Ticker {
     /// an unreadable history is a reason for the daemon to carry on starting
     /// runs. The alternative is a full disk stopping the scheduler, which
     /// trades a bounded problem for an unbounded one.
+    ///
+    /// **It runs before `tick_goals`, and that is deliberate — do not move it.**
+    /// `Tick for Ticker` calls this half first, so a trim technically sits
+    /// between the schedules and the goals of one pass. The analysis has been
+    /// done, so that the next person to notice does not redo it and act on it: a
+    /// single `DELETE` pair over at most [`ledger::MAX_ROWS`] rows, once an
+    /// hour, against a sixty-second tick is sub-millisecond in SQLite, and it
+    /// adds no new contention because schedules already write inside this same
+    /// tick. Fixing it means reordering the most load-bearing loop in the
+    /// system — the one place a mistake is a schedule that never fires — to buy
+    /// microseconds. "Bounded but not zero" is the honest description of
+    /// something that does not matter.
     fn trim_ledger(&self, store: &Store, now_ms: i64) {
         let last = store
             .setting(PRUNED_AT_KEY)
