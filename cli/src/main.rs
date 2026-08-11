@@ -1349,13 +1349,16 @@ fn show_main_chat(jod: &Jod, id: &str, limit: usize, now: i64) -> Result<()> {
     if !done.is_empty() {
         println!("\nset in motion:");
         for d in done {
-            let what = d
-                .run_id
-                .or(d.schedule_name)
-                .or(d.goal_name)
-                .unwrap_or_else(|| "—".into());
+            // A run is named by its short id everywhere else in Jod, and this
+            // column sat next to a schedule name — so a bare UUID here was both
+            // inconsistent and the widest thing on the screen.
+            let what = match (d.run_id, d.schedule_name, d.goal_name) {
+                (Some(run), _, _) => short_id(&run),
+                (_, Some(name), _) | (_, _, Some(name)) => name,
+                _ => "—".into(),
+            };
             println!(
-                "  {} {:<20} {}",
+                "  {} {:<12} {}",
                 render_time::when(d.at_ms, now),
                 d.kind,
                 what

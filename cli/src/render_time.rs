@@ -161,6 +161,97 @@ pub fn fires(list: &[(Fire, Option<String>)], now_ms: i64) {
 mod tests {
     use super::*;
 
+    /// The strings below are copied out of a real `jod main` run's `messages`
+    /// rows, not invented, because the bug was that plausible-looking rendering
+    /// code had never been shown a real payload.
+    mod transcript_turns {
+        use super::*;
+        use jod_core::conversation::Role;
+
+        /// The `text` column here is deliberately the *cut* form the store
+        /// actually wrote, so a renderer that reached for it instead of
+        /// `tool_input` fails this test rather than passing on a tidy fake.
+        #[test]
+        fn a_tool_call_reads_as_the_verb_and_its_subject() {
+            let whole = serde_json::json!({
+                "cron": "0 8 * * 1-5",
+                "cwd": "/home/reljod",
+                "misfire": "fire_once",
+                "name": "weekday-pr-sweep",
+                "overlap": "skip",
+                "prompt": "Sweep the open PRs and report only what needs him.",
+            });
+            let cut = r#"{"cron":"0 8 * * 1-5","cwd":"/home/reljod","misfire":"fire_once","name":"weekday-pr-swe… (+926 chars)"#;
+            let line = turn_line(
+                Role::ToolCall,
+                Some("mcp__jod__schedule_create"),
+                cut,
+                Some(&whole),
+            );
+            assert_eq!(line, "schedule_create weekday-pr-sweep");
+        }
+
+        /// `name` is preferred over `prompt` deliberately: both are present on
+        /// the call above, and the prompt would have filled the line with the
+        /// briefing text while saying nothing about which schedule this is.
+        #[test]
+        fn a_call_with_no_nameable_subject_still_names_the_tool() {
+            let line = turn_line(
+                Role::ToolCall,
+                Some("mcp__jod__schedule_list"),
+                "{}",
+                Some(&serde_json::json!({})),
+            );
+            assert_eq!(line, "schedule_list");
+        }
+
+        #[test]
+        fn a_result_sheds_its_content_envelope() {
+            let stored = r#"[{"text":"{\n  \"name\": \"weekday-pr-sweep\",\n  \"state\": \"armed\"\n}","type":"text"}]"#;
+            let line = turn_line(Role::ToolResult, Some("schedule_create"), stored, None);
+            assert!(!line.contains("\"type\""), "envelope survived: {line}");
+            assert!(line.contains("weekday-pr-sweep"), "{line}");
+        }
+
+        /// The escapes are the point: an earlier draft searched the raw JSON for
+        /// the decoded string, which cannot be found once it contains a newline.
+        #[test]
+        fn a_result_containing_newlines_is_still_unwrapped() {
+            let stored = r#"[{"text":"line one\nline two","type":"text"}]"#;
+            let line = turn_line(Role::ToolResult, None, stored, None);
+            assert_eq!(line, "line one line two");
+        }
+
+        /// Copied from `list_agents`, whose result was long enough that the
+        /// store cut it mid-string. No parser accepts this, and it is what the
+        /// chat actually holds — so the readable path cannot depend on parsing.
+        #[test]
+        fn a_result_cut_mid_string_is_still_readable() {
+            let stored = r#"[{"text":"[\n  {\n    \"run_id\": \"1f0fc870\",\n    \"name\": \"main\",\n    \"harn… (+16 chars)"#;
+            assert!(
+                serde_json::from_str::<serde_json::Value>(stored).is_err(),
+                "the fixture must be the unparseable form, or it proves nothing"
+            );
+            let line = turn_line(Role::ToolResult, Some("mcp__jod__list_agents"), stored, None);
+            assert!(!line.contains(r#"\""#), "escapes survived: {line}");
+            assert!(!line.starts_with("[{"), "envelope survived: {line}");
+            assert!(line.contains("1f0fc870"), "{line}");
+        }
+
+        #[test]
+        fn a_result_that_is_not_an_envelope_is_left_alone() {
+            let line = turn_line(Role::ToolResult, None, "plain text", None);
+            assert_eq!(line, "plain text");
+        }
+
+        /// One per tool call, and every one of them was a bullet on a blank
+        /// line. `thread` drops what this returns empty.
+        #[test]
+        fn an_empty_thinking_turn_renders_to_nothing() {
+            assert!(turn_line(Role::Thinking, None, "", None).is_empty());
+        }
+    }
+
     /// A schedule table that showed only the cron expression would be a puzzle;
     /// one that showed only "in 9h" cannot be checked against a clock.
     #[test]
@@ -279,15 +370,137 @@ pub fn thread(messages: &[jod_core::conversation::Message]) {
             Role::ToolResult => ("└", DIM),
             Role::System => ("•", YELLOW),
         };
+        let body = turn_line(m.role, m.tool_name.as_deref(), &m.text, m.tool_input.as_ref());
+        // A thinking turn with nothing in it is a blank line with a bullet on
+        // it. The harness emits one per tool call, so the transcript was one
+        // third punctuation.
+        if body.is_empty() {
+            continue;
+        }
         // The message id is shown because every other verb takes one: reverting
         // or forking means naming a message, and hunting for it in the database
         // is not a user interface.
-        println!(
-            "{DIM}{:>5}{RESET} {colour}{mark} {}{RESET}",
-            m.id,
-            first_line(&m.text)
-        );
+        println!("{DIM}{:>5}{RESET} {colour}{mark} {body}{RESET}", m.id);
     }
+}
+
+/// One transcript turn, as a person would want to read it.
+///
+/// Split out and pure because the interesting part is the tool turns, and they
+/// were being printed as their raw JSON: a `schedule_create` showed as
+/// `{"cron":"0 8 * * 1-5","cwd":"/home/reljod","misfire":…` and its result as an
+/// escaped content array. Both are *stored* whole on purpose — replay needs
+/// them — but the whole of a payload is not a line of a chat.
+fn turn_line(
+    role: jod_core::conversation::Role,
+    tool: Option<&str>,
+    text: &str,
+    input: Option<&serde_json::Value>,
+) -> String {
+    use jod_core::conversation::Role;
+    match role {
+        // `input` and not `text`: for a tool call `text` is a *summary*, cut to
+        // length with a `… (+926 chars)` marker glued on the end, so it is not
+        // JSON and no amount of parsing will make it one. The arguments live
+        // whole in `tool_input`, which is the column that exists for this.
+        Role::ToolCall => {
+            let name = short_tool(tool.unwrap_or("tool"));
+            match input.and_then(subject_of) {
+                Some(s) => format!("{name} {s}"),
+                None => name.to_string(),
+            }
+        }
+        // A result is worth a line to show the call returned, and rarely worth
+        // more: what it *did* shows up in the reply, and the payload is one
+        // `jod conv show` away.
+        Role::ToolResult => {
+            let flat = first_line(&unwrap_content(text));
+            if flat.is_empty() {
+                "ok".into()
+            } else {
+                flat
+            }
+        }
+        _ => first_line(text),
+    }
+}
+
+/// The one field of a tool's arguments a reader actually wants.
+///
+/// Tools disagree about what to call it, so this tries the names in the order
+/// that answers "which thing?" best: an explicit name beats a free-text query,
+/// and a prompt is the last resort because it is the longest.
+fn subject_of(input: &serde_json::Value) -> Option<String> {
+    for key in ["name", "id", "query", "goal", "prompt", "text"] {
+        if let Some(s) = input.get(key).and_then(|x| x.as_str()) {
+            if !s.is_empty() {
+                return Some(first_line(s));
+            }
+        }
+    }
+    None
+}
+
+/// `mcp__jod__schedule_create` is Jod calling itself, and saying so four times a
+/// screen is noise. The server prefix is dropped; anything else is left as the
+/// harness named it, because for a non-Jod tool the full name is the fact.
+fn short_tool(name: &str) -> &str {
+    name.strip_prefix("mcp__jod__").unwrap_or(name)
+}
+
+/// Pull the text out of a harness content array, leaving anything else alone.
+///
+/// MCP results arrive as `[{"type":"text","text":"…"}]`, so without this every
+/// result line is spent on the envelope rather than the answer.
+///
+/// Owned rather than borrowed, and the first draft got this wrong: the inner
+/// string comes back with its escapes *resolved*, so looking for it inside the
+/// raw JSON fails on any result containing a newline — which is nearly all of
+/// them — and the "fallback" would have been the envelope, in exactly the case
+/// this function exists to handle.
+fn unwrap_content(text: &str) -> String {
+    if let Some(inner) = serde_json::from_str::<serde_json::Value>(text)
+        .ok()
+        .as_ref()
+        .and_then(|v| v.as_array())
+        .and_then(|a| a.first())
+        .and_then(|first| first.get("text"))
+        .and_then(|t| t.as_str())
+    {
+        return inner.to_string();
+    }
+    // A result long enough to be worth summarising is stored *cut*, mid-string,
+    // with a marker after it — so the envelope is real but no parser will take
+    // it. Peeling the opening by hand is not elegant and is the difference
+    // between a readable line and a screen of `\"run_id\": \"1f0f…`.
+    match text.strip_prefix(r#"[{"text":""#) {
+        Some(rest) => unescape(rest),
+        None => text.to_string(),
+    }
+}
+
+/// Undo JSON string escaping on a fragment that is not parseable JSON.
+///
+/// Only the escapes that actually appear in a cut-off tool result: a lone
+/// backslash at the very end is dropped rather than guessed at, since the
+/// character it was escaping is exactly what the truncation removed.
+fn unescape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => out.push('\n'),
+            Some('t') => out.push('\t'),
+            Some('r') => out.push('\r'),
+            Some(other) => out.push(other),
+            None => {}
+        }
+    }
+    out
 }
 
 /// Search hits, each with the conversation's opening around it.
