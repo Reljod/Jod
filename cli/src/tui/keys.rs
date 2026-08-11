@@ -57,8 +57,8 @@
 //! Only step 3 is enforced by a test, deliberately. An attempt to pin step 2's
 //! tie-break — "a collided letter must be printed on every screen that defines
 //! it, or on none" — was written, run, and deleted: the fleet has thirteen
-//! verbs, room for four at eighty columns, and five collided letters among
-//! them (`a c t f u`). No ordering satisfies it, so the guarantee could only
+//! verbs, room for five at eighty columns, and seven collided letters among
+//! them (`r a c u g f t`). No ordering satisfies it, so the guarantee could only
 //! have been met by deleting verbs. A weaker form — collided letters first
 //! within step 2 — was also tried and also deleted, because it demanded
 //! `r resume` outrank `s stop` on the fleet, which is the tie-break overruling
@@ -186,9 +186,11 @@ const FLEET: &[Key] = &[
     // on goals, which does print it. See the ordering rule in the header.
     k("a", "attach"),
     // `delegate`, word for word as the task board spells it, because it is the
-    // same `Action::Delegate` on the selected row — the labels have to match or
-    // `a_letter_meaning_two_things_is_printed_on_both_screens_or_neither` reads
-    // two spellings of one verb as a collision that is not one.
+    // same `Action::Delegate` on the selected row. Two spellings of one verb
+    // read as a collision and are not one: `d` is the one letter here that
+    // transfers between screens intact, and it only does so while both screens
+    // call it the same thing. Six characters shorter is why it now survives
+    // eighty columns, but matching the board is the reason.
     k("d", "delegate"),
     k("c", "conversations"),
     k("b", "branches"),
