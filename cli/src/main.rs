@@ -364,6 +364,11 @@ enum Command {
     /// pointed at it by config, and `--access` says how much of Jod that
     /// particular agent gets.
     Mcp {
+        /// `install` registers this server with the harnesses *you* launch.
+        /// Absent, `jod mcp` is the server itself — which is how every config
+        /// Jod writes invokes it, so this must stay optional.
+        #[command(subcommand)]
+        cmd: Option<McpCommand>,
         /// How much of Jod the agent on the other end may reach. Fail-closed:
         /// an unset flag gets the read-only set, never the full one.
         /// Parsed by `jod_core::mcp::parse_access`, not by a `value_enum`, so
@@ -381,6 +386,38 @@ enum Command {
         /// `jod-api` applies to a remote caller, and the same default.
         #[arg(long, value_parser = parse_permission_arg, default_value = "accept_edits")]
         max_permission: PermissionPolicy,
+    },
+}
+
+#[derive(Subcommand)]
+enum McpCommand {
+    /// Register Jod's MCP server with the harnesses on this machine, so a
+    /// session *you* start holds Jod's tools too.
+    ///
+    /// Jod already hands its own spawned runs an MCP config on the command
+    /// line. Nothing hands one to the `claude` you type in a repo, so that
+    /// session cannot schedule, delegate or remember — which reads from the
+    /// chair like the feature not existing rather than like a missing config.
+    ///
+    /// Safe to re-run: it rewrites its own entry, leaves every other server and
+    /// setting alone, and refuses a config it cannot parse.
+    Install {
+        /// How much of Jod these sessions get. Defaults to the full set,
+        /// because the session on the other end is one a person opened and is
+        /// watching — the opposite of the unattended case, which is pinned to
+        /// read-only where it is spawned and cannot be widened from here.
+        #[arg(long, default_value = "orchestrate", value_parser = parse_access_arg)]
+        access: jod_core::harness::ToolAccess,
+        /// Just this harness, instead of every installed one.
+        #[arg(short = 'H', long, value_enum)]
+        harness: Option<HarnessArg>,
+        /// Include harnesses that are not installed, which writes a config
+        /// directory for a program that is not on this machine.
+        #[arg(long)]
+        all: bool,
+        /// Say what would be written, and write nothing.
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 
@@ -1103,6 +1140,15 @@ async fn main() -> Result<()> {
         }
 
         Command::Daemon { once } => {
+            // Here rather than inside `Daemon::run`, and the difference is not
+            // stylistic. Registration writes to `~/.claude.json` and its
+            // siblings — files this program does not own — so it must be an
+            // effect of *someone starting the daemon*, never of constructing or
+            // driving one. As a side effect of the library's run loop it also
+            // fired from the test suite, which duly registered a `cargo test`
+            // binary from `target/debug/deps/` as the machine's MCP server.
+            // A long-running binary's entrypoint is a place tests do not reach.
+            jod_core::mcp_install::ensure_registered();
             let daemon = jod_core::daemon::Daemon::persistent().await?;
             if once {
                 let report = daemon.run_once().await?;
@@ -1453,6 +1499,20 @@ async fn main() -> Result<()> {
         }
 
         Command::Mcp {
+            cmd:
+                Some(McpCommand::Install {
+                    access,
+                    harness,
+                    all,
+                    dry_run,
+                }),
+            ..
+        } => {
+            mcp_cmd::install(access, harness.map(Into::into), all, dry_run)?;
+        }
+
+        Command::Mcp {
+            cmd: None,
             access,
             max_permission,
         } => {

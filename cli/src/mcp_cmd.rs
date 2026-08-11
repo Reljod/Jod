@@ -11,8 +11,9 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use jod_core::harness::ToolAccess;
+use jod_core::harness::{HarnessKind, ToolAccess};
 use jod_core::mcp::{self, Server};
+use jod_core::mcp_install;
 use jod_core::{Jod, PermissionPolicy};
 
 /// Run the server until the harness closes its end of the pipe.
@@ -44,4 +45,81 @@ pub async fn run(jod: Arc<Jod>, access: ToolAccess, max_permission: PermissionPo
 /// The spelling `parse_permission` reads back, from the one definition of it.
 fn permission_id(p: PermissionPolicy) -> &'static str {
     p.as_str()
+}
+
+/// `jod mcp install` — register this binary with the harnesses on this machine.
+///
+/// Prints to stdout, unlike everything else in this file: this one *is* a
+/// command to type, and the person typing it is being told which of their own
+/// config files Jod just edited. Naming the path every time is the point —
+/// silent edits to a file someone else owns are how a tool loses trust.
+pub fn install(
+    access: ToolAccess,
+    harness: Option<HarnessKind>,
+    all: bool,
+    dry_run: bool,
+) -> Result<()> {
+    let home = jod_core::paths::jod_home();
+
+    let results = match harness {
+        // An explicit `--harness` is an instruction, so it skips the
+        // is-it-installed filter: someone wiring a machine before installing
+        // the harness on it has said what they want.
+        Some(h) => vec![mcp_install::install(h, access, &home, dry_run)],
+        None if all => HarnessKind::ALL
+            .into_iter()
+            .map(|h| mcp_install::install(h, access, &home, dry_run))
+            .collect(),
+        None => mcp_install::install_all(access, &home, dry_run),
+    };
+
+    if results.is_empty() {
+        println!(
+            "No harness found on this machine, so there was nothing to register.\n\
+             Install Claude Code, OpenCode or AGY first, or name one with --harness."
+        );
+        return Ok(());
+    }
+
+    // A failure against one harness must not hide the successes against the
+    // others: a broken OpenCode config is not a reason to leave Claude Code
+    // unregistered. Every line is printed, and the command fails at the end if
+    // any of them did.
+    let mut failed = 0;
+    for result in &results {
+        match result {
+            Ok(r) => println!(
+                "{:<12} {:<14} {}",
+                r.harness.label(),
+                r.outcome.as_str(),
+                r.path.display()
+            ),
+            Err(e) => {
+                failed += 1;
+                eprintln!("{e}");
+            }
+        }
+    }
+
+    let wrote = results
+        .iter()
+        .filter(|r| r.as_ref().is_ok_and(|r| r.outcome.wrote()))
+        .count();
+    if dry_run {
+        println!("\nDry run — nothing was written.");
+    } else if wrote > 0 {
+        println!(
+            "\nRegistered as `{}` with {access} access. Restart any open session to pick it up.",
+            mcp_install::SERVER_NAME,
+            access = access.as_str()
+        );
+    }
+
+    if failed > 0 {
+        anyhow::bail!(
+            "{failed} of {} harnesses could not be registered",
+            results.len()
+        );
+    }
+    Ok(())
 }

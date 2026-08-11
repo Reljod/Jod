@@ -63,6 +63,21 @@ version: they share the event and plan formats.
 At least one harness (`claude`, `opencode`, or `agy`) must be on the `jod`
 user's `PATH`.
 
+Every installed harness is registered with Jod's own MCP server on daemon
+start, so an upgrade that moves the binary re-points the configs by itself and
+a session started by hand holds `schedule_create`, `delegate` and `remember`
+like the main chat does. To do it without waiting for a restart, or to see what
+it would touch first:
+
+```sh
+sudo -u jod jod mcp install --dry-run
+sudo -u jod jod mcp install
+```
+
+It edits only its own entry, never a config it cannot parse, and re-running is
+free. Set `JOD_NO_MCP_INSTALL=1` in the unit file on a box whose harness
+configs are managed by something else.
+
 ```sh
 sudo -u jod jod-api serve --bind 127.0.0.1:8787   # will warn about anything missing
 ```
