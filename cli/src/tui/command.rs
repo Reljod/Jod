@@ -611,6 +611,7 @@ mod tests {
 
     fn agent(id: &str, status: &str) -> crate::tui::AgentLine {
         crate::tui::AgentLine {
+            delivery: crate::tui::delivery::Verdict::Nothing,
             id: id.into(),
             name: "port the parser".into(),
             harness: "Claude Code".into(),

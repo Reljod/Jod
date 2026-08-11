@@ -20,6 +20,7 @@
 mod app;
 mod command;
 mod config;
+mod delivery;
 // `data` and `ui` are public so `examples/screens.rs` can build the app from
 // the real loaders and render it against a `TestBackend`. That example is how
 // "the screens show what is in the database" is demonstrated without a TTY, and
@@ -2206,6 +2207,20 @@ fn on_fleet_key(app: &mut App, key: KeyEvent) -> Option<Action> {
         KeyCode::Char('f') => Some(Action::Sessions(sessions::Request::Fork(
             app.selected_agent()?.id.clone(),
         ))),
+        // `m` — did the message this run owed anybody actually arrive?
+        //
+        // The fleet says `completed`, and `completed` is silent about the one
+        // thing the ledger was written to record: a run can finish, say its
+        // piece, and the person it was for hear nothing. Answered here rather
+        // than only in `jod ledger`, because the question is asked while
+        // looking at the run, and a ledger read in another program answers too
+        // late to change what anybody does next.
+        //
+        // Most runs owe nobody anything and say so — that is not the same
+        // answer as "delivered", and `delivery::about_run` keeps them apart.
+        KeyCode::Char('m') => Some(Action::Sessions(sessions::Request::Delivery(
+            app.selected_agent()?.id.clone(),
+        ))),
         // `t` — try the last question again. The answer it got stays where it
         // is and the new attempt lands beside it, so this is "regenerate" with
         // both attempts kept rather than the second painted over the first.
@@ -3338,11 +3353,22 @@ fn edit_in_editor(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &m
 }
 
 async fn list_agents(jod: &Arc<Jod>) -> Vec<AgentLine> {
+    // Read once for the whole listing rather than per row. Without a store
+    // every run reads as `Nothing`, which is the honest answer: with no ledger
+    // there is nothing that could have failed to arrive.
+    let store = jod.store();
     let mut lines: Vec<AgentLine> = jod
         .agents()
         .await
         .into_iter()
         .map(|a| AgentLine {
+            // Asked before `a.id` is moved, and asked here rather than in the
+            // renderer because `draw` is a pure function of state and must not
+            // touch the database. This is the tick's job.
+            delivery: store
+                .as_ref()
+                .map(|s| delivery::verdict_of_run(s, &a.id))
+                .unwrap_or(delivery::Verdict::Nothing),
             id: a.id,
             name: a.name,
             harness: a.harness_label,
@@ -3889,6 +3915,7 @@ mod tests {
 
     fn agent_line(id: &str, session: Option<&str>) -> AgentLine {
         AgentLine {
+            delivery: delivery::Verdict::Nothing,
             id: id.into(),
             name: "work".into(),
             harness: "Claude Code".into(),
@@ -3975,6 +4002,7 @@ mod tests {
 
     fn running(id: &str, name: &str) -> AgentLine {
         AgentLine {
+            delivery: delivery::Verdict::Nothing,
             id: id.into(),
             name: name.into(),
             harness: "Claude Code".into(),
@@ -5942,6 +5970,49 @@ mod tests {
 
     // ---- the loop carries them out ----
 
+    /// The field is filled from the store, not left at its default.
+    ///
+    /// This is the test the whole branch keeps needing. Every failure it has
+    /// found has the same shape — something complete, tested, and connected to
+    /// nothing — and a `delivery` field that compiles, renders and is never
+    /// populated would be the next one. It would look right on every screen,
+    /// because `Nothing` is the correct answer for most runs and the wrong one
+    /// silently.
+    #[tokio::test]
+    async fn a_run_whose_reply_was_lost_says_so_on_its_fleet_row() {
+        use jod_core::ledger::NewMessage;
+
+        let store = RealStore::in_memory().unwrap();
+        let owner = jod_core::ledger::Owner::new("here", 1);
+        // A run that owed a reply, given up on.
+        let id = store
+            .record_obligation(
+                &NewMessage::new("telegram:7:1", "telegram", "7", "your build broke")
+                    .about_run("run-lost"),
+                &owner,
+                1_000,
+            )
+            .unwrap();
+        store.mark_attempting(id, &owner, 1_000).unwrap();
+        // Past `MAX_ATTEMPTS`, so this settles as failed rather than pending.
+        for _ in 0..jod_core::ledger::MAX_ATTEMPTS {
+            store.mark_failed(id, "chat is gone", 2_000).unwrap();
+            store.mark_attempting(id, &owner, 2_000).unwrap();
+        }
+        store.mark_failed(id, "chat is gone", 2_000).unwrap();
+
+        assert_eq!(
+            delivery::verdict_of_run(&store, "run-lost"),
+            delivery::Verdict::Lost,
+            "the ledger must call this lost before the row can"
+        );
+        // And a run that owed nobody anything is not quietly called fine.
+        assert_eq!(
+            delivery::verdict_of_run(&store, "run-quiet"),
+            delivery::Verdict::Nothing
+        );
+    }
+
     fn jod_with(store: RealStore) -> Arc<Jod> {
         Jod::with_store(Arc::new(store))
     }
@@ -6586,6 +6657,7 @@ mod tests {
             ('U', sessions::Request::Restore("run-7".into())),
             ('f', sessions::Request::Fork("run-7".into())),
             ('t', sessions::Request::Retry("run-7".into())),
+            ('m', sessions::Request::Delivery("run-7".into())),
         ] {
             let mut app = on_fleet_with_a_run();
             assert_eq!(
@@ -6628,6 +6700,53 @@ mod tests {
         );
     }
 
+    /// The gap this key closes: the fleet says `completed` and is silent about
+    /// whether the person it was for ever heard anything.
+    ///
+    /// Asserted end to end, because the join is the part that can be quietly
+    /// wrong — the ledger keys its rows on the run id that `about_run` recorded,
+    /// and a fleet row *is* that id. If those two ever stop being the same
+    /// thing, every run reads as owing nobody anything, which is the most
+    /// reassuring possible way to be broken.
+    #[test]
+    fn the_fleet_can_ask_whether_a_finished_run_s_reply_ever_arrived() {
+        let store = store();
+        let id = store
+            .record_obligation(
+                &jod_core::ledger::NewMessage::new(
+                    "telegram:7:1",
+                    "telegram",
+                    "7",
+                    "the nightly digest",
+                )
+                .about_run("run-7"),
+                &jod_core::ledger::Owner::new("jod-cloud", 4821),
+                1_000,
+            )
+            .expect("an obligation");
+        for _ in 0..jod_core::ledger::MAX_ATTEMPTS {
+            store
+                .mark_attempting(id, &jod_core::ledger::Owner::new("jod-cloud", 4821), 2_000)
+                .unwrap();
+            store.mark_failed(id, "chat not found", 2_000).unwrap();
+        }
+
+        let mut app = on_fleet_with_a_run();
+        let Some(Action::Sessions(request)) = press(&mut app, KeyCode::Char('m')) else {
+            panic!("`m` on the fleet asks about the selected run's delivery");
+        };
+
+        let said = sessions::apply(&store, &request, 5_000).join("\n");
+        assert!(
+            said.contains("never arrived"),
+            "the run under the cursor found its lost reply: {said}"
+        );
+        assert!(
+            said.contains("chat not found"),
+            "and the reason came with it: {said}"
+        );
+    }
+
     /// `u` is undo on every screen that has one.
     ///
     /// This shipped inverted for a while — `v` undid and `u` redid — which put
@@ -6665,7 +6784,7 @@ mod tests {
     /// exception by design: the list is the way *out* of an empty fleet.
     #[test]
     fn a_conversation_verb_with_no_run_selected_does_nothing_at_all() {
-        for key in ['b', 'u', 'U', 'f', 't'] {
+        for key in ['b', 'u', 'U', 'f', 't', 'm'] {
             let mut app = app_on(HarnessKind::ClaudeCode);
             app.go(Workspace::Fleet);
             assert_eq!(press(&mut app, KeyCode::Char(key)), None, "`{key}`");

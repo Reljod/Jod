@@ -417,6 +417,18 @@ pub enum Request {
     /// Ask the last question again, as a second answer rather than a
     /// replacement — ChatGPT's "regenerate", and the reason `branch_at` exists.
     Retry(String),
+    /// What became of the reply a run owed somebody — see [`super::delivery`].
+    ///
+    /// Here rather than in an `Action` of its own, and the reason is a seam
+    /// rather than a preference: `Action::Sessions` is already carried through
+    /// `perform`, so riding it costs nothing, while a second variant would mean
+    /// editing the loop that runs every other verb. The subject keeps its own
+    /// module; only the envelope is shared.
+    ///
+    /// The `String` is a **run** id, not a conversation — this is the one
+    /// request that starts from a fleet row rather than a thread, which is why
+    /// it does not go through `resolve`.
+    Delivery(String),
 }
 
 /// Carry out one request and say what happened, one line per line of output.
@@ -439,6 +451,7 @@ pub fn apply(store: &Store, request: &Request, now_ms: i64) -> Vec<String> {
         } => on_conversation(store, conversation, |id| goto(store, id, branch)),
         Request::Fork(needle) => on_conversation(store, needle, |id| fork(store, id)),
         Request::Retry(needle) => on_conversation(store, needle, |id| retry(store, id)),
+        Request::Delivery(run_id) => super::delivery::about_run(store, run_id, now_ms),
     }
 }
 

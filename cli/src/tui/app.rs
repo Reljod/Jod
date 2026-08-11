@@ -13,6 +13,7 @@ use jod_core::{AgentEvent, HarnessKind, PermissionPolicy, Resume};
 use super::data::{
     ActivityItem, GoalRow, HookRow, MemoryKind, MemoryNode, ScheduleRow, Source, TaskRow, TaskState,
 };
+use super::delivery::Verdict;
 use super::graph::GraphView;
 use super::workspace::{matches, ListState, Workspace};
 
@@ -267,6 +268,19 @@ pub struct AgentLine {
     /// The last thing it said, which is the only summary an unattended run
     /// offers of what it actually did.
     pub last: Option<String>,
+    /// Whether the message this run owed somebody actually reached them.
+    ///
+    /// On the row rather than behind a key, and that distinction is the whole
+    /// feature. The ledger could always answer "did that reply arrive" — but
+    /// only if asked, and you have to already suspect a problem to ask. "The
+    /// run says completed" is precisely the state in which nobody suspects
+    /// anything, so an answer available on request is an answer nobody gets.
+    ///
+    /// [`Verdict::Nothing`] for the great majority of runs, which owed nobody
+    /// a message at all. Deliberately not the same as `Fine`: saying
+    /// "delivered" about a message that never existed is how a reader learns
+    /// to distrust the good news.
+    pub delivery: Verdict,
 }
 
 impl AgentLine {
@@ -2059,6 +2073,7 @@ mod tests {
 
     fn line(id: &str, status: &str) -> AgentLine {
         AgentLine {
+            delivery: Verdict::Nothing,
             id: id.into(),
             name: format!("job {id}"),
             harness: "Claude Code".into(),

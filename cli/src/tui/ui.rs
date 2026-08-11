@@ -1125,9 +1125,11 @@ fn draw_fleet(f: &mut Frame, app: &App, area: Rect) {
                     a.name.clone(),
                     if chosen { bold(USER) } else { fg(AGENT) },
                 ));
-                if watched {
-                    spans.push(Span::styled("  ← on screen", fg(USER)));
-                }
+                let spans = if watched {
+                    with_marker(spans, "  ← on screen", fg(USER), inner)
+                } else {
+                    spans
+                };
                 ListItem::new(Line::from(spans))
             })
             .collect()
@@ -1150,9 +1152,11 @@ fn draw_fleet(f: &mut Frame, app: &App, area: Rect) {
                 field("harness", &a.harness),
                 field(
                     "status",
-                    // The master column is 48 cells at the design width, so the
-                    // inline `← on screen` marker is the first thing truncated.
-                    // The detail pane always has room to say it.
+                    // The master column is 48 cells at the design width, so
+                    // the inline `← on screen` marker is the first thing
+                    // *dropped* — whole, by `with_marker`, never clipped to
+                    // `← on scr`. This pane is where it is always said, which
+                    // is why dropping it there costs nothing above 90 columns.
                     &if app.watching.as_deref() == Some(a.id.as_str()) {
                         format!("{} · on screen", a.status)
                     } else {
@@ -1200,6 +1204,31 @@ fn draw_fleet(f: &mut Frame, app: &App, area: Rect) {
         ),
         right,
     );
+}
+
+/// Appends a trailing marker to a row, but only if the whole of it fits.
+///
+/// Whole or nothing, exactly like the keybar. These markers were pushed
+/// unconditionally and left for the widget to clip, which rendered `← on scr`
+/// at eighty columns, a bare `← ` at 150, `← whe` on the graph trail at 60 —
+/// and worst, `← n` for `← needs you`, the marker whose entire job is to say
+/// that a person is required. A phrase cut mid-word teaches a phrase that does
+/// not exist, which is the rule `keys::keybar` already follows one module over.
+///
+/// The comment this replaces called the marker "the first thing truncated". It
+/// was meant to read *dropped*, and the gap between those two words is exactly
+/// where the bug lived unread.
+fn with_marker(
+    mut spans: Vec<Span<'static>>,
+    marker: &str,
+    style: Style,
+    room: usize,
+) -> Vec<Span<'static>> {
+    let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+    if used + marker.chars().count() <= room {
+        spans.push(Span::styled(marker.to_string(), style));
+    }
+    spans
 }
 
 /// One `name  value` row of a detail pane, indented off the border — text
@@ -1429,10 +1458,12 @@ fn draw_graph(f: &mut Frame, app: &App, area: Rect) {
             fg(WARN),
         )));
     }
-    lines.push(Line::from(vec![
-        Span::styled(format!("   {}", app.graph.trail_line()), fg(MUTED)),
-        Span::styled("   ← where you have been", fg(MUTED)),
-    ]));
+    lines.push(Line::from(with_marker(
+        vec![Span::styled(format!("   {}", app.graph.trail_line()), fg(MUTED))],
+        "   ← where you have been",
+        fg(MUTED),
+        area.width.saturating_sub(2) as usize,
+    )));
 
     f.render_widget(
         Paragraph::new(lines).block(
@@ -2001,7 +2032,7 @@ fn draw_activity(f: &mut Frame, app: &App, area: Rect) {
             if chosen { bold(AGENT) } else { fg(AGENT) },
         ));
         if item.needs_you {
-            spans.push(Span::styled("  ← needs you", bold(WARN)));
+            spans = with_marker(spans, "  ← needs you", bold(WARN), width);
         }
         lines.push(Line::from(spans));
     }
@@ -2577,6 +2608,7 @@ mod tests {
 
     fn agent_line(id: &str, name: &str, status: &str) -> super::super::AgentLine {
         super::super::AgentLine {
+            delivery: crate::tui::delivery::Verdict::Nothing,
             id: id.into(),
             name: name.into(),
             harness: "Claude Code".into(),
@@ -3498,6 +3530,61 @@ mod tests {
         }
     }
 
+    /// Regression across three screens: trailing markers were pushed and left
+    /// for the widget to clip. The fleet said `← on scr` at 80 and a bare `← `
+    /// at 150, the graph trail said `← whe` at 60, and the activity feed said
+    /// `← n` — for `← needs you`, the marker whose entire job is to say a
+    /// person is required.
+    ///
+    /// The rule is the keybar's: whole or nothing. A marker that is present is
+    /// present in full, and one that will not fit is absent rather than cut,
+    /// because a cut phrase teaches a phrase that does not exist.
+    #[test]
+    fn a_row_marker_is_printed_whole_or_not_at_all() {
+        let mut whole = 0usize;
+        let mut check = |screen: &str, needle: &str, marker: &str, what: &str, w: u16| {
+            for line in screen.lines().filter(|l| l.contains(needle)) {
+                if !line.contains('←') {
+                    continue;
+                }
+                assert!(
+                    line.contains(marker),
+                    "{what} at {w}: marker cut — {line:?}"
+                );
+                whole += 1;
+            }
+        };
+
+        for w in [40u16, 60, 80, 100, 110, 120, 150, 200] {
+            let mut fleet = app();
+            fleet.agents = vec![agent_line("aaa11111", "port the parser to the new AST", "completed")];
+            fleet.watching = Some("aaa11111".into());
+            fleet.go(Workspace::Fleet);
+            check(&rendered(&fleet, w, 14), "aaa11111", "← on screen", "fleet", w);
+
+            let mut feed = activity_app();
+            feed.activity[2].text =
+                "inbox-to-zero iteration 118 stalled on a decision nobody has made yet".into();
+            check(&rendered(&feed, w, 20), "stalled", "← needs you", "activity", w);
+
+            let mut graph = memory_app();
+            graph.graph = GraphView::new("linear-is-truth");
+            graph.graph.recentre("prefers-spec-first");
+            graph.drill(Workspace::MemoryGraph);
+            check(
+                &rendered(&graph, w, 24),
+                "linear-is-truth ⟩",
+                "← where you have been",
+                "graph trail",
+                w,
+            );
+        }
+
+        // Anti-vacuity: a run where every marker was dropped for want of room
+        // has not shown they print whole, only that they can be absent.
+        assert!(whole > 0, "no marker was ever printed in full");
+    }
+
     // ---- what the screens teach ----
 
     /// The complement to `keys.rs`'s scan, which walks the tables and the two
@@ -3807,6 +3894,7 @@ mod tests {
     fn the_fleet_screen_lists_the_runs_it_knows_about() {
         let mut a = app();
         a.agents = vec![super::super::AgentLine {
+            delivery: crate::tui::delivery::Verdict::Nothing,
             id: "abcdef1234".into(),
             name: "do the thing".into(),
             harness: "AGY".into(),
