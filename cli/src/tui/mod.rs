@@ -1220,6 +1220,36 @@ fn point_at(
     app.cost_usd = 0.0;
     thread.conversation = conversation.map(str::to_string);
     thread.carried = carried;
+    offer_models(app, "/model ");
+}
+
+/// Put the model picker in front of somebody who has just changed harness.
+///
+/// The model was dropped two lines ago and the new harness's names look nothing
+/// like the old one's, so "what does this one take" is the next question every
+/// time. The answer is a list that only the completion popup holds — and the
+/// popup opens on what is in the input box. So the offer *is* the prefilled
+/// line: `/model ` with the cursor after it, which draws the list without
+/// choosing from it. Enter on nothing chosen restores the harness default, which
+/// is where the switch had already left things, so ignoring the offer costs
+/// nothing.
+///
+/// Only into an empty box. A prompt half-typed is worth more than a hint, and a
+/// switch that finishes while somebody is mid-sentence must not eat the
+/// sentence.
+fn offer_models(app: &mut App, line: &str) {
+    if !app.input.is_empty() {
+        return;
+    }
+    app.accept_completion(line);
+}
+
+/// The harness a preference value names, if it names one.
+fn harness_of(value: &config::Value) -> Option<HarnessKind> {
+    match value {
+        config::Value::Harness(kind) => Some(*kind),
+        _ => None,
+    }
 }
 
 /// Everything a finished run said, oldest first.
@@ -2817,11 +2847,31 @@ fn apply_slash(app: &mut App, slash: command::Slash) -> Option<Action> {
                 match (pref, value.flag()) {
                     (config::Pref::Thinking, Some(on)) => app.show_thinking = on,
                     (config::Pref::Details, Some(on)) => app.show_details = on,
-                    // `harness` and `mode` are deliberately not applied to this
-                    // session: they are what a *new* session starts with, and
-                    // `/harness` and `/mode` are how you change the one you are
-                    // in. Two commands, two scopes, both said out loud.
+                    // `harness`, `model` and `mode` are deliberately not applied
+                    // to this session: they are what a *new* session starts
+                    // with, and `/harness`, `/model` and `/mode` are how you
+                    // change the one you are in. Two commands, two scopes, both
+                    // said out loud.
                     _ => {}
+                }
+                // The same offer `/harness` makes, one scope up: the default
+                // model has just been dropped for belonging to the harness you
+                // left, so the names that could replace it are the next thing
+                // wanted. `/config model ` rather than `/model `, because the
+                // choice being made here is about new conversations and not
+                // this one.
+                //
+                // Withheld when the harness just chosen is not the one this
+                // session is on. The loaded list belongs to `app.harness` and
+                // nothing has asked the other harness for its own, so opening
+                // the picker there would offer Claude Code's names for a
+                // preference that is now about OpenCode — the exact failure
+                // `/model`'s live list was built to end. A notice can still be
+                // right where a list cannot: `apply` names the dropped model.
+                if let (config::Pref::Harness, Some(chosen)) = (pref, harness_of(value)) {
+                    if chosen == app.harness {
+                        offer_models(app, "/config model ");
+                    }
                 }
             }
             return Some(Action::Config(request));
@@ -3091,6 +3141,18 @@ fn load_preferences(app: &mut App, store: &Store, opts: &Options) {
             return;
         }
     };
+    // Which harness `default.model` was chosen against — the stored one, or the
+    // built-in when nobody stored one. `/config` drops the model whenever this
+    // changes, so the two are in step in the database; what it cannot see is
+    // `-H opencode` on this launch, which overrides the stored harness and would
+    // otherwise be handed a model chosen for Claude Code.
+    let stored_harness = all
+        .iter()
+        .find_map(|c| match (c.pref, &c.value) {
+            (config::Pref::Harness, config::Value::Harness(kind)) => Some(*kind),
+            _ => None,
+        })
+        .unwrap_or(HarnessKind::ClaudeCode);
     for current in all {
         if !current.chosen {
             if let Some(junk) = current.unreadable {
@@ -3111,6 +3173,18 @@ fn load_preferences(app: &mut App, store: &Store, opts: &Options) {
             // day the default moved.
             (config::Pref::Harness, config::Value::Harness(kind)) if opts.harness.is_none() => {
                 app.harness = *kind;
+            }
+            // `--model` is already an `Option`, so the second half of this needs
+            // none of the guesswork above: nothing given means nothing was asked
+            // for. The first half is the harness check — a stored model is only
+            // ever a name for the harness it was stored beside, and a launch
+            // flag that picks a different one strands it exactly the way
+            // `/config harness` would have.
+            (config::Pref::Model, config::Value::Model(model))
+                if opts.model.is_none()
+                    && opts.harness.unwrap_or(stored_harness) == stored_harness =>
+            {
+                app.model = model.clone();
             }
             (config::Pref::Mode, config::Value::Mode(mode)) if opts.permission.is_none() => {
                 app.mode = *mode;
@@ -3486,6 +3560,94 @@ mod tests {
         // The harness session belonged to the harness being left.
         assert_eq!(app.session, None);
         assert_eq!(app.resume, Resume::Fresh);
+    }
+
+    /// The model was just dropped, so the next question is what the new harness
+    /// takes — and the answer is a list only the completion popup holds. The
+    /// popup opens on the text in the input box, so a prefilled `/model ` *is*
+    /// the picker appearing.
+    #[test]
+    fn arriving_at_a_new_harness_opens_the_model_picker() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        point_at(
+            &mut app,
+            &mut Thread::default(),
+            HarnessKind::OpenCode,
+            None,
+            None,
+        );
+
+        assert_eq!(app.input, "/model ");
+        assert_eq!(app.cursor, app.input.len(), "the cursor goes after it");
+        assert!(
+            !command::completions(&app.input, &app).is_empty(),
+            "and that is a line the popup opens on"
+        );
+    }
+
+    /// A half-typed prompt is worth more than a hint. The switch can finish at
+    /// any moment — the summariser is a whole run — and landing on somebody
+    /// mid-sentence must not eat the sentence.
+    #[test]
+    fn the_picker_never_overwrites_something_being_typed() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.input = "port the parser to".into();
+        app.cursor = app.input.len();
+
+        point_at(
+            &mut app,
+            &mut Thread::default(),
+            HarnessKind::OpenCode,
+            None,
+            None,
+        );
+        assert_eq!(app.input, "port the parser to");
+    }
+
+    /// `/config harness` is about new conversations, so its offer is the
+    /// preference and not the live command.
+    #[test]
+    fn choosing_a_default_harness_offers_the_default_model_next() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        apply_slash(
+            &mut app,
+            command::Slash::Config(config::Request::Set(
+                config::Pref::Harness,
+                config::Value::Harness(HarnessKind::ClaudeCode),
+            )),
+        );
+        assert_eq!(app.input, "/config model ");
+    }
+
+    /// ...but only when the harness chosen is the one this session is on. The
+    /// loaded list belongs to `app.harness`; offering it for a preference about
+    /// a *different* harness would suggest names that harness rejects, which is
+    /// the failure the live list exists to prevent.
+    #[test]
+    fn no_picker_for_a_harness_whose_models_are_not_the_ones_loaded() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        apply_slash(
+            &mut app,
+            command::Slash::Config(config::Request::Set(
+                config::Pref::Harness,
+                config::Value::Harness(HarnessKind::Agy),
+            )),
+        );
+        assert!(app.input.is_empty(), "{}", app.input);
+    }
+
+    /// Setting anything else leaves the box alone.
+    #[test]
+    fn the_other_preferences_do_not_open_a_picker() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        apply_slash(
+            &mut app,
+            command::Slash::Config(config::Request::Set(
+                config::Pref::Mode,
+                config::Value::Mode(PermissionPolicy::Plan),
+            )),
+        );
+        assert!(app.input.is_empty(), "{}", app.input);
     }
 
     #[test]
@@ -6442,8 +6604,7 @@ mod tests {
             "nothing was asked for, so the choice wins"
         );
 
-        let launched_on =
-            options_launched_on(HarnessKind::OpenCode, PermissionPolicy::default());
+        let launched_on = options_launched_on(HarnessKind::OpenCode, PermissionPolicy::default());
         let mut app = app_on(HarnessKind::OpenCode);
         load_preferences(&mut app, &store, &launched_on);
         assert_eq!(
@@ -6451,6 +6612,71 @@ mod tests {
             HarnessKind::OpenCode,
             "-H opencode wins over the choice"
         );
+    }
+
+    /// The point of the preference: choose the model once and every later
+    /// session opens on it, instead of typing `/model` at each launch.
+    #[test]
+    fn a_stored_model_applies_when_the_command_line_asked_for_nothing() {
+        let store = store();
+        config::write(
+            &store,
+            config::Pref::Model,
+            &config::Value::Model(Some("haiku".into())),
+        )
+        .unwrap();
+
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        load_preferences(&mut app, &store, &options());
+        assert_eq!(app.model.as_deref(), Some("haiku"));
+
+        // `--model` is somebody overruling their own preference for one session.
+        let mut insisted = options();
+        insisted.model = Some("opus".into());
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.model = Some("opus".into());
+        load_preferences(&mut app, &store, &insisted);
+        assert_eq!(
+            app.model.as_deref(),
+            Some("opus"),
+            "--model must win over the stored choice"
+        );
+    }
+
+    /// The half `/config` cannot enforce on its own. It drops the model when the
+    /// *stored* harness changes, but `-H opencode` changes the harness for this
+    /// launch only — and `haiku` handed to OpenCode fails the first turn of the
+    /// session with a name it has never heard of.
+    #[test]
+    fn a_stored_model_is_not_handed_to_a_harness_named_at_launch() {
+        let store = store();
+        config::write(
+            &store,
+            config::Pref::Harness,
+            &config::Value::Harness(HarnessKind::ClaudeCode),
+        )
+        .unwrap();
+        config::write(
+            &store,
+            config::Pref::Model,
+            &config::Value::Model(Some("haiku".into())),
+        )
+        .unwrap();
+
+        let launched_on = options_launched_on(HarnessKind::OpenCode, PermissionPolicy::default());
+        let mut app = app_on(HarnessKind::OpenCode);
+        load_preferences(&mut app, &store, &launched_on);
+        assert_eq!(
+            app.model, None,
+            "haiku was Claude Code's name, and OpenCode is what is running"
+        );
+
+        // ...and still applies when the launch flag names the harness it was
+        // chosen for, which is not a change at all.
+        let same = options_launched_on(HarnessKind::ClaudeCode, PermissionPolicy::default());
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        load_preferences(&mut app, &store, &same);
+        assert_eq!(app.model.as_deref(), Some("haiku"));
     }
 
     /// A stored mode has to apply, and it must not stop applying because a
@@ -6465,8 +6691,12 @@ mod tests {
     #[test]
     fn a_stored_mode_applies_when_the_command_line_asked_for_nothing() {
         let store = store();
-        config::write(&store, config::Pref::Mode, &config::Value::Mode(PermissionPolicy::Plan))
-            .unwrap();
+        config::write(
+            &store,
+            config::Pref::Mode,
+            &config::Value::Mode(PermissionPolicy::Plan),
+        )
+        .unwrap();
 
         let mut app = app_on(HarnessKind::ClaudeCode);
         app.mode = PermissionPolicy::default();
@@ -6740,7 +6970,13 @@ mod tests {
 
         assert_eq!(press(&mut app, KeyCode::Char('g')), None, "`g` asks first");
         assert!(
-            matches!(app.overlay, Overlay::Prompt { intent: PromptIntent::Branch, .. }),
+            matches!(
+                app.overlay,
+                Overlay::Prompt {
+                    intent: PromptIntent::Branch,
+                    ..
+                }
+            ),
             "got {:?}",
             app.overlay
         );

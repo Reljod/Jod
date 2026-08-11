@@ -1396,3 +1396,30 @@ budget and the deadline in view, and it is the one setting the caller can
 already express. So no agent in `agents/` or `.claude/agents/` sets `model:`,
 and a subagent inherits the session's. Pin one only when the role genuinely
 cannot be done at another tier, and say why in the file.
+
+## A model belongs to a harness, so nothing may hold one without the other
+
+`/model` has always dropped the model when `/harness` moved, because `opus` is a
+Claude Code alias, OpenCode wants `opencode/claude-opus-5` and AGY wants
+`claude-opus-4-6-thinking` — carrying either name across makes the *next* turn
+fail on a `--model` the new harness has never heard of, and the switch looks like
+it simply did not work. `default.model` is that same name, stored for longer, so
+it inherits the same rule rather than a gentler one: setting `default.harness`
+clears it, and a stored model is withheld at launch when `-H` names a harness
+other than the one it was chosen beside.
+
+The alternative — one key per harness, `default.model.opencode` — keeps three
+answers alive and looks more capable. It is worse. Two of the three are always
+stale, nothing ever tells you which one is in force, and the preference stops
+being a decision you can read off `/config` in one line. Dropping the model is
+lossy and *legible*: the drop is announced with the name it dropped, and the
+picker for the new harness opens in the same keystroke.
+
+That picker is the second half. The valid names live in the harness and reaching
+them means running a subprocess, so the completion popup is the only thing that
+holds the list — which is why the offer is a prefilled `/model ` in the input box
+rather than a new overlay. The popup already opens on whatever is typed there. It
+is withheld when the box is not empty, and after `/config harness` it is withheld
+unless the chosen harness is the one this session is on, because the loaded list
+belongs to `app.harness` and offering Claude Code's names for an OpenCode
+preference is the exact failure the live list was built to end.

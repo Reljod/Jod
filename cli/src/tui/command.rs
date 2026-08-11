@@ -353,7 +353,7 @@ pub const HELP: &[(&str, &str)] = &[
     ),
     (
         "/model <name>",
-        "set the model; no argument restores the default",
+        "set the model for this conversation; no argument restores the default",
     ),
     (
         "/mode [name]",
@@ -540,7 +540,7 @@ pub fn completions(input: &str, app: &crate::tui::App) -> Vec<Completion> {
             .filter(|kind| kind.starts_with(&typed))
             .map(|kind| Completion::new(format!("/new {kind}"), format!("a new {kind}")))
             .collect(),
-        "config" | "prefs" | "preferences" | "settings" => config_completions(&name, &typed),
+        "config" | "prefs" | "preferences" | "settings" => config_completions(&name, &typed, app),
         // The same reasoning as the agent ids: retyping a name off the screen
         // above is not a user interface. A schedule and a goal are both things
         // you pause, run and un-pause, so both are offered on those verbs.
@@ -569,8 +569,11 @@ pub fn completions(input: &str, app: &crate::tui::App) -> Vec<Completion> {
 ///
 /// The values matter more than the names here. `on`/`off` is guessable and
 /// `plan | ask | edits | auto` is not, and a preference whose spelling you
-/// cannot recall is one that stays at its default for ever.
-fn config_completions(command: &str, typed: &str) -> Vec<Completion> {
+/// cannot recall is one that stays at its default for ever. `model` is the
+/// extreme of that: nobody recalls `opencode/claude-opus-5`, which is why this
+/// takes the app — the live list is the only thing that makes the preference
+/// usable, and it is the same list `/model` offers rather than a second copy.
+fn config_completions(command: &str, typed: &str, app: &crate::tui::App) -> Vec<Completion> {
     match typed.split_once(char::is_whitespace) {
         // Still on the key. A trailing space, because every preference takes a
         // value and the cursor should land where it goes.
@@ -583,14 +586,33 @@ fn config_completions(command: &str, typed: &str) -> Vec<Completion> {
             let Some(pref) = config::Pref::named(name) else {
                 return vec![];
             };
-            let value = value.trim_start();
-            pref.choices()
+            let value = value.trim_start().to_ascii_lowercase();
+            let mut out: Vec<Completion> = pref
+                .choices()
                 .into_iter()
-                .filter(|choice| choice.starts_with(value))
+                .filter(|choice| choice.starts_with(&value))
                 .map(|choice| {
                     Completion::new(format!("/{command} {} {choice}", pref.name()), pref.what())
                 })
-                .collect()
+                .collect();
+            // The half of `model`'s list that no pure function can hold. Matched
+            // anywhere in the id and labelled by the harness, for the reasons
+            // `/model`'s own arm gives — this is that list, reached through a
+            // different command, so it behaves the same way.
+            if pref == config::Pref::Model {
+                out.extend(
+                    app.models
+                        .iter()
+                        .filter(|m| m.id.to_ascii_lowercase().contains(&value))
+                        .map(|m| {
+                            Completion::new(
+                                format!("/{command} {} {}", pref.name(), m.id),
+                                m.label.clone(),
+                            )
+                        }),
+                );
+            }
+            out
         }
     }
 }
@@ -703,6 +725,56 @@ mod tests {
     }
 
     /// `default` is offered by name because it is the one answer no harness
+    /// The preference and the command offer one list, because they set the same
+    /// kind of thing and a second copy is how the two drift apart.
+    #[test]
+    fn the_model_preference_offers_the_harnesss_own_list_too() {
+        let app = with_models(&[
+            ("opencode/claude-sonnet-5", "opencode"),
+            ("opencode/gemini-3.1-pro", "opencode"),
+        ]);
+        assert_eq!(
+            model_lines("/config model ", &app),
+            vec![
+                "/config model default",
+                "/config model opencode/claude-sonnet-5",
+                "/config model opencode/gemini-3.1-pro",
+            ]
+        );
+        // Matched anywhere in the id, for the reason `/model` is: nobody types
+        // the provider first.
+        assert_eq!(
+            model_lines("/config model gemini", &app),
+            vec!["/config model opencode/gemini-3.1-pro"]
+        );
+    }
+
+    /// The other preferences must not pick up model names on their way past the
+    /// new branch.
+    #[test]
+    fn a_preference_that_is_not_the_model_offers_only_its_own_values() {
+        let app = with_models(&[("opus", "the latest Opus")]);
+        assert_eq!(
+            model_lines("/config mode ", &app),
+            vec![
+                "/config mode plan",
+                "/config mode ask",
+                "/config mode edits",
+                "/config mode auto",
+            ]
+        );
+    }
+
+    /// Every preference is reachable by name, the new one included.
+    #[test]
+    fn config_offers_the_model_preference_among_the_keys() {
+        assert!(
+            lines("/config mod").iter().any(|l| l == "/config model "),
+            "{:?}",
+            lines("/config mod")
+        );
+    }
+
     /// lists, and it is what `parse` reads as "clear the model".
     #[test]
     fn default_is_offered_and_means_clear() {
@@ -1170,9 +1242,22 @@ mod tests {
             let offered = completions(&format!("/config {} ", pref.name()), &fleet(&[]));
             assert!(!offered.is_empty(), "{} offers no values", pref.name());
             for c in offered {
+                // `Set` or `Clear`. Every value used to be a `Set`, because
+                // every preference had a closed list of values and none of them
+                // was spelled `default`. `model` has no closed list, so the one
+                // value it can always offer is the word that means "no name" —
+                // and that word is the same one `/config <key> default` reads as
+                // giving the choice up. Both are the popup being obeyed rather
+                // than rejected, which is what this test is for; insisting on
+                // `Set` here would only force `model` to hide its one
+                // universally-valid answer.
+                let parsed = parse(&c.line);
                 assert!(
-                    matches!(parse(&c.line), Some(Slash::Config(Request::Set(_, _)))),
-                    "{} was suggested but does not set anything",
+                    matches!(
+                        parsed,
+                        Some(Slash::Config(Request::Set(_, _) | Request::Clear(_)))
+                    ),
+                    "{} was suggested but parses as {parsed:?}",
                     c.line
                 );
             }

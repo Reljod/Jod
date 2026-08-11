@@ -40,14 +40,24 @@ pub enum Pref {
     Details,
     /// Which harness a conversation starts on.
     Harness,
+    /// Which model that harness starts on. Directly below `Harness` because it
+    /// is meaningless without it — see [`Value::Model`].
+    Model,
     /// How much a turn may do without asking.
     Mode,
 }
 
 impl Pref {
     /// Every preference, in the order `/config` lists them: the two that change
-    /// what you see first, then the two that change what happens.
-    pub const ALL: [Pref; 4] = [Pref::Thinking, Pref::Details, Pref::Harness, Pref::Mode];
+    /// what you see first, then the three that change what happens — harness
+    /// before the model it has to be a model *of*.
+    pub const ALL: [Pref; 5] = [
+        Pref::Thinking,
+        Pref::Details,
+        Pref::Harness,
+        Pref::Model,
+        Pref::Mode,
+    ];
 
     /// What you type at `/config`. Deliberately the same word as the command
     /// that toggles it — `/thinking` and `/config thinking` are one setting
@@ -57,6 +67,7 @@ impl Pref {
             Pref::Thinking => "thinking",
             Pref::Details => "details",
             Pref::Harness => "harness",
+            Pref::Model => "model",
             Pref::Mode => "mode",
         }
     }
@@ -67,6 +78,7 @@ impl Pref {
             Pref::Thinking => "tui.show_thinking",
             Pref::Details => "tui.show_tool_output",
             Pref::Harness => "default.harness",
+            Pref::Model => "default.model",
             Pref::Mode => "default.permission",
         }
     }
@@ -77,6 +89,7 @@ impl Pref {
             Pref::Thinking => "show the harness reasoning",
             Pref::Details => "show what tools returned",
             Pref::Harness => "which harness a new conversation starts on",
+            Pref::Model => "which model it asks that harness for",
             Pref::Mode => "how much a turn may do without asking",
         }
     }
@@ -89,6 +102,11 @@ impl Pref {
             // noise, and choices are what this file stores.
             Pref::Thinking | Pref::Details => Value::Flag(true),
             Pref::Harness => Value::Harness(HarnessKind::ClaudeCode),
+            // Nothing, and deliberately not a name. Jod has no opinion worth
+            // holding about which model is best, the three harnesses do not
+            // spell theirs alike, and a built-in default here would be a name
+            // two of them reject.
+            Pref::Model => Value::Model(None),
             Pref::Mode => Value::Mode(PermissionPolicy::default()),
         }
     }
@@ -99,6 +117,7 @@ impl Pref {
         match self {
             Pref::Thinking | Pref::Details => parse_flag(text).map(Value::Flag),
             Pref::Harness => harness_named(text).map(Value::Harness),
+            Pref::Model => parse_model(text),
             Pref::Mode => jod_core::mcp::parse_permission(text).map(Value::Mode),
         }
     }
@@ -106,6 +125,13 @@ impl Pref {
     /// Everything this preference accepts, for the completion popup and for the
     /// sentence a refused value gets. One list, so the popup cannot offer
     /// something `parse` then rejects.
+    ///
+    /// `model` is the one preference whose list this cannot hold: the names come
+    /// from the harness, over a subprocess, and this module is pure. Only
+    /// `default` — the answer no harness lists — is here, and the live names are
+    /// added by the completion popup, which does have the list. See [`takes`].
+    ///
+    /// [`takes`]: Pref::takes
     pub fn choices(self) -> Vec<String> {
         match self {
             Pref::Thinking | Pref::Details => vec!["on".into(), "off".into()],
@@ -113,10 +139,26 @@ impl Pref {
                 .into_iter()
                 .map(|k| Value::Harness(k).label())
                 .collect(),
+            Pref::Model => vec!["default".into()],
             Pref::Mode => PermissionPolicy::ALL
                 .into_iter()
                 .map(|m| Value::Mode(m).label())
                 .collect(),
+        }
+    }
+
+    /// What to say this preference takes when it has refused something.
+    ///
+    /// `choices` for everything with a closed list, and a sentence for `model`,
+    /// which has not got one: telling somebody that `model` "takes default"
+    /// after refusing `claude sonnet 5` would name the single value that is not
+    /// the one they were reaching for.
+    pub fn takes(self) -> String {
+        match self {
+            Pref::Model => {
+                "one model name — /model lists what this harness accepts — or default".into()
+            }
+            _ => joined(&self.choices()),
         }
     }
 
@@ -136,6 +178,20 @@ impl Pref {
 pub enum Value {
     Flag(bool),
     Harness(HarnessKind),
+    /// A model name in the harness's own spelling, or `None` for "whatever it
+    /// picks itself".
+    ///
+    /// Unvalidated on purpose, and the only preference of which that is true.
+    /// The names live in the harness — `opencode/claude-opus-5`,
+    /// `claude-opus-4-6-thinking`, `opus` — and asking for them means running a
+    /// subprocess, which this module does not do. The completion popup offers
+    /// the real list; typing past it is allowed, and gets you the same failed
+    /// turn `/model` has always given for a name the harness does not know.
+    ///
+    /// `None` is *not* the same as no opinion: choosing to let the harness
+    /// decide survives a change to what Jod would otherwise pick, in exactly the
+    /// way the module doc describes.
+    Model(Option<String>),
     Mode(PermissionPolicy),
 }
 
@@ -150,6 +206,10 @@ impl Value {
             Value::Flag(true) => "on".into(),
             Value::Flag(false) => "off".into(),
             Value::Harness(k) => k.id().to_string(),
+            // Verbatim: this is the string handed to `--model`, and a
+            // normalised one would be a name the harness does not answer to.
+            Value::Model(Some(id)) => id.clone(),
+            Value::Model(None) => "default".into(),
             Value::Mode(m) => m.as_str().to_string(),
         }
     }
@@ -166,6 +226,8 @@ impl Value {
             Value::Harness(HarnessKind::ClaudeCode) => "claude".into(),
             Value::Harness(HarnessKind::OpenCode) => "opencode".into(),
             Value::Harness(HarnessKind::Agy) => "agy".into(),
+            Value::Model(Some(id)) => id.clone(),
+            Value::Model(None) => "default".into(),
             Value::Mode(m) => m.label().to_string(),
         }
     }
@@ -178,6 +240,29 @@ impl Value {
             _ => None,
         }
     }
+}
+
+/// A model name, or the word that means "no name".
+///
+/// Almost nothing is refused, because almost nothing *can* be: the valid names
+/// are the harness's, and it is not here to ask. What is refused is the shape
+/// that is certainly wrong — empty, or several words, which is a sentence
+/// somebody typed at the wrong prompt and never a model id.
+fn parse_model(text: &str) -> Option<Value> {
+    let text = text.trim();
+    // The same three words `request` treats as "give the choice up". Accepted
+    // here too so that `Pref::parse` alone — which is what the round-trip test
+    // and any non-`/config` caller use — reads the printed `default` back.
+    if matches!(
+        text.to_ascii_lowercase().as_str(),
+        "default" | "clear" | "unset"
+    ) {
+        return Some(Value::Model(None));
+    }
+    if text.is_empty() || text.contains(char::is_whitespace) {
+        return None;
+    }
+    Some(Value::Model(Some(text.to_string())))
 }
 
 /// `on`, `off`, and the words people reach for instead.
@@ -206,12 +291,27 @@ pub struct Current {
     pub unreadable: Option<String>,
 }
 
+/// The narrowest the value column ever gets. Wide enough for every closed list
+/// of values, so a `/config` with no model chosen looks exactly as it always did.
+const VALUE_WIDTH: usize = 9;
+
 impl Current {
     /// One line for the list: name, value, who decided, what it does.
     pub fn line(&self) -> String {
+        self.line_in(VALUE_WIDTH)
+    }
+
+    /// The same line with the value column widened to fit its neighbours.
+    ///
+    /// Model ids are the reason this is a parameter. `opencode/claude-sonnet-5`
+    /// is two and a half times the width of every other value in the table, and
+    /// at a fixed width it pushes `chosen` and the description out of line on
+    /// its row only — leaving the one command whose whole job is to be read as a
+    /// table with a step in the middle of it.
+    pub fn line_in(&self, value_width: usize) -> String {
         let origin = if self.chosen { "chosen" } else { "default" };
         let mut line = format!(
-            "{:<9} {:<9} {:<8} {}",
+            "{:<9} {:<value_width$} {:<8} {}",
             self.pref.name(),
             self.value.label(),
             origin,
@@ -322,7 +422,7 @@ pub fn request(arg: &str) -> std::result::Result<Request, String> {
         None => Err(format!(
             "{} does not take “{rest}” — it takes {}",
             pref.name(),
-            joined(&pref.choices())
+            pref.takes()
         )),
     }
 }
@@ -336,25 +436,57 @@ pub fn request(arg: &str) -> std::result::Result<Request, String> {
 pub fn apply(store: &Store, request: &Request) -> Vec<String> {
     match request {
         Request::List => match read_all(store) {
-            Ok(all) => all.iter().map(Current::line).collect(),
+            Ok(all) => {
+                // Measured across the whole list, so one long model id widens
+                // every row rather than stepping out of its own.
+                let width = all
+                    .iter()
+                    .map(|c| c.value.label().chars().count())
+                    .max()
+                    .unwrap_or(VALUE_WIDTH)
+                    .max(VALUE_WIDTH);
+                all.iter().map(|c| c.line_in(width)).collect()
+            }
             Err(e) => vec![format!("could not read the preferences: {e}")],
         },
         Request::Show(pref) => match read(store, *pref) {
             Ok(current) => vec![current.line()],
             Err(e) => vec![format!("could not read {}: {e}", pref.name())],
         },
-        Request::Set(pref, value) => match write(store, *pref, value) {
-            Ok(()) => vec![format!(
-                "{} is {} — remembered for next time",
-                pref.name(),
-                value.label()
-            )],
-            Err(e) => vec![format!(
-                "{} is {} for this session — it was not recorded: {e}",
-                pref.name(),
-                value.label()
-            )],
-        },
+        Request::Set(pref, value) => {
+            // Read before the write, because the answer is "did this *change*
+            // the harness", and after the write there is nothing left to
+            // compare against.
+            let stale = model_left_behind(store, pref, value);
+            let mut said = match write(store, *pref, value) {
+                Ok(()) => vec![format!(
+                    "{} is {} — remembered for next time",
+                    pref.name(),
+                    value.label()
+                )],
+                Err(e) => vec![format!(
+                    "{} is {} for this session — it was not recorded: {e}",
+                    pref.name(),
+                    value.label()
+                )],
+            };
+            if let Some(orphan) = stale {
+                said.push(match clear(store, Pref::Model) {
+                    Ok(_) => format!(
+                        "{orphan} was a {} model, so the model is the harness's own again — \
+                         /model lists what {} takes",
+                        Pref::Harness.name(),
+                        value.label()
+                    ),
+                    Err(e) => format!(
+                        "the stored model {orphan} belongs to the harness you just left and \
+                         could not be forgotten, so it will be handed to {}: {e}",
+                        value.label()
+                    ),
+                });
+            }
+            said
+        }
         Request::Clear(pref) => match clear(store, *pref) {
             Ok(true) => vec![format!(
                 "{} follows the default again, which is {}",
@@ -368,6 +500,38 @@ pub fn apply(store: &Store, request: &Request) -> Vec<String> {
             )],
             Err(e) => vec![format!("could not forget {}: {e}", pref.name())],
         },
+    }
+}
+
+/// The model name a harness change is about to strand, if it strands one.
+///
+/// A model belongs to a harness. `opus` means nothing to OpenCode, and
+/// `opencode/claude-opus-5` means nothing to AGY — so a stored model outliving
+/// the harness it was chosen for is not a preference, it is a name that fails
+/// the first turn of every new conversation. The session-level `/harness` has
+/// dropped the live model for this reason since it was written; this is the same
+/// rule one level up.
+///
+/// `None` whenever nothing is stranded: a different preference, the harness it
+/// already was, or no model chosen in the first place.
+fn model_left_behind(store: &Store, pref: &Pref, value: &Value) -> Option<String> {
+    if *pref != Pref::Harness {
+        return None;
+    }
+    // The harness *in force*, chosen or defaulted: setting `claude` when claude
+    // was already what a new conversation would open on changes nothing, and a
+    // model dropped there would be dropped for no reason.
+    let now = read(store, Pref::Harness).ok()?;
+    if now.value == *value {
+        return None;
+    }
+    match read(store, Pref::Model).ok()? {
+        Current {
+            value: Value::Model(Some(id)),
+            chosen: true,
+            ..
+        } => Some(id),
+        _ => None,
     }
 }
 
@@ -489,6 +653,146 @@ mod tests {
         }
     }
 
+    /// A model id is whatever the harness calls it, so the parser's job is to
+    /// pass names through rather than to know them. Every spelling the three
+    /// harnesses actually use has to survive.
+    #[test]
+    fn a_model_name_reaches_the_store_in_the_harnesss_own_spelling() {
+        let store = store();
+        for id in [
+            "opus",
+            "sonnet[1m]",
+            "claude-opus-5",
+            "opencode/claude-sonnet-5",
+            "claude-opus-4-6-thinking",
+        ] {
+            let value = Value::Model(Some(id.to_string()));
+            write(&store, Pref::Model, &value).unwrap();
+            assert_eq!(
+                store.setting("default.model").unwrap().as_deref(),
+                Some(id),
+                "{id} was rewritten on the way in"
+            );
+            assert_eq!(read(&store, Pref::Model).unwrap().value, value, "{id}");
+        }
+    }
+
+    /// Nothing else can be checked — the valid names live in the harness — so
+    /// the only refusals are the shapes that are certainly not a model.
+    #[test]
+    fn model_refuses_only_what_cannot_be_a_name() {
+        assert_eq!(Pref::Model.parse(""), None);
+        assert_eq!(Pref::Model.parse("   "), None);
+        assert_eq!(Pref::Model.parse("claude sonnet 5"), None);
+        assert_eq!(
+            Pref::Model.parse("  gpt-9  "),
+            Some(Value::Model(Some("gpt-9".into()))),
+            "a name Jod has never heard of is still a name"
+        );
+    }
+
+    /// Refusing `model` with "it takes default" would name the one value the
+    /// user was not reaching for.
+    #[test]
+    fn refusing_a_model_points_at_where_the_names_are() {
+        let said = request("model claude sonnet 5").unwrap_err();
+        assert!(said.contains("claude sonnet 5"), "{said}");
+        assert!(said.contains("/model"), "{said}");
+    }
+
+    #[test]
+    fn letting_the_harness_choose_is_itself_a_choice() {
+        let store = store();
+        write(&store, Pref::Model, &Value::Model(None)).unwrap();
+        let current = read(&store, Pref::Model).unwrap();
+        assert_eq!(current.value, Value::Model(None));
+        assert!(current.chosen, "it was decided, not left alone");
+    }
+
+    /// The rule the whole pairing rests on: `opus` means nothing to OpenCode, so
+    /// a model must not outlive the harness it was chosen for.
+    #[test]
+    fn changing_the_default_harness_forgets_the_model_that_belonged_to_it() {
+        let store = store();
+        write(&store, Pref::Model, &Value::Model(Some("opus".into()))).unwrap();
+
+        let said = apply(
+            &store,
+            &Request::Set(Pref::Harness, Value::Harness(HarnessKind::OpenCode)),
+        );
+        assert_eq!(said.len(), 2, "the drop has to be said, not done quietly");
+        assert!(said[1].contains("opus"), "{}", said[1]);
+        assert!(said[1].contains("opencode"), "{}", said[1]);
+
+        let current = read(&store, Pref::Model).unwrap();
+        assert_eq!(current.value, Value::Model(None));
+        assert!(!current.chosen, "and it is no opinion again");
+    }
+
+    /// Setting the harness to the one already in force changes nothing, so it
+    /// must not cost a model — including when that harness was the built-in
+    /// default rather than a stored choice.
+    #[test]
+    fn re_choosing_the_same_harness_keeps_the_model() {
+        for stored_first in [false, true] {
+            let store = store();
+            if stored_first {
+                write(
+                    &store,
+                    Pref::Harness,
+                    &Value::Harness(HarnessKind::ClaudeCode),
+                )
+                .unwrap();
+            }
+            write(&store, Pref::Model, &Value::Model(Some("opus".into()))).unwrap();
+
+            let said = apply(
+                &store,
+                &Request::Set(Pref::Harness, Value::Harness(HarnessKind::ClaudeCode)),
+            );
+            assert_eq!(said.len(), 1, "{said:?}");
+            assert_eq!(
+                read(&store, Pref::Model).unwrap().value,
+                Value::Model(Some("opus".into())),
+                "stored_first={stored_first}"
+            );
+        }
+    }
+
+    /// Only the model is collateral. Changing the harness must not quietly
+    /// reset how much a turn may do.
+    #[test]
+    fn changing_the_harness_leaves_every_other_preference_alone() {
+        let store = store();
+        write(&store, Pref::Mode, &Value::Mode(PermissionPolicy::Plan)).unwrap();
+        write(&store, Pref::Thinking, &Value::Flag(false)).unwrap();
+
+        apply(
+            &store,
+            &Request::Set(Pref::Harness, Value::Harness(HarnessKind::Agy)),
+        );
+        assert_eq!(
+            read(&store, Pref::Mode).unwrap().value,
+            Value::Mode(PermissionPolicy::Plan)
+        );
+        assert_eq!(
+            read(&store, Pref::Thinking).unwrap().value,
+            Value::Flag(false)
+        );
+    }
+
+    /// Nothing to strand, nothing to say. A second line about a model that was
+    /// never chosen is noise on the one command that exists to be legible.
+    #[test]
+    fn changing_the_harness_with_no_model_chosen_says_only_the_one_thing() {
+        let store = store();
+        let said = apply(
+            &store,
+            &Request::Set(Pref::Harness, Value::Harness(HarnessKind::OpenCode)),
+        );
+        assert_eq!(said.len(), 1, "{said:?}");
+    }
+
     #[test]
     fn giving_up_a_choice_returns_the_preference_to_the_default() {
         let store = store();
@@ -553,6 +857,17 @@ mod tests {
                 Value::Mode(PermissionPolicy::Bypass)
             ))
         );
+        assert_eq!(
+            request("model opencode/claude-sonnet-5"),
+            Ok(Request::Set(
+                Pref::Model,
+                Value::Model(Some("opencode/claude-sonnet-5".into()))
+            ))
+        );
+        // `/config model default` gives the choice up rather than storing the
+        // word — the same ending `/model default` has, reached from the other
+        // command.
+        assert_eq!(request("model default"), Ok(Request::Clear(Pref::Model)));
     }
 
     #[test]
@@ -619,6 +934,29 @@ mod tests {
             lines[1].contains("details") && lines[1].contains("default"),
             "{}",
             lines[1]
+        );
+    }
+
+    /// A model id is far wider than any other value, and a table with a step in
+    /// the middle of it is the one thing `/config` cannot afford to be.
+    #[test]
+    fn one_long_value_widens_every_row_rather_than_breaking_its_own() {
+        let store = store();
+        write(
+            &store,
+            Pref::Model,
+            &Value::Model(Some("opencode/claude-sonnet-5".into())),
+        )
+        .unwrap();
+
+        let lines = apply(&store, &Request::List);
+        let columns: Vec<usize> = lines
+            .iter()
+            .map(|l| l.find("chosen").or_else(|| l.find("default")).unwrap())
+            .collect();
+        assert!(
+            columns.windows(2).all(|w| w[0] == w[1]),
+            "the third column does not line up: {lines:#?}"
         );
     }
 
