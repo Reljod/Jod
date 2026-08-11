@@ -958,6 +958,22 @@ fn on_overlay_key(app: &mut App, key: KeyEvent) -> Option<Action> {
 /// without knowing that actions exist.
 fn confirmed(app: &mut App, verb: &str, what: &str) -> Option<Action> {
     let what = what.to_string();
+    // Dispatched on the verb, not the workspace, because backgrounding is not
+    // one screen's version of "delete the selected row" — it is the same act
+    // wherever it is asked for.
+    //
+    // Nothing is stopped, and nothing needs to be: a Jod run is a detached
+    // process group that reports through the database, so the TUI was only ever
+    // a viewer of it. "Background" here means this window stops looking, which
+    // is why it can be done without asking the supervisor anything.
+    if verb == "background" {
+        app.watching = None;
+        app.go(Workspace::Fleet);
+        app.push(Entry::Notice(format!(
+            "{what} keeps running — ⏎ or → opens it again"
+        )));
+        return None;
+    }
     match app.workspace {
         Workspace::Schedules => Some(Action::DeleteSchedule(what)),
         Workspace::Goals => Some(Action::DeleteGoal(what)),
@@ -1229,7 +1245,12 @@ fn accept_prompt(
 fn on_fleet_key(app: &mut App, key: KeyEvent) -> Option<Action> {
     match key.code {
         // Reading a run is the common case, so it is the plain key.
-        KeyCode::Enter => {
+        //
+        // `→` is the same verb spelled spatially: `←` backs out of a run into
+        // this list, `→` goes into the one under the cursor. Having both means
+        // the pair reads as one movement rather than as a key and its unrelated
+        // opposite.
+        KeyCode::Enter | KeyCode::Right => {
             let id = app.selected_agent()?.id.clone();
             app.go(Workspace::Chat);
             Some(Action::Watch(id))
@@ -1697,6 +1718,25 @@ fn on_chat_key(app: &mut App, key: KeyEvent, viewport: usize) -> Option<Action> 
         }
         KeyCode::Backspace => app.backspace(),
         KeyCode::Delete => app.delete_forward(),
+        // `←` on an *empty* input backs out of the run into the agents list,
+        // and asks first. With anything typed it is the cursor, as it must be:
+        // the same rule `?` follows two arms down, for the same reason —
+        // stealing a key people use to edit text is not worth any shortcut.
+        //
+        // Only offered when there is something to leave. Backgrounding an idle
+        // session means nothing, and a confirmation for it would be a question
+        // with no answer worth giving.
+        KeyCode::Left if app.input.is_empty() && (app.busy || app.watching.is_some()) => {
+            let what = app
+                .watching
+                .as_deref()
+                .map(short)
+                .unwrap_or_else(|| "this turn".to_string());
+            app.overlay = Overlay::Confirm {
+                verb: "background".to_string(),
+                what,
+            };
+        }
         KeyCode::Left => app.left(),
         KeyCode::Right => app.right(),
         KeyCode::Home => app.home(),
@@ -2362,6 +2402,67 @@ mod tests {
         assert_eq!(app.input, "queued thought");
     }
 
+    /// `←` backs out of a run, and asks before it does.
+    #[test]
+    fn left_on_an_empty_line_offers_to_background_the_run() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.watching = Some("abc12345".into());
+        press(&mut app, KeyCode::Left);
+        assert!(
+            matches!(&app.overlay, Overlay::Confirm { verb, .. } if verb == "background"),
+            "expected a confirmation, got {:?}",
+            app.overlay
+        );
+    }
+
+    /// The rule that keeps the shortcut from costing anything: with text in the
+    /// box, `←` is the cursor. A version of this that grabbed the key
+    /// unconditionally would make the input box unusable and pass every test
+    /// that only ever pressed it on an empty line.
+    #[test]
+    fn left_with_something_typed_still_moves_the_cursor() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.watching = Some("abc12345".into());
+        type_line(&mut app, "hello");
+        press(&mut app, KeyCode::Left);
+        assert_eq!(app.overlay, Overlay::None, "must not confirm anything");
+        assert_eq!(app.cursor, 4, "the cursor moved back over the `o`");
+    }
+
+    /// Nothing to leave means nothing to ask about.
+    #[test]
+    fn left_does_nothing_special_when_no_run_is_in_flight() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.watching = None;
+        app.busy = false;
+        press(&mut app, KeyCode::Left);
+        assert_eq!(app.overlay, Overlay::None);
+    }
+
+    /// Backgrounding detaches the view and lands on the agents list. The run
+    /// itself is a detached process group and is deliberately left alone.
+    #[test]
+    fn confirming_background_stops_watching_and_shows_the_agents() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.watching = Some("abc12345".into());
+        press(&mut app, KeyCode::Left);
+        assert_eq!(press(&mut app, KeyCode::Char('y')), None);
+        assert_eq!(app.watching, None, "the view detached");
+        assert_eq!(app.workspace, Workspace::Fleet);
+        assert_eq!(app.overlay, Overlay::None);
+    }
+
+    /// Anything that is not a yes leaves the run attached.
+    #[test]
+    fn declining_background_keeps_watching() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.watching = Some("abc12345".into());
+        press(&mut app, KeyCode::Left);
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(app.watching.as_deref(), Some("abc12345"));
+        assert_eq!(app.workspace, Workspace::Chat);
+    }
+
     #[test]
     fn a_prompt_typed_while_idle_is_sent_straight_away() {
         let mut app = app_on(HarnessKind::ClaudeCode);
@@ -2962,6 +3063,22 @@ mod tests {
             "nothing was stopped: {:?}",
             app.transcript
         );
+    }
+
+    /// The other half of the pair: `←` backs out to this list, `→` goes into
+    /// the run under the cursor. It must reach the same action `⏎` does, or the
+    /// two keys would drift apart the first time either one changed.
+    #[test]
+    fn right_enters_the_selected_run_exactly_as_enter_does() {
+        let mut by_enter = panel_with_agents();
+        let mut by_arrow = panel_with_agents();
+        let expected = press(&mut by_enter, KeyCode::Enter);
+        assert!(
+            matches!(expected, Some(Action::Watch(_))),
+            "the fixture should open a run, got {expected:?}"
+        );
+        assert_eq!(press(&mut by_arrow, KeyCode::Right), expected);
+        assert_eq!(by_arrow.workspace, Workspace::Chat);
     }
 
     #[test]
