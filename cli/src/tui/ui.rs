@@ -2501,6 +2501,30 @@ pub fn wrap(text: &str, width: usize, indent: usize) -> Vec<String> {
     out
 }
 
+/// The composer's caret. A bordered box with nothing in it looks like a box;
+/// a caret is the one column that says the keystrokes land *here*, and unlike
+/// the placeholder it keeps saying so once the line is full of text.
+const CARET: &str = "› ";
+
+/// What the empty composer says, in the longest form that fits — same shape as
+/// [`caption`], and for the same reason: a blank field tells a first-time user
+/// nothing about what this program wants from them. It names the two ways in
+/// (prose, or `/`) and gets out of the way at the first keystroke. It stops
+/// there: the splash caption above it and the status bar below it already
+/// teach Alt-K, and a third copy is noise rather than help. Empty when even the
+/// shortest form would be truncated, since half a sentence reads as a rendering
+/// bug rather than a hint.
+fn placeholder(width: usize) -> &'static str {
+    const LINES: [&str; 2] = [
+        "tell Jod what to do · / for commands",
+        "tell Jod what to do",
+    ];
+    LINES
+        .into_iter()
+        .find(|line| line.chars().count() <= width)
+        .unwrap_or("")
+}
+
 fn draw_input(f: &mut Frame, app: &App, area: Rect) {
     if area.height == 0 {
         return;
@@ -2521,14 +2545,38 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
         .title(title);
 
     let inner_width = area.width.saturating_sub(2).max(1) as usize;
+    // The caret costs two columns, which a box this narrow does not have to
+    // spare: on it the text wins and the caret goes.
+    let caret = if inner_width >= CARET.chars().count() + 8 {
+        CARET
+    } else {
+        ""
+    };
+    let gutter = caret.chars().count();
+    let field = inner_width.saturating_sub(gutter).max(1);
+
     // Keep the cursor on screen by scrolling the field horizontally once the
     // line outgrows the box.
     let col = app.cursor_column();
-    let shift = col.saturating_sub(inner_width.saturating_sub(1));
-    let visible: String = app.input.chars().skip(shift).take(inner_width).collect();
+    let shift = col.saturating_sub(field.saturating_sub(1));
+    let visible: String = app.input.chars().skip(shift).take(field).collect();
 
-    f.render_widget(Paragraph::new(visible).block(block), area);
-    f.set_cursor_position((area.x + 1 + (col - shift) as u16, area.y + 1));
+    // Muted while the field is empty so the caret and the hint read as one
+    // piece of furniture; live the moment there is something to send.
+    let line = if app.input.is_empty() {
+        Line::from(vec![
+            Span::styled(caret, fg(MUTED)),
+            Span::styled(placeholder(field), fg(MUTED)),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled(caret, fg(if app.busy { WARN } else { USER })),
+            Span::raw(visible),
+        ])
+    };
+
+    f.render_widget(Paragraph::new(line).block(block), area);
+    f.set_cursor_position((area.x + 1 + (gutter + col - shift) as u16, area.y + 1));
 }
 
 fn status_colour(status: &str) -> Color {
@@ -2996,6 +3044,60 @@ mod tests {
         let out = rendered(&app(), 60, 12);
         assert!(out.contains("you"), "input box must be labelled:\n{out}");
         assert!(out.contains("jod"), "transcript must be titled:\n{out}");
+    }
+
+    /// An empty bordered box is a box. The caret says the keystrokes land
+    /// here; the hint says what to put in it.
+    #[test]
+    fn the_empty_composer_says_where_to_type_and_what_to_type() {
+        let screen = rendered(&app(), 100, 24);
+        assert!(
+            screen.contains("› tell Jod what to do"),
+            "caret and hint:\n{screen}"
+        );
+        assert!(
+            screen.contains("/ for commands"),
+            "the other way in:\n{screen}"
+        );
+    }
+
+    /// The hint is furniture for an empty field — once there is something to
+    /// send it would be in the way. The caret is not, and stays.
+    #[test]
+    fn the_hint_goes_at_the_first_keystroke_and_the_caret_stays() {
+        let mut a = app();
+        a.input = "summarise my inbox".into();
+        a.cursor = a.input.len();
+        let screen = rendered(&a, 100, 24);
+        assert!(screen.contains("› summarise my inbox"), "{screen}");
+        assert!(
+            !screen.contains("tell Jod what to do"),
+            "the hint must not sit under the typing:\n{screen}"
+        );
+    }
+
+    /// Half a sentence reads as a rendering bug, not a hint.
+    #[test]
+    fn the_hint_shortens_to_fit_rather_than_being_cut_off() {
+        for width in 0..80 {
+            assert!(
+                placeholder(width).chars().count() <= width,
+                "{width}: {:?}",
+                placeholder(width)
+            );
+        }
+    }
+
+    /// Two columns of furniture is a lot on a box this narrow, and text you
+    /// cannot read is worse than a field you have to guess at.
+    #[test]
+    fn a_narrow_composer_drops_the_caret_rather_than_the_text() {
+        let mut a = app();
+        a.input = "abcdefg".into();
+        a.cursor = a.input.len();
+        let screen = rendered(&a, 10, 8);
+        assert!(screen.contains("abcdefg"), "the text survives:\n{screen}");
+        assert!(!screen.contains('›'), "no room for a caret:\n{screen}");
     }
 
     #[test]
