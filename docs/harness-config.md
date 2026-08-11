@@ -21,16 +21,20 @@ Jod inherits the result.
 | Model | `/model <name>`, `/model` to reset | `jod tui -m <name>` |
 | Permission mode | `/mode <name>`, or **Tab** to cycle | `jod tui --permission <name>` |
 
-`/model` is generic on purpose. All three harnesses take `--model` and Jod
-forwards the name verbatim; what a valid name looks like is the harness's
-business, and Jod does not keep a table of model names that would be wrong the
-week a model ships. Ask each harness what it has:
+`/model` forwards the name verbatim, because no two harnesses spell a model the
+same way — `opus`, `opencode/claude-opus-5`, `claude-opus-4-6-thinking` are all
+the same model. So the completion list comes from the harness itself: OpenCode
+and AGY are asked (`opencode models`, `agy models`) and their stdout parsed;
+Claude Code has no such subcommand — `claude models` is read as a *prompt* and
+hangs — so its list is the static catalogue in `core/src/harness/models.rs`.
 
-```sh
-agy models          # gemini-3.6-flash-high, claude-sonnet-4-6, gpt-oss-120b-medium, …
-opencode models     # provider/model form, e.g. anthropic/claude-sonnet-4-5
-claude --help       # --model takes an alias or a full name
-```
+The list is an aid, not a gate. A name that is not on it is still passed
+through, and a harness that is missing, slow or has changed its output format
+just offers nothing.
+→ [why](decisions.md#the-model-list-comes-from-the-harness-except-where-it-cannot)
+
+`/model` with no argument — or `default`, or `clear` — hands the choice back to
+the harness.
 
 Model names do not survive `/harness`. `claude-sonnet-4-5` means nothing to
 OpenCode or AGY, so switching harness drops the requested model back to `None`

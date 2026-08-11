@@ -8,22 +8,25 @@ skill that owns it.
 ## What this repo is
 
 **Jod** is Reljod's autonomous agent — a duplicate of how he plans, decides, and
-executes, to be delegated to like a competent chief of staff. Three parts:
+executes, to be delegated to like a competent chief of staff.
 
-- **`core/` + `cli/`** — Jod the program, resident on a VPS. `jod-core` delegates
-  tasks to agent harnesses (Claude Code, OpenCode, AGY), one supervised
-  process group each,
-  normalises their output into one event stream, and keeps runs and memory in
-  one SQLite file; `cli/` is the `jod` command over it. Jod never does the work
-  itself. → [design](docs/jod-system.md)
-- **`.agents/`** — the portable toolkit. Skills that depend on nothing below
-  them, so the directory drops into any repo unchanged. Skills reach their own
-  bundled scripts through `${CLAUDE_SKILL_DIR}`, never a repo-relative path —
-  the repo root ships as the `jod` Claude Code plugin, where a path into
-  `.agents/` doesn't exist. → [why](docs/decisions.md)
+- **`core/` `supervisor/` `cli/` `api/`** — Jod the program, resident on a VPS.
+  It delegates tasks to agent harnesses (Claude Code, OpenCode, AGY), one
+  supervised process group each, normalises their output into one event stream,
+  and keeps runs and memory in one SQLite file. Jod never does the work itself.
+  → [design](docs/jod-system.md), [settings](docs/harness-config.md),
+  [HTTP API](docs/jod-api.md)
+- **`.agents/skills/` + `agents/`** — the portable toolkit: skills and subagents
+  that depend on nothing below them, so they drop into any repo unchanged.
+  Skills reach their own bundled scripts through `${CLAUDE_SKILL_DIR}`, never a
+  repo-relative path — the repo root ships as the `jod` Claude Code plugin,
+  where a path into `.agents/` doesn't exist. `agents/` is duplicated into
+  `.claude/agents/` and a test keeps the two identical.
+  → [why](docs/decisions.md)
 - **`domains/`** — Reljod's private operating data, one directory per
   life-domain. Read the relevant one before acting there. Tasks → Linear,
   notes → Notion, finance → TBD, infra → the `jod-cloud` box.
+- **`apps/`** — desktop, iOS, web and voice clients over the API.
 
 ## Never work around a blocked check
 
@@ -54,8 +57,9 @@ A check that can't pass makes faking it the cheapest path.
 ## How work runs
 
 - **Non-trivial work starts with a spec, not a plan.** Interview until nothing
-  material is guessed → `SPEC.md` → execute in a *fresh* session.
-  → **`/write-spec`**
+  material is guessed → `SPEC.md` → execute in a *fresh* session. Delete the
+  spec once it has shipped; a delivered spec left at the root reads as pending
+  work. → **`/write-spec`**
 - **Every task needs one runnable check.** Without one, "looks done" is the only
   stop signal and you are the loop.
 - **Unattended runs need their whole dependency set present.** Missing key,
@@ -90,5 +94,8 @@ A check that can't pass makes faking it the cheapest path.
 - **PRs:** draft by default.
 - **History:** linear. Squash or rebase, never a merge commit, and never
   merge a branch that is behind its base.
+- **Subagents:** an agent definition sets no `model:` — it describes a role, and
+  the caller's session picks the model.
+  → [why](docs/decisions.md#an-agent-definition-that-pins-a-model-overrides-the-session-that-spawned-it)
 - **Attribution:** commits and PRs are Reljod's, no Claude branding.
   → [`docs/attribution.md`](docs/attribution.md)
