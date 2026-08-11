@@ -17,7 +17,7 @@ use crate::error::{JodError, Result};
 use crate::event::{AgentEnvelope, AgentEvent, Usage};
 use crate::harness::{HarnessKind, PermissionPolicy, SpawnRequest};
 use crate::store::{Store, StoredRun};
-use crate::{paths, proc, runner};
+use crate::{paths, proc, recall, runner};
 
 /// The persisted view of one agent. The whole summary is kept verbatim so
 /// adding a field to `AgentSummary` never needs a schema migration.
@@ -684,6 +684,21 @@ impl Jod {
         if let Some(open) = &conversation {
             prefer_conversation_settings(&mut req, open);
         }
+
+        // What Jod already knows about this, as framing rather than as a turn.
+        //
+        // Here — the one entry point every spawn funnels through — because a
+        // recall that only the chat box performed would be a Jod that learns
+        // from you when you are watching and forgets when a schedule fires. The
+        // whole point is the opposite.
+        //
+        // `Origin::Agent` is the trigger: this call is Jod acting, not the
+        // owner speaking, and `recall` uses that to decide how much it may
+        // lean on lower-trust material. Nothing marked `Untrusted` is ever
+        // injected, whatever the trigger — a preamble is the position from
+        // which an agent is steered, and material Jod merely *read* has no
+        // business there.
+        recall::augment(&store, &mut req, crate::store::Origin::Agent);
 
         let summary = AgentSummary {
             id: id.clone(),
