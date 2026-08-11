@@ -393,12 +393,9 @@ pub enum Request {
     Restore(String),
     /// A new conversation starting from this one's head.
     Fork(String),
-    /// Revert to a named message and ask again from there.
-    BranchAt {
-        conversation: String,
-        message: i64,
-        prompt: String,
-    },
+    /// Ask the last question again, as a second answer rather than a
+    /// replacement — ChatGPT's "regenerate", and the reason `branch_at` exists.
+    Retry(String),
 }
 
 /// Carry out one request and say what happened, one line per line of output.
@@ -416,13 +413,7 @@ pub fn apply(store: &Store, request: &Request, now_ms: i64) -> Vec<String> {
         Request::Rewind(needle) => on_conversation(store, needle, |id| rewind(store, id)),
         Request::Restore(needle) => on_conversation(store, needle, |id| restore(store, id)),
         Request::Fork(needle) => on_conversation(store, needle, |id| fork(store, id)),
-        Request::BranchAt {
-            conversation,
-            message,
-            prompt,
-        } => on_conversation(store, conversation, |id| {
-            branch_at(store, id, *message, prompt)
-        }),
+        Request::Retry(needle) => on_conversation(store, needle, |id| retry(store, id)),
     }
 }
 
@@ -487,13 +478,48 @@ fn restore(store: &Store, id: &str) -> Vec<String> {
     }
 }
 
-fn branch_at(store: &Store, id: &str, message: i64, prompt: &str) -> Vec<String> {
-    match store.branch_at(id, message, NewMessage::user(prompt)) {
-        Ok(new_id) => vec![format!(
-            "{} branched at #{message} — asking again as #{new_id}",
+/// Ask the last question again, beside the answer it already got.
+///
+/// `Store::branch_at` in one call, and the reason it is one call rather than a
+/// revert followed by an append: the two have to be the same act. A retry that
+/// reverted, failed to append, and left the head parked before a question
+/// nobody could see would look exactly like a delete.
+///
+/// The new question lands as a *sibling* of the old one, which is ChatGPT's
+/// model: editing appends a node under the same parent instead of mutating the
+/// old one, and the answer you did not like stays in the export. So this is
+/// non-destructive too, and the sentence says where the first answer went.
+fn retry(store: &Store, id: &str) -> Vec<String> {
+    let Some(thread) = store.thread(id).ok() else {
+        return vec![format!("could not read {}", short(id))];
+    };
+    let Some(asked) = thread.iter().rev().find(|m| m.role == Role::User) else {
+        return vec![format!("{} has no question to ask again", short(id))];
+    };
+    let Some(target) = asked.parent_id else {
+        return vec![format!(
+            "{}'s first question has nothing before it to branch from",
             short(id)
-        )],
-        Err(e) => vec![format!("could not branch {} at #{message}: {e}", short(id))],
+        )];
+    };
+    let text = asked.text.clone();
+    match store.branch_at(id, target, NewMessage::user(&text)) {
+        Ok(new_id) => {
+            let mut said = vec![format!(
+                "{} asking again: “{}” — #{new_id}",
+                short(id),
+                one_line(&text, SNIPPET)
+            )];
+            // Named off the tip rather than off the old question, because the
+            // thing the user wants back is the *answer* they are replacing and
+            // the question id points at both branches equally.
+            match restore_target(store, id) {
+                Some(tip) => said.push(format!("  kept: {}", tip.label())),
+                None => said.push("  the first attempt had not answered yet".to_string()),
+            }
+            said
+        }
+        Err(e) => vec![format!("could not ask {} again: {e}", short(id))],
     }
 }
 
@@ -761,6 +787,44 @@ mod tests {
         );
     }
 
+    /// `v` then `u` has to land exactly where `v` started, even when the
+    /// conversation already had older branches lying around — which is the
+    /// common case, because reverting is a thing people do more than once.
+    ///
+    /// It did not, at first. Tips abandoned inside the same millisecond sorted
+    /// by ascending id, so `u` offered back the oldest branch and undo/redo
+    /// walked the user into a thread they had never seen.
+    #[test]
+    fn undo_then_redo_lands_back_where_it_started_even_among_older_branches() {
+        let store = store();
+        let id = conversation(&store, "the parser");
+        say(&store, &id, Role::User, "port the parser");
+        let fork_point = say(&store, &id, Role::Assistant, "done");
+        say(&store, &id, Role::User, "now rewrite it in one pass");
+        say(&store, &id, Role::Assistant, "rewritten");
+        store.revert_to(&id, fork_point).expect("an older revert");
+        say(&store, &id, Role::User, "actually just add a test");
+        let was_here = say(&store, &id, Role::Assistant, "added tests/lexer.rs");
+
+        let rewound = apply(&store, &Request::Rewind(id.clone()), 0);
+        assert!(
+            rewound[1].contains("actually just add a test"),
+            "the rewind keeps the branch it just left, not an older one: {rewound:?}"
+        );
+
+        apply(&store, &Request::Restore(id.clone()), 0);
+
+        assert_eq!(
+            store
+                .conversation(&id)
+                .expect("the conversation")
+                .expect("it exists")
+                .head_id,
+            Some(was_here),
+            "redo returns to the branch undo set aside"
+        );
+    }
+
     #[test]
     fn the_first_question_of_a_conversation_has_nothing_to_rewind_to() {
         let store = store();
@@ -895,29 +959,50 @@ mod tests {
     }
 
     #[test]
-    fn branching_at_a_point_asks_again_without_losing_the_first_answer() {
+    fn asking_again_puts_the_second_answer_beside_the_first_rather_than_over_it() {
         let store = store();
         let id = conversation(&store, "the parser");
-        let first_q = say(&store, &id, Role::User, "fix the parser");
-        let first_a = say(&store, &id, Role::Assistant, "fixed it badly");
+        say(&store, &id, Role::User, "port the parser");
+        say(&store, &id, Role::Assistant, "ported");
+        let asked = say(&store, &id, Role::User, "now add a test");
+        let first_answer = say(&store, &id, Role::Assistant, "added a bad test");
 
-        let said = apply(
-            &store,
-            &Request::BranchAt {
-                conversation: id.clone(),
-                message: first_q,
-                prompt: "fix the parser, carefully".into(),
-            },
-            0,
+        let said = apply(&store, &Request::Retry(id.clone()), 0);
+
+        assert!(said[0].contains("now add a test"), "{said:?}");
+        assert!(
+            said[1].contains(&format!("#{first_answer}")) && said[1].contains("added a bad test"),
+            "the retry names the answer it replaced, not the question both share: {said:?}"
         );
 
-        assert!(said[0].contains(&format!("#{first_q}")), "{said:?}");
+        // The question was asked again, not edited: two of it now hang off the
+        // same parent, and the old answer is a findable branch rather than an
+        // overwrite.
+        assert_eq!(store.sibling_pager(asked).expect("a pager"), Some((1, 2)));
         let tips = tip_rows(&store, &id);
         assert!(
-            tips.iter().any(|t| t.id == first_a && !t.live),
-            "the first answer is still a findable branch: {tips:?}"
+            tips.iter().any(|t| t.id == first_answer && !t.live),
+            "the first answer survives as a branch: {tips:?}"
         );
-        assert_eq!(store.sibling_pager(first_a).expect("a pager"), Some((1, 2)));
+        assert_eq!(
+            store.thread(&id).expect("the thread").len(),
+            3,
+            "the live thread carries the new question, not both"
+        );
+    }
+
+    #[test]
+    fn a_conversation_with_nothing_before_its_first_question_cannot_ask_it_again() {
+        let store = store();
+        let id = conversation(&store, "fresh");
+        say(&store, &id, Role::User, "hello");
+
+        let said = apply(&store, &Request::Retry(id.clone()), 0);
+
+        assert!(
+            said[0].contains("nothing before it to branch from"),
+            "{said:?}"
+        );
     }
 
     #[test]

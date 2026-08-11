@@ -169,14 +169,22 @@ enum Command {
     },
     /// The full-screen interface: conversation, live agents, status.
     Tui {
-        #[arg(short = 'H', long, value_enum, default_value_t = HarnessArg::Claude)]
-        harness: HarnessArg,
+        /// Optional, and that is load-bearing: the TUI stores a preferred
+        /// harness, and it can only defer to it if it can tell "not given"
+        /// from "given the value that happens to be the default". Clap
+        /// collapses those two when the flag has a default, so the flag has
+        /// none and the default lives at the point of use.
+        #[arg(short = 'H', long, value_enum)]
+        harness: Option<HarnessArg>,
         #[arg(short, long)]
         cwd: Option<PathBuf>,
         #[arg(short, long)]
         model: Option<String>,
-        #[arg(short, long, value_parser = parse_permission_arg, default_value = "auto")]
-        permission: PermissionPolicy,
+        /// Optional for the same reason as `--harness`, and with more at stake:
+        /// this is also the ceiling the TUI may not raise past, so "the user
+        /// said auto" and "the user said nothing" must not be the same value.
+        #[arg(short, long, value_parser = parse_permission_arg)]
+        permission: Option<PermissionPolicy>,
         /// Pick up the last conversation instead of starting a new one.
         #[arg(short = 'C', long = "continue")]
         continue_last: bool,
@@ -1146,11 +1154,11 @@ async fn main() -> Result<()> {
             tui::run(
                 jod,
                 tui::Options {
-                    harness: harness.into(),
+                    harness: harness.map(Into::into),
                     team,
                     cwd: cwd.unwrap_or_else(jod_core::service::default_cwd),
                     model,
-                    permission: permission.into(),
+                    permission,
                     resume: if continue_last {
                         Resume::Last
                     } else {

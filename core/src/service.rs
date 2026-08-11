@@ -265,7 +265,11 @@ fn open_conversation(
 /// a spawn quietly reading a column. A handoff lands here as
 /// [`RunConversation::Existing`] naming the *new* conversation, whose harness is
 /// already the one the caller asked for.
-fn prefer_conversation_settings(req: &mut SpawnRequest, conversation: &Conversation) {
+/// Public because "what will this spawn actually use" is a question clients ask
+/// *before* spawning — a status bar that shows the app's own mode while the
+/// conversation's stored one is what the run will get is a status bar that lies.
+/// [`Jod::spawn_agent_in`] applies it either way; nobody has to remember to.
+pub fn prefer_conversation_settings(req: &mut SpawnRequest, conversation: &Conversation) {
     if let Some(model) = &conversation.model {
         req.model = Some(model.clone());
     }

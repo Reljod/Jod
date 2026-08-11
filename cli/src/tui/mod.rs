@@ -76,6 +76,18 @@ pub enum Action {
     /// model, and Jod has no model client — so the first half is a *run* on the
     /// harness being left. See [`begin_crossing`].
     SwitchHarness(HarnessKind),
+    /// Write a setting down on the conversation it belongs to.
+    ///
+    /// The model and the permission mode are not properties of this process, and
+    /// holding them here is what made `/model` evaporate on resume — see
+    /// [`Setting`].
+    ///
+    /// Named `Keep` rather than `Remember` because this file already has a
+    /// `Remember`, and it means the other thing: writing a *fact* to memory.
+    /// Two verbs called remember, one about a preference and one about what
+    /// Jod knows, is a collision waiting to be resolved by whoever guesses
+    /// wrong first.
+    Keep(Setting),
     /// Stop talking into the conversation the chat box was bound to.
     ///
     /// `/new` and `/resume` both move the cursor somewhere the binding does not
@@ -168,6 +180,17 @@ struct Thread {
     carried: Option<String>,
     /// A harness switch waiting on the run that is writing its summary.
     switching: Option<PendingSwitch>,
+    /// Settings chosen before there was a conversation to write them on.
+    ///
+    /// A conversation is minted by the first *run*, so `/model opus` typed into
+    /// an empty chat box has nowhere to go yet. Dropping it would be the same
+    /// bug one layer along; applying it to the app and forgetting to store it is
+    /// what this whole change is undoing. So it waits here and is written the
+    /// moment the first turn creates something to write it on.
+    ///
+    /// Applied in order, so choosing twice before typing leaves the second
+    /// choice — which is what the user would expect from having chosen it last.
+    pending: Vec<Setting>,
 }
 
 impl Thread {
@@ -184,6 +207,25 @@ impl Thread {
             None => RunConversation::New,
         }
     }
+}
+
+/// Something the user chose that belongs to the conversation rather than to
+/// this process.
+///
+/// Both of these are re-decided at every spawn — Jod respawns the harness once
+/// per turn against a resumed session, so `--model` and `--permission-mode` are
+/// arguments built afresh each time. A choice kept only in [`App`] therefore
+/// lasts until the next `jod tui` and then silently reverts, which is exactly
+/// what `/model` did. [`Store::set_conversation_model`] and
+/// [`Store::set_conversation_permission`] are the other end;
+/// `prefer_conversation_settings` reads them back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Setting {
+    /// `None` is a choice too — "whatever the harness picks" — and has to be
+    /// storable, or `/model` with no argument could set a model but never unset
+    /// one.
+    Model(Option<String>),
+    Mode(PermissionPolicy),
 }
 
 /// A harness switch that has spawned its summariser and is waiting for it.
@@ -218,14 +260,47 @@ enum Crossing {
 }
 
 pub struct Options {
-    pub harness: HarnessKind,
+    /// The harness asked for on the command line, or `None` when nothing was
+    /// asked for — which is what lets a stored preference win without having to
+    /// guess whether `claude` was typed or merely defaulted to.
+    pub harness: Option<HarnessKind>,
     /// The team to watch, if any. `None` leaves the team panel saying so
     /// rather than showing an empty board.
     pub team: Option<String>,
     pub cwd: PathBuf,
     pub model: Option<String>,
-    pub permission: PermissionPolicy,
+    /// The mode asked for, and — when one was — the ceiling the TUI may not
+    /// raise past. `None` means nobody set a ceiling, so the built-in default
+    /// applies and a stored preference may override it.
+    ///
+    /// The distinction earns its `Option`. With a clap default these were the
+    /// same value, so `load_preferences` had to guess by comparing against the
+    /// default — and the moment that default moved from `ask` to `auto` the
+    /// comparison silently stopped matching and every stored mode preference
+    /// was ignored. A guess that fails quietly when a constant changes is not
+    /// a guess worth keeping.
+    pub permission: Option<PermissionPolicy>,
     pub resume: Resume,
+}
+
+impl Options {
+    /// The harness to open on when no preference is stored either.
+    pub fn harness_or_default(&self) -> HarnessKind {
+        self.harness.unwrap_or(HarnessKind::ClaudeCode)
+    }
+
+    /// The mode to start in when no preference is stored either.
+    pub fn mode_or_default(&self) -> PermissionPolicy {
+        self.permission.unwrap_or_default()
+    }
+
+    /// How far the mode may be raised from inside the program.
+    ///
+    /// An explicit `--permission` is a ceiling; saying nothing is not. Nobody
+    /// who omitted the flag has expressed an opinion to be protected from.
+    pub fn ceiling(&self) -> PermissionPolicy {
+        self.permission.unwrap_or(PermissionPolicy::Bypass)
+    }
 }
 
 pub async fn run(jod: Arc<Jod>, opts: Options) -> Result<()> {
@@ -263,11 +338,25 @@ async fn event_loop(
     jod: Arc<Jod>,
     opts: Options,
 ) -> Result<()> {
-    let mut app = App::new(opts.harness, opts.model.clone(), opts.resume.clone());
-    // Start where the launch flag put us. It is also the ceiling — see
-    // `bounded` — so starting anywhere else would show a mode the first spawn
-    // would silently clamp.
-    app.mode = opts.permission;
+    let mut app = App::new(
+        opts.harness_or_default(),
+        opts.model.clone(),
+        opts.resume.clone(),
+    );
+    // Start where the launch flag put us, or at the built-in default when it
+    // said nothing. An explicit flag is also the ceiling — see `bounded` — so
+    // starting anywhere else would show a mode the first spawn would clamp.
+    app.mode = opts.mode_or_default();
+    // ...and then whatever was chosen last time, which may move both. Only
+    // where the command line did not insist, which is what `Options`' two
+    // `Option`s exist to make knowable.
+    //
+    // This call is the whole feature. Without it `/config` writes preferences
+    // the program never reads back, and every setting silently resets on the
+    // next launch — which is exactly what it did until this line was added.
+    if let Some(store) = jod.store() {
+        load_preferences(&mut app, &store, &opts);
+    }
     app.team = opts.team.clone();
     app.now_ms = now_ms();
     app.agents = list_agents(&jod).await;
@@ -360,13 +449,9 @@ async fn event_loop(
                             }
                         };
                         match jod.store() {
-                            Some(store) => finish_crossing(
-                                &store,
-                                &mut app,
-                                &mut thread,
-                                &pending,
-                                &summary,
-                            ),
+                            Some(store) => {
+                                finish_crossing(store, &mut app, &mut thread, &pending, &summary)
+                            }
                             None => app.push(Entry::Notice(
                                 "the database went away mid-switch, so nothing was handed over"
                                     .into(),
@@ -480,6 +565,10 @@ async fn perform(
                     // turn would hand the model a summary of a conversation it
                     // is already in.
                     thread.carried = None;
+                    // The first turn is what mints a conversation, so it is the
+                    // first moment anything chosen before it can be written
+                    // down.
+                    flush_pending(jod, app, thread, &id);
                     app.watching = Some(id);
                     app.busy = true;
                     app.turn_started_ms = Some(app.now_ms);
@@ -552,6 +641,30 @@ async fn perform(
                     watch(jod, app, handed.agent.id).await;
                 }
                 Err(e) => app.push(Entry::Notice(format!("could not reach the main chat: {e}"))),
+            }
+        }
+        Action::Keep(setting) => {
+            // Before the first turn there is no conversation: one is minted by
+            // the first *run*, not by opening the program. The choice is already
+            // on the app, so the first spawn uses it either way — `spawn` reads
+            // `app.model` and `app.mode` — and `open_conversation` creates the
+            // conversation with that model. What it cannot do is record the
+            // *mode*, so the choice waits and is written the moment there is
+            // something to write it on.
+            match jod.store() {
+                Some(store) => match current_conversation(store, app, thread) {
+                    Some(id) => {
+                        if let Some(said) = write_setting(store, &id, &setting) {
+                            app.push(Entry::Notice(said));
+                        }
+                    }
+                    None => thread.pending.push(setting),
+                },
+                // Without a database it applies to this session and stops there,
+                // which the user should hear once rather than discover tomorrow.
+                None => app.push(Entry::Notice(format!(
+                    "{NO_STORE} — that applies to this session only"
+                ))),
             }
         }
         Action::SwitchHarness(to) => begin_crossing(jod, app, opts, thread, to).await,
@@ -922,7 +1035,7 @@ async fn begin_crossing(
                 // Reading and writing prose, nothing else. A summariser that
                 // stopped to ask permission would hang a switch nobody is
                 // watching the prompt of.
-                permission: bounded(opts.permission, PermissionPolicy::Bypass),
+                permission: bounded(opts.ceiling(), PermissionPolicy::Bypass),
                 // With a session, it summarises what it is already holding;
                 // without one, the record came in the prompt.
                 resume: match material {
@@ -2042,6 +2155,12 @@ fn on_fleet_key(app: &mut App, key: KeyEvent) -> Option<Action> {
         KeyCode::Char('f') => Some(Action::Sessions(sessions::Request::Fork(
             app.selected_agent()?.id.clone(),
         ))),
+        // `t` — try the last question again. The answer it got stays where it
+        // is and the new attempt lands beside it, so this is "regenerate" with
+        // both attempts kept rather than the second painted over the first.
+        KeyCode::Char('t') => Some(Action::Sessions(sessions::Request::Retry(
+            app.selected_agent()?.id.clone(),
+        ))),
         _ => None,
     }
 }
@@ -2526,13 +2645,18 @@ fn apply_slash(app: &mut App, slash: command::Slash) -> Option<Action> {
         // client: so the first half of this is a run, and a run belongs to the
         // loop. `perform` decides whether one is owed at all.
         Slash::Harness(kind) => return Some(Action::SwitchHarness(kind)),
+        // Applied to the app *and* handed back to be written down. Neither of
+        // these was ever a property of the process: the harness is respawned
+        // once per turn, so both are re-read at every spawn, and a choice held
+        // only in this struct lasted until the next `jod tui` and no longer.
         Slash::Model(model) => {
             let said = match &model {
                 Some(m) => format!("model: {m}"),
                 None => "model: the harness default".to_string(),
             };
-            app.model = model;
+            app.model = model.clone();
             app.push(Entry::Notice(said));
+            return Some(remember_model(model));
         }
         // Naming a mode sets it; naming none moves to the next, so `/mode` and
         // the Tab key are one setting reached two ways rather than two.
@@ -2545,6 +2669,9 @@ fn apply_slash(app: &mut App, slash: command::Slash) -> Option<Action> {
                 None => app.cycle_mode(),
             };
             app.push(Entry::Notice(said));
+            // `app.mode` rather than `mode`: cycling picked one, and this has to
+            // record the mode arrived at, not the argument that was absent.
+            return Some(remember_mode(app.mode));
         }
         // The two toggles apply now and are recorded as a choice, so the answer
         // to "do I want to watch it think" is given once rather than at every
@@ -2729,6 +2856,81 @@ fn apply_slash(app: &mut App, slash: command::Slash) -> Option<Action> {
     None
 }
 
+/// Record the model this conversation is to run on from now on.
+///
+/// Its own function, beside [`remember_flag`], for the same reason that one has:
+/// `/model`, `/config` and any future picker must end at one place, because two
+/// paths writing the same setting is how one of them ends up not writing it.
+fn remember_model(model: Option<String>) -> Action {
+    Action::Keep(Setting::Model(model))
+}
+
+/// Record how much this conversation's agent may do without asking.
+///
+/// **Tab does not reach this yet.** Cycling the mode with Tab is handled in
+/// `on_key`, which changes `app.mode` and returns `None`, so the choice applies
+/// to the next spawn and is never written down — the same gap `/mode` had. The
+/// fix is one line in that branch, and it is deliberately not made here because
+/// `on_key` belongs to another track: return `Some(remember_mode(app.mode))`
+/// instead of `None`.
+fn remember_mode(mode: PermissionPolicy) -> Action {
+    Action::Keep(Setting::Mode(mode))
+}
+
+/// Write one setting onto one conversation.
+///
+/// The single writer. Returns what to say only when something went wrong: the
+/// slash command has already said what it did, and a second notice confirming
+/// that it was also *stored* describes plumbing rather than the choice.
+///
+/// A write that finds no row is a failure and not a silent nothing. It means the
+/// conversation the chat box believes it is talking into is not there, which is
+/// precisely the state where a setting quietly failing to stick would be
+/// impossible to diagnose.
+fn write_setting(store: &Store, conversation: &str, setting: &Setting) -> Option<String> {
+    let wrote = match setting {
+        Setting::Model(model) => store.set_conversation_model(conversation, model.as_deref()),
+        Setting::Mode(mode) => store.set_conversation_permission(conversation, Some(*mode)),
+    };
+    match wrote {
+        Ok(true) => None,
+        Ok(false) => Some(format!(
+            "there is no conversation {} to remember that on — it applies to this turn only",
+            short(conversation)
+        )),
+        Err(e) => Some(format!(
+            "could not remember that for next time, so it applies to this turn only: {e}"
+        )),
+    }
+}
+
+/// Write down whatever was chosen before there was a conversation to write it
+/// on.
+///
+/// Called once the first turn has minted one. `conversation_for_run` is what
+/// finds it: the run has already recorded its prompt by the time `spawn`
+/// returns, so the conversation exists and the run is the handle on it.
+fn flush_pending(jod: &Arc<Jod>, app: &mut App, thread: &mut Thread, run_id: &str) {
+    if thread.pending.is_empty() {
+        return;
+    }
+    let Some(store) = jod.store() else {
+        return;
+    };
+    let Some(conversation) = thread
+        .conversation
+        .clone()
+        .or_else(|| store.conversation_for_run(run_id).ok().flatten())
+    else {
+        return;
+    };
+    for setting in thread.pending.drain(..) {
+        if let Some(said) = write_setting(store, &conversation, &setting) {
+            app.push(Entry::Notice(said));
+        }
+    }
+}
+
 /// Record a flag preference the user just toggled.
 ///
 /// Its own function so `/thinking`, `/details` and `/config thinking off` all
@@ -2779,14 +2981,14 @@ fn load_preferences(app: &mut App, store: &Store, opts: &Options) {
         match (current.pref, &current.value) {
             (config::Pref::Thinking, config::Value::Flag(on)) => app.show_thinking = *on,
             (config::Pref::Details, config::Value::Flag(on)) => app.show_details = *on,
-            (config::Pref::Harness, config::Value::Harness(kind))
-                if opts.harness == HarnessKind::ClaudeCode =>
-            {
+            // A stored preference wins only where the command line said
+            // nothing at all. `is_none` rather than a comparison against the
+            // default: comparing was the old guess, and it broke silently the
+            // day the default moved.
+            (config::Pref::Harness, config::Value::Harness(kind)) if opts.harness.is_none() => {
                 app.harness = *kind;
             }
-            (config::Pref::Mode, config::Value::Mode(mode))
-                if opts.permission == PermissionPolicy::Ask =>
-            {
+            (config::Pref::Mode, config::Value::Mode(mode)) if opts.permission.is_none() => {
                 app.mode = *mode;
             }
             _ => {}
@@ -2968,7 +3170,7 @@ async fn spawn(
                 // machine, not today", and a Tab press inside the program must not
                 // be able to talk them out of it. Downwards is always allowed —
                 // asking for *less* needs no permission.
-                permission: bounded(opts.permission, app.mode),
+                permission: bounded(opts.ceiling(), app.mode),
                 // App owns the conversation cursor: it advances to the exact
                 // session the harness reported on the previous turn. A background
                 // delegation passes its own, because it is not part of this
@@ -5693,14 +5895,207 @@ mod tests {
         Jod::with_store(Arc::new(store))
     }
 
+    // ---- the model and the mode are written down ----
+
+    /// A conversation with a turn in it, and a chat box bound to it.
+    fn talking_about(s: &RealStore, run: &str) -> (App, Thread) {
+        let c = s
+            .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
+            .unwrap();
+        s.append_prompt(&c.id, run, "go").unwrap();
+        (
+            app_on(HarnessKind::ClaudeCode),
+            Thread {
+                conversation: Some(c.id),
+                ..Thread::default()
+            },
+        )
+    }
+
+    /// What the next spawn would actually send, asked of the same function
+    /// `Jod::spawn_agent_in` asks.
+    fn next_turn(s: &RealStore, conversation: &str) -> SpawnRequest {
+        let mut req = SpawnRequest {
+            name: "n".into(),
+            harness: HarnessKind::ClaudeCode,
+            prompt: "the next thing".into(),
+            system: None,
+            cwd: PathBuf::from("/tmp"),
+            // A fresh process, carrying nothing but its defaults — which is the
+            // state that used to lose the choice.
+            model: None,
+            permission: PermissionPolicy::Bypass,
+            resume: Resume::Fresh,
+            tools: None,
+        };
+        let row = s.conversation(conversation).unwrap().unwrap();
+        jod_core::service::prefer_conversation_settings(&mut req, &row);
+        req
+    }
+
+    /// The gap the wiring audit found: the read side was built and nothing ever
+    /// wrote the column, so `/model` still evaporated on resume and the tests
+    /// passed because they set the column themselves.
+    ///
+    /// Driven through the real path — the slash command hands back an action,
+    /// the loop carries it out — and read back through the real function a spawn
+    /// uses, so nothing here is a stand-in for the thing being tested.
+    #[tokio::test]
+    async fn a_model_chosen_in_the_chat_box_survives_into_the_next_turn() {
+        let jod = jod_with(store());
+        let s = jod.store().unwrap().clone();
+        let (mut app, mut thread) = talking_about(&s, "run-1");
+        let id = thread.conversation.clone().unwrap();
+
+        let action = apply_slash(&mut app, command::Slash::Model(Some("sonnet".into())))
+            .expect("/model is written down, not only applied");
+        perform(&jod, &mut app, &options(), &mut thread, action).await;
+
+        // It applied here...
+        assert_eq!(app.model.as_deref(), Some("sonnet"));
+        // ...and it is still the answer for a spawn that asked for nothing.
+        assert_eq!(next_turn(&s, &id).model.as_deref(), Some("sonnet"));
+    }
+
+    /// Same for the mode, which before this was fixed once at `jod tui` launch
+    /// and could not be changed at all — then could be changed and not kept.
+    #[tokio::test]
+    async fn a_mode_chosen_in_the_chat_box_survives_into_the_next_turn() {
+        let jod = jod_with(store());
+        let s = jod.store().unwrap().clone();
+        let (mut app, mut thread) = talking_about(&s, "run-1");
+        let id = thread.conversation.clone().unwrap();
+
+        let action = apply_slash(&mut app, command::Slash::Mode(Some(PermissionPolicy::Plan)))
+            .expect("/mode is written down too");
+        perform(&jod, &mut app, &options(), &mut thread, action).await;
+
+        assert_eq!(app.mode, PermissionPolicy::Plan);
+        let next = next_turn(&s, &id);
+        assert_eq!(next.permission, PermissionPolicy::Plan);
+        assert!(!next.permission.may_act(), "plan still means plan tomorrow");
+    }
+
+    /// `/mode` with no argument cycles, and what has to be recorded is the mode
+    /// it arrived at — not the argument, which is exactly the one that is
+    /// missing.
+    #[tokio::test]
+    async fn cycling_the_mode_records_the_one_it_landed_on() {
+        let jod = jod_with(store());
+        let s = jod.store().unwrap().clone();
+        let (mut app, mut thread) = talking_about(&s, "run-1");
+        let id = thread.conversation.clone().unwrap();
+        app.mode = PermissionPolicy::Plan;
+
+        let action =
+            apply_slash(&mut app, command::Slash::Mode(None)).expect("cycling is a choice");
+        perform(&jod, &mut app, &options(), &mut thread, action).await;
+
+        assert_eq!(app.mode, PermissionPolicy::Ask, "no argument cycles");
+        assert_eq!(next_turn(&s, &id).permission, PermissionPolicy::Ask);
+    }
+
+    /// "The harness default" is a choice like any other. Without this, `/model`
+    /// with no argument could set a model but never unset one, and the only way
+    /// back would be to start a new conversation.
+    #[tokio::test]
+    async fn clearing_the_model_is_stored_as_a_choice_rather_than_ignored() {
+        let jod = jod_with(store());
+        let s = jod.store().unwrap().clone();
+        let (mut app, mut thread) = talking_about(&s, "run-1");
+        let id = thread.conversation.clone().unwrap();
+        for chosen in [Some("sonnet".to_string()), None] {
+            let action = apply_slash(&mut app, command::Slash::Model(chosen)).unwrap();
+            perform(&jod, &mut app, &options(), &mut thread, action).await;
+        }
+
+        assert_eq!(app.model, None);
+        assert_eq!(s.conversation(&id).unwrap().unwrap().model, None);
+        // ...and a caller with an opinion is left with it, because the
+        // conversation now says it has none.
+        let mut req = next_turn(&s, &id);
+        req.model = Some("opus".into());
+        jod_core::service::prefer_conversation_settings(
+            &mut req,
+            &s.conversation(&id).unwrap().unwrap(),
+        );
+        assert_eq!(req.model.as_deref(), Some("opus"));
+    }
+
+    /// There is no conversation before the first turn — one is minted by the
+    /// first *run*, not by opening the program. The choice must not be dropped
+    /// on the floor for being early, and it must not be dropped from the first
+    /// spawn either.
+    #[tokio::test]
+    async fn a_choice_made_before_the_first_turn_is_kept_until_there_is_somewhere_to_put_it() {
+        let jod = jod_with(store());
+        let s = jod.store().unwrap().clone();
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        let mut thread = Thread::default();
+
+        let action = apply_slash(&mut app, command::Slash::Mode(Some(PermissionPolicy::Plan)))
+            .expect("still a choice");
+        perform(&jod, &mut app, &options(), &mut thread, action).await;
+        assert_eq!(
+            thread.pending,
+            vec![Setting::Mode(PermissionPolicy::Plan)],
+            "nowhere to write it yet, so it waits"
+        );
+        // The first spawn still gets it: `spawn` reads the app, not the store.
+        assert_eq!(
+            bounded(options().ceiling(), app.mode),
+            PermissionPolicy::Plan
+        );
+
+        // The first turn mints a conversation; the run is the handle on it.
+        let c = s
+            .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
+            .unwrap();
+        s.append_prompt(&c.id, "run-1", "go").unwrap();
+        flush_pending(&jod, &mut app, &mut thread, "run-1");
+
+        assert!(thread.pending.is_empty(), "written down and let go of");
+        assert_eq!(next_turn(&s, &c.id).permission, PermissionPolicy::Plan);
+    }
+
+    /// A write that lands nowhere is a failure, not a silent nothing. It means
+    /// the chat box is bound to a conversation that is not there — precisely the
+    /// state in which a setting quietly failing to stick could not be diagnosed.
+    #[tokio::test]
+    async fn a_setting_that_could_not_be_stored_says_so() {
+        let jod = jod_with(store());
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        let mut thread = Thread {
+            conversation: Some("no-such-conversation".into()),
+            ..Thread::default()
+        };
+
+        let action = apply_slash(&mut app, command::Slash::Model(Some("sonnet".into()))).unwrap();
+        perform(&jod, &mut app, &options(), &mut thread, action).await;
+
+        let last = format!("{:?}", app.transcript.last().unwrap());
+        assert!(last.contains("this turn only"), "{last}");
+    }
+
+    /// A launch that asked for nothing — both `None`, which is what "no flags
+    /// were given" now means and what lets a stored preference apply.
     fn options() -> Options {
         Options {
-            harness: HarnessKind::ClaudeCode,
+            harness: None,
             team: None,
             cwd: PathBuf::from("/tmp"),
             model: None,
-            permission: PermissionPolicy::default(),
+            permission: None,
             resume: Resume::Fresh,
+        }
+    }
+
+    /// A launch that insisted, which a stored preference must not override.
+    fn options_launched_on(harness: HarnessKind, mode: PermissionPolicy) -> Options {
+        Options {
+            harness: Some(harness),
+            permission: Some(mode),
+            ..options()
         }
     }
 
@@ -5867,16 +6262,79 @@ mod tests {
             "nothing was asked for, so the choice wins"
         );
 
-        let launched_on = Options {
-            harness: HarnessKind::OpenCode,
-            ..options()
-        };
+        let launched_on =
+            options_launched_on(HarnessKind::OpenCode, PermissionPolicy::default());
         let mut app = app_on(HarnessKind::OpenCode);
         load_preferences(&mut app, &store, &launched_on);
         assert_eq!(
             app.harness,
             HarnessKind::OpenCode,
             "-H opencode wins over the choice"
+        );
+    }
+
+    /// A stored mode has to apply, and it must not stop applying because a
+    /// constant somewhere else changed.
+    ///
+    /// The bug this closes was silent and had two halves. `load_preferences`
+    /// decided "did the user ask for a mode" by comparing the launch option
+    /// against `PermissionPolicy::Ask` — the clap default at the time. When the
+    /// default moved to `Bypass`, every launch stopped matching, and every
+    /// stored mode preference was ignored from then on with nothing to show
+    /// for it. Comparing against a default is a guess; `Option` is knowledge.
+    #[test]
+    fn a_stored_mode_applies_when_the_command_line_asked_for_nothing() {
+        let store = store();
+        config::write(&store, config::Pref::Mode, &config::Value::Mode(PermissionPolicy::Plan))
+            .unwrap();
+
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.mode = PermissionPolicy::default();
+        load_preferences(&mut app, &store, &options());
+        assert_eq!(
+            app.mode,
+            PermissionPolicy::Plan,
+            "nothing was asked for, so the stored mode wins"
+        );
+
+        // ...and must not, when it did ask. `--permission auto` is somebody
+        // overruling their own stored preference for this one session.
+        let insisted = options_launched_on(HarnessKind::ClaudeCode, PermissionPolicy::Bypass);
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.mode = PermissionPolicy::Bypass;
+        load_preferences(&mut app, &store, &insisted);
+        assert_eq!(
+            app.mode,
+            PermissionPolicy::Bypass,
+            "-p auto must win over the stored choice"
+        );
+    }
+
+    /// Saying nothing is not a ceiling. Only an explicit `--permission` bounds
+    /// what the Tab key may reach, or omitting the flag would quietly pin every
+    /// session to the default and make the mode key half-broken.
+    #[test]
+    fn only_an_explicit_flag_becomes_a_ceiling() {
+        assert_eq!(
+            options().ceiling(),
+            PermissionPolicy::Bypass,
+            "no flag must leave every mode reachable"
+        );
+        assert_eq!(
+            options_launched_on(HarnessKind::ClaudeCode, PermissionPolicy::Plan).ceiling(),
+            PermissionPolicy::Plan,
+        );
+        assert_eq!(
+            bounded(options().ceiling(), PermissionPolicy::Bypass),
+            PermissionPolicy::Bypass
+        );
+        assert_eq!(
+            bounded(
+                options_launched_on(HarnessKind::ClaudeCode, PermissionPolicy::Plan).ceiling(),
+                PermissionPolicy::Bypass
+            ),
+            PermissionPolicy::Plan,
+            "the TUI escalated past a ceiling somebody set on purpose"
         );
     }
 
@@ -6076,6 +6534,7 @@ mod tests {
             ('v', sessions::Request::Rewind("run-7".into())),
             ('u', sessions::Request::Restore("run-7".into())),
             ('f', sessions::Request::Fork("run-7".into())),
+            ('t', sessions::Request::Retry("run-7".into())),
         ] {
             let mut app = on_fleet_with_a_run();
             assert_eq!(
@@ -6091,7 +6550,7 @@ mod tests {
     /// exception by design: the list is the way *out* of an empty fleet.
     #[test]
     fn a_conversation_verb_with_no_run_selected_does_nothing_at_all() {
-        for key in ['b', 'v', 'u', 'f'] {
+        for key in ['b', 'v', 'u', 'f', 't'] {
             let mut app = app_on(HarnessKind::ClaudeCode);
             app.go(Workspace::Fleet);
             assert_eq!(press(&mut app, KeyCode::Char(key)), None, "`{key}`");
