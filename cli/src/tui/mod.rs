@@ -47,6 +47,7 @@ use crossterm::terminal::{
 use futures::StreamExt;
 use jod_core::schedule::{GoalState, ScheduleState};
 use jod_core::store::Store;
+use jod_core::harness::ToolAccess;
 use jod_core::{AgentEvent, HarnessKind, Jod, PermissionPolicy, Resume, SpawnRequest};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
@@ -284,7 +285,20 @@ async fn perform(jod: &Arc<Jod>, app: &mut App, opts: &Options, action: Action) 
     let now = app.now_ms;
     match action {
         Action::Send(prompt) => {
-            match spawn(jod, app, opts, prompt.clone(), app.resume.clone()).await {
+            // The one place Jod's own verbs are handed over from the chat box.
+            //
+            // The rule this codebase already states is "the main chat is you,
+            // present, watching" — and a turn you just typed into the TUI is
+            // exactly that. The grant used to be withheld here on the grounds
+            // that "an agent started from the chat box is doing a task, not
+            // orchestrating", which conflated two different things reached
+            // through one function: a turn you are watching, and a delegation
+            // that goes off on its own. Only the second is unattended, and only
+            // the second still gets nothing.
+            //
+            // Without this you could ask Jod to schedule something and it would
+            // answer as if it had, having no verb to do it with.
+            match spawn(jod, app, opts, prompt.clone(), app.resume.clone(), WATCHED).await {
                 Ok(id) => {
                     app.watching = Some(id);
                     app.busy = true;
@@ -299,7 +313,15 @@ async fn perform(jod: &Arc<Jod>, app: &mut App, opts: &Options, action: Action) 
             // Fresh, always: a background job that silently continued the
             // conversation on screen would inherit context nobody asked it to,
             // and two agents writing into one session is not a conversation.
-            match spawn(jod, app, opts, prompt.clone(), Resume::Fresh).await {
+            //
+            // Read-only rather than nothing, and rather than the orchestrating
+            // set a watched turn gets. Nobody is reading this one's output as
+            // it goes, and the thing you least want unattended is an agent that
+            // can create more unattended agents — see `ToolAccess::unattended`,
+            // whose reasoning this is. Reading is the half that pays for
+            // itself: an agent that can see what else is running can decline to
+            // duplicate it.
+            match spawn(jod, app, opts, prompt.clone(), Resume::Fresh, DELEGATED).await {
                 Ok(id) => {
                     app.push(Entry::Notice(format!(
                         "delegated {} — {} · runs in the background, Ctrl-A to watch",
@@ -2067,6 +2089,20 @@ fn resolve_agent(app: &mut App, typed: &str) -> Option<String> {
     }
 }
 
+/// What a turn you are sitting in front of may do to Jod itself.
+///
+/// The full set, because the condition this codebase attaches to it — "you,
+/// present, watching" — is met by definition here: this is the run whose output
+/// is filling your screen.
+const WATCHED: Option<ToolAccess> = Some(ToolAccess::Orchestrate);
+
+/// What a run that goes off on its own may do to Jod itself.
+///
+/// Named as a pair with [`WATCHED`] so the difference between them is one line
+/// to read rather than two call sites to find. The whole distinction is
+/// whether anybody is looking.
+const DELEGATED: Option<ToolAccess> = Some(ToolAccess::ReadOnly);
+
 /// The stricter of the launch ceiling and what is asked for.
 ///
 /// `jod_core::mcp::permits` already knows the ordering, so this asks it rather
@@ -2080,12 +2116,20 @@ fn bounded(ceiling: PermissionPolicy, wanted: PermissionPolicy) -> PermissionPol
     }
 }
 
+/// Start a run for this conversation.
+///
+/// `tools` is a parameter rather than a constant because this one function
+/// serves two situations with different amounts of trust in them: a turn you
+/// are watching, and a delegation that goes off on its own. It used to hard-code
+/// `None` for both, which is how "tell Jod to schedule this" became a request it
+/// could answer but not carry out.
 async fn spawn(
     jod: &Arc<Jod>,
     app: &App,
     opts: &Options,
     prompt: String,
     resume: Resume,
+    tools: Option<ToolAccess>,
 ) -> Result<String> {
     let agent = jod
         .spawn_agent(SpawnRequest {
@@ -2110,13 +2154,9 @@ async fn spawn(
             // delegation passes its own, because it is not part of this
             // conversation at all.
             resume,
-            // No tools, deliberately. An agent started from the chat box is
-            // doing a task, not orchestrating: giving it Jod's own verbs would
-            // let a prompt typed in a hurry create schedules and spend money
-            // every night. The orchestrator is the thing that gets those, and
-            // granting them anywhere else should be a decision somebody made
-            // rather than a default they inherited.
-            tools: None,
+            // Decided by the caller — see the parameter's own doc. Each of the
+            // two call sites says which situation it is in and why.
+            tools,
         })
         .await?;
     Ok(agent.id)
@@ -2297,6 +2337,35 @@ mod tests {
         for c in text.chars() {
             press(app, KeyCode::Char(c));
         }
+    }
+
+    /// The grant that lets "schedule this for me" be carried out rather than
+    /// merely acknowledged. Before this, a turn from the chat box was handed no
+    /// Jod tools at all, so the harness could describe arming a schedule and
+    /// had no verb with which to arm one.
+    #[test]
+    fn a_turn_you_are_watching_may_schedule_and_a_delegation_may_not() {
+        let watched = WATCHED.expect("a watched turn gets Jod's tools");
+        assert!(watched.may_orchestrate(), "cannot create a schedule or a goal");
+        assert!(watched.may_delegate());
+
+        // The compounding failure `ToolAccess::unattended` exists to prevent: a
+        // background agent that can create background agents has no bound at
+        // all, and it multiplies while nobody is reading.
+        let delegated = DELEGATED.expect("a delegation still gets to look");
+        assert!(
+            !delegated.may_orchestrate(),
+            "an unwatched run could arm a schedule that spends every night"
+        );
+        assert!(
+            !delegated.may_delegate(),
+            "an unwatched run could start more unwatched runs"
+        );
+        assert_eq!(
+            delegated,
+            ToolAccess::unattended(),
+            "the delegation path must track the codebase's own answer, not a copy of it"
+        );
     }
 
     /// Tab is the mode key, and it works on every screen because "how much may
