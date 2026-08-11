@@ -470,15 +470,19 @@ impl Store {
     /// not taking the row.
     ///
     /// **"It settles eventually anyway" is the objection to expect from whoever
-    /// next tries to remove this parameter, and it is true and it is worse.**
-    /// `mark_failed` calls a row done when it is out of attempts *or* past
-    /// [`STALE_AFTER_MS`], so a foreign-channel row a bridge kept failing would
-    /// not cycle for ever — after a day it would settle as **`failed`**. The
-    /// ledger would then be asserting a delivery failure for a message that
-    /// nothing capable of sending it ever attempted, which is the same class of
-    /// lie as sweeping from a process with no transport at all. Cycling for ever
-    /// would at least be visibly wrong; settling is quietly wrong, and this
-    /// module is for the difference.
+    /// next tries to remove this parameter, and it is true and it is the reason
+    /// to keep it.** Measured, not reasoned: a `cli` row in front of a telegram
+    /// bridge is **`failed` after three restarts** — [`MAX_ATTEMPTS`] — because
+    /// the redelivery path spends an attempt on every sweep before it discovers
+    /// it cannot address the row. No elapsed time is needed and
+    /// [`STALE_AFTER_MS`] never comes into it.
+    ///
+    /// So the row is not stranded, it is **destroyed**, and quickly. The record
+    /// that existed to prove somebody was owed something becomes the record that
+    /// they were written off — by a process that never attempted delivery and
+    /// never could have. That is the same class of lie as sweeping from a
+    /// process with no transport at all, and it is the harder one to spot: a
+    /// row that cycled for ever would at least look wrong.
     pub fn sweep_recoverable(
         &self,
         me: &Owner,
