@@ -1109,7 +1109,7 @@ fn draw_fleet(f: &mut Frame, app: &App, area: Rect) {
                 let age = super::app::short_duration(app.now_ms.saturating_sub(a.created_at_ms));
                 let watched = app.watching.as_deref() == Some(a.id.as_str());
                 let mut spans = vec![
-                    delivery_mark(a.delivery),
+                    delivery_gutter(a.delivery),
                     Span::styled(if chosen { "▸ " } else { "  " }, fg(USER)),
                     Span::styled(
                         format!("{} ", run_glyph(&a.status)),
@@ -1127,15 +1127,19 @@ fn draw_fleet(f: &mut Frame, app: &App, area: Rect) {
                 if show_harness {
                     spans.push(Span::styled(format!("{:<4}", code(&a.harness)), fg(MUTED)));
                 }
+                // The name was clipped by the widget with nothing saying so —
+                // `port the p` at the design width. It is cut with an ellipsis
+                // now, and the marker beside it is reserved first.
+                let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+                let marker = if watched { "  \u{2190} on screen" } else { "" };
+                let (name, marked) = fit_row(used, &a.name, marker, inner);
                 spans.push(Span::styled(
-                    a.name.clone(),
+                    name,
                     if chosen { bold(USER) } else { fg(AGENT) },
                 ));
-                let spans = if watched {
-                    with_marker(spans, "  ← on screen", fg(USER), inner)
-                } else {
-                    spans
-                };
+                if marked {
+                    spans.push(Span::styled(marker.to_string(), fg(USER)));
+                }
                 ListItem::new(Line::from(spans))
             })
             .collect()
@@ -1160,7 +1164,7 @@ fn draw_fleet(f: &mut Frame, app: &App, area: Rect) {
                     "status",
                     // The master column is 48 cells at the design width, so
                     // the inline `← on screen` marker is the first thing
-                    // *dropped* — whole, by `with_marker`, never clipped to
+                    // *dropped* — whole, by `fit_row`, never clipped to
                     // `← on scr`. This pane is where it is always said, which
                     // is why dropping it there costs nothing above 90 columns.
                     &if app.watching.as_deref() == Some(a.id.as_str()) {
@@ -1212,30 +1216,40 @@ fn draw_fleet(f: &mut Frame, app: &App, area: Rect) {
     );
 }
 
-/// Appends a trailing marker to a row, but only if the whole of it fits.
+/// A row's variable text and its trailing marker, fitted together.
 ///
-/// Whole or nothing, exactly like the keybar. These markers were pushed
-/// unconditionally and left for the widget to clip, which rendered `← on scr`
-/// at eighty columns, a bare `← ` at 150, `← whe` on the graph trail at 60 —
-/// and worst, `← n` for `← needs you`, the marker whose entire job is to say
-/// that a person is required. A phrase cut mid-word teaches a phrase that does
-/// not exist, which is the rule `keys::keybar` already follows one module over.
+/// **The marker is the invariant; the text is best-effort.** This is the
+/// `two_ends` ruling one level down. Markers used to be pushed and left for the
+/// widget to clip — `← on scr` at eighty columns, a bare `← ` at 150, `← whe`
+/// on the graph trail, and worst `← n` for `← needs you`. Dropping them whole
+/// fixed the lie but kept the priority backwards: `← needs you` then vanished
+/// exactly when a line ran long, which is precisely when something worth
+/// saying had happened. A marker whose entire job is to say a person is
+/// required cannot be the half that yields.
 ///
-/// The comment this replaces called the marker "the first thing truncated". It
-/// was meant to read *dropped*, and the gap between those two words is exactly
-/// where the bug lived unread.
-fn with_marker(
-    mut spans: Vec<Span<'static>>,
-    marker: &str,
-    style: Style,
-    room: usize,
-) -> Vec<Span<'static>> {
-    let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
-    if used + marker.chars().count() <= room {
-        spans.push(Span::styled(marker.to_string(), style));
+/// So the marker's width is reserved first, and the text is `cut` to what
+/// remains. `cut` rather than a silent clip because it *says* it cut: content
+/// that shrinks visibly is honest, where a marker that disappears tells you
+/// nothing. That asymmetry is the whole reason the two halves are treated
+/// differently.
+///
+/// The one exception is a row too narrow to hold both: below `LEAST_TEXT` the
+/// marker is dropped instead, because a row that is all marker and no name has
+/// stopped saying *which* run it is talking about, and the marker's meaning
+/// depends on knowing that.
+fn fit_row(used: usize, text: &str, marker: &str, room: usize) -> (String, bool) {
+    let for_text = room.saturating_sub(used);
+    let marker_len = marker.chars().count();
+    if !marker.is_empty() && marker_len + LEAST_TEXT <= for_text {
+        (cut(text, for_text - marker_len), true)
+    } else {
+        (cut(text, for_text), false)
     }
-    spans
 }
+
+/// The narrowest a name or a line of feed text may be squeezed before the
+/// marker beside it gives way instead.
+const LEAST_TEXT: usize = 12;
 
 /// The delivery gutter: one cell at the far left of a fleet row, saying that
 /// the reply this run owed somebody never arrived, or may have arrived twice.
@@ -1257,7 +1271,7 @@ fn with_marker(
 /// surface inventing its own marks is how two screens come to disagree about
 /// what `✗` means. `marks_a_row` decides *whether* to draw, and it is narrower
 /// than `is_trouble` on purpose — a reply still in flight is not yet news.
-fn delivery_mark(verdict: super::delivery::Verdict) -> Span<'static> {
+fn delivery_gutter(verdict: super::delivery::Verdict) -> Span<'static> {
     if !verdict.marks_a_row() {
         return Span::raw(" ");
     }
@@ -1501,12 +1515,17 @@ fn draw_graph(f: &mut Frame, app: &App, area: Rect) {
             fg(WARN),
         )));
     }
-    lines.push(Line::from(with_marker(
-        vec![Span::styled(format!("   {}", app.graph.trail_line()), fg(MUTED))],
-        "   ← where you have been",
-        fg(MUTED),
+    let (trail, marked) = fit_row(
+        3,
+        &app.graph.trail_line(),
+        "   \u{2190} where you have been",
         area.width.saturating_sub(2) as usize,
-    )));
+    );
+    let mut trail_spans = vec![Span::styled(format!("   {trail}"), fg(MUTED))];
+    if marked {
+        trail_spans.push(Span::styled("   \u{2190} where you have been", fg(MUTED)));
+    }
+    lines.push(Line::from(trail_spans));
 
     f.render_widget(
         Paragraph::new(lines).block(
@@ -2070,12 +2089,15 @@ fn draw_activity(f: &mut Frame, app: &App, area: Rect) {
             format!("{} ", item.source.glyph()),
             fg(source_colour(item.source)),
         ));
+        let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+        let marker = if item.needs_you { "  \u{2190} needs you" } else { "" };
+        let (text, marked) = fit_row(used, &item.text, marker, width);
         spans.push(Span::styled(
-            item.text.clone(),
+            text,
             if chosen { bold(AGENT) } else { fg(AGENT) },
         ));
-        if item.needs_you {
-            spans = with_marker(spans, "  ← needs you", bold(WARN), width);
+        if marked {
+            spans.push(Span::styled(marker.to_string(), bold(WARN)));
         }
         lines.push(Line::from(spans));
     }
@@ -2310,7 +2332,7 @@ fn code(harness: &str) -> &'static str {
     }
 }
 
-fn run_glyph(status: &str) -> &'static str {
+pub(super) fn run_glyph(status: &str) -> &'static str {
     match status {
         "running" => "●",
         "completed" => "✓",
@@ -3629,6 +3651,56 @@ mod tests {
         assert!(whole > 0, "no marker was ever printed in full");
     }
 
+    /// The marker is the invariant and the text is best-effort — the `two_ends`
+    /// ruling one level down. Dropping markers whole fixed the lie but left the
+    /// priority backwards: `← needs you` then vanished exactly when a line ran
+    /// long, which is precisely when something worth saying had happened.
+    #[test]
+    fn a_needs_you_marker_outlives_the_text_it_sits_beside() {
+        for w in [80u16, 100, 120, 150] {
+            let mut a = activity_app();
+            a.activity[2].text =
+                "inbox-to-zero iteration 118 stalled on a decision nobody has made yet".into();
+            let screen = rendered(&a, w, 20);
+            let row = screen
+                .lines()
+                .find(|l| l.contains("inbox-to-zero"))
+                .unwrap();
+            assert!(
+                row.contains("← needs you"),
+                "{w}: the marker yielded instead of the text — {row}"
+            );
+        }
+    }
+
+    /// And whichever half yields has to say so. A silent clip and an ellipsis
+    /// are identical to the renderer and completely different to a reader:
+    /// `port the p` looks like a short name, `port the…` looks like a cut one.
+    #[test]
+    fn text_that_was_shortened_says_that_it_was() {
+        let mut a = app();
+        a.agents = vec![agent_line(
+            "aaa11111",
+            "port the parser to the new AST",
+            "completed",
+        )];
+        a.go(Workspace::Fleet);
+        let screen = rendered(&a, 100, 16);
+        let line = screen.lines().find(|l| l.contains("aaa11111")).unwrap();
+        // Past 90 columns the detail pane shares the row and prints the name in
+        // full, so the master pane's own segment is taken first — otherwise the
+        // assertion below reads the *other* pane's copy and never fails.
+        let row = line
+            .split('│')
+            .find(|segment| segment.contains("aaa11111"))
+            .unwrap_or(line);
+        assert!(row.contains('…'), "a cut name must admit it: {row}");
+        assert!(
+            !row.contains("port the parser to the new AST"),
+            "it really was too narrow to fit: {row}"
+        );
+    }
+
     // ---- the delivery gutter ----
 
     fn owing(id: &str, name: &str, verdict: Verdict) -> super::super::AgentLine {
@@ -3699,14 +3771,14 @@ mod tests {
     fn a_run_that_owed_nobody_anything_wears_no_mark() {
         for quiet in [Verdict::Nothing, Verdict::Fine, Verdict::Owed] {
             assert_eq!(
-                delivery_mark(quiet).content,
+                delivery_gutter(quiet).content,
                 " ",
                 "{quiet:?} must leave the gutter empty, whatever glyph it owns"
             );
         }
         for loud in [Verdict::Lost, Verdict::Twice] {
             assert_eq!(
-                delivery_mark(loud).content,
+                delivery_gutter(loud).content,
                 loud.glyph(),
                 "{loud:?} must wear its own mark rather than one invented here"
             );
