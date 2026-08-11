@@ -1088,9 +1088,14 @@ fn draw_fleet(f: &mut Frame, app: &App, area: Rect) {
         .index(&app.row_ids(Workspace::Fleet));
     let (first, height) = window(left, selected, rows.len());
     // Declared drop order: detail pane → harness → id, name last.
+    //
+    // Each threshold is one higher than it was, because the delivery gutter
+    // took a cell from every row permanently. Left alone, a pane of exactly the
+    // old width would spend the whole line on fixed columns and leave the name
+    // nothing — the column that says what the run was *for*.
     let inner = left.width.saturating_sub(2) as usize;
-    let show_id = inner >= 34;
-    let show_harness = inner >= 30;
+    let show_id = inner >= 35;
+    let show_harness = inner >= 31;
 
     let items: Vec<ListItem> = if rows.is_empty() {
         empty("no agents yet — Alt-B delegates one")
@@ -1104,6 +1109,7 @@ fn draw_fleet(f: &mut Frame, app: &App, area: Rect) {
                 let age = super::app::short_duration(app.now_ms.saturating_sub(a.created_at_ms));
                 let watched = app.watching.as_deref() == Some(a.id.as_str());
                 let mut spans = vec![
+                    delivery_mark(a.delivery),
                     Span::styled(if chosen { "▸ " } else { "  " }, fg(USER)),
                     Span::styled(
                         format!("{} ", run_glyph(&a.status)),
@@ -1229,6 +1235,43 @@ fn with_marker(
         spans.push(Span::styled(marker.to_string(), style));
     }
     spans
+}
+
+/// The delivery gutter: one cell at the far left of a fleet row, saying that
+/// the reply this run owed somebody never arrived, or may have arrived twice.
+///
+/// **In the gutter, and blank on almost every row.** A run started from the TUI
+/// reports into the transcript you are already reading and owes nobody
+/// anything, so `Verdict::Nothing` is the common case and gets a space — the
+/// same argument that keeps the compaction hint quiet until it is worth having.
+/// A marker on every row is a marker nobody reads, and this one has to survive
+/// being the only thing on the screen that is wrong.
+///
+/// Left gutter rather than appended after the name, for two reasons the row
+/// itself proves. There is no room at the end: at the design width the master
+/// pane gives the name ten cells and is already cutting it. And a fixed column
+/// at the start is where a scan begins — the precedent is the activity feed's
+/// unread dot, four hundred lines below.
+///
+/// The glyph comes from `Verdict`, never from a match written here: a second
+/// surface inventing its own marks is how two screens come to disagree about
+/// what `✗` means. `marks_a_row` decides *whether* to draw, and it is narrower
+/// than `is_trouble` on purpose — a reply still in flight is not yet news.
+fn delivery_mark(verdict: super::delivery::Verdict) -> Span<'static> {
+    if !verdict.marks_a_row() {
+        return Span::raw(" ");
+    }
+    Span::styled(
+        verdict.glyph(),
+        // Red for a message nobody got, amber for one somebody may hold twice:
+        // the first is a loss, the second is a mess. The glyphs differ too, so
+        // `NO_COLOR` loses which *kind* of trouble it is, never that there is
+        // trouble.
+        bold(match verdict {
+            super::delivery::Verdict::Lost => BAD,
+            _ => WARN,
+        }),
+    )
 }
 
 /// One `name  value` row of a detail pane, indented off the border — text
@@ -2556,6 +2599,7 @@ mod tests {
         ActivityItem, Check, Delivery, GoalRow, GoalState, HookRow, HookState, Iteration,
         MemoryEdge, MemoryKind, MemoryNode, PastRun, ScheduleRow, ScheduleState,
     };
+    use crate::tui::delivery::Verdict;
     use crate::tui::graph::GraphView;
     use crate::tui::PromptIntent;
     use jod_core::team::{Member, TeamTask};
@@ -3583,6 +3627,112 @@ mod tests {
         // Anti-vacuity: a run where every marker was dropped for want of room
         // has not shown they print whole, only that they can be absent.
         assert!(whole > 0, "no marker was ever printed in full");
+    }
+
+    // ---- the delivery gutter ----
+
+    fn owing(id: &str, name: &str, verdict: Verdict) -> super::super::AgentLine {
+        let mut line = agent_line(id, name, "completed");
+        line.delivery = verdict;
+        line
+    }
+
+    /// A run whose reply was lost renders identically to one delivered unless
+    /// the row says otherwise — and "the run says completed" is exactly the
+    /// state in which nobody thinks to look.
+    #[test]
+    fn a_run_whose_reply_was_lost_is_marked_on_the_row() {
+        let mut a = app();
+        a.agents = vec![owing("aaa11111", "answer the telegram", Verdict::Lost)];
+        a.go(Workspace::Fleet);
+        let screen = rendered(&a, 100, 16);
+        let row = screen
+            .lines()
+            .find(|l| l.contains("answer the telegram"))
+            .unwrap();
+        assert!(row.contains('⊘'), "the lost mark belongs on the row: {row}");
+    }
+
+    /// The two facts are different — they got nothing, or they may hold two —
+    /// so they must not wear the same mark. The shape of
+    /// `render_time::a_settled_row_and_an_owed_one_never_share_a_glyph`.
+    #[test]
+    fn no_two_delivery_verdicts_share_a_glyph() {
+        let marks: Vec<&str> = [
+            Verdict::Lost,
+            Verdict::Owed,
+            Verdict::Twice,
+            Verdict::Fine,
+            Verdict::Nothing,
+        ]
+        .iter()
+        .map(|v| v.glyph())
+        .collect();
+        let mut all = marks.clone();
+        all.sort_unstable();
+        all.dedup();
+        assert_eq!(all.len(), 5, "two verdicts share a glyph: {marks:?}");
+
+        // And none of them collides with the status glyph two cells to its
+        // right, or the row would show one character meaning two things.
+        for status in ["running", "completed", "failed", "killed", "queued"] {
+            for verdict in [Verdict::Lost, Verdict::Twice] {
+                assert_ne!(
+                    verdict.glyph(),
+                    run_glyph(status),
+                    "{verdict:?} collides with the {status} glyph"
+                );
+            }
+        }
+    }
+
+    /// Rare is the whole basis on which this earns attention: a mark on every
+    /// row is a mark nobody reads. `Nothing` is the common case — most runs
+    /// report into the transcript and owe nobody anything.
+    ///
+    /// It asserts the gutter is **blank**, not that it avoids two particular
+    /// glyphs. That distinction is the test: the first version checked the row
+    /// carried neither `⊘` nor `♻`, and swapping `marks_a_row` for `is_trouble`
+    /// passed it — because `Owed` draws `○`, which is neither. A test that
+    /// enumerates the marks it forbids cannot see a new one being added.
+    #[test]
+    fn a_run_that_owed_nobody_anything_wears_no_mark() {
+        for quiet in [Verdict::Nothing, Verdict::Fine, Verdict::Owed] {
+            assert_eq!(
+                delivery_mark(quiet).content,
+                " ",
+                "{quiet:?} must leave the gutter empty, whatever glyph it owns"
+            );
+        }
+        for loud in [Verdict::Lost, Verdict::Twice] {
+            assert_eq!(
+                delivery_mark(loud).content,
+                loud.glyph(),
+                "{loud:?} must wear its own mark rather than one invented here"
+            );
+        }
+    }
+
+    /// The gutter is a fixed column, so it must not push the row off the end of
+    /// a narrow pane — the failure this file has now had four times.
+    #[test]
+    fn the_delivery_gutter_costs_a_narrow_row_nothing_it_cannot_spare() {
+        let mut a = app();
+        a.agents = (0..12)
+            .map(|i| owing(&format!("id{i:06}"), &format!("job {i}"), Verdict::Lost))
+            .collect();
+        a.go(Workspace::Fleet);
+        for (w, h) in [(150u16, 20u16), (100, 16), (80, 14), (60, 12), (40, 10), (20, 6), (12, 5)] {
+            let screen = rendered(&a, w, h);
+            assert!(
+                screen.lines().all(|l| l.chars().count() <= w as usize),
+                "{w}×{h} overflowed:\n{screen}"
+            );
+        }
+        // The name is what the row is for, so it survives to the width where
+        // the pane still has one.
+        let screen = rendered(&a, 100, 16);
+        assert!(screen.contains("job 0"), "the name must survive:\n{screen}");
     }
 
     // ---- what the screens teach ----

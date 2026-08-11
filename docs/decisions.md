@@ -1126,6 +1126,34 @@ to say so.
 Where a tool can decline to answer, it must be made to say which inputs it
 skipped, or its zeroes cannot be read as evidence.
 
+### The same shape again, with the tool skipping everything
+
+Checking whether a change had introduced any `rustfmt` diffs, the working copy
+of `cli/src/tui/mod.rs` reported six and the question was how many of those
+already existed. So `HEAD`'s copy of the file was extracted to a scratch path
+and `rustfmt --check` run against it. It printed no diffs. That was read as a
+baseline of zero, and therefore as "all six are mine".
+
+It had not run at all. A standalone `mod.rs` cannot resolve the children it
+declares, so `rustfmt` had failed —
+
+```text
+Error writing files: failed to resolve mod `app`: …/app.rs does not exist
+```
+
+— and exited non-zero having formatted nothing. Every one of the six hunks was
+in fact present verbatim in `HEAD`; none of them were new. Checking that, by
+grepping `HEAD`'s content for the exact lines, is what settled it.
+
+The NUL byte above is a tool that silently skipped *one input*. This is a tool
+that silently skipped *the entire job*, and both produce the same clean zero.
+The habit that catches it is small: **check that the check happened, not just
+what it said.** An empty result and a failed run are the same text, so a tool's
+exit code is part of its answer and a zero is only evidence once you know it was
+reached. The same technique was sound for the sibling files in that change —
+they declare no child modules — which is the other half of the trap: it works
+often enough to be trusted the once it does not.
+
 ## Asking and planning were the same mode, so nothing ever acted
 
 `PermissionPolicy` had three levels, and the least of them was `Ask`. It mapped
