@@ -26,6 +26,28 @@
 //! does, so a short bar reads as short rather than as complete. `?` then opens
 //! the overlay, which lists the screen's own verbs before anything else.
 //!
+//! ## Where a new verb goes in its table
+//!
+//! The budget drops from the end, so the order of a table decides what a narrow
+//! terminal loses. Order every screen's verbs:
+//!
+//! 1. `⏎` — the primary action, always first.
+//! 2. Verbs **unique to this screen**, most important first.
+//! 3. Verbs that also appear in [`SPINE`].
+//!
+//! The point is that the bar should print what only this screen can teach you.
+//! `n`, `e`, `x` and `/` mean the same thing on all ten screens and have their
+//! own section in the overlay, so losing them off the bar costs nothing — the
+//! meaning transfers. `a answer` exists on exactly one screen and can be
+//! learned nowhere else, so it must outrank `e edit` even though `e` was typed
+//! into the table first.
+//!
+//! This is why the rule is an ordering and not a special case: the budget then
+//! drops the cheapest thing available by construction, on every screen and
+//! every screen added later.
+//! `no_verb_the_spine_already_teaches_sits_above_one_only_this_screen_has`
+//! keeps it that way.
+//!
 //! ## Why the verbs are on Alt and the editing keys are not
 //!
 //! Every global chord used to be Ctrl, which put Jod in a fight it cannot win:
@@ -52,6 +74,9 @@
 //! to send it: iTerm2's "Esc+" for the left Option key, Terminal.app's "Use
 //! Option as Meta key". Without that the terminal eats it to type `å`.
 
+// Only the drift net turns a printed label back into a keypress, and that is
+// test-only — the running program prints these strings and never reads them.
+#[cfg(test)]
 use crossterm::event::{KeyCode, KeyModifiers};
 
 use super::workspace::Workspace;
@@ -117,8 +142,9 @@ const CHAT: &[Key] = &[
 ];
 
 /// The fleet is the widest screen, because it is the only one that is both a
-/// list of runs and a handle on the conversation graph behind them. The first
-/// six act on the run; the last six act on its thread.
+/// list of runs and a handle on the conversation graph behind them: `s r d a`
+/// act on the run under the cursor, `c b u U g f t` act on its thread. `/` is
+/// last because it is the spine's, not the fleet's — see the module header.
 ///
 /// `u` undoes and `U` puts it back. Lower case is undo on every screen that has
 /// one — memory's `u` is an undo too — because undo and redo are a verb and its
@@ -141,7 +167,6 @@ const FLEET: &[Key] = &[
     k("r", "resume"),
     k("d", "delegate again"),
     k("a", "attach"),
-    k("/", "filter"),
     k("c", "conversations"),
     k("b", "branches"),
     k("u", "undo"),
@@ -149,15 +174,16 @@ const FLEET: &[Key] = &[
     k("g", "go to #"),
     k("f", "fork"),
     k("t", "retry"),
+    k("/", "filter"),
 ];
 
 const MEMORY: &[Key] = &[
     k("g", "graph"),
+    k("l", "link"),
+    k("t", "type"),
     k("e", "edit"),
     k("n", "new"),
-    k("l", "link"),
     k("x", "forget"),
-    k("t", "type"),
     k("/", "filter"),
 ];
 
@@ -180,22 +206,35 @@ const SCHEDULES: &[Key] = &[
     k("/", "filter"),
 ];
 
+/// `a answer` is fourth rather than last because it is the verb that unblocks a
+/// stuck loop and exists on no other screen, while `e` and `n` are the spine's
+/// and mean the same thing everywhere.
+///
+/// It is also `answer` rather than `answer escalation`, and that is one decision
+/// rather than two. Ordering alone was **not** enough here — this is the only
+/// screen where it was not. At nineteen characters the full phrase did not fit
+/// eighty columns even in fourth place, so the reorder reserved a slot it could
+/// not use and dropped `e edit` for nothing: strictly fewer verbs than before.
+/// At eight it fits, and a shorter label still teaches the key, which is the
+/// whole reason for printing one. `draw_goals` already prints `needs you` in
+/// bold above the bar, so the screen says *that* a goal is stuck; the keybar
+/// only owes you the key.
 const GOALS: &[Key] = &[
     k("⏎", "last iteration"),
     k("r", "run now"),
     k("p", "pause"),
+    k("a", "answer"),
     k("e", "edit"),
     k("n", "new"),
-    k("a", "answer escalation"),
 ];
 
 const HOOKS: &[Key] = &[
     k("⏎", "open run"),
     k("t", "test payload"),
     k("p", "pause"),
+    k("c", "copy URL"),
     k("e", "edit"),
     k("n", "new"),
-    k("c", "copy URL"),
     k("x", "delete"),
 ];
 
@@ -271,10 +310,24 @@ pub fn keybar(ws: Workspace, width: u16) -> String {
 ///
 /// Mirrors `ui::two_ends`, which reserves the right half first and hands the
 /// remainder to the verbs: a space of margin at each end and at least one
-/// between the halves, so three columns beyond the exit text itself. If that
-/// padding ever changes there, `the_way_out_fits_beside_the_verbs_at_every_realistic_width`
-/// is what notices.
-fn verb_budget(ws: Workspace, width: u16) -> usize {
+/// between the halves, so three columns beyond the exit text itself.
+///
+/// Two files therefore have to agree on that number, and **nothing in this
+/// module can check it**. `the_way_out_fits_beside_the_verbs_at_every_realistic_width`
+/// looks like it does and does not: it measures a bar this function already
+/// budgeted, so it is self-consistent by construction and stays green however
+/// wrong the shared number is. Worse, `keybar` drops *whole* verbs, so it
+/// usually lands well under budget and quietly absorbs a disagreement of a
+/// column or two — until the one screen whose verbs end exactly on the
+/// boundary, which is the day that screen loses its entire left half rather
+/// than one verb.
+///
+/// The real guard is `ui::tests::two_ends_accepts_a_left_half_of_exactly_the_budgeted_width`,
+/// which calls this function, builds a left half of precisely that width, and
+/// asserts `two_ends` prints it. Public for exactly that reason: the number
+/// lives here, and the test that pins it against the renderer calls it rather
+/// than repeating it.
+pub fn verb_budget(ws: Workspace, width: u16) -> usize {
     (width as usize).saturating_sub(keybar_exit(ws).chars().count() + 3)
 }
 
@@ -302,6 +355,17 @@ pub fn keybar_exit(ws: Workspace) -> &'static str {
 
 /// The footer printed inside a workspace's own border, shorter than the keybar
 /// because it repeats only what acts on the selected row.
+///
+/// Unlike [`keybar`], this takes no width and does no fitting — `ui::fit_verbs`
+/// does it at the call site, against the pane's own rect. The split is
+/// deliberate: the keybar has to reserve room for the way out and say `? more`
+/// when it drops something, which is keymap policy, whereas the footer carries
+/// no marker and nothing not already on the bar. What is left is "make text fit
+/// a box", which belongs to the renderer.
+///
+/// So do not add a budget here. Two of them would fight, and the second would
+/// be invisible — the string this returns is already whole, and clipping it
+/// twice looks exactly like clipping it once.
 pub fn footer(ws: Workspace) -> String {
     let verbs = items(local(ws))
         .into_iter()
@@ -364,8 +428,13 @@ pub fn which_key_title(making: bool) -> &'static str {
 // stopped working. So the labels are made *machine-readable* here, and
 // `mod.rs`'s tests press every one of them. A binding added to either side
 // alone now fails the build instead of shipping.
+//
+// Everything below is `cfg(test)`: the running program never reads a label back
+// out, only prints it, so these would be dead code in the binary — and a
+// standing dead-code warning is how a real one gets missed.
 
 /// Does this label name a chord, rather than a bare key like `⏎` or `n`?
+#[cfg(test)]
 pub fn is_chord(label: &str) -> bool {
     label.starts_with("Ctrl-") || label.starts_with("Alt-")
 }
@@ -374,6 +443,7 @@ pub fn is_chord(label: &str) -> bool {
 ///
 /// Exit hints are sentences (`"Alt-X stop · Ctrl-C quit"`), not table rows, so
 /// a chord can arrive there as a substring nobody registered anywhere.
+#[cfg(test)]
 pub fn chords_in(text: &str) -> Vec<String> {
     text.split_whitespace()
         .filter(|token| is_chord(token))
@@ -391,6 +461,7 @@ pub fn chords_in(text: &str) -> Vec<String> {
 /// Anything printed *outside* this module is outside the net. That is the
 /// argument for moving a chord-bearing string in here rather than spelling it
 /// at the call site.
+#[cfg(test)]
 pub fn all_documented_chords() -> Vec<String> {
     let mut found: Vec<String> = Vec::new();
     for ws in Workspace::ALL {
@@ -426,6 +497,7 @@ pub fn all_documented_chords() -> Vec<String> {
 /// An empty result means the label is not pressable, which the drift test
 /// treats as a bug in the label rather than as a row to skip. Silently
 /// skipping is how a table drifts.
+#[cfg(test)]
 pub fn press_of(label: &str) -> Vec<(KeyCode, KeyModifiers)> {
     let mut presses = Vec::new();
     let mut carried: Option<KeyModifiers> = None;
@@ -454,6 +526,7 @@ pub fn press_of(label: &str) -> Vec<(KeyCode, KeyModifiers)> {
 }
 
 /// The key codes a label's tail names, once the modifier is stripped off.
+#[cfg(test)]
 fn codes_of(rest: &str) -> Vec<KeyCode> {
     match rest {
         "↑↓" => vec![KeyCode::Up, KeyCode::Down],
@@ -487,6 +560,12 @@ mod tests {
     /// The invariant. A screen showing three of its five verbs is merely
     /// terse; a screen with no way out is one you have to kill the terminal to
     /// leave.
+    ///
+    /// Note what this does **not** prove: it measures a bar `verb_budget`
+    /// already sized, so it cannot see the padding here disagreeing with the
+    /// padding in `ui::two_ends`. That coupling is pinned by
+    /// `ui::tests::two_ends_accepts_a_left_half_of_exactly_the_budgeted_width`,
+    /// which builds the boundary case by hand. See `verb_budget`.
     #[test]
     fn the_way_out_fits_beside_the_verbs_at_every_realistic_width() {
         for ws in Workspace::ALL {
@@ -499,6 +578,66 @@ mod tests {
                     left + right + 3
                 );
             }
+        }
+    }
+
+    /// The budget drops from the end, so a table's order decides what a narrow
+    /// terminal loses. Shared verbs go last so that what it loses is the thing
+    /// the spine already teaches everywhere, rather than the one verb that
+    /// exists on this screen alone.
+    ///
+    /// Without this, the order is whatever someone happened to type, and the
+    /// casualty is whatever that accident put at the end — which is how goals
+    /// came to hide `a answer` at eighty columns while keeping
+    /// `e edit`, a verb printed on six other screens.
+    #[test]
+    fn no_verb_the_spine_already_teaches_sits_above_one_only_this_screen_has() {
+        for ws in Workspace::ALL {
+            let mut shared_so_far: Option<&Key> = None;
+            for binding in local(ws) {
+                // The primary action leads every screen, spine or not.
+                if binding.key == "⏎" {
+                    continue;
+                }
+                let shared = SPINE.iter().any(|s| s.key == binding.key);
+                match (shared, shared_so_far) {
+                    (true, None) => shared_so_far = Some(binding),
+                    (false, Some(earlier)) => panic!(
+                        "{ws:?} lists `{} {}` after `{} {}`. The second is the spine's and means \
+                         the same thing on every screen; the first exists only here. The budget \
+                         drops from the end, so this order loses the one that cannot be learned \
+                         anywhere else.",
+                        binding.key, binding.what, earlier.key, earlier.what
+                    ),
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    /// The rule is only worth anything if it changes what a narrow terminal
+    /// shows, so both screens where it does are pinned here.
+    ///
+    /// Hooks is the clean case: the reorder alone surfaces `c copy URL` and
+    /// drops `e edit`, where before the bar spent its last slot on the spine's
+    /// verb and hid the only way to get a webhook's address out of Jod.
+    ///
+    /// Goals is the case that needed a label change as well, and is the reason
+    /// this test exists in both halves — ordering `a` above `e` reserved a slot
+    /// that nineteen characters could not fit, so until `answer escalation`
+    /// became `answer` the reorder made this width strictly worse rather than
+    /// better. A rule that is necessary but not sufficient looks identical to a
+    /// rule that works, right up until someone measures.
+    #[test]
+    fn a_screen_specific_verb_outlives_a_spine_verb_at_eighty_columns() {
+        for (ws, kept, dropped) in [
+            (Workspace::Hooks, "c copy URL", "e edit"),
+            (Workspace::Goals, "a answer", "e edit"),
+        ] {
+            let bar = keybar(ws, 80);
+            assert!(bar.contains(kept), "{ws:?} must keep `{kept}`: {bar}");
+            assert!(!bar.contains(dropped), "{ws:?} must drop `{dropped}`: {bar}");
+            assert!(bar.contains(MORE), "{ws:?} must say it dropped something: {bar}");
         }
     }
 
@@ -552,10 +691,10 @@ mod tests {
     #[test]
     fn a_letter_that_changes_meaning_is_reachable_on_both_screens() {
         assert!(keybar(Workspace::Fleet, 150).contains("a attach"));
-        assert!(keybar(Workspace::Goals, 150).contains("a answer escalation"));
+        assert!(keybar(Workspace::Goals, 150).contains("a answer"));
         for (ws, what) in [
             (Workspace::Fleet, "attach"),
-            (Workspace::Goals, "answer escalation"),
+            (Workspace::Goals, "answer"),
         ] {
             assert!(
                 keymap(ws)

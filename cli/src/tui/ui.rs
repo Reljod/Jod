@@ -654,10 +654,11 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
 /// verbs rather than one.
 ///
 /// `two_ends_accepts_a_left_half_of_exactly_the_budgeted_width` is what fails
-/// if they drift, and it has to construct that exact width by hand. Rendering a
-/// real keybar does not catch it: `keys::keybar` drops whole verbs, so it
-/// almost always lands a few columns under its budget and quietly absorbs the
-/// disagreement until the one screen whose verbs happen to end on the boundary.
+/// if they drift: it asks `keys::verb_budget` for the number and builds a left
+/// half of exactly that width. Rendering a real keybar does not catch it —
+/// `keys::keybar` drops whole verbs, so it almost always lands a few columns
+/// under its budget and quietly absorbs the disagreement until the one screen
+/// whose verbs happen to end on the boundary.
 fn two_ends(left: &str, right: &str, width: u16, colour: Color) -> Line<'static> {
     let width = width as usize;
     let left_len = left.chars().count();
@@ -848,6 +849,17 @@ fn draw_which_key(f: &mut Frame, app: &App) {
 
 /// The `?` overlay, showing the screen you are on first. Help that omits the
 /// focused screen's verbs sends you to the source.
+///
+/// **It spills into columns rather than off the bottom.** Fleet's keymap is 46
+/// rows; `centred` clamps a panel to the terminal, so at 80×30 it drew the
+/// first 28 and dropped the rest — the whole `anywhere` section — with nothing
+/// on screen to say so. The screen's own verbs survived only because
+/// `keys::keymap` happens to put them first, which made a discoverability
+/// preference silently load-bearing for correctness. It is a preference again:
+/// the layout below shows everything that fits in as many columns as the window
+/// affords, and *counts what it still cannot show* rather than dropping it
+/// quietly. Help that lies about being complete is worse than no help, because
+/// you stop looking.
 fn draw_keymap(f: &mut Frame, app: &App) {
     let mut lines: Vec<Line> = Vec::new();
     for (heading, bindings) in keys::keymap(app.workspace) {
@@ -862,25 +874,61 @@ fn draw_keymap(f: &mut Frame, app: &App) {
             ]));
         }
     }
-    let widest = lines
-        .iter()
-        .map(|l| {
-            l.spans
-                .iter()
-                .map(|s| s.content.chars().count())
-                .sum::<usize>()
-        })
-        .max()
-        .unwrap_or(20);
-    let panel = centred(f.area(), (widest + 6) as u16, (lines.len() + 2) as u16);
+    let width_of = |line: &Line| {
+        line.spans
+            .iter()
+            .map(|s| s.content.chars().count())
+            .sum::<usize>()
+    };
+    let widest = lines.iter().map(width_of).max().unwrap_or(20);
+
+    let screen = f.area();
+    // Two border cells vertically, two horizontally, and two of margin between
+    // a column and the next.
+    let rows = screen.height.saturating_sub(2).max(1) as usize;
+    let column = widest + 2;
+    let wanted = lines.len().div_ceil(rows);
+    let affordable = ((screen.width.saturating_sub(2)) as usize / column.max(1)).max(1);
+    let columns = wanted.min(affordable);
+    let shown = (columns * rows).min(lines.len());
+    let hidden = lines.len() - shown;
+
+    // Read down each column and then across, the way a keymap is scanned.
+    let tall = rows.min(shown);
+    let mut composed: Vec<Line> = Vec::with_capacity(tall);
+    for row in 0..tall {
+        let mut spans: Vec<Span> = Vec::new();
+        for col in 0..columns {
+            let at = col * rows + row;
+            if at >= shown {
+                break;
+            }
+            let used = width_of(&lines[at]);
+            spans.extend(lines[at].spans.iter().cloned());
+            if (col + 1) * rows + row < shown {
+                spans.push(Span::raw(" ".repeat(column.saturating_sub(used))));
+            }
+        }
+        composed.push(Line::from(spans));
+    }
+
+    let panel = centred(
+        screen,
+        (columns * column + 2) as u16,
+        (composed.len() + 2) as u16,
+    );
     f.render_widget(Clear, panel);
     f.render_widget(
-        Paragraph::new(lines).block(
+        Paragraph::new(composed).block(
             Block::default()
                 .borders(Borders::ALL)
                 .border_style(fg(USER))
                 .title(" keys ")
-                .title_bottom(" any key closes this "),
+                .title_bottom(if hidden > 0 {
+                    format!(" {hidden} more — widen the window ")
+                } else {
+                    " any key closes this ".to_string()
+                }),
         ),
         panel,
     );
@@ -1012,13 +1060,13 @@ fn titled(ws: Workspace, app: &App) -> String {
 /// Its title is the screen's name alone: the master pane is 48 cells at the
 /// design width, so a counted title would be truncated mid-word — and the
 /// status bar already carries the count on every screen.
-fn body<'a>(ws: Workspace, items: Vec<ListItem<'a>>) -> List<'a> {
+fn body<'a>(ws: Workspace, items: Vec<ListItem<'a>>, width: u16) -> List<'a> {
     List::new(items).block(
         Block::default()
             .borders(Borders::ALL)
             .border_style(fg(USER))
             .title(format!(" {} ", ws.title()))
-            .title_bottom(keys::footer(ws)),
+            .title_bottom(fit_verbs(&keys::footer(ws), width)),
     )
 }
 
@@ -1089,7 +1137,7 @@ fn draw_fleet(f: &mut Frame, app: &App, area: Rect) {
         items.push(ListItem::new(Line::from("")));
         items.push(ListItem::new(line));
     }
-    f.render_widget(body(Workspace::Fleet, items), left);
+    f.render_widget(body(Workspace::Fleet, items, left.width), left);
 
     let Some(right) = right else { return };
     let lines = match app.selected_agent() {
@@ -1148,7 +1196,7 @@ fn draw_fleet(f: &mut Frame, app: &App, area: Rect) {
                 .borders(Borders::ALL)
                 .border_style(fg(MUTED))
                 .title(" run ")
-                .title_bottom(" ⏎ watch · s stop · r resume · a attach "),
+                .title_bottom(fit_verbs(" ⏎ watch · s stop · r resume · a attach ", right.width)),
         ),
         right,
     );
@@ -1222,7 +1270,7 @@ fn draw_memory(f: &mut Frame, app: &App, area: Rect) {
             fg(WARN),
         )));
     }
-    f.render_widget(body(Workspace::Memory, items), left);
+    f.render_widget(body(Workspace::Memory, items, left.width), left);
 
     let Some(right) = right else { return };
     let lines = match app.selected_memory() {
@@ -1277,7 +1325,7 @@ fn draw_memory(f: &mut Frame, app: &App, area: Rect) {
                 .borders(Borders::ALL)
                 .border_style(fg(MUTED))
                 .title(" node ")
-                .title_bottom(" g local graph · e edit · x forget "),
+                .title_bottom(fit_verbs(" g local graph · e edit · x forget ", right.width)),
         ),
         right,
     );
@@ -1537,7 +1585,7 @@ fn draw_schedules(f: &mut Frame, app: &App, area: Rect) {
         }
     }
 
-    f.render_widget(page(Workspace::Schedules, app, lines), area);
+    f.render_widget(page(Workspace::Schedules, app, lines, area.width), area);
 }
 
 /// A goal is a schedule with a **denominator**: "done when" is a checklist, so
@@ -1681,7 +1729,7 @@ fn draw_goals(f: &mut Frame, app: &App, area: Rect) {
         }
     }
 
-    f.render_widget(page(Workspace::Goals, app, lines), area);
+    f.render_widget(page(Workspace::Goals, app, lines, area.width), area);
 }
 
 /// Webhooks answer three questions without a drill-down: is it armed, is the
@@ -1798,7 +1846,7 @@ fn draw_hooks(f: &mut Frame, app: &App, area: Rect) {
         }
     }
 
-    f.render_widget(page(Workspace::Hooks, app, lines), area);
+    f.render_widget(page(Workspace::Hooks, app, lines, area.width), area);
 }
 
 /// The board, promoted out of the team panel into a screen of its own. The verb
@@ -1908,7 +1956,7 @@ fn draw_tasks(f: &mut Frame, app: &App, area: Rect) {
         )));
     }
 
-    f.render_widget(page(Workspace::Tasks, app, lines), area);
+    f.render_widget(page(Workspace::Tasks, app, lines, area.width), area);
 }
 
 /// The durable answer to "what happened while I was away". A toast-only ending
@@ -1974,7 +2022,7 @@ fn draw_activity(f: &mut Frame, app: &App, area: Rect) {
         fg(MUTED),
     )));
 
-    f.render_widget(page(Workspace::Activity, app, lines), area);
+    f.render_widget(page(Workspace::Activity, app, lines, area.width), area);
 }
 
 /// The team: who is on it, and what each of them is doing.
@@ -2070,14 +2118,56 @@ fn draw_team(f: &mut Frame, app: &App, area: Rect) {
 }
 
 /// A table-over-detail screen, boxed and titled.
-fn page<'a>(ws: Workspace, app: &App, lines: Vec<Line<'a>>) -> Paragraph<'a> {
+fn page<'a>(ws: Workspace, app: &App, lines: Vec<Line<'a>>, width: u16) -> Paragraph<'a> {
     Paragraph::new(lines).block(
         Block::default()
             .borders(Borders::ALL)
             .border_style(fg(USER))
             .title(titled(ws, app))
-            .title_bottom(keys::footer(ws)),
+            .title_bottom(fit_verbs(&keys::footer(ws), width)),
     )
+}
+
+/// A `·`-joined verb list, cut back to **whole verbs** so it fits inside a box
+/// `width` cells wide.
+///
+/// Regression, same family as the keybar's and worse for being invisible at the
+/// design size. `keys::footer(Fleet)` is 58 cells and the master pane is 46 at
+/// 100 columns, so the fleet's bottom border read `… r resume · d d` — `d d` is
+/// a key that does not exist. It was fine at 80, where the pane is full width
+/// because `split` has not engaged, and fine again at 150 where the pane is
+/// wide enough; the broken band is roughly 92 to 140, which brackets the
+/// stated design width. A clipped title is cosmetic. A clipped *keymap* teaches
+/// a chord nobody can press.
+///
+/// No `? more` marker here, unlike `keys::keybar`. The footer is by
+/// construction a repeat of the first few verbs already printed on the bar two
+/// rows below, so nothing it drops is only taught here, and a second marker two
+/// rows from the first is noise. That is also why the fitting lives in `ui`
+/// rather than in `keys`: with no marker to append this is only "make text fit
+/// a box", which is a rendering concern and not a keymap one.
+fn fit_verbs(text: &str, width: u16) -> String {
+    // The two border cells the title is drawn between.
+    let room = (width as usize).saturating_sub(2);
+    if text.chars().count() <= room {
+        return text.to_string();
+    }
+    let mut kept: Vec<&str> = Vec::new();
+    for verb in text.trim().split(" · ") {
+        let mut next = kept.clone();
+        next.push(verb);
+        // Measured with the padding put back, because the padding is what
+        // actually occupies the border — measuring the join alone lets the two
+        // spaces overflow by exactly the amount that looks like a rendering bug.
+        if format!(" {} ", next.join(" · ")).chars().count() > room {
+            break;
+        }
+        kept = next;
+    }
+    if kept.is_empty() {
+        return String::new();
+    }
+    format!(" {} ", kept.join(" · "))
 }
 
 fn detail(name: &str, value: &str) -> Line<'static> {
@@ -2994,9 +3084,11 @@ mod tests {
         let left = top.chars().position(|c| c == '┌').unwrap();
         let right = top.chars().position(|c| c == '┐').unwrap();
         assert!(left > GUTTER as usize, "the box must be inset: {left}");
+        // Inclusive of both border columns, which is what `MEASURE` counts.
+        let box_width = right - left + 1;
         assert!(
-            right - left + 1 <= MEASURE as usize,
-            "capped at the measure: {left}..{right}"
+            box_width <= MEASURE as usize,
+            "capped at the measure: {box_width} wide, {left}..{right}"
         );
         assert_eq!(left, 199 - right, "and centred in what is left");
     }
@@ -3252,16 +3344,17 @@ mod tests {
     /// The exact coupling with `keys::verb_budget`: a left half of *precisely*
     /// the budgeted width must still be printed.
     ///
-    /// The three columns are spelled out here on purpose — this test is the
-    /// specification of the number both files share, so changing the padding on
-    /// either side without acknowledging it here fails. `verb_budget` is
-    /// private to `keys`, so it cannot be called; if it is ever made public,
-    /// call it instead of repeating the arithmetic.
+    /// It asks `keys::verb_budget` for the number rather than repeating it,
+    /// which is not merely tidier — it is the only version that catches the
+    /// dangerous direction. A hardcoded copy passes when `verb_budget` grows
+    /// *more* generous than `two_ends`, and that is exactly the break: the
+    /// keybar hands back a string this renderer then elides whole, so a screen
+    /// loses all its verbs rather than one.
     ///
     /// Rendering a real keybar does not prove this. `keys::keybar` drops whole
     /// verbs, so it lands under its budget by however much the last dropped
     /// verb was worth and absorbs a padding disagreement of one or two columns
-    /// — measured: widening the padding below from 3 to 5 leaves every
+    /// — measured: widening the padding in `two_ends` from 3 to 5 leaves every
     /// eighty-column render passing, and would still lose a screen's entire
     /// verb list the day its verbs ended on the boundary.
     #[test]
@@ -3269,7 +3362,7 @@ mod tests {
         for ws in Workspace::ALL {
             for width in [80u16, 100, 120, 150] {
                 let right = keys::keybar_exit(ws);
-                let budget = (width as usize) - right.chars().count() - 3;
+                let budget = keys::verb_budget(ws, width);
                 let left = "x".repeat(budget);
                 let line = two_ends(&left, right, width, MUTED);
                 let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
@@ -3303,6 +3396,103 @@ mod tests {
                 assert!(
                     text.contains("Alt-X stop · Ctrl-C quit"),
                     "{width}: the way out went: {text:?}"
+                );
+            }
+        }
+    }
+
+    /// Regression: `keys::footer(Fleet)` is 58 cells and the master pane is 46
+    /// at 100 columns, so the bottom border read `… r resume · d d`. `d d` is
+    /// not a key. Nothing caught it because the suite rendered at 150, where
+    /// the pane is wide enough, and at 80, where `split` has not engaged and
+    /// the pane is full width — the broken band brackets the design size.
+    ///
+    /// A cut *keymap* is worse than a cut title: it does not look damaged, it
+    /// looks like a shorter key.
+    #[test]
+    fn a_footer_drops_whole_verbs_rather_than_cutting_one_in_half() {
+        for ws in [Workspace::Fleet, Workspace::Memory] {
+            for width in [80u16, 90, 100, 110, 120, 150, 200] {
+                let mut a = populated();
+                a.go(ws);
+                let screen = rendered(&a, width, 20);
+                let row = screen
+                    .lines()
+                    .rev()
+                    .find(|l| l.contains("pick"))
+                    .unwrap_or_else(|| panic!("{ws:?} at {width} printed no footer"));
+                // Past 90 columns the detail pane shares this row, so the master
+                // pane's own border segment is taken first — otherwise the split
+                // below runs across the join and invents a verb out of two.
+                let footer = row
+                    .split('┘')
+                    .find(|segment| segment.contains("pick"))
+                    .unwrap_or(row);
+                // Every verb on the border must be one `keys::footer` actually
+                // offers, matched *whole*. `contains` would not do: `r resu` is
+                // a substring of `r resume`, so a prefix — which is exactly the
+                // bug — would satisfy it, and this test passed against the
+                // unfixed code until it compared for equality instead.
+                let full = keys::footer(ws);
+                let offered: Vec<&str> = full.trim().split(" · ").collect();
+                for verb in footer
+                    .split('·')
+                    .map(|v| v.trim_matches(|c: char| c == '─' || c == '└' || c == '┘' || c == ' '))
+                    .filter(|v| !v.is_empty())
+                {
+                    assert!(
+                        offered.contains(&verb),
+                        "{ws:?} at {width}: {verb:?} is not a whole verb of {offered:?} — {footer}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Regression: Fleet's keymap is 46 rows and `centred` clamps to the
+    /// terminal, so at 80×30 the overlay drew 28 and dropped the rest — the
+    /// whole `anywhere` section — with nothing on screen admitting it. Help
+    /// that lies about being complete is worse than no help, because you stop
+    /// looking.
+    #[test]
+    fn the_keymap_overlay_shows_every_binding_or_counts_what_it_cannot() {
+        for (w, h) in [(150u16, 40u16), (100, 30), (80, 30), (80, 24), (60, 20)] {
+            let mut a = populated();
+            a.go(Workspace::Fleet);
+            a.overlay = Overlay::Keymap;
+            let screen = rendered(&a, w, h);
+            let total: usize = keys::keymap(Workspace::Fleet)
+                .into_iter()
+                .map(|(_, bindings)| bindings.len())
+                .sum();
+            let shown = keys::keymap(Workspace::Fleet)
+                .into_iter()
+                .flat_map(|(_, bindings)| bindings)
+                .filter(|b| screen.contains(b.what))
+                .count();
+            if shown < total {
+                assert!(
+                    screen.contains("more — widen the window"),
+                    "{w}×{h}: {shown} of {total} shown and the overlay did not say so:\n{screen}"
+                );
+            }
+        }
+    }
+
+    /// The size the overlay is actually used at has to be complete, not merely
+    /// honest about being incomplete.
+    #[test]
+    fn the_keymap_overlay_is_complete_at_the_design_size() {
+        let mut a = populated();
+        a.go(Workspace::Fleet);
+        a.overlay = Overlay::Keymap;
+        let screen = rendered(&a, 100, 30);
+        for (_, bindings) in keys::keymap(Workspace::Fleet) {
+            for binding in bindings {
+                assert!(
+                    screen.contains(binding.what),
+                    "{:?} missing from the keymap at 100×30:\n{screen}",
+                    binding.what
                 );
             }
         }
@@ -3405,7 +3595,12 @@ mod tests {
             (Workspace::Fleet, "s stop"),
             (Workspace::Memory, "g graph"),
             (Workspace::Schedules, "r run now"),
-            (Workspace::Goals, "a answer escalation"),
+            // The verb, not the whole label: `a answer escalation` may shorten
+            // to `a answer` so it fits Goals' fourth slot at eighty columns,
+            // and this assertion is about the screen printing its own key
+            // rather than about the wording. Matching the stem means the
+            // decision needs no coordinated edit here to avoid a red tree.
+            (Workspace::Goals, "a answer"),
             (Workspace::Hooks, "t test payload"),
             (Workspace::Tasks, "d delegate"),
             (Workspace::Activity, "m mark read"),
