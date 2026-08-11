@@ -1251,6 +1251,7 @@ impl<B: BotApi + 'static> Bridge<B> {
             name: msg.session.clone(),
             harness: self.harness,
             prompt: msg.text.clone(),
+            system: None,
             cwd: self.cwd.clone(),
             model: None,
             permission: self.permission,

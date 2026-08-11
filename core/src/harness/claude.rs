@@ -32,6 +32,10 @@ impl Harness for ClaudeCode {
         HarnessKind::ClaudeCode
     }
 
+    fn takes_system_prompt(&self) -> bool {
+        true
+    }
+
     fn args(&self, req: &SpawnRequest) -> Vec<ArgPart> {
         let mut args = vec![
             ArgPart::lit("-p"),
@@ -53,6 +57,18 @@ impl Harness for ClaudeCode {
                 args.push(ArgPart::lit(id));
             }
         }
+        // `--append-system-prompt` rather than `--system-prompt`: the latter
+        // replaces Claude Code's own, which is where its tools, its editing
+        // conventions and its safety framing live. Jod adds a role; it does not
+        // want to reconstruct a working agent from scratch.
+        if let Some(system) = &req.system {
+            args.push(ArgPart::lit("--append-system-prompt"));
+            args.push(ArgPart::lit(system.clone()));
+        }
+
+        // Built across both branches below: the permission mode contributes the
+        // read-only set, `req.tools` contributes Jod's own server.
+        let mut allowed: Vec<String> = Vec::new();
         match req.permission {
             // Nobody is at the other end of `-p` to answer a prompt, so "ask"
             // is really "deny" — and a bare `claude -p` refused to so much as
@@ -80,29 +96,39 @@ impl Harness for ClaudeCode {
                 // heredoc or `printf >`.
                 args.push(ArgPart::lit("--permission-mode"));
                 args.push(ArgPart::lit("plan"));
-                args.push(ArgPart::lit("--allowedTools"));
-                let mut allowed: Vec<String> =
-                    READ_ONLY_TOOLS.iter().map(|t| t.to_string()).collect();
-                // Jod's own tools have to be named here or they are denied,
-                // however carefully they were granted. Found the hard way: the
-                // `--mcp-config` flag reached the command line, the server
-                // started, and the agent still reported "no jod tools" —
-                // because this allowlist, one line above, did not mention them.
-                //
-                // Server-wide rather than per tool, because which tools exist
-                // is already decided by the access level the config carries.
-                // Listing them again here would be a second copy of that
-                // decision, free to drift from the first.
-                if req.tools.is_some() {
-                    allowed.push(format!("mcp__{}", crate::mcp_config::SERVER_NAME));
-                }
-                args.push(ArgPart::lit(allowed.join(",")));
+                allowed.extend(READ_ONLY_TOOLS.iter().map(|t| t.to_string()));
             }
             PermissionPolicy::AcceptEdits => {
                 args.push(ArgPart::lit("--permission-mode"));
                 args.push(ArgPart::lit("acceptEdits"));
             }
             PermissionPolicy::Bypass => args.push(ArgPart::lit("--dangerously-skip-permissions")),
+        }
+
+        // Jod's own tools have to be named here or they are denied, however
+        // carefully they were granted. Found the hard way twice, and the second
+        // time was this line's own fault: the grant used to live *inside* the
+        // `Ask` arm, so the moment a run needed a mode other than plan it
+        // silently lost every Jod tool. `acceptEdits` auto-approves file edits
+        // and nothing else, so the orchestrator — whose only job is to call
+        // these tools — got four consecutive
+        // "requested permissions ... but you haven't granted it yet" and
+        // delegated nothing.
+        //
+        // The grant belongs to `req.tools`, which is what actually decides
+        // whether this run has Jod tools. The permission mode bounds what the
+        // run may do to the machine; it has no opinion about Jod's own verbs.
+        //
+        // Server-wide rather than per tool, because which tools exist is
+        // already decided by the access level the config carries. Listing them
+        // again here would be a second copy of that decision, free to drift
+        // from the first.
+        if req.tools.is_some() {
+            allowed.push(format!("mcp__{}", crate::mcp_config::SERVER_NAME));
+        }
+        if !allowed.is_empty() {
+            args.push(ArgPart::lit("--allowedTools"));
+            args.push(ArgPart::lit(allowed.join(",")));
         }
 
         // Jod's own tools, if this run was granted any. Without these two flags
@@ -296,6 +322,7 @@ mod tests {
             name: "t".into(),
             harness: HarnessKind::ClaudeCode,
             prompt: "hi".into(),
+            system: None,
             cwd: PathBuf::from("/tmp"),
             model: model.map(str::to_string),
             permission,
@@ -363,6 +390,37 @@ mod tests {
             .find(|s| s.contains("Read,Grep"))
             .expect("an allowlist");
         assert!(!allowed.contains("mcp__jod"), "{allowed}");
+    }
+
+    /// The test above passed while the feature was broken, because it only ever
+    /// asked about `Ask`. The grant used to be written inside that one arm, so
+    /// changing a run's permission mode silently revoked every Jod tool it had
+    /// been given — which is how the orchestrator came to call four tools and be
+    /// refused all four. A grant that depends on the permission mode is not a
+    /// grant, so check every mode.
+    #[test]
+    fn granted_tools_survive_any_permission_mode() {
+        for permission in [
+            PermissionPolicy::Ask,
+            PermissionPolicy::AcceptEdits,
+            PermissionPolicy::Bypass,
+        ] {
+            let mut r = req(permission, None);
+            r.tools = Some(super::super::ToolAccess::Orchestrate);
+            let args = ClaudeCode::default().args(&r);
+
+            let allowed = args
+                .iter()
+                .filter_map(|a| match a {
+                    ArgPart::Literal(s) => Some(s.clone()),
+                    _ => None,
+                })
+                .find(|s| s.contains("mcp__jod"));
+            assert!(
+                allowed.is_some(),
+                "{permission:?} revoked the granted tools: {args:?}"
+            );
+        }
     }
 
     #[test]

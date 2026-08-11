@@ -140,6 +140,20 @@ pub struct SpawnRequest {
     pub name: String,
     pub harness: HarnessKind,
     pub prompt: String,
+    /// Standing framing for this run: who it is, what it may not do, how to
+    /// decide. Separate from `prompt` because it is not something anybody said.
+    ///
+    /// The distinction earns its place in the transcript. Folded into the
+    /// prompt, the orchestrator's framing became the opening *user* turn of the
+    /// main chat — so `jod main` showed a screen of instructions-to-itself
+    /// before the one sentence the user actually typed. A system prompt is
+    /// addressed to the model and belongs nowhere in the conversation a person
+    /// reads back.
+    ///
+    /// Not every harness has the concept; [`Harness::args`] implementations
+    /// that lack one prepend it to the prompt, which is the behaviour this
+    /// field replaced and is still correct — just less tidy.
+    pub system: Option<String>,
     /// Working directory for the agent. Defaults to the user's home.
     pub cwd: PathBuf,
     #[serde(default)]
@@ -333,6 +347,18 @@ pub trait Harness: Send {
 
     /// argv after the program name.
     fn args(&self, req: &SpawnRequest) -> Vec<ArgPart>;
+
+    /// Whether [`SpawnRequest::system`] reaches this harness as a real system
+    /// prompt rather than as text glued to the front of the user's.
+    ///
+    /// Defaults to `false`, which is both the safe answer and the true one for
+    /// most CLIs: a harness that never learned the flag would otherwise drop
+    /// the framing on the floor, and framing that silently vanishes is worse
+    /// than framing in the wrong place. The runner folds it into the prompt for
+    /// everyone who answers `false`.
+    fn takes_system_prompt(&self) -> bool {
+        false
+    }
 
     /// Translate one line of harness output. May yield zero events (noise) or
     /// several (one assistant message can carry thinking + text + a tool call).

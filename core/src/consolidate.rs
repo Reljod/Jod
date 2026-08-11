@@ -208,6 +208,7 @@ impl Consolidation {
             name: format!("consolidate {}", self.scope),
             harness: self.harness,
             prompt: self.prompt(),
+            system: None,
             cwd: self.cwd.clone(),
             model: self.model.clone(),
             // Extraction reads a string that is already in its prompt. Anything

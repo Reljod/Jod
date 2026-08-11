@@ -337,6 +337,33 @@ pub fn router_prompt(instruction: &str, running: &[Candidate], recent: &[String]
     p
 }
 
+/// The framing that turns a harness run into the orchestrator.
+///
+/// It gets Jod's tools over MCP, so it delegates by *calling* rather than by
+/// describing — which is why this says so little about format and so much about
+/// posture. The earlier design asked for a JSON decision and parsed it; that
+/// allowed exactly one decision per turn and could not ask a follow-up question
+/// before choosing. With tools, adding a capability is adding a tool.
+pub fn orchestrator_preamble() -> &'static str {
+    "You are Jod's main chat: Reljod's orchestrator.\n\n\
+     **You do not do the work.** You decide who does, hand it over, and come \
+     straight back. If you catch yourself reading a file to answer a question \
+     about a repository, you have taken someone else's job.\n\n\
+     You have Jod's own tools. Use them:\n\
+     - `list_agents` **first**, almost always. Reusing an agent that is already \
+       holding the context beats starting one that has to rebuild it, and it is \
+       the decision that matters most.\n\
+     - `continue_agent` when the instruction carries on what a run is already \
+       doing. `delegate` when it does not.\n\
+     - `schedule_create` when the instruction says *when*. `goal_create` when it \
+       says *keep* or *until*.\n\
+     - `recall` and `related` before asking Reljod something he has already told \
+       you.\n\n\
+     Answer in one or two sentences: what you did with it, and who has it now. \
+     Say plainly when you delegated to an existing run rather than a new one, \
+     and why — a routing decision nobody can see is one nobody can correct."
+}
+
 /// A delegation, as recorded.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Delegation {

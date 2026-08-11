@@ -204,6 +204,31 @@ enum Command {
         #[arg(long)]
         once: bool,
     },
+    /// The main chat — the one conversation that is always there.
+    ///
+    /// Send it an instruction and it decides who does the work: an agent
+    /// already running, a fresh one, a schedule, or a goal. It never does the
+    /// work itself, so it comes back to you immediately rather than when the
+    /// job is finished — which is the point, because the moment you most want
+    /// to ask for something else is while something is already running.
+    ///
+    /// With no instruction it shows the chat: what you last said, what it
+    /// decided, and what that set in motion.
+    Main {
+        /// What you want done. Omit to read the chat instead.
+        instruction: Vec<String>,
+        /// Wait for the orchestrator's reply instead of returning at once.
+        /// It still does not wait for the work it delegates.
+        #[arg(long)]
+        wait: bool,
+        #[arg(short = 'H', long, value_enum, default_value_t = HarnessArg::Claude)]
+        harness: HarnessArg,
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+        /// How many exchanges to show when reading the chat.
+        #[arg(short, long, default_value_t = 20)]
+        limit: usize,
+    },
     /// Conversations Jod owns: list them, fork one, take one back.
     ///
     /// A conversation here is a tree, not a line. Two of the three harnesses
@@ -686,6 +711,7 @@ async fn main() -> Result<()> {
                 name: name.unwrap_or_else(|| default_name(&prompt)),
                 harness: harness.into(),
                 prompt,
+                system: None,
                 cwd: cwd.unwrap_or_else(jod_core::service::default_cwd),
                 model,
                 permission: permission.into(),
@@ -850,6 +876,15 @@ async fn main() -> Result<()> {
             }
         }
 
+        Command::Main {
+            instruction,
+            wait,
+            harness,
+            cwd,
+            limit,
+        } => {
+            main_chat(&jod, instruction.join(" "), wait, harness, cwd, limit).await?;
+        }
         Command::Conv { what } => conv_command(&jod, what)?,
         Command::Schedule { what } => schedule_command(&jod, what)?,
         Command::Goal { what } => goal_command(&jod, what)?,
@@ -1058,6 +1093,7 @@ async fn main() -> Result<()> {
                                 name: format!("{team}-{}", order.member),
                                 harness: order.harness,
                                 prompt: order.prompt,
+                                system: None,
                                 cwd: cwd.clone(),
                                 model: None,
                                 permission: permission.into(),
@@ -1116,6 +1152,7 @@ async fn main() -> Result<()> {
                             name: format!("{team}-{member}"),
                             harness: who.harness,
                             prompt: prompt.join(" "),
+                            system: None,
                             cwd: cwd.unwrap_or_else(jod_core::service::default_cwd),
                             model: None,
                             permission: permission.into(),
@@ -1173,6 +1210,163 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Send an instruction to the main chat, or read it.
+///
+/// Non-blocking by default, and that is the feature rather than an
+/// optimisation: a main chat that waited for the work would be unusable
+/// exactly when you most want it. It returns as soon as the orchestrator has
+/// been *handed* the instruction.
+async fn main_chat(
+    jod: &Jod,
+    instruction: String,
+    wait: bool,
+    harness: HarnessArg,
+    cwd: Option<PathBuf>,
+    limit: usize,
+) -> Result<()> {
+    let store = jod.store().context("this command needs the database")?;
+    let kind: HarnessKind = harness.into();
+    let cwd = cwd.unwrap_or_else(jod_core::service::default_cwd);
+    let id = store.main_conversation(kind, &cwd.display().to_string())?;
+    let now = chrono::Utc::now().timestamp_millis();
+
+    if instruction.trim().is_empty() {
+        return show_main_chat(jod, &id, limit, now);
+    }
+
+    // Compaction is checked before the instruction goes out, not after: the
+    // right moment to summarise is *between* things, and doing it mid-turn
+    // would mean the turn that triggered it ran against the old window anyway.
+    let live = store.live_window(&id)?;
+    let chars: usize = live.iter().map(|m| m.text.len()).sum();
+    if let Some(reason) =
+        jod_core::orchestrator::should_compact(chars, store.last_human_ms(&id)?, now)
+    {
+        println!(
+            "· the chat is due for compaction ({}) — {} chars in the live window",
+            reason.as_str(),
+            chars
+        );
+        println!("  `jod conv compact {}` summarises it", &id[..8.min(id.len())]);
+    }
+
+    // The orchestrator is a harness run holding Jod's own tools, so it
+    // delegates by calling them rather than by describing what it would do.
+    // `Resume` keeps it one conversation across restarts.
+    //
+    // `spawn_agent_in(.., Existing)` and not `spawn_agent`: the plain form
+    // binds `RunConversation::New`, which minted a *second* conversation per
+    // instruction — unpinned, titled with the first line of the preamble, and
+    // holding the entire transcript, while the pinned `main` conversation this
+    // function had just fetched stayed empty. `jod main` read the pinned one
+    // and truthfully reported nothing there. A main chat that does not
+    // accumulate is not a chat.
+    let agent = jod
+        .spawn_agent_in(SpawnRequest {
+            name: "main".into(),
+            harness: kind,
+            prompt: instruction.clone(),
+            system: Some(jod_core::orchestrator::orchestrator_preamble().to_string()),
+            cwd,
+            model: None,
+            // Not `Ask`. `Ask` is plan mode, and plan mode refuses every
+            // mutation — including the MCP tool calls that *are* this run's
+            // entire job. Caught by running it: the orchestrator dutifully
+            // called `schedule_list`, `list_agents` and `recall`, then reached
+            // for `ExitPlanMode`, could not find it, and wrote a plan file
+            // instead of arming the schedule it had been asked for.
+            //
+            // Its confinement is `ToolAccess`, not the permission mode. The
+            // mutations that matter here are Jod's own verbs, and those are
+            // already scoped by the access level; the permission axis bounds
+            // what it may do to the *machine*, which for a chat that only
+            // delegates should be little — but it cannot be nothing, or it
+            // cannot delegate at all.
+            permission: PermissionPolicy::AcceptEdits,
+            resume: store.resume_for(&id)?,
+            tools: Some(jod_core::harness::ToolAccess::Orchestrate),
+        },
+            RunConversation::Existing(id.clone()),
+        )
+        .await?;
+
+    // The spawn already recorded the instruction as this conversation's user
+    // turn; this call is what returns its id, and appending is keyed to the run
+    // so the second call finds the first row rather than writing a duplicate.
+    let message = store.append_prompt(&id, &agent.id, &instruction)?;
+    store.touch_human(&id, now)?;
+    store.record_delegation(&jod_core::orchestrator::Delegation {
+        id: 0,
+        conversation_id: id.clone(),
+        message_id: message,
+        kind: "orchestrate".into(),
+        run_id: Some(agent.id.clone()),
+        schedule_name: None,
+        goal_name: None,
+        // What it decided goes here once the run reports; this row exists from
+        // the moment the instruction is handed over, so a chat that was
+        // interrupted still shows what it was doing.
+        reason: String::new(),
+        at_ms: now,
+    })?;
+
+    if !wait {
+        println!("→ {} · {}", short_id(&agent.id), "handed to the orchestrator");
+        println!("  `jod main` reads the chat · `jod watch {}` follows it", short_id(&agent.id));
+        return Ok(());
+    }
+
+    let mut events = jod.subscribe();
+    while let Ok(envelope) = events.recv().await {
+        if envelope.agent_id != agent.id {
+            continue;
+        }
+        match &envelope.event {
+            jod_core::AgentEvent::Message { text } => println!("{text}"),
+            jod_core::AgentEvent::ToolCall { name, .. } => println!("  · {name}"),
+            jod_core::AgentEvent::Finished { .. } => break,
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// Read the main chat: what was said, and what it set in motion.
+fn show_main_chat(jod: &Jod, id: &str, limit: usize, now: i64) -> Result<()> {
+    let store = jod.store().context("this command needs the database")?;
+    let thread = store.live_window(id)?;
+    if thread.is_empty() {
+        println!("the main chat is empty — `jod main \"<instruction>\"` starts it");
+        return Ok(());
+    }
+    render_time::thread(&thread[thread.len().saturating_sub(limit)..]);
+
+    // What the chat actually caused, which is the question a transcript alone
+    // does not answer.
+    let done = store.delegations(id, 10)?;
+    if !done.is_empty() {
+        println!("\nset in motion:");
+        for d in done {
+            let what = d
+                .run_id
+                .or(d.schedule_name)
+                .or(d.goal_name)
+                .unwrap_or_else(|| "—".into());
+            println!(
+                "  {} {:<20} {}",
+                render_time::when(d.at_ms, now),
+                d.kind,
+                what
+            );
+        }
+    }
+    Ok(())
+}
+
+fn short_id(id: &str) -> String {
+    id.chars().take(8).collect()
 }
 
 /// Carry out a `jod conv …` subcommand.
@@ -1822,6 +2016,7 @@ async fn chat(
                     name: default_name(&prompt),
                     harness: kind,
                     prompt,
+                    system: None,
                     cwd: cwd.clone(),
                     model: model.clone(),
                     permission: permission.into(),

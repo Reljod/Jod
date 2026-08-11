@@ -808,6 +808,9 @@ impl Ticker {
                 name: goal.name.clone(),
                 harness: HarnessKind::from_id(&goal.harness).unwrap_or(HarnessKind::ClaudeCode),
                 prompt,
+                // The goal's own text is the framing, and it is already in the
+                // prompt this iteration was built from.
+                system: None,
                 cwd: std::path::PathBuf::from(&goal.cwd),
                 model: goal.model.clone(),
                 permission: PermissionPolicy::default(),
@@ -858,6 +861,7 @@ impl Ticker {
                 name: s.name.clone(),
                 harness: HarnessKind::from_id(&s.harness).unwrap_or(HarnessKind::ClaudeCode),
                 prompt: prompt_for(s, watch),
+                system: None,
                 cwd: std::path::PathBuf::from(&s.cwd),
                 model: s.model.clone(),
                 permission: PermissionPolicy::default(),

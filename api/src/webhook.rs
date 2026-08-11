@@ -387,6 +387,7 @@ impl SpawnTask {
             name: format!("{} ({})", rule.name, self.event),
             harness,
             prompt: prompt_for(rule, &self.event, &self.payload),
+            system: None,
             cwd,
             model: rule.model.clone(),
             permission,

@@ -352,6 +352,7 @@ pub async fn spawn_agent(
         name: body.name.unwrap_or_else(|| default_name(&prompt)),
         harness: body.harness,
         prompt,
+        system: None,
         cwd,
         model: body.model,
         permission: body.permission,

@@ -1975,6 +1975,7 @@ async fn spawn(
             // these mid-session, and a spawn must use what is current.
             harness: app.harness,
             prompt,
+            system: None,
             cwd: opts.cwd.clone(),
             model: app.model.clone(),
             permission: opts.permission,

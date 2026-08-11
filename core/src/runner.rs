@@ -92,14 +92,22 @@ pub async fn launch(
 
     let dir = paths::run_dir(agent_id);
     tokio::fs::create_dir_all(&dir).await?;
-    tokio::fs::write(paths::prompt_path(agent_id), &req.prompt).await?;
+    // A harness that has no system-prompt flag still has to receive the
+    // framing, so it goes in front of the prompt for those. Done here rather
+    // than in each adapter because the prompt reaches argv as a placeholder —
+    // an adapter cannot rewrite what it never holds.
+    let prompt = match (&req.system, harness.takes_system_prompt()) {
+        (Some(system), false) => format!("{system}\n\n---\n\n{}", req.prompt),
+        _ => req.prompt.clone(),
+    };
+    tokio::fs::write(paths::prompt_path(agent_id), &prompt).await?;
 
     let plan = SpawnPlan {
         run_id: agent_id.to_string(),
         harness: harness.kind(),
         db_path: store.path().ok_or(JodError::StoreRequired)?,
         program: program.to_path_buf(),
-        args: resolve_args(&harness.args(req), &req.prompt),
+        args: resolve_args(&harness.args(req), &prompt),
         cwd: req.cwd.clone(),
     };
     let plan_file = paths::spawn_path(agent_id);

@@ -366,6 +366,7 @@ mod tests {
             name: "t".into(),
             harness: HarnessKind::Agy,
             prompt: "hi".into(),
+            system: None,
             cwd: std::path::PathBuf::from("/tmp"),
             model: None,
             permission: PermissionPolicy::Ask,

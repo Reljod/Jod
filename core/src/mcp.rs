@@ -556,6 +556,10 @@ impl Server {
             name: opt_str(args, "name").unwrap_or_else(|| default_name(&prompt)),
             harness,
             prompt,
+            // A delegated agent gets its role from the prompt it was handed.
+            // Nothing here is standing framing, so there is no system prompt to
+            // give it.
+            system: None,
             cwd: opt_str(args, "cwd").map(PathBuf::from).unwrap_or_else(default_cwd),
             model: opt_str(args, "model"),
             permission,
@@ -620,6 +624,9 @@ impl Server {
             name: agent.name.clone(),
             harness: agent.harness,
             prompt,
+            // Continuing a run, so its framing arrived with the first turn and
+            // is already in the session being resumed.
+            system: None,
             cwd: PathBuf::from(&agent.cwd),
             model: agent.model.clone(),
             permission: agent.permission,

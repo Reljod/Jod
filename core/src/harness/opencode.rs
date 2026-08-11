@@ -219,6 +219,7 @@ mod tests {
             name: "t".into(),
             harness: HarnessKind::OpenCode,
             prompt: "hi".into(),
+            system: None,
             cwd: PathBuf::from("/work"),
             model: model.map(str::to_string),
             permission,
