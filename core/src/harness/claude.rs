@@ -567,11 +567,8 @@ mod tests {
         }
     }
 
-    /// The default policy has to leave the agent able to *look things up*.
-    /// Without this, `claude -p` denied WebSearch and a question as ordinary as
-    /// the weather came back as "I need permission".
-    #[test]
-    /// The regression guard for a false security claim. `Ask` is Jod's default,
+    /// The regression guard for a false security claim. `Ask` used to be Jod's
+    /// default,
     /// and it was documented as denying everything not on the allowlist while
     /// denying nothing at all — a run holding only the five read tools ran Bash
     /// and wrote a file, its own result reporting `permission_denials: []`.
