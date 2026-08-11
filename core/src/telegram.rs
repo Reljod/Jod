@@ -1092,6 +1092,31 @@ pub const POLL_TIMEOUT_S: u64 = 50;
 pub struct HttpBot {
     client: reqwest::Client,
     base: String,
+    /// The token, kept so it can be taken back *out* of anything on its way to
+    /// a log. See [`HttpBot::redacted`].
+    token: String,
+}
+
+/// Replace a bot token wherever it appears in text bound for a log.
+///
+/// Telegram puts the token in the URL path, and `reqwest` puts the URL in its
+/// error messages. So a single unreachable-network moment wrote a live
+/// credential into the bridge's log, in the clear, on a line nobody would think
+/// to treat as sensitive:
+///
+/// ```text
+/// poll failed, retrying: could not reach Telegram: error sending request for
+/// url (https://api.telegram.org/bot<TOKEN>/getUpdates)
+/// ```
+///
+/// Redacting at the point the error is *built* rather than at the point it is
+/// printed, because there is no single point where it is printed — the error
+/// travels, and every future call site would have to remember.
+fn redact_token(text: String, token: &str) -> String {
+    if token.is_empty() {
+        return text;
+    }
+    text.replace(token, "<token>")
 }
 
 #[cfg(feature = "telegram")]
@@ -1106,7 +1131,13 @@ impl HttpBot {
         Ok(HttpBot {
             client,
             base: format!("https://api.telegram.org/bot{token}"),
+            token: token.to_string(),
         })
+    }
+
+    /// An error message with the token taken out of it.
+    fn redacted(&self, e: impl std::fmt::Display) -> String {
+        redact_token(e.to_string(), &self.token)
     }
 
     async fn call<T: serde::de::DeserializeOwned>(
@@ -1120,13 +1151,15 @@ impl HttpBot {
             .json(&body)
             .send()
             .await
-            .map_err(|e| BotError::Transport(e.to_string()))?;
+            .map_err(|e| BotError::Transport(self.redacted(e)))?;
         // The status code alone is not enough: Telegram puts `retry_after`
         // in the body, and the body is present on every error.
         let parsed: ApiResponse<T> = resp
             .json()
             .await
-            .map_err(|e| BotError::Transport(format!("unreadable response: {e}")))?;
+            .map_err(|e| {
+                BotError::Transport(format!("unreadable response: {}", self.redacted(e)))
+            })?;
         if !parsed.ok {
             return Err(classify_api_error(
                 parsed.error_code.unwrap_or(0),
@@ -1631,6 +1664,41 @@ impl<B: BotApi + 'static> Bridge<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A live credential must not survive into anything printable.
+    ///
+    /// Found in the bridge's own log, in the clear. Telegram puts the token in
+    /// the URL path and `reqwest` puts the URL in its error message, so one
+    /// unreachable-network moment wrote the bot token to a log line that reads
+    /// like ordinary noise:
+    ///
+    /// `poll failed, retrying: could not reach Telegram: error sending request
+    /// for url (https://api.telegram.org/bot<TOKEN>/getUpdates)`
+    ///
+    /// Nothing about that line looks sensitive, which is exactly the problem.
+    #[test]
+    fn a_token_never_survives_into_an_error_message() {
+        let token = "8752043386:AAFkFAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKE";
+        let leaked = format!(
+            "error sending request for url (https://api.telegram.org/bot{token}/getUpdates)"
+        );
+        let safe = redact_token(leaked, token);
+        assert!(!safe.contains(token), "the token is still in there: {safe}");
+        assert!(
+            safe.contains("<token>"),
+            "the shape of the message has to survive redaction: {safe}"
+        );
+        // The rest of the message is what makes the error worth logging at all.
+        assert!(safe.contains("getUpdates"), "{safe}");
+    }
+
+    /// An empty token must not turn every message into confetti — `replace("")`
+    /// inserts the placeholder between every character.
+    #[test]
+    fn redacting_with_no_token_leaves_the_message_alone() {
+        let msg = "could not reach Telegram".to_string();
+        assert_eq!(redact_token(msg.clone(), ""), msg);
+    }
 
     // -- fake transport ----------------------------------------------------
 
