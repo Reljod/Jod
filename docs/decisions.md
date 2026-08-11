@@ -251,10 +251,14 @@ no-tty falls back to `--list` instead of hanging on a prompt.
 
 ## Releases are semver tags, cut manually
 
-`vMAJOR.MINOR.PATCH` via the Release Action's `workflow_dispatch`, never on
-every push. Install pins to latest; `jod update` only takes newer patches within
-the installed MAJOR.MINOR, so a minor/major bump can't yank the rug out from
-under an existing install.
+`vMAJOR.MINOR.PATCH`, never on every push — pushing a `release/vX.Y.Z` branch
+prepares one and a person publishes it (`workflow_dispatch` is still there for
+the case with no branch).
+→ [how the version is decided](#a-branch-name-is-a-request-the-tag-list-is-the-fact)
+
+Install pins to latest; `jod update` only takes newer patches within the
+installed MAJOR.MINOR, so a minor/major bump can't yank the rug out from under
+an existing install.
 
 ## Scaffold fitness is checked at release time, not every push
 
@@ -334,7 +338,7 @@ The rule that falls out: let discovery do its job, and declare a path only when
 a component genuinely lives somewhere else. `tests/plugin.test.sh` fails if
 either key reappears, since validation won't.
 
-## The four agents exist twice, and a test keeps them identical
+## The subagents exist twice, and a test keeps them identical
 
 A plugin reads agents only from `agents/` at its root; the repo reads them only
 from `.claude/agents/`. Both are needed — the plugin ships them, and they have
@@ -1353,3 +1357,42 @@ And none of that logic lives in the YAML. A workflow that publishes a tag cannot
 be tested by running it — dispatching it *is* the release — so the resolution is
 a sourced script with an offline suite, and the workflow's only job is to call
 it.
+
+## The model list comes from the harness, except where it cannot
+
+`/model <name>` is only usable by someone who already knows the name, and the
+three harnesses do not agree on any of them: `opus`, `opencode/claude-opus-5`
+and `claude-opus-4-6-thinking` are one model spelled three ways. A typo is not
+rejected at the prompt — it is forwarded to `--model`, which fails the whole
+turn. So the completion list has to come from the harness that will be asked.
+
+Two of them will say: `opencode models` and `agy models` both print one model
+per line, and `core/src/harness/models.rs` parses each format. Claude Code will
+not — `claude models` is read as a *prompt* and opens a session — so its list is
+a static catalogue in the same module. Hence a module with both a parser and a
+hardcoded list, which looks like indecision and is not.
+
+The catalogue leads with aliases (`opus`, `sonnet`) precisely because they
+follow the newest model of each family without this file being edited; the
+pinned ids below them are the thing an alias cannot do. Typing filters on any
+part of an id rather than its prefix, because the half of
+`opencode/claude-sonnet-5` worth typing is the half a prefix cannot reach.
+
+The list is an aid, not a gate — any name is still forwarded, a missing or slow
+harness yields an empty list, and the popup simply does not appear. A completion
+that reports its own failure would be worse than one that stays quiet.
+
+## An agent definition that pins a model overrides the session that spawned it
+
+Subagent frontmatter accepts `model:`, and all five agents here set it to
+`sonnet`. Each was a sensible local choice on the day it was written. Together
+they made the session model decorative: a session on Opus spawned every
+reviewer, investigator and author on Sonnet, and no setting the caller could
+reach changed that.
+
+An agent definition describes a *role* — its lens, its tools, its output
+contract. Which model plays the role is the caller's decision, made with the
+budget and the deadline in view, and it is the one setting the caller can
+already express. So no agent in `agents/` or `.claude/agents/` sets `model:`,
+and a subagent inherits the session's. Pin one only when the role genuinely
+cannot be done at another tier, and say why in the file.

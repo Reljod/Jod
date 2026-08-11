@@ -111,3 +111,6 @@ ask, that was a gap in the spec — fix the spec, not just the answer.
 - Update the spec when reality contradicts it mid-run, and say so. A spec
   that quietly diverges from the diff is worse than no spec, because review
   is checking the diff against it.
+- Delete the spec in the PR that ships it. Its substitutions and evidence
+  are already in the PR body, and a delivered `SPEC.md` sitting at the root
+  reads to the next session as work still waiting to be done.

@@ -32,6 +32,11 @@ Reusable teammate roles live in `.claude/agents/`:
 | `toolkit-engineer` | write | the installer + CLI + their suites |
 | `reviewer` | read-only | exactly one review lens |
 | `investigator` | read-only | exactly one hypothesis about a bug |
+| `merge-checker` | read-only | exactly one PR's readiness to merge |
+
+None of them pins a model — a teammate runs on the model of the session that
+spawned it.
+→ [why](decisions.md#an-agent-definition-that-pins-a-model-overrides-the-session-that-spawned-it)
 
 Spawn 3–5. Scale by whether the work genuinely splits into disjoint paths, not
 by how big it feels.

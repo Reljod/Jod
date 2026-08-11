@@ -185,8 +185,8 @@ the repo's *default branch*. To pin a ref, use the full git URL with `#`:
 Plugin components are namespaced, so the skills arrive as `/jod:write-spec`,
 `/jod:tdd-loop`, `/jod:test-scenarios`, `/jod:create-pr`, `/jod:setup-git-hooks`
 and `/jod:setup-project`, and Claude invokes them on its own when a task matches
-their description. It also brings the four subagents (`reviewer`,
-`investigator`, `skill-author`, `toolkit-engineer`) and the `TaskCompleted`
+their description. It also brings the subagents (`reviewer`, `investigator`,
+`merge-checker`, `skill-author`, `toolkit-engineer`) and the `TaskCompleted`
 gate, which refuses to close a task while a test suite is red unless a
 `BLOCKED.md` documents why — the anti-workaround rule from
 [`AGENTS.md`](./AGENTS.md), enforced rather than requested.
@@ -327,13 +327,15 @@ install.sh         curlable bootstrap: clones this repo, links the `jod` CLI
 bin/jod            CLI shim — dispatches into .agents/skills/ from any repo
 .claude-plugin/    plugin manifest + marketplace catalog (installs this repo as a plugin)
 hooks/hooks.json   the TaskCompleted gate, as the plugin ships it
-agents/            the four subagents, where a plugin reads them from
-.claude/agents/    the same four, so they work here without the plugin
+agents/            the subagents, where a plugin reads them from
+.claude/agents/    the same files, so they work here without the plugin
 .agents/skills/    the portable toolkit — reusable Claude Code skills
 domains/           personal operating notes, one per area of Reljod's life
 core/              the orchestrator service — harnesses, supervision, events, memory
 supervisor/        jod-run — supervises one agent process, writes its events
 cli/               the `jod` command, the way you talk to it
+api/               the HTTP API over the same store, for remote clients
+apps/              desktop, iOS, web and voice clients over that API
 research/          the measured groundwork the design rests on
 ```
 
