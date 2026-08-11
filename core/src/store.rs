@@ -702,6 +702,55 @@ const MIGRATIONS: &[(&str, &str)] = &[
       ON delegations(conversation_id, at_ms DESC);
     "#,
     ),
+    (
+        "0011_settings_and_modes",
+        r#"
+    -- How much this conversation's agent may do without asking.
+    --
+    -- On the conversation rather than on the process, because Jod respawns the
+    -- harness once per turn against a resumed session: there is no long-lived
+    -- process to hold the setting. `--permission-mode` is decided afresh at
+    -- every spawn, so the only place the answer can live and survive a restart
+    -- is the row the spawn is for.
+    --
+    -- Null means "whatever the caller passed" — an older row does not suddenly
+    -- acquire an opinion it never had.
+    ALTER TABLE conversations ADD COLUMN permission TEXT;
+
+    -- Preferences that outlive a process.
+    --
+    -- Key/value rather than columns, because these are answers to "how do you
+    -- like it" — show thinking, which harness to open with, which mode to
+    -- start in — and every one of them would otherwise be a migration. The
+    -- schema's job here is to stop being in the way.
+    CREATE TABLE settings (
+      key           TEXT PRIMARY KEY,
+      value         TEXT NOT NULL,
+      updated_at_ms INTEGER NOT NULL
+    );
+
+    -- One durable conversation per place a message can arrive from.
+    --
+    -- Telegram had this as a `HashMap` inside the bridge, which meant a restart
+    -- silently started every chat over: you carried on typing and the agent had
+    -- forgotten the morning. A chat window is one continuous conversation to
+    -- the person in it, so it has to be one to Jod, and that outlives a
+    -- process.
+    --
+    -- Keyed by the channel's own idea of a thread (`telegram:private:…`) rather
+    -- than by conversation id, because the question asked of this table is
+    -- always "this message just arrived — what was I saying?".
+    CREATE TABLE channel_sessions (
+      key             TEXT PRIMARY KEY,
+      -- Jod's conversation, when one has been opened for this thread.
+      conversation_id TEXT REFERENCES conversations(id) ON DELETE SET NULL,
+      -- The harness-side session to resume. Null until the first run reports
+      -- one, which is exactly the "start fresh" state `/new` restores.
+      session_id      TEXT,
+      updated_at_ms   INTEGER NOT NULL
+    );
+    "#,
+    ),
 ];
 
 /// Who asserted a fact. Kept out of the fact's text so that content Jod
@@ -2379,6 +2428,53 @@ impl Store {
             Ok(total)
         })
     }
+
+    /// One preference, or `None` if it has never been set.
+    ///
+    /// Deliberately untyped. A preference is read at the one place that cares
+    /// about it and parsed there; a typed accessor per key would put every
+    /// screen's opinions in this file, which is how a store becomes the place
+    /// features go to couple to each other.
+    pub fn setting(&self, key: &str) -> Result<Option<String>> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        Ok(conn
+            .query_row(
+                "SELECT value FROM settings WHERE key = ?1",
+                params![key],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Set a preference, replacing any previous value.
+    pub fn set_setting(&self, key: &str, value: &str) -> Result<()> {
+        self.write(|tx| {
+            tx.execute(
+                "INSERT INTO settings (key, value, updated_at_ms) VALUES (?1, ?2, ?3)
+                   ON CONFLICT(key) DO UPDATE SET value = ?2, updated_at_ms = ?3",
+                params![key, value, now_ms()],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Every preference that has been set, for a screen that lists them.
+    pub fn settings(&self) -> Result<Vec<(String, String)>> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        let mut stmt = conn.prepare("SELECT key, value FROM settings ORDER BY key")?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// Forget a preference, so it falls back to the built-in default.
+    ///
+    /// Distinct from setting it to the default's value: "I have no opinion"
+    /// follows a changed default, and "I chose this" does not.
+    pub fn clear_setting(&self, key: &str) -> Result<bool> {
+        self.write(|tx| {
+            Ok(tx.execute("DELETE FROM settings WHERE key = ?1", params![key])? > 0)
+        })
+    }
 }
 
 /// How far a traversal may go.
@@ -2731,6 +2827,66 @@ mod tests {
             seq,
             event: AgentEvent::Message { text: text.into() },
         }
+    }
+
+    /// An unset preference has no value, so the caller's own default wins.
+    /// The distinction that matters: `None` is "no opinion", not "off".
+    #[test]
+    fn an_unset_preference_is_absent_rather_than_empty() {
+        let s = store();
+        assert_eq!(s.setting("tui.thinking").unwrap(), None);
+    }
+
+    #[test]
+    fn a_preference_survives_being_written_and_replaced() {
+        let s = store();
+        s.set_setting("tui.thinking", "on").unwrap();
+        assert_eq!(s.setting("tui.thinking").unwrap().as_deref(), Some("on"));
+
+        // Set again rather than inserted twice — a primary key alone would
+        // have made this an error instead of a change of mind.
+        s.set_setting("tui.thinking", "off").unwrap();
+        assert_eq!(s.setting("tui.thinking").unwrap().as_deref(), Some("off"));
+        assert_eq!(s.settings().unwrap().len(), 1);
+    }
+
+    /// Clearing is not the same as setting the default's value: one follows a
+    /// changed default and the other pins the old one.
+    #[test]
+    fn clearing_a_preference_restores_having_no_opinion() {
+        let s = store();
+        s.set_setting("tui.harness", "agy").unwrap();
+        assert!(s.clear_setting("tui.harness").unwrap());
+        assert_eq!(s.setting("tui.harness").unwrap(), None);
+        assert!(!s.clear_setting("tui.harness").unwrap(), "already gone");
+    }
+
+    /// The durable half of "Telegram is one conversation": the mapping has to
+    /// outlive the process, or a restart silently starts every chat over.
+    #[test]
+    fn a_channel_thread_can_be_remembered_and_forgotten() {
+        let s = store();
+        let key = "telegram:private:42:7";
+        s.write(|tx| {
+            tx.execute(
+                "INSERT INTO channel_sessions (key, session_id, updated_at_ms)
+                   VALUES (?1, ?2, ?3)",
+                params![key, "ses-1", now_ms()],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let got: Option<String> = {
+            let conn = s.conn.lock().unwrap();
+            conn.query_row(
+                "SELECT session_id FROM channel_sessions WHERE key = ?1",
+                params![key],
+                |r| r.get(0),
+            )
+            .optional()
+            .unwrap()
+        };
+        assert_eq!(got.as_deref(), Some("ses-1"));
     }
 
     #[test]

@@ -41,10 +41,7 @@ pub async fn run(jod: Arc<Jod>, access: ToolAccess, max_permission: PermissionPo
         .context("serving MCP over stdio")
 }
 
+/// The spelling `parse_permission` reads back, from the one definition of it.
 fn permission_id(p: PermissionPolicy) -> &'static str {
-    match p {
-        PermissionPolicy::Ask => "ask",
-        PermissionPolicy::AcceptEdits => "accept_edits",
-        PermissionPolicy::Bypass => "bypass",
-    }
+    p.as_str()
 }

@@ -69,34 +69,37 @@ impl Harness for ClaudeCode {
         // Built across both branches below: the permission mode contributes the
         // read-only set, `req.tools` contributes Jod's own server.
         let mut allowed: Vec<String> = Vec::new();
+        // The mode names below are the six this build actually accepts —
+        // `acceptEdits`, `auto`, `bypassPermissions`, `manual`, `dontAsk`,
+        // `plan` — read off `claude --help` rather than assumed.
         match req.permission {
-            // Nobody is at the other end of `-p` to answer a prompt, so "ask"
-            // is really "deny" — and a bare `claude -p` refused to so much as
-            // search the web. Allow the tools that cannot change anything, and
-            // keep denying the rest.
-            PermissionPolicy::Ask => {
-                // Plan mode, and this is a security fix rather than a
-                // preference. The comment here used to claim that an allowlist
-                // "keeps denying the rest"; measured against the real binary,
-                // it does not deny anything at all. `--allowedTools` *grants
-                // without prompting* — it is not a boundary, and a run given
-                // `Read,Grep,Glob,WebSearch,WebFetch` cheerfully ran Bash and
-                // wrote a file, with `permission_denials: []` in its own
-                // result. Since `Ask` is the default, Jod's default was
-                // effectively bypass while documented as the opposite.
-                //
-                // A name blocklist is not the answer either: `--disallowedTools
+            PermissionPolicy::Plan => {
+                // A *mode*, not an allowlist, and that distinction is a
+                // security fix rather than a preference. `--allowedTools`
+                // *grants without prompting* — it is not a boundary: a run
+                // given `Read,Grep,Glob,WebSearch,WebFetch` cheerfully ran Bash
+                // and wrote a file, with `permission_denials: []` in its own
+                // result. A name blocklist is no better; `--disallowedTools
                 // Bash` blocked Bash and the agent reached the same shell
                 // through another tool. Enumerating the tools that can execute
                 // is a race you lose on the next release.
                 //
-                // `--permission-mode plan` is a *mode*, so it closes the class
-                // rather than the names — verified: reads and reasoning still
-                // work, and every write path is refused, including a Bash
-                // heredoc or `printf >`.
+                // `plan` closes the class rather than the names — verified:
+                // reads and reasoning still work, and every write path is
+                // refused, including a Bash heredoc or `printf >`.
                 args.push(ArgPart::lit("--permission-mode"));
                 args.push(ArgPart::lit("plan"));
                 allowed.extend(READ_ONLY_TOOLS.iter().map(|t| t.to_string()));
+            }
+            // `manual` is the mode that actually means "put it to a person".
+            // Under `-p` there is nobody to put it to, so this denies rather
+            // than blocks — which is why it is a mode you choose and not one
+            // you get by default. It used to be spelled `plan`, and that one
+            // substitution is why every unattended run described its work
+            // instead of doing it.
+            PermissionPolicy::Ask => {
+                args.push(ArgPart::lit("--permission-mode"));
+                args.push(ArgPart::lit("manual"));
             }
             PermissionPolicy::AcceptEdits => {
                 args.push(ArgPart::lit("--permission-mode"));
@@ -331,6 +334,65 @@ mod tests {
         }
     }
 
+    /// The argv as strings, with the prompt placeholder spelled out.
+    fn flat(r: &SpawnRequest) -> Vec<String> {
+        ClaudeCode::default()
+            .args(r)
+            .iter()
+            .map(|a| match a {
+                ArgPart::Literal(s) => s.clone(),
+                ArgPart::Prompt => "<PROMPT>".into(),
+            })
+            .collect()
+    }
+
+    /// Every mode maps to a spelling this build accepts.
+    ///
+    /// The six are what `claude --help` prints — `acceptEdits`, `auto`,
+    /// `bypassPermissions`, `manual`, `dontAsk`, `plan`. Pinned here because a
+    /// mode name Claude Code does not recognise is not a compile error, not a
+    /// spawn error, and not visible until an agent quietly does the wrong
+    /// amount. An earlier attempt at this seam designed against
+    /// `--permission-prompt-tool`, which this build does not have at all.
+    #[test]
+    fn each_mode_names_something_the_binary_accepts() {
+        const ACCEPTED: [&str; 6] = [
+            "acceptEdits",
+            "auto",
+            "bypassPermissions",
+            "manual",
+            "dontAsk",
+            "plan",
+        ];
+        for mode in PermissionPolicy::ALL {
+            let args = flat(&req(mode, None));
+            let Some(at) = args.iter().position(|a| a == "--permission-mode") else {
+                // Bypass uses the standalone flag instead of a mode name.
+                assert!(
+                    args.contains(&"--dangerously-skip-permissions".to_string()),
+                    "{mode:?} asked the harness for nothing at all"
+                );
+                continue;
+            };
+            let named = &args[at + 1];
+            assert!(
+                ACCEPTED.contains(&named.as_str()),
+                "{mode:?} passes --permission-mode {named}, which this build rejects"
+            );
+        }
+    }
+
+    /// The specific substitution that made every run a planning run.
+    #[test]
+    fn asking_is_manual_and_only_planning_is_plan() {
+        let asked = flat(&req(PermissionPolicy::Ask, None));
+        assert!(asked.contains(&"manual".to_string()));
+        assert!(!asked.contains(&"plan".to_string()), "ask is not plan");
+
+        let planned = flat(&req(PermissionPolicy::Plan, None));
+        assert!(planned.contains(&"plan".to_string()));
+    }
+
     /// The test that would have caught `tools` being decoration. It was set,
     /// capped and unit-tested for hours while reaching no command line at all —
     /// a component complete, tested, and wired to nothing.
@@ -360,19 +422,20 @@ mod tests {
     fn granted_tools_are_also_allowed_by_the_permission_policy() {
         let mut r = req(PermissionPolicy::Ask, None);
         r.tools = Some(super::super::ToolAccess::ReadOnly);
-        let args = ClaudeCode::default().args(&r);
+        let args = flat(&r);
 
-        let allowed = args
+        // Located by the flag rather than by the read-only names that used to
+        // sit beside it: only plan mode seeds those, so searching for them was
+        // asking "is this plan mode" while claiming to ask "were the granted
+        // tools allowed". The property holds in every mode; the locator has to.
+        let at = args
             .iter()
-            .filter_map(|a| match a {
-                ArgPart::Literal(s) => Some(s.clone()),
-                _ => None,
-            })
-            .find(|s| s.contains("Read,Grep"))
+            .position(|a| a == "--allowedTools")
             .expect("an allowlist");
         assert!(
-            allowed.contains("mcp__jod"),
-            "granted tools are denied by the allowlist: {allowed}"
+            args[at + 1].contains("mcp__jod"),
+            "granted tools are denied by the allowlist: {}",
+            args[at + 1]
         );
     }
 
@@ -380,7 +443,9 @@ mod tests {
     /// server name either, or the allowlist would advertise what does not exist.
     #[test]
     fn an_agent_granted_nothing_is_not_allowed_jods_tools() {
-        let args = ClaudeCode::default().args(&req(PermissionPolicy::Ask, None));
+        // `Plan` rather than `Ask`: this reads the read-only allowlist, which
+        // is now plan mode's, not ask mode's.
+        let args = ClaudeCode::default().args(&req(PermissionPolicy::Plan, None));
         let allowed = args
             .iter()
             .filter_map(|a| match a {
@@ -401,6 +466,7 @@ mod tests {
     #[test]
     fn granted_tools_survive_any_permission_mode() {
         for permission in [
+            PermissionPolicy::Plan,
             PermissionPolicy::Ask,
             PermissionPolicy::AcceptEdits,
             PermissionPolicy::Bypass,
@@ -464,23 +530,41 @@ mod tests {
         assert!(a.contains(&ArgPart::Prompt));
     }
 
-    /// Each policy still maps to its own flags. The `Ask` assertion changed
-    /// deliberately: it used to require that `Ask` set **no** permission mode,
-    /// which is exactly what made Jod's default permissive — the run was
-    /// confined by an allowlist that confines nothing. The property being
-    /// tested (three distinct policies) is unchanged; what `Ask` means is not.
+    /// Each policy maps to its own flags, and no two share one.
+    ///
+    /// The property under test — distinct policies produce distinct argv — is
+    /// the same one this test has always had; it now covers four modes rather
+    /// than three. The `Ask` case is the interesting one: it used to assert
+    /// `plan`, which is precisely the conflation that made every Jod run a
+    /// planning run.
     #[test]
     fn permission_policies_map_to_distinct_flags() {
-        let ask = ClaudeCode::default().args(&req(PermissionPolicy::Ask, None));
-        assert!(ask.contains(&ArgPart::lit("plan")));
-        assert!(!ask.contains(&ArgPart::lit("acceptEdits")));
-        assert!(!ask.contains(&ArgPart::lit("--dangerously-skip-permissions")));
+        let plan = flat(&req(PermissionPolicy::Plan, None));
+        assert!(plan.contains(&"plan".to_string()));
+        assert!(!plan.contains(&"manual".to_string()));
+        assert!(!plan.contains(&"--dangerously-skip-permissions".to_string()));
 
-        let edits = ClaudeCode::default().args(&req(PermissionPolicy::AcceptEdits, None));
-        assert!(edits.contains(&ArgPart::lit("acceptEdits")));
+        let ask = flat(&req(PermissionPolicy::Ask, None));
+        assert!(ask.contains(&"manual".to_string()));
+        assert!(!ask.contains(&"plan".to_string()));
+        assert!(!ask.contains(&"--dangerously-skip-permissions".to_string()));
 
-        let bypass = ClaudeCode::default().args(&req(PermissionPolicy::Bypass, None));
-        assert!(bypass.contains(&ArgPart::lit("--dangerously-skip-permissions")));
+        let edits = flat(&req(PermissionPolicy::AcceptEdits, None));
+        assert!(edits.contains(&"acceptEdits".to_string()));
+
+        let bypass = flat(&req(PermissionPolicy::Bypass, None));
+        assert!(bypass.contains(&"--dangerously-skip-permissions".to_string()));
+
+        // And no two modes produce the same command line.
+        let all: Vec<Vec<String>> = PermissionPolicy::ALL
+            .iter()
+            .map(|m| flat(&req(*m, None)))
+            .collect();
+        for (i, a) in all.iter().enumerate() {
+            for b in all.iter().skip(i + 1) {
+                assert_ne!(a, b, "two modes are indistinguishable to the harness");
+            }
+        }
     }
 
     /// The default policy has to leave the agent able to *look things up*.
@@ -497,12 +581,12 @@ mod tests {
     /// to reach the same shell through another tool, and enumerating everything
     /// that can execute is a race lost on the next release.
     #[test]
-    fn asking_confines_the_run_by_mode_rather_than_by_a_list_of_names() {
-        let a = ClaudeCode::default().args(&req(PermissionPolicy::Ask, None));
+    fn planning_confines_the_run_by_mode_rather_than_by_a_list_of_names() {
+        let a = ClaudeCode::default().args(&req(PermissionPolicy::Plan, None));
         let i = a
             .iter()
             .position(|p| p == &ArgPart::lit("--permission-mode"))
-            .expect("`Ask` must set a permission mode, or it grants everything");
+            .expect("`Plan` must set a permission mode, or it grants everything");
         assert_eq!(
             a[i + 1],
             ArgPart::lit("plan"),
@@ -513,7 +597,11 @@ mod tests {
     /// The modes that are meant to permit work must not inherit the confinement.
     #[test]
     fn a_run_allowed_to_work_is_not_put_in_plan_mode() {
-        for policy in [PermissionPolicy::AcceptEdits, PermissionPolicy::Bypass] {
+        for policy in [
+            PermissionPolicy::Ask,
+            PermissionPolicy::AcceptEdits,
+            PermissionPolicy::Bypass,
+        ] {
             let a = ClaudeCode::default().args(&req(policy, None));
             let plan = a
                 .iter()
@@ -525,8 +613,8 @@ mod tests {
     }
 
     #[test]
-    fn asking_still_grants_the_tools_that_only_read() {
-        let a = ClaudeCode::default().args(&req(PermissionPolicy::Ask, None));
+    fn planning_still_grants_the_tools_that_only_read() {
+        let a = ClaudeCode::default().args(&req(PermissionPolicy::Plan, None));
         let i = a
             .iter()
             .position(|p| p == &ArgPart::lit("--allowedTools"))

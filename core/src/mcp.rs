@@ -331,27 +331,32 @@ fn allows(have: ToolAccess, need: ToolAccess) -> bool {
 
 /// Is `requested` within `ceiling`?
 ///
-/// `Ask < AcceptEdits < Bypass`, ordered by how much can happen without anyone
-/// being asked — the same rule `jod-api` applies to a remote caller in
+/// `Plan < Ask < AcceptEdits < Bypass`, ordered by how much can happen without
+/// anyone being asked — the same rule `jod-api` applies to a remote caller in
 /// `api/src/config.rs`. Restated here rather than shared because `jod-core`
 /// cannot depend on `jod-api`; if one side's ordering changes, the other has to
 /// change with it.
+///
+/// The rank is [`PermissionPolicy::ALL`]'s own index, so a mode added there and
+/// forgotten here is impossible rather than merely unlikely.
 pub fn permits(ceiling: PermissionPolicy, requested: PermissionPolicy) -> bool {
-    fn rank(p: PermissionPolicy) -> u8 {
-        match p {
-            PermissionPolicy::Ask => 0,
-            PermissionPolicy::AcceptEdits => 1,
-            PermissionPolicy::Bypass => 2,
-        }
+    fn rank(p: PermissionPolicy) -> usize {
+        PermissionPolicy::ALL
+            .iter()
+            .position(|m| *m == p)
+            .expect("PermissionPolicy::ALL is missing a variant")
     }
     rank(requested) <= rank(ceiling)
 }
 
 pub fn parse_permission(s: &str) -> Option<PermissionPolicy> {
     match s.trim().to_ascii_lowercase().replace('-', "_").as_str() {
-        "ask" => Some(PermissionPolicy::Ask),
-        "accept_edits" => Some(PermissionPolicy::AcceptEdits),
-        "bypass" => Some(PermissionPolicy::Bypass),
+        // `plan` and `auto` are what the harnesses call these two, and what a
+        // person types; the stored spellings are accepted alongside.
+        "plan" => Some(PermissionPolicy::Plan),
+        "ask" | "manual" => Some(PermissionPolicy::Ask),
+        "accept_edits" | "edits" => Some(PermissionPolicy::AcceptEdits),
+        "bypass" | "auto" | "bypass_permissions" => Some(PermissionPolicy::Bypass),
         _ => None,
     }
 }
@@ -920,12 +925,11 @@ struct AgentView<'a> {
     last_message: Option<&'a str>,
 }
 
+/// The spelling `parse_permission` reads back. Delegated rather than repeated:
+/// this used to be a second copy of the same match, which is one edit away from
+/// a mode that can be set and not named.
 fn permission_id(p: PermissionPolicy) -> &'static str {
-    match p {
-        PermissionPolicy::Ask => "ask",
-        PermissionPolicy::AcceptEdits => "accept_edits",
-        PermissionPolicy::Bypass => "bypass",
-    }
+    p.as_str()
 }
 
 /// Where a schedule runs when nobody said. The server's own directory, which is

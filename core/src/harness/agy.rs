@@ -74,9 +74,17 @@ impl Harness for Agy {
                 args.push(ArgPart::lit(id));
             }
         }
+        // `--mode` takes exactly `accept-edits` or `plan` in this build, read
+        // off `agy --help`. There is no "ask" mode to name, which is fine:
+        // AGY's own default *is* ask.
         match req.permission {
+            PermissionPolicy::Plan => {
+                args.push(ArgPart::lit("--mode"));
+                args.push(ArgPart::lit("plan"));
+            }
             // AGY's default is `request-review`, which in headless mode
-            // auto-denies anything needing approval. That is the safe default.
+            // auto-denies anything needing approval — exactly what `Ask` means
+            // when nobody is at the other end. Adding no flag is the mapping.
             PermissionPolicy::Ask => {}
             PermissionPolicy::AcceptEdits => {
                 args.push(ArgPart::lit("--mode"));

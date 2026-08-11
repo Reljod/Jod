@@ -46,8 +46,12 @@ impl Harness for OpenCode {
                 args.push(ArgPart::lit(id));
             }
         }
-        // OpenCode has one auto-approve switch; Ask and AcceptEdits both leave
-        // it off, since it cannot separate edits from other tool calls.
+        // OpenCode has one auto-approve switch and nothing else — `opencode run
+        // --help` offers `--auto` and no mode flag at all. So three of Jod's
+        // four levels collapse to "leave it off": it cannot separate edits from
+        // other tool calls, and it has no plan mode to ask for. Reported here
+        // rather than faked, because a `--mode plan` OpenCode ignores would look
+        // like a working plan mode right up until something got written.
         if req.permission == PermissionPolicy::Bypass {
             args.push(ArgPart::lit("--auto"));
         }

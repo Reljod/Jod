@@ -119,19 +119,82 @@ pub enum Resume {
 }
 
 /// How much the agent may do without asking.
+///
+/// Four levels rather than three, because `Ask` was carrying two jobs that
+/// pull in opposite directions. It mapped to Claude Code's `plan`, so asking
+/// to be *consulted* silently became asking the model to *change nothing* —
+/// and since `plan` was also the default, every run Jod started was a planning
+/// run. That is why the agents kept describing work instead of doing it.
+///
+/// Split apart: [`Plan`](PermissionPolicy::Plan) is "think, do not act",
+/// [`Ask`](PermissionPolicy::Ask) is "act, but check with me first".
+///
+/// The order of the variants is the ordering [`crate::mcp::permits`] ranks
+/// them by — how much can happen with nobody watching.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PermissionPolicy {
-    /// Reading is allowed — the filesystem and the web — and anything that
-    /// could change something is refused. Named for the prompt it *would*
-    /// raise if a person were watching; under `-p` nobody is, so the harness
-    /// grants the read-only set outright rather than denying the lot.
-    #[default]
+    /// Read and reason; change nothing. Reading is allowed — the filesystem
+    /// and the web — and anything that could change something is refused.
+    Plan,
+    /// Every sensitive call is put to a person first.
+    ///
+    /// Honest about the headless case: under `-p` there is nobody to answer,
+    /// so a harness in this mode denies rather than blocks. That is the right
+    /// behaviour and a poor default, which is why it is not the default.
     Ask,
     /// File edits go through; other sensitive calls still prompt.
     AcceptEdits,
-    /// Everything is auto-approved. Only sane inside a throwaway worktree.
+    /// Everything is auto-approved — "auto". The default, because Jod's whole
+    /// premise is work that happens while nobody is watching, and a mode that
+    /// stops to ask an empty room is a mode that never finishes.
+    #[default]
     Bypass,
+}
+
+impl PermissionPolicy {
+    /// Every mode, in the order the TUI cycles them.
+    pub const ALL: [PermissionPolicy; 4] = [
+        PermissionPolicy::Plan,
+        PermissionPolicy::Ask,
+        PermissionPolicy::AcceptEdits,
+        PermissionPolicy::Bypass,
+    ];
+
+    /// The stored spelling. Matches [`crate::mcp::parse_permission`].
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PermissionPolicy::Plan => "plan",
+            PermissionPolicy::Ask => "ask",
+            PermissionPolicy::AcceptEdits => "accept_edits",
+            PermissionPolicy::Bypass => "bypass",
+        }
+    }
+
+    /// What a person calls it. `auto` rather than `bypass` for the top level,
+    /// because that is the word every harness puts on the same setting.
+    pub fn label(&self) -> &'static str {
+        match self {
+            PermissionPolicy::Plan => "plan",
+            PermissionPolicy::Ask => "ask",
+            PermissionPolicy::AcceptEdits => "edits",
+            PermissionPolicy::Bypass => "auto",
+        }
+    }
+
+    /// The next mode when cycling forward, wrapping at the top.
+    pub fn next(self) -> PermissionPolicy {
+        let at = PermissionPolicy::ALL.iter().position(|m| *m == self);
+        PermissionPolicy::ALL[(at.unwrap_or(0) + 1) % PermissionPolicy::ALL.len()]
+    }
+
+    /// Whether this level lets the agent change anything at all.
+    ///
+    /// The one question the screen needs answered to colour the indicator, and
+    /// the one a caller needs before handing over an unattended run.
+    pub fn may_act(&self) -> bool {
+        !matches!(self, PermissionPolicy::Plan)
+    }
 }
 
 /// What the caller asked for. Harness-neutral on purpose.
@@ -373,6 +436,68 @@ pub trait Harness: Send {
 mod tests {
     use super::*;
     use crate::store::Origin;
+
+    /// The bug this split exists to fix. `Ask` used to mean Claude Code's
+    /// `plan`, so every run Jod started could only describe work — and since
+    /// `Ask` was the default, that was every run.
+    #[test]
+    fn planning_and_asking_are_no_longer_the_same_mode() {
+        assert_ne!(PermissionPolicy::Plan, PermissionPolicy::Ask);
+        assert!(!PermissionPolicy::Plan.may_act(), "plan changes nothing");
+        assert!(PermissionPolicy::Ask.may_act(), "ask acts, having checked");
+    }
+
+    /// What the user asked for in so many words: the default is auto.
+    #[test]
+    fn the_default_is_auto_because_nobody_is_watching() {
+        assert_eq!(PermissionPolicy::default(), PermissionPolicy::Bypass);
+        assert_eq!(PermissionPolicy::default().label(), "auto");
+    }
+
+    /// Cycling is what the Tab key does, so it must reach every mode and come
+    /// back — a cycle that stops at the top is a mode you can leave and not
+    /// return to.
+    #[test]
+    fn cycling_reaches_every_mode_and_wraps() {
+        let mut seen = vec![PermissionPolicy::Plan];
+        let mut at = PermissionPolicy::Plan;
+        for _ in 0..PermissionPolicy::ALL.len() - 1 {
+            at = at.next();
+            assert!(!seen.contains(&at), "{at:?} came round twice");
+            seen.push(at);
+        }
+        assert_eq!(seen.len(), PermissionPolicy::ALL.len());
+        assert_eq!(at.next(), PermissionPolicy::Plan, "and wraps");
+    }
+
+    /// Every mode must survive being written down and read back, or a stored
+    /// conversation would silently reopen in a different one.
+    #[test]
+    fn every_mode_round_trips_through_its_stored_spelling() {
+        for mode in PermissionPolicy::ALL {
+            assert_eq!(
+                crate::mcp::parse_permission(mode.as_str()),
+                Some(mode),
+                "{mode:?} does not read back from {:?}",
+                mode.as_str()
+            );
+            // And by the name a person types, which is the harnesses' own.
+            assert_eq!(crate::mcp::parse_permission(mode.label()), Some(mode));
+        }
+    }
+
+    /// The ordering the ceiling check depends on.
+    #[test]
+    fn a_ceiling_permits_everything_at_or_below_it() {
+        use crate::mcp::permits;
+        assert!(permits(PermissionPolicy::Bypass, PermissionPolicy::Plan));
+        assert!(permits(PermissionPolicy::Ask, PermissionPolicy::Plan));
+        assert!(!permits(PermissionPolicy::Plan, PermissionPolicy::Ask));
+        assert!(!permits(PermissionPolicy::AcceptEdits, PermissionPolicy::Bypass));
+        for mode in PermissionPolicy::ALL {
+            assert!(permits(mode, mode), "{mode:?} must permit itself");
+        }
+    }
 
     /// The escalation this exists to close: a webhook rule names a
     /// high-privilege schedule, a stranger opens a pull request that matches
