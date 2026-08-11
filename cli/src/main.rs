@@ -169,20 +169,24 @@ enum Command {
     },
     /// The full-screen interface: conversation, live agents, status.
     Tui {
-        /// Optional, and that is load-bearing: the TUI stores a preferred
-        /// harness, and it can only defer to it if it can tell "not given"
-        /// from "given the value that happens to be the default". Clap
-        /// collapses those two when the flag has a default, so the flag has
-        /// none and the default lives at the point of use.
+        /// Which harness to open on. Defaults to your stored preference.
+        //
+        // The `Option` is load-bearing rather than decorative: the TUI stores a
+        // preferred harness, and can only defer to it if it can tell "not
+        // given" from "given the value that happens to be the default". Clap
+        // collapses those two the moment a flag has a `default_value`, so the
+        // flag has none and the default lives at the point of use.
         #[arg(short = 'H', long, value_enum)]
         harness: Option<HarnessArg>,
         #[arg(short, long)]
         cwd: Option<PathBuf>,
         #[arg(short, long)]
         model: Option<String>,
-        /// Optional for the same reason as `--harness`, and with more at stake:
-        /// this is also the ceiling the TUI may not raise past, so "the user
-        /// said auto" and "the user said nothing" must not be the same value.
+        /// plan, ask, edits or auto. Also the ceiling Tab may not raise past.
+        //
+        // `Option` for the same reason as `--harness`, with more at stake: an
+        // explicit flag is a ceiling and saying nothing is not, so "the user
+        // said auto" and "the user said nothing" must not be one value.
         #[arg(short, long, value_parser = parse_permission_arg)]
         permission: Option<PermissionPolicy>,
         /// Pick up the last conversation instead of starting a new one.

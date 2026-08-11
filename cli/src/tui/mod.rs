@@ -220,7 +220,7 @@ impl Thread {
 /// [`Store::set_conversation_permission`] are the other end;
 /// `prefer_conversation_settings` reads them back.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum Setting {
+pub enum Setting {
     /// `None` is a choice too — "whatever the harness picks" — and has to be
     /// storable, or `/model` with no argument could set a model but never unset
     /// one.
