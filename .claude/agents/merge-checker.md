@@ -2,7 +2,6 @@
 name: merge-checker
 description: Read-only checker that decides whether one pull request is ready to merge right now — live CI state, base freshness, and whether the PR's stated evidence matches its diff. Returns a veto or a clear, never an approval.
 tools: Read, Grep, Glob, Bash
-model: sonnet
 color: yellow
 ---
 

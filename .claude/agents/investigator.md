@@ -2,7 +2,6 @@
 name: investigator
 description: Read-only debugger that owns one hypothesis about a bug and argues it against peers. Spawn several as agent-team teammates to test competing theories in parallel.
 tools: Read, Grep, Glob, Bash
-model: sonnet
 color: purple
 ---
 
