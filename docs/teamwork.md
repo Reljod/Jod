@@ -70,3 +70,30 @@ as a fact about the project. So:
 The general rule: in a shared checkout, `git` is the source of truth about what
 exists and the author is the source of truth about what it means. The test
 runner is neither.
+
+### Stage paths, not the tree
+
+The same rule cuts the other way, and the lead is the one who gets it wrong.
+`git add -A` in a shared checkout stages whatever every *other* agent has in
+flight and commits it under your subject line. It happened here three times:
+`cli/src/tui/sessions.rs` — 932 lines, the whole conversation-graph feature —
+landed inside a commit titled *"carry a conversation across a harness"*, which
+is a different feature by a different agent. Nothing was lost, and
+`git log -- cli/src/tui/sessions.rs` now tells a reader something untrue about
+where that code came from.
+
+- **Stage the paths you changed.** `git add cli/src/tui/mod.rs core/src/x.rs`,
+  not `git add -A`. If that feels tedious, it is measuring the right thing: a
+  commit spanning files you did not touch is a commit whose message cannot be
+  accurate.
+- **`git status` before every commit, and read it.** An untracked file you do
+  not recognise is a teammate mid-task, not a stray.
+- **Do not fix it by rewriting.** Once a branch is pushed, the repair costs a
+  force-push, which this repo forbids outright. The cost is bounded anyway:
+  branches land squashed, so the mis-attribution never reaches `main`. Say it
+  in the PR body and move on — a wrong history is cheaper than a rewritten one.
+
+The asymmetry is worth naming. A teammate reading the tree wrongly reports
+something false and is corrected in a message. A lead committing the tree
+wrongly writes something false into history, permanently, and the author finds
+out afterwards.
