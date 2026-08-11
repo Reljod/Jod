@@ -1099,3 +1099,29 @@ feature, not like three broken layers.
 
 Nothing here was found by a unit test. All of it was found by running `jod main`
 and reading what the run actually did.
+
+## One byte made a whole module invisible to every audit
+
+`core/src/webhook.rs` contained a literal NUL inside a doc comment — in a line
+explaining, of all things, how control bytes are escaped. It is valid UTF-8 and
+rustc accepted it, so the file compiled and its 39 tests passed for as long as it
+had existed.
+
+`grep` classifies a file containing NUL as binary and silently skips it. Not a
+warning, not a partial result — no output and exit 0. So for that whole module:
+
+- every `grep -rn` in this branch returned nothing, including the ones that
+  concluded a function had no callers;
+- `wiring.py`, the audit that measured "44 of 278 core pub fns have no
+  production caller", never saw 1,234 lines of it;
+- `match_rules` appeared to be called from `api/` and defined nowhere, which is
+  what finally exposed it.
+
+The lesson is not about NUL bytes. It is that a *silent* zero result and a true
+zero result are indistinguishable, and every conclusion of the form "nothing
+calls this" had been resting on that ambiguity. The audit that reported the
+sharpest finding of the branch was running with one file missing and had no way
+to say so.
+
+Where a tool can decline to answer, it must be made to say which inputs it
+skipped, or its zeroes cannot be read as evidence.
