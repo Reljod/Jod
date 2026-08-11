@@ -2,7 +2,6 @@
 name: reviewer
 description: Read-only reviewer that examines a change through exactly one lens the lead assigns. Use several in parallel as agent-team teammates to review a change from independent angles.
 tools: Read, Grep, Glob, Bash
-model: sonnet
 color: green
 ---
 

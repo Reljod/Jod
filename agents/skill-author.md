@@ -2,7 +2,6 @@
 name: skill-author
 description: Authors or revises exactly one skill under .agents/skills/. Use as an agent-team teammate when several skills change at once, one teammate per skill directory.
 tools: Read, Write, Edit, Grep, Glob, Bash
-model: sonnet
 color: blue
 ---
 
