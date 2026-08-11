@@ -1423,3 +1423,57 @@ is withheld when the box is not empty, and after `/config harness` it is withhel
 unless the chosen harness is the one this session is on, because the loaded list
 belongs to `app.harness` and offering Claude Code's names for an OpenCode
 preference is the exact failure the live list was built to end.
+
+## Two MCP configs, because a run Jod spawns and a session you start are not the same client
+
+`mcp_config.rs` had been read as "the MCP wiring", and it is only half of it. It
+writes `~/.jod/mcp/<access>.json` and hands it to a harness on the command line,
+which covers exactly the runs Jod launches. The `claude` typed in a repo is
+launched by nobody, reads the *user's* config, and therefore held none of Jod's
+tools.
+
+That gap does not present as a gap. Asked to schedule something, such a session
+answers that there is no tool for it — indistinguishable, from the chair, from a
+scheduler that was never built. Jod had `schedule_create`, `schedule_list`,
+`schedule_pause` and `schedule_run_now` behind a passing suite for weeks while
+the answer to "can you schedule this?" was no.
+
+So `mcp_install.rs` writes the durable half: one entry in each harness's own
+user-level config — `~/.claude.json`, `~/.config/opencode/opencode.json*`,
+`~/.gemini/config/mcp_config.json`. Three paths and two shapes, because OpenCode
+takes one `command` array where the others take `command` plus `args`; the wrong
+shape parses, loads, and yields no tools.
+
+Three things follow from these being *the user's* files rather than Jod's:
+
+- **It merges, never writes wholesale.** Every other key and every other server
+  survives. `~/.claude.json` also holds session state, and an OpenCode config
+  holds model choices.
+- **A file it cannot parse is left alone and reported.** Comments are legal in
+  an `opencode.jsonc` and this parser rejects them; the failure mode of guessing
+  is destroying configuration Jod does not own. `--dry-run` prints the entry to
+  paste by hand.
+- **It writes through a rename**, so an interrupted install leaves the old
+  config or the new one, never half of either.
+
+It runs from the `jod daemon` entrypoint, not from `install.sh` and not from
+`Daemon::run` — and both exclusions were paid for. `install.sh` links the
+*shell* toolkit `jod`, which has no `mcp` subcommand. `Daemon::run` is library
+code with tests, and hanging registration off it meant `cargo test` wrote three
+real harness configs on the developer's own machine, each naming a
+`target/debug/deps/jod_core-<hash>` that the next build deleted. An effect on
+files this program does not own belongs at the entrypoint of a long-running
+binary, where no test goes; `is_a_test_binary` is the guard that no longer
+depends on remembering that.
+
+The daemon restart is the right moment for the rest of it: it follows every
+build, and it is exactly when `current_exe()` can have changed. Re-registering
+then is what keeps a config from naming a binary that has since moved — the same
+reason `mcp_config.rs` refuses to name `jod` on the `PATH`. Idempotent, silent
+when there is nothing to do, and never fatal: a harness config Jod cannot parse
+is not a reason for the daemon that fires every schedule to refuse to start.
+
+Interactive sessions get `orchestrate`, the full set, because someone opened
+them and is watching. This cannot widen an unattended run — those are pinned to
+read-only where they are spawned, and
+[a chat you are watching may schedule; one that wandered off may not](#a-chat-you-are-watching-may-schedule-one-that-wandered-off-may-not).

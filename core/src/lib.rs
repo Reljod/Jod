@@ -30,6 +30,7 @@ pub mod harness;
 pub mod ledger;
 pub mod mcp;
 pub mod mcp_config;
+pub mod mcp_install;
 pub mod monitor;
 pub mod orchestrator;
 pub mod paths;
