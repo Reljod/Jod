@@ -266,10 +266,37 @@ each command does.
 #### Versioning and updates
 
 Releases are tagged [Semantic Versioning](https://semver.org)
-`vMAJOR.MINOR.PATCH`, cut manually from the **Release** GitHub Action
-(Actions tab → Release → Run workflow → pick `patch`/`minor`/`major`) — it
-gates on the test suites and an e2e scaffold-fitness check (`tests/e2e/`,
-too expensive to run on every push), tags, and publishes a GitHub Release.
+`vMAJOR.MINOR.PATCH`. Cutting one is two steps, and only the second is visible
+to anyone else.
+
+**1. Push a branch — this part is automatic.**
+
+```sh
+git switch -c release/v1.2.0 && git push -u origin release/v1.2.0
+```
+
+The **Release** workflow runs the test suites, resolves the version, stamps it
+into `.claude-plugin/plugin.json`, `Cargo.toml` and `Cargo.lock`, and opens a
+draft release PR. The branch name decides the version — with one exception: if
+it names the version that is *already* the latest tag, the patch is bumped
+(`release/v1.2.0` with `v1.2.0` tagged → `v1.2.1`) rather than failing at
+`git tag` after the suite has run. A branch naming a version *below* the latest
+tag is refused: that tag would install on nobody's machine.
+→ [`.github/scripts/release_version.sh`](./.github/scripts/release_version.sh),
+[`tests/release-version.test.sh`](./tests/release-version.test.sh)
+
+**2. Publish — this part is manual, always.**
+
+```sh
+gh workflow run release.yml --ref main -f version=v1.2.0
+```
+
+Or Actions tab → Release → Run workflow. It repeats the suites plus the e2e
+scaffold-fitness check (`tests/e2e/`, too expensive for every push), tags, and
+publishes a GitHub Release. It runs in the `release` environment, so adding a
+required reviewer in repo settings adds an approval gate with no code change.
+Dispatching with no `version` and no release branch falls back to bumping the
+latest tag by the `bump` input — the old behaviour, still there.
 
 - **Install** always pins to the newest release by default. Ask for another
   version with `JOD_VERSION`:

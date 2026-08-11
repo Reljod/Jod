@@ -1320,3 +1320,36 @@ Asserting anything about a window means measuring the window — and if you cann
 say when you looked rather than what has been true.
 
 A test you have never seen fail is a test you have never seen.
+
+## A branch name is a request; the tag list is the fact
+
+Releases used to be one manual dispatch that picked `patch`/`minor`/`major`.
+That works and says nothing: the intended version existed only in whoever's head
+ran it, and the first written record of it was the tag itself — after the tests,
+the e2e check, and the push.
+
+Cutting `release/v1.2.0` says it out loud, in a place that can be reviewed
+before anything is published. So the branch name decides the version. The one
+case where it cannot be obeyed literally is the interesting one: a branch naming
+the version that is *already* the latest tag. There are exactly two things to do
+about it — resolve it, or let `git tag` fail at the end of a green run — and
+failing there is the worst possible moment, because everything expensive has
+already happened and nothing has been recorded. So it patch-bumps, and the PR
+says it did.
+
+A branch naming a version *below* the latest tag is refused rather than bumped.
+It looks like the same problem and isn't: `install.sh` resolves the **highest**
+tag, so cutting `v0.0.9` while `v0.1.0` exists publishes a release that installs
+on nobody's machine. A stale branch and a typo both land here, and neither wants
+a version chosen for it.
+
+The split that matters is which half runs on its own. **Preparing is automatic
+because it is invisible and reversible** — delete the branch and it never
+happened. **Publishing is manual because it is neither.** A tag is what
+`install.sh` and `jod update` serve to every installed machine, so it waits for
+a person, in an environment that can require a second one.
+
+And none of that logic lives in the YAML. A workflow that publishes a tag cannot
+be tested by running it — dispatching it *is* the release — so the resolution is
+a sourced script with an offline suite, and the workflow's only job is to call
+it.
