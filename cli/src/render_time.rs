@@ -44,6 +44,72 @@ fn schedule_mark(state: ScheduleState) -> (&'static str, &'static str) {
     }
 }
 
+/// Webhook rules: what fires, on what, and whether it is armed.
+///
+/// The match is on the first line because it is what a reader is checking — a
+/// rule that never fires is nearly always matching something narrower than its
+/// author meant. Conditions go underneath, and only when there are any.
+pub fn webhook_rules(list: &[jod_core::webhook::Rule]) {
+    for r in list {
+        let (mark, colour) = if r.enabled { ("●", GREEN) } else { ("○", DIM) };
+        let event = match &r.action {
+            Some(a) => format!("{}.{a}", r.event),
+            None => r.event.clone(),
+        };
+        println!(
+            "{colour}{mark}{RESET} {BOLD}{:<20}{RESET} {DIM}{:<22}{RESET} {}",
+            r.name, event, r.repo
+        );
+        let c = &r.conditions;
+        let mut narrowing = Vec::new();
+        if !c.labels.is_empty() {
+            // "all of" and not a bare list: requiring every label is the
+            // conservative reading the matcher implements, and a comma-separated
+            // list reads like any-of to everyone who has used a search box.
+            narrowing.push(format!("all of [{}]", c.labels.join(", ")));
+        }
+        if let Some(b) = &c.branch {
+            narrowing.push(format!("branch {b}"));
+        }
+        if let Some(a) = &c.author {
+            narrowing.push(format!("author {a}"));
+        }
+        if let Some(d) = c.draft {
+            narrowing.push(if d { "drafts only".into() } else { "not drafts".into() });
+        }
+        if !narrowing.is_empty() {
+            println!("  {DIM}when {}{RESET}", narrowing.join(" · "));
+        }
+    }
+}
+
+/// What has arrived on the webhook endpoint.
+///
+/// The status is the point — a delivery that arrived and matched nothing is the
+/// single most common thing to be confused about, so it says `no match` rather
+/// than being absent from a list of runs.
+pub fn deliveries(list: &[jod_core::webhook::Delivery], now_ms: i64) {
+    for d in list {
+        let status = d.status.as_str();
+        let colour = match d.status {
+            jod_core::webhook::DeliveryStatus::Accepted => GREEN,
+            jod_core::webhook::DeliveryStatus::Rejected => RED,
+            _ => DIM,
+        };
+        let what = match (&d.repo, &d.action) {
+            (Some(repo), Some(action)) => format!("{} {}.{action}", repo, d.event),
+            (Some(repo), None) => format!("{} {}", repo, d.event),
+            (None, _) => d.event.clone(),
+        };
+        println!(
+            "{DIM}{}{RESET} {colour}{:<9}{RESET} {}",
+            when(d.received_at_ms, now_ms),
+            status,
+            what
+        );
+    }
+}
+
 pub fn schedules(list: &[Schedule], now_ms: i64) {
     for s in list {
         let (mark, colour) = schedule_mark(s.state);

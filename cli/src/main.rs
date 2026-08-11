@@ -248,6 +248,17 @@ enum Command {
         #[command(subcommand)]
         what: ScheduleCommand,
     },
+    /// Work that fires when GitHub says something happened.
+    ///
+    /// A rule is a match — source, repo, event, optional action and conditions
+    /// — and a prompt template to run when it matches. The receiver, the
+    /// signature check, the delivery ledger and the TUI's rule list were all
+    /// built before anything could *create* one, so the table stayed empty and
+    /// the whole path was unreachable. This is that missing verb.
+    Webhook {
+        #[command(subcommand)]
+        what: WebhookCommand,
+    },
     /// Standing objectives, pursued until they are met.
     ///
     /// A goal differs from a schedule in having an end: it stops when it is
@@ -387,6 +398,65 @@ enum ConvCommand {
         id: String,
         #[arg(short = 'H', long, value_enum)]
         to: HarnessArg,
+    },
+}
+
+#[derive(Subcommand)]
+enum WebhookCommand {
+    /// Every rule, and whether it is armed.
+    Ls {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Add a rule.
+    Add {
+        /// A short name, used everywhere else to refer to it.
+        name: String,
+        /// What to ask the agent to do. `{{placeholders}}` — `{{title}}`,
+        /// `{{body}}`, `{{author}}`, `{{branch}}`, `{{number}}` — are filled
+        /// from the payload as *quoted JSON data*, never as bare text.
+        prompt: String,
+        /// `owner/repo`, or `*` for every repository the receiver hears from.
+        #[arg(short, long, default_value = jod_core::webhook::ANY_REPO)]
+        repo: String,
+        /// The GitHub event name: `pull_request`, `issues`, `push`.
+        #[arg(short, long)]
+        event: String,
+        /// One action of that event — `opened`, `closed`. Omitted matches all.
+        #[arg(short, long)]
+        action: Option<String>,
+        /// Require *all* of these labels. Repeat the flag for each.
+        #[arg(long = "label")]
+        labels: Vec<String>,
+        #[arg(long)]
+        branch: Option<String>,
+        #[arg(long)]
+        author: Option<String>,
+        /// Match only drafts (`true`) or only non-drafts (`false`).
+        #[arg(long)]
+        draft: Option<bool>,
+        #[arg(short = 'H', long, value_enum, default_value_t = HarnessArg::Claude)]
+        harness: HarnessArg,
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+        #[arg(short, long)]
+        model: Option<String>,
+        /// Add it disarmed, to check what it would match first.
+        #[arg(long)]
+        paused: bool,
+    },
+    /// Arm a rule.
+    Enable { name: String },
+    /// Disarm a rule without deleting it.
+    Disable { name: String },
+    /// Delete a rule. Its past deliveries survive, with the rule id cleared.
+    Rm { name: String },
+    /// What has arrived, newest first.
+    Deliveries {
+        #[arg(short, long, default_value_t = 20)]
+        limit: usize,
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -756,6 +826,7 @@ async fn main() -> Result<()> {
             // produce the live events, and one that fired first would be lost.
             let events = jod.subscribe();
             jod.rehydrate(200).await?;
+            let id = resolve_run(&jod, &id).await?;
             let agent = jod.agent(&id).await?;
 
             // Everything that already happened, then everything that follows,
@@ -776,6 +847,7 @@ async fn main() -> Result<()> {
 
         Command::Kill { id } => {
             jod.rehydrate(200).await?;
+            let id = resolve_run(&jod, &id).await?;
             jod.kill_agent(&id).await?;
             println!("killed {id}");
         }
@@ -887,6 +959,7 @@ async fn main() -> Result<()> {
         }
         Command::Conv { what } => conv_command(&jod, what)?,
         Command::Schedule { what } => schedule_command(&jod, what)?,
+        Command::Webhook { what } => webhook_command(&jod, what)?,
         Command::Goal { what } => goal_command(&jod, what)?,
 
         Command::Forget {
@@ -1495,6 +1568,31 @@ fn resolve_conversation(store: &Store, typed: &str) -> Result<String> {
     }
 }
 
+/// Resolve a typed run-id prefix against the runs Jod knows about.
+///
+/// Every surface *shows* an eight-character id — `jod ls`, `jod main`, the run
+/// summary printed after a spawn — and `jod watch` and `jod kill` then demanded
+/// the full uuid. `jod main` printed ``jod watch 1f0fc870`` as a hint and that
+/// hint did not work, which is the kind of detail that teaches someone the tool
+/// is lying to them.
+///
+/// Ambiguity is refused rather than guessed, for the same reason as
+/// [`resolve_conversation`]: `jod kill` on the wrong agent is not undoable.
+/// An exact match wins outright, so a full uuid never has to be disambiguated
+/// against itself.
+async fn resolve_run(jod: &Jod, typed: &str) -> Result<String> {
+    if jod.agent(typed).await.is_ok() {
+        return Ok(typed.to_string());
+    }
+    let all = jod.agents().await;
+    let hits: Vec<_> = all.iter().filter(|a| a.id.starts_with(typed)).collect();
+    match hits.as_slice() {
+        [only] => Ok(only.id.clone()),
+        [] => bail!("no agent with id `{typed}`"),
+        many => bail!("{typed} matches {} agents — type more of it", many.len()),
+    }
+}
+
 /// Turn a conversation, or a run, into memory.
 ///
 /// The shape of this command follows the module it drives: Jod builds the
@@ -1750,6 +1848,112 @@ async fn collect_output(
 /// schedule is armed by writing a row, and the tick is what fires it. Even
 /// `run` only brings the next instant forward, so a hand-started run picks up
 /// the same overlap policy, failure count and fire record as a timed one.
+/// Carry out a `jod webhook …` subcommand.
+///
+/// The verbs a rule needs to exist at all. Everything downstream of a rule —
+/// the receiver, the HMAC check, the delivery ledger, the TUI's list with its
+/// enable/disable/delete keys — was already built and tested against rules that
+/// only ever existed inside test functions.
+fn webhook_command(jod: &Jod, what: WebhookCommand) -> Result<()> {
+    use jod_core::webhook::{Conditions, Rule};
+    let store = jod.store().context("this command needs the database")?;
+    let now = chrono::Utc::now().timestamp_millis();
+    match what {
+        WebhookCommand::Ls { json } => {
+            let all = store.webhook_rules()?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&all)?);
+            } else if all.is_empty() {
+                println!("no webhook rules — `jod webhook add` writes one");
+            } else {
+                render_time::webhook_rules(&all);
+            }
+        }
+        WebhookCommand::Add {
+            name,
+            prompt,
+            repo,
+            event,
+            action,
+            labels,
+            branch,
+            author,
+            draft,
+            harness,
+            cwd,
+            model,
+            paused,
+        } => {
+            if store.webhook_rule(&name)?.is_some() {
+                bail!("a rule named `{name}` already exists — `jod webhook rm {name}` first");
+            }
+            let rule = Rule {
+                id: uuid::Uuid::new_v4().to_string(),
+                name: name.clone(),
+                source: "github".into(),
+                repo,
+                event,
+                action,
+                conditions: Conditions {
+                    labels,
+                    branch,
+                    author,
+                    draft,
+                },
+                prompt,
+                harness: HarnessKind::from(harness).id().to_string(),
+                cwd: cwd.unwrap_or(std::env::current_dir()?).display().to_string(),
+                model,
+                enabled: !paused,
+                created_at_ms: now,
+            };
+            store.add_webhook_rule(&rule)?;
+            println!(
+                "{} {name} · {} {}",
+                if paused { "○" } else { "●" },
+                rule.event,
+                rule.repo
+            );
+            if paused {
+                println!("  disarmed — `jod webhook enable {name}` arms it");
+            }
+        }
+        WebhookCommand::Enable { name } => set_rule_armed(&store, &name, true)?,
+        WebhookCommand::Disable { name } => set_rule_armed(&store, &name, false)?,
+        WebhookCommand::Rm { name } => {
+            if store.delete_webhook_rule(&name)? {
+                println!("deleted {name}");
+            } else {
+                bail!("no rule named `{name}`");
+            }
+        }
+        WebhookCommand::Deliveries { limit, json } => {
+            let all = store.deliveries(limit)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&all)?);
+            } else if all.is_empty() {
+                println!("nothing has arrived yet");
+            } else {
+                render_time::deliveries(&all, now);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Arm or disarm a rule, reporting the name back rather than a silent success.
+///
+/// A missing name is an error and not a no-op: `jod webhook enable ci-faild` is
+/// a typo, and a cheerful nothing would read as "armed".
+fn set_rule_armed(store: &jod_core::store::Store, name: &str, armed: bool) -> Result<()> {
+    if store.set_webhook_rule_enabled(name, armed)? {
+        println!("{} {name}", if armed { "●" } else { "○" });
+        Ok(())
+    } else {
+        bail!("no rule named `{name}`")
+    }
+}
+
 fn schedule_command(jod: &Jod, what: ScheduleCommand) -> Result<()> {
     let store = jod.store().context("this command needs the database")?;
     let now = chrono::Utc::now().timestamp_millis();
