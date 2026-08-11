@@ -12,10 +12,12 @@ use crate::event::{AgentEvent, Usage};
 
 pub mod agy;
 pub mod claude;
+pub mod models;
 pub mod opencode;
 
 pub use agy::Agy;
 pub use claude::ClaudeCode;
+pub use models::Model;
 pub use opencode::OpenCode;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

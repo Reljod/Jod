@@ -8,7 +8,7 @@
 use std::cmp::Reverse;
 
 use jod_core::team::{Member, TeamTask};
-use jod_core::{AgentEvent, HarnessKind, PermissionPolicy, Resume};
+use jod_core::{AgentEvent, HarnessKind, Model, PermissionPolicy, Resume};
 
 use super::data::{
     ActivityItem, GoalRow, HookRow, MemoryKind, MemoryNode, ScheduleRow, Source, TaskRow, TaskState,
@@ -134,6 +134,15 @@ pub struct App {
     /// feed back into a spawn, because a name one harness reports (say
     /// `claude-sonnet-4-5`) is not a name another harness accepts.
     pub reported_model: Option<String>,
+    /// What `/model` offers, in the current harness's own spelling. Loaded off
+    /// the render path — asking OpenCode or AGY costs a subprocess, and AGY
+    /// asks the network — so it is a field rather than a call.
+    pub models: Vec<Model>,
+    /// Which harness `models` belongs to, or `None` while nothing has been
+    /// loaded. A list is only correct for the harness that produced it, so the
+    /// loader compares this against `harness` rather than assuming: `/harness`
+    /// mid-session makes the list on screen the wrong one.
+    pub models_for: Option<HarnessKind>,
     pub session: Option<String>,
     pub resume: Resume,
     pub cost_usd: f64,
@@ -458,6 +467,8 @@ impl App {
             harness,
             model,
             reported_model: None,
+            models: Vec::new(),
+            models_for: None,
             session: None,
             resume,
             cost_usd: 0.0,

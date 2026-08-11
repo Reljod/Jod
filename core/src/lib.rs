@@ -50,7 +50,7 @@ pub use tokio::sync::broadcast;
 
 pub use error::{JodError, Result};
 pub use event::{AgentEnvelope, AgentEvent, Usage};
-pub use harness::{Harness, HarnessKind, PermissionPolicy, Resume, SpawnRequest};
+pub use harness::{Harness, HarnessKind, Model, PermissionPolicy, Resume, SpawnRequest};
 pub use service::{AgentStatus, AgentSummary, HarnessInfo, Jod, Report};
 
 /// Tests that mutate process-wide environment variables must hold this, or they
