@@ -97,3 +97,38 @@ The asymmetry is worth naming. A teammate reading the tree wrongly reports
 something false and is corrected in a message. A lead committing the tree
 wrongly writes something false into history, permanently, and the author finds
 out afterwards.
+
+### Check the call site, not the definition
+
+Three times in one session, across two agents, someone verified a claim about
+behaviour by reading the function it named — and was wrong each time, because
+the claim was about a *use*:
+
+- A key was wired to `Request::Restore(String)` on the strength of its name.
+  The `String` is a conversation needle, not a message id, so a typed `57`
+  could prefix-match a uuid and move the head of an entirely different thread.
+- A ruling on `sweep_recoverable`'s channel filter was checked against
+  `mark_failed`'s arithmetic and accepted the caller's premise that
+  `mark_attempting` never ran. It does — `redeliver_owed` calls it — so the
+  consequence was three restarts to destruction, not a slow drift to staleness.
+- The comment recording that finding then named `STALE_AFTER_MS` as the
+  mechanism, written by someone with the measured output in front of them
+  showing `MAX_ATTEMPTS`.
+
+Every one was a check of a definition standing in for a check of a use, and
+each felt exactly like verifying. So:
+
+- **A claim about what happens is verified at the call site.** Find who calls
+  it and under what conditions; the body is where you go second, to confirm
+  what you found. A signature tells you what is *possible*, never what is done.
+- **Run it if you can.** The third failure above was corrected by a throwaway
+  harness that printed the state after each simulated restart. Ten minutes of
+  scaffolding beat three careful readings by two people.
+- **Name the mechanism, not just the outcome, in comments** — "failed after
+  three restarts via `MAX_ATTEMPTS`" rather than "settles eventually". An
+  outcome with the wrong mechanism attached reads as verified and sends the
+  next person to the wrong file.
+
+The general rule: reading the function you were handed feels identical to
+verifying and is not. The difference is whether you went looking for the caller
+before you agreed.
