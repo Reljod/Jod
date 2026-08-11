@@ -32,7 +32,13 @@
 //! terminal loses. Order every screen's verbs:
 //!
 //! 1. `⏎` — the primary action, always first.
-//! 2. Verbs **unique to this screen**, most important first.
+//! 2. Verbs **unique to this screen**, most important first. Where two are
+//!    equally important, prefer the one whose letter means something *else* on
+//!    another screen: `a` attaches here and answers an escalation in goals, and
+//!    printing only one half of that pair teaches a habit the other screen
+//!    breaks. That is a tie-break and not a rule — importance wins. `s stop`
+//!    stays above `r resume` on the fleet even though `r` is the collided
+//!    letter, because stopping a run matters more than the tidiness does.
 //! 3. Verbs that also appear in [`SPINE`].
 //!
 //! The point is that the bar should print what only this screen can teach you.
@@ -47,6 +53,17 @@
 //! every screen added later.
 //! `no_verb_the_spine_already_teaches_sits_above_one_only_this_screen_has`
 //! keeps it that way.
+//!
+//! Only step 3 is enforced by a test, deliberately. An attempt to pin step 2's
+//! tie-break — "a collided letter must be printed on every screen that defines
+//! it, or on none" — was written, run, and deleted: the fleet has thirteen
+//! verbs, room for four at eighty columns, and five collided letters among
+//! them (`a c t f u`). No ordering satisfies it, so the guarantee could only
+//! have been met by deleting verbs. A weaker form — collided letters first
+//! within step 2 — was also tried and also deleted, because it demanded
+//! `r resume` outrank `s stop` on the fleet, which is the tie-break overruling
+//! importance rather than settling it. What survives is the part that is both
+//! true and checkable; the rest is judgement, and is written down as judgement.
 //!
 //! ## Why the verbs are on Alt and the editing keys are not
 //!
@@ -165,8 +182,14 @@ const FLEET: &[Key] = &[
     k("⏎", "watch"),
     k("s", "stop"),
     k("r", "resume"),
-    k("d", "delegate again"),
+    // Above `d` because `a` is the collided letter — it answers an escalation
+    // on goals, which does print it. See the ordering rule in the header.
     k("a", "attach"),
+    // `delegate`, word for word as the task board spells it, because it is the
+    // same `Action::Delegate` on the selected row — the labels have to match or
+    // `a_letter_meaning_two_things_is_printed_on_both_screens_or_neither` reads
+    // two spellings of one verb as a collision that is not one.
+    k("d", "delegate"),
     k("c", "conversations"),
     k("b", "branches"),
     k("u", "undo"),
