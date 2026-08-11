@@ -1241,7 +1241,7 @@ codebase's own answer rather than a copy of it. A background agent that can
 create background agents has no bound at all, and it multiplies while nobody is
 reading.
 
-## Five guards were green, and none of them were guarding
+## Six guards were green, and none of them were guarding
 
 Every one of these passed. Every one would have kept passing through the change
 it existed to catch.
@@ -1264,13 +1264,19 @@ it existed to catch.
   `a_run_that_owed_nobody_anything_wears_no_mark` asserted the row carried
   neither `⊘` nor `♻`. Swapping the predicate for a wrong one *passed*, because
   the wrong predicate draws `○` — a third glyph the list had never heard of.
+- **A green suite reported as a statement about a window it never measured.**
+  A call site was added in one edit and the function it called in the next; in
+  between, the file did not compile, and somebody else's `cargo test` caught
+  exactly that window. The author ran the suite *after* both edits, saw green,
+  and said "the tree was never red" — a claim about an interval backed by a
+  reading taken at one later instant.
 - **An assertion pointed at the wrong half of the screen.**
   `text_that_was_shortened_says_that_it_was` checked `!row.contains(name)` — but
   past ninety columns the detail pane shares the rendered line and prints the
   name in full, so it was reading the *other* pane's copy and would have passed
   through any amount of silent clipping in the pane under test.
 
-The shape is one thing, and it is not carelessness — all five were written
+The shape is one thing, and it is not carelessness — all six were written
 deliberately, by people who had just been arguing about correctness:
 
 **A guard has to name the property, not enumerate the ways of violating it.**
@@ -1300,5 +1306,17 @@ that the shape is structural rather than a slip.
 So: **assert against the smallest region that can hold the answer.** A whole
 rendered screen is not a unit; it is several, and `contains` will find your
 string in any of them.
+
+The sixth is the one that does not look like a testing mistake at all — it
+looks like reporting a result, which is why it reached two people in one
+exchange. One read a compiler *note* about what else was in scope and inferred
+what the author had meant to call; the other read a green suite and inferred
+what had been true five minutes earlier. Both outputs were accurate. Both
+conclusions were false, and neither was checkable from the thing that had been
+read.
+
+In a shared checkout, **"green" is a statement about the instant you ran it.**
+Asserting anything about a window means measuring the window — and if you cannot,
+say when you looked rather than what has been true.
 
 A test you have never seen fail is a test you have never seen.
