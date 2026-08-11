@@ -37,6 +37,30 @@
 //! no way to tell whether a pid on another is still running. Rows belonging to
 //! a live process — or to any process on a machine that is not this one — are
 //! left exactly where they are.
+//!
+//! ## Who may invoke the sweep
+//!
+//! **Only a process that can actually send**, and this is a rule about the
+//! caller rather than about the ledger — which is why it needs saying here.
+//! Everything above describes *when* a row may be recovered and says nothing
+//! about *who* may recover it, and the obvious startup hook is the daemon,
+//! which holds no transport at all.
+//!
+//! Claiming is a write. `sweep_recoverable` rewrites the owner in the same
+//! transaction that selects the rows, precisely so two Jods starting together
+//! cannot both redeliver. So a caller that claims a row it cannot send has not
+//! merely failed to help: it now *owns* the row, it is alive, and every later
+//! sweep therefore skips that row correctly for as long as it runs. A
+//! recoverable message becomes an unrecoverable one, and the ledger is left
+//! asserting that a live process is answerable for something nothing will ever
+//! send — the exact lie this module exists to prevent, told by the machinery
+//! meant to prevent it.
+//!
+//! The same argument decides the `channel` argument: a sweep is per-transport
+//! because *claiming* is, and rows belonging to a channel this caller cannot
+//! address must be left orphaned so the process that can address them finds
+//! them. There is no way to hand one back — [`Store::mark_failed`] means "this
+//! attempt failed, try again", not "I can never send this".
 
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -444,6 +468,17 @@ impl Store {
     /// failed, try again" and returns the row to `pending`; there is no verb for
     /// "I can never send this", and inventing one would be a worse answer than
     /// not taking the row.
+    ///
+    /// **"It settles eventually anyway" is the objection to expect from whoever
+    /// next tries to remove this parameter, and it is true and it is worse.**
+    /// `mark_failed` calls a row done when it is out of attempts *or* past
+    /// [`STALE_AFTER_MS`], so a foreign-channel row a bridge kept failing would
+    /// not cycle for ever — after a day it would settle as **`failed`**. The
+    /// ledger would then be asserting a delivery failure for a message that
+    /// nothing capable of sending it ever attempted, which is the same class of
+    /// lie as sweeping from a process with no transport at all. Cycling for ever
+    /// would at least be visibly wrong; settling is quietly wrong, and this
+    /// module is for the difference.
     pub fn sweep_recoverable(
         &self,
         me: &Owner,

@@ -3312,6 +3312,42 @@ mod tests {
         );
     }
 
+    /// The tripwire for the day a second transport starts writing to the
+    /// ledger.
+    ///
+    /// The sweep is per-channel, so `cli` rows are left orphaned for a `cli`
+    /// sweeper. **If you are adding a second channel and this test fails, the
+    /// missing piece is that channel's own sweep at its own startup** — not a
+    /// change here. A row nobody sweeps is a message nobody sends, and it will
+    /// sit `pending` forever looking exactly like a row that is being handled.
+    ///
+    /// Asserted through the bridge rather than by reading the constant, so it
+    /// fails if the sweep is ever changed to claim everything: that version
+    /// passes a "the constant is telegram" test and still eats the `cli` row.
+    #[tokio::test]
+    async fn a_second_transport_needs_a_sweep_of_its_own_before_it_ships() {
+        let s = store();
+        let mine = Owed::new("telegram:7:1", CHANNEL, "7", "mine");
+        let theirs = Owed::new("cli:1", "cli", "stdout", "theirs");
+        s.record_obligation(&mine, &crashed(), now_ms()).unwrap();
+        s.record_obligation(&theirs, &crashed(), now_ms()).unwrap();
+
+        bridge(Arc::clone(&s)).redeliver_owed().await;
+
+        let untouched = s.obligation_by_key("cli:1").unwrap().unwrap();
+        assert_eq!(
+            (untouched.state, untouched.attempts, &untouched.owner),
+            (DeliveryState::Pending, 0, &crashed()),
+            "a `cli` row must come out of a telegram sweep completely untouched — \
+             same state, no attempt spent, still orphaned"
+        );
+        assert_eq!(
+            s.obligation_by_key("telegram:7:1").unwrap().unwrap().state,
+            DeliveryState::Delivered,
+            "and this transport's own row still went"
+        );
+    }
+
     /// A telegram row whose target this build cannot read spends an attempt
     /// rather than being skipped, so it settles after `MAX_ATTEMPTS` restarts
     /// instead of being retried forever by a process that will never manage it.
