@@ -1635,7 +1635,23 @@ fn schedule_command(jod: &Jod, what: ScheduleCommand) -> Result<()> {
             if fires.is_empty() {
                 println!("{name} has not fired yet");
             } else {
-                render_time::fires(&fires, now);
+                // A fire's outcome is decided when the run is *started*, so a
+                // run that then failed still reads `ran`. Judged alone, a
+                // schedule whose every run has failed shows a column of ticks —
+                // in the one place you look to ask whether it works. So each
+                // fire is paired with how its run actually ended.
+                let outcomes: Vec<(jod_core::schedule::Fire, Option<String>)> = fires
+                    .into_iter()
+                    .map(|f| {
+                        let ended = f
+                            .run_id
+                            .as_deref()
+                            .and_then(|id| store.run(id).ok().flatten())
+                            .map(|r| r.status);
+                        (f, ended)
+                    })
+                    .collect();
+                render_time::fires(&outcomes, now);
             }
         }
     }

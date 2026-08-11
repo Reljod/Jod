@@ -110,28 +110,49 @@ pub fn goals(list: &[Goal], now_ms: i64) {
     }
 }
 
-pub fn fires(list: &[Fire], now_ms: i64) {
-    for f in list {
-        let (mark, colour) = match f.outcome {
-            FireOutcome::Ran => ("✓", GREEN),
-            FireOutcome::Replaced => ("↻", YELLOW),
-            FireOutcome::SkippedOverlap | FireOutcome::SkippedMisfire => ("○", DIM),
-            FireOutcome::SpawnFailed => ("✗", RED),
-            FireOutcome::Abandoned => ("■", RED),
-            // A watchdog that found nothing is a success, and it is dimmed
-            // rather than green: a column of bright ticks for a schedule that
-            // has done nothing all week would read as activity.
-            FireOutcome::MonitorQuiet => ("·", DIM),
-            // Rendered as a question mark on purpose. A row this build cannot
-            // read must look unreadable rather than borrowing another
-            // outcome's glyph and quietly claiming to be it.
-            FireOutcome::Unknown => ("?", YELLOW),
-        };
+/// A schedule's history, each fire shown with how its run actually ended.
+///
+/// The pair matters. `schedule_fires.outcome` is written when a run is
+/// *started*, so a run that then failed still says `ran` — and this is the one
+/// place a person looks to ask "does this job work". Judged on the fire alone,
+/// a schedule whose every run has failed prints a column of green ticks, which
+/// is worse than printing nothing.
+/// How one fire should read, given how its run actually ended.
+///
+/// Pure and separate so the judgement is testable rather than only reviewable —
+/// a test that re-implemented this match would pass while the real one was
+/// wrong, which is the shape of bug this whole file keeps finding.
+///
+/// **How it ended outranks how it started.** Only `Ran` is reinterpreted: a
+/// skip or an abandonment never had a run to disagree with.
+fn fire_mark(outcome: FireOutcome, ended: Option<&str>) -> (&'static str, &'static str, &'static str) {
+    if outcome == FireOutcome::Ran && ended == Some("failed") {
+        return ("✗", RED, "ran, then failed");
+    }
+    match outcome {
+        FireOutcome::Ran => ("✓", GREEN, "ran"),
+        FireOutcome::Replaced => ("↻", YELLOW, "replaced"),
+        FireOutcome::SkippedOverlap => ("○", DIM, "skipped_overlap"),
+        FireOutcome::SkippedMisfire => ("○", DIM, "skipped_misfire"),
+        FireOutcome::SpawnFailed => ("✗", RED, "spawn_failed"),
+        FireOutcome::Abandoned => ("■", RED, "abandoned"),
+        // A watchdog that found nothing is a success, and it is dimmed rather
+        // than green: a column of bright ticks for a schedule that has done
+        // nothing all week would read as activity.
+        FireOutcome::MonitorQuiet => ("·", DIM, "monitor_quiet"),
+        // A question mark on purpose. A row this build cannot read must look
+        // unreadable rather than borrowing another outcome's glyph.
+        FireOutcome::Unknown => ("?", YELLOW, "unknown"),
+    }
+}
+
+pub fn fires(list: &[(Fire, Option<String>)], now_ms: i64) {
+    for (f, ended) in list {
+        let (mark, colour, label) = fire_mark(f.outcome, ended.as_deref());
         let detail = f.detail.clone().unwrap_or_default();
         println!(
-            "{colour}{mark}{RESET} {:<30} {DIM}{:<16}{RESET} {detail}",
+            "{colour}{mark}{RESET} {:<30} {DIM}{label:<16}{RESET} {detail}",
             when(f.fired_at_ms, now_ms),
-            f.outcome.as_str()
         );
     }
 }
@@ -177,6 +198,39 @@ mod tests {
         .collect();
         let distinct: std::collections::HashSet<_> = marks.iter().collect();
         assert_eq!(distinct.len(), marks.len(), "two states share a glyph");
+    }
+
+    /// The defect this guards: a schedule whose every run fails printed a
+    /// column of green ticks, in the one place a person looks to ask whether
+    /// the job works. The outcome is written when the run *starts*.
+    #[test]
+    fn a_fire_whose_run_failed_is_not_shown_as_a_success() {
+        let (mark, _, label) = fire_mark(FireOutcome::Ran, Some("failed"));
+        assert_eq!(mark, "✗", "a failed run rendered as a tick");
+        assert_eq!(label, "ran, then failed", "and it says which half failed");
+    }
+
+    #[test]
+    fn a_fire_whose_run_succeeded_still_reads_as_success() {
+        assert_eq!(fire_mark(FireOutcome::Ran, Some("completed")).0, "✓");
+        assert_eq!(fire_mark(FireOutcome::Ran, None).0, "✓");
+    }
+
+    /// A skip never had a run to disagree with, so it keeps its own outcome
+    /// whatever a stray status says.
+    #[test]
+    fn an_outcome_with_no_run_is_not_reinterpreted() {
+        for outcome in [
+            FireOutcome::SkippedOverlap,
+            FireOutcome::SkippedMisfire,
+            FireOutcome::SpawnFailed,
+            FireOutcome::Abandoned,
+            FireOutcome::MonitorQuiet,
+        ] {
+            let alone = fire_mark(outcome, None);
+            let with_status = fire_mark(outcome, Some("failed"));
+            assert_eq!(alone, with_status, "{outcome:?} was reinterpreted");
+        }
     }
 
     #[test]
