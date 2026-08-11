@@ -91,6 +91,40 @@ delegates the typed line to an agent that runs in the background and reports
 back when it ends; the panel is where those runs are watched, stopped, resumed
 or attached to.
 
+### `jod main` — the pinned chat
+
+One conversation is pinned and never ends. It is where you say what you want,
+and it is the only part of Jod you have to remember how to use.
+
+```sh
+jod main "every weekday at 8am, sweep the open PRs and tell me what needs me"
+jod main "keep working until the README explains what jod main does, then stop"
+jod main "count the Rust files in the repo and tell me"
+jod main                                  # read the chat back
+```
+
+**It does not do the work.** It is a harness run holding Jod's own tools over
+MCP, so it delegates by *calling* rather than by describing, and it returns
+immediately — the command above comes back in the same second it was typed,
+while the work carries on without it.
+
+What it does with an instruction depends on what the instruction is:
+
+| you say | it calls | you get |
+|---|---|---|
+| *when* — "every weekday at 8am" | `schedule_create` | an armed schedule |
+| *keep* / *until* — "until the README explains…" | `goal_create` | a goal that runs until its done-check passes |
+| a task | `delegate` | a new agent |
+| a follow-up | `continue_agent` | the **same** agent, resumed with its context |
+
+The last row is the one that matters most, and the reason it calls `list_agents`
+before deciding anything: reusing a run that is already holding the context
+beats starting one that has to rebuild it. It says which it chose and why.
+
+Its window is managed for you. `jod main` checks the live transcript before
+sending — against both size and how long since you last said something — and
+tells you when it is due for compaction.
+
 The full design — including the planned knowledge graph (Open Knowledge Format
 notes indexed by GraphQLite) and agent-to-agent messaging — is in
 [`docs/jod-system.md`](./docs/jod-system.md).

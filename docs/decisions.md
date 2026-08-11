@@ -1049,3 +1049,53 @@ any harness with no MCP support, but it is a weaker version of the same idea: it
 allows exactly one decision per turn, cannot ask a follow-up question before
 deciding, and turns every capability into a new line in a prompt and a new arm
 in a parser. With tools, adding a capability is adding a tool.
+
+## A grant that depends on the permission mode is not a grant
+
+`SpawnRequest::tools` is the seam the whole system turns on, and it took four
+runs of the main chat to get one tool call through it. Each failure looked like
+a different bug and all four were the same shape: a decision recorded in one
+place and consulted in another.
+
+The last two are the instructive pair.
+
+**Plan mode refuses the tools it was given.** `PermissionPolicy::Ask` maps to
+`--permission-mode plan`, which is correct — it is what actually confines a run
+that must not change anything, as opposed to an allowlist that grants without
+denying. But the orchestrator's entire job is calling tools that change
+something, and plan mode does not distinguish "writes to the filesystem" from
+"writes to Jod's own schedule table". Given `Ask`, the orchestrator dutifully
+called `list_agents`, `schedule_list` and `recall`, reached for `ExitPlanMode`,
+could not find it, and wrote a plan file instead of arming the schedule it had
+been asked for. It looked like a model that would not commit. It was a mode that
+would not let it.
+
+**So the confinement axis and the grant axis are separate, and the code has to
+say so.** The permission mode bounds what a run may do to the *machine*.
+`ToolAccess` bounds what it may do to *Jod*. Neither substitutes for the other,
+and an orchestrator wants little of the first and a lot of the second.
+
+Which exposed the fourth bug immediately: the `mcp__jod` entry in `--allowedTools`
+had been written inside the `Ask` arm of the permission match. Moving off plan
+mode therefore revoked every Jod tool, silently, and the run came back with four
+consecutive *"requested permissions to use `mcp__jod__schedule_create`, but you
+haven't granted it yet"*. The grant now hangs off `req.tools`, which is the thing
+that actually decides whether a run has Jod tools.
+
+The test that missed it is more interesting than the bug. It asserted the grant
+appears — under `Ask`, the only mode it ever passed. A test that fixes one value
+of the variable your bug lives in will pass forever. It now loops over every
+permission mode, because "the grant survives a mode change" is the property, and
+the single-mode version was asserting a coincidence.
+
+### The general shape
+
+All four failures were components that were complete, tested, and connected to
+nothing: `tools` reached no command line; the allowlist denied what the config
+granted; `read_only` on one side met `read-only` on the other; the grant lived
+in the wrong branch. Unit tests were green throughout, and each failure produced
+a *plausible* symptom — an agent saying it has no tools reads like a missing
+feature, not like three broken layers.
+
+Nothing here was found by a unit test. All of it was found by running `jod main`
+and reading what the run actually did.
