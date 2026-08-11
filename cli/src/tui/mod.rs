@@ -52,7 +52,7 @@ use jod_core::harness::ToolAccess;
 use jod_core::schedule::{GoalState, ScheduleState};
 use jod_core::service::RunConversation;
 use jod_core::store::Store;
-use jod_core::{AgentEvent, HarnessKind, Jod, PermissionPolicy, Resume, SpawnRequest};
+use jod_core::{AgentEvent, HarnessKind, Jod, Model, PermissionPolicy, Resume, SpawnRequest};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use std::path::PathBuf;
@@ -384,6 +384,14 @@ async fn event_loop(
     // elapsed counter to look like a clock, cheap enough to be free.
     let mut ticks = tokio::time::interval(std::time::Duration::from_millis(250));
     ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // What `/model` will offer, and which harness is currently being asked.
+    //
+    // A channel rather than a call, because asking costs a subprocess and AGY
+    // asks the network: doing it where the popup is drawn would freeze the
+    // program for as long as the harness takes to answer.
+    let (models_tx, mut models_rx) =
+        tokio::sync::mpsc::unbounded_channel::<(HarnessKind, Vec<Model>)>();
+    let mut asking_models: Option<HarnessKind> = None;
 
     loop {
         terminal.draw(|f| viewport = ui::draw(f, &app))?;
@@ -475,8 +483,26 @@ async fn event_loop(
                 }
             }
 
+            // A harness answered. Kept only if it is still the harness on
+            // screen: `/harness` may have moved on while it was thinking, and
+            // one harness's model names are not another's.
+            Some((kind, models)) = models_rx.recv() => {
+                if app.harness == kind {
+                    app.models = models;
+                    app.models_for = Some(kind);
+                }
+                if asking_models == Some(kind) {
+                    asking_models = None;
+                }
+            }
+
             _ = ticks.tick() => {
                 app.advance(now_ms());
+                // Every tick rather than at startup only, because `/harness`
+                // changes the answer. `ask_models` returns immediately when the
+                // list on hand already belongs to the current harness, which is
+                // the usual case.
+                ask_models(&app, &mut asking_models, &models_tx);
                 // Statuses change in other processes as well as this one, and a
                 // panel that only refreshes when the watched agent finishes
                 // shows a fleet that stopped moving minutes ago.
@@ -495,6 +521,31 @@ async fn event_loop(
 
 fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
+}
+
+/// Ask the current harness what models it accepts, unless that is already known
+/// or already being asked.
+///
+/// Blocking rather than async: `HarnessKind::models` runs a child process and
+/// waits on it, which is exactly what must not happen on the runtime's own
+/// threads while a turn is streaming.
+fn ask_models(
+    app: &App,
+    asking: &mut Option<HarnessKind>,
+    tx: &tokio::sync::mpsc::UnboundedSender<(HarnessKind, Vec<Model>)>,
+) {
+    let kind = app.harness;
+    if app.models_for == Some(kind) || *asking == Some(kind) {
+        return;
+    }
+    *asking = Some(kind);
+    let tx = tx.clone();
+    // The result may arrive after the program has quit, or after another
+    // harness has been chosen. Both are fine: the send fails or the receiver
+    // drops it, and neither is worth reporting to somebody who has moved on.
+    tokio::task::spawn_blocking(move || {
+        let _ = tx.send((kind, kind.models()));
+    });
 }
 
 /// Say that a background agent ended, and how it went.
@@ -1157,6 +1208,13 @@ fn point_at(
     app.session = None;
     app.model = None;
     app.reported_model = None;
+    // And the list `/model` offers, for the same reason as the model itself:
+    // `opencode/claude-opus-5` is not a name AGY accepts, so offering the old
+    // harness's models until the new list arrives would be offering names that
+    // fail the turn. Cleared rather than replaced — the loader notices the
+    // mismatch on the next tick and asks the new harness.
+    app.models = Vec::new();
+    app.models_for = None;
     // Spend belongs to the conversation being left. Carrying it over showed
     // `$0.11` next to AGY, which had charged nothing.
     app.cost_usd = 0.0;

@@ -509,6 +509,32 @@ pub fn completions(input: &str, app: &crate::tui::App) -> Vec<Completion> {
                 Completion::new(format!("/{name} {}", m.label()), what)
             })
             .collect(),
+        // Whatever this harness said it accepts, in its own spelling. This is
+        // the one completion list where getting it wrong costs a turn: a model
+        // name is not validated at the prompt, it is handed to `--model`, and a
+        // harness that does not recognise it fails the run.
+        //
+        // Matched anywhere in the id rather than at the front, because the
+        // useful half of `opencode/claude-sonnet-5` is the half a prefix match
+        // cannot reach — nobody types the provider first.
+        "model" | "models" => {
+            let mut out = Vec::new();
+            // Offered first and always, because it is the one answer no
+            // harness lists: not a model, the absence of one.
+            if "default".starts_with(&typed) {
+                out.push(Completion::new(
+                    format!("/{name} default"),
+                    "whatever the harness picks itself",
+                ));
+            }
+            out.extend(
+                app.models
+                    .iter()
+                    .filter(|m| m.id.to_ascii_lowercase().contains(&typed))
+                    .map(|m| Completion::new(format!("/{name} {}", m.id), m.label.clone())),
+            );
+            out
+        }
         "new" => KINDS
             .iter()
             .filter(|kind| kind.starts_with(&typed))
@@ -621,6 +647,76 @@ mod tests {
             cost_usd: None,
             last: None,
         }
+    }
+
+    /// An app carrying a model list, the way the loader leaves one.
+    fn with_models(ids: &[(&str, &str)]) -> crate::tui::App {
+        let mut app = fleet(&[]);
+        app.models = ids
+            .iter()
+            .map(|(id, label)| jod_core::Model {
+                id: (*id).to_string(),
+                label: (*label).to_string(),
+            })
+            .collect();
+        app.models_for = Some(HarnessKind::ClaudeCode);
+        app
+    }
+
+    fn model_lines(input: &str, app: &crate::tui::App) -> Vec<String> {
+        completions(input, app)
+            .into_iter()
+            .map(|c| c.line)
+            .collect()
+    }
+
+    /// The whole point: `/model ` shows what this harness accepts rather than
+    /// nothing, so the name does not have to be remembered.
+    #[test]
+    fn model_offers_the_harnesss_own_list() {
+        let app = with_models(&[("opus", "the latest Opus"), ("haiku", "fastest")]);
+        assert_eq!(
+            model_lines("/model ", &app),
+            vec!["/model default", "/model opus", "/model haiku"]
+        );
+    }
+
+    /// Typing filters, and it filters on any part of the id — a provider-first
+    /// id like `opencode/claude-sonnet-5` is unreachable by prefix, because
+    /// what you remember is the model, not who serves it.
+    #[test]
+    fn typing_filters_the_list_anywhere_in_the_name() {
+        let app = with_models(&[
+            ("opencode/claude-sonnet-5", "opencode"),
+            ("opencode/gemini-3.1-pro", "opencode"),
+        ]);
+        assert_eq!(
+            model_lines("/model sonnet", &app),
+            vec!["/model opencode/claude-sonnet-5"]
+        );
+        // And the filter is not case-sensitive, because the ids are lowercase
+        // and the shift key is not a search term.
+        assert_eq!(
+            model_lines("/model GEMINI", &app),
+            vec!["/model opencode/gemini-3.1-pro"]
+        );
+    }
+
+    /// `default` is offered by name because it is the one answer no harness
+    /// lists, and it is what `parse` reads as "clear the model".
+    #[test]
+    fn default_is_offered_and_means_clear() {
+        let app = with_models(&[("opus", "the latest Opus")]);
+        assert_eq!(model_lines("/model def", &app), vec!["/model default"]);
+        assert_eq!(parse("/model default"), Some(Slash::Model(None)));
+    }
+
+    /// Before the list arrives — or when the harness is not installed — the
+    /// only thing offered is the one option that is always true. A popup that
+    /// claimed the harness had no models would be a lie.
+    #[test]
+    fn an_unloaded_list_still_offers_the_default() {
+        assert_eq!(model_lines("/model ", &fleet(&[])), vec!["/model default"]);
     }
 
     #[test]
