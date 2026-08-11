@@ -64,6 +64,8 @@ pub enum Action {
     Send(String),
     /// Start an agent that runs without taking over the transcript.
     Delegate(String),
+    /// Hand an instruction to the orchestrator and let it decide the shape.
+    Orchestrate(String),
     /// Stop an agent and close its tmux session.
     Stop(String),
     /// Put an agent's output on screen and follow it.
@@ -303,6 +305,33 @@ async fn perform(jod: &Arc<Jod>, app: &mut App, opts: &Options, action: Action) 
                     app.scroll_to_bottom();
                 }
                 Err(e) => app.push(Entry::Notice(format!("could not delegate: {e}"))),
+            }
+        }
+        Action::Orchestrate(instruction) => {
+            // Straight through `crate::hand_to_orchestrator`, the same call
+            // `jod main` makes. Not a TUI-shaped copy of it: which conversation,
+            // which tools and which permission mode are decisions with four
+            // bugs already behind them, and a second copy would be a second
+            // place for the fifth to hide.
+            match crate::hand_to_orchestrator(jod, &instruction, app.harness, opts.cwd.clone())
+                .await
+            {
+                Ok(handed) => {
+                    if let Some((reason, chars)) = handed.compaction_due {
+                        app.push(Entry::Notice(format!(
+                            "the main chat is due for compaction ({reason}) — {chars} chars live"
+                        )));
+                    }
+                    app.push(Entry::Notice(format!(
+                        "→ {} · handed to the orchestrator — it decides where this goes",
+                        short(&handed.agent.id)
+                    )));
+                    // Watched rather than merely started: the whole point of
+                    // routing through the orchestrator is *which* route it
+                    // picks, and that arrives as its reply.
+                    watch(jod, app, handed.agent.id).await;
+                }
+                Err(e) => app.push(Entry::Notice(format!("could not reach the main chat: {e}"))),
             }
         }
         Action::Stop(id) => match jod.kill_agent(&id).await {
@@ -1865,6 +1894,7 @@ fn apply_slash(app: &mut App, slash: command::Slash) -> Option<Action> {
             };
         }
         Slash::Delegate(prompt) => return Some(Action::Delegate(prompt)),
+        Slash::Main(instruction) => return Some(Action::Orchestrate(instruction)),
         Slash::Stop(which) => return resolve_agent(app, &which).map(Action::Stop),
         Slash::Watch(which) => return resolve_agent(app, &which).map(Action::Watch),
         Slash::Attach(which) => return resolve_agent(app, &which).map(Action::Attach),
@@ -2587,6 +2617,18 @@ mod tests {
         assert_eq!(
             apply_slash(&mut app, command::Slash::Delegate("do it".into())),
             Some(Action::Delegate("do it".into()))
+        );
+    }
+
+    /// The TUI is the interface that matters, so the orchestrator has to be
+    /// reachable from it — a headline feature only the CLI can reach is a
+    /// feature most of its use will never see.
+    #[test]
+    fn the_orchestrator_reaches_the_loop_as_its_own_action() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        assert_eq!(
+            apply_slash(&mut app, command::Slash::Main("sweep the PRs daily".into())),
+            Some(Action::Orchestrate("sweep the PRs daily".into()))
         );
     }
 

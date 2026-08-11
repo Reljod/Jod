@@ -1309,21 +1309,55 @@ async fn main_chat(
         return show_main_chat(jod, &id, limit, now);
     }
 
+    let handed = hand_to_orchestrator(jod, &instruction, kind, cwd).await?;
+    if let Some((reason, chars)) = handed.compaction_due {
+        println!("· the chat is due for compaction ({reason}) — {chars} chars in the live window");
+        println!("  `jod conv compact {}` summarises it", &id[..8.min(id.len())]);
+    }
+    let agent = handed.agent;
+
+    if !wait {
+        println!("→ {} · {}", short_id(&agent.id), "handed to the orchestrator");
+        println!("  `jod main` reads the chat · `jod watch {}` follows it", short_id(&agent.id));
+        return Ok(());
+    }
+    wait_for_orchestrator(jod, &agent.id).await
+}
+
+/// What [`hand_to_orchestrator`] did, for a caller that has its own way of
+/// saying so. The CLI prints; the TUI pushes a notice.
+struct Handed {
+    agent: jod_core::service::AgentSummary,
+    /// `(reason, chars)` when the live window has grown past a threshold.
+    compaction_due: Option<(&'static str, usize)>,
+}
+
+/// Give an instruction to the pinned main chat.
+///
+/// Shared by `jod main` and the TUI's `/main`, because two copies of "which
+/// conversation, which tools, which permission mode" is two things to keep in
+/// step, and the TUI is the interface that matters most — a divergence there
+/// would mean the tested path is not the used one.
+async fn hand_to_orchestrator(
+    jod: &Jod,
+    instruction: &str,
+    kind: HarnessKind,
+    cwd: PathBuf,
+) -> Result<Handed> {
+    let store = jod.store().context("this command needs the database")?;
+    let id = store.main_conversation(kind, &cwd.display().to_string())?;
+    let now = chrono::Utc::now().timestamp_millis();
+
     // Compaction is checked before the instruction goes out, not after: the
     // right moment to summarise is *between* things, and doing it mid-turn
     // would mean the turn that triggered it ran against the old window anyway.
     let live = store.live_window(&id)?;
     let chars: usize = live.iter().map(|m| m.text.len()).sum();
-    if let Some(reason) =
+    let compaction_due =
         jod_core::orchestrator::should_compact(chars, store.last_human_ms(&id)?, now)
-    {
-        println!(
-            "· the chat is due for compaction ({}) — {} chars in the live window",
-            reason.as_str(),
-            chars
-        );
-        println!("  `jod conv compact {}` summarises it", &id[..8.min(id.len())]);
-    }
+            .map(|reason| (reason.as_str(), chars));
+
+    let instruction = instruction.to_string();
 
     // The orchestrator is a harness run holding Jod's own tools, so it
     // delegates by calling them rather than by describing what it would do.
@@ -1385,15 +1419,17 @@ async fn main_chat(
         at_ms: now,
     })?;
 
-    if !wait {
-        println!("→ {} · {}", short_id(&agent.id), "handed to the orchestrator");
-        println!("  `jod main` reads the chat · `jod watch {}` follows it", short_id(&agent.id));
-        return Ok(());
-    }
+    Ok(Handed {
+        agent,
+        compaction_due,
+    })
+}
 
+/// Follow an orchestrator run to its end, for `jod main --wait`.
+async fn wait_for_orchestrator(jod: &Jod, run_id: &str) -> Result<()> {
     let mut events = jod.subscribe();
     while let Ok(envelope) = events.recv().await {
-        if envelope.agent_id != agent.id {
+        if envelope.agent_id != run_id {
             continue;
         }
         match &envelope.event {

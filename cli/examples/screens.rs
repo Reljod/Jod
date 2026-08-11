@@ -55,6 +55,26 @@ fn default_name(prompt: &str) -> String {
     }
 }
 
+/// The other symbol the compiled-in module reaches for in the crate root.
+///
+/// A stub, because this example renders screens and never runs the event loop
+/// that would reach it — the same reason `default_name` above is a copy rather
+/// than a call. It has to *exist* and it must never be *used*, so it says so
+/// rather than quietly returning something plausible.
+struct Handed {
+    agent: jod_core::service::AgentSummary,
+    compaction_due: Option<(&'static str, usize)>,
+}
+
+async fn hand_to_orchestrator(
+    _jod: &Jod,
+    _instruction: &str,
+    _kind: HarnessKind,
+    _cwd: PathBuf,
+) -> anyhow::Result<Handed> {
+    anyhow::bail!("the screens example does not run agents")
+}
+
 /// The size the screens were designed against: every column of every table is
 /// present at 100 wide, and the drop order only starts biting below it.
 const WIDTH: u16 = 100;

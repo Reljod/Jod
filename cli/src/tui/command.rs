@@ -49,6 +49,13 @@ pub enum Slash {
     Forget(String),
     /// Start an agent that runs without taking over the screen.
     Delegate(String),
+    /// Hand an instruction to the orchestrator — the pinned main chat.
+    ///
+    /// Distinct from [`Slash::Delegate`], which starts one agent on one prompt.
+    /// This decides *what kind of thing* the instruction is: continue an agent
+    /// already holding the context, start a new one, arm a schedule, or set a
+    /// goal. The screen gets the decision and the reason for it.
+    Main(String),
     /// Stop an agent, by an id prefix or its name.
     Stop(String),
     /// Put an agent's output on screen.
@@ -190,6 +197,15 @@ pub fn parse(line: &str) -> Option<Slash> {
                 Slash::Delegate(arg.to_string())
             }
         }
+        // `/main` and `/jod` both, because the second is what people type when
+        // they mean "you decide" and the first is what the CLI verb is called.
+        "main" | "jod" => {
+            if arg.is_empty() {
+                Slash::NeedsArgument("/main <instruction>")
+            } else {
+                Slash::Main(arg.to_string())
+            }
+        }
         "stop" | "kill" => {
             if arg.is_empty() {
                 Slash::NeedsArgument("/stop <id>")
@@ -265,6 +281,7 @@ pub const HELP: &[(&str, &str)] = &[
     ("/sessions", "conversations you can pick up"),
     ("/resume <id>", "continue one of them"),
     ("/delegate <prompt>", "run it in the background (Ctrl-B)"),
+    ("/main <instruction>", "hand it to the orchestrator — it picks the shape"),
     ("/agents", "the fleet (Ctrl-A, Ctrl-K f)"),
     ("/watch <id>", "put an agent's output on screen"),
     ("/stop <id>", "stop an agent and close its session"),
@@ -665,6 +682,19 @@ mod tests {
         assert_eq!(parse("/attach abc123"), Some(Slash::Attach("abc123".into())));
         assert_eq!(parse("/todo port the parser"), Some(Slash::Todo("port the parser".into())));
         assert_eq!(parse("/done port-the-parser"), Some(Slash::Done("port-the-parser".into())));
+    }
+
+    /// `/main` is not `/delegate`. `/delegate` starts one agent on one prompt;
+    /// `/main` hands the instruction over and lets the orchestrator decide
+    /// whether it is a continuation, a new agent, a schedule or a goal.
+    #[test]
+    fn the_orchestrator_is_reachable_from_the_chat() {
+        assert_eq!(
+            parse("/main every weekday at 8am, sweep the PRs"),
+            Some(Slash::Main("every weekday at 8am, sweep the PRs".into()))
+        );
+        assert_eq!(parse("/jod do the thing"), Some(Slash::Main("do the thing".into())));
+        assert_eq!(parse("/main"), Some(Slash::NeedsArgument("/main <instruction>")));
     }
 
     /// Each of these does something irreversible or unguessable without its
