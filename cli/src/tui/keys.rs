@@ -243,6 +243,36 @@ pub fn keymap(ws: Workspace) -> Vec<(String, &'static [Key])> {
     sections
 }
 
+/// The which-key overlay's keybar line, which has to name the leader it is
+/// waiting on — an overlay that says only "waiting for a key" tells you it is
+/// stuck without telling you what unstuck it.
+///
+/// `making` is the `n` submenu, which is one keypress deeper and so names the
+/// two-key route rather than the leader alone.
+///
+/// This lives here rather than in `ui.rs` for one reason: `ui.rs` is prose the
+/// drift test cannot see. Spelled here, `Alt-K` is scanned and pressed like
+/// every other advertised chord, so it cannot go stale the next time the
+/// keymap moves. That is exactly how these four strings were left saying
+/// `Ctrl-K` after the keymap had already moved to Alt.
+pub fn which_key_hint(making: bool) -> String {
+    if making {
+        "Alt-K n … s schedule · g goal · h hook · m memory · t task".to_string()
+    } else {
+        "Alt-K … waiting for a key".to_string()
+    }
+}
+
+/// The which-key overlay's border title. Same reasoning as `which_key_hint`,
+/// and the two must name the same chord — which is why they sit together.
+pub fn which_key_title(making: bool) -> &'static str {
+    if making {
+        " Alt-K n · new… "
+    } else {
+        " Alt-K "
+    }
+}
+
 // ---- keeping the printed keymap and the dispatch honest -------------------
 //
 // This table is display-only; the `match` in `mod.rs` is what actually runs.
@@ -272,7 +302,12 @@ pub fn chords_in(text: &str) -> Vec<String> {
 ///
 /// `keymap` already folds in each workspace's own verbs, the shared spine and
 /// the global chords, and the keybar and footer are rendered from that same
-/// data — so this plus the exit hints is genuinely everything.
+/// data — so this plus the exit hints and the which-key overlay is genuinely
+/// everything Jod advertises.
+///
+/// Anything printed *outside* this module is outside the net. That is the
+/// argument for moving a chord-bearing string in here rather than spelling it
+/// at the call site.
 pub fn all_documented_chords() -> Vec<String> {
     let mut found: Vec<String> = Vec::new();
     for ws in Workspace::ALL {
@@ -285,6 +320,10 @@ pub fn all_documented_chords() -> Vec<String> {
             );
         }
         found.extend(chords_in(keybar_exit(ws)));
+    }
+    for making in [false, true] {
+        found.extend(chords_in(&which_key_hint(making)));
+        found.extend(chords_in(which_key_title(making)));
     }
     found.sort();
     found.dedup();
@@ -477,6 +516,51 @@ mod tests {
     fn a_chord_named_only_inside_an_exit_hint_is_still_found() {
         assert!(all_documented_chords().iter().any(|c| c == "Alt-X"));
         assert!(all_documented_chords().iter().any(|c| c == "Ctrl-C/D"));
+    }
+
+    /// An overlay that says only "waiting for a key" tells you it is stuck
+    /// without telling you what unstuck it, and the two halves disagreeing
+    /// would be worse than either.
+    #[test]
+    fn the_which_key_overlay_names_the_leader_that_opened_it() {
+        for making in [false, true] {
+            assert!(which_key_hint(making).contains("Alt-K"), "hint, making={making}");
+            assert!(which_key_title(making).contains("Alt-K"), "title, making={making}");
+        }
+    }
+
+    /// The forward drift test presses what is printed — but `Ctrl-K` still
+    /// fires, so a screen that quietly went back to printing it would pass.
+    /// Nothing else would catch that, and it is exactly the state the four
+    /// which-key strings were found in after the keymap had already moved.
+    ///
+    /// `GLOBAL` is the one table allowed to name Ctrl, because it is where the
+    /// readline keys are taught. Every other screen names Jod's verbs, and
+    /// those are Alt — plus `Ctrl-C`, which any screen may print because
+    /// leaving must never depend on finding the right table.
+    #[test]
+    fn no_screen_outside_the_global_table_teaches_a_ctrl_verb() {
+        let mut printed: Vec<String> = Vec::new();
+        for ws in Workspace::ALL {
+            printed.extend(
+                local(ws)
+                    .iter()
+                    .filter(|b| is_chord(b.key))
+                    .map(|b| b.key.to_string()),
+            );
+            printed.extend(chords_in(keybar_exit(ws)));
+        }
+        for making in [false, true] {
+            printed.extend(chords_in(&which_key_hint(making)));
+            printed.extend(chords_in(which_key_title(making)));
+        }
+        assert!(!printed.is_empty(), "the scan found nothing to check");
+        for label in printed {
+            assert!(
+                label.starts_with("Alt-") || label == "Ctrl-C",
+                "{label} is printed on a screen — Jod's verbs live on Alt, and only GLOBAL teaches Ctrl"
+            );
+        }
     }
 
     /// The move off Ctrl exists to stop a multiplexer eating Jod's verbs, and

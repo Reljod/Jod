@@ -27,6 +27,7 @@ mod config;
 pub mod data;
 mod graph;
 mod keys;
+mod sessions;
 pub mod ui;
 mod workspace;
 
@@ -47,6 +48,7 @@ use crossterm::terminal::{
 };
 use futures::StreamExt;
 use jod_core::schedule::{GoalState, ScheduleState};
+use jod_core::service::RunConversation;
 use jod_core::store::Store;
 use jod_core::harness::ToolAccess;
 use jod_core::{AgentEvent, HarnessKind, Jod, PermissionPolicy, Resume, SpawnRequest};
@@ -68,6 +70,18 @@ pub enum Action {
     Delegate(String),
     /// Hand an instruction to the orchestrator and let it decide the shape.
     Orchestrate(String),
+    /// Move the conversation to another harness, carrying its context across.
+    ///
+    /// Not something `apply_slash` can do: it needs a summary, a summary needs a
+    /// model, and Jod has no model client — so the first half is a *run* on the
+    /// harness being left. See [`begin_crossing`].
+    SwitchHarness(HarnessKind),
+    /// Stop talking into the conversation the chat box was bound to.
+    ///
+    /// `/new` and `/resume` both move the cursor somewhere the binding does not
+    /// follow. Without this, a handed-over conversation would keep collecting
+    /// turns that belong to a different thread — see [`Thread::conversation`].
+    NewThread,
     /// Stop an agent and close its tmux session.
     Stop(String),
     /// Put an agent's output on screen and follow it.
@@ -106,6 +120,10 @@ pub enum Action {
     /// something the store can be asked for; the writing needs the database and
     /// so belongs to the loop.
     Config(config::Request),
+    /// List, open, rewind, restore or fork a conversation in Jod's own message
+    /// graph. The screens hold no store, so the whole verb travels as data and
+    /// `sessions::apply` runs it.
+    Sessions(sessions::Request),
     /// Open the typed line in `$EDITOR`. The TUI has to be suspended and
     /// restored around it, which only the loop can do.
     Editor,
@@ -115,6 +133,87 @@ pub enum Action {
     Pending {
         verb: String,
         needs: &'static str,
+    },
+}
+
+/// Which Jod conversation the chat box is talking into, and what the next spawn
+/// still owes it.
+///
+/// Held by the loop rather than by [`App`], which is a deliberate compromise
+/// and not a design: it belongs on the app beside `session` and `resume`, but
+/// `app.rs` is owned by another track while this lands. Everything here is
+/// state the *loop* consumes, so it works where it is; move it when that file
+/// is free.
+///
+/// Note what this is not. `App::session` is the *harness's* conversation id —
+/// what `--resume` takes. This is Jod's, which is a different thing: it outlives
+/// the harness session, and after a handoff it is the only one of the two that
+/// still exists.
+#[derive(Debug, Default)]
+struct Thread {
+    /// The conversation every turn from the chat box is recorded in.
+    ///
+    /// `None` means "the one the run on screen wrote", which is what
+    /// [`Store::conversation_for_run`] answers. It is only set explicitly after
+    /// a harness switch, because the conversation that switch minted has no run
+    /// yet — nothing to find it by.
+    conversation: Option<String>,
+    /// Prior context the next spawn has to carry in its system framing.
+    ///
+    /// Taken once and then dropped. A handoff lands on a harness with no session
+    /// of its own, so the *first* turn is the only one that has to bring the
+    /// context with it; from the second turn on, the new harness's own session
+    /// is carrying it. Leaving it set would re-send a summary the model is
+    /// already looking at.
+    carried: Option<String>,
+    /// A harness switch waiting on the run that is writing its summary.
+    switching: Option<PendingSwitch>,
+}
+
+impl Thread {
+    /// Where the next turn's transcript goes.
+    ///
+    /// `New` unless a handoff bound this chat to a conversation, which is the
+    /// pre-existing behaviour and stays the default: the harness session is what
+    /// carries an ordinary conversation forward, and Jod's graph records each
+    /// turn beside it. After a switch there is no harness session yet, so the
+    /// binding is the only thing holding the thread together.
+    fn binding(&self) -> RunConversation {
+        match &self.conversation {
+            Some(id) => RunConversation::Existing(id.clone()),
+            None => RunConversation::New,
+        }
+    }
+}
+
+/// A harness switch that has spawned its summariser and is waiting for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingSwitch {
+    to: HarnessKind,
+    /// The run asked to write the summary. The switch completes when this run
+    /// finishes, and only for this run.
+    run: String,
+    /// The conversation being handed over.
+    conversation: String,
+}
+
+/// What `/harness <kind>` turns out to mean, decided before anything is spawned.
+///
+/// Separated from carrying it out so the decision is testable without a harness
+/// on the machine — the part with the interesting cases is this one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Crossing {
+    /// Already on that harness. Nothing to do, and nothing to throw away.
+    Stay,
+    /// Nothing has been said yet, so there is nothing to summarise and no model
+    /// call to pay for. The app simply moves.
+    Bare,
+    /// A thread has to be summarised first, by a run on the harness being left.
+    Summarise {
+        conversation: String,
+        /// The transcript to summarise, when the harness cannot be asked to
+        /// read its own — see [`begin_crossing`].
+        material: Option<String>,
     },
 }
 
@@ -183,6 +282,11 @@ async fn event_loop(
             .to_string(),
     ));
 
+    // Which Jod conversation the chat box is talking into. Starts derived —
+    // "the one the run on screen wrote" — and only becomes explicit once a
+    // harness switch mints a conversation no run has reached yet.
+    let mut thread = Thread::default();
+
     let mut keys = EventStream::new();
     let mut events = jod.subscribe();
     let mut viewport = 20usize;
@@ -210,7 +314,7 @@ async fn event_loop(
                             // done from here — with the same discipline as
                             // `enter`/`restore`, panic hook included.
                             Some(Action::Editor) => edit_in_editor(terminal, &mut app),
-                            Some(action) => perform(&jod, &mut app, &opts, action).await,
+                            Some(action) => perform(&jod, &mut app, &opts, &mut thread, action).await,
                             None => {}
                         }
                     }
@@ -230,16 +334,54 @@ async fn event_loop(
                 if watched {
                     app.apply(&envelope.event);
                 }
+                let switching = thread
+                    .switching
+                    .as_ref()
+                    .is_some_and(|s| s.run == envelope.agent_id);
                 if finished {
                     app.agents = list_agents(&jod).await;
                     refresh_team(&jod, &mut app);
                     refresh_workspaces(&jod, &mut app);
                     app.reconcile();
-                    if watched {
+                    if switching {
+                        // The other half of `/harness`. It is not `announce`d as
+                        // a finished delegation, because from the user's side
+                        // this was never an agent they started — it is the
+                        // switch they asked for, arriving.
+                        let pending = thread.switching.take().expect("just checked");
+                        let summary = match jod.events_since(&pending.run, None).await {
+                            Ok(events) => said(&events),
+                            Err(e) => {
+                                app.push(Entry::Notice(format!(
+                                    "could not read the summary back, so nothing was handed \
+                                     over: {e}"
+                                )));
+                                String::new()
+                            }
+                        };
+                        match jod.store() {
+                            Some(store) => finish_crossing(
+                                &store,
+                                &mut app,
+                                &mut thread,
+                                &pending,
+                                &summary,
+                            ),
+                            None => app.push(Entry::Notice(
+                                "the database went away mid-switch, so nothing was handed over"
+                                    .into(),
+                            )),
+                        }
+                        app.busy = false;
+                        app.turn_started_ms = None;
+                    }
+                    if watched || switching {
                         // A prompt typed mid-turn goes now rather than being
-                        // refused earlier and forgotten.
+                        // refused earlier and forgotten. Mid-*switch* counts:
+                        // the queue is why the switch could take the screen at
+                        // all without losing what was typed over it.
                         if let Some(next) = app.next_queued() {
-                            perform(&jod, &mut app, &opts, Action::Send(next)).await;
+                            perform(&jod, &mut app, &opts, &mut thread, Action::Send(next)).await;
                         }
                     } else {
                         announce(&mut app, &envelope.agent_id);
@@ -291,7 +433,13 @@ fn announce(app: &mut App, id: &str) {
 }
 
 /// Carry out one action against the service.
-async fn perform(jod: &Arc<Jod>, app: &mut App, opts: &Options, action: Action) {
+async fn perform(
+    jod: &Arc<Jod>,
+    app: &mut App,
+    opts: &Options,
+    thread: &mut Thread,
+    action: Action,
+) {
     // The clock the app is already drawing with, rather than a fresh reading:
     // "run now" writes an instant the *tick* then compares against `now`, and a
     // value a hair in the future would sit undue for a quarter of a second.
@@ -311,8 +459,27 @@ async fn perform(jod: &Arc<Jod>, app: &mut App, opts: &Options, action: Action) 
             //
             // Without this you could ask Jod to schedule something and it would
             // answer as if it had, having no verb to do it with.
-            match spawn(jod, app, opts, prompt.clone(), app.resume.clone(), WATCHED).await {
+            match spawn(
+                jod,
+                app,
+                opts,
+                prompt.clone(),
+                app.resume.clone(),
+                WATCHED,
+                // Into the conversation the chat box is bound to, which after a
+                // handoff is the one carrying the summary. Everything else is
+                // still `New`, as it was.
+                thread.binding(),
+                thread.carried.clone(),
+            )
+            .await
+            {
                 Ok(id) => {
+                    // Only once. From here the harness has a session of its own
+                    // and is holding the context itself; re-sending it every
+                    // turn would hand the model a summary of a conversation it
+                    // is already in.
+                    thread.carried = None;
                     app.watching = Some(id);
                     app.busy = true;
                     app.turn_started_ms = Some(app.now_ms);
@@ -334,7 +501,21 @@ async fn perform(jod: &Arc<Jod>, app: &mut App, opts: &Options, action: Action) 
             // whose reasoning this is. Reading is the half that pays for
             // itself: an agent that can see what else is running can decline to
             // duplicate it.
-            match spawn(jod, app, opts, prompt.clone(), Resume::Fresh, DELEGATED).await {
+            match spawn(
+                jod,
+                app,
+                opts,
+                prompt.clone(),
+                Resume::Fresh,
+                DELEGATED,
+                // Its own conversation, and no context from this one. A
+                // background job that silently joined the thread on screen would
+                // interleave two agents' turns in one transcript.
+                RunConversation::New,
+                None,
+            )
+            .await
+            {
                 Ok(id) => {
                     app.push(Entry::Notice(format!(
                         "delegated {} — {} · runs in the background, Alt-A to watch",
@@ -373,6 +554,11 @@ async fn perform(jod: &Arc<Jod>, app: &mut App, opts: &Options, action: Action) 
                 Err(e) => app.push(Entry::Notice(format!("could not reach the main chat: {e}"))),
             }
         }
+        Action::SwitchHarness(to) => begin_crossing(jod, app, opts, thread, to).await,
+        Action::NewThread => {
+            thread.conversation = None;
+            thread.carried = None;
+        }
         Action::Stop(id) => match jod.kill_agent(&id).await {
             Ok(()) => {
                 if app.watching.as_deref() == Some(id.as_str()) {
@@ -383,7 +569,14 @@ async fn perform(jod: &Arc<Jod>, app: &mut App, opts: &Options, action: Action) 
             }
             Err(e) => app.push(Entry::Notice(format!("could not stop {}: {e}", short(&id)))),
         },
-        Action::Watch(id) => watch(jod, app, id).await,
+        // The binding follows the eye, like the session cursor does: watching
+        // another agent means the next turn continues *that* conversation, and
+        // `current_conversation` derives it from the run being watched.
+        Action::Watch(id) => {
+            thread.conversation = None;
+            thread.carried = None;
+            watch(jod, app, id).await
+        }
         Action::Attach(id) => match jod.agent(&id).await {
             Ok(agent) => {
                 app.push(Entry::Notice(format!(
@@ -449,6 +642,17 @@ async fn perform(jod: &Arc<Jod>, app: &mut App, opts: &Options, action: Action) 
             let lines = match jod.store() {
                 Some(store) => config::apply(store, &request),
                 None => vec![format!("{NO_STORE} — this preference lasts the session only")],
+            };
+            for line in lines {
+                app.push(Entry::Notice(line));
+            }
+        }
+        // The other multi-line answer, for the same reason: a list of
+        // conversations folded into one notice is fifty threads in a paragraph.
+        Action::Sessions(request) => {
+            let lines = match jod.store() {
+                Some(store) => sessions::apply(store, &request, now),
+                None => vec![NO_STORE.to_string()],
             };
             for line in lines {
                 app.push(Entry::Notice(line));
@@ -533,6 +737,312 @@ async fn watch(jod: &Arc<Jod>, app: &mut App, id: String) {
         }
         Err(e) => app.push(Entry::Notice(format!("cannot open {}: {e}", short(&id)))),
     }
+}
+
+// ---- switching harness ---------------------------------------------------
+
+/// What the harness being left is asked to write.
+///
+/// Addressed to a model, so it says what the *next* agent needs rather than
+/// asking for a nice summary: a handoff that omits the paths and the commands
+/// leaves the receiving agent to rediscover them, which is the whole cost the
+/// switch was meant to avoid.
+const SUMMARISE: &str = "Summarise this conversation so that an agent who has \
+    never seen it can pick the work up. Cover what is being done and why, what \
+    has already been decided, what has already been changed — files, commands, \
+    results — and what is still open. Be specific: real paths, real names, real \
+    commands. Output the summary and nothing else: no preamble, no questions, \
+    no offer to continue.";
+
+/// The same, for a harness that has no session to read and must be handed the
+/// record in its prompt.
+const SUMMARISE_RECORD: &str = "Below is the record of a conversation. \
+    Summarise it so that an agent who has never seen it can pick the work up. \
+    Cover what is being done and why, what has already been decided, what has \
+    already been changed — files, commands, results — and what is still open. \
+    Be specific: real paths, real names, real commands. Output the summary and \
+    nothing else: no preamble, no questions, no offer to continue.";
+
+/// Why the compaction happened, for the row `Store::compact` writes.
+const CROSSING: &str = "harness switch";
+
+/// The conversation the chat box is talking into.
+///
+/// Explicit after a handoff, because the conversation a handoff mints has no run
+/// to be found by. Otherwise it is derived — "the one the run on screen wrote" —
+/// which needs no state and cannot go stale.
+fn current_conversation(store: &Store, app: &App, thread: &Thread) -> Option<String> {
+    if let Some(bound) = &thread.conversation {
+        return Some(bound.clone());
+    }
+    store
+        .conversation_for_run(app.watching.as_deref()?)
+        .ok()
+        .flatten()
+}
+
+/// What `/harness <to>` turns out to mean.
+///
+/// Pure, and separate from carrying it out, because the cases that matter are
+/// decided here: whether a model call is owed at all, and whether the harness
+/// being left can be asked to summarise what it is already holding.
+fn crossing(store: Option<&Store>, app: &App, thread: &Thread, to: HarnessKind) -> Crossing {
+    if app.harness == to {
+        return Crossing::Stay;
+    }
+    // No database means no conversation to hand over — the app can still move,
+    // it just moves empty-handed. That is the old behaviour, and it is the
+    // honest one when there is nothing stored to carry.
+    let Some(store) = store else {
+        return Crossing::Bare;
+    };
+    let Some(conversation) = current_conversation(store, app, thread) else {
+        return Crossing::Bare;
+    };
+    // Nothing live is not an error and not a summary: it is a conversation that
+    // has said nothing, and summarising it would spend a model call to produce
+    // the word "nothing".
+    match store.live_window(&conversation) {
+        Ok(live) if live.is_empty() => return Crossing::Bare,
+        Err(_) => return Crossing::Bare,
+        Ok(_) => {}
+    }
+    Crossing::Summarise {
+        // A harness with a session of its own is holding the conversation and
+        // can be asked about it directly. One resuming nothing has never seen
+        // this thread — it would summarise an empty context and say so — so the
+        // record has to travel in the prompt. That is the case immediately
+        // after a previous switch, which is exactly when it would be missed.
+        material: match app.resume {
+            Resume::Fresh => store.handoff_text(&conversation).ok(),
+            _ => None,
+        },
+        conversation,
+    }
+}
+
+/// What to say about a target that cannot be handed structure, if it is one.
+///
+/// Asked of the store rather than decided here, so "which carriers lose
+/// something" has one answer and not a copy of it in the UI — today that is AGY
+/// alone, and the day a harness grows an import path this line stops warning
+/// about it without being edited.
+///
+/// Said *before* the move: it is the one loss a user can still avoid, by
+/// choosing a different target. The compaction's cost is reported after,
+/// because by then it is a fact rather than a choice.
+fn lossy_warning(store: &Store, conversation: &str, to: HarnessKind) -> Option<String> {
+    store
+        .handoff(conversation, to)
+        .ok()
+        .filter(|carrier| carrier.is_lossy())
+        .map(|_| {
+            format!(
+                "{} has no import path, so the context can only travel as prose in the prompt \
+                 — tool calls and structure will not survive the crossing",
+                to.label()
+            )
+        })
+}
+
+/// Start a harness switch: warn about what it costs, and put the harness being
+/// left to work writing the summary that makes it possible.
+///
+/// Returns without moving the app when a summary is owed. The switch finishes
+/// in [`finish_crossing`] when that run ends, which is what keeps the screen
+/// alive while a model writes several paragraphs — the alternative was awaiting
+/// a run inside `perform`, which freezes the whole interface, keys included.
+async fn begin_crossing(
+    jod: &Arc<Jod>,
+    app: &mut App,
+    opts: &Options,
+    thread: &mut Thread,
+    to: HarnessKind,
+) {
+    let store = jod.store();
+    match crossing(store.map(Arc::as_ref), app, thread, to) {
+        // Said rather than silently done. `/harness claude` on Claude Code used
+        // to reset the session cursor and the model — a no-op that quietly threw
+        // away the conversation you were in the middle of.
+        Crossing::Stay => app.push(Entry::Notice(format!(
+            "already on {} — nothing to switch",
+            to.label()
+        ))),
+        Crossing::Bare => {
+            point_at(app, thread, to, None, None);
+            app.push(Entry::Notice(format!(
+                "{} from the next turn — nothing had been said, so there was nothing to carry",
+                to.label()
+            )));
+        }
+        Crossing::Summarise {
+            conversation,
+            material,
+        } => {
+            // Asked of the store rather than decided here, so there is one
+            // answer to "does this carrier lose anything" and not a copy of it
+            // in the UI. Before the move, because it is the loss you could still
+            // avoid by choosing a different target.
+            if let Some(warning) = store.and_then(|s| lossy_warning(s, &conversation, to)) {
+                app.push(Entry::Notice(warning));
+            }
+            let prompt = match &material {
+                Some(record) => format!("{SUMMARISE_RECORD}\n\n{record}"),
+                None => SUMMARISE.to_string(),
+            };
+            let request = SpawnRequest {
+                name: format!("summarise for {}", to.id()),
+                // The harness being *left*: it is the one holding the
+                // conversation, and asking the new one to summarise a thread it
+                // has never seen is the bug this whole flow exists to fix.
+                harness: app.harness,
+                prompt,
+                system: None,
+                cwd: opts.cwd.clone(),
+                model: app.model.clone(),
+                // Reading and writing prose, nothing else. A summariser that
+                // stopped to ask permission would hang a switch nobody is
+                // watching the prompt of.
+                permission: bounded(opts.permission, PermissionPolicy::Bypass),
+                // With a session, it summarises what it is already holding;
+                // without one, the record came in the prompt.
+                resume: match material {
+                    Some(_) => Resume::Fresh,
+                    None => app.resume.clone(),
+                },
+                // No Jod verbs. This run answers a question, it does not act.
+                tools: None,
+            };
+            // Detached: its prompt is a request to summarise, and recording that
+            // in the conversation being handed over would put "summarise this"
+            // into the transcript a moment before compacting it — and index it
+            // for search as though somebody had said it.
+            match jod.spawn_agent_in(request, RunConversation::Detached).await {
+                Ok(agent) => {
+                    thread.switching = Some(PendingSwitch {
+                        to,
+                        run: agent.id.clone(),
+                        conversation,
+                    });
+                    // Busy so a turn typed now queues instead of racing the
+                    // switch onto whichever harness wins.
+                    app.busy = true;
+                    app.turn_started_ms = Some(app.now_ms);
+                    app.push(Entry::Notice(format!(
+                        "summarising this conversation on {} before handing it to {}…",
+                        app.harness.label(),
+                        to.label()
+                    )));
+                    app.scroll_to_bottom();
+                }
+                Err(e) => app.push(Entry::Notice(format!(
+                    "could not start the summary, so nothing was handed over: {e}"
+                ))),
+            }
+        }
+    }
+}
+
+/// Complete a switch whose summariser has finished.
+///
+/// Takes the summary as text rather than reading it out of a run, so the part
+/// with the decisions in it is testable without a harness: what happens when the
+/// model says nothing, and what happens when the store refuses.
+///
+/// Every failure path leaves the app exactly where it was. A half-completed
+/// switch — new harness, no context — is strictly worse than one that did not
+/// happen, because the conversation is still there and the user no longer has a
+/// way back to it.
+fn finish_crossing(
+    store: &Store,
+    app: &mut App,
+    thread: &mut Thread,
+    pending: &PendingSwitch,
+    said: &str,
+) {
+    let summary = said.trim();
+    // Not fabricated, not defaulted, not "(no summary)". `Store::switch_harness`
+    // treats an empty summary as an error precisely so a thread cannot be
+    // compacted into nothing; inventing a placeholder here would walk straight
+    // through that guard.
+    if summary.is_empty() {
+        app.push(Entry::Notice(format!(
+            "the summary came back empty, so nothing was handed over — still on {}",
+            app.harness.label()
+        )));
+        return;
+    }
+    let switch = match store.switch_harness(&pending.conversation, pending.to, summary, CROSSING) {
+        Ok(switch) => switch,
+        Err(e) => {
+            app.push(Entry::Notice(format!(
+                "could not hand the conversation over, so it stays where it is: {e}"
+            )));
+            return;
+        }
+    };
+    // The summary has to reach the new harness's *prompt*, because the new
+    // conversation has no session for it to be resumed into — and nothing in
+    // `runner` can stream a transcript into a harness yet. See
+    // `Store::handoff_text`.
+    let carried = store.handoff_text(&switch.conversation.id).ok();
+    let compaction = switch.compaction.clone();
+    let to = pending.to;
+    point_at(app, thread, to, Some(&switch.conversation.id), carried);
+    app.push(Entry::Notice(format!(
+        "handed over to {} — a new conversation carrying the summary, {}",
+        to.label(),
+        match &compaction {
+            Some(c) => format!("{} chars of transcript became {}", c.before_chars, c.after_chars),
+            None => "nothing needed compacting".to_string(),
+        }
+    )));
+    app.scroll_to_bottom();
+}
+
+/// Point the app at another harness, and at the conversation it is now talking
+/// into.
+///
+/// The model is dropped every time and that is not incidental:
+/// `claude-sonnet-4-5` means nothing to OpenCode or AGY, so keeping either the
+/// requested or the reported name would hand the new harness a model it rejects
+/// — and the switch would look like it simply did not work.
+fn point_at(
+    app: &mut App,
+    thread: &mut Thread,
+    to: HarnessKind,
+    conversation: Option<&str>,
+    carried: Option<String>,
+) {
+    app.harness = to;
+    // A harness session id is the old harness's word for a transcript it owns.
+    // The new one has never heard of it.
+    app.resume = Resume::Fresh;
+    app.session = None;
+    app.model = None;
+    app.reported_model = None;
+    // Spend belongs to the conversation being left. Carrying it over showed
+    // `$0.11` next to AGY, which had charged nothing.
+    app.cost_usd = 0.0;
+    thread.conversation = conversation.map(str::to_string);
+    thread.carried = carried;
+}
+
+/// Everything a finished run said, oldest first.
+///
+/// Every assistant message rather than the last, for the reason
+/// `collect_output` gives: a model asked for bare text will preface it,
+/// apologise, or wrap it — and dropping all but the final message would throw
+/// away the summary to keep the sign-off.
+fn said(events: &[jod_core::AgentEnvelope]) -> String {
+    let mut out = String::new();
+    for envelope in events {
+        if let AgentEvent::Message { text } = &envelope.event {
+            out.push_str(text);
+            out.push('\n');
+        }
+    }
+    out
 }
 
 /// Bring a schedule's next instant forward to now.
@@ -1449,6 +1959,44 @@ fn on_fleet_key(app: &mut App, key: KeyEvent) -> Option<Action> {
             let agent = app.selected_agent()?;
             Some(Action::Delegate(agent.name.clone()))
         }
+        // ---- the conversation graph ------------------------------------
+        //
+        // Five keys, and only the first is about the *list*. The other four are
+        // about the run under the cursor, because that is the handle this
+        // screen already has: a fleet row is a run, `Store::conversation_for_run`
+        // turns one into a thread, and `sessions::resolve` makes that the
+        // caller's problem instead of this function's.
+        //
+        // `c` lists every conversation.
+        KeyCode::Char('c') => Some(Action::Sessions(sessions::Request::List)),
+        // `b` — the branches of the selected run's thread: the turns, which one
+        // the head is on, and every leaf a revert left behind, each named.
+        KeyCode::Char('b') => Some(Action::Sessions(sessions::Request::Open(
+            app.selected_agent()?.id.clone(),
+        ))),
+        // `v` undoes the last turn and `u` puts it back — the pair OpenCode
+        // ships as `revert`/`unrevert`.
+        //
+        // Neither is behind `Overlay::Confirm`, and that is a decision rather
+        // than an omission. That overlay's frame reads "this cannot be undone",
+        // which is true of `x` on a webhook and false of every verb here:
+        // `revert_to` keeps every row and every parent edge on purpose, and
+        // `move_head` exists precisely so the head can be put back. Making a
+        // reversible act wear an irreversible warning teaches the user to click
+        // through the warning that matters. What these do instead is name the
+        // way back in the same breath — see `sessions::rewind`.
+        KeyCode::Char('v') => Some(Action::Sessions(sessions::Request::Rewind(
+            app.selected_agent()?.id.clone(),
+        ))),
+        KeyCode::Char('u') => Some(Action::Sessions(sessions::Request::Restore(
+            app.selected_agent()?.id.clone(),
+        ))),
+        // `f` forks at the head: a second conversation from this point, sharing
+        // the prefix rather than copying it. It writes one row and destroys
+        // nothing, so it asks nothing either.
+        KeyCode::Char('f') => Some(Action::Sessions(sessions::Request::Fork(
+            app.selected_agent()?.id.clone(),
+        ))),
         _ => None,
     }
 }
@@ -1926,32 +2474,13 @@ fn apply_slash(app: &mut App, slash: command::Slash) -> Option<Action> {
                 app.push(Entry::Notice(format!("{usage:<18} {what}")));
             }
         }
-        Slash::Harness(kind) => {
-            let changed = app.harness != kind;
-            app.harness = kind;
-            // Conversations belong to a harness, so carrying the old session
-            // cursor across would try to resume a conversation the new harness
-            // has never heard of.
-            app.resume = Resume::Fresh;
-            app.session = None;
-            if changed {
-                // Model names do not survive the crossing. `claude-sonnet-4-5`
-                // means nothing to OpenCode or AGY, so keeping either the
-                // requested or the reported name would hand the new harness a
-                // model it rejects — and the switch would look like it simply
-                // did not work. Dropping to `None` lets each harness choose its
-                // own default, which is what switching harness should mean.
-                app.model = None;
-                app.reported_model = None;
-                // Spend belongs to the conversation being abandoned. Carrying
-                // it over showed `$0.11` next to AGY, which had charged nothing.
-                app.cost_usd = 0.0;
-            }
-            app.push(Entry::Notice(format!(
-                "{} from the next turn — fresh conversation, its own default model",
-                kind.label()
-            )));
-        }
+        // Handed straight back rather than applied here. Switching harness used
+        // to mean *dropping* the conversation — fresh resume, no session, no
+        // model — with the whole thread sitting in the graph unread. Carrying it
+        // across needs a summary, a summary needs a model, and Jod has no model
+        // client: so the first half of this is a run, and a run belongs to the
+        // loop. `perform` decides whether one is owed at all.
+        Slash::Harness(kind) => return Some(Action::SwitchHarness(kind)),
         Slash::Model(model) => {
             let said = match &model {
                 Some(m) => format!("model: {m}"),
@@ -2008,6 +2537,10 @@ fn apply_slash(app: &mut App, slash: command::Slash) -> Option<Action> {
             app.transcript.clear();
             app.scroll_to_bottom();
             app.push(Entry::Notice("new conversation".into()));
+            // Jod's conversation as well as the harness's. Without this, a
+            // conversation handed over by `/harness` would keep collecting the
+            // turns of the fresh one that replaced it.
+            return Some(Action::NewThread);
         }
         Slash::Sessions => {
             app.go(Workspace::Fleet);
@@ -2020,6 +2553,8 @@ fn apply_slash(app: &mut App, slash: command::Slash) -> Option<Action> {
                 app.resume = Resume::Session(session.clone());
                 app.session = Some(session.clone());
                 app.push(Entry::Notice(format!("continuing {session}")));
+                // The cursor moved to a thread Jod's binding does not follow.
+                return Some(Action::NewThread);
             }
             app::Resolved::Verbatim(raw) => {
                 app.resume = Resume::Session(raw.clone());
@@ -2034,6 +2569,7 @@ fn apply_slash(app: &mut App, slash: command::Slash) -> Option<Action> {
                         "continuing {raw} — not one of the agents listed, passing it on as typed"
                     )));
                 }
+                return Some(Action::NewThread);
             }
             app::Resolved::NoSession(agent) => {
                 app.push(Entry::Notice(format!(
@@ -2340,6 +2876,13 @@ fn bounded(ceiling: PermissionPolicy, wanted: PermissionPolicy) -> PermissionPol
 /// are watching, and a delegation that goes off on its own. It used to hard-code
 /// `None` for both, which is how "tell Jod to schedule this" became a request it
 /// could answer but not carry out.
+///
+/// `conversation` and `system` are parameters for the same reason. Only the
+/// caller knows whether a run continues something — Jod cannot infer it, and
+/// guessing welds unrelated work into one transcript — and only the caller knows
+/// whether this is the first turn after a handoff, which is the one turn that
+/// has to bring its context with it.
+#[allow(clippy::too_many_arguments)]
 async fn spawn(
     jod: &Arc<Jod>,
     app: &App,
@@ -2347,15 +2890,21 @@ async fn spawn(
     prompt: String,
     resume: Resume,
     tools: Option<ToolAccess>,
+    conversation: RunConversation,
+    system: Option<String>,
 ) -> Result<String> {
     let agent = jod
-        .spawn_agent(SpawnRequest {
+        .spawn_agent_in(SpawnRequest {
             name: crate::default_name(&prompt),
             // From the app, not the options: `/harness` and `/model` change
             // these mid-session, and a spawn must use what is current.
             harness: app.harness,
             prompt,
-            system: None,
+            // A handed-over transcript is framing, not something anybody said.
+            // Folded into the prompt it would become the opening *user* turn of
+            // the new conversation — the exact bug `SpawnRequest::system` was
+            // added to fix.
+            system,
             cwd: opts.cwd.clone(),
             model: app.model.clone(),
             // The live mode, clamped by the one the process was launched with.
@@ -2374,7 +2923,9 @@ async fn spawn(
             // Decided by the caller — see the parameter's own doc. Each of the
             // two call sites says which situation it is in and why.
             tools,
-        })
+        },
+            conversation,
+        )
         .await?;
     Ok(agent.id)
 }
@@ -2506,6 +3057,10 @@ mod tests {
         App::new(harness, None, Resume::Fresh)
     }
 
+    /// `/harness` no longer moves the app itself — it hands the switch back,
+    /// because carrying the conversation across needs a run first. The move it
+    /// eventually makes is [`point_at`], and everything this test asserted about
+    /// the old arm still has to hold there.
     #[test]
     fn switching_harness_drops_the_old_model() {
         let mut app = app_on(HarnessKind::ClaudeCode);
@@ -2514,7 +3069,15 @@ mod tests {
         app.model = Some("opus".into());
         app.cost_usd = 0.11;
 
-        apply_slash(&mut app, command::Slash::Harness(HarnessKind::OpenCode));
+        let action = apply_slash(&mut app, command::Slash::Harness(HarnessKind::OpenCode));
+        assert_eq!(action, Some(Action::SwitchHarness(HarnessKind::OpenCode)));
+        point_at(
+            &mut app,
+            &mut Thread::default(),
+            HarnessKind::OpenCode,
+            None,
+            None,
+        );
 
         // Neither name may survive: OpenCode rejects both, and passing either
         // made the switch look like it had not happened at all.
@@ -2522,6 +3085,9 @@ mod tests {
         assert_eq!(app.reported_model, None);
         assert_eq!(app.cost_usd, 0.0);
         assert_eq!(app.harness, HarnessKind::OpenCode);
+        // The harness session belonged to the harness being left.
+        assert_eq!(app.session, None);
+        assert_eq!(app.resume, Resume::Fresh);
     }
 
     #[test]
@@ -2537,13 +3103,271 @@ mod tests {
         assert!(app.status().contains("claude-opus-5"));
     }
 
+    /// Re-selecting the harness you are on must change nothing at all. It used
+    /// to reset the session cursor either way — a "no-op" that silently threw
+    /// away the conversation you were in the middle of — and it must not become
+    /// an error instead: `Store::switch_harness` refuses a same-harness move,
+    /// and passing that refusal to the screen would answer a harmless keystroke
+    /// with a failure.
     #[test]
     fn re_selecting_the_same_harness_keeps_the_chosen_model() {
         let mut app = app_on(HarnessKind::ClaudeCode);
         app.model = Some("haiku".into());
-        apply_slash(&mut app, command::Slash::Harness(HarnessKind::ClaudeCode));
+        app.session = Some("claude-session-1".into());
+        app.resume = Resume::Session("claude-session-1".into());
+        app.cost_usd = 0.11;
+
+        let action = apply_slash(&mut app, command::Slash::Harness(HarnessKind::ClaudeCode));
+        assert_eq!(action, Some(Action::SwitchHarness(HarnessKind::ClaudeCode)));
+        assert_eq!(
+            crossing(None, &app, &Thread::default(), HarnessKind::ClaudeCode),
+            Crossing::Stay,
+            "nothing to summarise, nothing to hand over, nothing to reset"
+        );
+
         // Nothing crossed a harness boundary, so the choice stands.
         assert_eq!(app.model.as_deref(), Some("haiku"));
+        assert_eq!(app.session.as_deref(), Some("claude-session-1"));
+        assert_eq!(app.cost_usd, 0.11);
+    }
+
+    // ---- switching harness ----------------------------------------------
+
+    /// A conversation with something in it, bound to the chat box the way a
+    /// handoff binds one.
+    fn talking_into(s: &RealStore, harness: HarnessKind) -> (App, Thread) {
+        use jod_core::conversation::NewMessage;
+        let c = s.new_conversation(harness, "/tmp", Some("opus")).unwrap();
+        s.append_message(&c.id, NewMessage::user("port the parser"))
+            .unwrap();
+        s.append_message(
+            &c.id,
+            NewMessage::new(jod_core::conversation::Role::Assistant, "ported it"),
+        )
+        .unwrap();
+        let mut app = app_on(harness);
+        app.session = Some("session-1".into());
+        app.resume = Resume::Session("session-1".into());
+        (
+            app,
+            Thread {
+                conversation: Some(c.id),
+                ..Thread::default()
+            },
+        )
+    }
+
+    fn pending(thread: &Thread, to: HarnessKind) -> PendingSwitch {
+        PendingSwitch {
+            to,
+            run: "run-summariser".into(),
+            conversation: thread.conversation.clone().expect("a bound conversation"),
+        }
+    }
+
+    /// The whole point of the verb: end up somewhere else, holding what you had.
+    /// Before this, `/harness` set `resume = Fresh`, `session = None`,
+    /// `model = None` and walked away from the conversation entirely.
+    #[test]
+    fn a_switch_lands_on_a_new_conversation_on_the_target_harness() {
+        let s = store();
+        let (mut app, mut thread) = talking_into(&s, HarnessKind::ClaudeCode);
+        let was = thread.conversation.clone().unwrap();
+
+        finish_crossing(
+            &s,
+            &mut app,
+            &mut thread,
+            &pending(&thread, HarnessKind::OpenCode),
+            "the parser is ported; tests are green",
+        );
+
+        assert_eq!(app.harness, HarnessKind::OpenCode);
+        let now = thread.conversation.clone().expect("bound to the new one");
+        assert_ne!(now, was, "a new conversation, not the old one relabelled");
+
+        let landed = s.conversation(&now).unwrap().unwrap();
+        assert_eq!(landed.harness_kind(), Some(HarnessKind::OpenCode));
+        assert_eq!(landed.forked_from.as_deref(), Some(was.as_str()));
+        // ...and the summary is in it, visibly, not only in the replay.
+        let live = s.live_window(&now).unwrap();
+        assert_eq!(live.len(), 1, "the thread became one turn: {live:?}");
+        assert!(live[0].text.contains("the parser is ported"));
+
+        // The original is still there and still on its own harness.
+        let left = s.conversation(&was).unwrap().unwrap();
+        assert_eq!(left.harness_kind(), Some(HarnessKind::ClaudeCode));
+    }
+
+    /// Landing on the new conversation is not enough on its own: the new harness
+    /// has no session to be resumed into, and nothing in `runner` can stream a
+    /// transcript at one. So the summary has to travel in the next spawn's
+    /// system framing, exactly once.
+    #[test]
+    fn the_summary_crosses_into_the_first_turn_and_not_the_second() {
+        let s = store();
+        let (mut app, mut thread) = talking_into(&s, HarnessKind::ClaudeCode);
+
+        finish_crossing(
+            &s,
+            &mut app,
+            &mut thread,
+            &pending(&thread, HarnessKind::OpenCode),
+            "the parser is ported; tests are green",
+        );
+
+        let carried = thread.carried.clone().expect("context for the first turn");
+        assert!(carried.contains("the parser is ported"));
+        assert!(
+            carried.contains("not instructions to"),
+            "framed as a record rather than a fresh instruction: {carried}"
+        );
+        // The next turn is recorded in the conversation the switch minted, so
+        // the thread does not fragment the moment it crosses.
+        assert_eq!(
+            thread.binding(),
+            RunConversation::Existing(thread.conversation.clone().unwrap())
+        );
+
+        // `Action::Send` drops it after one spawn. From there the new harness
+        // has a session of its own and is holding the context itself.
+        thread.carried = None;
+        assert_eq!(thread.carried, None);
+    }
+
+    /// AGY has no import path, so its context can only arrive as prose. That is
+    /// the one loss a user could still avoid by choosing another target, so it
+    /// is said before the move — and asked of the store, so there is no second
+    /// copy of the rule to drift.
+    #[test]
+    fn a_lossy_target_says_so_before_the_move_and_a_lossless_one_stays_quiet() {
+        let s = store();
+        let (_, thread) = talking_into(&s, HarnessKind::ClaudeCode);
+        let id = thread.conversation.unwrap();
+
+        let warned = lossy_warning(&s, &id, HarnessKind::Agy).expect("AGY loses structure");
+        assert!(warned.contains("no import path"), "{warned}");
+        assert_eq!(lossy_warning(&s, &id, HarnessKind::OpenCode), None);
+    }
+
+    /// The failure that matters most. A half-completed switch — new harness, no
+    /// context — is strictly worse than one that did not happen, because the
+    /// conversation is still there and the user no longer has a way back to it.
+    ///
+    /// And nothing is invented to fill the gap: `Store::switch_harness` treats an
+    /// empty summary as an error precisely so a thread cannot be compacted into
+    /// nothing, and a placeholder here would walk straight through that guard.
+    #[test]
+    fn a_summary_that_came_back_empty_leaves_the_conversation_where_it_was() {
+        let s = store();
+        let (mut app, mut thread) = talking_into(&s, HarnessKind::ClaudeCode);
+        let was = thread.conversation.clone().unwrap();
+
+        finish_crossing(
+            &s,
+            &mut app,
+            &mut thread,
+            &pending(&thread, HarnessKind::OpenCode),
+            "   \n  ",
+        );
+
+        assert_eq!(app.harness, HarnessKind::ClaudeCode, "still where it was");
+        assert_eq!(app.session.as_deref(), Some("session-1"), "still resumable");
+        assert_eq!(thread.conversation.as_deref(), Some(was.as_str()));
+        assert_eq!(thread.carried, None);
+        assert_eq!(s.conversations(10).unwrap().len(), 1, "nothing was minted");
+        assert_eq!(s.live_window(&was).unwrap().len(), 2, "nothing compacted");
+        assert!(s.compactions(&was).unwrap().is_empty());
+        assert!(
+            app.transcript.iter().any(|e| matches!(
+                e,
+                Entry::Notice(n) if n.contains("empty") && n.contains("Claude Code")
+            )),
+            "and it says so: {:?}",
+            app.transcript
+        );
+    }
+
+    /// Switching before anything has been said is the most ordinary moment to do
+    /// it. Spending a model call to summarise nothing would make the cheapest
+    /// case the slowest one.
+    #[test]
+    fn an_empty_thread_crosses_without_paying_for_a_summary() {
+        let s = store();
+        let app = app_on(HarnessKind::ClaudeCode);
+        let empty = s
+            .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
+            .unwrap();
+        let bound = Thread {
+            conversation: Some(empty.id),
+            ..Thread::default()
+        };
+
+        assert_eq!(
+            crossing(Some(&s), &app, &bound, HarnessKind::OpenCode),
+            Crossing::Bare
+        );
+        // Nothing said and nothing bound is the same answer, reached without
+        // touching the database at all.
+        assert_eq!(
+            crossing(Some(&s), &app, &Thread::default(), HarnessKind::OpenCode),
+            Crossing::Bare
+        );
+        // ...and so is having no database.
+        assert_eq!(
+            crossing(None, &app, &bound, HarnessKind::OpenCode),
+            Crossing::Bare
+        );
+    }
+
+    /// A thread with something in it owes a summary, and who writes it depends
+    /// on whether the harness being left can still be asked. Immediately after a
+    /// previous switch it cannot — it has no session — so the record has to
+    /// travel in the prompt, and that is exactly the case that would be missed.
+    #[test]
+    fn a_harness_with_no_session_is_handed_the_record_to_summarise() {
+        let s = store();
+        let (mut app, thread) = talking_into(&s, HarnessKind::ClaudeCode);
+        let id = thread.conversation.clone().unwrap();
+
+        assert_eq!(
+            crossing(Some(&s), &app, &thread, HarnessKind::OpenCode),
+            Crossing::Summarise {
+                conversation: id.clone(),
+                material: None,
+            },
+            "it has the session, so it can be asked about what it is holding"
+        );
+
+        app.resume = Resume::Fresh;
+        let Crossing::Summarise { material, .. } =
+            crossing(Some(&s), &app, &thread, HarnessKind::OpenCode)
+        else {
+            panic!("a thread with turns in it owes a summary");
+        };
+        let material = material.expect("nothing to resume, so the record travels");
+        assert!(material.contains("port the parser"));
+    }
+
+    /// The binding is Jod's conversation, not the harness's session, and it does
+    /// not follow the cursor when the cursor moves somewhere else. Without this,
+    /// a conversation handed over by `/harness` would keep collecting the turns
+    /// of the fresh one that replaced it.
+    #[test]
+    fn starting_or_resuming_something_else_drops_the_binding() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        assert_eq!(
+            apply_slash(&mut app, command::Slash::New),
+            Some(Action::NewThread)
+        );
+        assert_eq!(
+            apply_slash(&mut app, command::Slash::Resume("s-99".into())),
+            Some(Action::NewThread)
+        );
+
+        // An unbound thread records each turn in a conversation of its own,
+        // which is what every turn did before a handoff existed.
+        assert_eq!(Thread::default().binding(), RunConversation::New);
     }
 
     fn press(app: &mut App, code: KeyCode) -> Option<Action> {
@@ -4754,6 +5578,7 @@ mod tests {
             &jod,
             &mut app,
             &options(),
+            &mut Thread::default(),
             Action::ToggleSchedule("nightly-inbox".into()),
         )
         .await;
@@ -4775,6 +5600,7 @@ mod tests {
             &jod,
             &mut app,
             &options(),
+            &mut Thread::default(),
             Action::DeleteSchedule("nightly-inbox".into()),
         )
         .await;
@@ -4794,7 +5620,7 @@ mod tests {
             Action::Forget("reljod".into()),
             Action::OpenScheduleRun("nightly-inbox".into()),
         ] {
-            perform(&jod, &mut app, &options(), action).await;
+            perform(&jod, &mut app, &options(), &mut Thread::default(), action).await;
             let last = format!("{:?}", app.transcript.last().unwrap());
             assert!(last.contains(NO_STORE), "{last}");
         }
@@ -4855,7 +5681,7 @@ mod tests {
         let jod = jod_with(store());
         let mut app = app_on(HarnessKind::ClaudeCode);
         let action = apply_slash(&mut app, command::Slash::Thinking).unwrap();
-        perform(&jod, &mut app, &options(), action).await;
+        perform(&jod, &mut app, &options(), &mut Thread::default(), action).await;
 
         let mut next = app_on(HarnessKind::ClaudeCode);
         assert!(next.show_thinking, "a fresh app starts at the default");
@@ -4928,6 +5754,7 @@ mod tests {
             &jod,
             &mut app,
             &options(),
+            &mut Thread::default(),
             Action::Config(config::Request::Set(
                 config::Pref::Thinking,
                 config::Value::Flag(false),
@@ -4936,7 +5763,14 @@ mod tests {
         .await;
         app.transcript.clear();
 
-        perform(&jod, &mut app, &options(), Action::Config(config::Request::List)).await;
+        perform(
+            &jod,
+            &mut app,
+            &options(),
+            &mut Thread::default(),
+            Action::Config(config::Request::List),
+        )
+        .await;
         assert_eq!(app.transcript.len(), config::Pref::ALL.len());
         let listed = format!("{:?}", app.transcript);
         for pref in config::Pref::ALL {
@@ -4998,6 +5832,7 @@ mod tests {
             &jod,
             &mut app,
             &options(),
+            &mut Thread::default(),
             Action::Config(config::Request::List),
         )
         .await;
@@ -5057,6 +5892,97 @@ mod tests {
                 predicate: "prefers".into(),
                 object: "linear".into(),
             })
+        );
+    }
+
+    // ---- the conversation graph, from the fleet ----
+
+    fn on_fleet_with_a_run() -> App {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.agents = vec![agent_line("run-7", None)];
+        app.go(Workspace::Fleet);
+        app.reconcile();
+        app
+    }
+
+    /// The audit's complaint was that `tips`, `branch_at`, `children` and
+    /// `sibling_pager` had no production call site. These five keys are that
+    /// call site, and this asserts the keypress produces the verb rather than
+    /// `None` — the state the whole feature was in before.
+    #[test]
+    fn the_fleet_keys_reach_the_conversation_graph() {
+        for (key, expected) in [
+            ('c', sessions::Request::List),
+            ('b', sessions::Request::Open("run-7".into())),
+            ('v', sessions::Request::Rewind("run-7".into())),
+            ('u', sessions::Request::Restore("run-7".into())),
+            ('f', sessions::Request::Fork("run-7".into())),
+        ] {
+            let mut app = on_fleet_with_a_run();
+            assert_eq!(
+                press(&mut app, KeyCode::Char(key)),
+                Some(Action::Sessions(expected)),
+                "`{key}` on the fleet"
+            );
+        }
+    }
+
+    /// The run under the cursor is what these act on, so with no cursor they
+    /// must do nothing — not act on a thread the user cannot see. `c` is the
+    /// exception by design: the list is the way *out* of an empty fleet.
+    #[test]
+    fn a_conversation_verb_with_no_run_selected_does_nothing_at_all() {
+        for key in ['b', 'v', 'u', 'f'] {
+            let mut app = app_on(HarnessKind::ClaudeCode);
+            app.go(Workspace::Fleet);
+            assert_eq!(press(&mut app, KeyCode::Char(key)), None, "`{key}`");
+        }
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.go(Workspace::Fleet);
+        assert_eq!(
+            press(&mut app, KeyCode::Char('c')),
+            Some(Action::Sessions(sessions::Request::List))
+        );
+    }
+
+    /// The five letters must stay letters everywhere they are not verbs. `f`
+    /// especially: it is the first letter of half the sentences typed into the
+    /// box, and a fork triggered from the chat line would be unexplainable.
+    #[test]
+    fn the_conversation_keys_are_still_text_in_the_chat_box() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        type_line(&mut app, "fix the buggy version urgently, cheers");
+        assert_eq!(app.input, "fix the buggy version urgently, cheers");
+        assert_eq!(app.workspace, Workspace::Chat);
+    }
+
+    /// Reachability all the way to the database: the key produces the action,
+    /// and the action's payload is one `sessions::apply` away from a sentence.
+    /// This is the join the two halves are otherwise tested either side of.
+    #[test]
+    fn the_key_a_user_presses_and_the_store_it_lands_in_are_the_same_thread() {
+        let store = store();
+        let conversation = store
+            .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
+            .expect("a conversation");
+        store
+            .append_message(
+                &conversation.id,
+                jod_core::conversation::NewMessage::user("port the parser")
+                    .from_run("run-7")
+                    .at_seq(1),
+            )
+            .expect("a message from run-7");
+
+        let mut app = on_fleet_with_a_run();
+        let Some(Action::Sessions(request)) = press(&mut app, KeyCode::Char('b')) else {
+            panic!("`b` on the fleet asks for the selected run's thread");
+        };
+
+        let said = sessions::apply(&store, &request, 0).join("\n");
+        assert!(
+            said.contains("port the parser"),
+            "the run id under the cursor found its thread: {said}"
         );
     }
 }

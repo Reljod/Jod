@@ -1438,6 +1438,38 @@ impl HarnessSwitch {
     }
 }
 
+impl Store {
+    /// The prior context as text, for a caller that can only put it in a
+    /// prompt.
+    ///
+    /// [`Store::handoff`] gives each harness the best carrier it has, and two of
+    /// the three are structured. **Jod cannot currently deliver either of them.**
+    /// [`Handoff::StreamJson`] needs the harness started with
+    /// `--input-format stream-json`, and [`crate::runner`] does not start Claude
+    /// Code that way; [`Handoff::Import`] needs somebody to run
+    /// `opencode import`, and nothing does. Until a launch path exists for them,
+    /// the only carrier that actually *arrives* is the prompt one — so a caller
+    /// wiring a real handoff today needs this rather than a carrier it cannot
+    /// use.
+    ///
+    /// Deliberately the AGY rendering for every target, framing included: the
+    /// text says the block is a record of prior work and not instructions, which
+    /// matters more, not less, when the receiving harness is one that would have
+    /// accepted structure. Empty when the conversation has nothing live.
+    ///
+    /// Delete this the day the runner can stream a transcript in. It is a
+    /// statement about what Jod can deliver, not about what the harnesses
+    /// accept.
+    pub fn handoff_text(&self, conversation_id: &str) -> Result<String> {
+        match self.handoff(conversation_id, HarnessKind::Agy)? {
+            Handoff::PromptPrefix { text } => Ok(text),
+            other => Err(JodError::Invalid(format!(
+                "expected a prompt carrier, got {other:?}"
+            ))),
+        }
+    }
+}
+
 /// What a harness will accept as prior context.
 ///
 /// Three variants because there are three answers, not because the enum is

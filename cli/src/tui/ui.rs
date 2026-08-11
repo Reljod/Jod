@@ -118,7 +118,7 @@ pub fn draw(f: &mut Frame, app: &App) -> usize {
 
     // Last, so they float over everything.
     if app.panel && side.is_none() {
-        draw_floating_panel(f, app);
+        draw_floating_panel(f, app, body);
     }
     draw_completions(f, app, input);
     draw_overlay(f, app);
@@ -219,7 +219,7 @@ fn banner() -> Vec<String> {
 /// remember you launched.
 fn caption(width: usize) -> &'static str {
     const LINES: [&str; 3] = [
-        "jod · an orchestrator, not a chat window · Ctrl-K opens every screen",
+        "jod · an orchestrator, not a chat window · Alt-K opens every screen",
         "jod · an orchestrator, not a chat window",
         "jod",
     ];
@@ -352,8 +352,18 @@ fn draw_panel(f: &mut Frame, app: &App, area: Rect) {
 }
 
 /// The panel when the terminal is too narrow to put it beside anything.
-fn draw_floating_panel(f: &mut Frame, app: &App) {
-    let area = centred(f.area(), PANEL, f.area().height.saturating_sub(2));
+///
+/// Still on the right and still inside the body, rather than centred over the
+/// whole screen: it is *the right-hand panel* whichever way it is drawn, and a
+/// float that covered the keybar would hide the keys while you were looking for
+/// them.
+fn draw_floating_panel(f: &mut Frame, app: &App, body: Rect) {
+    let width = PANEL.min(body.width);
+    let area = Rect {
+        x: body.x + body.width - width,
+        width,
+        ..body
+    };
     f.render_widget(Clear, area);
     draw_panel(f, app, area);
 }
@@ -375,8 +385,14 @@ fn draw_sessions(f: &mut Frame, app: &App, area: Rect) {
             Span::styled(" harness ", fg(MUTED)),
             Span::styled(app.harness.label().to_string(), fg(AGENT)),
         ])),
+        // A dash rather than `$0.0000`: four decimal places of nothing is four
+        // decimal places of noise on a thirty-column panel.
         ListItem::new(Line::from(Span::styled(
-            format!(" spend   ${:.4}", app.cost_usd),
+            if app.cost_usd > 0.0 {
+                format!(" spend   ${:.4}", app.cost_usd)
+            } else {
+                " spend   —".to_string()
+            },
             fg(MUTED),
         ))),
         ListItem::new(Line::from(Span::styled(
@@ -386,7 +402,7 @@ fn draw_sessions(f: &mut Frame, app: &App, area: Rect) {
     ];
 
     if app.agents.is_empty() {
-        for chunk in wrap("no runs yet — Ctrl-B delegates one", inner, 1) {
+        for chunk in wrap("no runs yet — Alt-B delegates one", inner, 1) {
             items.push(ListItem::new(Span::styled(format!(" {chunk}"), fg(MUTED))));
         }
     }
@@ -538,8 +554,11 @@ fn draw_keybar(f: &mut Frame, app: &App, area: Rect) {
     }
     let ws = app.workspace;
     let (left, right) = match &app.overlay {
-        Overlay::WhichKey => ("Ctrl-K … waiting for a key".to_string(), "Esc cancels"),
-        Overlay::WhichKeyNew => ("Ctrl-K n … s schedule · g goal · h hook · m memory · t task".to_string(), "Esc cancels"),
+        // The leader's own spelling comes from `keys`, not from a literal here:
+        // these two lines named the chord in prose, so the drift net could not
+        // see them and they went on teaching `Ctrl-K` after the keymap moved.
+        Overlay::WhichKey => (keys::which_key_hint(false), "Esc cancels"),
+        Overlay::WhichKeyNew => (keys::which_key_hint(true), "Esc cancels"),
         Overlay::Keymap => ("the keymap — any key closes it".to_string(), "Esc closes"),
         Overlay::Confirm { .. } => ("y confirms · anything else cancels".to_string(), "Esc cancels"),
         Overlay::Prompt { .. } => ("⏎ accepts · Esc cancels".to_string(), "Esc cancels"),
@@ -595,7 +614,7 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     ];
     // The status grows — a spinner, a clock, a background count, a queue — so
     // the badge has to yield rather than collide with it. Running them together
-    // produced `1 queuedCtrl-X stop`, which reads as neither.
+    // produced `1 queuedAlt-X stop`, which reads as neither.
     let used = mode_width + 3 + left.chars().count() + 2;
     let room = (area.width as usize).saturating_sub(used);
     if !badge.is_empty() && room >= badge.chars().count() + 2 {
@@ -760,11 +779,7 @@ fn draw_which_key(f: &mut Frame, app: &App) {
         })
         .collect();
 
-    let title = if making {
-        " Ctrl-K n · new… "
-    } else {
-        " Ctrl-K "
-    };
+    let title = keys::which_key_title(making);
     let panel = centred(f.area(), (widest + 10) as u16, (rows.len() + 2) as u16);
     f.render_widget(Clear, panel);
     f.render_widget(
@@ -814,7 +829,7 @@ fn draw_keymap(f: &mut Frame, app: &App) {
     );
 }
 
-/// A destructive verb on a bare letter is one fat-fingered `Ctrl-K h x` away
+/// A destructive verb on a bare letter is one fat-fingered `Alt-K h x` away
 /// from losing a secret, so the confirmation **names the thing**.
 fn draw_confirm(f: &mut Frame, verb: &str, what: &str) {
     let question = format!("{verb} {what}?");
@@ -971,7 +986,7 @@ fn draw_fleet(f: &mut Frame, app: &App, area: Rect) {
     let show_harness = inner >= 30;
 
     let items: Vec<ListItem> = if rows.is_empty() {
-        empty("no agents yet — Ctrl-B delegates one")
+        empty("no agents yet — Alt-B delegates one")
     } else {
         rows.iter()
             .enumerate()
@@ -2562,6 +2577,22 @@ mod tests {
         a
     }
 
+    /// Every screen with something on it, for the sweeps that have to see the
+    /// populated form of a list as well as its empty state.
+    fn populated() -> App {
+        let mut a = memory_app();
+        a.agents = vec![agent_line("aaa11111", "port the parser", "running")];
+        a.schedules = schedules_app().schedules;
+        a.goals = goals_app().goals;
+        a.hooks = hooks_app().hooks;
+        a.activity = activity_app().activity;
+        a.tasks = vec![task("t1", "port the parser", Some("scout"), "open")];
+        a.team = Some("crew".into());
+        a.graph = GraphView::new("prefers-spec-first");
+        a.push(Entry::Agent("here is the summary".into()));
+        a
+    }
+
     // ---- the completion popup ----
 
     #[test]
@@ -2767,7 +2798,7 @@ mod tests {
     #[test]
     fn the_wordmark_survives_a_notice_and_goes_when_the_conversation_starts() {
         let mut a = app();
-        a.push(Entry::Notice("Ctrl-K opens every screen".into()));
+        a.push(Entry::Notice("Alt-K opens every screen".into()));
         assert!(rendered(&a, 100, 24).contains("an orchestrator"));
 
         a.push(Entry::You("summarise my inbox".into()));
@@ -3033,6 +3064,89 @@ mod tests {
         }
     }
 
+    // ---- what the screens teach ----
+
+    /// The complement to `keys.rs`'s scan, which walks the tables and the two
+    /// which-key accessors — it cannot see a chord named in *prose*, and prose
+    /// is exactly where `Ctrl-K` and `Ctrl-B` survived the move to Alt: in the
+    /// splash caption and in two empty-state sentences, which no table owns.
+    ///
+    /// So this one reads the finished screen instead of the source. Anything a
+    /// pixel teaches is caught, whatever string it came from. `Ctrl-C` is the
+    /// one survivor by design: leaving must never depend on finding the right
+    /// table.
+    ///
+    /// **`Overlay::Keymap` is excluded deliberately, and this is not a gap to
+    /// close.** That overlay *is* the global table on display, and the global
+    /// table is the one surface where Ctrl is legitimately taught — readline's
+    /// `Ctrl-U` and `Ctrl-W` are not ours to move. It is covered from the other
+    /// side by `keys::tests::the_verbs_are_advertised_on_alt_and_the_editing_
+    /// keys_on_ctrl`, which pins those two present and `Ctrl-K`/`Ctrl-G`/
+    /// `Ctrl-B`/`Ctrl-X`/`Ctrl-T`/`Ctrl-O`/`Ctrl-L` absent. Deleting the
+    /// exclusion here would delete that coverage and gain nothing.
+    ///
+    /// Everything renders wide, at 150×40, because clipping makes a
+    /// buffer-reading assertion lie in *both* directions: a `Ctrl-C quit` cut
+    /// mid-token leaves a bare `Ctrl-` and fails correct code, and a stale
+    /// `Ctrl-B` truncated off the right edge passes broken code. The count at
+    /// the end is what proves the width was actually enough — a scan that
+    /// found nothing has not passed, it has failed to look.
+    #[test]
+    fn no_screen_teaches_a_ctrl_chord_that_is_not_ctrl_c() {
+        let overlays = || {
+            [
+                Overlay::None,
+                Overlay::WhichKey,
+                Overlay::WhichKeyNew,
+                Overlay::Confirm {
+                    verb: "delete".into(),
+                    what: "pr-opened".into(),
+                },
+                Overlay::Prompt {
+                    label: "task".into(),
+                    value: "port the parser".into(),
+                    intent: PromptIntent::New(Workspace::Tasks),
+                },
+            ]
+        };
+        let mut kept = 0usize;
+        for ws in Workspace::ALL {
+            for overlay in overlays() {
+                for panel in [false, true] {
+                    // A fresh app as well as a populated one, so the splash
+                    // caption and the empty states are both on screen.
+                    for mut a in [app(), populated()] {
+                        a.go(ws);
+                        a.overlay = overlay.clone();
+                        a.panel = panel;
+                        let screen = rendered(&a, 150, 40);
+                        for (i, line) in screen.lines().enumerate() {
+                            let mut rest = line;
+                            while let Some(at) = rest.find("Ctrl-") {
+                                let tail = &rest[at + "Ctrl-".len()..];
+                                assert!(
+                                    tail.starts_with('C'),
+                                    "{ws:?} row {i} teaches a Ctrl verb: {line}"
+                                );
+                                kept += 1;
+                                rest = tail;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // The anti-vacuity guard. `Ctrl-C quit` is on the keybar of every
+        // screen, so a run that saw none of it did not prove the screens are
+        // clean — it proved the render was too narrow to hold the token, which
+        // is exactly the width at which a stale chord would also have been
+        // clipped away unseen.
+        assert!(
+            kept > 0,
+            "no Ctrl-C reached the buffer, so nothing was really scanned"
+        );
+    }
+
     // ---- the keybar and the status bar ----
 
     /// Nielsen #6: the four keys you need right now are on screen, so you never
@@ -3077,7 +3191,7 @@ mod tests {
     }
 
     /// Regression: the status and the hints were run together on a narrow
-    /// terminal — `1 queuedCtrl-X stop`, which reads as neither. The hints now
+    /// terminal — `1 queuedAlt-X stop`, which reads as neither. The hints now
     /// live on their own row, so the rule is tested on both.
     #[test]
     fn the_bars_drop_their_right_hand_side_rather_than_colliding_with_it() {
@@ -3132,7 +3246,7 @@ mod tests {
                 "{ws:?} missing from the menu:\n{screen}"
             );
         }
-        assert!(screen.contains("Ctrl-K"));
+        assert!(screen.contains("Alt-K"));
         assert!(screen.contains("Esc cancels"));
     }
 
@@ -3214,7 +3328,7 @@ mod tests {
 
     // ---- confirmation and prompts ----
 
-    /// `x` deleting a webhook silently is one fat-fingered `Ctrl-K h x` away
+    /// `x` deleting a webhook silently is one fat-fingered `Alt-K h x` away
     /// from losing a secret, so the confirmation names the thing.
     #[test]
     fn a_destructive_confirmation_names_what_it_is_about_to_destroy() {
@@ -4054,27 +4168,5 @@ mod tests {
     fn cutting_a_long_string_says_it_was_cut() {
         assert_eq!(cut("short", 10), "short");
         assert_eq!(cut("a-very-long-name", 8), "a-very-…");
-    }
-
-    #[test]
-    fn scratch_dump() {
-        let mut a = app();
-        a.panel = true;
-        a.context_tokens = 158_000;
-        a.cost_usd = 0.0412;
-        a.agents = vec![
-            agent_line("a3f91c22aa", "port the parser to the new AST", "running"),
-            agent_line("b1c2d3e4ff", "write the docs", "completed"),
-        ];
-        a.advance(125_000);
-        println!("=== splash + panel, 130x28 ===\n{}", rendered(&a, 130, 28));
-        let mut b = app();
-        b.panel = true;
-        b.context_tokens = 158_000;
-        b.agents = a.agents.clone();
-        b.push(Entry::You("summarise my inbox".into()));
-        b.push(Entry::Agent("Three items need you.".into()));
-        println!("=== talking, 130x28 ===\n{}", rendered(&b, 130, 28));
-        println!("=== narrow 70x20, panel open ===\n{}", rendered(&a, 70, 20));
     }
 }
