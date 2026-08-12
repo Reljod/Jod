@@ -406,6 +406,46 @@ impl Store {
         })
     }
 
+    /// Every conversation with something waiting to be said to it.
+    ///
+    /// The list the tick walks. Deliberately just the addresses: whether each
+    /// one may be spoken to *now* is [`Store::plan_injection`]'s question, and
+    /// answering it in the query would put the judgement in two places.
+    ///
+    /// Oldest queue first, so a session that has been waiting since before
+    /// lunch is not overtaken by one queued a second ago.
+    pub fn conversations_awaiting_delivery(&self) -> Result<Vec<String>> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT conversation_id, MIN(id) AS first FROM pending_deliveries
+              WHERE state = 'queued' GROUP BY conversation_id ORDER BY first",
+        )?;
+        let rows = stmt.query_map([], |r| r.get(0))?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// Whether a turn of this conversation is in flight.
+    ///
+    /// The one fact [`Store::plan_injection`] cannot work out for itself, and
+    /// the reason the whole queue exists: a prompt is assembled once, at spawn,
+    /// so anything spliced in afterwards arrives in a context that was built
+    /// before it existed.
+    ///
+    /// Read from the runs that wrote into this conversation, which is the same
+    /// join `conversation_for_run` uses in the other direction — there is no
+    /// column saying a conversation is busy, and a second one would be a fact
+    /// that could disagree with the runs themselves.
+    pub fn conversation_is_busy(&self, conversation_id: &str) -> Result<bool> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        let busy: i64 = conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM messages m JOIN runs r ON r.id = m.run_id
+                             WHERE m.conversation_id = ?1 AND r.status = 'running')",
+            params![conversation_id],
+            |r| r.get(0),
+        )?;
+        Ok(busy != 0)
+    }
+
     /// Decide what, if anything, to say to this conversation now.
     ///
     /// A value rather than an action, the same shape and for the same reason as

@@ -1934,3 +1934,57 @@ that work and expires, so a stale one cannot arm a later delete. A work with no
 leases deletes on the first command, because there is nothing on disk to lose —
 a confirmation that fires when there is no risk is one people learn to type
 through without reading.
+
+## A unit test proves a function; only an entry-point test proves a feature
+
+This repository has now produced the same defect at scale twice. The first
+entry about it — "Six guards were green, and none of them were guarding" —
+turned out not to be enough on its own, so here is the general form.
+
+An audit of one large build found **twenty-four functions with no caller
+outside their own tests**, and five user-visible promises broken behind a fully
+green suite:
+
+- answering a card never reached the agent — the handler that injects a queued
+  answer at a turn boundary had no caller, so an answer sat queued for ever
+  unless the agent happened to re-poll for it;
+- nothing could claim a worktree — a session was pointed at a read-only
+  checkout and told to claim one before writing, with no way to do so, making
+  the instruction unfollowable;
+- no pull request was ever recorded — schema, stream parser and forge poller
+  all built, all tested, referenced by exactly one file: their own;
+- discovered commands never reached the palette they were discovered for;
+- a work never closed when its last task completed, because the three functions
+  that would have noticed were called by nothing.
+
+Every component passed its tests. Every seam between components was missing.
+
+**The reason the tests cannot see it is structural, not careless.** A unit test
+calls the function directly, so it proves the function works when called — and
+says nothing about whether anything calls it. The test and the missing caller
+are independent, so the suite stays green at exactly the moment the feature
+stops existing. Adding more unit tests makes this *worse*, because the green
+count grows while coverage of the actual product does not.
+
+Three things follow, and they are cheap:
+
+**Wire it before you finish it.** A function with no caller is not a
+half-finished feature, it is a zero-finished one with convincing decoration.
+Landing the caller in the same change as the function is the only reliable
+moment — afterwards there is nothing to notice the gap.
+
+**Write at least one test that fails when the caller is removed.** Not when the
+function breaks: when the *wiring* breaks. That is a different test and usually
+a coarser one — drive the entry point a person or an agent would actually
+reach, and assert the observable effect.
+
+**Grep for callers before believing a green suite.** `grep -rn 'name(' --include=*.rs | grep -v test`
+is fifteen seconds and it is the only check that caught any of these. Three of
+the five were found not by testing but by *trying to use the feature* — writing
+the end-to-end script, or giving the module a caller and watching what it
+produced.
+
+The counting error underneath all of it is worth naming: a test count measures
+how much code has been exercised, and it is routinely read as measuring how
+much of the product works. Those diverge silently, and the gap between them is
+invisible from inside the suite.

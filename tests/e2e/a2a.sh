@@ -36,6 +36,32 @@ AREA=a2a
 # them there when the suite ends. That is not a test artefact, it is a broken
 # machine — and it was discovered the hard way.
 export JOD_NO_MCP_INSTALL=1
+
+# A comment is not an enforcement. If somebody edits the line above out, or an
+# environment arrives with it unset, this suite must stop rather than quietly
+# reconfigure the machine it is running on.
+case "${JOD_NO_MCP_INSTALL:-}" in
+  "" | 0)
+    echo "FAIL  JOD_NO_MCP_INSTALL is not set, so \`jod daemon\` would rewrite this"
+    echo "      machine's real harness configs to point at a scratch database."
+    echo "      Refusing to run."
+    exit 1
+    ;;
+esac
+
+# And the effect, not only the flag. These are the three files
+# `mcp_install::ensure_registered` writes; they are fingerprinted here and
+# checked again at the end, so a future change that reaches them is caught by
+# the suite rather than by the developer wondering why their tools broke.
+fingerprint_configs() {
+  for f in "$HOME/.claude.json" \
+           "$HOME/.config/opencode/opencode.jsonc" \
+           "$HOME/.config/opencode/opencode.json" \
+           "$HOME/.gemini/config/mcp_config.json"; do
+    if [ -e "$f" ]; then stat -c '%n %Y %s' "$f" 2>/dev/null; else echo "$f absent"; fi
+  done
+}
+CONFIGS_BEFORE="$(fingerprint_configs)"
 # ---------------------------------------------------------------------------
 
 rm -rf "$JOD_HOME"; mkdir -p "$JOD_HOME"
@@ -202,7 +228,9 @@ section "3. the human says one thing, to one agent, once"
 run jod team msg crew --from reljod --to asker \
   "Use your jod MCP tools now. Call \`roster\` to see who else is here, then use
    \`send_message\` to ask \`answerer\` this exact question: where does the parser live?
-   Then stop. Do not use \`ask\`, and do not wait for the answer."
+   Then, in the same turn, use \`send_message\` once more to send the word HELLO to
+   \`nobody-here\` — that one is expected to be refused, and reporting the refusal is
+   the point of it. Then stop. Do not use \`ask\`, and do not wait for the answer."
 runsh "q \"SELECT id, sender, recipient, substr(body,1,40) AS body, state FROM team_messages\""
 
 section "4. the tick delivers it — nobody types \`jod team wake\`"
@@ -234,6 +262,18 @@ check "a fresh question is depth zero" \
   test "$(val "SELECT depth FROM team_messages WHERE id=${QUESTION_ID:-0}")" = 0
 check "it went through Jod's MCP tools rather than the CLI" \
   test "$(val "SELECT count(*) FROM events WHERE $JOD_TOOL_CALL")" -gt 0
+
+# A8, on purpose rather than by accident: mail to somebody who cannot receive
+# it becomes visible, never a silence. The sender is told at the call, and the
+# attempt is on the record for whoever reads the traffic afterwards.
+runsh "q \"SELECT id, sender, recipient, state, substr(detail,1,60) AS detail
+             FROM team_messages WHERE state='undeliverable'\""
+check "a message to somebody who is not here is recorded rather than lost" \
+  test "$(val "SELECT count(*) FROM team_messages WHERE state='undeliverable' AND recipient='nobody-here'")" -ge 1
+check "it says why, rather than merely failing" \
+  test -n "$(val "SELECT detail FROM team_messages WHERE recipient='nobody-here' LIMIT 1")"
+check "and it was never delivered to anybody" \
+  test "$(val "SELECT count(*) FROM team_messages WHERE recipient='nobody-here' AND delivered=0")" = 0
 
 section "6. the tick delivers the question, and the answer comes back in-thread"
 run jod daemon --once
@@ -368,7 +408,17 @@ AFTER="$(val "SELECT count(*) FROM runs")"
 echo "runs before the tick: ${BEFORE:-?}   after: ${AFTER:-?}"
 check "a paused thread starts no further model call" test "${BEFORE:-0}" = "${AFTER:-1}"
 
-section "11. summary"
+section "11. the machine this ran on is as it was found"
+# The guard at the top of the file, checked by its effect rather than trusted.
+if [ "$CONFIGS_BEFORE" = "$(fingerprint_configs)" ]; then
+  check "no harness config on this machine was touched" true
+else
+  echo "-- before --"; echo "$CONFIGS_BEFORE"
+  echo "-- after --";  fingerprint_configs
+  check "no harness config on this machine was touched" false
+fi
+
+section "12. summary"
 echo "roles ran on:       asker=$ASKER_HARNESS  answerer=$ANSWERER_HARNESS"
 echo "shared thread id:   ${THREAD:-<none>}"
 echo "deepest hop:        $(val "SELECT COALESCE(MAX(depth),0) FROM team_messages WHERE state != 'undeliverable'")"

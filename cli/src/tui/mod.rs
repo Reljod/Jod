@@ -35,6 +35,7 @@ mod picker;
 mod rail;
 mod secret;
 mod sessions;
+mod todo;
 pub mod ui;
 mod workspace;
 

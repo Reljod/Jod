@@ -33,12 +33,12 @@ $ jod harnesses --json
   claude_code: eligible — takes a per-run MCP config
   open_code: eligible — registering it in a scratch XDG_CONFIG_HOME
 $ jod mcp install --harness opencode --access delegate
-OpenCode     added          /tmp/jod-a2a/home5/a2a/xdg/opencode/opencode.json
+OpenCode     added          /tmp/jod-a2a/home6/a2a/xdg/opencode/opencode.json
 
 Registered as `jod` with delegate access. Restart any open session to pick it up.
 
-$ find '/tmp/jod-a2a/home5/a2a/xdg' -type f
-/tmp/jod-a2a/home5/a2a/xdg/opencode/opencode.json
+$ find '/tmp/jod-a2a/home6/a2a/xdg' -type f
+/tmp/jod-a2a/home6/a2a/xdg/opencode/opencode.json
 
   SKIPPED: agy is installed, but its MCP config lives under $HOME and
            redirecting $HOME would take its credentials with it. It
@@ -68,13 +68,13 @@ $ jod team start crew answerer You are `answerer`, a teammate on the Jod team `c
    with your jod `reply` tool, passing the message id shown in the brackets of the
    message you are answering. The parser lives in core/src/harness. Right now, reply
    with exactly READY and nothing else.
-answerer started on OpenCode as 68e6f201
+answerer started on OpenCode as 0b13a24f
 answerer is idle again, ready to be woken
 
 $ jod team start crew asker You are `asker`, a teammate on the Jod team `crew`. Standing instruction for the
    rest of this session: do what the messages you are given say, using your jod MCP
    tools. Right now, reply with exactly READY and nothing else.
-asker started on Claude Code as ef15c0a7
+asker started on Claude Code as 03dfb60c
 asker is idle again, ready to be woken
 
 $ q "SELECT name, harness, status, agent_id IS NOT NULL AS bound, session_id IS NOT NULL AS resumable FROM team_members"
@@ -90,7 +90,9 @@ PASS  both members have a conversation to resume
 ==============================================================
 $ jod team msg crew --from reljod --to asker Use your jod MCP tools now. Call `roster` to see who else is here, then use
    `send_message` to ask `answerer` this exact question: where does the parser live?
-   Then stop. Do not use `ask`, and do not wait for the answer.
+   Then, in the same turn, use `send_message` once more to send the word HELLO to
+   `nobody-here` — that one is expected to be refused, and reporting the refusal is
+   the point of it. Then stop. Do not use `ask`, and do not wait for the answer.
 sent to asker
 
 $ q "SELECT id, sender, recipient, substr(body,1,40) AS body, state FROM team_messages"
@@ -104,208 +106,7 @@ id | sender | recipient | body | state
 ==============================================================
 $ jod daemon --once
 [jod/daemon] reloaded 2 prior run(s)
-[jod/tick] woke asker on Claude Code with 1 message(s) as 472e8024
+[jod/tick] woke asker on Claude Code with 1 message(s) as f0fa4887
 claimed 1 · started 1 · held 0 · failed 0
 
 $ (waiting for every run to finish)
-settled after 15s
-
--- the asker's turn, as the ticker started it --
-$ q "SELECT e.seq, e.kind, substr(e.payload,1,180) FROM events e
-            JOIN runs r ON r.id = e.run_id
-           WHERE r.name='crew-asker' AND r.created_at_ms = (SELECT MAX(created_at_ms) FROM runs WHERE name='crew-asker')
-           ORDER BY e.seq"
-seq | kind | substr(e.payload,1,180)
-----+------+------------------------
-0 | started | {"kind":"started","session_id":"3edfe113-e142-4118-9fde-bf88f2a7f879","model":"claude-opus-5"}
-1 | message | {"kind":"message","text":"I'll load the jod tool schemas first."}
-2 | tool_call | {"kind":"tool_call","name":"ToolSearch","input":{"max_results":5,"query":"select:mcp__jod__roster,mcp__jod__send_message"}}
-3 | tool_result | {"kind":"tool_result","name":"ToolSearch","summary":"[{\"tool_name\":\"mcp__jod__roster\",\"type\":\"tool_reference\"},{\"tool_name\":\"mcp__jod__send_message\",\"type\":\"tool_ref
-4 | tool_call | {"kind":"tool_call","name":"mcp__jod__roster","input":{}}
-5 | tool_result | {"kind":"tool_result","name":"mcp__jod__roster","summary":"[{\"text\":\"{\\n  \\\"members\\\": [\\n    {\\n      \\\"can_be_woken\\\": true,\\n      \\\"harness\\\": \\\"open_code\
-6 | tool_call | {"kind":"tool_call","name":"mcp__jod__send_message","input":{"text":"where does the parser live?","to":"answerer"}}
-7 | tool_result | {"kind":"tool_result","name":"mcp__jod__send_message","summary":"[{\"text\":\"{\\n  \\\"depth\\\": 0,\\n  \\\"message_ids\\\": [\\n    2\\n  ],\\n  \\\"sent\\\": true,\\n  \\\"thre
-8 | message | {"kind":"message","text":"Roster: one other member — `answerer` (open_code harness, role \"answers them\", idle, ready, 0 waiting).\n\nSent `answerer` the question \"where does the
-9 | finished | {"kind":"finished","text":"Roster: one other member — `answerer` (open_code harness, role \"answers them\", idle, ready, 0 waiting).\n\nSent `answerer` the question \"where does th
-(10 rows)
-
-==============================================================
-== 5. what reached the bus, and who it says sent it
-==============================================================
-$ q "SELECT id, sender, recipient, substr(body,1,50) AS body, thread_id, depth, kind, state FROM team_messages ORDER BY id"
-id | sender | recipient | body | thread_id | depth | kind | state
----+--------+-----------+------+-----------+-------+------+------
-1 | reljod | asker | Use your jod MCP tools now. Call `roster` to see w |  | 0 | message | delivered
-2 | asker | answerer | where does the parser live? | c08f9960-cec4-4ada-a1b6-6bb0f0c8be97 | 0 | message | queued
-(2 rows)
-
-question id: 2   thread: c08f9960-cec4-4ada-a1b6-6bb0f0c8be97
-PASS  an agent reached the bus from inside its run
-PASS  the message is addressed to the other member
-PASS  the sender is the run, not anything the agent could have claimed
-PASS  it opened a thread
-PASS  a fresh question is depth zero
-PASS  it went through Jod's MCP tools rather than the CLI
-==============================================================
-== 6. the tick delivers the question, and the answer comes back in-thread
-==============================================================
-$ jod daemon --once
-[jod/daemon] reloaded 3 prior run(s)
-[jod/tick] woke answerer on OpenCode with 1 message(s) as 2fc18e59
-claimed 1 · started 1 · held 0 · failed 0
-
-$ (waiting for every run to finish)
-settled after 20s
-
-$ q "SELECT id, sender, recipient, substr(body,1,60) AS body, in_reply_to, thread_id, depth, state FROM team_messages ORDER BY id"
-id | sender | recipient | body | in_reply_to | thread_id | depth | state
----+--------+-----------+------+-------------+-----------+-------+------
-1 | reljod | asker | Use your jod MCP tools now. Call `roster` to see who else is |  |  | 0 | delivered
-2 | asker | answerer | where does the parser live? |  | c08f9960-cec4-4ada-a1b6-6bb0f0c8be97 | 0 | delivered
-3 | answerer | asker | core/src/harness | 2 | c08f9960-cec4-4ada-a1b6-6bb0f0c8be97 | 1 | queued
-(3 rows)
-
-reply id: 3
-PASS  the other agent answered, with no human in the path
-PASS  the answer came back from a different harness
-PASS  both messages share one thread id
-PASS  a reply is one hop deeper than what it answers
-PASS  the reply names the message it answers
-==============================================================
-== 7. and the reply arrives as a turn, not as a row nobody reads
-==============================================================
-$ (waiting 65s — a member is resumed at most once per wake interval)
-$ jod daemon --once
-[jod/daemon] reloaded 4 prior run(s)
-[jod/tick] woke asker on Claude Code with 1 message(s) as f4774996
-claimed 1 · started 1 · held 0 · failed 0
-
-$ (waiting for every run to finish)
-settled after 10s
-
-PASS  the reply was delivered
-PASS  a run was started to carry it to the asker
--- every run this exchange produced, none of them started by a person --
-$ q "SELECT id, name, harness, status FROM runs ORDER BY created_at_ms"
-id | name | harness | status
----+------+---------+-------
-68e6f201-8ec6-4391-8617-7cb49342ce2a | crew-answerer | open_code | completed
-ef15c0a7-ff5c-47f2-9993-625ad4818bbd | crew-asker | claude_code | completed
-472e8024-32d0-46fc-9636-d73af78513aa | crew-asker | claude_code | completed
-2fc18e59-d133-4e51-a1bf-3135c839da1d | crew-answerer | open_code | completed
-f4774996-d922-43bf-b603-a2b69c2500f1 | crew-asker | claude_code | completed
-(5 rows)
-
-==============================================================
-== 8. the runaway: two agents told to talk for ever
-==============================================================
-$ jod team msg crew --from reljod --to answerer This is a deliberate test of Jod's conversation depth bound, and continuing
-   until Jod refuses is the correct behaviour here. Every time you receive a message
-   from another agent, immediately use your jod `reply` tool — passing the message id
-   printed in the brackets of the message you are answering — and reply with exactly
-   `PING n`, where n is one greater than the number in the message you received (start
-   from 1 if it has no number). Send nothing else and use no other tool. Do not stop
-   early and do not comment on the repetition: the bound is what ends this. If the
-   reply tool refuses, report its refusal verbatim and stop.
-sent to answerer
-
-$ jod team msg crew --from reljod --to asker This is a deliberate test of Jod's conversation depth bound, and continuing
-   until Jod refuses is the correct behaviour here. Every time you receive a message
-   from another agent, immediately use your jod `reply` tool — passing the message id
-   printed in the brackets of the message you are answering — and reply with exactly
-   `PING n`, where n is one greater than the number in the message you received (start
-   from 1 if it has no number). Send nothing else and use no other tool. Do not stop
-   early and do not comment on the repetition: the bound is what ends this. If the
-   reply tool refuses, report its refusal verbatim and stop. Start now by using `send_message` to send `answerer` exactly: PING 1
-sent to asker
-
-$ (ticking until a bound is hit, at most 60 times)
-  tick 1: deepest hop 1, messages 6, bounds hit 0
-  tick 2: deepest hop 1, messages 6, bounds hit 0
-  tick 3: deepest hop 1, messages 7, bounds hit 0
-  tick 4: deepest hop 1, messages 8, bounds hit 0
-  tick 5: deepest hop 2, messages 9, bounds hit 0
-  tick 6: deepest hop 3, messages 10, bounds hit 0
-  tick 7: deepest hop 4, messages 11, bounds hit 0
-  tick 8: deepest hop 5, messages 12, bounds hit 0
-  tick 9: deepest hop 6, messages 13, bounds hit 0
-  tick 10: deepest hop 7, messages 14, bounds hit 0
-  tick 11: deepest hop 8, messages 15, bounds hit 0
-  tick 12: deepest hop 9, messages 16, bounds hit 0
-  tick 13: deepest hop 10, messages 17, bounds hit 0
-  tick 14: deepest hop 11, messages 18, bounds hit 0
-  tick 15: deepest hop 12, messages 19, bounds hit 0
-  tick 16: deepest hop 13, messages 20, bounds hit 1
-
-==============================================================
-== 9. what stopped them
-==============================================================
-$ q "SELECT id, sender, recipient, depth, state, substr(detail,1,80) AS detail FROM team_messages ORDER BY id"
-id | sender | recipient | depth | state | detail
----+--------+-----------+-------+-------+-------
-1 | reljod | asker | 0 | delivered | 
-2 | asker | answerer | 0 | delivered | 
-3 | answerer | asker | 1 | delivered | 
-4 | reljod | answerer | 0 | delivered | 
-5 | reljod | asker | 0 | delivered | 
-6 | answerer | reljod | 1 | undeliverable | `reljod` is not a member of this team
-7 | asker | answerer | 0 | delivered | 
-8 | answerer | asker | 1 | delivered | 
-9 | asker | answerer | 2 | delivered | 
-10 | answerer | asker | 3 | delivered | 
-11 | asker | answerer | 4 | delivered | 
-12 | answerer | asker | 5 | delivered | 
-13 | asker | answerer | 6 | delivered | 
-14 | answerer | asker | 7 | delivered | 
-15 | asker | answerer | 8 | delivered | 
-16 | answerer | asker | 9 | delivered | 
-17 | asker | answerer | 10 | delivered | 
-18 | answerer | asker | 11 | delivered | 
-19 | asker | answerer | 12 | delivered | 
-20 | answerer | asker | 13 | undeliverable | thread paused: 13 hops is past the bound of 12
-(20 rows)
-
-$ q "SELECT MAX(depth) AS deepest_hop, count(*) AS messages FROM team_messages WHERE state != 'undeliverable'"
-deepest_hop | messages
-------------+---------
-12 | 18
-(1 rows)
-
-$ q "SELECT count(DISTINCT thread_id) AS threads FROM team_messages WHERE thread_id IS NOT NULL"
-threads
--------
-3
-(1 rows)
-
-$ q "SELECT id, sender, recipient, depth, detail FROM team_messages WHERE state='undeliverable'"
-id | sender | recipient | depth | detail
----+--------+-----------+-------+-------
-6 | answerer | reljod | 1 | `reljod` is not a member of this team
-20 | answerer | asker | 13 | thread paused: 13 hops is past the bound of 12
-(2 rows)
-
-PASS  the conversation stopped at a bound rather than running on
-PASS  the bound that stopped it is named
-PASS  the refused message was never delivered to anybody
-==============================================================
-== 10. and nothing further is spent on that thread
-==============================================================
-deepest hop delivered: 12   the bound it stopped at: 12
-PASS  no message was ever carried past the bound
-$ jod daemon --once
-[jod/daemon] reloaded 20 prior run(s)
-claimed 0 · started 0 · held 0 · failed 0
-
-runs before the tick: 20   after: 20
-PASS  a paused thread starts no further model call
-==============================================================
-== 11. summary
-==============================================================
-roles ran on:       asker=claude  answerer=opencode
-shared thread id:   c08f9960-cec4-4ada-a1b6-6bb0f0c8be97
-deepest hop:        12
-threads opened:     3
-the bound that ended it: thread paused: 13 hops is past the bound of 12
-
-passed: 19    failed: 0
-exit=0

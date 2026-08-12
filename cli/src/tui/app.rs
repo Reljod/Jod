@@ -18,6 +18,7 @@ use super::delivery::Verdict;
 use super::graph::GraphView;
 use super::diff;
 use super::fleet::TreeState;
+use super::todo;
 use super::mention::Mention;
 use super::picker::Picker;
 use super::rail::RailState;
@@ -62,6 +63,11 @@ pub enum Entry {
     /// difference between watching an agent work and being able to trust it
     /// afterwards.
     Diff(diff::Edit),
+    /// The agent's plan, updating in place.
+    ///
+    /// One block per turn, not one per revision — see `todo.rs`. `App::apply`
+    /// replaces the existing block rather than pushing a new one.
+    Plan(Vec<todo::Item>),
     /// A line the harness printed that we could not classify.
     Raw(String),
 }
@@ -980,6 +986,24 @@ impl App {
         self.jobs.iter().filter(|j| j.is_running()).count()
     }
 
+    /// Replace the plan on screen, or start one.
+    ///
+    /// In place, and *where it already was*. A harness rewrites its todo list
+    /// once per item finished, so appending would put fifteen near-identical
+    /// lists between two sentences — and moving the block to the bottom on each
+    /// revision would be a second kind of noise in place of the first. Its
+    /// position says when the agent started planning, which does not change.
+    pub fn revise_plan(&mut self, plan: Vec<todo::Item>) {
+        match self
+            .transcript
+            .iter_mut()
+            .rfind(|e| matches!(e, Entry::Plan(_)))
+        {
+            Some(existing) => *existing = Entry::Plan(plan),
+            None => self.push(Entry::Plan(plan)),
+        }
+    }
+
     pub fn push(&mut self, entry: Entry) {
         self.transcript.push(entry);
         // New output pulls the view back to the bottom only if it was already
@@ -1722,10 +1746,19 @@ impl App {
             }
             AgentEvent::Message { text } => self.push(Entry::Agent(text.clone())),
             AgentEvent::ToolCall { name, input } => {
+                // A todo call *is* the plan block, and gets no summary line of
+                // its own. The line would be pushed again on every revision —
+                // a dozen `⚙ TodoWrite` rows around one block — which is the
+                // noise this whole slice exists to remove.
+                if let Some(plan) = input.as_ref().and_then(|i| todo::from_tool(name, i)) {
+                    self.revise_plan(plan);
+                    return;
+                }
                 // A file edit becomes a diff; everything else keeps its
-                // one-line summary. The call still gets its `Tool` line above
-                // the diff, so the transcript reads as "it did this, and here
-                // is what it was".
+                // one-line summary. An edit *does* keep its `Tool` line above
+                // the diff — unlike the plan it is pushed once per edit, and it
+                // makes the transcript read as "it did this, and here is what
+                // it was".
                 self.push(Entry::Tool {
                     name: name.clone(),
                     detail: input.as_ref().and_then(tool_detail),

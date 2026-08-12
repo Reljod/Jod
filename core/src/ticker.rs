@@ -52,7 +52,7 @@ use crate::harness::{HarnessKind, PermissionPolicy, Resume, SpawnRequest};
 use crate::heartbeat::{self, Beat, Heartbeat, Observed, SweepReport, Verdict, Watching};
 use crate::monitor::{self, LocalProbes, Observation, Probes};
 use crate::schedule::{self, Fire, FireOutcome, Goal, Misfire, Overlap, Schedule};
-use crate::service::{AgentStatus, Jod};
+use crate::service::{AgentStatus, Jod, RunConversation};
 use crate::store::{NewFact, Origin, Store};
 use crate::team::{self, MemberStatus};
 
@@ -996,6 +996,122 @@ impl Ticker {
     ///   session is left asleep — resuming it would start a fresh context and
     ///   it would answer having forgotten everything — and the mail is
     ///   annotated rather than left silently sitting there.
+    /// Say to each idle session whatever has been queued for it.
+    ///
+    /// **The missing half of E2.S7**, and the reason it was missing is worth
+    /// keeping written down: [`Store::plan_injection`] was built, tested and
+    /// called by nothing, so a card answered from the rail was queued and then
+    /// waited for the agent to happen to ask for it over MCP. An answer nobody
+    /// fetched sat queued for ever, and the rail said *queued* about answers
+    /// the agent already had. The queue was never the missing piece; the caller
+    /// was.
+    ///
+    /// The shape is deliberately [`Ticker::tick_mail`]'s, because the two
+    /// answer the same question about different addressees — a conversation
+    /// here, a member there:
+    ///
+    /// - **The judgement is not in this function.** `plan_injection` decides
+    ///   whether to speak and what to say, and returns a value; everything here
+    ///   is the spawn and the bookkeeping.
+    /// - **Nothing is settled until the spawn has worked.** A failed spawn
+    ///   leaves the answers queued for the next tick rather than marking them
+    ///   delivered to a run that never started.
+    /// - **A session with no harness session to resume is left alone**, for the
+    ///   same reason `wake_order` refuses one: delivering into a fresh context
+    ///   would have the agent answer having forgotten the work the card was
+    ///   about.
+    ///
+    /// The turn is injected into the conversation the answers belong to
+    /// ([`RunConversation::Existing`]), never a new one. A fresh conversation
+    /// would resume the harness session while forking Jod's record of it, and
+    /// the transcript the human is reading would stop growing.
+    pub async fn tick_deliveries(&self, _now_ms: i64) -> Result<TickReport> {
+        let Some(store) = self.jod.store().cloned() else {
+            return Ok(TickReport::default());
+        };
+        let waiting = store.conversations_awaiting_delivery()?;
+        let mut report = TickReport {
+            claimed: waiting.len(),
+            ..Default::default()
+        };
+
+        for conversation_id in waiting {
+            let busy = store.conversation_is_busy(&conversation_id)?;
+            let Some(injection) = store.plan_injection(&conversation_id, busy)? else {
+                report.held += 1;
+                continue;
+            };
+            // A queue outliving its conversation is not a state the schema
+            // permits — the rows cascade with it — so this is held rather than
+            // settled: if it ever happens, something is wrong that a tick
+            // should not be papering over by marking answers undeliverable.
+            let Some(conversation) = store.conversation(&conversation_id)? else {
+                report.held += 1;
+                continue;
+            };
+            let Resume::Session(session_id) = store.resume_for(&conversation_id)? else {
+                report.held += 1;
+                continue;
+            };
+            let Some(harness) = conversation.harness_kind() else {
+                report.held += 1;
+                continue;
+            };
+
+            let mut req = SpawnRequest {
+                name: format!("answers-{}", &conversation_id[..conversation_id.len().min(8)]),
+                harness,
+                prompt: injection.prompt.clone(),
+                // The session's framing arrived with the turn that started it
+                // and is already in the conversation being resumed.
+                system: None,
+                cwd: std::path::PathBuf::from(&conversation.cwd),
+                model: None,
+                permission: PermissionPolicy::default(),
+                resume: Resume::Session(session_id),
+                // Enough of Jod to act on what it has just been told. An agent
+                // handed a decision it may not carry out is a turn spent
+                // saying so — the same reasoning that gives a woken teammate
+                // its tools in `tick_mail`.
+                tools: Some(crate::harness::ToolAccess::Delegate),
+                ..SpawnRequest::default()
+            };
+            // The conversation's own model and permission, not this process's
+            // defaults: a queued answer arriving on a different model from the
+            // turn that raised the card is a different agent answering.
+            crate::service::prefer_conversation_settings(&mut req, &conversation);
+
+            match self
+                .jod
+                .spawn_agent_in(req, RunConversation::Existing(conversation_id.clone()))
+                .await
+            {
+                Ok(agent) => {
+                    let ids: Vec<i64> = injection.items.iter().map(|p| p.id).collect();
+                    // Which run carried it, so "did it actually arrive" stays
+                    // answerable — and the card's own `delivery` moves in the
+                    // same transaction, because the rail reads the card while
+                    // this reads the queue.
+                    store.mark_deliveries_delivered(&ids, Some(&agent.id))?;
+                    report.started += 1;
+                    eprintln!(
+                        "[jod/tick] delivered {} queued item(s) to {} as {}",
+                        injection.count(),
+                        &conversation_id[..conversation_id.len().min(8)],
+                        &agent.id[..agent.id.len().min(8)]
+                    );
+                }
+                Err(e) => {
+                    report.failed += 1;
+                    // Still queued, so the next tick tries again. Nothing was
+                    // marked delivered to a run that does not exist.
+                    eprintln!("[jod/tick] could not deliver to {conversation_id}: {e}");
+                }
+            }
+        }
+        Ok(report)
+    }
+
     pub async fn tick_mail(&self, now_ms: i64) -> Result<TickReport> {
         let Some(store) = self.jod.store().cloned() else {
             return Ok(TickReport::default());
@@ -2593,6 +2709,224 @@ mod tests {
     /// as `started + failed`, exactly as the monitor tests above do. Everything
     /// that decides *whether* to wake — the rate limit, the no-session rule,
     /// the busy rule — happens before the spawn and is asserted exactly.
+    /// E2.S7's other half: the handler that decides when a queued answer
+    /// reaches its session, and the caller that was missing for long enough
+    /// that every test of it stayed green while nothing ran it.
+    mod deliveries {
+        use super::*;
+        use crate::cards::NewCard;
+        use crate::conversation::{NewMessage, Role};
+        use crate::daemon::Tick;
+        use crate::delivery::{Kind, State};
+        use crate::harness::HarnessKind;
+        use crate::store::Store;
+
+        fn ticker_over(store: &Arc<Store>) -> Ticker {
+            Ticker::new(Jod::with_store(store.clone())).as_owner("t")
+        }
+
+        /// A conversation with a harness session to resume — the ordinary case,
+        /// and the only one anything may be delivered into.
+        fn session(store: &Store) -> String {
+            let c = store
+                .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
+                .unwrap();
+            store
+                .set_conversation_session(&c.id, Some("ses-1"))
+                .unwrap();
+            c.id
+        }
+
+        fn answered_card(store: &Store, conversation: &str, title: &str) -> i64 {
+            let card = store
+                .raise_card(NewCard {
+                    conversation_id: conversation.to_string(),
+                    title: title.to_string(),
+                    ..NewCard::default()
+                })
+                .unwrap();
+            store.answer_card(card.id, None, Some("yes, go ahead")).unwrap();
+            card.id
+        }
+
+        /// A run of this conversation, in whatever state, so `plan_injection`
+        /// can be asked the one question it cannot work out for itself.
+        fn run_in(store: &Store, conversation: &str, id: &str, status: &str) {
+            store
+                .save_run(&crate::store::StoredRun {
+                    id: id.into(),
+                    name: "worker".into(),
+                    harness: "claude_code".into(),
+                    status: status.into(),
+                    cwd: "/tmp".into(),
+                    session_id: Some("ses-1".into()),
+                    pid: None,
+                    pgid: None,
+                    created_at_ms: 1,
+                    summary: serde_json::Value::Null,
+                })
+                .unwrap();
+            store
+                .append_message(
+                    conversation,
+                    NewMessage::new(Role::Assistant, "working").from_run(id),
+                )
+                .unwrap();
+        }
+
+        #[tokio::test]
+        async fn a_tick_with_nothing_queued_speaks_to_nobody() {
+            let store = Arc::new(Store::in_memory().unwrap());
+            session(&store);
+            let report = ticker_over(&store).tick_deliveries(1).await.unwrap();
+            assert_eq!(report.claimed, 0);
+            assert_eq!(report.started + report.failed, 0);
+        }
+
+        /// The acceptance case. A test box has no supervisor for the spawn to
+        /// reach, so this asserts the tick got as far as attempting it — the
+        /// same way every other spawning test here does. What it proves is the
+        /// part that was missing: something *looks* at the queue.
+        #[tokio::test]
+        async fn an_answer_queued_against_an_idle_session_is_carried_by_a_turn() {
+            let store = Arc::new(Store::in_memory().unwrap());
+            let conversation = session(&store);
+            answered_card(&store, &conversation, "shall I use SQLite?");
+
+            let report = ticker_over(&store).tick_deliveries(1).await.unwrap();
+
+            assert_eq!(report.claimed, 1, "the queue was read");
+            assert_eq!(
+                report.started + report.failed,
+                1,
+                "an idle session with a queued answer is spoken to"
+            );
+            assert_eq!(report.held, 0);
+        }
+
+        /// The rule the whole queue exists for. The running turn's prompt was
+        /// assembled before this answer existed.
+        #[tokio::test]
+        async fn a_session_mid_turn_is_left_alone_and_its_answer_waits() {
+            let store = Arc::new(Store::in_memory().unwrap());
+            let conversation = session(&store);
+            run_in(&store, &conversation, "run-1", "running");
+            answered_card(&store, &conversation, "shall I rename the column?");
+
+            let report = ticker_over(&store).tick_deliveries(1).await.unwrap();
+
+            assert_eq!(report.held, 1);
+            assert_eq!(report.started + report.failed, 0, "a turn was interrupted");
+            assert_eq!(
+                store.pending_for(&conversation).unwrap().len(),
+                1,
+                "and nothing was lost"
+            );
+        }
+
+        /// Ten answers queued during one turn are one turn carrying ten, not
+        /// ten turns. A cost control, and the more coherent answer.
+        #[tokio::test]
+        async fn everything_queued_for_one_session_goes_in_one_turn() {
+            let store = Arc::new(Store::in_memory().unwrap());
+            let conversation = session(&store);
+            for i in 0..10 {
+                answered_card(&store, &conversation, &format!("question {i}"));
+            }
+
+            let report = ticker_over(&store).tick_deliveries(1).await.unwrap();
+
+            assert_eq!(report.claimed, 1, "ten answers, one session, one turn");
+            assert_eq!(report.started + report.failed, 1);
+        }
+
+        /// The same refusal `wake_order` makes for a member with no session:
+        /// delivering into a fresh context would have the agent answer having
+        /// forgotten what the card was about.
+        #[tokio::test]
+        async fn a_session_that_has_never_run_is_not_spoken_into_an_empty_context() {
+            let store = Arc::new(Store::in_memory().unwrap());
+            let c = store
+                .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
+                .unwrap();
+            answered_card(&store, &c.id, "shall I start?");
+
+            let report = ticker_over(&store).tick_deliveries(1).await.unwrap();
+
+            assert_eq!(report.held, 1);
+            assert_eq!(report.started + report.failed, 0);
+            assert_eq!(
+                store.pending_for(&c.id).unwrap()[0].state,
+                State::Queued,
+                "held, not marked delivered to a turn that never happened"
+            );
+        }
+
+        /// A failed spawn must leave the answer queued. Marking it delivered to
+        /// a run that never started is how an answer is lost silently — the
+        /// rail would show `delivered` and no agent would ever have heard it.
+        #[tokio::test]
+        async fn a_spawn_that_fails_leaves_the_answer_queued() {
+            let store = Arc::new(Store::in_memory().unwrap());
+            let conversation = session(&store);
+            let card = answered_card(&store, &conversation, "shall I?");
+
+            let report = ticker_over(&store).tick_deliveries(1).await.unwrap();
+
+            // No supervisor on a test box, so the spawn fails and this is the
+            // failure path rather than a contrivance.
+            if report.failed == 1 {
+                assert_eq!(
+                    store.pending_for(&conversation).unwrap().len(),
+                    1,
+                    "a failed spawn must not consume the answer"
+                );
+                assert_eq!(
+                    store.card(card).unwrap().unwrap().delivery,
+                    crate::cards::Delivery::Queued,
+                    "and the rail must not claim it arrived"
+                );
+            }
+        }
+
+        /// A queue that outlived its conversation would be counted as waiting
+        /// on every tick from now until the end of time.
+        #[tokio::test]
+        async fn a_queue_whose_conversation_is_gone_is_marked_undeliverable() {
+            let store = Arc::new(Store::in_memory().unwrap());
+            let c = store
+                .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
+                .unwrap();
+            store
+                .enqueue_delivery(&c.id, Kind::Human, "", "stop and show me the diff")
+                .unwrap();
+            store.delete_conversation(&c.id).unwrap();
+
+            // The row cascades with the conversation, so there is nothing left
+            // to deliver — which is the point: the queue does not outlive it.
+            let report = ticker_over(&store).tick_deliveries(1).await.unwrap();
+            assert_eq!(report.claimed, 0);
+        }
+
+        /// The guard the lesson of this build asks for: unit tests on an
+        /// uncalled function stay green for ever, so this one calls the tick
+        /// the daemon actually runs. Remove the `tick_deliveries` line from
+        /// `impl Tick for Ticker` and this fails.
+        #[tokio::test]
+        async fn the_daemons_tick_reads_the_delivery_queue() {
+            let store = Arc::new(Store::in_memory().unwrap());
+            let conversation = session(&store);
+            answered_card(&store, &conversation, "shall I use SQLite?");
+
+            let report = Tick::tick(&ticker_over(&store), 1_000_000).await.unwrap();
+
+            assert!(
+                report.claimed >= 1,
+                "the composite tick never looked at the delivery queue: {report:?}"
+            );
+        }
+    }
+
     mod mail {
         use super::*;
         use crate::harness::HarnessKind;

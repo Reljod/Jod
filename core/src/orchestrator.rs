@@ -512,15 +512,29 @@ fn roots_lines(brief: &Brief) -> Vec<PreambleLine> {
             }
         )));
     }
-    // D5, stated as the rule it is rather than as a description of the flags.
-    out.push(PreambleLine::shared(
-        "\nA read-only root is Reljod's real checkout, and he may be editing it while you \
-         read it. **Before you change, create, move or delete anything, claim a worktree.** \
-         Claiming cuts a branch of your own and gives you one writable root; the checkout \
-         stays beside it, readable, so you can still diff against what he is doing. A sibling \
-         session on the same repository in this work is offered the worktree you claimed \
-         before a second one is cut, so ask before you cut.",
-    ));
+    // D5, stated as the rule it is rather than as a description of the flags —
+    // and naming the verb, because a brief that says "claim a worktree" without
+    // saying what to call is an instruction an agent cannot act on. That is not
+    // hypothetical: `claim_lease` existed, was tested, and had no caller
+    // outside its own tests for as long as nothing named it.
+    out.push(PreambleLine::shared(match brief.tools {
+        Some(_) => "\nA read-only root is Reljod's real checkout, and he may be editing it \
+             while you read it. **Before you change, create, move or delete anything, call \
+             `claim_worktree`.** It cuts a branch of your own and makes that your one writable \
+             root; the checkout stays beside it, readable, so you can still diff against what \
+             he is doing. A sibling already working on the same repository in this work is \
+             offered its worktree instead of a second branch being cut — the answer says which \
+             happened, and if you are sharing one, read what is there before you change it. \
+             `release_worktree` gives it back when you are done; a tree with uncommitted work \
+             in it is kept rather than removed.",
+        // Honest about a session that has no way to obey. Telling it to claim
+        // would be telling it to call something it does not have.
+        None => "\nA read-only root is Reljod's real checkout, and he may be editing it while \
+             you read it. This session holds none of Jod's tools, so it has **no way to claim \
+             a worktree** — which means it has nowhere it may write. Do what the job needs \
+             read-only, and say plainly that you are blocked rather than changing anything in \
+             a root you were told not to change.",
+    }));
     out.push(PreambleLine::shared(
         "This is a convention, not a sandbox. Nothing here stops you writing outside your \
          roots; a write that lands in a read-only root raises a card with your name on it \
@@ -1484,7 +1498,8 @@ mod tests {
         let said = worker_preamble(&brief(HarnessKind::ClaudeCode, &roots, &[], &[]));
         assert!(said.contains("/repo` — **read-only**"), "{said}");
         assert!(said.contains("/repo-worktree` — **writable**"), "{said}");
-        assert!(said.contains("claim a worktree"));
+        // The verb by the name it is registered under, not a paraphrase.
+        assert!(said.contains("`claim_worktree`"), "{said}");
         // Roots are not a sandbox, and the preamble must not imply they are.
         assert!(said.contains("not a sandbox"));
     }

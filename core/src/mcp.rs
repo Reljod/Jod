@@ -455,6 +455,55 @@ pub fn catalogue() -> Vec<Tool> {
             schema: obj(json!({}), &[]),
         },
         Tool {
+            name: "claim_worktree",
+            description:
+                "Claim somewhere to write, before you change anything. Your roots start \
+                 read-only — they are Reljod's real checkout — and this cuts a branch and a \
+                 worktree of your own and makes that your one writable root, with the checkout \
+                 still beside it so you can diff against what he is editing. A sibling already \
+                 working on this repository is offered its worktree rather than a second branch \
+                 being cut. Call it once, when you first need to write; not at the start out of \
+                 habit.",
+            // **D5's explicit step, and the reason it has to be a tool.**
+            // "Detect the first write" has no harness-agnostic implementation —
+            // every harness spells its pre-write hook differently and two of
+            // the three barely have one — so the claim is something the agent
+            // *does*, not something Jod notices. An agent that cannot call this
+            // has been told to claim a worktree and given no way to obey, which
+            // makes the instruction in its preamble unfollowable.
+            //
+            // `delegate` rather than `read_only`: this cuts a branch and
+            // creates a directory. It is the one card-adjacent verb that
+            // changes the world outside the database.
+            needs: ToolAccess::Delegate,
+            schema: obj(
+                json!({
+                    "repo": text(
+                        "The repository to cut a branch of, as an absolute path. Defaults to \
+                         your first root — `list_roots` says what that is."
+                    )
+                }),
+                &[],
+            ),
+        },
+        Tool {
+            name: "release_worktree",
+            description:
+                "Give back a worktree you claimed. It is removed only when it is clean and its \
+                 branch is merged; otherwise it is kept and you are told why, because a \
+                 directory costs nothing and somebody's uncommitted afternoon does not. Your \
+                 writable root goes away either way, so claim again if you need to write more.",
+            needs: ToolAccess::Delegate,
+            schema: obj(
+                json!({
+                    "lease_id": int(
+                        "Which one. Omit when you hold exactly one, which is the ordinary case."
+                    )
+                }),
+                &[],
+            ),
+        },
+        Tool {
             name: "open_work",
             description:
                 "Open a work — one intent, its own board, its own colour — and start the first \
@@ -822,6 +871,8 @@ impl Server {
             "ask_question" => self.ask_question(args).await,
             "request_secret" => self.request_secret(args),
             "list_roots" => self.list_roots(),
+            "claim_worktree" => self.claim_worktree(args),
+            "release_worktree" => self.release_worktree(args),
             "open_work" => self.open_work(args).await,
             "roster" => self.roster(),
             "read_messages" => self.read_messages(),
@@ -1583,6 +1634,164 @@ impl Server {
                 })
                 .collect::<Vec<_>>(),
         )
+    }
+
+    /// Claim somewhere to write — D5's explicit step.
+    ///
+    /// Everything hard about this is already in [`Store::claim_lease`]: the
+    /// reuse-before-cutting rule, the race the partial index arbitrates, the
+    /// root rebinding that leaves the checkout readable beside the worktree,
+    /// and the card a non-git root raises instead of a crash. This is the seam
+    /// that lets an agent reach it, and it is the *only* reason any of that
+    /// runs outside a test.
+    fn claim_worktree(&self, args: &Value) -> Result<String, ToolError> {
+        let raiser = self.raiser()?;
+        // A lease is per work *and* repository — that is what makes it
+        // reusable by a sibling, and there is no sibling without a work.
+        let Some(work_id) = raiser.work_id.clone() else {
+            return Err(ToolError::Refused(
+                "this session does not belong to a work, so there is nothing to key a lease to \
+                 and no sibling to share one with. Work is opened with `open_work`; a session \
+                 outside one writes wherever it was pointed and owns that decision."
+                    .into(),
+            ));
+        };
+        let store = self.store()?;
+        let repo = match opt_str(args, "repo") {
+            Some(path) => PathBuf::from(path),
+            None => store
+                .roots(&raiser.conversation_id)
+                .map_err(|e| ToolError::Refused(format!("could not read your roots: {e}")))?
+                .into_iter()
+                // The first *read-only* root, not simply the first: after an
+                // earlier claim the worktree may sort ahead of the checkout,
+                // and cutting a branch of a worktree is not what anybody meant.
+                .find(|r| !r.writable)
+                .map(|r| r.path)
+                .ok_or_else(|| {
+                    ToolError::Refused(
+                        "say which repository to claim — `repo` — because this session has no \
+                         read-only root to infer one from"
+                            .into(),
+                    )
+                })?,
+        };
+
+        match store
+            .claim_lease(&work_id, &raiser.conversation_id, &repo)
+            .map_err(|e| ToolError::Refused(format!("could not claim a worktree: {e}")))?
+        {
+            // Cut and reused are reported apart, not flattened into "here is a
+            // path". A session that believes it cut a fresh branch when it was
+            // handed a sibling's will commit over that sibling's work and
+            // describe it as its own.
+            claim @ (crate::leases::Claim::Cut(_) | crate::leases::Claim::Reused(_)) => {
+                let reused = matches!(claim, crate::leases::Claim::Reused(_));
+                let lease = claim.lease().expect("cut and reused both carry a lease");
+                as_json(&json!({
+                    "lease_id": lease.id,
+                    "worktree": lease.worktree_path.to_string_lossy(),
+                    "branch": lease.branch,
+                    "base": lease.base_ref,
+                    "reused": reused,
+                    "note": if reused {
+                        "this worktree was already claimed for this repository in this work, so \
+                         you are sharing it. Somebody else is working here: read what is there \
+                         before you change it, and say on the bus what you are taking."
+                    } else {
+                        "cut for you. This is now your only writable root; the checkout is still \
+                         beside it, read-only, so you can diff against what Reljod is editing."
+                    },
+                }))
+            }
+            crate::leases::Claim::NotGit { card_id, detail, .. } => {
+                // An answer, not an error: the session is still running and
+                // still useful, and a person now has to decide whether that
+                // root was wrong or wants `git init`.
+                as_json(&json!({
+                    "claimed": false,
+                    "card_id": card_id,
+                    "why": detail,
+                    "note": "raised on Reljod's rail. You have nowhere to write in that \
+                             directory — do what you can read-only, and stop rather than \
+                             writing into a root you were told not to change.",
+                }))
+            }
+        }
+    }
+
+    /// Give a worktree back, keeping anything that would be lost by removing it.
+    fn release_worktree(&self, args: &Value) -> Result<String, ToolError> {
+        let raiser = self.raiser()?;
+        let store = self.store()?;
+        let lease_id = match opt_i64(args, "lease_id")? {
+            Some(id) => id,
+            None => {
+                let Some(work_id) = raiser.work_id.clone() else {
+                    return Err(ToolError::Refused(
+                        "this session belongs to no work, so it holds no lease".into(),
+                    ));
+                };
+                let mine: Vec<crate::leases::Lease> = store
+                    .work_leases(&work_id)
+                    .map_err(|e| ToolError::Refused(format!("could not read the leases: {e}")))?
+                    .into_iter()
+                    .filter(|l| {
+                        l.state == crate::leases::State::Held
+                            && l.conversation_id.as_deref() == Some(raiser.conversation_id.as_str())
+                    })
+                    .collect();
+                match mine.as_slice() {
+                    [only] => only.id,
+                    [] => {
+                        return Err(ToolError::Refused(
+                            "you hold no worktree, so there is nothing to give back".into(),
+                        ))
+                    }
+                    // Named rather than guessed: releasing the wrong one takes
+                    // away the root the agent is actually writing in.
+                    many => {
+                        return Err(ToolError::Refused(format!(
+                            "you hold {} worktrees — say which, by `lease_id`: {}",
+                            many.len(),
+                            many.iter()
+                                .map(|l| format!("#{} on `{}`", l.id, l.branch))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )))
+                    }
+                }
+            }
+        };
+
+        match store
+            .release_lease(lease_id)
+            .map_err(|e| ToolError::Refused(format!("could not release that: {e}")))?
+        {
+            crate::leases::Release::Removed { lease } => as_json(&json!({
+                "removed": true,
+                "branch": lease.branch,
+                "worktree": lease.worktree_path.to_string_lossy(),
+                "note": "clean and merged, so it is gone from disk. The branch remains.",
+            })),
+            crate::leases::Release::Kept {
+                lease,
+                condition,
+                reason,
+            } => as_json(&json!({
+                "removed": false,
+                "branch": lease.branch,
+                "worktree": lease.worktree_path.to_string_lossy(),
+                "dirty": condition.dirty,
+                "merged": condition.merged,
+                "why": reason,
+                // Not a failure, and it must not read as one — an agent told
+                // this is an error will try to force it.
+                "note": "kept on disk on purpose: removing it would destroy work that is not \
+                         recorded anywhere else. Commit or merge it and it can go later; \
+                         `jod work leases` finds it in the meantime.",
+            })),
+        }
     }
 
     /// Open a work and put its first session on a checkout.
@@ -2748,7 +2957,7 @@ mod tests {
     // Writing to a peer spends a turn of theirs, which is money now — the same
     // line `delegate` sits on. What stops it running away is not the access
     // level but the bounds in `team`: depth, budget, and a deadline on a wait.
-    const DELEGATE_TOOLS: [&str; 8] = [
+    const DELEGATE_TOOLS: [&str; 10] = [
         "delegate",
         "continue_agent",
         "stop_agent",
@@ -2760,6 +2969,10 @@ mod tests {
         // thing you least want an unattended run to hold is the power to create
         // more unattended runs.
         "open_work",
+        // These two cut a branch and remove a directory. Every other tool on
+        // the rail's side only writes rows.
+        "claim_worktree",
+        "release_worktree",
     ];
     const ORCHESTRATE_TOOLS: [&str; 5] = [
         "schedule_create",

@@ -23,6 +23,7 @@ use jod_core::PermissionPolicy;
 use super::app::{absolute, short_duration, since, until, App, Entry, JobState, Overlay};
 use super::data::{Outcome, Source};
 use super::diff;
+use super::todo;
 use super::graph::{self, Direction as EdgeDirection};
 use super::keys;
 use super::fleet;
@@ -4010,6 +4011,7 @@ fn render(entry: &Entry, width: u16) -> Vec<Line<'static>> {
         // not one line. An arm keeps the match exhaustive, so a new `Entry`
         // still fails the build here rather than falling through to a default.
         Entry::Diff(edit) => return render_diff(edit, width),
+        Entry::Plan(items) => return render_plan(items, width),
         Entry::You(t) => ("› ", bold(USER), t.clone()),
         Entry::Agent(t) => ("", fg(AGENT), t.clone()),
         Entry::Thinking(t) => ("  ", fg(MUTED).add_modifier(Modifier::ITALIC), t.clone()),
@@ -4057,6 +4059,34 @@ fn render(entry: &Entry, width: u16) -> Vec<Line<'static>> {
             Line::from(vec![Span::styled(lead, style), Span::styled(text, style)])
         })
         .collect()
+}
+
+/// The agent's plan, as a block that updates in place.
+///
+/// A count in the header because the thing you want at a glance is *how far
+/// through* it is; the items themselves answer "through what".
+fn render_plan(items: &[todo::Item], width: u16) -> Vec<Line<'static>> {
+    let (done, total) = todo::progress(items);
+    let room = (width as usize).saturating_sub(8);
+    let mut lines = vec![Line::from(vec![
+        Span::styled("  ☰ ".to_string(), fg(USER)),
+        Span::styled("plan".to_string(), bold(AGENT)),
+        Span::styled(format!("  {done}/{total}"), fg(MUTED)),
+    ])];
+    for item in items {
+        let (colour, style) = match item.state {
+            // The one in flight is the only line worth finding at a glance, so
+            // it is the only one in the foreground colour.
+            todo::State::Doing => (WARN, bold(AGENT)),
+            todo::State::Done => (GOOD, fg(MUTED)),
+            todo::State::Pending => (MUTED, fg(MUTED)),
+        };
+        lines.push(Line::from(vec![
+            Span::styled(format!("    {} ", item.state.glyph()), fg(colour)),
+            Span::styled(cut(&item.text, room), style),
+        ]));
+    }
+    lines
 }
 
 /// A file edit, as a diff.
@@ -7370,6 +7400,79 @@ mod tests {
         assert!(!card_border(&base(CardKind::Decision, Importance::Normal, false))
             .add_modifier
             .contains(Modifier::BOLD));
+    }
+
+    // ---- the plan, inline and in place ----
+
+    fn todo_call(items: &[(&str, &str)]) -> jod_core::AgentEvent {
+        jod_core::AgentEvent::ToolCall {
+            name: "TodoWrite".into(),
+            input: Some(serde_json::json!({
+                "todos": items
+                    .iter()
+                    .map(|(text, status)| serde_json::json!({
+                        "content": text, "status": status
+                    }))
+                    .collect::<Vec<_>>()
+            })),
+        }
+    }
+
+    /// **The slice's whole point**: a revision replaces the block rather than
+    /// following it. A harness rewrites its list once per item finished, and
+    /// appending would put a dozen near-identical lists between two sentences.
+    #[test]
+    fn a_revised_plan_replaces_the_block_rather_than_adding_one() {
+        let mut a = app();
+        a.apply(&todo_call(&[("port the lexer", "in_progress"), ("write the docs", "pending")]));
+        a.apply(&todo_call(&[("port the lexer", "completed"), ("write the docs", "in_progress")]));
+
+        let blocks = a
+            .transcript
+            .iter()
+            .filter(|e| matches!(e, Entry::Plan(_)))
+            .count();
+        assert_eq!(blocks, 1, "one block, however many revisions");
+
+        let frame = rendered(&a, 120, 30);
+        assert!(frame.contains("1/2"), "and it shows the newest state:\n{frame}");
+    }
+
+    /// The block stays where it first appeared. Its position says when the
+    /// agent started planning, and a block that jumped to the bottom on every
+    /// revision would be a second kind of noise in place of the first.
+    #[test]
+    fn the_plan_block_stays_where_it_first_appeared() {
+        let mut a = app();
+        a.apply(&todo_call(&[("port the lexer", "pending")]));
+        a.push(Entry::Agent("starting on the lexer now".into()));
+        a.apply(&todo_call(&[("port the lexer", "completed")]));
+
+        assert!(
+            matches!(a.transcript.first(), Some(Entry::Plan(_))),
+            "still first: {:?}",
+            a.transcript
+        );
+        assert!(matches!(a.transcript.last(), Some(Entry::Agent(_))));
+    }
+
+    #[test]
+    fn the_plan_renders_inline_with_a_glyph_per_state() {
+        let mut a = app();
+        a.apply(&todo_call(&[
+            ("port the lexer", "completed"),
+            ("write the docs", "in_progress"),
+            ("cut a release", "pending"),
+        ]));
+        let frame = rendered(&a, 120, 30);
+        assert!(frame.contains("plan"), "{frame}");
+        assert!(frame.contains("1/3"), "{frame}");
+        assert!(frame.contains("port the lexer"), "{frame}");
+        assert!(frame.contains("write the docs"), "{frame}");
+        // A glyph per state, so the column reads without colour.
+        assert!(frame.contains('●'), "done:\n{frame}");
+        assert!(frame.contains('◐'), "in flight:\n{frame}");
+        assert!(frame.contains('○'), "pending:\n{frame}");
     }
 
     // ---- diffs render as diffs ----

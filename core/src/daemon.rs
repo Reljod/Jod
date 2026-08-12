@@ -60,8 +60,8 @@ pub trait Tick: Send + Sync {
 }
 
 impl Tick for Ticker {
-    /// Heartbeats first, then schedules, then goals, then the mail — every step
-    /// every pass.
+    /// Heartbeats first, then schedules, then goals, then the mail, then the
+    /// queue — every step every pass.
     ///
     /// Separate claims rather than one, because they are different contended
     /// resources — a process holding a goal must not thereby hold a schedule —
@@ -80,11 +80,18 @@ impl Tick for Ticker {
     /// already going; schedules that are due are a separate promise, and one
     /// unkillable process group must not become a scheduler that stopped.
     ///
-    /// The mail is last and deliberately so: it resumes agents that are already
-    /// working, and nothing else in a tick waits on it. It is also the half
-    /// that turns the bus from something a person operates into something that
-    /// runs — without this call, a teammate's message sits in an inbox until
-    /// somebody types `jod team wake`.
+    /// The two delivery steps are last and deliberately so: both resume agents
+    /// that are already working, and nothing else in a tick waits on either.
+    /// They are also the halves that turn Jod from something a person operates
+    /// into something that runs — without [`Ticker::tick_mail`] a teammate's
+    /// message sits in an inbox until somebody types `jod team wake`, and
+    /// without [`Ticker::tick_deliveries`] a card answered in the rail is
+    /// queued and never spoken.
+    ///
+    /// **This function is the whole wiring.** Both of those were built and
+    /// tested against nothing for a while, and unit tests on an uncalled
+    /// function stay green for ever; the test that guards this one calls
+    /// `Tick::tick` rather than the steps, so removing a line here fails it.
     async fn tick(&self, now_ms: i64) -> Result<TickReport> {
         let swept = match self.tick_heartbeats(now_ms).await {
             Ok(report) => report,
@@ -96,15 +103,16 @@ impl Tick for Ticker {
         let schedules = Ticker::tick(self, now_ms).await?;
         let goals = self.tick_goals(now_ms).await?;
         let mail = self.tick_mail(now_ms).await?;
+        let queued = self.tick_deliveries(now_ms).await?;
         Ok(TickReport {
-            claimed: schedules.claimed + goals.claimed + mail.claimed,
-            started: schedules.started + goals.started + mail.started,
-            held: schedules.held + goals.held + mail.held,
+            claimed: schedules.claimed + goals.claimed + mail.claimed + queued.claimed,
+            started: schedules.started + goals.started + mail.started + queued.started,
+            held: schedules.held + goals.held + mail.held + queued.held,
             // A reaped run is a failure that happened, and the daemon's own log
             // line is where a person finds out that anything did. Counting it
             // here rather than in a fourth field keeps `TickReport` meaning
             // "what went wrong this pass", which is what reads it.
-            failed: schedules.failed + goals.failed + mail.failed + swept.stopped,
+            failed: schedules.failed + goals.failed + mail.failed + queued.failed + swept.stopped,
         })
     }
 }

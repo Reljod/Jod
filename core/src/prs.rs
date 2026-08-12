@@ -1066,6 +1066,176 @@ impl Store {
     }
 }
 
+// ---- the two callers --------------------------------------------------
+//
+// Everything above is inert until something calls it, and a subsystem that
+// nothing calls is one whose tests are green for ever. These two functions are
+// the shapes the two live callers want: one per event, one per tick.
+
+/// Record any pull request an event says this run opened.
+///
+/// **The stream half's entry point**, called from the service's event loop
+/// beside the card lifter. Deliberately cheap on the ordinary event, because it
+/// runs on *every* event of every run: an event with no text at all returns
+/// immediately, text without `/pull/` in it costs one substring scan, and the
+/// conversation is only looked up once there is something to attribute.
+///
+/// Nothing here is worth failing a run over — a pull request nobody recorded is
+/// a row missing from a panel — so the caller logs and carries on.
+pub fn note_from_stream(
+    store: &Store,
+    conversation_id: Option<&str>,
+    event: &AgentEvent,
+) -> Result<Vec<PullRequest>> {
+    let Some(text) = spoken_text(event) else {
+        return Ok(Vec::new());
+    };
+    // The rejection that makes this affordable per event. Every pull request
+    // URL contains `/pull/`, and almost nothing else an agent prints does.
+    if !text.contains("/pull/") {
+        return Ok(Vec::new());
+    }
+    let attribution = match conversation_id {
+        Some(id) => store.attribution_for(id)?,
+        None => Attribution::default(),
+    };
+    store.note_pull_requests(text, &attribution)
+}
+
+/// What one poll of the forge did, for the tick's log.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Swept {
+    /// Rows whose state was refreshed.
+    pub reconciled: usize,
+    /// Pull requests nobody had parsed out of a stream.
+    pub discovered: usize,
+    /// Why the sweep stopped early, when it did. Said once by whoever produced
+    /// it; the caller does not print this again.
+    pub quiet: Option<Unavailable>,
+}
+
+/// **The poll half's entry point**, called once per tick.
+///
+/// Two passes, in this order: refresh what is already known, then ask each held
+/// lease's branch for anything Jod has never seen. Refreshing first because a
+/// stale "open" on a row somebody is looking at is worse than a pull request
+/// nobody has noticed yet.
+///
+/// Bounded by `limit` on both halves, because this runs on a timer against a
+/// rate-limited API, and it stops at the first sign that nobody can be asked —
+/// there is no `gh` halfway through a sweep.
+pub fn sweep(store: &Store, limit: usize) -> Result<Swept> {
+    sweep_with(store, limit, gh_binary().as_deref())
+}
+
+/// [`sweep`] with the binary passed in, so the degradation can be exercised.
+pub fn sweep_with(store: &Store, limit: usize, gh: Option<&Path>) -> Result<Swept> {
+    let mut swept = Swept::default();
+
+    for outcome in store.reconcile_pull_requests_with(limit, gh)? {
+        match outcome {
+            Reconciliation::Updated(_) => swept.reconciled += 1,
+            Reconciliation::Unavailable(why) => {
+                swept.quiet = Some(why);
+                return Ok(swept);
+            }
+            Reconciliation::Unknown => {}
+        }
+    }
+
+    for lease in store.leases_to_ask(limit)? {
+        // A worktree removed by hand is ordinary and is not a reason to stop
+        // the sweep; `run_gh` says so plainly and the next lease still gets
+        // its turn.
+        for outcome in store.discover_pull_requests_with(
+            &lease.worktree_path,
+            &lease.branch,
+            &lease.attribution,
+            gh,
+        )? {
+            match outcome {
+                Reconciliation::Updated(_) => swept.discovered += 1,
+                Reconciliation::Unavailable(why @ (Unavailable::NotInstalled | Unavailable::NotAuthenticated)) => {
+                    swept.quiet = Some(why);
+                    return Ok(swept);
+                }
+                Reconciliation::Unavailable(why) => swept.quiet = Some(why),
+                Reconciliation::Unknown => {}
+            }
+        }
+    }
+
+    Ok(swept)
+}
+
+/// A held lease, reduced to what the poller needs from it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Askable {
+    pub worktree_path: PathBuf,
+    pub branch: String,
+    pub attribution: Attribution,
+}
+
+impl Store {
+    /// Who a pull request found in this conversation's output belongs to.
+    ///
+    /// The work comes from the conversation row and the branch from the lease
+    /// the session is holding, which is what lets a URL printed in prose be
+    /// attributed to the worktree the work was actually done in.
+    pub fn attribution_for(&self, conversation_id: &str) -> Result<Attribution> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        let row: Option<(Option<String>, Option<String>)> = conn
+            .query_row(
+                "SELECT c.work_id, l.branch
+                   FROM conversations c
+                   LEFT JOIN leases l
+                     ON l.conversation_id = c.id AND l.state = 'held'
+                  WHERE c.id = ?1
+                  ORDER BY l.created_at_ms DESC
+                  LIMIT 1",
+                params![conversation_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let (work_id, branch) = row.unwrap_or((None, None));
+        Ok(Attribution {
+            work_id,
+            conversation_id: Some(conversation_id.to_string()),
+            lease_id: None,
+            branch,
+        })
+    }
+
+    /// The held leases the poller should ask about, newest first.
+    ///
+    /// **Integration point**, like [`lease_for_branch`]: `leases` owns this
+    /// table and has no "every held lease" query yet. Only held ones, because a
+    /// released lease's branch is somebody else's business now, and asking
+    /// about it every minute for ever is how a poller becomes the reason for a
+    /// rate limit.
+    pub fn leases_to_ask(&self, limit: usize) -> Result<Vec<Askable>> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT worktree_path, branch, work_id, conversation_id, id
+               FROM leases WHERE state = 'held' AND branch <> ''
+              ORDER BY created_at_ms DESC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit as i64], |r| {
+            Ok(Askable {
+                worktree_path: PathBuf::from(r.get::<_, String>(0)?),
+                branch: r.get(1)?,
+                attribution: Attribution {
+                    work_id: r.get(2)?,
+                    conversation_id: r.get(3)?,
+                    lease_id: Some(r.get(4)?),
+                    branch: Some(r.get(1)?),
+                },
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+}
+
 /// What Jod says to a session when auto-PR is on and its work looks finished.
 ///
 /// An instruction to the agent rather than a `gh pr create` Jod runs itself,
