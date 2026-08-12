@@ -28,6 +28,8 @@
  * wording from `data::gloss` so the phone and the terminal agree.
  */
 
+import type { AgentSummary } from "./contract";
+
 // ─── core/src/store.rs — memory ─────────────────────────────────────────────
 
 /** One entity in Jod's memory graph. */
@@ -383,10 +385,33 @@ export interface MainChat {
   messages: Message[];
 }
 
-/** What `POST /v1/conversations/main/messages` answers with. `201` on success. */
+/**
+ * Why the live window is due for a compaction, when it is.
+ *
+ * Not a boolean. Read from `api/src/conversations.rs` rather than from a
+ * summary of it — a flag would say a compaction is owed without saying what
+ * crossed the threshold, and `chars` is the number that makes it actionable.
+ */
+export interface CompactionDue {
+  reason: string;
+  chars: number;
+}
+
+/**
+ * What `POST /v1/conversations/main/messages` answers with. `201` on success,
+ * or `200` when an `Idempotency-Key` replay returns the original.
+ */
 export interface HandedOver {
-  agent: unknown;
+  /** The run that was started. The full summary, so nothing needs re-fetching. */
+  agent: AgentSummary;
+  /**
+   * The conversation it landed in. Returned rather than looked up again,
+   * because resolving the pinned chat twice is two chances to disagree.
+   */
   conversation_id: string;
-  /** True when the thread is long enough that a compaction is owed. */
-  compaction_due: boolean;
+  /**
+   * `null` unless the live window has grown past a threshold. **Advisory** — the
+   * turn still ran, so this must not be rendered as a failure.
+   */
+  compaction_due: CompactionDue | null;
 }

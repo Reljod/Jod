@@ -285,7 +285,7 @@ describe("the pinned main chat", () => {
   it("carries an idempotency key when handing over an instruction", async () => {
     const http = new FakeFetch().on("POST /v1/conversations/main/messages", {
       status: 201,
-      body: { agent: {}, conversation_id: "8ce8211e", compaction_due: false },
+      body: { agent: {}, conversation_id: "8ce8211e", compaction_due: null },
     });
     const handed = await client(http).sendToMain({ instruction: "ship it" });
 
@@ -293,17 +293,44 @@ describe("the pinned main chat", () => {
     expect(call.headers["idempotency-key"]).toBe("key-1");
     expect(call.body).toEqual({ instruction: "ship it" });
     expect(handed.conversation_id).toBe("8ce8211e");
+    expect(handed.compaction_due).toBeNull();
+  });
+
+  /**
+   * `compaction_due` is an object or `null`, **not** a boolean — it names what
+   * crossed the threshold and by how much. And it is advisory: the turn ran, so
+   * a screen must not render it as a failure.
+   *
+   * Asserted because reading it as a flag is the easy mistake, and a truthy
+   * object would make a boolean check silently "work" while throwing away the
+   * only two fields worth showing.
+   */
+  it("carries why a compaction is due, without calling the turn a failure", async () => {
+    const http = new FakeFetch().on("POST /v1/conversations/main/messages", {
+      status: 201,
+      body: {
+        agent: { id: "a1" },
+        conversation_id: "8ce8211e",
+        compaction_due: { reason: "live window over threshold", chars: 120_000 },
+      },
+    });
+    const handed = await client(http).sendToMain({ instruction: "ship it" });
+
+    expect(handed.compaction_due?.reason).toBe("live window over threshold");
+    expect(handed.compaction_due?.chars).toBe(120_000);
+    // The run still happened; this is advice, not an error.
+    expect(handed.agent.id).toBe("a1");
   });
 
   it("sends harness and cwd only when given", async () => {
     const http = new FakeFetch()
       .on("POST /v1/conversations/main/messages", {
         status: 201,
-        body: { agent: {}, conversation_id: "c", compaction_due: false },
+        body: { agent: {}, conversation_id: "c", compaction_due: null },
       })
       .on("POST /v1/conversations/main/messages", {
         status: 201,
-        body: { agent: {}, conversation_id: "c", compaction_due: false },
+        body: { agent: {}, conversation_id: "c", compaction_due: null },
       });
     const c = client(http);
 
