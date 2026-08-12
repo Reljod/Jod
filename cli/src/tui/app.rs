@@ -25,6 +25,7 @@ use super::rail::RailState;
 use super::secret::Typed;
 use super::workspace::{matches, ListState, Workspace};
 use jod_core::cards::Card;
+use jod_core::commands::Discovered;
 use jod_core::roots::Root;
 use jod_core::secrets::Scope;
 use jod_core::tree::{Node, NodeId};
@@ -356,6 +357,9 @@ pub struct App {
     pub candidates: Vec<Arc<Vec<String>>>,
     /// The `@` popup, while it is up.
     pub mention: Option<Mention>,
+    /// The slash commands and skills this repository offers, already filtered
+    /// to the harness on screen. Refreshed on the tick, off the render path.
+    pub discovered: Vec<Discovered>,
 
     // ---- the fleet tree -------------------------------------------------
     /// Works, their sessions and their runs, flattened by core in one pass.
@@ -739,6 +743,7 @@ impl App {
             roots: Vec::new(),
             candidates: Vec::new(),
             mention: None,
+            discovered: Vec::new(),
             forest: Vec::new(),
             closed_works: HashSet::new(),
             tree: TreeState::default(),

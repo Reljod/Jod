@@ -1399,13 +1399,37 @@ async fn main() -> Result<()> {
                 Some(store) => grants_for_run(store, &resume, harness.into())?,
                 None => (Vec::new(), Vec::new()),
             };
+            // Where the session *lives*, not where the command was typed.
+            //
+            // A resumed run in the wrong directory is not a cosmetic mistake.
+            // OpenCode resolves its project from `--dir` and scopes sessions to
+            // it, and `--session <id>` naming a session from another project
+            // does not error — **it hangs, silently, for ever**. Measured:
+            // `opencode run --format json --dir <other> --session <id> "…"`
+            // emitted nothing at all on either stream and was still running
+            // when killed at 90 seconds, while the identical command with the
+            // session's own `--dir` answered in under a second. That is what
+            // made a resumed OpenCode run in the parity suite produce one bare
+            // `finished` event and never terminate — the directory, not the
+            // session id, which was correct all along.
+            //
+            // Jod knows the answer, so it uses it. An explicit `--cwd` still
+            // wins: somebody who names a directory means it, and being told
+            // where their session lives is [`continuing_conversation`]'s job
+            // rather than this one's.
+            let cwd = match (cwd, jod.store()) {
+                (Some(given), _) => given,
+                (None, Some(store)) => session_cwd(store, &resume, harness.into())?
+                    .unwrap_or_else(jod_core::service::default_cwd),
+                (None, None) => jod_core::service::default_cwd(),
+            };
 
             let req = SpawnRequest {
                 name: name.unwrap_or_else(|| default_name(&prompt)),
                 harness: harness.into(),
                 prompt,
                 system: None,
-                cwd: cwd.unwrap_or_else(jod_core::service::default_cwd),
+                cwd,
                 model,
                 permission: permission.into(),
                 resume,
@@ -3706,6 +3730,32 @@ fn grants_for_run(
     Ok((roots, secrets))
 }
 
+/// The directory a resumed session belongs to, when Jod knows it.
+///
+/// `None` for a fresh run, and for a session id Jod has never seen — somebody
+/// resuming a session started outside Jod, where there is nothing to look up
+/// and the caller's own directory is the only answer available.
+///
+/// Separate from [`grants_for_run`] rather than folded into it because the two
+/// answer different questions and one of them can be wrong without the other
+/// noticing: that one asks what this run may *reach*, this one asks where it
+/// must *happen*. Sharing [`continuing_conversation`] keeps them agreeing about
+/// which thread is being rejoined.
+fn session_cwd(
+    store: &Store,
+    resume: &Resume,
+    harness: jod_core::HarnessKind,
+) -> Result<Option<PathBuf>> {
+    let Some(id) = continuing_conversation(store, resume, harness)? else {
+        return Ok(None);
+    };
+    Ok(store
+        .conversation(&id)?
+        .map(|c| c.cwd)
+        .filter(|cwd| !cwd.trim().is_empty())
+        .map(PathBuf::from))
+}
+
 /// Which conversation a `--continue` or `--session` run is rejoining.
 ///
 /// `jod run` binds its *transcript* to a new conversation every time
@@ -4155,6 +4205,79 @@ mod tests {
         assert!(
             !secrets.iter().any(|s| s.contains(value)),
             "a value reached the spawn request, which is written to spawn.json"
+        );
+    }
+
+    /// **A resumed run happens where its session lives.**
+    ///
+    /// Measured, not guessed: OpenCode scopes a session to the project it
+    /// resolves from `--dir`, and `--session <id>` naming a session from
+    /// another project neither errors nor starts fresh — it hangs silently for
+    /// ever. So resuming in whatever directory the command was typed in is not
+    /// a cosmetic mistake, and this is the lookup that prevents it.
+    #[tokio::test]
+    async fn resuming_a_session_uses_the_directory_that_session_belongs_to() {
+        let store = Store::in_memory().unwrap();
+        let conversation = store
+            .new_conversation(HarnessKind::OpenCode, "/tmp/the-project", None)
+            .unwrap();
+        store
+            .set_conversation_session(&conversation.id, Some("ses_abc"))
+            .unwrap();
+
+        assert_eq!(
+            session_cwd(
+                &store,
+                &Resume::Session("ses_abc".into()),
+                HarnessKind::OpenCode
+            )
+            .unwrap(),
+            Some(PathBuf::from("/tmp/the-project"))
+        );
+        // A fresh run has no session to belong to, and a session Jod never saw
+        // cannot be looked up — both fall back to the caller's directory rather
+        // than inventing one.
+        assert_eq!(
+            session_cwd(&store, &Resume::Fresh, HarnessKind::OpenCode).unwrap(),
+            None
+        );
+        assert_eq!(
+            session_cwd(
+                &store,
+                &Resume::Session("ses_started_outside_jod".into()),
+                HarnessKind::OpenCode
+            )
+            .unwrap(),
+            None
+        );
+    }
+
+    /// `--continue` resumes *this* harness's last session, so it must not hand
+    /// one harness's directory to another — the same rule
+    /// `continuing_conversation` already applies to roots and secrets.
+    #[tokio::test]
+    async fn continuing_takes_the_directory_of_that_harnesss_own_last_session() {
+        let store = Store::in_memory().unwrap();
+        let opencode = store
+            .new_conversation(HarnessKind::OpenCode, "/tmp/opencode-project", None)
+            .unwrap();
+        store
+            .set_conversation_session(&opencode.id, Some("ses_oc"))
+            .unwrap();
+        let claude = store
+            .new_conversation(HarnessKind::ClaudeCode, "/tmp/claude-project", None)
+            .unwrap();
+        store
+            .set_conversation_session(&claude.id, Some("ses_cc"))
+            .unwrap();
+
+        assert_eq!(
+            session_cwd(&store, &Resume::Last, HarnessKind::OpenCode).unwrap(),
+            Some(PathBuf::from("/tmp/opencode-project"))
+        );
+        assert_eq!(
+            session_cwd(&store, &Resume::Last, HarnessKind::ClaudeCode).unwrap(),
+            Some(PathBuf::from("/tmp/claude-project"))
         );
     }
 

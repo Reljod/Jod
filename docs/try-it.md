@@ -248,11 +248,10 @@ an agent that wants permission raises one, in the rail you are already watching.
 
 ## What is not done
 
-- **Discovered commands do not reach the palette.** `jod commands ls` finds a
-  repository's slash commands and skills; the TUI's palette is still a separate
-  hardcoded list.
-- **The traffic view.** Agent-to-agent messages are stored and bounded but there
-  is no screen showing who said what to whom.
+- **The traffic view.** Agent-to-agent messages are stored, threaded and bounded
+  but there is no screen showing who said what to whom. `mail_thread`,
+  `traffic`, `thread_state` and `mail_held` exist in `core/src/team.rs` and are
+  test-only — the screen is what they are waiting for.
 - **A2A across works.** Only the orchestrator crosses works, by design, but the
   human is not addressable from inside one — an agent replying to you is told
   you are not a member.

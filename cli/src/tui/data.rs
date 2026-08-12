@@ -25,6 +25,8 @@ use std::sync::Arc;
 use std::collections::HashSet;
 
 use jod_core::cards::{Card, Query};
+use jod_core::commands::Discovered;
+use jod_core::HarnessKind;
 use jod_core::rank;
 use jod_core::roots::Root;
 use jod_core::tree::{Node, NodeId, NodeKind};
@@ -1349,6 +1351,24 @@ pub fn tasks(jod: &Arc<Jod>, team: Option<&str>) -> Vec<TaskRow> {
         .flat_map(|t| store.team_tasks(t).unwrap_or_default())
         .map(task_row)
         .collect()
+}
+
+// ---- what a repository offers -------------------------------------------
+
+/// The slash commands and skills found under this session's roots, for the
+/// harness on screen.
+///
+/// **Filtered by harness in the query, not afterwards.** A
+/// `.claude/commands/foo.md` has no OpenCode equivalent, so offering it to
+/// OpenCode would be offering something that cannot resolve — and the honest
+/// alternative, pasting the body in, is the inlining branch D7's measurement
+/// deleted. `Discovered::invoke` refuses a mismatch as a backstop; this is what
+/// keeps one from ever being on screen to pick.
+pub fn discovered(jod: &Arc<Jod>, harness: HarnessKind) -> Vec<Discovered> {
+    match jod.store() {
+        Some(store) => store.discovered(Some(harness)).unwrap_or_default(),
+        None => Vec::new(),
+    }
 }
 
 // ---- searching the transcript -------------------------------------------

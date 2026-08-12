@@ -340,6 +340,15 @@ pub struct Ticker {
     probes: Arc<dyn Probes + Send + Sync>,
 }
 
+/// Whether a run has not finished yet.
+///
+/// The three words a run wears before it is over, in one place: two callers
+/// ask this question and a fourth spelling of it would be the kind of drift
+/// that leaves a member busy for ever.
+fn is_live(status: &str) -> bool {
+    matches!(status, "running" | "starting" | "queued")
+}
+
 /// What one tick did, for logging and for tests.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct TickReport {
@@ -1095,6 +1104,98 @@ impl Ticker {
         Ok(report)
     }
 
+    /// Fold in the titles of works whose titler nobody was left to hear.
+    ///
+    /// **The backstop for a launcher that does not outlive what it launched.**
+    /// `orchestrator::start_titler` subscribes to the event stream and folds
+    /// the answer in from a detached task, which is right and is the fast path:
+    /// when the process survives, the title lands the moment the titler
+    /// answers. But on the path that matters most — a work opened through
+    /// Jod's own MCP server, which exits when the harness closes stdin — that
+    /// task dies before the titler replies. Observed, not theorised: a work
+    /// left holding its fallback name and a throwaway conversation nobody
+    /// deleted, contradicting D6.
+    ///
+    /// Awaiting the titler instead is not the answer and never will be. The
+    /// orchestrator must not block; that is the property the whole design
+    /// exists to protect. So the answer is the same one that worked for the
+    /// mail and the queue: a tick, reading rows that outlive whoever wrote
+    /// them.
+    ///
+    /// Everything it needs is durable by construction — the work id is in the
+    /// titler conversation's title and in its run's name, and the answer is in
+    /// the run's events, which the *supervisor* writes. Nothing here reads a
+    /// message, because messages are written by the process that was following
+    /// the run and that is exactly the process presumed gone.
+    ///
+    /// A titler that failed, said nothing, or was never spawned still gets its
+    /// conversation deleted and its work keeps the fallback name.
+    /// [`Store::finish_titling`] has always done that; it just had nobody to
+    /// call it.
+    pub fn tick_titlers(&self, now_ms: i64) -> Result<TickReport> {
+        let Some(store) = self.jod.store().cloned() else {
+            return Ok(TickReport::default());
+        };
+        let orphans = store.orphaned_titlers()?;
+        let mut report = TickReport {
+            claimed: orphans.len(),
+            ..Default::default()
+        };
+
+        for titler in orphans {
+            let run = store.titler_run(&titler.work_id)?;
+            let output = match &run {
+                // Still working. The fast path may yet settle it, and if that
+                // process is gone this tick will find it again in a minute.
+                Some((_, status)) if is_live(status) => {
+                    report.held += 1;
+                    continue;
+                }
+                Some((run_id, _)) => store.titler_output(run_id)?,
+                // No run at all: the process died between opening the
+                // conversation and starting the run. Left alone briefly in
+                // case it is about to start, then swept — the work keeps its
+                // fallback name, which is what it has anyway.
+                None => {
+                    if now_ms - titler.created_at_ms < works::TITLER_GRACE_MS {
+                        report.held += 1;
+                        continue;
+                    }
+                    String::new()
+                }
+            };
+
+            match store.finish_titling(&titler.work_id, &titler.conversation_id, &output) {
+                Ok(titled) => {
+                    report.started += 1;
+                    if titled.fell_back {
+                        eprintln!(
+                            "[jod/tick] the titler for `{}` said nothing usable; \
+                             the work keeps its opening name",
+                            titler.work_id
+                        );
+                    } else {
+                        eprintln!("[jod/tick] work `{}` is now `{}`", titler.work_id, titled.title);
+                    }
+                }
+                // The fast path settling it between the read above and here is
+                // the ordinary case on a machine where the launcher *did*
+                // survive, and it leaves no conversation to delete. That is a
+                // race won, not a failure, and logging it as one would put a
+                // line in front of somebody every minute on a healthy system.
+                Err(_) if store.conversation(&titler.conversation_id)?.is_none() => {}
+                Err(e) => {
+                    report.failed += 1;
+                    eprintln!(
+                        "[jod/tick] could not settle the titler for `{}`: {e}",
+                        titler.work_id
+                    );
+                }
+            }
+        }
+        Ok(report)
+    }
+
     /// Close the works whose boards have emptied, and finish the ones whose
     /// last run has stopped.
     ///
@@ -1458,7 +1559,7 @@ impl Ticker {
                             continue;
                         }
                     };
-                    if matches!(run.status.as_str(), "running" | "starting" | "queued") {
+                    if is_live(&run.status) {
                         continue;
                     }
                     if let Err(e) = store.bind_member(
@@ -2969,6 +3070,232 @@ mod tests {
     /// reason it needs its own tests: every piece of it was written and green
     /// while nothing in the running system ever asked whether a board had
     /// emptied.
+    /// D6's titler, settled by a sweep rather than by the process that started
+    /// it.
+    ///
+    /// **Every fixture here has no launcher.** Nothing subscribes to the event
+    /// stream, nothing awaits the run, and no `messages` row is ever written
+    /// for the titler's conversation — which is precisely the state the bug
+    /// happened in, and the state a test that kept the launching process alive
+    /// would never reach. It passed against the old code for exactly that
+    /// reason.
+    mod titlers {
+        use super::*;
+        use crate::daemon::Tick;
+        use crate::event::AgentEnvelope;
+        use crate::harness::HarnessKind;
+        use crate::store::Store;
+        use crate::works::{fallback_title, titler_run_name, TITLER_GRACE_MS};
+        use crate::AgentEvent;
+
+        fn ticker_over(store: &Arc<Store>) -> Ticker {
+            Ticker::new(Jod::with_store(store.clone())).as_owner("t")
+        }
+
+        /// A work, its titler conversation, and — optionally — the run that was
+        /// started to name it, in whatever state. No process is following any
+        /// of it.
+        fn work_with_titler(store: &Store, status: Option<&str>) -> (String, String) {
+            let work = store.create_work("count how many rs files are in the repo").unwrap();
+            let titler = store.open_titler(&work.id, HarnessKind::ClaudeCode).unwrap();
+            if let Some(status) = status {
+                store
+                    .save_run(&crate::store::StoredRun {
+                        id: format!("run-for-{}", work.id),
+                        name: titler_run_name(&work.id),
+                        harness: "claude_code".into(),
+                        status: status.into(),
+                        cwd: "/tmp".into(),
+                        session_id: None,
+                        pid: None,
+                        pgid: None,
+                        created_at_ms: 1,
+                        summary: serde_json::Value::Null,
+                    })
+                    .unwrap();
+            }
+            (work.id, titler.id)
+        }
+
+        /// What the supervisor writes. Deliberately not `append_message`: the
+        /// events are the durable half and the messages are the half that goes
+        /// missing when the launcher does.
+        fn said(store: &Store, work_id: &str, event: AgentEvent, seq: u64) {
+            store
+                .append_event(&AgentEnvelope {
+                    agent_id: format!("run-for-{work_id}"),
+                    at_ms: 1,
+                    seq,
+                    event,
+                })
+                .unwrap();
+        }
+
+        /// The bug, in the shape it was found in: a completed titler, nobody
+        /// left to hear it, a work stuck on its fallback name and a throwaway
+        /// conversation nobody deleted.
+        #[tokio::test]
+        async fn a_titler_whose_launcher_is_gone_is_folded_in_by_the_tick() {
+            let store = Arc::new(Store::in_memory().unwrap());
+            let (work, titler) = work_with_titler(&store, Some("completed"));
+            said(
+                &store,
+                &work,
+                AgentEvent::Message {
+                    text: "{\"title\":\"count the rust files\",\"summary\":\"how big is this repo\"}"
+                        .into(),
+                },
+                0,
+            );
+            assert!(
+                store.thread(&titler).unwrap().is_empty(),
+                "the fixture must have no messages, or it is not the state the bug happened in"
+            );
+
+            let report = ticker_over(&store).tick_titlers(1_000).unwrap();
+
+            assert_eq!(report.started, 1);
+            let work = store.work(&work).unwrap().unwrap();
+            assert_eq!(work.title, "count the rust files");
+            assert_eq!(work.summary, "how big is this repo");
+            assert!(
+                store.conversation(&titler).unwrap().is_none(),
+                "D6: the throwaway is deleted once it has answered"
+            );
+        }
+
+        /// Some harnesses put a short reply in the final event rather than in
+        /// prose. The live reader takes only the prose, so this is a case the
+        /// sweep handles and the fast path does not.
+        #[tokio::test]
+        async fn a_title_carried_only_by_the_final_event_is_still_read() {
+            let store = Arc::new(Store::in_memory().unwrap());
+            let (work, _) = work_with_titler(&store, Some("completed"));
+            said(
+                &store,
+                &work,
+                AgentEvent::Finished {
+                    text: Some("{\"title\":\"the rust file census\",\"summary\":\"\"}".into()),
+                    exit_code: Some(0),
+                    is_error: false,
+                    usage: Default::default(),
+                },
+                0,
+            );
+
+            ticker_over(&store).tick_titlers(1_000).unwrap();
+
+            assert_eq!(
+                store.work(&work).unwrap().unwrap().title,
+                "the rust file census"
+            );
+        }
+
+        /// A titler that failed or said nothing still gets swept: the work keeps
+        /// the name it opened with, which is findable, and the fleet does not
+        /// keep a session nobody opened.
+        #[tokio::test]
+        async fn a_titler_that_said_nothing_is_still_cleared_and_the_work_keeps_its_name() {
+            let store = Arc::new(Store::in_memory().unwrap());
+            let (work, titler) = work_with_titler(&store, Some("failed"));
+            let opened_as = store.work(&work).unwrap().unwrap().title;
+
+            let report = ticker_over(&store).tick_titlers(1_000).unwrap();
+
+            assert_eq!(report.started, 1);
+            assert!(store.conversation(&titler).unwrap().is_none());
+            let work = store.work(&work).unwrap().unwrap();
+            assert_eq!(work.title, opened_as);
+            assert_eq!(
+                work.title,
+                fallback_title("count how many rs files are in the repo")
+            );
+        }
+
+        /// A titler still working is left alone. The fast path may yet settle
+        /// it, and reading a half-written answer would fold in a fragment.
+        #[tokio::test]
+        async fn a_titler_still_running_is_left_alone() {
+            let store = Arc::new(Store::in_memory().unwrap());
+            let (_work, titler) = work_with_titler(&store, Some("running"));
+
+            let report = ticker_over(&store).tick_titlers(1_000).unwrap();
+
+            assert_eq!(report.held, 1);
+            assert_eq!(report.started, 0);
+            assert!(store.conversation(&titler).unwrap().is_some());
+        }
+
+        /// The process can also die *between* opening the conversation and
+        /// starting the run, which leaves a titler with no run to wait for. It
+        /// is given a grace period and then swept, or it sits in the fleet for
+        /// ever.
+        #[tokio::test]
+        async fn a_titler_whose_run_never_started_is_swept_once_its_grace_has_passed() {
+            let store = Arc::new(Store::in_memory().unwrap());
+            let (_, titler) = work_with_titler(&store, None);
+
+            let early = ticker_over(&store).tick_titlers(1_000).unwrap();
+            assert_eq!(early.held, 1, "it may still be about to start");
+            assert!(store.conversation(&titler).unwrap().is_some());
+
+            let opened_at = store.conversation(&titler).unwrap().unwrap().created_at_ms;
+            let later = ticker_over(&store)
+                .tick_titlers(opened_at + TITLER_GRACE_MS + 1)
+                .unwrap();
+
+            assert_eq!(later.started, 1);
+            assert!(store.conversation(&titler).unwrap().is_none());
+        }
+
+        /// Settling is not repeated: the conversation is gone, so there is
+        /// nothing left to find.
+        #[tokio::test]
+        async fn a_settled_titler_is_not_swept_twice() {
+            let store = Arc::new(Store::in_memory().unwrap());
+            let (work, _) = work_with_titler(&store, Some("completed"));
+            said(
+                &store,
+                &work,
+                AgentEvent::Message {
+                    text: "{\"title\":\"once\",\"summary\":\"\"}".into(),
+                },
+                0,
+            );
+
+            ticker_over(&store).tick_titlers(1_000).unwrap();
+            let again = ticker_over(&store).tick_titlers(2_000).unwrap();
+
+            assert_eq!(again.claimed, 0);
+            assert_eq!(store.work(&work).unwrap().unwrap().title, "once");
+        }
+
+        /// The guard. Remove the `tick_titlers` line from `impl Tick for
+        /// Ticker` and this fails.
+        #[tokio::test]
+        async fn the_daemons_tick_settles_an_orphaned_titler() {
+            let store = Arc::new(Store::in_memory().unwrap());
+            let (work, titler) = work_with_titler(&store, Some("completed"));
+            said(
+                &store,
+                &work,
+                AgentEvent::Message {
+                    text: "{\"title\":\"named by the tick\",\"summary\":\"\"}".into(),
+                },
+                0,
+            );
+
+            Tick::tick(&ticker_over(&store), 1_000_000).await.unwrap();
+
+            assert_eq!(
+                store.work(&work).unwrap().unwrap().title,
+                "named by the tick",
+                "the composite tick never settled the titler"
+            );
+            assert!(store.conversation(&titler).unwrap().is_none());
+        }
+    }
+
     mod works {
         use super::*;
         use crate::daemon::Tick;

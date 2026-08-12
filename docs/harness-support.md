@@ -22,6 +22,12 @@ stable interface, and a version bump is exactly when a silent change lands.
 | OpenCode | `--dir` only, exactly one — repeating it is a hard error | **Native, but only via a flag.** `/name` in the message is *not* expanded; `run --command <name>` resolves `.opencode/command/*.md` | Also loads `.agents/skills/*/SKILL.md` through its own `skill` tool |
 | AGY | `--add-dir`, repeatable, accumulates | **Native, in the prompt.** `/name` resolves `.agents/skills/*/SKILL.md`; an unknown name is refused rather than treated as text | Has no repo command directory at all — its customisations are Skills and Rules |
 
+| Harness | Resuming a session | Measured |
+| --- | --- | --- |
+| Claude Code | `--resume <id>` | Not measured against a mismatched directory |
+| OpenCode | `--session <id>`, **and `--dir` must be the session's own project** | A mismatch **hangs for ever, silently** — see below |
+| AGY | `--conversation <id>` | An unknown id silently starts fresh; see `harness/agy.rs` |
+
 How Jod sends each one, derived from the middle column: `Discovered::invoke`
 builds `/name args` for Claude Code and AGY, and `--command name` with the
 arguments as the message for OpenCode. It refuses to send a command to a harness
@@ -133,6 +139,88 @@ The binary contains the strings `additionalDirectories` and `workspaceFolders`,
 but both appear in its bundled Agent Client Protocol and language-server code
 rather than anywhere reachable from `opencode.json`, so treating them as a
 supported route would be a guess. Not tested, not claimed.
+
+## Resuming, and the OpenCode hang
+
+A session id is not enough to resume an OpenCode session. **The session is scoped
+to the project OpenCode resolves from `--dir`, and `--session <id>` naming a
+session from a different project does not error and does not start fresh — it
+produces no output on either stream and never exits.**
+
+Four runs, in order, on 12 August 2026 against `opencode` 1.18.15. A fresh run in
+`tmp/oc`, reporting its session id:
+
+```console
+$ opencode run --format json --dir /…/tmp/oc "Reply with exactly the word FRESHOK and nothing else."
+{"type":"text",…,"sessionID":"ses_008b390a4ffe8ayOultV14MuPU",…,"text":"FRESHOK",…}
+{"type":"step_finish",…,"tokens":{"total":10291,"input":8349,…}}
+EXIT=0
+```
+
+Resumed in the **same** directory — works, and the token counts prove the context
+came back rather than being rebuilt (`input` falls from 8349 to 68, with 10240
+read from cache):
+
+```console
+$ opencode run --format json --dir /…/tmp/oc --session ses_008b390a4ffe8ayOultV14MuPU "…RESUMEDOK…"
+{"type":"text",…,"text":"RESUMEDOK",…}
+{"type":"step_finish",…,"tokens":{"total":10313,"input":68,…,"cache":{"read":10240}}}
+EXIT=0
+```
+
+`--thinking`, which Jod always passes, changes nothing — ruled out explicitly
+because it was the first suspect:
+
+```console
+$ opencode run --format json --dir /…/tmp/oc --thinking --session ses_008b390a4… "…THINKRESUME…"
+{"type":"reasoning",…}
+{"type":"text",…,"text":"THINKRESUME",…}
+EXIT=0
+```
+
+The same session id with a **different** `--dir` — nothing, on either stream,
+until it was killed at ninety seconds:
+
+```console
+$ cd /…/tmp/oc-other
+$ timeout 90 opencode run --format json --dir /…/tmp/oc-other --thinking \
+    --session ses_008b390a4ffe8ayOultV14MuPU "Reply with exactly the word WRONGDIR and nothing else."
+Terminated
+EXIT=143
+```
+
+The control that makes this the *session lookup* rather than the directory: a
+**fresh** run in that same other directory is fine.
+
+```console
+$ opencode run --format json --dir /…/tmp/oc-other --thinking "…OTHERDIRFRESH…"
+{"type":"text",…,"text":"OTHERDIRFRESH",…}
+EXIT=0
+```
+
+### What this cost, and what Jod does about it
+
+This is what made a resumed OpenCode run in the parity suite emit a single
+`finished` event with no content and never terminate, twice, at ten and
+twenty-two minutes. The session id was correct throughout; the directory was
+not — `jod run -s <id>` took the directory the command was typed in.
+
+**Jod's half is fixed and its half only.** A resume now happens in the directory
+its session belongs to: `session_cwd` in `cli/src/main.rs` resolves the session
+to its conversation and uses that `cwd`, and an explicit `--cwd` still wins,
+because somebody who names a directory means it.
+
+**No workaround for the hang itself, deliberately.** Jod cannot tell a session
+that will never answer from a model that is thinking, so a timeout here would
+have to be a guess, and a guess that fires early kills real work. What Jod can
+do is stop *causing* the mismatch, which is what the fix does. A session started
+outside Jod and resumed by id is still exposed — there is nothing to look up —
+and the honest answer for that case is this section.
+
+Not measured, and so not claimed: whether Claude Code and AGY behave the same way
+on a mismatched directory. AGY has a documented defect of a related shape — an
+unknown `--conversation` silently starts fresh, losing the thread rather than
+hanging — and `harness/agy.rs` carries that measurement.
 
 ## Slash-command expansion, per harness
 

@@ -115,6 +115,17 @@ pub enum Action {
     EnterMain,
     /// Stop an agent and close its tmux session.
     Stop(String),
+    /// Run a command this repository offers, in the spelling its harness takes.
+    ///
+    /// Both fields come from `commands::Discovered::invoke`, which is the one
+    /// place that knows Claude Code and AGY expand `/name` from the prompt
+    /// while OpenCode needs `run --command <name>`. Nothing here branches on
+    /// the harness — a second copy of that measurement is how the two would
+    /// drift.
+    RunCommand {
+        prompt: String,
+        command: Option<String>,
+    },
     /// Put text on the terminal's clipboard.
     ///
     /// An `Action` because it writes an escape sequence to stdout, which the
@@ -928,61 +939,13 @@ async fn perform(
         // instructing the orchestrator — that is what being in it means. In any
         // other conversation it is what it always was: a turn to an agent whose
         // answer fills the screen.
-        Action::Send(prompt) => {
-            if thread.in_main(jod.store().map(Arc::as_ref)) {
-                orchestrate(jod, app, opts, thread, prompt).await;
-                return;
-            }
-            // The one place Jod's own verbs are handed over from the chat box.
-            //
-            // The rule this codebase already states is "the main chat is you,
-            // present, watching" — and a turn you just typed into the TUI is
-            // exactly that. The grant used to be withheld here on the grounds
-            // that "an agent started from the chat box is doing a task, not
-            // orchestrating", which conflated two different things reached
-            // through one function: a turn you are watching, and a delegation
-            // that goes off on its own. Only the second is unattended, and only
-            // the second still gets nothing.
-            //
-            // Without this you could ask Jod to schedule something and it would
-            // answer as if it had, having no verb to do it with.
-            match spawn(
-                jod,
-                app,
-                opts,
-                prompt.clone(),
-                app.resume.clone(),
-                WATCHED,
-                // Into the conversation the chat box is bound to, which after a
-                // handoff is the one carrying the summary. Everything else is
-                // still `New`, as it was.
-                thread.binding(),
-                thread.carried.clone(),
-            )
-            .await
-            {
-                Ok(id) => {
-                    // Only once. From here the harness has a session of its own
-                    // and is holding the context itself; re-sending it every
-                    // turn would hand the model a summary of a conversation it
-                    // is already in.
-                    thread.carried = None;
-                    // The first turn is what mints a conversation, so it is the
-                    // first moment anything chosen before it can be written
-                    // down.
-                    flush_pending(jod, app, thread, &id);
-                    app.watching = Some(id);
-                    app.busy = true;
-                    app.turn_started_ms = Some(app.now_ms);
-                    app.push(Entry::You(prompt));
-                    app.scroll_to_bottom();
-                }
-                Err(e) => app.push(Entry::Notice(format!("could not start: {e}"))),
-            }
+        Action::Send(prompt) => send_turn(jod, app, opts, thread, prompt, None).await,
+        // A repository's own command. Same turn, one field different — and
+        // that field is the whole of D7's measurement: Claude Code and AGY take
+        // `/name` in the prompt, OpenCode takes it in a flag.
+        Action::RunCommand { prompt, command } => {
+            send_turn(jod, app, opts, thread, prompt, command).await
         }
-        // One instruction to the main chat from wherever you happen to be, and
-        // it leaves you there. `Action::EnterMain` is the other thing — going
-        // to live in it.
         Action::Orchestrate(instruction) => orchestrate(jod, app, opts, thread, instruction).await,
         Action::EnterMain => enter_main(jod, app, opts, thread).await,
         Action::Delegate(prompt) => {
@@ -1008,6 +971,7 @@ async fn perform(
                 // background job that silently joined the thread on screen would
                 // interleave two agents' turns in one transcript.
                 RunConversation::New,
+                None,
                 None,
             )
             .await
@@ -3867,7 +3831,35 @@ fn on_chat_key(app: &mut App, key: KeyEvent, viewport: usize) -> Option<Action> 
             // A slash line is an instruction to Jod, not to the agent, so it
             // works while an agent is busy — switching the model for the *next*
             // turn is exactly the sort of thing you do while waiting.
-            if let Some(slash) = command::parse(app.input.trim()) {
+            let parsed = command::parse(app.input.trim());
+            // A repository's own command sits in exactly one gap: after Jod's
+            // own names, before the line becomes prose.
+            //
+            // Both edges are bugs a test caught here. Checked *first*, a repo
+            // shipping a `/model` would shadow Jod's — and Jod's `/model`
+            // changes this program's state, which no repository should be able
+            // to take over by choosing a filename. Checked *last*, it would
+            // never run at all: `parse` answers `Slash::Unknown` rather than
+            // `None` for an unrecognised name, so the line would be reported as
+            // an unknown command instead of forwarded.
+            //
+            // Hence the condition: only where Jod has no opinion.
+            let jod_has_no_opinion =
+                matches!(parsed, None | Some(command::Slash::Unknown(_)));
+            if jod_has_no_opinion {
+                if let Some((name, invocation)) = command::repo_invocation(&app.input, app) {
+                    let typed = app.input.trim().to_string();
+                    app.remember_typed(&typed);
+                    app.input.clear();
+                    app.cursor = 0;
+                    app.push(Entry::You(format!("/{name}")));
+                    return Some(Action::RunCommand {
+                        prompt: invocation.prompt,
+                        command: invocation.command,
+                    });
+                }
+            }
+            if let Some(slash) = parsed {
                 let typed = app.input.trim().to_string();
                 app.remember_typed(&typed);
                 app.input.clear();
@@ -4598,6 +4590,9 @@ async fn spawn(
     tools: Option<ToolAccess>,
     conversation: RunConversation,
     system: Option<String>,
+    // The harness's own command name, for the one harness that takes it in a
+    // flag rather than in the prompt. `None` for every ordinary turn.
+    command: Option<String>,
 ) -> Result<String> {
     let agent = jod
         .spawn_agent_in(
@@ -4630,12 +4625,86 @@ async fn spawn(
                 // Decided by the caller — see the parameter's own doc. Each of the
                 // two call sites says which situation it is in and why.
                 tools,
+                // Set only for a repository command on a harness that takes the
+                // name in a flag. `commands::Discovered::invoke` decides which
+                // spelling this is; nothing here branches on the harness.
+                command,
                 ..SpawnRequest::default()
             },
             conversation,
         )
         .await?;
     Ok(agent.id)
+}
+
+
+/// One turn from the chat box, with or without a repository command attached.
+///
+/// Extracted so `Action::Send` and `Action::RunCommand` cannot drift: they are
+/// the same turn, and the only difference is whether a command name rides along
+/// in the spawn request. A second copy of this would be a second place for the
+/// tool grant, the carried summary and the conversation binding to get out of
+/// step.
+async fn send_turn(
+    jod: &Arc<Jod>,
+    app: &mut App,
+    opts: &Options,
+    thread: &mut Thread,
+    prompt: String,
+    command: Option<String>,
+) {
+    if thread.in_main(jod.store().map(Arc::as_ref)) {
+        orchestrate(jod, app, opts, thread, prompt).await;
+        return;
+    }
+
+            // The one place Jod's own verbs are handed over from the chat box.
+            //
+            // The rule this codebase already states is "the main chat is you,
+            // present, watching" — and a turn you just typed into the TUI is
+            // exactly that. The grant used to be withheld here on the grounds
+            // that "an agent started from the chat box is doing a task, not
+            // orchestrating", which conflated two different things reached
+            // through one function: a turn you are watching, and a delegation
+            // that goes off on its own. Only the second is unattended, and only
+            // the second still gets nothing.
+            //
+            // Without this you could ask Jod to schedule something and it would
+            // answer as if it had, having no verb to do it with.
+            match spawn(
+                jod,
+                app,
+                opts,
+                prompt.clone(),
+                app.resume.clone(),
+                WATCHED,
+                // Into the conversation the chat box is bound to, which after a
+                // handoff is the one carrying the summary. Everything else is
+                // still `New`, as it was.
+                thread.binding(),
+                thread.carried.clone(),
+                command,
+            )
+            .await
+            {
+                Ok(id) => {
+                    // Only once. From here the harness has a session of its own
+                    // and is holding the context itself; re-sending it every
+                    // turn would hand the model a summary of a conversation it
+                    // is already in.
+                    thread.carried = None;
+                    // The first turn is what mints a conversation, so it is the
+                    // first moment anything chosen before it can be written
+                    // down.
+                    flush_pending(jod, app, thread, &id);
+                    app.watching = Some(id);
+                    app.busy = true;
+                    app.turn_started_ms = Some(app.now_ms);
+                    app.push(Entry::You(prompt));
+                    app.scroll_to_bottom();
+                }
+                Err(e) => app.push(Entry::Notice(format!("could not start: {e}"))),
+            }
 }
 
 /// Re-read the team from the store.
@@ -4682,6 +4751,10 @@ fn refresh_workspaces(jod: &Arc<Jod>, app: &mut App) {
     // The forest, and then the cursor onto a row that still exists — the tree
     // reshapes on every tick as runs finish, which is the whole reason the
     // selection is an id.
+    // What this repository offers, for the harness on screen. On the tick
+    // because `/harness` changes the answer and the palette must not go stale
+    // mid-session.
+    app.discovered = data::discovered(jod, app.harness);
     let (forest, closed) = data::forest(jod, app.tree.show_closed);
     app.forest = forest;
     app.closed_works = closed;
@@ -9357,6 +9430,149 @@ mod tests {
         app.watching = Some("run-1".into());
         app.busy = false;
         assert_eq!(press(&mut app, KeyCode::Esc), None);
+    }
+
+    // ---- a repository's own commands reach the palette ----
+    //
+    // These are wiring tests on purpose. `commands.rs` works and `jod commands
+    // ls` proves it; what was missing was any TUI file calling it. So each of
+    // these fails if the *call* is deleted, not merely if the function behind
+    // it breaks — deleting `repo_commands` from `completions`, or the
+    // `repo_invocation` check in `on_chat_key`, turns them red.
+
+    fn found(name: &str, kind: jod_core::commands::Kind, harness: HarnessKind) -> jod_core::commands::Discovered {
+        jod_core::commands::Discovered {
+            id: 1,
+            root: PathBuf::from("/home/reljod/repo/Jod"),
+            scope: jod_core::commands::Scope::Root,
+            kind,
+            name: name.into(),
+            description: "open a pull request with evidence".into(),
+            path: PathBuf::from(".claude/commands/create-pr.md"),
+            harness: harness.id().to_string(),
+            body: String::new(),
+            scanned_at_ms: 0,
+        }
+    }
+
+    fn with_repo_commands(harness: HarnessKind) -> App {
+        let mut app = app_on(harness);
+        app.discovered = vec![found("create-pr", jod_core::commands::Kind::Command, harness)];
+        app
+    }
+
+    /// The gap this closes: the palette was a hardcoded enum, so a repository's
+    /// own commands were invisible in the one place they would be used.
+    #[test]
+    fn a_repo_command_is_offered_in_the_palette_beside_jods_own() {
+        let mut app = with_repo_commands(HarnessKind::ClaudeCode);
+        app.input = "/c".into();
+        let offered = command::completions(&app.input, &app);
+        assert!(
+            offered.iter().any(|c| c.line.starts_with("/create-pr")),
+            "the repo's command is missing: {offered:?}"
+        );
+        assert!(
+            offered.iter().any(|c| c.line.starts_with("/config")),
+            "and Jod's own are still there: {offered:?}"
+        );
+    }
+
+    /// `/review` from Jod and `/review` from the checkout are different things,
+    /// so which one a row is has to be on the row.
+    #[test]
+    fn a_repo_command_says_where_it_came_from() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.discovered = vec![
+            found("create-pr", jod_core::commands::Kind::Command, HarnessKind::ClaudeCode),
+            found("write-spec", jod_core::commands::Kind::Skill, HarnessKind::ClaudeCode),
+        ];
+        app.input = "/".into();
+        let offered = command::completions(&app.input, &app);
+        let pr = offered
+            .iter()
+            .find(|c| c.line.starts_with("/create-pr"))
+            .expect("the command");
+        assert!(pr.hint.contains("repo"), "{}", pr.hint);
+        assert!(pr.hint.contains("command"), "{}", pr.hint);
+        assert!(
+            pr.hint.contains("open a pull request"),
+            "the description is real now: {}",
+            pr.hint
+        );
+        let spec = offered
+            .iter()
+            .find(|c| c.line.starts_with("/write-spec"))
+            .expect("the skill");
+        assert!(spec.hint.contains("skill"), "{}", spec.hint);
+    }
+
+    /// D7's measurement, forwarded rather than reimplemented: Claude Code takes
+    /// `/name` in the prompt.
+    #[test]
+    fn enter_on_a_repo_command_forwards_it_in_the_prompt_for_claude_code() {
+        let mut app = with_repo_commands(HarnessKind::ClaudeCode);
+        type_line(&mut app, "/create-pr the rail");
+        assert_eq!(
+            press(&mut app, KeyCode::Enter),
+            Some(Action::RunCommand {
+                prompt: "/create-pr the rail".into(),
+                command: None,
+            })
+        );
+        assert_eq!(app.input, "", "the line is consumed");
+    }
+
+    /// ...and OpenCode needs the name in a flag. Given `/name` in the message
+    /// it passed the literal text to the model, which went hunting and answered
+    /// correctly — right for the wrong reason, which is the failure this
+    /// spelling prevents.
+    #[test]
+    fn enter_on_a_repo_command_uses_the_flag_for_opencode() {
+        let mut app = with_repo_commands(HarnessKind::OpenCode);
+        type_line(&mut app, "/create-pr the rail");
+        assert_eq!(
+            press(&mut app, KeyCode::Enter),
+            Some(Action::RunCommand {
+                prompt: "the rail".into(),
+                command: Some("create-pr".into()),
+            })
+        );
+    }
+
+    /// A `.claude/commands/foo.md` has no OpenCode equivalent. The palette
+    /// filters by harness at the query; this is the backstop, and it drops back
+    /// to the ordinary prose path rather than forwarding a spelling that cannot
+    /// resolve.
+    #[test]
+    fn a_command_from_another_harnesss_convention_is_not_forwarded() {
+        let mut app = app_on(HarnessKind::OpenCode);
+        app.discovered = vec![found(
+            "create-pr",
+            jod_core::commands::Kind::Command,
+            HarnessKind::ClaudeCode,
+        )];
+        type_line(&mut app, "/create-pr");
+        let action = press(&mut app, KeyCode::Enter);
+        assert!(
+            !matches!(action, Some(Action::RunCommand { .. })),
+            "it must not be forwarded: {action:?}"
+        );
+    }
+
+    /// Jod's own commands still win — a repo shipping a `/model` must not
+    /// shadow the built-in, because the built-in is what the rest of the
+    /// program documents.
+    #[test]
+    fn jods_own_commands_are_unaffected_by_a_repo_of_the_same_name() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.discovered = vec![found("model", jod_core::commands::Kind::Command, HarnessKind::ClaudeCode)];
+        type_line(&mut app, "/model opus");
+        let action = press(&mut app, KeyCode::Enter);
+        assert!(
+            !matches!(action, Some(Action::RunCommand { .. })),
+            "Jod's own /model must still be Jod's: {action:?}"
+        );
     }
 
     // ---- searching every transcript ----

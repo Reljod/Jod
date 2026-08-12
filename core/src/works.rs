@@ -301,7 +301,7 @@ impl Titling {
 
     pub fn request(&self) -> SpawnRequest {
         SpawnRequest {
-            name: format!("title {}", self.work_id),
+            name: titler_run_name(&self.work_id),
             harness: self.harness,
             prompt: self.prompt(),
             system: None,
@@ -389,6 +389,48 @@ impl Titling {
             fell_back: true,
         }
     }
+}
+
+/// What the titler's run is called.
+///
+/// The work id is in the name because the name is **durable and written at
+/// spawn**, by the process that starts the run, into a row the supervisor then
+/// owns. That matters more than it looks: the whole point of settling a titler
+/// from a tick is that the process which started it may be gone, so every link
+/// the settling needs has to survive it. One function rather than two format
+/// strings, because a name written in one place and parsed in another is a
+/// contract, and this is the only copy of it.
+pub fn titler_run_name(work_id: &str) -> String {
+    format!("title {work_id}")
+}
+
+/// What a titler conversation is called while it exists.
+///
+/// It exists for seconds and is then deleted, so the title is free to carry
+/// the one fact a sweeper needs — which work it is for. Written at creation
+/// into the conversation row itself, so it survives the launcher: nothing else
+/// about a titler does. It is also better than what was there before, which
+/// was the first line of its own prompt.
+pub const TITLER_TITLE_PREFIX: &str = "titler for ";
+
+/// How long a titler with no run at all is left alone before it is swept.
+///
+/// A titler whose *spawn* never happened — the process died between opening
+/// the conversation and starting the run — has no run to wait for and would
+/// otherwise sit in the fleet for ever. Generous, because the alternative
+/// mistake is sweeping one that is about to start.
+pub const TITLER_GRACE_MS: i64 = 5 * 60_000;
+
+/// A titler conversation nobody folded in.
+///
+/// Its mere existence is the signal: [`Store::finish_titling`] deletes the
+/// conversation whatever the answer was, so a titler that is still here is one
+/// that was never settled. There is no flag to check and none to forget to set.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OrphanedTitler {
+    pub conversation_id: String,
+    pub work_id: String,
+    pub created_at_ms: i64,
 }
 
 /// FNV-1a, so the fence depends on the instruction it fences and the prompt
@@ -765,21 +807,113 @@ impl Store {
 
     /// Open the throwaway conversation the titler runs in.
     ///
-    /// Deliberately attached to no work. A conversation that belongs to a work
+    /// Deliberately attached to no work: a conversation that belongs to a work
     /// cannot be deleted on its own — that is what keeps a session from being
     /// cut out of a tree still pointing at it — and the titler's whole life is
     /// to be deleted.
-    pub fn open_titler(&self, harness: HarnessKind) -> Result<Conversation> {
+    ///
+    /// So the work it is for is recorded in its **title** instead. That is not
+    /// decoration: the process that starts a titler may not outlive it, and
+    /// then the only thing that can settle the titler is a later sweep with
+    /// nothing in memory. Everything that sweep needs — which work, which run —
+    /// has to be in a row somebody else wrote. The title is that row.
+    pub fn open_titler(&self, work_id: &str, harness: HarnessKind) -> Result<Conversation> {
         let cwd = crate::paths::jod_home().to_string_lossy().to_string();
         let conversation = self.new_conversation(harness, &cwd, None)?;
+        let title = format!("{TITLER_TITLE_PREFIX}{work_id}");
         self.write(|tx| {
             tx.execute(
-                "UPDATE conversations SET origin = ?2 WHERE id = ?1",
-                params![conversation.id, Origin::Titler.as_str()],
+                "UPDATE conversations SET origin = ?2, title = ?3 WHERE id = ?1",
+                params![conversation.id, Origin::Titler.as_str(), title],
             )?;
             Ok(())
         })?;
-        Ok(conversation)
+        Ok(Conversation {
+            title,
+            ..conversation
+        })
+    }
+
+    /// Every titler conversation that was never folded in.
+    ///
+    /// Oldest first, because the oldest is the one most likely to have been
+    /// orphaned rather than to be mid-flight.
+    pub fn orphaned_titlers(&self) -> Result<Vec<OrphanedTitler>> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT id, title, created_at_ms FROM conversations
+              WHERE origin = ?1 ORDER BY created_at_ms, id",
+        )?;
+        let rows = stmt.query_map(params![Origin::Titler.as_str()], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (conversation_id, title, created_at_ms) = row?;
+            // A titler from before the work id was recorded in the title has
+            // nothing to fold into. It is left alone rather than guessed at:
+            // settling the wrong work would overwrite a title somebody may
+            // have been given by a titler that did work.
+            let Some(work_id) = title.strip_prefix(TITLER_TITLE_PREFIX) else {
+                continue;
+            };
+            out.push(OrphanedTitler {
+                conversation_id,
+                work_id: work_id.to_string(),
+                created_at_ms,
+            });
+        }
+        Ok(out)
+    }
+
+    /// The run that was started to name this work, and what became of it.
+    ///
+    /// Found by the run's name, which [`titler_run_name`] wrote at spawn. The
+    /// newest wins: a work whose titler was retried has two, and the last
+    /// attempt is the one with an answer in it.
+    pub fn titler_run(&self, work_id: &str) -> Result<Option<(String, String)>> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        Ok(conn
+            .query_row(
+                "SELECT id, status FROM runs WHERE name = ?1
+                  ORDER BY created_at_ms DESC, id DESC LIMIT 1",
+                params![titler_run_name(work_id)],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?)
+    }
+
+    /// What a titler said, read back from the durable event log.
+    ///
+    /// **Not from the conversation's messages**, and that is the whole point.
+    /// A run's `messages` are written by whichever Jod process is following it;
+    /// its `events` are written by the supervisor, which is a separate process
+    /// that outlives the launcher by design. A titler settled after its
+    /// launcher has gone has events and may have no messages at all.
+    ///
+    /// Both the prose and the final answer are taken, because harnesses differ
+    /// about which one carries a short reply, and [`Titling::parse`] is happy
+    /// to be handed more than it needs.
+    pub fn titler_output(&self, run_id: &str) -> Result<String> {
+        let mut said = String::new();
+        for envelope in self.events(run_id)? {
+            match envelope.event {
+                crate::AgentEvent::Message { text } => {
+                    said.push_str(&text);
+                    said.push('\n');
+                }
+                crate::AgentEvent::Finished { text: Some(text), .. } => {
+                    said.push_str(&text);
+                    said.push('\n');
+                }
+                _ => {}
+            }
+        }
+        Ok(said)
     }
 
     /// Put a conversation in a work, under a parent.
@@ -1615,7 +1749,7 @@ mod tests {
     fn the_titler_names_the_work_and_the_conversation_is_then_gone() {
         let s = store();
         let work = s.create_work("make the fleet screen a tree").unwrap();
-        let titler = s.open_titler(HarnessKind::ClaudeCode).unwrap();
+        let titler = s.open_titler(&work.id, HarnessKind::ClaudeCode).unwrap();
 
         let titled = s
             .finish_titling(
@@ -1643,7 +1777,7 @@ mod tests {
         let work = s
             .create_work("investigate why the ticker wakes twice a minute")
             .unwrap();
-        let titler = s.open_titler(HarnessKind::ClaudeCode).unwrap();
+        let titler = s.open_titler(&work.id, HarnessKind::ClaudeCode).unwrap();
 
         let titled = s.finish_titling(&work.id, &titler.id, "").unwrap();
 
@@ -1998,7 +2132,7 @@ mod tests {
         let work = s
             .create_work(&format!("work on {} and make the tests pass", repo.display()))
             .unwrap();
-        let titler = s.open_titler(HarnessKind::ClaudeCode).unwrap();
+        let titler = s.open_titler(&work.id, HarnessKind::ClaudeCode).unwrap();
         s.finish_titling(
             &work.id,
             &titler.id,

@@ -1066,7 +1066,7 @@ async fn start_titler(
     // finishes before anything is listening and the work keeps its fallback
     // name for no reason.
     let events = jod.subscribe();
-    let conversation = store.open_titler(harness).ok()?;
+    let conversation = store.open_titler(&work.id, harness).ok()?;
     let request = crate::works::Titling::new(work)
         .with_harness(harness)
         .request();

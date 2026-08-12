@@ -558,16 +558,84 @@ impl Completion {
 /// — `/harness ` is the point where a user has to remember three spellings, and
 /// the commands that take an agent id are otherwise a UUID-retyping exercise,
 /// so the live fleet is offered there.
+/// The repository's own commands, as palette rows.
+///
+/// **Marked with their source**, and that is not decoration: `/review` from
+/// Jod and `/review` from the checkout you happen to be in are different
+/// things, and a palette that showed them identically would make which one
+/// fired a matter of ordering. The mark says `repo` or `user`, and `skill` or
+/// `command`, because those are the two facts that decide what it will do.
+///
+/// `app.discovered` is already filtered to the harness on screen — see
+/// `data::discovered` — so nothing here can offer a command that would not
+/// resolve.
+fn repo_commands(typed: &str, app: &crate::tui::App) -> Vec<Completion> {
+    app.discovered
+        .iter()
+        .filter(|found| found.name.to_ascii_lowercase().starts_with(typed))
+        .map(|found| {
+            // `Root` is the repository's own; the rest come from the user's
+            // config or a plugin and are available everywhere. Which of the
+            // two it is decides whether the command travels with the checkout,
+            // which is the fact worth a column.
+            let source = match found.scope {
+                jod_core::commands::Scope::Root => "repo",
+                jod_core::commands::Scope::User => "user",
+                jod_core::commands::Scope::Plugin => "plugin",
+            };
+            let what = if found.description.trim().is_empty() {
+                String::new()
+            } else {
+                format!(" · {}", found.description.trim())
+            };
+            Completion::new(
+                format!("/{} ", found.name),
+                format!("{source} {}{what}", found.kind.as_str()),
+            )
+        })
+        .collect()
+}
+
+/// The repository command a typed line names, and how to send it to `harness`.
+///
+/// `None` when the line names none, which leaves every existing path
+/// untouched: an unknown `/word` is still prose, as it was.
+///
+/// The spelling comes from [`Discovered::invoke`] rather than from anything
+/// here. Claude Code and AGY expand `/name` straight out of the prompt;
+/// OpenCode needs the name in `run --command <name>`. That was measured once,
+/// lives in `commands.rs`, and reimplementing the branch at this call site is
+/// how the two copies would drift.
+pub fn repo_invocation(
+    line: &str,
+    app: &crate::tui::App,
+) -> Option<(String, jod_core::commands::Invocation)> {
+    let rest = line.trim().strip_prefix('/')?;
+    let mut parts = rest.splitn(2, char::is_whitespace);
+    let name = parts.next()?;
+    let args = parts.next().unwrap_or("").trim();
+    let found = app
+        .discovered
+        .iter()
+        .find(|found| found.name.eq_ignore_ascii_case(name))?;
+    // A refusal here means the harness moved between the palette being built
+    // and the line being sent. Dropping to `None` puts it back on the ordinary
+    // prose path rather than sending a spelling the harness cannot resolve.
+    let invocation = found.invoke(app.harness, args).ok()?;
+    Some((found.name.clone(), invocation))
+}
+
 pub fn completions(input: &str, app: &crate::tui::App) -> Vec<Completion> {
     let agents = &app.agents;
     let Some(rest) = input.strip_prefix('/') else {
         return vec![];
     };
 
-    // Still typing the command word: offer names.
+    // Still typing the command word: offer names — Jod's own first, then
+    // whatever this repository brought.
     if !rest.contains(char::is_whitespace) {
         let typed = rest.to_ascii_lowercase();
-        return HELP
+        let mut offered: Vec<Completion> = HELP
             .iter()
             .filter(|(usage, _)| {
                 usage
@@ -588,6 +656,8 @@ pub fn completions(input: &str, app: &crate::tui::App) -> Vec<Completion> {
                 Completion::new(line, *hint)
             })
             .collect();
+        offered.extend(repo_commands(&typed, app));
+        return offered;
     }
 
     // Past the name: offer arguments for the commands that have a fixed set.
