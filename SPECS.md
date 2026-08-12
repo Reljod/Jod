@@ -46,6 +46,9 @@ Fixed here because six epics use these words, and a drifting noun is a bug.
 | **project-session** | A conversation belonging to a work. Not a new type — an existing conversation with a work attached. |
 | **card** | One row in the left rail: a decision, a question, or a secret request. |
 | **lease** | A git worktree a session claimed to write in, tracked so siblings can reuse it. |
+| **task** | One item on a work's board. A work opens with at least one, so "all done" always means something. |
+| **closed** | Every task complete. The work is over; its record and its worktrees remain. |
+| **deleted** | The work and its sessions are gone from Jod. Its worktrees and branches are not. |
 | **redaction** | The supervisor step that replaces a live secret's value in every line before it is stored. |
 
 ## The two seams
@@ -77,6 +80,7 @@ two lanes that will conflict.
 | The MCP server | The card tools, opening a work, listing roots | **C** |
 | The orchestrator | Preambles rewritten; the router learns to open a work | **C** |
 | The conversation store | Deleting a conversation, which does not exist today | **A** |
+| The task board and work lifecycle | Tasks per work, closing when the board empties, cascading delete with its confirmation | **A** |
 | Command discovery and pull requests | Scanning, caching, detection, reconciliation | **C** / **A** |
 | **Every TUI file** — rail, picker, tree, and the shared renderer, keymap, mode switch and app state | The screens themselves, and registering them | **B, alone** |
 | The CLI | Root, card, secret, work and session-delete subcommands | **C** |
@@ -147,6 +151,25 @@ half-finished state accumulates.
 **D6 — the titler is a throwaway conversation that is then deleted.** Cheap
 model, one turn, then removed. This is why deleting a conversation is in scope at
 all.
+
+**D8 — a work ends when its tasks do, and deleting one never eats uncommitted
+code.** *Done* is not a judgement call: a work opens with at least one task and
+is **closed** when every task on its board is complete. Closing is automatic and
+cheap — the record stays, the tree stays, nothing is destroyed.
+
+**Deleting** is the separate, explicit act, and it takes every session in the
+work with it: their transcripts, their unanswered cards, their bus traffic.
+Because that is unrecoverable and easy to fire by accident, deleting a work that
+holds worktrees **refuses the first time** — it prints exactly what would be
+lost and what is dirty — and proceeds only if the *same* command is repeated. A
+different work's delete does not inherit that confirmation.
+
+What deletion does **not** do is remove the git worktrees or their branches. Jod's
+records are cheap to recreate; a branch with uncommitted work on it is not, and
+the moment of deleting a session's history is exactly the moment nobody is left
+to remember what was on it. The paths are printed, so nothing is orphaned
+silently, and removing them is a separate deliberate flag that still refuses a
+dirty tree.
 
 **D7 — repo slash commands are forwarded, not reimplemented.** Jod sends the
 command line through to harnesses that expand it themselves, and inlines the
@@ -238,9 +261,12 @@ value appears nowhere in the database.
 - **E4.S1 Works.** A titled, coloured group; conversations gain a work, a parent
   and an origin; the tree and the whole forest are queryable; cycles are refused.
 - **E4.S2 The throwaway titler.** One cheap turn produces a title and a summary,
-  then the conversation is deleted. Deleting a conversation is new here, and
-  refuses the pinned main chat. A titler outage falls back to the first few words
-  of the instruction rather than blocking the work.
+  then the conversation is deleted. Deleting a conversation is new here. It
+  refuses the pinned main chat, and it refuses a conversation that belongs to a
+  work — deleting the *work* is the only sanctioned way to remove those, so a
+  session cannot be quietly cut out of a tree that still points at it. A titler
+  outage falls back to the first few words of the instruction rather than
+  blocking the work.
 - **E4.S3 Claiming a worktree.** A session starts with the real checkout as a
   read-only root. An explicit claim — the agent's own step, per D5 — cuts a
   branch and worktree, records the lease, and adds it as the session's writable
@@ -259,11 +285,39 @@ value appears nowhere in the database.
 - **E4.S5 Cascading cards.** Card queries gain subtree scope; the main rail shows
   every descendant's cards, tinted by work; cascade is upward only; every card
   names the session it came from so an answer never lands on the wrong agent.
+- **E4.S6 A work has a board, and finishing it closes the work.** Opening a work
+  records at least one task — the instruction itself, if nothing finer is known —
+  so "all tasks complete" is always a meaningful state. Tasks reuse the existing
+  board and its atomic claim rather than a second one. When the last task closes
+  the work becomes **closed** on its own: its idle sessions are stopped, its
+  running ones are left alone to finish, and a closing card summarises what came
+  out of it — the branches, the pull requests, the leases still on disk, and any
+  card nobody answered. A work whose tasks are done but whose sessions are still
+  running is shown as *finishing*, not closed, because the two are different
+  questions and only one of them is safe to act on.
+- **E4.S7 Deleting a work.** Removes the work and every session attached to it —
+  transcripts, cards, delegations, bus traffic — in one transaction, so a
+  half-deleted tree is not a state that exists. Per D8 it **refuses the first
+  time if the work holds any worktree**, printing each lease's path, branch,
+  whether it is dirty, and whether it is merged, plus the count of transcripts
+  and unanswered cards about to go. Repeating the identical command completes it.
+  The confirmation is bound to that work and expires, so a stale confirmation
+  cannot arm a later delete. A work with no leases deletes on the first command,
+  because there is nothing on disk to lose.
+- **E4.S8 The worktrees outlive the work.** Deletion prints the paths it left
+  behind and leaves the branches alone. Removing them is a separate explicit
+  flag, and even then a dirty or unmerged tree is kept and reported rather than
+  removed. `jod work leases` remains the way to find and clean them afterwards,
+  including leases whose work is gone.
 
 **Check:** one instruction naming a folder produces a titled work and a session
 with the folder as a read-only root and **no worktree yet**; the session's first
 claim cuts a branch, and after it the original root is still readable and no
-longer writable. A printed two-level tree shows both.
+longer writable. A printed two-level tree shows both. Completing the work's last
+task closes it and raises the closing card. Deleting it then **fails the first
+time** naming the lease, succeeds when the command is repeated, removes every
+session in the work — asserted by counting conversations before and after — and
+leaves the branch and its worktree on disk.
 
 ## E5 — Fleet as a tree
 
@@ -278,6 +332,10 @@ longer writable. A printed two-level tree shows both.
   order at narrow widths, spinners on running nodes, a card count per node so the
   tree says where the questions are, work colour on the row, and a filter that
   keeps ancestors of every hit visible.
+- **E5.S3b Closed works get out of the way.** A closed work collapses by default
+  and sorts below live ones; a toggle hides them entirely. Otherwise the tree
+  becomes an archive of everything ever done, which is the state that makes
+  people stop reading it.
 - **E5.S4 Summaries.** The newest message or tool call as the node's summary — no
   extra model call — refreshed on the existing tick, off the render path.
 
@@ -541,8 +599,10 @@ it below.
 
 - irreversible or externally-visible actions — opening a pull request, pushing a
   branch, removing a worktree with uncommitted work in it
-- data migrations, deletion, money — deleting a conversation is a hard delete and
-  its refusal list must not be widened without asking
+- data migrations, deletion, money — deleting a conversation or a work is a hard
+  delete. Its refusal list must not be widened, its repeat-confirmation must not
+  be weakened into a flag, and deletion must never grow the power to remove a
+  worktree that is dirty or unmerged
 - auth, permissions, secrets — any change to where a secret is written, what is
   redacted, or what reaches the model
 - public contracts — the spawn request, the MCP tool set, the HTTP routes

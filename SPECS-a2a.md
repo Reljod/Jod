@@ -200,6 +200,10 @@ Depends on `SPECS.md` E4.
   addressed to an ambiguous name is a message delivered to the wrong agent.
 - **G3.S5 Explicit teams keep working.** Everything `jod team` does today keeps
   doing it; this is additive.
+- **G3.S6 A work's bus ends with the work.** Closing a work stops delivery into
+  it — waiting mail is reported, not delivered into sessions that are finishing.
+  Deleting a work takes its traffic with it, in the same transaction as its
+  sessions (`SPECS.md` E4.S7), so no thread outlives its participants.
 
 **Check:** two sessions the orchestrator opened for one work message each other
 by name, having never been joined to a team.
