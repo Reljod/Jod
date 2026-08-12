@@ -67,22 +67,23 @@ Areas of the repo, not signatures — the executing session designs those. This
 table is here because it is also the **lane map**: two lanes that share a row are
 two lanes that will conflict.
 
-| Area | What changes | Owned in |
+| Area | What changes | Lane |
 |---|---|---|
-| The store's schema and queries | New tables for roots, cards, works, leases, pull requests, discovered commands; new columns tying a conversation to a work and a parent | Wave 0, then each epic's own lane |
-| New core modules | Roots, cards, secrets, works, leases, command discovery, pull requests — one module each, no shared file | Their epic's lane |
-| The supervisor | Applies the injected environment, scrubs secrets from both output streams | Lane C only |
+| The store's schema | New tables for roots, cards, works, leases, pull requests, discovered commands; new columns tying a conversation to a work and a parent | Wave 0 |
+| The store's queries | Everything the rail, the tree and the CLI read | **A** |
+| New core modules | Roots, ranking, cards, works, leases, the tree model, pull requests — one module each, no shared file | **A** |
+| Secrets and the supervisor | Storage, injection, and scrubbing both output streams | **C** |
 | The spawn contract | Carries roots and environment pairs through to the harness | Wave 0 |
-| The MCP server | Three card tools, plus opening a work and listing roots | Lanes B and E4's lane |
-| The orchestrator | Preambles rewritten; the router learns to open a work | E4's lane, then wave 4 |
-| The conversation store | Deleting a conversation, which does not exist today | E4's lane |
-| **New TUI modules** — rail, picker, tree | One per surface, so three lanes never share a file | Lanes A, B and E5's lane |
-| **Shared TUI files** — mode switch, renderer, keymap, app state | Registration only: a key, a workspace entry, a draw call | **One wiring task per wave, one owner** |
-| The CLI | Root, card, secret, work and session-delete subcommands | Their epic's lane |
-| Docs — decisions, system design, harness config, README | The seven decisions, the new concepts, the measured support matrix | Wave 4 |
+| The MCP server | The card tools, opening a work, listing roots | **C** |
+| The orchestrator | Preambles rewritten; the router learns to open a work | **C** |
+| The conversation store | Deleting a conversation, which does not exist today | **A** |
+| Command discovery and pull requests | Scanning, caching, detection, reconciliation | **C** / **A** |
+| **Every TUI file** — rail, picker, tree, and the shared renderer, keymap, mode switch and app state | The screens themselves, and registering them | **B, alone** |
+| The CLI | Root, card, secret, work and session-delete subcommands | **C** |
+| Docs — decisions, system design, harness config, README | The seven decisions, the new concepts, the measured support matrix | **C** |
 
-The bolded pair is the whole coordination problem; see *The real constraint is
-not the epics* below.
+**One lane owns the terminal.** That is the single most important row: it is why
+three lanes need no conflict protocol at all. See *Why three, and not four*.
 
 ## Decisions taken here
 
@@ -334,24 +335,25 @@ Only four hard dependencies exist. Everything else is schedule, not logic.
         │  contracts: table shapes · query names · spawn fields       │
         └───────┬────────────┬────────────┬───────────┬───────────────┘
                 │            │            │           │
-        ┌───────▼──┐  ┌──────▼──────┐  ┌──▼───────┐  ┌▼────────────┐
-   W1   │ E1 roots │  │ E2 cards    │  │ E3.S1–3  │  │ E6.S2 probe │
-        │ + picker │  │ + rail      │  │ secrets  │  │ + discovery │
-        └───────┬──┘  └──┬───────┬──┘  └──┬───────┘  └─────────────┘
-                │        │       │        │
-                │        │       └────────▼──────┐
-                │        │            ┌──────────▼─┐
-   W2           │        │            │ E3.S4–5    │   rail flow needs the rail
-                ▼        │            └────────────┘
-        ┌────────────────▼─┐
-        │ E4 works+leases  │   leases rebind roots → needs E1.S1
-        └───────┬──────────┘
-                │
-   W3    ┌──────▼─────┐   ┌──────────────┐
-        │ E5 tree     │   │ E6.S3 PRs    │   both need E4's leases/tree
-        └─────────────┘   └──────────────┘
+        ┌───────▼────────┐  ┌────▼───────────┐  ┌──▼──────────────┐
+   W1   │ A: roots ·     │  │ B: the rail ·  │  │ C: secrets ·    │
+        │    ranking ·   │  │    the mention │  │    injection ·  │
+        │    card store  │  │    popup       │  │    the probe    │
+        └───────┬────────┘  └────┬───────────┘  └──┬──────────────┘
+                │                │                 │
+   W2   ┌───────▼────────┐  ┌────▼───────────┐  ┌──▼──────────────┐
+        │ A: works ·     │  │ B: the picker  │  │ C: MCP tools ·  │
+        │    titler ·    │  │    screen ·    │  │    discovery ·  │
+        │    leases ·    │  │    the secret  │  │    CLI parity   │
+        │    tree query  │  │    card        │  │                 │
+        └───────┬────────┘  └────┬───────────┘  └──┬──────────────┘
+                │                │                 │
+   W3   ┌───────▼────────┐  ┌────▼───────────┐  ┌──▼──────────────┐
+        │ A: pull        │  │ B: the fleet   │  │ C: preambles    │
+        │    requests    │  │    tree        │  │                 │
+        └────────────────┘  └────────────────┘  └─────────────────┘
 
-   W4    E6.S1 preambles · E6.S4 docs   ← last, because they describe the rest
+   W4    docs · the last wiring   ← last, because they describe the rest
 ```
 
 The four real edges:
@@ -371,66 +373,76 @@ One short session, alone, before any lane starts: land the migrations and the
 empty query signatures the lanes will call. Nothing implemented, everything
 named.
 
-This exists because the alternative is four lanes each inventing a card table.
+This exists because the alternative is three lanes each inventing a card table.
 It is the only genuinely serial work in the spec, and it is small. Skip it and
 wave 1 spends its time in merge conflicts instead.
 
-## Wave 1 — four lanes, no overlap
+## The three lanes
 
-| Lane | Owns | Does not touch |
+They are **stable across every wave** — the same three owners from wave 1 to
+wave 4 — because a lane's value is the context its owner accumulates, and
+reshuffling ownership between waves throws that away.
+
+| Lane | Owns, throughout | Never touches |
 |---|---|---|
-| **A · roots + picker** | E1 | the rail, works, the supervisor |
-| **B · cards + rail** | E2 | roots, works, the supervisor |
-| **C · secrets** | E3.S1–S3 | any TUI file |
-| **D · commands probe** | E6.S2 | everything else |
+| **A · data and core** | The store's queries and every new core module: roots, ranking, cards, works, leases, the tree model, pull requests | The terminal, the supervisor |
+| **B · the terminal** | Every TUI file, shared ones included — the rail, the pickers, the tree, and the wiring that registers them | Core, the supervisor, the CLI |
+| **C · edges** | The supervisor, secrets, the MCP server, the orchestrator's preambles, command discovery, the CLI, the docs | The terminal, the store's queries |
 
-Lane D is deliberately first rather than last. It is a *measurement* — does each
-binary expand its own slash commands — and its answer deletes or keeps a branch
-of E6's design. Measuring it in wave 1 costs an hour; discovering it in wave 4
-costs a redesign.
+**The dividing rule between A and B: anything testable without a terminal lives
+in core and belongs to A.** Fuzzy ranking, the tree's flatten, card filtering and
+sorting are logic, not drawing. B writes only what paints and what handles keys.
+This is what keeps the one-terminal-lane rule from making B the bottleneck, and
+it is a better architecture regardless — none of that logic should need a
+terminal to be tested.
 
-Lane C is the other one worth starting early despite shipping late: redaction
-touches the supervisor, which nothing else in this spec touches, so it is the
-one lane that can run to completion without ever waiting.
+## Wave 1
 
-## Wave 2 — two lanes
+- **A** — roots exist; candidate enumeration and ranking as a core module; the
+  card store and its one query builder.
+- **B** — the rail, collapsed and expanded, with filter and sort; the mention
+  popup over A's ranking.
+- **C** — secret storage, injection and redaction, end to end; and the
+  command-expansion probe.
 
-Lane A folds into **E4** (works and leases) as soon as roots land, because the
-same person now holds the root model in their head. Lane B finishes the rail and
-picks up **E3.S4–S5**, the secret flow, for the same reason.
+C's probe is deliberately first rather than last. It is a *measurement* — does
+each binary expand its own slash commands — and its answer deletes or keeps a
+branch of E6's design. An hour in wave 1; a redesign in wave 4.
 
-Lanes C and D are done and their owners move into wave 3 early.
+## Wave 2
 
-## Wave 3 — two lanes
+- **A** — works, the throwaway titler, leases and claiming, and the tree query
+  E5 will render.
+- **B** — the full-screen picker; the secret card flow; cards cascading by work.
+- **C** — the MCP tools over A's queries; command discovery; CLI parity for
+  roots, cards, secrets and session delete.
 
-**E5** (the tree) and **E6.S3** (pull requests) are independent of each other and
-both unblocked by E4. This is the widest point in the plan and the moment to add
-a session rather than earlier.
+## Wave 3
 
-## Wave 4 — one lane
+- **A** — pull requests, detected per lease.
+- **B** — the fleet tree.
+- **C** — the preambles, once there is something settled to describe.
 
-**E6.S1** and **E6.S4** — preambles and documentation — last, because they
-describe what the other five epics turned out to be. Writing them earlier means
-writing them twice.
+## Wave 4
 
-## The real constraint is not the epics
+Documentation and the last wiring. Small, and genuinely last: written earlier it
+would be written twice.
 
-It is four shared TUI files: the mode switch, the renderer, the keymap and the
-app state. Three of wave 1's four lanes want to edit all four.
+## Why three, and not four
 
-**One owner per path, per the charter.** So:
+Four lanes forced a coordination protocol. Rail, picker and tree were three
+lanes all editing the same four shared terminal files, so the plan needed a
+"one wiring task per wave, one owner" rule, and a standing instruction to stop
+and reassign if two lanes ever landed in the renderer together.
 
-- Every new surface — rail, picker, tree — is **its own module**, written by its
-  lane and touched by nobody else.
-- The shared files get **one wiring task per wave**, owned by a single lane, that
-  registers whatever that wave produced: the key, the workspace entry, the draw
-  call. It is small, it is mechanical, and it is the only thing that ever
-  conflicts.
-- Wave 1's wiring belongs to lane B, because the rail is the most invasive of the
-  three.
+**At three lanes that whole problem disappears**, because one lane owns the
+terminal outright. There is no wiring task, no shared-file protocol, and nothing
+to police. The cost is that B is the critical path — which is why A and C are cut
+to feed it: A hands it tested logic, C takes every CLI mirror, doc and preamble
+off its plate.
 
-If two lanes are editing the renderer at once, the plan has already failed —
-stop and reassign rather than resolving conflicts.
+Three is not a compromise between two and four here. It is the width at which
+the file boundaries and the work boundaries are the same boundary.
 
 ## Sequencing rules
 
@@ -451,8 +463,11 @@ Worth naming, so it is recognised early:
 - The card table needing a shape change after E2 ships — E3, E4 and E5 all read
   it. This is the highest-value thing to get right in wave 0.
 - Discovering in wave 3 that a harness cannot pass extra directories or register
-  an MCP server. That is what lane D's probe is for, and the probe should be
-  widened to cover both if it is cheap.
+  an MCP server. That is what lane C's probe is for, and it should be widened to
+  cover both if that is cheap.
+- **Lane B falling behind.** It is the critical path by construction. If it
+  slips, A and C should take more logic out of the terminal rather than opening a
+  fourth lane, which would re-create the problem three lanes exist to avoid.
 
 ---
 
@@ -559,20 +574,14 @@ just confirming it.
    column, toggled, auto-opening once on the first blocker, and replaced by a
    one-line summary on a narrow terminal.
 
-## The one open question
+## Settled: three lanes
 
-**How many lanes?** A lane is one `jod` session working alone on files no other
-lane may touch (see *Parallelisation*). The number is bounded by how many
-non-overlapping piles of files this spec cuts into, not by how fast you want it.
+Three `jod` sessions, stable owners, four waves. Recorded here rather than left
+open because it changed the plan's shape: at three lanes one owner holds the
+whole terminal, so the shared-file coordination protocol the four-lane version
+needed was deleted rather than adapted. See *Why three, and not four*.
 
-**Recommendation: start with two, widen to four only if the first wave is
-comfortable.** Two lanes — one on the store and core modules, one on the TUI —
-have almost no coordination cost and get the whole spec done. Four is the most
-this spec can absorb, and it only pays off if wave 0's contracts are solid;
-otherwise the extra two lanes spend their time waiting or conflicting.
-
-Everything else in the plan works unchanged at either width. Two lanes is
-roughly double the wall clock and a fraction of the coordination.
+Nothing else in the spec is waiting on an answer.
 
 ## Decision log
 
