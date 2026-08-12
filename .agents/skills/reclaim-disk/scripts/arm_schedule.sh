@@ -61,8 +61,20 @@ repo_root="$(git -C "$script_dir" rev-parse --path-format=absolute --git-common-
 # command has vanished fails silently every hour, which is worse than never
 # having armed it. So the durable copy in the shared checkout wins whenever it
 # exists, and only a repo without one falls back to this script's own directory.
-SWEEP="$repo_root/.agents/skills/reclaim-disk/scripts/sweep_targets.sh"
-if [ ! -x "$SWEEP" ]; then
+#
+# That twin sits at the same path relative to the checkout root, so it is derived
+# from this script's own location rather than spelled out: a skill that writes its
+# own repo path stops working the moment it is installed anywhere else, which is
+# what tests/plugin.test.sh enforces.
+worktree_root="$(git -C "$script_dir" rev-parse --show-toplevel 2>/dev/null || true)"
+rel_dir="${script_dir#"$worktree_root"/}"
+SWEEP=""
+if [ -n "$worktree_root" ] && [ "$rel_dir" != "$script_dir" ]; then
+  SWEEP="$repo_root/$rel_dir/sweep_targets.sh"
+fi
+# An underivable twin falls through to the same guard as a missing one, rather
+# than quietly arming the copy that dies with this worktree.
+if [ -z "$SWEEP" ] || [ ! -x "$SWEEP" ]; then
   SWEEP="$script_dir/sweep_targets.sh"
   case "$SWEEP" in
     */.claude/worktrees/*)
