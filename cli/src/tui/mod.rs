@@ -686,10 +686,10 @@ fn replay(live: &[jod_core::conversation::Message]) -> Vec<Entry> {
 /// Every line the chat box sends arrives here — a plain turn and `/main` alike
 /// — because since the TUI holds one conversation they are the same act. It
 /// goes straight through [`crate::hand_to_orchestrator`], the call `jod main`
-/// makes, rather than a TUI-shaped copy of it: which conversation, which tools
-/// and which permission mode are decisions with four bugs already behind them
-/// (`tests/e2e/main-chat/REPORT.md`), and a second copy would be a second place
-/// for the fifth to hide.
+/// and the Telegram bridge also make, rather than a TUI-shaped copy of it: which
+/// conversation, which tools and which permission mode are decisions with four
+/// bugs already behind them (`tests/e2e/main-chat/REPORT.md`), and a second copy
+/// would be a second place for the fifth to hide.
 ///
 /// Deliberately not `watch()`, which the `/main` verb used to call. `watch`
 /// clears the transcript before replaying a run, which is right when you are
@@ -714,8 +714,15 @@ async fn orchestrate(
     // still owed to the next attempt. A switch whose context evaporated because
     // the harness was briefly unreachable is the worst of both endings.
     let carried = thread.carried.clone();
-    match crate::hand_to_orchestrator(jod, &instruction, app.harness, opts.cwd.clone(), carried)
-        .await
+    match crate::hand_to_orchestrator(
+        jod,
+        &instruction,
+        app.harness,
+        opts.cwd.clone(),
+        carried,
+        "main",
+    )
+    .await
     {
         Ok(handed) => {
             // Once. From here the harness has a session of its own and is

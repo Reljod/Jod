@@ -44,18 +44,33 @@
 //! another thing to audit. `rustls` rather than the system OpenSSL for the same
 //! reason.
 //!
-//! # A chat is one conversation, and it survives a restart
+//! # The phone is a seat at the main chat, not a chat of its own
 //!
 //! To the person holding the phone there is one thread with Jod in it, going
-//! back weeks. So every message in a chat resumes the same harness session,
-//! and the mapping lives in `channel_sessions` rather than in this process:
-//! this was a `HashMap` on the bridge first, and the symptom was that a daemon
-//! restart silently started every chat over — you carried on typing and the
-//! agent had forgotten the morning, with nothing on screen to say why.
+//! back weeks — and it is the *same* thread as the one at the desk. So a
+//! message here is not a conversation of its own: it is a turn in the pinned
+//! main chat, handed over by the same [`crate::orchestrator::hand_to_orchestrator`]
+//! that `jod main` and the TUI's `/main` call. Say something from the sofa and
+//! it is there in `jod main`; say something at the desk and the phone picks up
+//! from it.
 //!
-//! Starting over is therefore something you ask for, with `/new` or `/clear`.
-//! Those are the only two ways a chat forgets, which is what makes the default
-//! trustworthy: nothing else in here drops a session.
+//! That is the second version of this. The first gave every chat its own
+//! conversation and kept a per-chat harness session in `channel_sessions`, which
+//! felt continuous on the phone and meant the main chat heard nothing that was
+//! ever said to it from outside a terminal. → [why](../../../docs/decisions.md)
+//!
+//! The resume cursor therefore lives on the conversation row, not here, and it
+//! survives a restart because the row does. (An earlier version kept it in a
+//! `HashMap` on the bridge; the symptom was a daemon restart silently starting
+//! every chat over — you carried on typing and the agent had forgotten the
+//! morning, with nothing on screen to say why.) `channel_sessions` records
+//! which conversation a chat's turns landed in and which session its last turn
+//! ran on — the audit trail, no longer the lookup.
+//!
+//! Starting over is something you ask for, with `/new` or `/clear`, and because
+//! there is one chat those clear it for every surface — which the reply says
+//! out loud. They drop the harness session and never the transcript: Jod owns
+//! the transcript, and nothing else in here drops anything.
 
 use std::collections::HashSet;
 use std::future::Future;
@@ -68,7 +83,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{JodError, Result};
 use crate::event::AgentEvent;
-use crate::harness::{HarnessKind, PermissionPolicy, Resume, SpawnRequest};
+use crate::harness::{HarnessKind, Resume};
+use crate::orchestrator::hand_to_orchestrator;
 use crate::service::Jod;
 use crate::store::Store;
 
@@ -352,16 +368,21 @@ impl ChatKind {
     }
 }
 
-/// The conversation a message belongs to, derived from the message alone.
+/// Which chat a message came from, derived from the message alone.
+///
+/// **Not which conversation it lands in** — that is always the pinned main chat
+/// now. This is the identity of the *place* it was sent from, and three things
+/// still key off it: the row in `channel_sessions` that records where a chat's
+/// turns went, the [`reply_key`] the delivery ledger owes an answer against, and
+/// the name the run answers to in `jod ls`.
 ///
 /// Three rules, and the first is the one that matters. **When an update carries
 /// no chat id, the sender's id stands in for it.** Defaulting to a constant
-/// instead — or to the chat kind alone — collapses every user into one shared
-/// session, and the symptom is not a crash but one person's history being read
-/// back to another. The other two follow Telegram's own grain: a thread is a
-/// place several people are talking about one thing, so it is shared; a group
-/// without threads is several conversations interleaved in one room, so it is
-/// per-user.
+/// instead — or to the chat kind alone — collapses every chat into one key, and
+/// the symptom is not a crash but one chat's ledger row answering for another's
+/// message. The other two follow Telegram's own grain: a thread is a place
+/// several people are talking about one thing, so it is shared; a group without
+/// threads is several conversations interleaved in one room, so it is per-user.
 pub fn session_key(
     chat_id: Option<i64>,
     kind: ChatKind,
@@ -376,12 +397,17 @@ pub fn session_key(
     }
 }
 
-/// What one chat was in the middle of, as the database remembers it.
+/// What one chat has been doing, as the database remembers it.
 ///
-/// Keyed by [`session_key`], because the question this table is asked is always
-/// "a message just arrived from here — what was I saying?". `session_id` is the
-/// harness's own cursor and `None` means the next message starts a run with no
-/// history, which is exactly the state `/new` restores.
+/// Keyed by [`session_key`]. The question it answers is "where did this chat's
+/// turns go, and when did it last say anything" — `conversation_id` is the
+/// conversation they landed in (the main chat), and `session_id` is the harness
+/// session its last turn ran on.
+///
+/// **Neither column is the resume cursor any more.** That lives on the
+/// conversation row, where [`Store::resume_for`] reads it, because the chat and
+/// the desk share one conversation and a second copy of the cursor is a second
+/// answer to one question.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChannelSession {
     pub key: String,
@@ -431,6 +457,31 @@ impl Store {
         })
     }
 
+    /// Record which conversation this chat's turns land in.
+    ///
+    /// The counterpart to [`Store::set_channel_session`] and the reason that one
+    /// names `session_id` alone: the two columns are written by different events
+    /// — the binding when a turn is handed over, the session id when the harness
+    /// reports one — so each upsert names only its own, and neither blanks the
+    /// other.
+    pub fn bind_channel_conversation(&self, key: &str, conversation_id: &str) -> Result<()> {
+        self.write(|tx| {
+            tx.execute(
+                "INSERT INTO channel_sessions (key, conversation_id, updated_at_ms)
+                   VALUES (?1, ?2, ?3)
+                 ON CONFLICT(key) DO UPDATE SET
+                   conversation_id = excluded.conversation_id,
+                   updated_at_ms   = excluded.updated_at_ms",
+                params![
+                    key,
+                    conversation_id,
+                    chrono::Utc::now().timestamp_millis()
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
     /// Forget what this chat was saying. Returns whether there was anything to
     /// forget, so `/clear` can say "already fresh" instead of implying it threw
     /// something away.
@@ -470,10 +521,10 @@ fn row_to_channel_session(row: &rusqlite::Row) -> rusqlite::Result<ChannelSessio
 /// What a leading `/word` asked for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
-    /// Forget this chat's session, so the next message starts a conversation
-    /// with no history. `/new` and `/clear` both, because both are what a
-    /// person reaches for and a bot that knows only one of them looks broken to
-    /// whoever typed the other.
+    /// Start the main chat's harness session over, so the next message runs
+    /// with no context window behind it. `/new` and `/clear` both, because both
+    /// are what a person reaches for and a bot that knows only one of them looks
+    /// broken to whoever typed the other.
     New,
     /// List what the bot understands.
     Help,
@@ -484,7 +535,7 @@ pub enum Command {
 /// Every command, and what `/help` says about it. One list, so the parser and
 /// the help text cannot drift apart.
 pub const COMMANDS: &[(&str, &str)] = &[
-    ("/new", "forget this chat's history and start over"),
+    ("/new", "start the main chat over — everywhere, not just here"),
     ("/clear", "the same thing, by its other name"),
     ("/help", "this list"),
 ];
@@ -492,8 +543,9 @@ pub const COMMANDS: &[(&str, &str)] = &[
 /// The whole of `/help`.
 pub fn help_text() -> String {
     let mut out = String::from(
-        "Send me anything and I'll work on it. A chat is one conversation — I \
-         pick up where we left off, including after a restart.\n",
+        "Send me anything and I'll work on it. This is Jod's main chat — the \
+         same conversation as the one at the desk, so what you say here is \
+         there and what you said there is here, including after a restart.\n",
     );
     for (name, gloss) in COMMANDS {
         out.push('\n');
@@ -505,7 +557,7 @@ pub fn help_text() -> String {
 }
 
 /// What `/new` and `/clear` say back.
-const FRESH_START: &str = "🆕 Fresh start. I've forgotten what we were doing here — the next message begins a new conversation.";
+const FRESH_START: &str = "🆕 Fresh start. The main chat begins its next message with no context behind it — here and at the desk both, since they're the one chat. The transcript is kept; only the context window is dropped.";
 
 /// Read `text` as a command. `None` means "this is an ordinary message", and
 /// ordinary messages are the only thing that ever reaches a harness.
@@ -1378,10 +1430,6 @@ pub struct Config {
     /// Where an agent launched from a chat runs.
     pub cwd: PathBuf,
     pub harness: HarnessKind,
-    /// How much a chat-launched agent may do without asking. Left at
-    /// [`PermissionPolicy::Ask`]: nobody is watching a phone-launched run
-    /// closely enough to catch a `Bypass` going wrong.
-    pub permission: PermissionPolicy,
 }
 
 impl Config {
@@ -1408,7 +1456,6 @@ impl Config {
             allow,
             cwd,
             harness: HarnessKind::ClaudeCode,
-            permission: PermissionPolicy::Ask,
         })
     }
 
@@ -1437,7 +1484,6 @@ pub struct Bridge<B: BotApi> {
     jod: Arc<Jod>,
     cwd: PathBuf,
     harness: HarnessKind,
-    permission: PermissionPolicy,
 }
 
 impl<B: BotApi + 'static> Bridge<B> {
@@ -1447,7 +1493,6 @@ impl<B: BotApi + 'static> Bridge<B> {
             jod,
             cwd: config.cwd.clone(),
             harness: config.harness,
-            permission: config.permission,
         })
     }
 
@@ -1658,34 +1703,41 @@ impl<B: BotApi + 'static> Bridge<B> {
         }
     }
 
-    /// Where this chat picks up from.
+    /// Note that this chat's turn landed in `conversation_id`.
     ///
-    /// A store that will not answer is reported and read as "nothing
-    /// remembered". Losing the thread is bad; refusing to answer the message at
-    /// all because of a bookkeeping failure is worse, and the person in the
-    /// chat can say `/new` and carry on either way.
-    fn resume_for(&self, key: &str) -> Resume {
-        // A `Jod` built without a store keeps nothing — no runs, no
-        // transcripts — so a bridge on one cannot remember a conversation
-        // either. Every way the daemon actually starts passes one.
+    /// **Where a chat picks up from is no longer this table's answer.** It used
+    /// to be: each chat carried its own harness session id here, and a phone
+    /// thread was a conversation of its own. That meant "what did I ask Jod
+    /// today" had a different answer depending on which device you had asked
+    /// from, and the main chat — the one `jod main` and the TUI sit at — never
+    /// heard any of it. Now every message is a turn at that one desk, and the
+    /// resume cursor lives where the desk does, on the conversation row.
+    ///
+    /// So this write is the record of *where a chat's turns went*, which is the
+    /// question the column `0011` added and nothing ever filled. It is also
+    /// what keeps `updated_at_ms` answering "when did this chat last do
+    /// anything", and it is where a future per-chat conversation would be a
+    /// write rather than a new code path.
+    ///
+    /// Failure is logged, never raised. A binding Jod could not write down is a
+    /// worse record of a turn that happened, not a reason to withhold the
+    /// answer from the person waiting for it.
+    fn bind_to(&self, key: &str, conversation_id: &str) {
         let Some(store) = self.jod.store() else {
-            return Resume::Fresh;
+            return;
         };
-        match store.channel_session(key) {
-            Ok(Some(ChannelSession {
-                session_id: Some(id),
-                ..
-            })) => Resume::Session(id),
-            Ok(_) => Resume::Fresh,
-            Err(e) => {
-                eprintln!("[jod/telegram] could not read the session for {key}: {e}");
-                Resume::Fresh
-            }
+        if let Err(e) = store.bind_channel_conversation(key, conversation_id) {
+            eprintln!("[jod/telegram] could not bind {key} to {conversation_id}: {e}");
         }
     }
 
-    /// Remember the session a run just reported, so the next message in this
-    /// chat continues it rather than starting over.
+    /// Remember the harness session this chat's turn ran on.
+    ///
+    /// Not the resume cursor any more — [`Store::resume_for`] reads that off the
+    /// conversation, and [`crate::service`] writes it there from the same
+    /// `Started` event. This is the per-chat copy, kept because "which session
+    /// was this chat's last turn on" is a question worth being able to answer
+    /// when a phone reply and a console reply disagree.
     fn remember_session(&self, key: &str, session_id: &str) {
         let Some(store) = self.jod.store() else {
             return;
@@ -1695,12 +1747,36 @@ impl<B: BotApi + 'static> Bridge<B> {
         }
     }
 
-    /// Drop this chat's session. `Ok(false)` means there was none to drop.
+    /// Start the main chat's harness session over. `Ok(false)` means it was
+    /// already starting fresh.
+    ///
+    /// **`/new` from a phone is not a private reset,** and the reply says so:
+    /// the chat it clears is the main one, shared with `jod main` and the TUI.
+    /// That is the honest consequence of one desk rather than several, and the
+    /// alternative — a `/new` that only *looks* like it worked, while the next
+    /// message resumes the same session anyway — is the failure this replaces.
+    ///
+    /// What it drops is the harness session id, which is the only thing
+    /// carrying a model's context window. Jod's own transcript stays, because
+    /// Jod owns it: `jod conv` still has to be able to read what happened, and
+    /// a reset that destroyed the record would make the main chat unauditable
+    /// from whichever surface reset it last.
     fn forget_session(&self, key: &str) -> Result<bool> {
-        match self.jod.store() {
-            Some(store) => store.clear_channel_session(key),
-            None => Ok(false),
+        let Some(store) = self.jod.store() else {
+            return Ok(false);
+        };
+        let id = store.main_conversation(self.harness, &self.cwd.display().to_string())?;
+        let had_session = matches!(store.resume_for(&id)?, Resume::Session(_));
+        if had_session {
+            store.set_conversation_session(&id, None)?;
         }
+        // The chat's own row goes back to "has not said anything yet" either
+        // way, so a cleared chat does not keep pointing at a session it will
+        // not resume.
+        if let Err(e) = store.clear_channel_session(key) {
+            eprintln!("[jod/telegram] could not clear the row for {key}: {e}");
+        }
+        Ok(had_session)
     }
 
     /// Poll until something fatal happens.
@@ -1768,25 +1844,48 @@ impl<B: BotApi + 'static> Bridge<B> {
         // into a channel nobody is listening to.
         let mut events = self.jod.subscribe();
 
-        let resume = self.resume_for(&msg.session);
-        let request = SpawnRequest {
-            name: msg.session.clone(),
-            harness: self.harness,
-            prompt: msg.text.clone(),
-            system: None,
-            cwd: self.cwd.clone(),
-            model: None,
-            permission: self.permission,
-            resume,
-            // A message from the phone is Reljod, on an allowlisted chat id, so
-            // it is as trusted as the terminal — but the tools stay off until
-            // there is a way to see from a phone what an agent did with them.
-            // Granting them is one field, and it should be a decision rather
-            // than a default nobody chose.
-            tools: None,
-        };
-        let agent = match self.jod.spawn_agent(request).await {
-            Ok(a) => a,
+        // **The message becomes a turn in the main chat**, through the same
+        // function `jod main` and the TUI's `/main` call. Not `spawn_agent`:
+        // that bound `RunConversation::New`, so every message from the phone
+        // minted a one-turn conversation of its own and the main chat — the
+        // conversation Jod is actually *for* — never heard a word of it. You
+        // could ask Jod something from the sofa and then find no trace of it at
+        // the desk.
+        //
+        // Routing here decides three things that used to be decided locally,
+        // and it decides them the same way for every surface:
+        //
+        // - **Which conversation.** The pinned main one, resumed from its own
+        //   session id, so a phone turn and a console turn are consecutive
+        //   turns of one conversation rather than two threads about one topic.
+        // - **Which tools.** `ToolAccess::Orchestrate`. This is the widening
+        //   worth naming: a phone message used to run with no Jod tools at all.
+        //   It cannot stay that way, because the main chat's entire job is to
+        //   call those tools, and a session where every other turn could not
+        //   see them is a session whose transcript references tools that are
+        //   gone. The gate on a phone message is the allowlist, which is
+        //   default-deny and always was.
+        // - **Which permission mode.** `AcceptEdits`, for the reason
+        //   `hand_to_orchestrator` documents at length: `Ask` is plan mode, and
+        //   plan mode refuses the very MCP calls that are the point.
+        let handed = match hand_to_orchestrator(
+            &self.jod,
+            &msg.text,
+            self.harness,
+            self.cwd.clone(),
+            // Nothing carried. A `/harness` switch moves the pin to a
+            // conversation the new harness has never seen, and the summary that
+            // has to travel with it is held on the TUI's thread — this process
+            // cannot see it, and inventing one here would hand the model a
+            // summary of a conversation it is already in.
+            None,
+            // The chat key as the run's name, so `jod ls` says which chat
+            // started a run. Cosmetic, and the only thing this call site varies.
+            &msg.session,
+        )
+        .await
+        {
+            Ok(h) => h,
             // Owed, and through the ledger. Somebody asked for something and
             // got nothing at all — silence after a request is the same failure
             // as a lost answer, and it is the one where they cannot tell
@@ -1802,6 +1901,8 @@ impl<B: BotApi + 'static> Bridge<B> {
                 return Ok(());
             }
         };
+        self.bind_to(&msg.session, &handed.conversation_id);
+        let agent = handed.agent;
 
         let started = Instant::now();
         let bubble = self
@@ -1872,7 +1973,16 @@ impl<B: BotApi + 'static> Bridge<B> {
                 )
                 .await;
         }
-        if let Some(answer) = text.filter(|t| !t.trim().is_empty()) {
+        if let Some(mut answer) = text.filter(|t| !t.trim().is_empty()) {
+            // The compaction notice rides along with the answer rather than
+            // being dropped. `jod main` prints it and the TUI pushes it; a
+            // bridge that swallowed it would mean a main chat driven only from
+            // a phone grows for ever with nobody ever told.
+            if let Some((reason, chars)) = handed.compaction_due {
+                answer.push_str(&format!(
+                    "\n\n· the main chat is due for compaction ({reason}) — {chars} chars live"
+                ));
+            }
             // The message this whole module exists for. The run is over, the
             // store says so, and until this lands the person who asked has
             // nothing — which is the failure `ledger` was written to stop being
@@ -1901,11 +2011,11 @@ impl<B: BotApi + 'static> Bridge<B> {
         let reply = match command {
             Command::New => match self.forget_session(&msg.session) {
                 Ok(true) => FRESH_START.to_string(),
-                Ok(false) => format!("{FRESH_START}\n\n(There was nothing to forget.)"),
+                Ok(false) => format!("{FRESH_START}\n\n(It was already starting fresh.)"),
                 // Said out loud rather than swallowed: a `/clear` that silently
                 // failed would leave the next reply carrying history the person
                 // believes they deleted.
-                Err(e) => format!("❌ Could not forget this chat's session: {e}"),
+                Err(e) => format!("❌ Could not start the main chat over: {e}"),
             },
             Command::Help => help_text(),
             Command::Unknown(name) => format!(
@@ -2725,21 +2835,31 @@ mod tests {
         }
     }
 
-    // -- durable sessions --------------------------------------------------
+    // -- the main chat, shared with every other surface --------------------
+
+    /// Nowhere, deliberately: no test here intends to start a process, so if one
+    /// ever does the cwd is a second thing standing in its way.
+    const TEST_CWD: &str = "/nonexistent/jod/telegram/test";
 
     fn store() -> Arc<Store> {
         Arc::new(Store::in_memory().expect("an in-memory store"))
+    }
+
+    /// The conversation every chat's turns land in, resolved the way the bridge
+    /// resolves it — same harness, same cwd, so this is the same row and not a
+    /// second one that happens to look alike.
+    fn main_of(store: &Store) -> String {
+        store
+            .main_conversation(HarnessKind::ClaudeCode, TEST_CWD)
+            .expect("the main conversation")
     }
 
     fn bridge_on(jod: Arc<Jod>) -> Arc<Bridge<FakeBot>> {
         let config = Config {
             token: "not-a-token".to_string(),
             allow: Allowlist::new([42]),
-            // Nowhere, deliberately: no test here intends to start a process,
-            // so if one ever does the cwd is a second thing standing in its way.
-            cwd: PathBuf::from("/nonexistent/jod/telegram/test"),
+            cwd: PathBuf::from(TEST_CWD),
             harness: HarnessKind::ClaudeCode,
-            permission: PermissionPolicy::Ask,
         };
         Bridge::new(FakeBot::default(), jod, &config)
     }
@@ -2795,41 +2915,150 @@ mod tests {
         assert!(!s.clear_channel_session(key).unwrap());
     }
 
-    /// The whole point of the table. A restart used to start every chat over
-    /// with nothing on screen to explain it: you carried on typing and the
-    /// agent had forgotten the morning.
+    /// Every chat lands in the one pinned conversation, and the row says so.
+    ///
+    /// The binding used to be per chat and the main chat heard none of it, so
+    /// "what did I ask Jod today" had a different answer on the phone than at
+    /// the desk. Two chats, one conversation, and still exactly one pinned row.
+    #[test]
+    fn every_chat_binds_to_the_one_main_conversation() {
+        let s = store();
+        let main = main_of(&s);
+        let keys = ["telegram:private:7:42", "telegram:group:9:u99"];
+        for key in keys {
+            s.bind_channel_conversation(key, &main).unwrap();
+        }
+        for key in keys {
+            assert_eq!(
+                s.channel_session(key)
+                    .unwrap()
+                    .expect("a bound chat has a row")
+                    .conversation_id
+                    .as_deref(),
+                Some(main.as_str()),
+                "{key} landed somewhere else"
+            );
+        }
+        assert_eq!(
+            s.pinned_conversation().unwrap().as_deref(),
+            Some(main.as_str()),
+            "a second desk was minted"
+        );
+    }
+
+    /// The two columns are written by different events, so neither upsert may
+    /// blank the other. This is the invariant `set_channel_session`'s doc has
+    /// always claimed and nothing checked, because until now nothing wrote
+    /// `conversation_id` at all.
+    #[test]
+    fn the_binding_and_the_session_id_do_not_blank_each_other() {
+        let s = store();
+        let key = "telegram:private:7:42";
+        // Real conversations, because the column is a foreign key and a test
+        // that invented ids would be testing a table the schema does not have.
+        let first = main_of(&s);
+        let second = s
+            .new_conversation(HarnessKind::ClaudeCode, TEST_CWD, None)
+            .unwrap()
+            .id;
+
+        s.bind_channel_conversation(key, &first).unwrap();
+        s.set_channel_session(key, "ses-1").unwrap();
+        let row = s.channel_session(key).unwrap().unwrap();
+        assert_eq!(row.conversation_id.as_deref(), Some(first.as_str()));
+        assert_eq!(row.session_id.as_deref(), Some("ses-1"));
+
+        // Rebinding keeps the session id...
+        s.bind_channel_conversation(key, &second).unwrap();
+        let row = s.channel_session(key).unwrap().unwrap();
+        assert_eq!(row.conversation_id.as_deref(), Some(second.as_str()));
+        assert_eq!(row.session_id.as_deref(), Some("ses-1"));
+
+        // ...and a new session id keeps the binding.
+        s.set_channel_session(key, "ses-2").unwrap();
+        let row = s.channel_session(key).unwrap().unwrap();
+        assert_eq!(row.conversation_id.as_deref(), Some(second.as_str()));
+        assert_eq!(row.session_id.as_deref(), Some("ses-2"));
+    }
+
+    /// A restart used to start every chat over with nothing on screen to
+    /// explain it: you carried on typing and the agent had forgotten the
+    /// morning. The cursor now lives on the conversation row, so a wholly new
+    /// process finds the session the dead one left behind.
     #[tokio::test]
     async fn a_restart_keeps_the_conversation_the_chat_was_already_having() {
         let s = store();
-        let msg = incoming("what were we doing?");
-        let before = bridge(Arc::clone(&s));
+        let main = main_of(&s);
         assert_eq!(
-            before.resume_for(&msg.session),
+            s.resume_for(&main).unwrap(),
             Resume::Fresh,
-            "a chat that has never spoken has nothing to resume"
+            "a desk nobody has sat at has nothing to resume"
         );
-        before.remember_session(&msg.session, "ses-1");
+        s.set_conversation_session(&main, Some("ses-1")).unwrap();
 
         // The process dies here. A wholly new bridge, a new service and a new
         // transport — everything except the file on disk.
         let after = bridge(Arc::clone(&s));
-        assert_eq!(
-            after.resume_for(&msg.session),
-            Resume::Session("ses-1".to_string()),
-            "the restart started the chat over"
+        Arc::clone(&after).handle(incoming("/new")).await.unwrap();
+
+        // It found a session to clear, which is the proof that it read the one
+        // the previous process left behind rather than starting from nothing.
+        let sent = after.poller().bot().sent_texts();
+        assert!(
+            !sent[0].contains("already starting fresh"),
+            "the restart started the chat over: {:?}",
+            sent[0]
+        );
+        assert_eq!(s.resume_for(&main).unwrap(), Resume::Fresh);
+    }
+
+    /// `/new` from one chat is `/new` everywhere, because there is only one
+    /// conversation to clear — and the second chat finding nothing left is only
+    /// possible if it reached the same one.
+    #[tokio::test]
+    async fn clearing_from_one_chat_clears_the_desk_every_surface_shares() {
+        let s = store();
+        let main = main_of(&s);
+        s.set_conversation_session(&main, Some("ses-1")).unwrap();
+
+        let mine = bridge(Arc::clone(&s));
+        Arc::clone(&mine).handle(incoming("/new")).await.unwrap();
+        assert_eq!(s.resume_for(&main).unwrap(), Resume::Fresh);
+        assert!(mine.poller().bot().sent_texts()[0].starts_with(FRESH_START));
+
+        let theirs = bridge(Arc::clone(&s));
+        let elsewhere = match classify(&update(2, 99, 9, "/clear"), &Allowlist::new([99])) {
+            Inbound::Handle(m) => m,
+            other => panic!("the fixture message was not handled: {other:?}"),
+        };
+        Arc::clone(&theirs).handle(elsewhere).await.unwrap();
+        assert!(
+            theirs.poller().bot().sent_texts()[0].contains("already starting fresh"),
+            "the second chat cleared a desk of its own: {:?}",
+            theirs.poller().bot().sent_texts()[0]
         );
     }
 
-    /// Two chats must not share a session across a restart either — the
-    /// durable version of the same isolation `session_key` gives in memory.
+    /// What `/new` drops is the context window, not the record. Jod owns the
+    /// transcript, and a reset that destroyed it would leave the main chat
+    /// unauditable from whichever surface reset it last.
     #[tokio::test]
-    async fn one_chat_resuming_does_not_resume_another() {
+    async fn clearing_drops_the_session_and_keeps_the_transcript() {
         let s = store();
-        let mine = bridge(Arc::clone(&s));
-        mine.remember_session("telegram:private:7:42", "ses-mine");
-        assert_eq!(
-            bridge(Arc::clone(&s)).resume_for("telegram:private:9:99"),
-            Resume::Fresh
+        let main = main_of(&s);
+        s.append_prompt(&main, "run-1", "what were we doing?")
+            .unwrap()
+            .expect("the turn was recorded");
+        s.set_conversation_session(&main, Some("ses-1")).unwrap();
+
+        let b = bridge(Arc::clone(&s));
+        Arc::clone(&b).handle(incoming("/clear")).await.unwrap();
+
+        assert_eq!(s.resume_for(&main).unwrap(), Resume::Fresh);
+        let live = s.live_window(&main).unwrap();
+        assert!(
+            live.iter().any(|m| m.text == "what were we doing?"),
+            "the transcript went with the session: {live:?}"
         );
     }
 
@@ -2837,14 +3066,14 @@ mod tests {
     async fn both_new_and_clear_drop_the_session_and_say_so() {
         for word in ["/new", "/clear"] {
             let s = store();
+            let main = main_of(&s);
+            s.set_conversation_session(&main, Some("ses-1")).unwrap();
             let b = bridge(Arc::clone(&s));
-            let msg = incoming(word);
-            b.remember_session(&msg.session, "ses-1");
 
-            Arc::clone(&b).handle(msg.clone()).await.unwrap();
+            Arc::clone(&b).handle(incoming(word)).await.unwrap();
 
             assert_eq!(
-                b.resume_for(&msg.session),
+                s.resume_for(&main).unwrap(),
                 Resume::Fresh,
                 "{word} left the session in place"
             );
@@ -2852,8 +3081,8 @@ mod tests {
             assert_eq!(sent.len(), 1, "{word} sent {sent:?}");
             assert!(sent[0].starts_with(FRESH_START), "{word} said {:?}", sent[0]);
             assert!(
-                !sent[0].contains("nothing to forget"),
-                "{word} claimed there was nothing to forget"
+                !sent[0].contains("already starting fresh"),
+                "{word} claimed there was nothing to do"
             );
         }
     }
@@ -2861,11 +3090,10 @@ mod tests {
     /// Clearing a chat that was already fresh is not an error, but it must not
     /// pretend to have thrown something away either.
     #[tokio::test]
-    async fn clearing_an_already_fresh_chat_says_there_was_nothing_to_forget() {
+    async fn clearing_an_already_fresh_chat_says_it_was_already_fresh() {
         let b = bridge(store());
-        let msg = incoming("/clear");
-        Arc::clone(&b).handle(msg).await.unwrap();
-        assert!(b.poller().bot().sent_texts()[0].contains("nothing to forget"));
+        Arc::clone(&b).handle(incoming("/clear")).await.unwrap();
+        assert!(b.poller().bot().sent_texts()[0].contains("already starting fresh"));
     }
 
     /// A `/word` that reached a harness would arrive as a prompt, and a prompt
@@ -2931,7 +3159,6 @@ mod tests {
             allow: Allowlist::new([42]),
             cwd: PathBuf::from("/nonexistent/jod/telegram/test"),
             harness: HarnessKind::ClaudeCode,
-            permission: PermissionPolicy::Ask,
         };
         Bridge::new(bot, Jod::with_store(store), &config)
     }
