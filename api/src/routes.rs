@@ -423,7 +423,12 @@ fn permission_id(p: PermissionPolicy) -> &'static str {
     p.as_str()
 }
 
-fn audit_write(
+/// Record a write attempt, whatever its outcome.
+///
+/// Visible to the crate because [`crate::conversations`] drives the main chat,
+/// which is a write with the same audit obligations — one logger, so a refused
+/// spawn and a refused instruction look the same in the trail.
+pub(crate) fn audit_write(
     state: &AppState,
     identity: &Identity,
     action: &str,

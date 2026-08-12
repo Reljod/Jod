@@ -87,6 +87,23 @@ const PROTECTED_GETS: &[&str] = &[
     "/v1/events",
     "/v1/teams",
     "/v1/teams/crew",
+    // The workspace reads. Every one of them is behind the same middleware, and
+    // this list is what proves it — a route added to the router but not to this
+    // list is a route nobody has checked is protected.
+    "/v1/memory",
+    "/v1/memory/1",
+    "/v1/memory/1/graph",
+    "/v1/schedules",
+    "/v1/schedules/nightly",
+    "/v1/goals",
+    "/v1/goals/ship-it",
+    "/v1/hooks",
+    "/v1/tasks",
+    "/v1/activity",
+    "/v1/conversations",
+    "/v1/conversations/main",
+    "/v1/conversations/some-id",
+    "/v1/conversations/some-id/messages",
 ];
 
 #[tokio::test]

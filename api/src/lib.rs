@@ -23,12 +23,14 @@
 pub mod audit;
 pub mod auth;
 pub mod config;
+pub mod conversations;
 pub mod error;
 pub mod idempotency;
 pub mod routes;
 pub mod session;
 pub mod sse;
 pub mod webhook;
+pub mod workspaces;
 
 use std::sync::Arc;
 
@@ -130,6 +132,34 @@ pub fn router(state: AppState) -> Router {
         // Read-only: a phone watches a team, it does not join one.
         .route("/v1/teams", get(routes::list_teams))
         .route("/v1/teams/{team}", get(routes::get_team))
+        // The rest of the TUI's workspaces, all reads. → [`workspaces`]
+        .route("/v1/memory", get(workspaces::list_memory))
+        .route("/v1/memory/{id}", get(workspaces::get_memory_node))
+        .route("/v1/memory/{id}/graph", get(workspaces::memory_graph))
+        .route("/v1/schedules", get(workspaces::list_schedules))
+        .route("/v1/schedules/{name}", get(workspaces::get_schedule))
+        .route("/v1/goals", get(workspaces::list_goals))
+        .route("/v1/goals/{name}", get(workspaces::get_goal))
+        .route("/v1/hooks", get(workspaces::list_hooks))
+        .route("/v1/tasks", get(workspaces::list_tasks))
+        .route("/v1/activity", get(workspaces::list_activity))
+        // Conversations, and the pinned main chat. The `main` routes are
+        // static, so they win over `{id}` on axum's static-first matching —
+        // there is no conversation whose id is the word "main". → [`conversations`]
+        .route("/v1/conversations", get(conversations::list_conversations))
+        .route("/v1/conversations/main", get(conversations::get_main))
+        .route(
+            "/v1/conversations/main/messages",
+            axum::routing::post(conversations::send_to_main),
+        )
+        .route(
+            "/v1/conversations/{id}",
+            get(conversations::get_conversation),
+        )
+        .route(
+            "/v1/conversations/{id}/messages",
+            get(conversations::get_messages),
+        )
         .route("/v1/session", axum::routing::delete(routes::end_session))
         // Layers apply to the routes declared above them. The state is captured
         // by the closure rather than extracted, which keeps the middleware's

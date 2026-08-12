@@ -139,12 +139,127 @@ All JSON, all under `/v1`. Errors are
 | `GET` | `/v1/agents/{id}/stream` | `read` | SSE: that agent, live, resumable. |
 | `GET` | `/v1/events` | `read` | SSE: every agent, for a dashboard. |
 | `GET` | `/v1/report` | `read` | Counts and total spend. |
+| `GET` | `/v1/teams` | `read` | Every team that has a member. |
+| `GET` | `/v1/teams/{team}` | `read` | One team's roster and board. |
+| `GET` | `/v1/memory` | `read` | Memory nodes, `?scope=&limit=`, plus graph counts. |
+| `GET` | `/v1/memory/{id}` | `read` | One node, with its edges split by direction. |
+| `GET` | `/v1/memory/{id}/graph` | `read` | The local graph, `?depth=&limit=`. |
+| `GET` | `/v1/schedules` | `read` | Every schedule. |
+| `GET` | `/v1/schedules/{name}` | `read` | One schedule and its fires, `?limit=`. |
+| `GET` | `/v1/goals` | `read` | Every goal. |
+| `GET` | `/v1/goals/{name}` | `read` | One goal. |
+| `GET` | `/v1/hooks` | `read` | Webhook rules with their deliveries, `?limit=`. |
+| `GET` | `/v1/tasks` | `read` | A team's board, `?team=`. |
+| `GET` | `/v1/activity` | `read` | Fires and goal iterations, `?limit=&needs_you=`. |
+| `GET` | `/v1/conversations` | `read` | Every conversation, `?limit=`. |
+| `GET` | `/v1/conversations/main` | `read` | The pinned main chat and its thread. |
+| `POST` | `/v1/conversations/main/messages` | `write` | Give the main chat an instruction. |
+| `GET` | `/v1/conversations/{id}` | `read` | One conversation. |
+| `GET` | `/v1/conversations/{id}/messages` | `read` | Its thread, oldest first. |
 | `POST` | `/v1/session` | bearer | Trade a token for a browser cookie. |
 | `DELETE` | `/v1/session` | any | Sign this browser out. |
 
 `/v1/health` is unauthenticated on purpose and returns `{"status":"ok"}` and
 nothing more — no version, no agent count, no hostname. A health check that
 leaks inventory is a reconnaissance endpoint.
+
+### The workspaces are reads, and store-shaped
+
+`jod tui` has nine screens. The rows from `/v1/memory` down cover the seven the
+agent routes do not, so a browser or a phone can draw the same console the
+terminal does. → `api/src/workspaces.rs`
+
+Two things about them are deliberate.
+
+**Nothing here writes.** Pausing a schedule, answering a goal, testing a webhook
+payload and marking activity read are all writes, and they are absent for the
+same reason `/v1/teams` is read-only: a remote client watches, it does not play.
+Adding them is a decision with its own audit-trail obligations, not an
+afterthought to a read surface.
+
+**The shapes are the store's, not the screen's.** `cli/src/tui/data.rs` builds
+rows carrying `gloss: "02:00 every day"` and `secret: "✓ verified 2m ago"`.
+Those are presentation: a cron gloss is a sentence in English, and a relative
+timestamp is only true for the second in which it was rendered — it is wrong the
+moment it sits in a cache. So the API sends `cron`, `timezone` and
+`next_fire_at_ms`, and each client writes its own gloss. The cost is that three
+clients each own a formatter; the alternative is one client's rendering choices
+becoming everyone's contract.
+
+`/v1/memory/{id}/graph` is the one route assembled from two store reads, because
+neither answers alone: `neighbourhood` walks the graph but returns no edges, and
+`edges_of` returns edges for a single node. It walks for the node set, then asks
+each node for its edges. Direction is carried as `from`/`to` rather than as a
+flag on a neighbour, so a caller can draw the arrowhead without knowing which
+node it asked about.
+
+It guarantees two things, and both are load-bearing for anything that draws it.
+
+**Every edge joins two nodes that are also in `nodes`.** Edges past the depth
+horizon are dropped, not dangled.
+
+This is not tidiness, it is what stops a renderer from lying. A force-directed
+layout given an edge to an id it was not sent does one of two things: throw on
+the missing lookup, or — far worse — materialise the endpoint at the origin with
+default mass. The second produces a node cloud that looks entirely plausible and
+is wrong, with a phantom at the centre that every real node is then pushed away
+from. The layout is stable, nothing errors, and the picture is fiction. A client
+cannot detect this from the response, so the guarantee has to live on the server.
+
+**The root appears exactly once, at `hops: 0`.** That is what lets a client frame
+the camera on the focus node without searching for it, and it makes "how far is
+this from what I asked about" a field rather than a graph traversal the client
+repeats.
+
+Both are pinned by tests in `api/tests/workspaces.rs`.
+
+`/v1/activity` is a poll, not a stream. Its rows are derived from schedule fires
+and goal facts rather than from an append-only log, so there is no natural `seq`
+to resume from and a cursor here would be a fiction. Each row carries a stable
+`id` so a client can diff rather than redraw. Read/unread is deliberately not
+server-side: the TUI tracks it in process memory, and a shared notion of "read"
+would make two clients disagree about it.
+
+An empty store answers with an empty list, never a 404 and never a 500. "There
+are no goals" is a fact, and the screen that asks wants to draw *no goals yet*
+rather than an error banner.
+
+### The main chat has one way in, and this is not a second one
+
+The fleet's top row *is* the main chat. `POST /v1/conversations/main/messages`
+drives it — and it does so by calling
+`jod_core::orchestrator::hand_to_orchestrator`, the same function behind
+`jod main`, the TUI's `/main` and the Telegram bridge. That function's own note
+says why there is only one: *which conversation, which tools, which permission
+mode* is a set of decisions with four bugs already behind it, and a second copy
+would be a second place for the fifth to hide. The API assembles no
+`SpawnRequest` of its own. → `api/src/conversations.rs`
+
+**The permission ceiling needs an explicit check here, and it is easy to miss.**
+`hand_to_orchestrator` fixes `accept_edits` internally, and is right to: `ask`
+is plan mode, and plan mode refuses the very MCP calls that are the
+orchestrator's job — the run once wrote a plan file instead of arming the
+schedule it was asked for. But that reasoning belongs to a person at a terminal.
+Across a socket, calling through without a check would hand `accept_edits` to
+anyone holding a write token, on a daemon whose `max_permission` might be `ask`
+— a ceiling with a hole in it that only this one path could find. So the route
+tests `accept_edits` against the ceiling *before* handing over, and refuses by
+naming both the mode and the setting. Every other bound `POST /v1/agents`
+applies — scope, cwd allowlist, concurrency cap, idempotency, audit — applies
+here too, in the same order.
+
+**Reads never create.** `main_conversation` in core is get-or-create;
+`GET /v1/conversations/main` deliberately uses `pinned_conversation`, which only
+looks, because a `GET` that creates is a `GET` a link prefetcher can fire.
+Before anyone has spoken, it answers `{"conversation":null,"messages":[]}`
+rather than 404 — the console draws that pinned row from first launch, captioned
+*the chat Jod keeps — pinned, and it never ends*, and a client wants to draw the
+same thing.
+
+`{id}/messages` returns the full `thread`, not the `live_window`. The window is
+what the harness is handed on the next turn, which is smaller than what someone
+scrolling wants; serving it here would make a transcript look like it had lost
+messages.
 
 ### Spawning
 
@@ -357,6 +472,20 @@ session_ttl_hours = 168         # JOD_API_SESSION_TTL_HOURS
 An empty `allowed_cwd` means **deny every spawn**, not "allow everything".
 Failing closed on an unset security control is the only safe default; the
 opposite turns a forgotten config line into an open shell.
+
+### Embedding the router in another process
+
+A shell that serves the HUD same-origin composes `jod_api::router(state)` on its
+own listener rather than talking to a separate daemon — this is what the desktop
+app does, and it is what keeps the session cookie's `SameSite=Strict` working.
+Two defaults bite in opposite directions when you build the `Config` by hand:
+
+- **`allowed_cwd` defaults to empty, which denies every spawn.** A shell whose
+  primary verb is "delegate" then silently never works. Set it explicitly.
+- **`max_permission` defaults to `accept_edits`, which the main chat needs.**
+  Tighten it to `ask` and `POST /v1/conversations/main/messages` refuses,
+  because the orchestrator runs at `accept_edits` by construction. That refusal
+  is correct; just know that lowering the ceiling turns the main chat off.
 
 ## Deployment
 
