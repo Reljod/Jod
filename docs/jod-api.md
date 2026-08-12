@@ -139,12 +139,66 @@ All JSON, all under `/v1`. Errors are
 | `GET` | `/v1/agents/{id}/stream` | `read` | SSE: that agent, live, resumable. |
 | `GET` | `/v1/events` | `read` | SSE: every agent, for a dashboard. |
 | `GET` | `/v1/report` | `read` | Counts and total spend. |
+| `GET` | `/v1/teams` | `read` | Every team that has a member. |
+| `GET` | `/v1/teams/{team}` | `read` | One team's roster and board. |
+| `GET` | `/v1/memory` | `read` | Memory nodes, `?scope=&limit=`, plus graph counts. |
+| `GET` | `/v1/memory/{id}` | `read` | One node, with its edges split by direction. |
+| `GET` | `/v1/memory/{id}/graph` | `read` | The local graph, `?depth=&limit=`. |
+| `GET` | `/v1/schedules` | `read` | Every schedule. |
+| `GET` | `/v1/schedules/{name}` | `read` | One schedule and its fires, `?limit=`. |
+| `GET` | `/v1/goals` | `read` | Every goal. |
+| `GET` | `/v1/goals/{name}` | `read` | One goal. |
+| `GET` | `/v1/hooks` | `read` | Webhook rules with their deliveries, `?limit=`. |
+| `GET` | `/v1/tasks` | `read` | A team's board, `?team=`. |
+| `GET` | `/v1/activity` | `read` | Fires and goal iterations, `?limit=&needs_you=`. |
 | `POST` | `/v1/session` | bearer | Trade a token for a browser cookie. |
 | `DELETE` | `/v1/session` | any | Sign this browser out. |
 
 `/v1/health` is unauthenticated on purpose and returns `{"status":"ok"}` and
 nothing more — no version, no agent count, no hostname. A health check that
 leaks inventory is a reconnaissance endpoint.
+
+### The workspaces are reads, and store-shaped
+
+`jod tui` has nine screens. The rows from `/v1/memory` down cover the seven the
+agent routes do not, so a browser or a phone can draw the same console the
+terminal does. → `api/src/workspaces.rs`
+
+Two things about them are deliberate.
+
+**Nothing here writes.** Pausing a schedule, answering a goal, testing a webhook
+payload and marking activity read are all writes, and they are absent for the
+same reason `/v1/teams` is read-only: a remote client watches, it does not play.
+Adding them is a decision with its own audit-trail obligations, not an
+afterthought to a read surface.
+
+**The shapes are the store's, not the screen's.** `cli/src/tui/data.rs` builds
+rows carrying `gloss: "02:00 every day"` and `secret: "✓ verified 2m ago"`.
+Those are presentation: a cron gloss is a sentence in English, and a relative
+timestamp is only true for the second in which it was rendered — it is wrong the
+moment it sits in a cache. So the API sends `cron`, `timezone` and
+`next_fire_at_ms`, and each client writes its own gloss. The cost is that three
+clients each own a formatter; the alternative is one client's rendering choices
+becoming everyone's contract.
+
+`/v1/memory/{id}/graph` is the one route assembled from two store reads, because
+neither answers alone: `neighbourhood` walks the graph but returns no edges, and
+`edges_of` returns edges for a single node. It walks for the node set, then keeps
+only the edges whose other end is also in that set — an edge pointing past the
+depth horizon is an arrow a renderer cannot draw. Direction is carried as
+`from`/`to` rather than as a flag on a neighbour, so a caller can draw the
+arrowhead without knowing which node it asked about.
+
+`/v1/activity` is a poll, not a stream. Its rows are derived from schedule fires
+and goal facts rather than from an append-only log, so there is no natural `seq`
+to resume from and a cursor here would be a fiction. Each row carries a stable
+`id` so a client can diff rather than redraw. Read/unread is deliberately not
+server-side: the TUI tracks it in process memory, and a shared notion of "read"
+would make two clients disagree about it.
+
+An empty store answers with an empty list, never a 404 and never a 500. "There
+are no goals" is a fact, and the screen that asks wants to draw *no goals yet*
+rather than an error banner.
 
 ### Spawning
 
