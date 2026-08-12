@@ -81,6 +81,23 @@ async fn run(plan_path: &PathBuf) -> Result<(), String> {
     let child = Command::new(&plan.program)
         .args(&plan.args)
         .current_dir(&plan.cwd)
+        // Stamp *this* run's id over whatever was inherited, before anything
+        // else in the environment is applied.
+        //
+        // The supervisor is the only process that knows, without being told,
+        // which run it is supervising — that is its whole job. Everything below
+        // it inherits this: the harness, and the Jod MCP server the harness
+        // starts. So an agent's tools resolve the right identity even on a
+        // harness with no per-run config document to carry one.
+        //
+        // Without it the variable simply flowed down the spawn chain. On the
+        // path that opens a work the supervisor's own parent is the
+        // orchestrator's MCP server, so its run id reached every descendant,
+        // and `identify` — correctly — refused to act for a server whose
+        // environment named one run while its process group named another.
+        // Clearing it in the config writers was necessary and not sufficient:
+        // it stops Jod *writing* a stale id, and this stops one *arriving*.
+        .env(jod_core::mcp_config::RUN_ID_ENV, &plan.run_id)
         .envs(plan.env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
         .envs(injected.iter().map(|(k, v)| (k.as_str(), v.as_str())))
         // Nothing may read a terminal: this process has none, and a harness
