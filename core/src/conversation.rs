@@ -1375,6 +1375,33 @@ impl Store {
                     at
                 ],
             )?;
+            // The pin follows the thread across the switch.
+            //
+            // `main_conversation` is get-or-create on `pinned = 1`, so a pin
+            // left behind on the conversation this switch just compacted away
+            // would send the next turn back to the thread that was handed
+            // over — the summary stranded in a conversation nobody opens
+            // again, and two chats where the schema says there is one. Cleared
+            // and re-set inside the one transaction because the partial unique
+            // index permits exactly one pinned row and would reject the
+            // overlap.
+            let pinned: i64 = tx
+                .query_row(
+                    "SELECT pinned FROM conversations WHERE id = ?1",
+                    params![conversation_id],
+                    |r| r.get(0),
+                )
+                .unwrap_or(0);
+            if pinned == 1 {
+                tx.execute(
+                    "UPDATE conversations SET pinned = 0 WHERE id = ?1",
+                    params![conversation_id],
+                )?;
+                tx.execute(
+                    "UPDATE conversations SET pinned = 1, title = 'main' WHERE id = ?1",
+                    params![new_id],
+                )?;
+            }
             Ok(())
         })?;
 

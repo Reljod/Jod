@@ -261,6 +261,51 @@ pub const COMPACT_AT: f64 = 0.75;
 /// honestly as long as the screen calls it an estimate.
 pub const CONTEXT_WINDOW: u64 = 200_000;
 
+/// What every run the main chat spawns for itself is named.
+///
+/// Set by `hand_to_orchestrator`, one run per instruction. It is the only
+/// handle the fleet has on "this row is the chat, not work the chat started" —
+/// a run carries its id and its name, not the conversation it wrote into.
+pub const ORCHESTRATOR: &str = "main";
+
+/// The row id the pinned chat occupies in the fleet list.
+///
+/// Deliberately not a uuid, because it is not a run: it stands for the
+/// conversation, which outlives every run underneath it. Nothing can collide
+/// with it — every real row id is a uuid — and [`App::selected_agent`]
+/// therefore answers `None` on it, which is the correct answer to "which agent
+/// is selected" when the answer is "none, the chat is".
+pub const MAIN_ROW: &str = "main";
+
+/// The pinned chat as one fleet row.
+///
+/// A row about a *conversation*, standing over rows about runs. Collapsing
+/// every `main` run into it is the point rather than a tidy-up: one instruction
+/// is one run, so a week of use puts dozens of identical `main` rows in the
+/// list, burying the delegated work the list exists to show — and none of them
+/// is the chat, which is the thing you actually want to get back to.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MainRow {
+    /// `running` while an instruction is still being routed, `idle` otherwise.
+    ///
+    /// Not the status of the *work*: the orchestrator delegates and stops, so
+    /// this goes idle while what it started keeps going. That is the honest
+    /// reading — the chat is free, the agents below it are busy.
+    pub status: String,
+    /// When the most recent instruction was handed over, or `0` for a chat
+    /// nothing has been said to yet.
+    pub last_ms: i64,
+    /// How many instructions this chat has routed in the runs still on screen.
+    pub turns: usize,
+    pub harness: String,
+}
+
+impl MainRow {
+    pub fn is_running(&self) -> bool {
+        self.status == "running"
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct AgentLine {
     pub id: String,
@@ -295,6 +340,17 @@ pub struct AgentLine {
 impl AgentLine {
     pub fn is_running(&self) -> bool {
         self.status == "running"
+    }
+
+    /// A turn of the main chat rather than work the main chat delegated.
+    ///
+    /// By name, which is the only signal a run carries. An agent someone
+    /// deliberately names `main` would be folded into the pinned row — the cost
+    /// of not adding a column to every run to record what one row needs, and
+    /// visible rather than silent, since the row it folds into says how many
+    /// turns it counted.
+    pub fn is_orchestrator(&self) -> bool {
+        self.name == ORCHESTRATOR
     }
 }
 
@@ -734,7 +790,13 @@ impl App {
     /// are automatically accounted for.
     pub fn row_ids(&self, ws: Workspace) -> Vec<String> {
         match ws {
-            Workspace::Fleet => self.fleet_rows().iter().map(|a| a.id.clone()).collect(),
+            // The pinned chat first, always, and before the sort rather than
+            // inside it: "running first, then newest" is a rule about work, and
+            // the chat is the thing the work hangs off. A top row that moves is
+            // a top row you have to look for.
+            Workspace::Fleet => std::iter::once(MAIN_ROW.to_string())
+                .chain(self.fleet_rows().iter().map(|a| a.id.clone()))
+                .collect(),
             Workspace::Memory => self.memory_rows().iter().map(|n| n.id.clone()).collect(),
             Workspace::Schedules => self
                 .schedule_rows()
@@ -762,6 +824,14 @@ impl App {
                 continue;
             }
             let ids = self.row_ids(ws);
+            // The fleet's top row is the pinned chat, and a cursor with nowhere
+            // to go belongs on the first *agent* rather than on it — see
+            // `ListState::reconcile_to`.
+            if ws == Workspace::Fleet {
+                let first_agent = self.fleet_rows().first().map(|a| a.id.clone());
+                self.list_mut(ws).reconcile_to(&ids, first_agent);
+                continue;
+            }
             self.list_mut(ws).reconcile(&ids);
         }
     }
@@ -773,10 +843,42 @@ impl App {
         }
     }
 
+    /// The pinned chat, collapsed out of however many runs it has taken.
+    ///
+    /// Always answers. The chat exists before anything has been said to it, and
+    /// a top row that appears only once you have used it is a top row you never
+    /// find — which is the whole failure this replaces.
+    pub fn main_row(&self) -> MainRow {
+        let turns = self.agents.iter().filter(|a| a.is_orchestrator());
+        MainRow {
+            status: if self
+                .agents
+                .iter()
+                .any(|a| a.is_orchestrator() && a.is_running())
+            {
+                "running".into()
+            } else {
+                "idle".into()
+            },
+            last_ms: turns.clone().map(|a| a.created_at_ms).max().unwrap_or(0),
+            turns: turns.count(),
+            harness: self.harness.label().to_string(),
+        }
+    }
+
+    /// Whether the cursor is on the pinned chat rather than on an agent.
+    pub fn main_selected(&self) -> bool {
+        self.list(Workspace::Fleet).selected.as_deref() == Some(MAIN_ROW)
+    }
+
     pub fn fleet_rows(&self) -> Vec<&AgentLine> {
         let mut rows: Vec<&AgentLine> = self
             .agents
             .iter()
+            // The chat's own runs belong to the pinned row above this list, not
+            // in it. Left in, one instruction per row, they are the majority of
+            // the fleet within a day and every one of them is the same chat.
+            .filter(|a| !a.is_orchestrator())
             .filter(|a| {
                 self.keep(
                     Workspace::Fleet,
@@ -2107,8 +2209,20 @@ mod tests {
         let mut a = app();
         a.agents = vec![line("a", "running"), line("b", "completed")];
         a.reconcile();
+        // The cursor starts on the work, not on the chat above it.
+        assert_eq!(a.selected_agent().unwrap().id, "a");
+
+        // Up from the first agent reaches the pinned chat, and stops there —
+        // it is the top of the list, not a row above the top.
         move_fleet(&mut a, -1);
-        assert_eq!(a.selected_agent().unwrap().id, "a", "already at the top");
+        assert!(
+            a.main_selected(),
+            "the chat is the row above the first agent"
+        );
+        move_fleet(&mut a, -1);
+        assert!(a.main_selected(), "already at the top");
+
+        move_fleet(&mut a, 1);
         move_fleet(&mut a, 1);
         move_fleet(&mut a, 1);
         assert_eq!(
@@ -2145,6 +2259,69 @@ mod tests {
         a.agents.truncate(1);
         a.reconcile();
         assert_eq!(a.selected_agent().unwrap().id, "a");
+    }
+
+    /// The pinned chat is the first row whatever the sort, whatever the filter,
+    /// and whether or not anything has been delegated. A top row that is only
+    /// sometimes there is a top row nobody relies on.
+    #[test]
+    fn the_pinned_chat_is_always_the_first_fleet_row() {
+        let mut a = app();
+        assert_eq!(a.row_ids(Workspace::Fleet), vec![MAIN_ROW.to_string()]);
+
+        a.agents = vec![line("a", "running"), line("b", "completed")];
+        a.reconcile();
+        assert_eq!(a.row_ids(Workspace::Fleet)[0], MAIN_ROW);
+
+        // Through every sort the list offers.
+        for sort in 0..4 {
+            a.list_mut(Workspace::Fleet).sort = sort;
+            assert_eq!(
+                a.row_ids(Workspace::Fleet)[0],
+                MAIN_ROW,
+                "sort {sort} moved the pinned row"
+            );
+        }
+    }
+
+    /// One instruction is one run, so a week of use puts dozens of identical
+    /// `main` rows in the fleet — burying the delegated work the list is for,
+    /// and none of them being the chat you wanted to get back to.
+    #[test]
+    fn the_chats_own_runs_collapse_into_the_pinned_row() {
+        let mut a = app();
+        let mut turn_one = line("r1", "completed");
+        turn_one.name = ORCHESTRATOR.into();
+        turn_one.created_at_ms = 1_000;
+        let mut turn_two = line("r2", "running");
+        turn_two.name = ORCHESTRATOR.into();
+        turn_two.created_at_ms = 5_000;
+        a.agents = vec![turn_one, turn_two, line("delegated", "running")];
+        a.reconcile();
+
+        // The list holds the delegated work and nothing else.
+        let ids: Vec<&str> = a.fleet_rows().iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, vec!["delegated"]);
+
+        let row = a.main_row();
+        assert_eq!(row.turns, 2);
+        assert_eq!(
+            row.last_ms, 5_000,
+            "the most recent instruction, not the first"
+        );
+        assert!(row.is_running(), "one of its turns is still being routed");
+    }
+
+    /// The chat exists before anything has been said to it, so the row does
+    /// too — and it says so rather than showing a zero that reads as "just now".
+    #[test]
+    fn an_unused_chat_still_has_a_row_and_claims_nothing() {
+        let a = app();
+        let row = a.main_row();
+        assert_eq!(row.turns, 0);
+        assert_eq!(row.last_ms, 0);
+        assert!(!row.is_running());
+        assert_eq!(row.status, "idle");
     }
 
     /// The fleet re-sorts under the cursor every four ticks. Tracking a row

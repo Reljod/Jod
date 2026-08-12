@@ -197,6 +197,15 @@ every delegation. That panel is the reason it is not just a chat window — Jod'
 job is watching several agents, and it shows runs from earlier processes too,
 because `rehydrate` puts them back.
 
+**It holds one conversation, and it is the pinned one.** The chat box is bound
+to the main chat from the first frame, and every line typed into it goes through
+the same `hand_to_orchestrator` call `jod main` makes. It used to mint a
+conversation per turn, with `/main` as a separate verb writing somewhere else —
+which meant the reply you were reading and the thread you were typing into were
+two different things, and `/model` wrote onto whichever one your eye was on. The
+fleet's first row is that chat, above the agents and outside their sort, so
+there is always one keystroke back to it.
+
 `jod tui --team <name>` adds `Ctrl-G`: the team's members, their harnesses and
 statuses, and the task board. It is read from the store on every refresh rather
 than kept in memory, because teammates run in their own processes and no
@@ -215,10 +224,14 @@ When it ends, a notice says which one, how it went and how long it took, because
 the whole point of delegating is that you were not watching.
 
 **The panel as a control surface.** `Ctrl-A` is a cursor over the fleet, sorted
-running-first then newest, showing each run's age. From it: `⏎` puts a run on
-screen, `s` stops one, `r` points the next turn at its conversation — bringing
-its harness with it, since a session id belongs to the harness that issued it —
-and `a` gives the `tmux attach` line. The same reaches the keyboard as
+running-first then newest, showing each run's age, with the pinned chat as a
+permanent first row above the sort — `⏎` there opens the chat, and the run verbs
+say why they do not apply rather than doing nothing. The chat's own runs, one
+per instruction, are collapsed into that row instead of filling the list with
+copies of itself. From an agent row: `⏎` puts a run on screen, `s` stops one,
+`r` points the next turn at its conversation — bringing its harness with it,
+since a session id belongs to the harness that issued it — and `a` gives the
+`tmux attach` line. The same reaches the keyboard as
 `/watch`, `/stop`, `/attach`, where an id prefix is enough and an ambiguous one
 is refused rather than guessed: stopping the wrong agent is not undoable.
 
@@ -250,7 +263,8 @@ than expecting them to be remembered.
 | `/harness <name>` | switch harness mid-session |
 | `/model <name>` | set the model; no argument restores the default |
 | `/thinking` · `/details` | show or hide reasoning, and what tools returned |
-| `/new` · `/resume <id>` · `/sessions` | move between conversations |
+| `/new` · `/sessions` | clear the screen · the fleet. There is one conversation, so neither leaves it |
+| `/main <instruction>` | the same as typing it — the chat box *is* the main chat |
 | `/delegate <prompt>` | run it in the background, same as `Ctrl-B` |
 | `/watch <id>` · `/stop <id>` · `/attach <id>` | act on one agent, by id prefix |
 | `/todo <title>` · `/done <id>` | write to the team's board |

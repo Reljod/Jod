@@ -142,8 +142,10 @@ pub fn parse(line: &str) -> Option<Slash> {
             Ok(request) => Slash::Config(request),
             Err(said) => Slash::Refused(said),
         },
-        // `/new` alone is still a fresh conversation, which is what it has
-        // always meant; `/new schedule` is the form ladder's front door.
+        // `/new` alone used to mean a fresh conversation. There is one now and
+        // it is pinned, so it clears the screen and says so — see the arm in
+        // `apply_slash`. `/new schedule` is the form ladder's front door and is
+        // untouched.
         "new" => match kind_from(arg) {
             Some(ws) => Slash::NewKind(ws),
             None if arg.is_empty() => Slash::New,
@@ -367,14 +369,13 @@ pub const HELP: &[(&str, &str)] = &[
     ),
     (
         "/new [kind]",
-        "a fresh conversation, or a new schedule/goal/hook/task",
+        "clear the screen, or start a new schedule/goal/hook/task",
     ),
-    ("/sessions", "conversations you can pick up"),
-    ("/resume <id>", "continue one of them"),
+    ("/sessions", "the fleet — the agents the chat started"),
     ("/delegate <prompt>", "run it in the background (Alt-B)"),
     (
         "/main <instruction>",
-        "hand it to the orchestrator — it picks the shape",
+        "the same as typing it — this chat is the main chat",
     ),
     ("/agents", "the fleet (Alt-A, Alt-K f)"),
     ("/watch <id>", "put an agent's output on screen"),
@@ -870,14 +871,23 @@ mod tests {
     /// how Enter used to be swallowed instead of running the command.
     #[test]
     fn a_command_needing_an_argument_completes_to_itself() {
-        assert_eq!(lines("/resume"), vec!["/resume "]);
+        assert_eq!(lines("/watch"), vec!["/watch "]);
         assert_eq!(lines("/harness"), vec!["/harness "]);
         // Trimmed, the only suggestion is what is already typed — so there is
         // nothing to accept and Enter must run it.
-        for input in ["/resume", "/harness"] {
+        for input in ["/watch", "/harness"] {
             let only = &completions(input, &fleet(&[]))[0].line;
             assert_eq!(only.trim_end(), input.trim_end());
         }
+    }
+
+    /// `/resume` is no longer offered — the chat box cannot be repointed at
+    /// another session — but it is still *understood*, so the muscle memory
+    /// gets the sentence naming `/watch` rather than "unknown command".
+    #[test]
+    fn resume_is_answered_even_though_it_is_no_longer_suggested() {
+        assert!(lines("/resume").is_empty(), "it is not advertised");
+        assert_eq!(parse("/resume ses-1"), Some(Slash::Resume("ses-1".into())));
     }
 
     #[test]

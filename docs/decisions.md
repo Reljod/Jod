@@ -1477,3 +1477,48 @@ Interactive sessions get `orchestrate`, the full set, because someone opened
 them and is watching. This cannot widen an unattended run — those are pinned to
 read-only where they are spawned, and
 [a chat you are watching may schedule; one that wandered off may not](#a-chat-you-are-watching-may-schedule-one-that-wandered-off-may-not).
+
+## The TUI had two conversations and called one of them the main chat
+
+`jod main "…"` wrote into a pinned conversation. A line typed into `jod tui` did
+not: the chat box minted a fresh conversation per turn, and `/main` was a
+separate verb that reached the pinned one and then left you typing into
+something else. Three things followed, and none of them looked like a bug from
+inside the code:
+
+- **Reading and writing came apart.** `/main` handed the instruction over and
+  watched the orchestrator's run, so its reply filled the screen. The next line
+  you typed started a new conversation. You were reading one thread and adding
+  to another.
+- **Settings and turns disagreed.** `current_conversation` fell back to "the
+  conversation the watched run wrote", so after `/main` a `/model` landed on the
+  pinned chat while the next *prompt* did not. Two answers to "which
+  conversation am I in", one per question asked.
+- **The pinned chat had no front door at all.** `jod main` with no argument
+  printed twenty exchanges and exited; `jod conv` offered ls/show/fork/revert
+  and no `open`. The record outlived every process and no process would let you
+  sit in it. Attaching to a run was not a substitute: main is one run per
+  instruction, so every one of them has already exited.
+
+So the TUI holds one conversation and it is the pinned one. The chat box is
+bound to it at startup, and every line — typed plainly or after `/main` — goes
+through the same `hand_to_orchestrator` the CLI calls. What that costs is worth
+stating plainly, because each was a real verb:
+
+- **`/resume <id>` is refused.** It pointed the chat box at an arbitrary harness
+  session, which is precisely the split being removed. The main chat resumes
+  itself from the session id on its own conversation.
+- **`/new` clears the screen.** It cannot start a second chat, because there is
+  nowhere for a second one to be.
+- **`r` on a fleet row drafts a follow-up** instead of repointing the chat box.
+  The orchestrator's `continue_agent` resumes a run *with its context*, which is
+  what the key was reaching for and more than the session id ever carried.
+
+Two invariants hold this together rather than convention. The pin **moves** on
+`/harness`: `switch_harness` mints a conversation, and a pin left on the thread
+it just compacted away would send the next turn back to a chat nobody can reach,
+with the handoff summary stranded in it. And the fleet shows the chat as a
+**pinned first row**, outside the sort and outside the filter, collapsing the
+chat's own runs into it — one instruction is one run, so within a day the list
+was mostly identical `main` rows, burying the delegated work the list exists for
+while none of them was the chat you wanted back.

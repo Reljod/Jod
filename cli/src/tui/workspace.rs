@@ -175,6 +175,20 @@ impl ListState {
     /// Keep the cursor on a row that still exists, preferring the one it was
     /// on. Called after every refresh and every filter change.
     pub fn reconcile(&mut self, ids: &[String]) {
+        let first = ids.first().cloned();
+        self.reconcile_to(ids, first);
+    }
+
+    /// [`ListState::reconcile`], but landing somewhere other than the top row
+    /// when the cursor has nowhere to go.
+    ///
+    /// The fleet needs it: its first row is the pinned chat, which is not an
+    /// agent, and a cursor that defaults there would put every one of the
+    /// list's verbs — stop, attach, watch — one keystroke away from the thing
+    /// they are for. The chat is *drawn* first because it is the anchor; the
+    /// cursor starts on the work, because managing the work is what opening
+    /// this list means.
+    pub fn reconcile_to(&mut self, ids: &[String], fallback: Option<String>) {
         if ids.is_empty() {
             self.selected = None;
             return;
@@ -184,7 +198,9 @@ impl ListState {
             .as_deref()
             .is_some_and(|id| ids.iter().any(|candidate| candidate == id));
         if !still_there {
-            self.selected = Some(ids[0].clone());
+            self.selected = fallback
+                .filter(|id| ids.contains(id))
+                .or_else(|| ids.first().cloned());
         }
     }
 

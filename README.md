@@ -84,12 +84,16 @@ cargo build --release
 ./target/release/jod recall "what do I prefer for tasks"
 ```
 
-`jod tui` is the one to start with: a scrolling conversation, an input box, and
+`jod tui` is the one to start with: **the pinned chat**, an input box, and
 `Ctrl-A` for a panel listing every agent Jod has running — which is the part
 that makes it an orchestrator's interface rather than a chat window. `Ctrl-B`
 delegates the typed line to an agent that runs in the background and reports
-back when it ends; the panel is where those runs are watched, stopped, resumed
-or attached to.
+back when it ends; the panel is where those runs are watched, stopped or
+attached to, and its top row is the chat itself.
+
+The TUI has exactly one conversation and it is the pinned one. Everything you
+type goes to the main chat below, whether or not you prefix it — there is no
+second thread to end up in, and nothing you type is recorded anywhere else.
 
 ### `jod main` — the pinned chat
 
@@ -102,6 +106,10 @@ jod main "keep working until the README explains what jod main does, then stop"
 jod main "count the Rust files in the repo and tell me"
 jod main                                  # read the chat back
 ```
+
+It is the same chat the TUI is: `jod main "…"` from a shell and a line typed
+into `jod tui` are the same call into the same conversation, so a scheduled
+sweep and the thing you asked for over breakfast are one thread.
 
 **It does not do the work.** It is a harness run holding Jod's own tools over
 MCP, so it delegates by *calling* rather than by describing, and it returns
