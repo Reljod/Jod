@@ -316,11 +316,26 @@ must not claim otherwise in the meantime.
 
 ## 5. Work order
 
-Each step keeps `npm run check` green; the suite is the runnable check.
+Each step keeps `npm run check` green; the suite is the runnable check. Baseline
+was **244** tests; it is **331** now.
 
-1. **Nav shell** — `Workspace` model ported from `workspace.rs`, tab bar in MENU
-   order, chat as root, `ListState` (id-keyed selection, filter, sort) as a pure
-   module. Tests mirror `workspace.rs`'s own, case for case.
+**Done — the headless layer.** Everything that can be got wrong is a pure module
+with tests, which is how the rest of this app is built (`session.ts` is a
+reducer, the components are a projection):
+
+| Module | What it holds | Tests |
+|---|---|---|
+| `workspaces.ts` | the map — names, letters, digits, titles, sort orders, `ListState` | 24, case for case with `workspace.rs`'s own suite |
+| `navigation.ts` | the state machine — back stack, one-at-a-time dismiss, the graph's visit stack | 32 |
+| `workspace-contract.ts` | TS mirrors of all fifteen wire types | — (types) |
+| `gloss.ts` | the cron gloss, ported from `data::gloss` | 10, including the must-not-guess list |
+| `client.ts` | the ten workspace routes + five conversation routes | 21, on the contract's sharp edges |
+
+**Remaining — the React projection.** No new rules live here; these draw the
+state above:
+
+1. ~~Nav shell state~~ — done (`navigation.ts`). **Still to draw:** the tab bar
+   in MENU order, and the screen frame that titles itself from `title()`.
 2. **Fleet** — off `/v1/agents` + `/v1/report` + `/v1/events`. Pinned top row is
    the main chat and **enters it** (§3). Sorts: running first · newest · name ·
    spend, with the pinned row outside the sort and outside the filter.
