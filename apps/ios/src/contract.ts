@@ -37,7 +37,7 @@ export type {
   TeamView,
   Usage,
   Fact,
-} from "@jod/hud";
+} from "@jod/hud/types";
 
 export {
   HARNESS_KINDS,
@@ -47,4 +47,4 @@ export {
   taskIsClaimed,
   taskIsDone,
   totalTokens,
-} from "@jod/hud";
+} from "@jod/hud/types";

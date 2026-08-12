@@ -22,7 +22,23 @@
     "baseUrl": ".",
     "paths": {
       "@jod/hud": ["../../packages/hud/src/index.ts"],
-      "@jod/hud/styles.css": ["../../packages/hud/src/styles.css"]
+      "@jod/hud/types": ["../../packages/hud/src/types.ts"],
+      "@jod/hud/styles.css": ["../../packages/hud/src/styles.css"],
+
+      // The HUD's sources live outside this project root, so TypeScript
+      // resolves their `react` imports by walking up from `packages/hud/src` —
+      // which finds `packages/hud/node_modules` on a machine that has run the
+      // HUD's own tests, and nothing at all in a clean checkout. That made a
+      // green local typecheck say nothing about CI.
+      //
+      // These point at `@types/*` rather than the runtime packages on purpose:
+      // what a `--noEmit` typecheck needs is the declarations, and the runtime
+      // copy has none of its own. Vite resolves the actual modules, and its
+      // `dedupe` keeps that to one copy.
+      "react": ["./node_modules/@types/react"],
+      "react/*": ["./node_modules/@types/react/*"],
+      "react-dom": ["./node_modules/@types/react-dom"],
+      "react-dom/*": ["./node_modules/@types/react-dom/*"]
     }
   },
   "include": ["src", "vite.config.ts"]

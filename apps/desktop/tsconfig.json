@@ -20,7 +20,16 @@
     "baseUrl": ".",
     "paths": {
       "@jod/hud": ["../../packages/hud/src/index.ts"],
-      "@jod/hud/styles.css": ["../../packages/hud/src/styles.css"]
+      "@jod/hud/types": ["../../packages/hud/src/types.ts"],
+      "@jod/hud/styles.css": ["../../packages/hud/src/styles.css"],
+
+      // See the note in `apps/web/tsconfig.json`: the HUD's sources sit outside
+      // this root, so their `react` types must be pinned to this app's copy
+      // rather than resolved by walking up out of the package.
+      "react": ["./node_modules/@types/react"],
+      "react/*": ["./node_modules/@types/react/*"],
+      "react-dom": ["./node_modules/@types/react-dom"],
+      "react-dom/*": ["./node_modules/@types/react-dom/*"]
     }
   },
   "include": ["src", "vite.config.ts"]

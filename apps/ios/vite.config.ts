@@ -17,13 +17,9 @@ export default defineConfig({
   plugins: [react()],
 
   resolve: {
-    alias: {
-      "@jod/hud/styles.css": `${hud}/styles.css`,
-      "@jod/hud": hud,
-    },
-    // The shared package sits outside this app's root and carries its own
-    // node_modules for its tests; without this React resolves twice.
-    dedupe: ["react", "react-dom"],
+    // Types only — see the note in `tsconfig.json`. This app takes the wire
+    // contract from the shared package and renders it its own way.
+    alias: { "@jod/hud/types": `${hud}/types` },
   },
 
   server: {

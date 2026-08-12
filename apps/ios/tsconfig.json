@@ -22,9 +22,16 @@
 
     "baseUrl": ".",
     "paths": {
-      "@jod/hud": ["../../packages/hud/src/index.ts"],
-      "@jod/hud/styles.css": ["../../packages/hud/src/styles.css"]
+      // Types only, deliberately. The phone needs the wire contract, not the
+      // desktop HUD — and `types.ts` imports nothing, so pulling it in cannot
+      // drag React into this project's type graph. Mapping `@jod/hud` here
+      // instead would typecheck every HUD component against *this* app's
+      // dependencies, which is both wrong and unresolvable: those files live
+      // outside this root, so `react` would be looked for in
+      // `packages/hud/node_modules` — present on a dev box that has run the
+      // HUD's tests, absent in CI.
+      "@jod/hud/types": ["../../packages/hud/src/types.ts"]
     }
   },
-  "include": ["src", "test", "vite.config.ts", "../../packages/hud/src"]
+  "include": ["src", "test", "vite.config.ts", "../../packages/hud/src/types.ts"]
 }
