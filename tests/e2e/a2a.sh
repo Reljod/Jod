@@ -49,16 +49,37 @@ case "${JOD_NO_MCP_INSTALL:-}" in
     ;;
 esac
 
-# And the effect, not only the flag. These are the three files
-# `mcp_install::ensure_registered` writes; they are fingerprinted here and
-# checked again at the end, so a future change that reaches them is caught by
-# the suite rather than by the developer wondering why their tools broke.
+# And the effect, not only the flag. These are the files
+# `mcp_install::ensure_registered` writes; the `jod` entry in each is
+# fingerprinted here and checked again at the end, so a future change that
+# reaches the developer's machine is caught by this suite rather than by the
+# developer wondering why their tools broke.
+#
+# The *entry*, not the file. Claude Code keeps its own session bookkeeping in
+# `~/.claude.json` and rewrites it whenever it runs — which this suite makes it
+# do, repeatedly — so a whole-file fingerprint reports the harness doing its job
+# as a failure. What must not change is which binary and which JOD_HOME the
+# `jod` server points at.
 fingerprint_configs() {
   for f in "$HOME/.claude.json" \
            "$HOME/.config/opencode/opencode.jsonc" \
            "$HOME/.config/opencode/opencode.json" \
            "$HOME/.gemini/config/mcp_config.json"; do
-    if [ -e "$f" ]; then stat -c '%n %Y %s' "$f" 2>/dev/null; else echo "$f absent"; fi
+    JOD_CFG="$f" python3 - <<'PY'
+import os, re
+path = os.environ['JOD_CFG']
+if not os.path.exists(path):
+    print(f'{path} absent'); raise SystemExit
+try:
+    text = open(path, encoding='utf-8', errors='replace').read()
+except OSError as e:
+    print(f'{path} unreadable: {e}'); raise SystemExit
+# Tolerant of JSONC, which no json parser will take. The 300 characters after
+# the key carry the command, its args and its environment, which is the whole
+# of what a registration decides.
+at = text.find('"jod"')
+print(f'{path} ' + (re.sub(r'\s+', ' ', text[at:at + 300]) if at >= 0 else 'no jod entry'))
+PY
   done
 }
 CONFIGS_BEFORE="$(fingerprint_configs)"

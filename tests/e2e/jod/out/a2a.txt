@@ -258,3 +258,94 @@ $ (ticking until a bound is hit, at most 60 times)
   tick 13: deepest hop 10, messages 19, bounds hit 0
   tick 14: deepest hop 11, messages 20, bounds hit 0
   tick 15: deepest hop 12, messages 21, bounds hit 0
+  tick 16: deepest hop 13, messages 22, bounds hit 1
+
+==============================================================
+== 9. what stopped them
+==============================================================
+$ q "SELECT id, sender, recipient, depth, state, substr(detail,1,80) AS detail FROM team_messages ORDER BY id"
+id | sender | recipient | depth | state | detail
+---+--------+-----------+-------+-------+-------
+1 | reljod | asker | 0 | delivered | 
+2 | asker | answerer | 0 | delivered | 
+3 | asker | nobody-here | 0 | undeliverable | `nobody-here` is not a member of this team
+4 | reljod | answerer | 0 | delivered | 
+5 | answerer | asker | 1 | delivered | 
+6 | reljod | answerer | 0 | delivered | 
+7 | reljod | asker | 0 | delivered | 
+8 | answerer | reljod | 1 | undeliverable | `reljod` is not a member of this team
+9 | asker | answerer | 0 | delivered | 
+10 | answerer | asker | 1 | delivered | 
+11 | asker | answerer | 2 | delivered | 
+12 | answerer | asker | 3 | delivered | 
+13 | asker | answerer | 4 | delivered | 
+14 | answerer | asker | 5 | delivered | 
+15 | asker | answerer | 6 | delivered | 
+16 | answerer | asker | 7 | delivered | 
+17 | asker | answerer | 8 | delivered | 
+18 | answerer | asker | 9 | delivered | 
+19 | asker | answerer | 10 | delivered | 
+20 | answerer | asker | 11 | delivered | 
+21 | asker | answerer | 12 | delivered | 
+22 | answerer | asker | 13 | undeliverable | thread paused: 13 hops is past the bound of 12
+(22 rows)
+
+$ q "SELECT MAX(depth) AS deepest_hop, count(*) AS messages FROM team_messages WHERE state != 'undeliverable'"
+deepest_hop | messages
+------------+---------
+12 | 19
+(1 rows)
+
+$ q "SELECT count(DISTINCT thread_id) AS threads FROM team_messages WHERE thread_id IS NOT NULL"
+threads
+-------
+4
+(1 rows)
+
+$ q "SELECT id, sender, recipient, depth, detail FROM team_messages WHERE state='undeliverable'"
+id | sender | recipient | depth | detail
+---+--------+-----------+-------+-------
+3 | asker | nobody-here | 0 | `nobody-here` is not a member of this team
+8 | answerer | reljod | 1 | `reljod` is not a member of this team
+22 | answerer | asker | 13 | thread paused: 13 hops is past the bound of 12
+(3 rows)
+
+PASS  the conversation stopped at a bound rather than running on
+PASS  the bound that stopped it is named
+PASS  the refused message was never delivered to anybody
+==============================================================
+== 10. and nothing further is spent on that thread
+==============================================================
+deepest hop delivered: 12   the bound it stopped at: 12
+PASS  no message was ever carried past the bound
+$ jod daemon --once
+[jod/daemon] reloaded 20 prior run(s)
+claimed 0 · started 0 · held 0 · failed 0
+
+runs before the tick: 20   after: 20
+PASS  a paused thread starts no further model call
+==============================================================
+== 11. the machine this ran on is as it was found
+==============================================================
+-- before --
+/home/reljod/.claude.json 1786551841 54895
+/home/reljod/.config/opencode/opencode.jsonc 1786549172 318
+/home/reljod/.config/opencode/opencode.json absent
+/home/reljod/.gemini/config/mcp_config.json 1786549172 229
+-- after --
+/home/reljod/.claude.json 1786552712 54921
+/home/reljod/.config/opencode/opencode.jsonc 1786549172 318
+/home/reljod/.config/opencode/opencode.json absent
+/home/reljod/.gemini/config/mcp_config.json 1786549172 229
+FAIL  no harness config on this machine was touched
+==============================================================
+== 12. summary
+==============================================================
+roles ran on:       asker=claude  answerer=opencode
+shared thread id:   de5b3687-872c-493f-b05e-207ea78fccc9
+deepest hop:        12
+threads opened:     4
+the bound that ended it: thread paused: 13 hops is past the bound of 12
+
+passed: 22    failed: 1
+exit=1

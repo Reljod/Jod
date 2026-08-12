@@ -2817,6 +2817,179 @@ mod tests {
     /// E2.S7's other half: the handler that decides when a queued answer
     /// reaches its session, and the caller that was missing for long enough
     /// that every test of it stayed green while nothing ran it.
+    /// D8's chain — last task done, work closes, closing card raised — and the
+    /// reason it needs its own tests: every piece of it was written and green
+    /// while nothing in the running system ever asked whether a board had
+    /// emptied.
+    mod works {
+        use super::*;
+        use crate::daemon::Tick;
+        use crate::harness::HarnessKind;
+        use crate::store::Store;
+        use crate::works::{Filter, Origin, State};
+
+        fn ticker_over(store: &Arc<Store>) -> Ticker {
+            Ticker::new(Jod::with_store(store.clone())).as_owner("t")
+        }
+
+        /// A work with one session, opened the way the orchestrator opens one.
+        fn work_with_a_session(store: &Store) -> (String, String) {
+            let work = store.create_work("port the parser").unwrap();
+            let c = store
+                .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
+                .unwrap();
+            store.set_conversation_title(&c.id, "worker").unwrap();
+            store
+                .attach_conversation(&c.id, &work.id, None, Origin::Orchestrator)
+                .unwrap();
+            (work.id, c.id)
+        }
+
+        fn run_in(store: &Store, conversation: &str, id: &str, status: &str) {
+            store
+                .save_run(&crate::store::StoredRun {
+                    id: id.into(),
+                    name: "worker".into(),
+                    harness: "claude_code".into(),
+                    status: status.into(),
+                    cwd: "/tmp".into(),
+                    session_id: Some("ses-1".into()),
+                    pid: None,
+                    pgid: None,
+                    created_at_ms: 1,
+                    summary: serde_json::Value::Null,
+                })
+                .unwrap();
+            store
+                .append_message(
+                    conversation,
+                    crate::conversation::NewMessage::new(
+                        crate::conversation::Role::Assistant,
+                        "working",
+                    )
+                    .from_run(id),
+                )
+                .unwrap();
+        }
+
+        /// A work with an open task is not over, whoever is asking.
+        #[tokio::test]
+        async fn a_work_with_an_unfinished_board_is_left_open() {
+            let store = Arc::new(Store::in_memory().unwrap());
+            let (work, _) = work_with_a_session(&store);
+
+            let report = ticker_over(&store).tick_works().unwrap();
+
+            assert_eq!(report.claimed, 1);
+            assert_eq!(report.held, 1);
+            assert_eq!(store.work(&work).unwrap().unwrap().state, State::Open);
+        }
+
+        /// The chain, driven the way it happens in production: something else
+        /// entirely completed the task, and the tick noticed.
+        #[tokio::test]
+        async fn a_work_whose_board_has_emptied_closes_itself_and_raises_its_card() {
+            let store = Arc::new(Store::in_memory().unwrap());
+            let (work, conversation) = work_with_a_session(&store);
+            // Completed through the *board's* own claim — not through
+            // `complete_work_task` — because that is the path an agent takes,
+            // and a rule that only fires on one call site is a rule the others
+            // forget.
+            let task = store.work_tasks(&work).unwrap().remove(0);
+            store.complete_task(&task.id).unwrap();
+
+            let report = ticker_over(&store).tick_works().unwrap();
+
+            assert_eq!(report.started, 1, "the work was closed by the tick");
+            assert_eq!(store.work(&work).unwrap().unwrap().state, State::Closed);
+            let cards = store
+                .cards(&crate::cards::Query {
+                    conversation_id: Some(conversation),
+                    ..Default::default()
+                })
+                .unwrap();
+            assert_eq!(cards.len(), 1, "the closing card was raised");
+            assert!(cards[0].title.contains("closed"), "{}", cards[0].title);
+        }
+
+        /// *Finishing* is tasks done with sessions still running, and only
+        /// something watching the runs can notice it stop being true.
+        #[tokio::test]
+        async fn a_finishing_work_is_closed_once_its_last_run_stops() {
+            let store = Arc::new(Store::in_memory().unwrap());
+            let (work, conversation) = work_with_a_session(&store);
+            run_in(&store, &conversation, "run-1", "running");
+            let task = store.work_tasks(&work).unwrap().remove(0);
+            store.complete_task(&task.id).unwrap();
+
+            let first = ticker_over(&store).tick_works().unwrap();
+            assert_eq!(first.started, 1);
+            assert_eq!(
+                store.work(&work).unwrap().unwrap().state,
+                State::Finishing,
+                "a session was still running, so the work is not safe to act on yet"
+            );
+
+            store.set_run_status("run-1", "completed").unwrap();
+            let second = ticker_over(&store).tick_works().unwrap();
+
+            assert_eq!(second.started, 1);
+            assert_eq!(store.work(&work).unwrap().unwrap().state, State::Closed);
+            assert!(store.works(Filter::Live).unwrap().is_empty());
+        }
+
+        /// E2.S7's last line: a session that ends with answers still queued
+        /// reports them as undeliverable instead of dropping them. Somebody
+        /// answered those cards, and a queue that loses one silently is
+        /// indistinguishable from one that works.
+        #[tokio::test]
+        async fn answers_nobody_will_now_hear_are_reported_rather_than_dropped() {
+            let store = Arc::new(Store::in_memory().unwrap());
+            let (work, conversation) = work_with_a_session(&store);
+            let card = store
+                .raise_card(crate::cards::NewCard {
+                    conversation_id: conversation.clone(),
+                    title: "which database?".into(),
+                    ..Default::default()
+                })
+                .unwrap();
+            store.answer_card(card.id, None, Some("sqlite")).unwrap();
+            let task = store.work_tasks(&work).unwrap().remove(0);
+            store.complete_task(&task.id).unwrap();
+
+            ticker_over(&store).tick_works().unwrap();
+
+            assert!(
+                store.pending_for(&conversation).unwrap().is_empty(),
+                "nothing is left queued against a session that has stopped"
+            );
+            assert_eq!(
+                store.card(card.id).unwrap().unwrap().delivery,
+                crate::cards::Delivery::Undeliverable,
+                "the rail has to say nobody heard it"
+            );
+        }
+
+        /// The guard. Unit tests on an uncalled function stay green for ever,
+        /// so this one goes through the tick the daemon runs: delete the
+        /// `tick_works` line from `impl Tick for Ticker` and it fails.
+        #[tokio::test]
+        async fn the_daemons_tick_closes_a_work_whose_board_has_emptied() {
+            let store = Arc::new(Store::in_memory().unwrap());
+            let (work, _) = work_with_a_session(&store);
+            let task = store.work_tasks(&work).unwrap().remove(0);
+            store.complete_task(&task.id).unwrap();
+
+            Tick::tick(&ticker_over(&store), 1_000_000).await.unwrap();
+
+            assert_eq!(
+                store.work(&work).unwrap().unwrap().state,
+                State::Closed,
+                "the composite tick never asked whether the board had emptied"
+            );
+        }
+    }
+
     mod deliveries {
         use super::*;
         use crate::cards::NewCard;
