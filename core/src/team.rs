@@ -265,6 +265,15 @@ impl Kind {
 pub use crate::delivery::State as MailState;
 
 impl MailState {
+    /// Every state a message can be in. Small and closed, so the SQL below can
+    /// be generated from it rather than written out again.
+    const ALL: [MailState; 4] = [
+        MailState::Queued,
+        MailState::Delivered,
+        MailState::Failed,
+        MailState::Undeliverable,
+    ];
+
     /// Whether this message counts against the work's budget. An attempt that
     /// was refused before it reached anybody must not also spend the allowance
     /// it was refused by, or hitting a bound once would spend the rest.
@@ -274,6 +283,23 @@ impl MailState {
     pub fn counts_against_budget(&self) -> bool {
         !matches!(self, MailState::Undeliverable)
     }
+}
+
+/// The `WHERE` fragment matching the messages that spend the budget.
+///
+/// Generated from [`MailState::counts_against_budget`] rather than written as
+/// `state != 'undeliverable'` in each of the three queries that need it. It
+/// was written out three times, which meant the rule and the code that
+/// enforced it were four things that had to agree — and one of them, the
+/// method, was not consulted by any of the others. A bound the agents cannot
+/// argue with should not depend on three string literals staying in step.
+fn spends_budget_sql() -> String {
+    let allowed: Vec<String> = MailState::ALL
+        .iter()
+        .filter(|s| s.counts_against_budget())
+        .map(|s| format!("'{}'", s.as_str()))
+        .collect();
+    format!("state IN ({})", allowed.join(", "))
 }
 
 /// One message and everything the thread around it needs.
@@ -707,8 +733,11 @@ impl Store {
     pub fn messages_used(&self, scope: Scope, team: &str) -> Result<i64> {
         let conn = self.conn.lock().expect("store lock poisoned");
         Ok(conn.query_row(
-            "SELECT COUNT(*) FROM team_messages
-              WHERE scope = ?1 AND team = ?2 AND state != 'undeliverable'",
+            &format!(
+                "SELECT COUNT(*) FROM team_messages
+                  WHERE scope = ?1 AND team = ?2 AND {}",
+                spends_budget_sql()
+            ),
             params![scope.as_str(), team],
             |r| r.get(0),
         )?)
@@ -723,8 +752,11 @@ impl Store {
         }
         let conn = self.conn.lock().expect("store lock poisoned");
         let deepest: i64 = conn.query_row(
-            "SELECT COALESCE(MAX(depth), -1) FROM team_messages
-              WHERE COALESCE(thread_id, CAST(id AS TEXT)) = ?1 AND state != 'undeliverable'",
+            &format!(
+                "SELECT COALESCE(MAX(depth), -1) FROM team_messages
+                  WHERE COALESCE(thread_id, CAST(id AS TEXT)) = ?1 AND {}",
+                spends_budget_sql()
+            ),
             params![thread_id],
             |r| r.get(0),
         )?;
@@ -856,8 +888,11 @@ impl Store {
                 });
             }
             let used: i64 = tx.query_row(
-                "SELECT COUNT(*) FROM team_messages
-                  WHERE scope = ?1 AND team = ?2 AND state != 'undeliverable'",
+                &format!(
+                    "SELECT COUNT(*) FROM team_messages
+                      WHERE scope = ?1 AND team = ?2 AND {}",
+                    spends_budget_sql()
+                ),
                 params![post.scope.as_str(), post.team],
                 |r| r.get(0),
             )?;

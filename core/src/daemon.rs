@@ -61,7 +61,7 @@ pub trait Tick: Send + Sync {
 
 impl Tick for Ticker {
     /// Heartbeats first, then schedules, then goals, then the mail, then the
-    /// queue — every step every pass.
+    /// delivery queue, then the works — every step every pass.
     ///
     /// Separate claims rather than one, because they are different contended
     /// resources — a process holding a goal must not thereby hold a schedule —
@@ -86,7 +86,9 @@ impl Tick for Ticker {
     /// into something that runs — without [`Ticker::tick_mail`] a teammate's
     /// message sits in an inbox until somebody types `jod team wake`, and
     /// without [`Ticker::tick_deliveries`] a card answered in the rail is
-    /// queued and never spoken.
+    /// queued and never spoken. [`Ticker::tick_works`] is the third of the
+    /// same kind: without it a work whose board has emptied stays open until a
+    /// person closes it by hand, and *finishing* is a state nothing reaches.
     ///
     /// **This function is the whole wiring.** Both of those were built and
     /// tested against nothing for a while, and unit tests on an uncalled
@@ -104,15 +106,31 @@ impl Tick for Ticker {
         let goals = self.tick_goals(now_ms).await?;
         let mail = self.tick_mail(now_ms).await?;
         let queued = self.tick_deliveries(now_ms).await?;
+        // Last, because closing a work reads what its sessions did and the two
+        // steps above are what let them do it. Nothing here starts a run.
+        let works = self.tick_works()?;
         Ok(TickReport {
-            claimed: schedules.claimed + goals.claimed + mail.claimed + queued.claimed,
-            started: schedules.started + goals.started + mail.started + queued.started,
-            held: schedules.held + goals.held + mail.held + queued.held,
+            claimed: schedules.claimed
+                + goals.claimed
+                + mail.claimed
+                + queued.claimed
+                + works.claimed,
+            started: schedules.started
+                + goals.started
+                + mail.started
+                + queued.started
+                + works.started,
+            held: schedules.held + goals.held + mail.held + queued.held + works.held,
             // A reaped run is a failure that happened, and the daemon's own log
             // line is where a person finds out that anything did. Counting it
             // here rather than in a fourth field keeps `TickReport` meaning
             // "what went wrong this pass", which is what reads it.
-            failed: schedules.failed + goals.failed + mail.failed + queued.failed + swept.stopped,
+            failed: schedules.failed
+                + goals.failed
+                + mail.failed
+                + queued.failed
+                + works.failed
+                + swept.stopped,
         })
     }
 }

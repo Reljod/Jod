@@ -433,6 +433,9 @@ pub struct Closing {
     /// Mail queued into this work that will no longer be delivered, because
     /// delivery into a work stops when it closes.
     pub waiting_mail: usize,
+    /// Card answers queued against a session that has now stopped. Reported,
+    /// never dropped: somebody answered these and nobody will ever hear them.
+    pub undelivered_answers: usize,
     /// The card this closing raised, when there was a session to raise it
     /// against.
     pub card_id: Option<i64>,
@@ -463,6 +466,12 @@ impl Closing {
             out.push_str(&format!(
                 "{} card(s) nobody answered\n",
                 self.unanswered_cards
+            ));
+        }
+        if self.undelivered_answers > 0 {
+            out.push_str(&format!(
+                "{} answered card(s) were never delivered to a session\n",
+                self.undelivered_answers
             ));
         }
         if self.waiting_mail > 0 {
@@ -1056,6 +1065,9 @@ impl Store {
             pull_requests: self.work_pull_request_urls(work_id)?,
             unanswered_cards: unanswered,
             waiting_mail,
+            // Filled in below, once the sessions that will never hear their
+            // answers have been settled.
+            undelivered_answers: 0,
             card_id: None,
         };
 
@@ -1082,6 +1094,39 @@ impl Store {
             }
             self.set_member_status(work_id, &session.name, crate::team::MemberStatus::Shutdown)?;
         }
+
+        // An answer queued against a session that is now stopped will never be
+        // spoken, and E2.S7 is explicit that such a thing is *reported* rather
+        // than dropped: a queue that silently loses an answer is
+        // indistinguishable from one that works, and the person who answered
+        // the card is entitled to know nobody ever heard it. A running session
+        // is left alone — it may still be told before it finishes.
+        let mut unheard = 0usize;
+        for session in &sessions {
+            if session.running {
+                continue;
+            }
+            let queued: Vec<i64> = self
+                .pending_for(&session.conversation_id)?
+                .iter()
+                .map(|p| p.id)
+                .collect();
+            if queued.is_empty() {
+                continue;
+            }
+            unheard += queued.len();
+            self.mark_deliveries_undeliverable(
+                &queued,
+                &format!("the work `{}` closed before this was delivered", work.title),
+            )?;
+        }
+
+        // Folded in before the card is raised, so the card body says it too:
+        // the rail is where somebody would look for it.
+        let closing = Closing {
+            undelivered_answers: unheard,
+            ..closing
+        };
 
         // Raised against the work's root session, which is the one the
         // orchestrator opened: its rail is where every descendant's cards

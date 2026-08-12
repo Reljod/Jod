@@ -255,3 +255,6 @@ $ (ticking until a bound is hit, at most 60 times)
   tick 10: deepest hop 7, messages 16, bounds hit 0
   tick 11: deepest hop 8, messages 17, bounds hit 0
   tick 12: deepest hop 9, messages 18, bounds hit 0
+  tick 13: deepest hop 10, messages 19, bounds hit 0
+  tick 14: deepest hop 11, messages 20, bounds hit 0
+  tick 15: deepest hop 12, messages 21, bounds hit 0
