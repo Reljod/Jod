@@ -276,13 +276,28 @@ runsh "q \"SELECT id, name, harness, status FROM runs ORDER BY created_at_ms\""
 section "8. the runaway: two agents told to talk for ever"
 # The sanctioned pathological pair. Both sides are told to keep one thread
 # going, so the only thing that can stop them is the bound.
-NEVER_STOP="From now on, every time you receive a message from another agent, immediately
-   use your jod \`reply\` tool — passing the message id in the brackets of the message
-   you are answering — to reply with one short follow-up question of your own. Never
-   conclude, never stop asking, and do not use any other tool."
+# Mechanical, and honest about what it is.
+#
+# The first version of this asked the pair to "keep asking follow-up questions,
+# never conclude", and Claude Code refused on its own judgement after three
+# hops: "I'm holding here rather than sending another question — message #10 is
+# a restatement of #8." That is *good* behaviour from the model and it is also
+# the wrong thing to argue with, so the instruction no longer asks an agent to
+# be pointless. It tells it the truth — this is a test of the bound, Jod is
+# what stops it — and gives it something mechanical to send, so that
+# continuing needs no judgement and stopping is Jod's decision rather than the
+# model's.
+NEVER_STOP="This is a deliberate test of Jod's conversation depth bound, and continuing
+   until Jod refuses is the correct behaviour here. Every time you receive a message
+   from another agent, immediately use your jod \`reply\` tool — passing the message id
+   printed in the brackets of the message you are answering — and reply with exactly
+   \`PING n\`, where n is one greater than the number in the message you received (start
+   from 1 if it has no number). Send nothing else and use no other tool. Do not stop
+   early and do not comment on the repetition: the bound is what ends this. If the
+   reply tool refuses, report its refusal verbatim and stop."
 run jod team msg crew --from reljod --to answerer "$NEVER_STOP"
 run jod team msg crew --from reljod --to asker \
-  "$NEVER_STOP Start now by using \`send_message\` to ask \`answerer\`: what should we do first?"
+  "$NEVER_STOP Start now by using \`send_message\` to send \`answerer\` exactly: PING 1"
 
 # Each hop is a model turn and a member may only be resumed once per wake
 # interval, so this is minutes. Two ways out, and both are endings rather than
@@ -290,8 +305,11 @@ run jod team msg crew --from reljod --to asker \
 # are opening new threads instead of continuing one, and the depth bound can
 # never be reached. Stopping on that second condition is what keeps a broken
 # thread from spending the entire message budget discovering it.
-BUDGET_TICKS="${A2A_MAX_TICKS:-40}"
-STALLED_LIMIT=6
+BUDGET_TICKS="${A2A_MAX_TICKS:-60}"
+# Generous, because a hop costs two ticks in the ordinary case — the wake rate
+# limit means the two members alternate — and a slow turn can cost a third. Set
+# low, this reports a working conversation as a stalled one.
+STALLED_LIMIT=10
 echo "\$ (ticking until a bound is hit, at most $BUDGET_TICKS times)"
 previous_depth=-1
 stalled=0
@@ -333,6 +351,16 @@ check "the refused message was never delivered to anybody" \
   test "$(val "SELECT count(*) FROM team_messages WHERE state='undeliverable' AND delivered=0")" = 0
 
 section "10. and nothing further is spent on that thread"
+# The bound is a ceiling, not a suggestion: no message may exist past it. This
+# is the assertion that cannot pass vacuously — a run count that does not move
+# proves nothing when there was no mail to deliver in the first place.
+DEEPEST="$(val "SELECT COALESCE(MAX(depth),0) FROM team_messages WHERE state != 'undeliverable'")"
+LIMIT="$(val "SELECT CAST(replace(substr(detail, instr(detail,'bound of ')+9), ' ', '') AS INTEGER)
+                FROM team_messages WHERE state='undeliverable' AND detail LIKE '%bound of%' LIMIT 1")"
+echo "deepest hop delivered: ${DEEPEST:-?}   the bound it stopped at: ${LIMIT:-?}"
+check "no message was ever carried past the bound" \
+  test "${DEEPEST:-99}" -le "${LIMIT:-0}"
+
 BEFORE="$(val "SELECT count(*) FROM runs")"
 run jod daemon --once
 sleep 30

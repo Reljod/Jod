@@ -15,6 +15,33 @@
 //! alone decided, and on almost every tick the fold is "start nothing". That
 //! fold is pure too, so "unchanged suppresses the run" is tested from a value
 //! rather than from a process.
+//!
+//! ## The tick is also what delivers agent mail, and why that is not
+//! [`crate::delivery`]
+//!
+//! [`Ticker::tick_mail`] is the **authoritative** path for agent-to-agent mail:
+//! [`crate::team::wake_order`] decides who may be woken, `claim_wake` rate-limits
+//! it across ticks, and [`crate::store::Store::drain_inbox`] takes the mail off
+//! the bus in one statement. Card answers and human nudges travel a different
+//! road, [`crate::delivery`], which queues against a *conversation*.
+//!
+//! Two roads is one more than the design wants, and merging them was examined
+//! and deliberately deferred. The full reasoning is at the top of
+//! [`crate::delivery`]; the short of it is that this queue addresses a
+//! **member** and that one addresses a **conversation**, an explicit team's
+//! member has no stable conversation to be addressed by, and closing that gap
+//! needs a schema change. The state vocabulary *was* unified, so both tables
+//! now mean the same thing by the same word.
+//!
+//! Two rules for whoever does merge them:
+//!
+//! - **`claim_wake` is not `plan_injection`.** One is a rate limit across
+//!   ticks, the other declines only while a turn is in flight. Fold the former
+//!   into the latter and an idle member receiving one message per tick gets one
+//!   turn per tick, which is the cost problem the rate limit exists to prevent.
+//! - **The drain and the queue must settle together.** Today exactly one row
+//!   records what an agent was told. Two records of that, settled in two
+//!   statements, disagree the first time a process dies between them.
 
 use std::sync::Arc;
 

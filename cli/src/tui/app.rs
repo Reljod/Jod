@@ -720,8 +720,20 @@ impl App {
     // ---- the fleet tree --------------------------------------------------
 
     /// The visible tree rows, in the order they are drawn.
+    ///
+    /// The filter comes from the fleet screen's own `ListState`, not from a
+    /// second one on `TreeState`. `/` is already wired there, on every list
+    /// screen, with its own `Esc` and its own line under the box — a private
+    /// copy would have been a filter the key never reached, which is exactly
+    /// what it was until a render test caught it.
     pub fn tree_rows(&self) -> Vec<NodeId> {
-        self.tree.row_ids(&self.forest, &self.closed_works)
+        self.tree
+            .row_ids(&self.forest, &self.closed_works, self.tree_filter())
+    }
+
+    /// What the fleet's `/` line currently holds.
+    pub fn tree_filter(&self) -> Option<&str> {
+        self.list(Workspace::Fleet).filter.as_deref()
     }
 
     /// The node under the cursor.
@@ -1154,6 +1166,11 @@ impl App {
             }
             self.list_mut(ws).reconcile(&ids);
         }
+        // The tree's cursor too, and for the same reason: `/` changes what is
+        // visible, and a cursor left on a filtered-out node would put the
+        // detail pane on something the list no longer shows.
+        let rows = self.tree_rows();
+        self.tree.reconcile(&rows);
     }
 
     fn keep(&self, ws: Workspace, text: &str) -> bool {

@@ -431,6 +431,31 @@ mod tests {
         assert_eq!(granted, vec!["/work/repo"]);
     }
 
+    /// AGY expands `/name` from the prompt, so forwarding is passing the line
+    /// through — no flag, no rewriting.
+    ///
+    /// It survives having framing in front of it, which is the case that
+    /// matters here: AGY answers `false` to `takes_system_prompt`, so
+    /// `runner.rs` prepends the system prompt to the message and the slash is
+    /// no longer the first thing in it. Measured rather than assumed — a
+    /// preamble followed by `/jodskill` still fired the skill — because the
+    /// obvious guess is that a slash command has to lead the line, and had that
+    /// been true every forwarded command under AGY would have been silently
+    /// downgraded to prose.
+    #[test]
+    fn a_command_rides_in_the_prompt_untouched() {
+        let mut r = req();
+        r.prompt = "/planning now".into();
+        let args = Agy::default().args(&r);
+        assert!(args.contains(&ArgPart::Prompt), "the prompt is a placeholder");
+        let flat = lits(&args);
+        assert!(!flat.iter().any(|a| a == "--command"));
+        assert!(
+            !flat.iter().any(|a| a.contains("/planning")),
+            "the prompt must not be inlined into argv"
+        );
+    }
+
     fn req() -> SpawnRequest {
         SpawnRequest {
             name: "t".into(),

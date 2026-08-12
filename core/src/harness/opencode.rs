@@ -66,6 +66,24 @@ impl Harness for OpenCode {
         if req.permission == PermissionPolicy::Bypass {
             args.push(ArgPart::lit("--auto"));
         }
+        // A repository command, named rather than written into the message.
+        //
+        // This is the whole reason `SpawnRequest::command` exists. OpenCode is
+        // the one harness measured *not* to expand `/name` from the prompt: it
+        // passed the literal text through, and the model recovered by hunting
+        // the file down with `ls` and `cat`. That produced the right answer by
+        // luck, which is the failure worth naming — it would have gone wrong
+        // silently for any command not sitting in the working directory.
+        //
+        // With this set the prompt below carries the command's *arguments*
+        // rather than a message; measured, `--command jodargs "hello world"`
+        // reaches the command as `$ARGUMENTS`. An empty prompt is fine — a
+        // command taking no arguments runs the same way.
+        if let Some(command) = &req.command {
+            args.push(ArgPart::lit("--command"));
+            args.push(ArgPart::lit(command.clone()));
+        }
+
         // `req.roots` is deliberately dropped here, and this is the documented
         // degradation rather than an oversight.
         //
@@ -299,6 +317,43 @@ mod tests {
         assert_eq!(a.last(), Some(&ArgPart::Prompt));
         assert!(a.contains(&ArgPart::lit("run")));
         assert!(a.contains(&ArgPart::lit("json")));
+    }
+
+    /// A repository command reaches OpenCode as `--command <name>`, with the
+    /// prompt trailing as the command's arguments.
+    ///
+    /// The flag is not decoration: `/name` written into the message measurably
+    /// does *not* expand here, so without this the model gets literal text.
+    #[test]
+    fn a_command_is_named_by_the_flag_that_actually_expands_it() {
+        let mut r = req(PermissionPolicy::Ask, None);
+        r.command = Some("deploy".into());
+        let args = OpenCode::default().args(&r);
+        let flat: Vec<String> = args
+            .iter()
+            .map(|a| match a {
+                ArgPart::Literal(s) => s.clone(),
+                ArgPart::Prompt => "<PROMPT>".into(),
+            })
+            .collect();
+        let at = flat
+            .iter()
+            .position(|a| a == "--command")
+            .expect("a command must be named by the flag, not written into the message");
+        assert_eq!(flat[at + 1], "deploy");
+        assert_eq!(
+            args.last(),
+            Some(&ArgPart::Prompt),
+            "the arguments still travel as the positional message"
+        );
+    }
+
+    /// An ordinary message must not grow a command flag, or every spawn would
+    /// be trying to resolve a command that does not exist.
+    #[test]
+    fn a_plain_prompt_carries_no_command_flag() {
+        let args = OpenCode::default().args(&req(PermissionPolicy::Ask, None));
+        assert!(!args.contains(&ArgPart::lit("--command")));
     }
 
     /// The documented degradation, pinned so nobody "fixes" it into a crash.

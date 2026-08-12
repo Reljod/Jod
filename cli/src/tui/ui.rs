@@ -24,6 +24,7 @@ use super::app::{absolute, short_duration, since, until, App, Entry, JobState, O
 use super::data::{Outcome, Source};
 use super::graph::{self, Direction as EdgeDirection};
 use super::keys;
+use super::fleet;
 use super::mention;
 use super::picker;
 use super::rail;
@@ -2271,7 +2272,211 @@ fn empty(what: &str) -> Vec<ListItem<'static>> {
 /// A panel you can only look at makes you leave the UI to do anything about
 /// what you saw, so it says how long each has been going, what it last said,
 /// and which keys act on the selected row.
+/// The forest, as rows.
+///
+/// **The column drop order is declared here and nowhere else**: summary first,
+/// then the card count, then the spinner, and the label never. A label that
+/// survives every width is the difference between a narrow tree and a broken
+/// one — you can work out what a row is from its name and nothing else, and
+/// from a truncated name you cannot.
+fn draw_tree(f: &mut Frame, app: &App, area: Rect) {
+    let rows: Vec<&jod_core::tree::Node> = app
+        .tree
+        .visible(&app.forest, &app.closed_works, app.tree_filter())
+        .into_iter()
+        .map(|at| &app.forest[at])
+        .collect();
+    let ids = app.tree_rows();
+    let selected = app.tree.index(&ids);
+    let width = area.width.saturating_sub(2) as usize;
+    // The guides go plain when the terminal says it cannot draw the alphabet.
+    // `NO_COLOR` is the closest signal Jod has to "this terminal is minimal",
+    // and it is the same one the rest of the renderer already honours.
+    let ascii = *COLOURLESS;
+
+    let (start, height) = window(area, selected, rows.len());
+    let items: Vec<ListItem> = rows
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(height)
+        .map(|(at, node)| {
+            let here = at == selected;
+            let expanded = app.tree.is_expanded(&node.id, &app.closed_works);
+            let mut spans = vec![
+                Span::styled(
+                    if here { "▸ " } else { "  " }.to_string(),
+                    bold(USER),
+                ),
+                Span::styled(fleet::guides(&rows, at, ascii), fg(MUTED)),
+                Span::styled(fleet::marker(node, expanded).to_string(), fg(MUTED)),
+                Span::styled(
+                    format!("{} ", fleet::kind_glyph(node.kind)),
+                    fg(work_colour(&node.colour)),
+                ),
+                Span::styled(
+                    node.label.clone(),
+                    if here { bold(AGENT) } else { fg(AGENT) },
+                ),
+            ];
+            let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+            let mut room = width.saturating_sub(used);
+
+            // A spinner, so a running node reads as moving rather than stuck.
+            if node.running {
+                let glyph = format!(" {}", app.spinner());
+                if room >= glyph.chars().count() {
+                    room -= glyph.chars().count();
+                    spans.push(Span::styled(glyph, fg(WARN)));
+                }
+            }
+            // The card count says *where the questions are* without expanding
+            // anything, which is most of why the tree is worth looking at.
+            if node.cards > 0 {
+                let badge = if node.blocked > 0 {
+                    format!(" [{} {}]", node.blocked, rail::BLOCKED)
+                } else {
+                    format!(" [{} cards]", node.cards)
+                };
+                if room >= badge.chars().count() {
+                    room -= badge.chars().count();
+                    spans.push(Span::styled(
+                        badge,
+                        if node.blocked > 0 { bold(BAD) } else { fg(MUTED) },
+                    ));
+                }
+            }
+            // Last on, first off.
+            if !node.summary.is_empty() && room > LEAST_TEXT {
+                spans.push(Span::styled(
+                    format!("  {}", cut(&node.summary, room.saturating_sub(2))),
+                    fg(MUTED),
+                ));
+            }
+            ListItem::new(Line::from(spans))
+        })
+        .collect();
+
+    let blocked: usize = rows
+        .iter()
+        .filter(|n| n.kind == jod_core::tree::NodeKind::Work)
+        .map(|n| n.blocked)
+        .sum();
+    let title = if blocked > 0 {
+        format!(" fleet · {blocked} blocked ")
+    } else {
+        " fleet ".to_string()
+    };
+    f.render_widget(
+        List::new(if items.is_empty() {
+            empty(if app.here().filtering() {
+                "  nothing matches"
+            } else {
+                "  no works yet"
+            })
+        } else {
+            items
+        })
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(fg(USER))
+                .title(title)
+                .title_bottom(fit_verbs(
+                    " ↑↓ pick · →← in/out · space toggle · ⏎ open · z closed ",
+                    area.width,
+                )),
+        ),
+        area,
+    );
+}
+
+/// What the selected node is, in full.
+fn draw_tree_detail(f: &mut Frame, app: &App, area: Rect) {
+    let mut lines: Vec<Line> = Vec::new();
+    match app.selected_node() {
+        Some(node) => {
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("  {} ", fleet::kind_glyph(node.kind)),
+                    fg(work_colour(&node.colour)),
+                ),
+                Span::styled(node.label.clone(), bold(AGENT)),
+            ]));
+            lines.push(Line::from(""));
+            lines.push(detail(
+                "kind",
+                match node.kind {
+                    jod_core::tree::NodeKind::Work => "work",
+                    jod_core::tree::NodeKind::Session => "session",
+                    jod_core::tree::NodeKind::Run => "run",
+                },
+            ));
+            lines.push(detail("id", &short(&node.id.id)));
+            lines.push(detail(
+                "state",
+                if node.running { "running" } else { "idle" },
+            ));
+            if node.cards > 0 {
+                lines.push(detail(
+                    "cards",
+                    &format!("{} open · {} {}", node.cards, node.blocked, rail::BLOCKED),
+                ));
+            }
+            if !node.summary.is_empty() {
+                lines.push(Line::from(""));
+                for wrapped in wrap(&node.summary, area.width.saturating_sub(4) as usize, 2) {
+                    lines.push(Line::from(Span::styled(wrapped, fg(MUTED))));
+                }
+            }
+        }
+        None => lines.push(Line::from(Span::styled(
+            "  nothing selected".to_string(),
+            fg(MUTED),
+        ))),
+    }
+    f.render_widget(
+        Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(fg(MUTED))
+                    .title(" node "),
+            )
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
+/// A work's colour name as one of the eight the terminal's own theme controls.
+///
+/// Unknown names fall back to the ordinary foreground rather than to something
+/// arbitrary: a work whose colour Jod does not recognise should look plain, not
+/// look like a different work.
+fn work_colour(name: &str) -> Color {
+    match name {
+        "red" => BAD,
+        "green" => GOOD,
+        "yellow" => WARN,
+        "blue" => Color::Blue,
+        "magenta" => Color::Magenta,
+        "cyan" => USER,
+        _ => AGENT,
+    }
+}
+
 fn draw_fleet(f: &mut Frame, app: &App, area: Rect) {
+    // The tree the moment there is one. Not a replacement for the flat list
+    // below but the other half of the same screen: a session belonging to no
+    // work has no node in the forest, and the list is what shows it.
+    if app.has_tree() {
+        let (left, right) = split(area);
+        draw_tree(f, app, left);
+        if let Some(right) = right {
+            draw_tree_detail(f, app, right);
+        }
+        return;
+    }
     let (left, right) = split(area);
     let rows = app.fleet_rows();
     let selected = app
@@ -7047,6 +7252,203 @@ mod tests {
         assert!(!card_border(&base(CardKind::Decision, Importance::Normal, false))
             .add_modifier
             .contains(Modifier::BOLD));
+    }
+
+    // ---- the fleet tree ----
+
+    fn tree_node(
+        id: jod_core::tree::NodeId,
+        parent: Option<jod_core::tree::NodeId>,
+        kind: jod_core::tree::NodeKind,
+        depth: usize,
+        label: &str,
+    ) -> jod_core::tree::Node {
+        jod_core::tree::Node {
+            id,
+            parent,
+            kind,
+            depth,
+            label: label.into(),
+            summary: String::new(),
+            running: false,
+            cards: 0,
+            blocked: 0,
+            colour: "cyan".into(),
+            expanded: true,
+            has_children: false,
+        }
+    }
+
+    /// **E5's check**: two works, four sessions, one expanded run, and a
+    /// blocked count in the gutter.
+    fn two_works() -> App {
+        use jod_core::tree::{NodeId, NodeKind};
+        let mut a = app();
+
+        let mut parser = tree_node(NodeId::work("w1"), None, NodeKind::Work, 0, "the parser");
+        parser.has_children = true;
+        parser.cards = 3;
+        parser.blocked = 1;
+        parser.colour = "cyan".into();
+
+        let mut lexer = tree_node(
+            NodeId::session("s1"),
+            Some(NodeId::work("w1")),
+            NodeKind::Session,
+            1,
+            "port the lexer",
+        );
+        lexer.has_children = true;
+        lexer.running = true;
+        lexer.cards = 1;
+        lexer.blocked = 1;
+        lexer.summary = "editing tokens.rs".into();
+
+        let mut run = tree_node(
+            NodeId::run("r1"),
+            Some(NodeId::session("s1")),
+            NodeKind::Run,
+            2,
+            "cargo test",
+        );
+        run.running = true;
+
+        let docs = tree_node(
+            NodeId::session("s2"),
+            Some(NodeId::work("w1")),
+            NodeKind::Session,
+            1,
+            "write the docs",
+        );
+
+        let mut deploy = tree_node(NodeId::work("w2"), None, NodeKind::Work, 0, "the deploy");
+        deploy.has_children = true;
+        deploy.colour = "green".into();
+
+        let ci = tree_node(
+            NodeId::session("s3"),
+            Some(NodeId::work("w2")),
+            NodeKind::Session,
+            1,
+            "fix the CI",
+        );
+        let release = tree_node(
+            NodeId::session("s4"),
+            Some(NodeId::work("w2")),
+            NodeKind::Session,
+            1,
+            "cut a release",
+        );
+
+        a.forest = vec![parser, lexer, run, docs, deploy, ci, release];
+        a.go(Workspace::Fleet);
+        let rows = a.tree_rows();
+        a.tree.reconcile(&rows);
+        a
+    }
+
+    #[test]
+    fn the_fleet_tree_draws_two_works_four_sessions_and_an_expanded_run() {
+        let a = two_works();
+        let frame = rendered(&a, 150, 30);
+
+        assert!(frame.contains("the parser"), "{frame}");
+        assert!(frame.contains("the deploy"), "{frame}");
+        for session in [
+            "port the lexer",
+            "write the docs",
+            "fix the CI",
+            "cut a release",
+        ] {
+            assert!(frame.contains(session), "{session} missing:\n{frame}");
+        }
+        assert!(
+            frame.contains("cargo test"),
+            "the expanded run:\n{frame}"
+        );
+        assert!(
+            frame.contains("1 blocked"),
+            "the blocked count in the gutter:\n{frame}"
+        );
+        // Guides, so the shape reads as a tree rather than as an indented list.
+        assert!(frame.contains('├') || frame.contains('└'), "{frame}");
+    }
+
+    /// Collapsing a work takes its sessions off the screen and leaves the other
+    /// work alone — the property the whole navigation hangs off.
+    #[test]
+    fn collapsing_a_work_hides_only_its_own_sessions() {
+        let mut a = two_works();
+        a.tree.selected = Some(jod_core::tree::NodeId::work("w1"));
+        let closed = a.closed_works.clone();
+        a.tree.toggle(&closed);
+
+        let frame = rendered(&a, 150, 30);
+        assert!(!frame.contains("port the lexer"), "{frame}");
+        assert!(!frame.contains("cargo test"), "{frame}");
+        assert!(frame.contains("the parser"), "the work itself stays:\n{frame}");
+        assert!(frame.contains("fix the CI"), "the other work is untouched:\n{frame}");
+    }
+
+    /// A filter keeps the path to every hit, so a matching session never floats
+    /// at a depth with nothing above it.
+    #[test]
+    fn a_filtered_tree_keeps_the_work_above_every_hit() {
+        let mut a = two_works();
+        // Through the screen's own `/`, which is what the key actually writes
+        // to — and `reconcile` after it, because a cursor left on a
+        // filtered-out node would keep the detail pane on a row the list no
+        // longer shows. That was a real bug this test found.
+        a.list_mut(Workspace::Fleet).filter = Some("release".into());
+        a.reconcile();
+        let frame = rendered(&a, 150, 30);
+        assert!(frame.contains("cut a release"), "{frame}");
+        assert!(
+            frame.contains("the deploy"),
+            "its work is kept as the path to it:\n{frame}"
+        );
+        assert!(!frame.contains("port the lexer"), "{frame}");
+        assert!(!frame.contains("the parser"), "{frame}");
+    }
+
+    /// The declared drop order: the summary goes first, the label never.
+    #[test]
+    fn a_narrow_tree_drops_the_summary_before_the_label() {
+        let a = two_works();
+        let wide = rendered(&a, 150, 30);
+        assert!(wide.contains("editing tokens.rs"), "{wide}");
+
+        // Narrow enough that the drop actually bites: the row's fixed part —
+        // guides, marker, glyph, label, spinner, card badge — is already near
+        // forty columns, so the summary only goes when there is less than
+        // `LEAST_TEXT` left after it.
+        let narrow = rendered(&a, 50, 30);
+        assert!(
+            narrow.contains("port the lexer"),
+            "the label survives every width:\n{narrow}"
+        );
+        assert!(
+            !narrow.contains("editing tokens.rs"),
+            "the summary is the first thing to go:\n{narrow}"
+        );
+    }
+
+    /// With no works the screen is the older flat list, because a session that
+    /// belongs to no work has no node in the forest.
+    #[test]
+    fn the_fleet_falls_back_to_its_list_when_there_are_no_works() {
+        // Its own fixture rather than `tui::tests`'s: a test module cannot see
+        // a sibling's helpers, and reaching for one is what left this file not
+        // compiling.
+        let mut a = app();
+        a.agents = vec![
+            agent_line("aaa11111", "port the parser", "running"),
+            agent_line("bbb22222", "write the docs", "completed"),
+        ];
+        a.go(Workspace::Fleet);
+        assert!(!a.has_tree());
+        let frame = rendered(&a, 150, 30);
+        assert!(frame.contains("aaa11111"), "the flat list still draws:\n{frame}");
     }
 
     // ---- the secret card ----

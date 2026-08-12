@@ -2487,6 +2487,56 @@ fn read_without_echo() -> Result<String> {
     outcome.map(|()| value)
 }
 
+/// Carry out a `jod commands …` subcommand.
+///
+/// The first thing in Jod that calls discovery at all. `scan`, `cache_discovered`
+/// and `discovered` were written, tested, and reachable from nothing — the same
+/// shape as the webhook rules and the Telegram bridge before them, where every
+/// piece was green and the feature did not exist. This is the missing verb, and
+/// it is deliberately the whole loop: scan the disk, write the cache, read it
+/// back, so the path the palette will use is exercised rather than assumed.
+fn commands_command(jod: &Jod, what: CommandsCommand) -> Result<()> {
+    let store = jod.store().context("this command needs the database")?;
+    match what {
+        CommandsCommand::Ls {
+            conversation,
+            roots,
+            harness,
+            cached,
+            json,
+        } => {
+            let kind = harness.map(HarnessKind::from);
+            if !cached {
+                // Roots from the flag, else the conversation's, else the main
+                // chat's. A scan of nothing is not an error: it caches an empty
+                // set, which correctly empties a palette whose repository has
+                // been unmounted.
+                let scanning: Vec<PathBuf> = if roots.is_empty() {
+                    let id = which_conversation(store, conversation)?;
+                    store.roots(&id)?.into_iter().map(|r| r.path).collect()
+                } else {
+                    roots
+                };
+                let found = jod_core::commands::scan(&scanning)?;
+                store.cache_discovered(&scanning, &found)?;
+            }
+
+            let all = store.discovered(kind)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&all)?);
+            } else if all.is_empty() {
+                println!(
+                    "nothing found — Jod looks for `.claude/commands/`, `.claude/skills/`, \
+                     `.opencode/command/` and `.agents/skills/` under each root"
+                );
+            } else {
+                render::discovered(&all);
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Carry out a `jod work …` subcommand.
 fn work_command(jod: &Jod, what: WorkCommand) -> Result<()> {
     use jod_core::works::{Deletion, Filter};
@@ -3954,6 +4004,53 @@ mod tests {
         // And the id stops resolving, so a repeat says so rather than
         // reporting a second success.
         assert!(work_command(&jod, WorkCommand::Delete { id: work.id }).is_err());
+    }
+
+    /// Discovery was written, tested and reachable from nothing. This asserts
+    /// the whole loop rather than any one piece: a real command file on disk is
+    /// scanned, cached, and read back out — which is the path the palette will
+    /// take, and the one that was missing.
+    #[tokio::test]
+    async fn listing_commands_scans_the_disk_caches_it_and_reads_it_back() {
+        let store = std::sync::Arc::new(Store::in_memory().unwrap());
+        let jod = Jod::with_store(store.clone());
+        let root = std::env::temp_dir().join(format!("jod-commands-{}", std::process::id()));
+        let commands = root.join(".claude/commands");
+        std::fs::create_dir_all(&commands).unwrap();
+        std::fs::write(
+            commands.join("ship-it.md"),
+            "---\ndescription: open a draft PR\n---\nbody\n",
+        )
+        .unwrap();
+
+        commands_command(
+            &jod,
+            CommandsCommand::Ls {
+                conversation: None,
+                roots: vec![root.clone()],
+                harness: None,
+                cached: false,
+                json: false,
+            },
+        )
+        .unwrap();
+
+        let cached = store.discovered(None).unwrap();
+        let found = cached
+            .iter()
+            .find(|d| d.name == "ship-it")
+            .expect("the scan did not reach the cache");
+        assert_eq!(found.description, "open a draft PR");
+        // A command is offered to the harness whose convention it follows and
+        // to no other: Jod never forwards one across conventions.
+        assert_eq!(found.harness, HarnessKind::ClaudeCode.id());
+        assert!(store
+            .discovered(Some(HarnessKind::OpenCode))
+            .unwrap()
+            .iter()
+            .all(|d| d.name != "ship-it"));
+
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]

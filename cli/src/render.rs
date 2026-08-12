@@ -490,6 +490,44 @@ pub fn secrets(list: &[jod_core::secrets::SecretMeta]) {
     }
 }
 
+/// Commands and skills, grouped by where they were found.
+///
+/// The harness column is the load-bearing one and it is never blank by
+/// accident: a command follows one harness's convention and is offered to that
+/// harness alone, because Jod does not forward one across conventions — a
+/// `.claude/commands/foo.md` handed to OpenCode has no `.opencode/command/foo.md`
+/// to resolve. An empty value means every harness would find it, which is true
+/// of `.agents/skills/` and of nothing else.
+pub fn discovered(list: &[jod_core::commands::Discovered]) {
+    let mut shown_under: Option<&std::path::Path> = None;
+    for d in list {
+        if shown_under != Some(d.root.as_path()) {
+            let where_ = if d.root.as_os_str().is_empty() {
+                // User config belongs to no repository, which is the whole
+                // meaning of the empty root — say so rather than printing a
+                // blank line and letting it look like a bug.
+                "your own config".to_string()
+            } else {
+                d.root.display().to_string()
+            };
+            println!("{}", paint(BOLD, &where_));
+            shown_under = Some(d.root.as_path());
+        }
+        println!(
+            "  {:<22} {:<8} {:<13} {}",
+            paint(CYAN, &format!("/{}", d.name)),
+            paint(DIM, d.kind.as_str()),
+            paint(
+                DIM,
+                &jod_core::HarnessKind::from_id(&d.harness)
+                    .map(|h| h.label().to_string())
+                    .unwrap_or_else(|| "any harness".into())
+            ),
+            d.description
+        );
+    }
+}
+
 pub fn works(list: &[jod_core::works::Work], now_ms: i64) {
     for w in list {
         println!(

@@ -446,6 +446,28 @@ mod tests {
         );
     }
 
+    /// Claude Code expands `/name` out of the prompt itself, so forwarding a
+    /// command means changing nothing at all.
+    ///
+    /// Worth a test precisely because the correct implementation is empty. The
+    /// prompt reaches argv as a placeholder and `runner.rs` resolves it to the
+    /// string unchanged — there is no shell to re-read a leading slash — so
+    /// this pins that no flag and no rewriting creeps in later. A `--command`
+    /// here would be an argument Claude Code does not have.
+    #[test]
+    fn a_command_rides_in_the_prompt_untouched() {
+        let mut r = req(PermissionPolicy::Bypass, None);
+        r.prompt = "/deploy now".into();
+        let args = ClaudeCode::default().args(&r);
+        assert!(args.contains(&ArgPart::Prompt), "the prompt is a placeholder");
+        let flat = flat(&r);
+        assert!(!flat.iter().any(|a| a == "--command"));
+        assert!(
+            !flat.iter().any(|a| a.contains("/deploy")),
+            "the prompt must not be inlined into argv"
+        );
+    }
+
     /// Every mode maps to a spelling this build accepts.
     ///
     /// The six are what `claude --help` prints — `acceptEdits`, `auto`,

@@ -31,7 +31,7 @@ use std::path::{Path, PathBuf};
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 
-use crate::error::Result;
+use crate::error::{JodError, Result};
 use crate::harness::HarnessKind;
 use crate::store::Store;
 
@@ -161,6 +161,77 @@ impl Expansion {
             // prose.
             HarnessKind::Agy => Expansion::Prompt,
         }
+    }
+}
+
+/// One command, addressed to one harness, in the spelling that harness takes.
+///
+/// The two fields map straight onto [`SpawnRequest`](crate::harness::SpawnRequest):
+/// `prompt` to its prompt, `command` to its command. Producing them together is
+/// the point — the pair is what keeps "which harness needs which spelling" in
+/// one place instead of at every call site.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Invocation {
+    /// For a harness that expands from the prompt, the whole line: `/name args`.
+    /// For OpenCode, the arguments alone — the name travels in `command`.
+    pub prompt: String,
+    /// `Some` only for a harness that needs the name in a flag.
+    pub command: Option<String>,
+}
+
+impl Discovered {
+    /// How to send this command to `harness`.
+    ///
+    /// Refuses when the harness is not the one whose convention this command
+    /// follows, and that refusal is the point rather than a nicety. A
+    /// `.claude/commands/foo.md` handed to OpenCode has no
+    /// `.opencode/command/foo.md` for it to resolve, so the honest answers are
+    /// "don't offer it" or "paste the body in" — and pasting the body is
+    /// exactly the inlining branch the D7 measurement deleted. Rebuilding it
+    /// here, one call site at a time, is how it would grow back.
+    ///
+    /// So the palette filters by harness and this refuses anything that slips
+    /// through. An error beats the alternative: forwarding `/foo` to OpenCode
+    /// would put literal text in front of the model, which — measured — may
+    /// well go and find the file itself and answer correctly, leaving a bug
+    /// that only shows up when the file is somewhere less convenient.
+    pub fn invoke(&self, harness: HarnessKind, args: &str) -> Result<Invocation> {
+        if self.harness != harness.id() {
+            return Err(JodError::Invalid(format!(
+                "`{}` follows {}'s convention and {} cannot resolve it; \
+                 offer it to the harness that owns it rather than forwarding it",
+                self.name,
+                self.harness,
+                harness.id(),
+            )));
+        }
+        let args = args.trim();
+        Ok(match Expansion::for_harness(harness) {
+            // The line as a person would have typed it. Nothing rewrites it on
+            // the way to argv — `runner.rs` resolves the prompt placeholder to
+            // the string unchanged, and there is no shell to re-read it.
+            Expansion::Prompt => Invocation {
+                prompt: if args.is_empty() {
+                    format!("/{}", self.name)
+                } else {
+                    format!("/{} {args}", self.name)
+                },
+                command: None,
+            },
+            Expansion::Flag => Invocation {
+                prompt: args.to_string(),
+                command: Some(self.name.clone()),
+            },
+            // Unreachable while every harness has a reading, and deliberately
+            // an error rather than a guess if one ever loses it: the whole
+            // point of the variant is that nothing branches on it.
+            Expansion::Unmeasured => {
+                return Err(JodError::Invalid(format!(
+                    "nobody has measured how {} takes a command, so Jod will not guess",
+                    harness.id()
+                )))
+            }
+        })
     }
 }
 
@@ -446,6 +517,57 @@ impl Store {
         })
     }
 
+    /// Rescan one conversation's roots and the user's config, and cache it.
+    ///
+    /// The entry point everything else goes through: [`scan`] reads the disk
+    /// and knows nothing about conversations, and a palette holding a
+    /// conversation id should not have to assemble root paths itself.
+    ///
+    /// **This touches the filesystem every time, so it is not what a keystroke
+    /// calls.** Reading the cache is [`commands_for`](Store::commands_for), and
+    /// the split is deliberate rather than an optimisation deferred: one
+    /// function that sometimes scanned would be one whose cost nobody could
+    /// predict from the call site, which is how the mention popup would have
+    /// ended up walking a hundred-thousand-file repository between two
+    /// keypresses. Refresh when the palette opens or someone asks; read on
+    /// every frame after that.
+    pub fn refresh_commands(&self, conversation_id: &str) -> Result<Vec<Discovered>> {
+        let roots: Vec<PathBuf> = self.roots(conversation_id)?.into_iter().map(|r| r.path).collect();
+        let found = scan(&roots)?;
+        self.cache_discovered(&roots, &found)?;
+        Ok(found)
+    }
+
+    /// What is cached for this conversation, without touching the disk.
+    ///
+    /// `harness` filters to one convention, which is what a palette wants: a
+    /// command is only offered to the harness that can resolve it, so that
+    /// [`Discovered::invoke`] never has to refuse one. User-scope commands come
+    /// back too — they belong to no repository and are available under every
+    /// root.
+    ///
+    /// A conversation nobody has refreshed yet yields nothing rather than an
+    /// error. An empty palette is a true statement about what Jod knows; a
+    /// failure would be a claim about the repository that Jod has not earned.
+    pub fn commands_for(
+        &self,
+        conversation_id: &str,
+        harness: Option<HarnessKind>,
+    ) -> Result<Vec<Discovered>> {
+        let roots: Vec<String> = self
+            .roots(conversation_id)?
+            .into_iter()
+            .map(|r| r.path.to_string_lossy().to_string())
+            .collect();
+        Ok(self
+            .discovered(harness)?
+            .into_iter()
+            .filter(|d| {
+                d.scope != Scope::Root || roots.iter().any(|r| *r == d.root.to_string_lossy())
+            })
+            .collect())
+    }
+
     /// Everything cached, in the order [`scan`] produced it.
     ///
     /// `harness` filters to one convention — what the palette wants, since a
@@ -498,15 +620,44 @@ mod tests {
         std::fs::write(path, text).unwrap();
     }
 
-    fn temp() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
+    /// A per-test tag, so tests running in parallel do not share a directory.
+    fn file_tag() -> String {
+        format!(
             "jod-commands-{}-{:?}",
             std::process::id(),
             std::thread::current().id()
-        ));
+        )
+    }
+
+    fn temp() -> PathBuf {
+        let dir = std::env::temp_dir().join(file_tag());
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// A conversation to hang roots off.
+    fn conversation(store: &Store) -> String {
+        store
+            .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
+            .unwrap()
+            .id
+    }
+
+    /// A `Discovered` as `scan` would have built it, without a disk.
+    fn found_for(harness: HarnessKind, name: &str) -> Discovered {
+        Discovered {
+            id: 0,
+            root: PathBuf::from("/work"),
+            scope: Scope::Root,
+            kind: Kind::Command,
+            name: name.to_string(),
+            description: String::new(),
+            path: PathBuf::from("/work/cmd.md"),
+            harness: harness.id().to_string(),
+            body: String::new(),
+            scanned_at_ms: 0,
+        }
     }
 
     /// Names come from the file stem for a command and the directory for a
@@ -519,7 +670,7 @@ mod tests {
         write(&root, ".opencode/command/build.md", "Build it.\n");
         write(&root, ".agents/skills/planning/SKILL.md", "Plan it.\n");
 
-        let found = scan(&[root.clone()]).unwrap();
+        let found = scan(std::slice::from_ref(&root)).unwrap();
         let named = |n: &str| found.iter().filter(|d| d.name == n).count();
         assert_eq!(named("deploy"), 1, "a Claude Code command");
         assert_eq!(named("reviewing"), 1, "a Claude Code skill");
@@ -542,7 +693,7 @@ mod tests {
     fn a_shared_directory_is_recorded_once_per_harness_that_reads_it() {
         let root = temp();
         write(&root, ".agents/skills/planning/SKILL.md", "Plan it.\n");
-        let found = scan(&[root.clone()]).unwrap();
+        let found = scan(std::slice::from_ref(&root)).unwrap();
         let mut harnesses: Vec<&str> = found.iter().map(|d| d.harness.as_str()).collect();
         harnesses.sort();
         assert_eq!(harnesses, vec![HarnessKind::Agy.id(), HarnessKind::OpenCode.id()]);
@@ -605,7 +756,7 @@ mod tests {
         write(&root, ".claude/commands/notes.txt", "not a command\n");
         write(&root, ".claude/commands/real.md", "a command\n");
         write(&root, ".claude/skills/empty/README.md", "no manifest here\n");
-        let found = scan(&[root.clone()]).unwrap();
+        let found = scan(std::slice::from_ref(&root)).unwrap();
         let names: Vec<&str> = found
             .iter()
             .filter(|d| d.scope == Scope::Root)
@@ -623,8 +774,8 @@ mod tests {
         write(&root, ".claude/commands/b.md", "b\n");
         write(&root, ".claude/commands/a.md", "a\n");
         write(&root, ".agents/skills/z/SKILL.md", "z\n");
-        let first = scan(&[root.clone()]).unwrap();
-        let second = scan(&[root.clone()]).unwrap();
+        let first = scan(std::slice::from_ref(&root)).unwrap();
+        let second = scan(std::slice::from_ref(&root)).unwrap();
         let names = |v: &[Discovered]| -> Vec<String> {
             v.iter().map(|d| format!("{}/{}", d.harness, d.name)).collect()
         };
@@ -661,9 +812,146 @@ mod tests {
     fn no_discovered_command_carries_a_body_to_inline() {
         let root = temp();
         write(&root, ".claude/commands/deploy.md", "Ship it.\n");
-        let found = scan(&[root.clone()]).unwrap();
+        let found = scan(std::slice::from_ref(&root)).unwrap();
         assert!(found.iter().all(|d| d.body.is_empty()));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A conversation with a root, refreshed through the entry point.
+    ///
+    /// The test this module was missing. Everything else here calls [`scan`]
+    /// directly, which is exactly why they all stayed green while nothing in
+    /// the workspace called any of it — green guards, guarding nothing. This
+    /// one starts from a conversation id, which is all a palette has.
+    #[test]
+    fn refreshing_a_conversation_finds_the_commands_under_its_roots() {
+        let root = temp();
+        write(&root, ".claude/commands/deploy.md", "---\ndescription: Ship it.\n---\n");
+        write(&root, ".opencode/command/build.md", "# Build it\n");
+        let store = Store::in_memory().unwrap();
+        let id = conversation(&store);
+        store
+            .add_root(&id, crate::roots::NewRoot::reading(root.clone()))
+            .unwrap();
+
+        let found = store.refresh_commands(&id).unwrap();
+        let deploy = found
+            .iter()
+            .find(|d| d.name == "deploy")
+            .expect("the root's Claude Code command must be discovered");
+        assert_eq!(deploy.harness, HarnessKind::ClaudeCode.id());
+        assert_eq!(deploy.description, "Ship it.");
+
+        // And it is readable back without another scan.
+        let claude = store
+            .commands_for(&id, Some(HarnessKind::ClaudeCode))
+            .unwrap();
+        assert!(claude.iter().any(|d| d.name == "deploy"));
+        assert!(
+            !claude.iter().any(|d| d.name == "build"),
+            "an OpenCode command is not Claude Code's to offer"
+        );
+
+        let opencode = store.commands_for(&id, Some(HarnessKind::OpenCode)).unwrap();
+        assert!(opencode.iter().any(|d| d.name == "build"));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// One conversation's palette must not show another's repository.
+    #[test]
+    fn a_conversation_only_sees_the_commands_under_its_own_roots() {
+        let mine = temp();
+        let theirs = mine.parent().unwrap().join(format!("{}-other", file_tag()));
+        let _ = std::fs::remove_dir_all(&theirs);
+        write(&mine, ".claude/commands/mine.md", "mine\n");
+        write(&theirs, ".claude/commands/theirs.md", "theirs\n");
+
+        let store = Store::in_memory().unwrap();
+        let a = conversation(&store);
+        let b = conversation(&store);
+        store
+            .add_root(&a, crate::roots::NewRoot::reading(mine.clone()))
+            .unwrap();
+        store
+            .add_root(&b, crate::roots::NewRoot::reading(theirs.clone()))
+            .unwrap();
+        store.refresh_commands(&a).unwrap();
+        store.refresh_commands(&b).unwrap();
+
+        let seen = store.commands_for(&a, None).unwrap();
+        assert!(seen.iter().any(|d| d.name == "mine"));
+        assert!(
+            !seen.iter().any(|d| d.name == "theirs"),
+            "another conversation's root leaked into this palette"
+        );
+
+        let _ = std::fs::remove_dir_all(&mine);
+        let _ = std::fs::remove_dir_all(&theirs);
+    }
+
+    /// A conversation nobody has refreshed knows nothing, and says so quietly.
+    #[test]
+    fn an_unrefreshed_conversation_is_empty_rather_than_an_error() {
+        let store = Store::in_memory().unwrap();
+        let id = conversation(&store);
+        assert!(store.commands_for(&id, None).unwrap().is_empty());
+    }
+
+    /// The two spellings, each produced for the harness that was measured to
+    /// take it.
+    #[test]
+    fn a_command_is_invoked_in_the_spelling_its_harness_takes() {
+        let claude = found_for(HarnessKind::ClaudeCode, "deploy");
+        assert_eq!(
+            claude.invoke(HarnessKind::ClaudeCode, "").unwrap(),
+            Invocation { prompt: "/deploy".into(), command: None }
+        );
+        assert_eq!(
+            claude.invoke(HarnessKind::ClaudeCode, "now").unwrap(),
+            Invocation { prompt: "/deploy now".into(), command: None }
+        );
+
+        let agy = found_for(HarnessKind::Agy, "planning");
+        assert_eq!(
+            agy.invoke(HarnessKind::Agy, "").unwrap(),
+            Invocation { prompt: "/planning".into(), command: None }
+        );
+
+        // OpenCode takes the name in a flag, and the prompt becomes the
+        // command's arguments — measured as `$ARGUMENTS`.
+        let opencode = found_for(HarnessKind::OpenCode, "build");
+        assert_eq!(
+            opencode.invoke(HarnessKind::OpenCode, "release").unwrap(),
+            Invocation { prompt: "release".into(), command: Some("build".into()) }
+        );
+        assert_eq!(
+            opencode.invoke(HarnessKind::OpenCode, "").unwrap(),
+            Invocation { prompt: String::new(), command: Some("build".into()) }
+        );
+    }
+
+    /// Cross-convention forwarding is refused. Allowing it would mean either
+    /// sending literal text OpenCode cannot resolve, or pasting the body in —
+    /// and pasting the body is the branch the measurement deleted.
+    #[test]
+    fn a_command_is_never_forwarded_to_a_harness_that_cannot_resolve_it() {
+        let claude = found_for(HarnessKind::ClaudeCode, "deploy");
+        assert!(claude.invoke(HarnessKind::OpenCode, "").is_err());
+        assert!(claude.invoke(HarnessKind::Agy, "").is_err());
+        assert!(claude.invoke(HarnessKind::ClaudeCode, "").is_ok());
+    }
+
+    /// A skill invokes exactly like a command; the difference is where it was
+    /// found, not how it is sent.
+    #[test]
+    fn a_skill_is_invoked_the_same_way_as_a_command() {
+        let mut skill = found_for(HarnessKind::Agy, "planning");
+        skill.kind = Kind::Skill;
+        assert_eq!(
+            skill.invoke(HarnessKind::Agy, "").unwrap().prompt,
+            "/planning"
+        );
     }
 
     #[test]
@@ -682,8 +970,8 @@ mod tests {
         write(&root, ".claude/commands/deploy.md", "---\ndescription: Ship it.\n---\n");
         write(&root, ".agents/skills/planning/SKILL.md", "# Plan\n");
         let store = Store::in_memory().unwrap();
-        let found = scan(&[root.clone()]).unwrap();
-        store.cache_discovered(&[root.clone()], &found).unwrap();
+        let found = scan(std::slice::from_ref(&root)).unwrap();
+        store.cache_discovered(std::slice::from_ref(&root), &found).unwrap();
 
         let back = store.discovered(None).unwrap();
         assert_eq!(back.len(), found.len());
@@ -711,13 +999,13 @@ mod tests {
         write(&root, ".claude/commands/stays.md", "Kept.\n");
         let store = Store::in_memory().unwrap();
         store
-            .cache_discovered(&[root.clone()], &scan(&[root.clone()]).unwrap())
+            .cache_discovered(std::slice::from_ref(&root), &scan(std::slice::from_ref(&root)).unwrap())
             .unwrap();
         assert_eq!(store.discovered(None).unwrap().len(), 2);
 
         std::fs::remove_file(root.join(".claude/commands/gone.md")).unwrap();
         store
-            .cache_discovered(&[root.clone()], &scan(&[root.clone()]).unwrap())
+            .cache_discovered(std::slice::from_ref(&root), &scan(std::slice::from_ref(&root)).unwrap())
             .unwrap();
         let back = store.discovered(None).unwrap();
         assert_eq!(back.len(), 1);

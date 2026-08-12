@@ -24,6 +24,53 @@
 //! turns. That is a cost control, and it is also the better answer: an agent
 //! reading everything that changed in one go responds more coherently than one
 //! woken ten times with a line each.
+//!
+//! ## Why agent mail does not come through here yet
+//!
+//! It should, eventually, and the paragraph above says so — but it does not
+//! today, and a reader who assumes otherwise will look for a bug that is not
+//! there. Mail reaches an agent through [`crate::ticker::Ticker::tick_mail`],
+//! which asks [`crate::team::wake_order`] who may be woken and drains the bus
+//! with [`crate::store::Store::drain_inbox`]. This module is authoritative for
+//! **card answers and human nudges**; [`crate::team`] is authoritative for
+//! **agent mail**, including whether the recipient may be woken at all.
+//!
+//! The merge was examined in full and deliberately not done. Three things are
+//! in the way, and all three are cheap to state and expensive to discover:
+//!
+//! 1. **This queue addresses a conversation; a team member has not got one.**
+//!    A member of a work *is* a conversation and would fit straight away. A
+//!    member joined through `jod team join` holds a run and a harness-side
+//!    session, and every wake mints a *fresh* Jod conversation
+//!    ([`crate::service::RunConversation::New`]) — so there is no stable id to
+//!    key a queue on, and one resolved at send time would name a conversation
+//!    that is already finished by the time it is read. Mail sent to a member
+//!    that has never run has no conversation at all, and today that mail waits
+//!    on the bus, visibly, which is a property A8 asks for by name.
+//!    Fixing it properly means letting the queue address a *member*, which is
+//!    a schema change and therefore a stop-and-ask.
+//! 2. **Nothing calls [`Store::plan_injection`] in production.** It is E2.S7's
+//!    handler, written and tested as a value; the turn-boundary injector that
+//!    would call it does not exist yet. Card answers currently reach an agent
+//!    when it *asks* — the blocking card tool returns the answer and settles
+//!    the queued row. So merging mail into this path would move the one
+//!    delivery route that works onto the one that has never run.
+//! 3. **`wake_order` asks a question this module cannot.** `plan_injection`
+//!    knows only whether a turn is in flight; `wake_order` also refuses a
+//!    member that is shutting down, or that has no session to resume — where
+//!    waking would start a fresh context and the agent would answer having
+//!    forgotten the work. Until that judgement moves too, merging the queues
+//!    would leave two decisions in two modules and only look unified.
+//!
+//! What *was* unified, because it cost nothing and the drift was real: both
+//! queues now speak one [`State`], so `pending_deliveries.state` and
+//! `team_messages.state` cannot mean different things by the same word.
+//!
+//! The order to do the rest in, when somebody does: build the injector that
+//! calls `plan_injection` for card answers (it is the missing half of E2.S7);
+//! then move `wake_order`'s eligibility here; then, with a migration, let this
+//! queue address a member. Mail moves last, when there is something proven to
+//! move it onto.
 
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -81,15 +128,35 @@ impl Kind {
     }
 }
 
-/// Where a queued item has got to.
+/// Where something waiting to be said to an agent has got to.
+///
+/// **One vocabulary for both queues.** `pending_deliveries.state` and
+/// `team_messages.state` hold the same four words, and until this type was
+/// shared they were two enums with two `parse` functions that happened to
+/// agree. Two spellings of one vocabulary is the kind of duplication that
+/// looks harmless right up to the day one of them learns a fifth word:
+/// [`crate::team::MailState`] is this type, not a copy of it.
+///
+/// The variants are deliberately about *the message*, never about the agent.
+/// Whether a session may be spoken to at all is a different question, asked in
+/// exactly one place — [`crate::team::wake_order`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum State {
     Queued,
     Delivered,
-    /// The session ended before it could be told. Recorded rather than
-    /// deleted, because "it never arrived" is the answer to a question
-    /// somebody will ask later.
+    /// Handed over and something went wrong on the way — a spawn that failed,
+    /// a run that died before its first turn. Distinct from `Undeliverable`
+    /// because it is worth retrying and that one is not.
+    ///
+    /// Only the bus writes this today. It lives here because the two tables
+    /// share one vocabulary, and a word one table cannot spell is a word the
+    /// next reader has to check for.
+    Failed,
+    /// There was nobody to tell. The session ended, or the scope closed, before
+    /// it could be said. Recorded rather than deleted, because "it never
+    /// arrived" is the answer to a question somebody asks later, and a queue
+    /// that silently drops is indistinguishable from one that works.
     Undeliverable,
 }
 
@@ -98,13 +165,19 @@ impl State {
         match self {
             State::Queued => "queued",
             State::Delivered => "delivered",
+            State::Failed => "failed",
             State::Undeliverable => "undeliverable",
         }
     }
 
+    /// Unknown text reads as `Queued` rather than failing: a row written by a
+    /// newer Jod must not make an older one unable to read its own queue, and
+    /// the safe reading of "I do not know what happened to this" is that it
+    /// has not happened yet.
     pub fn parse(s: &str) -> State {
         match s {
             "delivered" => State::Delivered,
+            "failed" => State::Failed,
             "undeliverable" => State::Undeliverable,
             _ => State::Queued,
         }
@@ -313,10 +386,15 @@ impl Store {
                 let Ok(card_id) = ref_id.parse::<i64>() else {
                     continue;
                 };
+                // The rail has three words, not four: to a person waiting on an
+                // answer, "the spawn failed and will be retried" and "it has
+                // not gone yet" are the same fact, and a card that said
+                // `failed` would invite answering it again. `Failed` is the
+                // bus's word for something it will try once more.
                 let card_state = match state {
                     State::Delivered => "delivered",
                     State::Undeliverable => "undeliverable",
-                    State::Queued => "queued",
+                    State::Queued | State::Failed => "queued",
                 };
                 tx.execute(
                     "UPDATE cards SET delivery = ?2, delivered_at_ms = ?3, updated_at_ms = ?4

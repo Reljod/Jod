@@ -22,6 +22,13 @@ stable interface, and a version bump is exactly when a silent change lands.
 | OpenCode | `--dir` only, exactly one — repeating it is a hard error | **Native, but only via a flag.** `/name` in the message is *not* expanded; `run --command <name>` resolves `.opencode/command/*.md` | Also loads `.agents/skills/*/SKILL.md` through its own `skill` tool |
 | AGY | `--add-dir`, repeatable, accumulates | **Native, in the prompt.** `/name` resolves `.agents/skills/*/SKILL.md`; an unknown name is refused rather than treated as text | Has no repo command directory at all — its customisations are Skills and Rules |
 
+How Jod sends each one, derived from the middle column: `Discovered::invoke`
+builds `/name args` for Claude Code and AGY, and `--command name` with the
+arguments as the message for OpenCode. It refuses to send a command to a harness
+whose convention it does not follow, because the only ways to make that work are
+literal text the harness cannot resolve or pasting the body in — and the body is
+what the last section deletes.
+
 ## Roots are not a sandbox
 
 Nothing in this document should be read as a confinement claim. A directory flag
@@ -209,6 +216,50 @@ The flag is expansion, and it is clean — one step, no searching:
 $ opencode run --format json --dir /…/tmp/po --command jodcmd
 "type":"text",…"text":"CMDFIRED"…
 ```
+
+With the flag set, the positional message stops being a message and becomes the
+command's *arguments*. A command whose body is `Reply with exactly
+ARGS=[$ARGUMENTS] and nothing else.` shows where the words land:
+
+```console
+$ opencode run --format json --dir /…/tmp/po --command jodargs "hello world"
+TEXT= 'ARGS=["hello world"]'
+```
+
+That is why `SpawnRequest::command` and `SpawnRequest::system` do not combine
+under OpenCode. OpenCode has no system-prompt flag, so the runner prepends the
+framing to the prompt — and under a command, the prompt is argument text. One or
+the other, and it is written down on the field because nothing in the types
+prevents it.
+
+### A forwarded command does not have to lead the line
+
+The obvious guess is that `/name` must be the first thing in the message. If
+that were true, AGY would silently lose every command Jod forwards: it answers
+`false` to `takes_system_prompt`, so `runner.rs` puts the worker preamble in
+front of the prompt and the slash ends up several lines down. Measured instead
+of assumed, and the guess is wrong:
+
+```console
+$ agy --print "You are a worker agent. Your roots are /tmp. Changing anything means claiming a worktree first.
+
+---
+
+/jodskill" --output-format stream-json --print-timeout 3m --add-dir /…/tmp/pa
+{"event":"result","result":{…,"status":"SUCCESS","response":"SKILLFIRED\n",…}}
+```
+
+Claude Code takes arguments after the name in the same way, and expands
+regardless:
+
+```console
+$ claude -p --output-format json --model sonnet "/jodcmd please"
+RESULT= 'CMDFIRED'
+```
+
+Nothing on the argv path rewrites either line. `runner.rs` resolves the prompt
+placeholder to the string as it stands and hands argv to `execve`; there is no
+shell left to re-read a leading slash.
 
 ## What this measurement decided
 

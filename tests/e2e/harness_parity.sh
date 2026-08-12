@@ -253,7 +253,7 @@ parity_run() {
   runsh "'$BIN/jod' root add '$root_b' -c '$cid'"
   run jod root ls -c "$cid"
   check "[$h] both roots are on the conversation" \
-    test "$(val "SELECT count(*) FROM roots WHERE conversation_id='$cid'")" = 2
+    test "$(val "SELECT count(*) FROM conversation_roots WHERE conversation_id='$cid'")" = 2
 
   section "3.$h  $h — the one run under test"
   # Detached, because step 4 of the instruction blocks inside the harness until
@@ -373,8 +373,8 @@ else
   diff <(echo "$BEFORE") <(echo "$AFTER") || true
   FAILED=$((FAILED + 1))
 fi
-check "the real ~/.jod holds nothing this suite stored" \
-  test -z "$(ls -A "$HOME/.jod/secrets" 2>/dev/null | grep -c PARITY | grep -v '^0$')"
+check "the real ~/.jod/secrets holds nothing this suite stored" \
+  test -z "$(ls -A "$HOME/.jod/secrets" 2>/dev/null | grep PARITY || true)"
 
 section "summary"
 echo "harnesses under test: ${HARNESSES[*]}"

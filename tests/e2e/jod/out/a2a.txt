@@ -33,12 +33,12 @@ $ jod harnesses --json
   claude_code: eligible — takes a per-run MCP config
   open_code: eligible — registering it in a scratch XDG_CONFIG_HOME
 $ jod mcp install --harness opencode --access delegate
-OpenCode     added          /tmp/jod-a2a/home3/a2a/xdg/opencode/opencode.json
+OpenCode     added          /tmp/jod-a2a/home5/a2a/xdg/opencode/opencode.json
 
 Registered as `jod` with delegate access. Restart any open session to pick it up.
 
-$ find '/tmp/jod-a2a/home3/a2a/xdg' -type f
-/tmp/jod-a2a/home3/a2a/xdg/opencode/opencode.json
+$ find '/tmp/jod-a2a/home5/a2a/xdg' -type f
+/tmp/jod-a2a/home5/a2a/xdg/opencode/opencode.json
 
   SKIPPED: agy is installed, but its MCP config lives under $HOME and
            redirecting $HOME would take its credentials with it. It
@@ -68,13 +68,13 @@ $ jod team start crew answerer You are `answerer`, a teammate on the Jod team `c
    with your jod `reply` tool, passing the message id shown in the brackets of the
    message you are answering. The parser lives in core/src/harness. Right now, reply
    with exactly READY and nothing else.
-answerer started on OpenCode as a0a2b6b3
+answerer started on OpenCode as 68e6f201
 answerer is idle again, ready to be woken
 
 $ jod team start crew asker You are `asker`, a teammate on the Jod team `crew`. Standing instruction for the
    rest of this session: do what the messages you are given say, using your jod MCP
    tools. Right now, reply with exactly READY and nothing else.
-asker started on Claude Code as 152c534f
+asker started on Claude Code as ef15c0a7
 asker is idle again, ready to be woken
 
 $ q "SELECT name, harness, status, agent_id IS NOT NULL AS bound, session_id IS NOT NULL AS resumable FROM team_members"
@@ -104,7 +104,7 @@ id | sender | recipient | body | state
 ==============================================================
 $ jod daemon --once
 [jod/daemon] reloaded 2 prior run(s)
-[jod/tick] woke asker on Claude Code with 1 message(s) as c477ffc7
+[jod/tick] woke asker on Claude Code with 1 message(s) as 472e8024
 claimed 1 · started 1 · held 0 · failed 0
 
 $ (waiting for every run to finish)
@@ -117,7 +117,7 @@ $ q "SELECT e.seq, e.kind, substr(e.payload,1,180) FROM events e
            ORDER BY e.seq"
 seq | kind | substr(e.payload,1,180)
 ----+------+------------------------
-0 | started | {"kind":"started","session_id":"17b3fd75-ec53-4ad6-9621-569b0a050812","model":"claude-opus-5"}
+0 | started | {"kind":"started","session_id":"3edfe113-e142-4118-9fde-bf88f2a7f879","model":"claude-opus-5"}
 1 | message | {"kind":"message","text":"I'll load the jod tool schemas first."}
 2 | tool_call | {"kind":"tool_call","name":"ToolSearch","input":{"max_results":5,"query":"select:mcp__jod__roster,mcp__jod__send_message"}}
 3 | tool_result | {"kind":"tool_result","name":"ToolSearch","summary":"[{\"tool_name\":\"mcp__jod__roster\",\"type\":\"tool_reference\"},{\"tool_name\":\"mcp__jod__send_message\",\"type\":\"tool_ref
@@ -125,8 +125,8 @@ seq | kind | substr(e.payload,1,180)
 5 | tool_result | {"kind":"tool_result","name":"mcp__jod__roster","summary":"[{\"text\":\"{\\n  \\\"members\\\": [\\n    {\\n      \\\"can_be_woken\\\": true,\\n      \\\"harness\\\": \\\"open_code\
 6 | tool_call | {"kind":"tool_call","name":"mcp__jod__send_message","input":{"text":"where does the parser live?","to":"answerer"}}
 7 | tool_result | {"kind":"tool_result","name":"mcp__jod__send_message","summary":"[{\"text\":\"{\\n  \\\"depth\\\": 0,\\n  \\\"message_ids\\\": [\\n    2\\n  ],\\n  \\\"sent\\\": true,\\n  \\\"thre
-8 | message | {"kind":"message","text":"Done.\n\n- **Roster** (team `crew`): one other member — `answerer` (role: \"answers them\", harness `open_code`, idle, 0 waiting). I'm `asker`.\n- **Sent*
-9 | finished | {"kind":"finished","text":"Done.\n\n- **Roster** (team `crew`): one other member — `answerer` (role: \"answers them\", harness `open_code`, idle, 0 waiting). I'm `asker`.\n- **Sent
+8 | message | {"kind":"message","text":"Roster: one other member — `answerer` (open_code harness, role \"answers them\", idle, ready, 0 waiting).\n\nSent `answerer` the question \"where does the
+9 | finished | {"kind":"finished","text":"Roster: one other member — `answerer` (open_code harness, role \"answers them\", idle, ready, 0 waiting).\n\nSent `answerer` the question \"where does th
 (10 rows)
 
 ==============================================================
@@ -136,10 +136,10 @@ $ q "SELECT id, sender, recipient, substr(body,1,50) AS body, thread_id, depth, 
 id | sender | recipient | body | thread_id | depth | kind | state
 ---+--------+-----------+------+-----------+-------+------+------
 1 | reljod | asker | Use your jod MCP tools now. Call `roster` to see w |  | 0 | message | delivered
-2 | asker | answerer | where does the parser live? | ff130e11-e1bd-4dd0-8746-b634d010a922 | 0 | message | queued
+2 | asker | answerer | where does the parser live? | c08f9960-cec4-4ada-a1b6-6bb0f0c8be97 | 0 | message | queued
 (2 rows)
 
-question id: 2   thread: ff130e11-e1bd-4dd0-8746-b634d010a922
+question id: 2   thread: c08f9960-cec4-4ada-a1b6-6bb0f0c8be97
 PASS  an agent reached the bus from inside its run
 PASS  the message is addressed to the other member
 PASS  the sender is the run, not anything the agent could have claimed
@@ -151,7 +151,7 @@ PASS  it went through Jod's MCP tools rather than the CLI
 ==============================================================
 $ jod daemon --once
 [jod/daemon] reloaded 3 prior run(s)
-[jod/tick] woke answerer on OpenCode with 1 message(s) as 359fbaed
+[jod/tick] woke answerer on OpenCode with 1 message(s) as 2fc18e59
 claimed 1 · started 1 · held 0 · failed 0
 
 $ (waiting for every run to finish)
@@ -161,8 +161,8 @@ $ q "SELECT id, sender, recipient, substr(body,1,60) AS body, in_reply_to, threa
 id | sender | recipient | body | in_reply_to | thread_id | depth | state
 ---+--------+-----------+------+-------------+-----------+-------+------
 1 | reljod | asker | Use your jod MCP tools now. Call `roster` to see who else is |  |  | 0 | delivered
-2 | asker | answerer | where does the parser live? |  | ff130e11-e1bd-4dd0-8746-b634d010a922 | 0 | delivered
-3 | answerer | asker | The parser lives in core/src/harness. | 2 | ff130e11-e1bd-4dd0-8746-b634d010a922 | 1 | queued
+2 | asker | answerer | where does the parser live? |  | c08f9960-cec4-4ada-a1b6-6bb0f0c8be97 | 0 | delivered
+3 | answerer | asker | core/src/harness | 2 | c08f9960-cec4-4ada-a1b6-6bb0f0c8be97 | 1 | queued
 (3 rows)
 
 reply id: 3
@@ -175,39 +175,3 @@ PASS  the reply names the message it answers
 == 7. and the reply arrives as a turn, not as a row nobody reads
 ==============================================================
 $ (waiting 65s — a member is resumed at most once per wake interval)
-$ jod daemon --once
-[jod/daemon] reloaded 4 prior run(s)
-claimed 1 · started 0 · held 1 · failed 0
-
-$ (waiting for every run to finish)
-settled after 0s
-
-FAIL  the reply was delivered
-PASS  a run was started to carry it to the asker
--- every run this exchange produced, none of them started by a person --
-$ q "SELECT id, name, harness, status FROM runs ORDER BY created_at_ms"
-id | name | harness | status
----+------+---------+-------
-a0a2b6b3-827c-4694-a664-40653ea0b774 | crew-answerer | open_code | completed
-152c534f-5e8b-4502-8bad-c6f16a5ea9df | crew-asker | claude_code | completed
-c477ffc7-ed70-4626-ba31-921f6ce1d0db | crew-asker | claude_code | completed
-359fbaed-02b1-44a5-a0f8-bbc3e69db63a | crew-answerer | open_code | completed
-(4 rows)
-
-==============================================================
-== 8. the runaway: two agents told to talk for ever
-==============================================================
-$ jod team msg crew --from reljod --to answerer From now on, every time you receive a message from another agent, immediately
-   use your jod `reply` tool — passing the message id in the brackets of the message
-   you are answering — to reply with one short follow-up question of your own. Never
-   conclude, never stop asking, and do not use any other tool.
-sent to answerer
-
-$ jod team msg crew --from reljod --to asker From now on, every time you receive a message from another agent, immediately
-   use your jod `reply` tool — passing the message id in the brackets of the message
-   you are answering — to reply with one short follow-up question of your own. Never
-   conclude, never stop asking, and do not use any other tool. Start now by using `send_message` to ask `answerer`: what should we do first?
-sent to asker
-
-$ (ticking until a bound is hit, at most 40 times)
-  tick 1: deepest hop 1, messages 5, bounds hit 0

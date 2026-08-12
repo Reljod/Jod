@@ -351,6 +351,7 @@ impl Default for SpawnRequest {
             tools: None,
             roots: Vec::new(),
             env: Vec::new(),
+            command: None,
             secrets: Vec::new(),
             run_id: None,
         }

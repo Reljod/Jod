@@ -257,37 +257,20 @@ impl Kind {
 /// Richer than the `delivered` flag it sits beside, and the reason is A8: mail
 /// to an agent that cannot receive it has to become visible rather than
 /// silent. `Undeliverable` is a message that was never anybody's to read.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MailState {
-    Queued,
-    Delivered,
-    Failed,
-    Undeliverable,
-}
+///
+/// **The same type the card queue uses**, rather than a second enum spelling
+/// the same four words. `team_messages.state` and `pending_deliveries.state`
+/// are one vocabulary; they were briefly two, which is how a fifth word added
+/// to one of them would have quietly meant nothing to the other.
+pub use crate::delivery::State as MailState;
 
 impl MailState {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            MailState::Queued => "queued",
-            MailState::Delivered => "delivered",
-            MailState::Failed => "failed",
-            MailState::Undeliverable => "undeliverable",
-        }
-    }
-
-    pub fn parse(s: &str) -> MailState {
-        match s {
-            "delivered" => MailState::Delivered,
-            "failed" => MailState::Failed,
-            "undeliverable" => MailState::Undeliverable,
-            _ => MailState::Queued,
-        }
-    }
-
     /// Whether this message counts against the work's budget. An attempt that
     /// was refused before it reached anybody must not also spend the allowance
     /// it was refused by, or hitting a bound once would spend the rest.
+    ///
+    /// Lives here rather than beside the type: the budget is the bus's
+    /// question, and the card queue has no allowance to spend.
     pub fn counts_against_budget(&self) -> bool {
         !matches!(self, MailState::Undeliverable)
     }
@@ -1008,7 +991,7 @@ impl Store {
         // first, and the sender is told it was delivered.
         let mut name = base.clone();
         let mut n = 2;
-        while taken.iter().any(|t| *t == name) {
+        while taken.contains(&name) {
             name = format!("{base}-{n}");
             n += 1;
         }
@@ -2089,6 +2072,36 @@ mod tests {
         }
         assert_eq!(Scope::parse("from_the_future"), Scope::Team);
         assert_eq!(MailState::parse(""), MailState::Queued);
+    }
+
+    /// The two queues store the same four words in two tables. They were two
+    /// enums that happened to agree; this asserts they are now one, so that a
+    /// fifth word cannot be added to the bus and mean nothing to the card
+    /// queue.
+    #[test]
+    fn the_bus_and_the_card_queue_speak_one_delivery_vocabulary() {
+        assert_eq!(
+            std::any::TypeId::of::<MailState>(),
+            std::any::TypeId::of::<crate::delivery::State>(),
+            "`MailState` is `delivery::State`, not a copy of it"
+        );
+        for word in ["queued", "delivered", "failed", "undeliverable"] {
+            let from_the_bus = MailState::parse(word);
+            let from_the_queue = crate::delivery::State::parse(word);
+            assert_eq!(from_the_bus, from_the_queue);
+            assert_eq!(from_the_bus.as_str(), word, "and it round-trips");
+        }
+    }
+
+    /// The one thing the two queues do *not* share, and the reason it is a
+    /// method here rather than beside the type: the card queue has no
+    /// allowance to spend.
+    #[test]
+    fn a_refused_message_does_not_also_spend_the_budget_it_was_refused_by() {
+        assert!(!MailState::Undeliverable.counts_against_budget());
+        for state in [MailState::Queued, MailState::Delivered, MailState::Failed] {
+            assert!(state.counts_against_budget());
+        }
     }
 
     // ---- a work is a team (G3) -------------------------------------------

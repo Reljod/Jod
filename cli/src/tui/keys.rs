@@ -207,6 +207,15 @@ const FLEET: &[Key] = &[
     k("g", "go to #"),
     k("f", "fork"),
     k("t", "retry"),
+    // The tree's own verbs, in force once there is a work to draw. Below the
+    // run verbs because those act on the row and these act on the shape, and
+    // the row is what people come here for; above `/` because that one is the
+    // spine's and means the same thing on every screen.
+    k("→←", "in / out"),
+    k("space", "expand / collapse"),
+    k("E", "expand all"),
+    k("C", "collapse all"),
+    k("z", "closed works"),
     k("/", "filter"),
 ];
 

@@ -37,20 +37,12 @@ pub struct TreeState {
     /// Closed works the user explicitly expanded, which is the exception to
     /// their being collapsed by default.
     pub opened: HashSet<NodeId>,
-    /// `Some` once `/` has been pressed, even while empty — the same rule the
-    /// list screens and the rail follow.
-    pub filter: Option<String>,
-    pub editing_filter: bool,
     /// Whether closed works appear at all. Off hides them entirely; on shows
     /// them collapsed, below the live ones.
     pub show_closed: bool,
 }
 
 impl TreeState {
-    pub fn filtering(&self) -> bool {
-        self.filter.as_deref().is_some_and(|f| !f.trim().is_empty())
-    }
-
     /// Whether this node's children are on screen.
     ///
     /// `closed` is the set of works core returned from its *closed* query, so
@@ -71,8 +63,13 @@ impl TreeState {
     /// Three passes, in this order, and the order matters: filter first so the
     /// cursor cannot land on something hidden, then collapse, because a
     /// collapsed node's children must go even when they match.
-    pub fn visible(&self, nodes: &[Node], closed: &HashSet<NodeId>) -> Vec<usize> {
-        let keep = self.matching(nodes);
+    pub fn visible(
+        &self,
+        nodes: &[Node],
+        closed: &HashSet<NodeId>,
+        needle: Option<&str>,
+    ) -> Vec<usize> {
+        let keep = matching(nodes, needle);
         let mut out = Vec::new();
         // The ancestors that are collapsed. A node is hidden when *any* of them
         // is, so this carries down the flattened list rather than being asked
@@ -104,11 +101,32 @@ impl TreeState {
     /// matching rows floating at a depth with nothing above them, which reads
     /// as a rendering fault rather than as a filter; and the path to a hit is
     /// usually what you were looking for anyway.
-    fn matching(&self, nodes: &[Node]) -> HashSet<usize> {
-        if !self.filtering() {
-            return (0..nodes.len()).collect();
-        }
-        let needle = self.filter.clone().unwrap_or_default();
+    pub fn row_ids(
+        &self,
+        nodes: &[Node],
+        closed: &HashSet<NodeId>,
+        needle: Option<&str>,
+    ) -> Vec<NodeId> {
+        self.visible(nodes, closed, needle)
+            .into_iter()
+            .map(|at| nodes[at].id.clone())
+            .collect()
+    }
+}
+
+/// Which nodes survive the filter — every hit, **plus every ancestor of a
+/// hit**.
+///
+/// The ancestors are the point. A tree filter that dropped them would leave
+/// matching rows floating at a depth with nothing above them, which reads as a
+/// rendering fault rather than as a filter; and the path to a hit is usually
+/// what you were looking for anyway.
+fn matching(nodes: &[Node], needle: Option<&str>) -> HashSet<usize> {
+        let needle = match needle {
+            Some(n) if !n.trim().is_empty() => n.to_string(),
+            // No filter, or one that is open but empty: nothing is hidden.
+            _ => return (0..nodes.len()).collect(),
+        };
         let mut keep: HashSet<usize> = HashSet::new();
         for (at, node) in nodes.iter().enumerate() {
             if !super::workspace::matches(&needle, &format!("{} {}", node.label, node.summary)) {
@@ -131,16 +149,9 @@ impl TreeState {
             }
         }
         keep
-    }
+}
 
-    /// The ids of the visible rows, in order — what the cursor moves over.
-    pub fn row_ids(&self, nodes: &[Node], closed: &HashSet<NodeId>) -> Vec<NodeId> {
-        self.visible(nodes, closed)
-            .into_iter()
-            .map(|at| nodes[at].id.clone())
-            .collect()
-    }
-
+impl TreeState {
     pub fn index(&self, rows: &[NodeId]) -> usize {
         self.selected
             .as_ref()
@@ -211,8 +222,10 @@ impl TreeState {
             return;
         }
         // Already open: the first child is the next visible row, because the
-        // flatten is depth-first.
-        let rows = self.row_ids(nodes, closed);
+        // flatten is depth-first. Unfiltered on purpose — descending is about
+        // the tree's shape, and a filter narrows what is listed rather than
+        // what is inside a node.
+        let rows = self.row_ids(nodes, closed, None);
         let at = self.index(&rows);
         if let Some(next) = rows.get(at + 1) {
             self.selected = Some(next.clone());
@@ -387,7 +400,7 @@ mod tests {
     fn everything_is_visible_until_something_is_collapsed() {
         let nodes = forest();
         let tree = TreeState::default();
-        assert_eq!(tree.visible(&nodes, &nothing()).len(), 4);
+        assert_eq!(tree.visible(&nodes, &nothing(), None).len(), 4);
     }
 
     #[test]
@@ -395,7 +408,7 @@ mod tests {
         let nodes = forest();
         let mut tree = TreeState::default();
         tree.collapsed.insert(NodeId::session("s1"));
-        let rows = tree.row_ids(&nodes, &nothing());
+        let rows = tree.row_ids(&nodes, &nothing(), None);
         assert_eq!(
             rows,
             vec![NodeId::work("w1"), NodeId::session("s1"), NodeId::session("s2")],
@@ -408,7 +421,7 @@ mod tests {
         let nodes = forest();
         let mut tree = TreeState::default();
         tree.collapsed.insert(NodeId::work("w1"));
-        assert_eq!(tree.row_ids(&nodes, &nothing()), vec![NodeId::work("w1")]);
+        assert_eq!(tree.row_ids(&nodes, &nothing(), None), vec![NodeId::work("w1")]);
     }
 
     /// E5.S3b: an archive is collapsed until asked for, or the tree becomes a
@@ -418,11 +431,11 @@ mod tests {
         let nodes = forest();
         let closed: HashSet<NodeId> = [NodeId::work("w1")].into_iter().collect();
         let mut tree = TreeState::default();
-        assert_eq!(tree.row_ids(&nodes, &closed), vec![NodeId::work("w1")]);
+        assert_eq!(tree.row_ids(&nodes, &closed, None), vec![NodeId::work("w1")]);
 
         tree.selected = Some(NodeId::work("w1"));
         tree.expand_or_descend(&nodes, &closed);
-        assert_eq!(tree.row_ids(&nodes, &closed).len(), 4, "opened by hand");
+        assert_eq!(tree.row_ids(&nodes, &closed, None).len(), 4, "opened by hand");
     }
 
     /// The cursor follows the *node*, which is the whole reason it is an id.
@@ -430,7 +443,7 @@ mod tests {
     fn the_cursor_stays_on_its_node_when_the_tree_reshapes() {
         let nodes = forest();
         let mut tree = TreeState::default();
-        let rows = tree.row_ids(&nodes, &nothing());
+        let rows = tree.row_ids(&nodes, &nothing(), None);
         tree.reconcile(&rows);
         tree.step(3, &rows);
         assert_eq!(tree.selected, Some(NodeId::session("s2")));
@@ -438,7 +451,7 @@ mod tests {
         // A run finishes and disappears from above the cursor.
         let mut fewer = forest();
         fewer.remove(2);
-        let rows = tree.row_ids(&fewer, &nothing());
+        let rows = tree.row_ids(&fewer, &nothing(), None);
         tree.reconcile(&rows);
         assert_eq!(
             tree.selected,
@@ -455,7 +468,7 @@ mod tests {
             selected: Some(NodeId::run("gone")),
             ..Default::default()
         };
-        let rows = tree.row_ids(&nodes, &nothing());
+        let rows = tree.row_ids(&nodes, &nothing(), None);
         tree.reconcile(&rows);
         assert_eq!(tree.selected, Some(NodeId::work("w1")));
     }
@@ -473,7 +486,7 @@ mod tests {
 
         tree.expand_or_descend(&nodes, &nothing());
         assert_eq!(tree.selected, Some(NodeId::work("w1")), "it only opened");
-        assert_eq!(tree.row_ids(&nodes, &nothing()).len(), 4);
+        assert_eq!(tree.row_ids(&nodes, &nothing(), None).len(), 4);
 
         tree.expand_or_descend(&nodes, &nothing());
         assert_eq!(
@@ -494,7 +507,7 @@ mod tests {
 
         tree.collapse_or_parent(&nodes, &nothing());
         assert_eq!(tree.selected, Some(NodeId::session("s1")), "it only shut");
-        assert_eq!(tree.row_ids(&nodes, &nothing()).len(), 3);
+        assert_eq!(tree.row_ids(&nodes, &nothing(), None).len(), 3);
 
         tree.collapse_or_parent(&nodes, &nothing());
         assert_eq!(tree.selected, Some(NodeId::work("w1")), "now it climbs");
@@ -520,9 +533,9 @@ mod tests {
             ..Default::default()
         };
         tree.toggle(&nothing());
-        assert_eq!(tree.row_ids(&nodes, &nothing()).len(), 3);
+        assert_eq!(tree.row_ids(&nodes, &nothing(), None).len(), 3);
         tree.toggle(&nothing());
-        assert_eq!(tree.row_ids(&nodes, &nothing()).len(), 4);
+        assert_eq!(tree.row_ids(&nodes, &nothing(), None).len(), 4);
     }
 
     #[test]
@@ -530,9 +543,9 @@ mod tests {
         let nodes = forest();
         let mut tree = TreeState::default();
         tree.collapse_all(&nodes);
-        assert_eq!(tree.row_ids(&nodes, &nothing()), vec![NodeId::work("w1")]);
+        assert_eq!(tree.row_ids(&nodes, &nothing(), None), vec![NodeId::work("w1")]);
         tree.expand_all(&nodes);
-        assert_eq!(tree.row_ids(&nodes, &nothing()).len(), 4);
+        assert_eq!(tree.row_ids(&nodes, &nothing(), None).len(), 4);
     }
 
     /// The filter's defining property: a hit deep in the tree keeps the path to
@@ -540,11 +553,8 @@ mod tests {
     #[test]
     fn filtering_keeps_every_ancestor_of_every_hit() {
         let nodes = forest();
-        let tree = TreeState {
-            filter: Some("docs".into()),
-            ..Default::default()
-        };
-        let rows = tree.row_ids(&nodes, &nothing());
+        let tree = TreeState::default();
+        let rows = tree.row_ids(&nodes, &nothing(), Some("docs"));
         assert_eq!(
             rows,
             vec![NodeId::work("w1"), NodeId::session("s2")],
@@ -556,12 +566,9 @@ mod tests {
     fn filtering_a_grandchild_keeps_both_levels_above_it() {
         let mut nodes = forest();
         nodes[2].label = "cargo test".into();
-        let tree = TreeState {
-            filter: Some("cargo".into()),
-            ..Default::default()
-        };
+        let tree = TreeState::default();
         assert_eq!(
-            tree.row_ids(&nodes, &nothing()),
+            tree.row_ids(&nodes, &nothing(), Some("cargo")),
             vec![
                 NodeId::work("w1"),
                 NodeId::session("s1"),
@@ -573,23 +580,20 @@ mod tests {
     #[test]
     fn a_filter_matching_nothing_empties_the_tree() {
         let nodes = forest();
-        let tree = TreeState {
-            filter: Some("zzzz".into()),
-            ..Default::default()
-        };
-        assert!(tree.row_ids(&nodes, &nothing()).is_empty());
+        let tree = TreeState::default();
+        assert!(tree.row_ids(&nodes, &nothing(), Some("zzzz")).is_empty());
     }
 
     /// An open but empty filter hides nothing, as everywhere else here.
     #[test]
     fn an_open_but_empty_filter_hides_nothing() {
         let nodes = forest();
-        let tree = TreeState {
-            filter: Some("  ".into()),
-            ..Default::default()
-        };
-        assert!(!tree.filtering());
-        assert_eq!(tree.row_ids(&nodes, &nothing()).len(), 4);
+        let tree = TreeState::default();
+        assert_eq!(
+            tree.row_ids(&nodes, &nothing(), Some("  ")).len(),
+            4,
+            "an open but empty filter hides nothing"
+        );
     }
 
     /// A collapsed parent wins over a matching child: the filter says what is
@@ -597,12 +601,12 @@ mod tests {
     #[test]
     fn a_collapsed_node_hides_its_matching_children() {
         let nodes = forest();
-        let mut tree = TreeState {
-            filter: Some("docs".into()),
-            ..Default::default()
-        };
+        let mut tree = TreeState::default();
         tree.collapsed.insert(NodeId::work("w1"));
-        assert_eq!(tree.row_ids(&nodes, &nothing()), vec![NodeId::work("w1")]);
+        assert_eq!(
+            tree.row_ids(&nodes, &nothing(), Some("docs")),
+            vec![NodeId::work("w1")]
+        );
     }
 
     /// The guides describe the tree *on screen*: the last child gets an elbow,
@@ -613,7 +617,7 @@ mod tests {
         let nodes = forest();
         let tree = TreeState::default();
         let rows: Vec<&Node> = tree
-            .visible(&nodes, &nothing())
+            .visible(&nodes, &nothing(), None)
             .into_iter()
             .map(|at| &nodes[at])
             .collect();
@@ -635,7 +639,7 @@ mod tests {
         let nodes = forest();
         let tree = TreeState::default();
         let rows: Vec<&Node> = tree
-            .visible(&nodes, &nothing())
+            .visible(&nodes, &nothing(), None)
             .into_iter()
             .map(|at| &nodes[at])
             .collect();
@@ -657,12 +661,9 @@ mod tests {
     #[test]
     fn the_guides_follow_the_filter_rather_than_the_whole_forest() {
         let nodes = forest();
-        let tree = TreeState {
-            filter: Some("lexer".into()),
-            ..Default::default()
-        };
+        let tree = TreeState::default();
         let rows: Vec<&Node> = tree
-            .visible(&nodes, &nothing())
+            .visible(&nodes, &nothing(), Some("lexer"))
             .into_iter()
             .map(|at| &nodes[at])
             .collect();
