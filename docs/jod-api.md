@@ -188,11 +188,30 @@ becoming everyone's contract.
 
 `/v1/memory/{id}/graph` is the one route assembled from two store reads, because
 neither answers alone: `neighbourhood` walks the graph but returns no edges, and
-`edges_of` returns edges for a single node. It walks for the node set, then keeps
-only the edges whose other end is also in that set — an edge pointing past the
-depth horizon is an arrow a renderer cannot draw. Direction is carried as
-`from`/`to` rather than as a flag on a neighbour, so a caller can draw the
-arrowhead without knowing which node it asked about.
+`edges_of` returns edges for a single node. It walks for the node set, then asks
+each node for its edges. Direction is carried as `from`/`to` rather than as a
+flag on a neighbour, so a caller can draw the arrowhead without knowing which
+node it asked about.
+
+It guarantees two things, and both are load-bearing for anything that draws it.
+
+**Every edge joins two nodes that are also in `nodes`.** Edges past the depth
+horizon are dropped, not dangled.
+
+This is not tidiness, it is what stops a renderer from lying. A force-directed
+layout given an edge to an id it was not sent does one of two things: throw on
+the missing lookup, or — far worse — materialise the endpoint at the origin with
+default mass. The second produces a node cloud that looks entirely plausible and
+is wrong, with a phantom at the centre that every real node is then pushed away
+from. The layout is stable, nothing errors, and the picture is fiction. A client
+cannot detect this from the response, so the guarantee has to live on the server.
+
+**The root appears exactly once, at `hops: 0`.** That is what lets a client frame
+the camera on the focus node without searching for it, and it makes "how far is
+this from what I asked about" a field rather than a graph traversal the client
+repeats.
+
+Both are pinned by tests in `api/tests/workspaces.rs`.
 
 `/v1/activity` is a poll, not a stream. Its rows are derived from schedule fires
 and goal facts rather than from an append-only log, so there is no natural `seq`
@@ -453,6 +472,20 @@ session_ttl_hours = 168         # JOD_API_SESSION_TTL_HOURS
 An empty `allowed_cwd` means **deny every spawn**, not "allow everything".
 Failing closed on an unset security control is the only safe default; the
 opposite turns a forgotten config line into an open shell.
+
+### Embedding the router in another process
+
+A shell that serves the HUD same-origin composes `jod_api::router(state)` on its
+own listener rather than talking to a separate daemon — this is what the desktop
+app does, and it is what keeps the session cookie's `SameSite=Strict` working.
+Two defaults bite in opposite directions when you build the `Config` by hand:
+
+- **`allowed_cwd` defaults to empty, which denies every spawn.** A shell whose
+  primary verb is "delegate" then silently never works. Set it explicitly.
+- **`max_permission` defaults to `accept_edits`, which the main chat needs.**
+  Tighten it to `ask` and `POST /v1/conversations/main/messages` refuses,
+  because the orchestrator runs at `accept_edits` by construction. That refusal
+  is correct; just know that lowering the ceiling turns the main chat off.
 
 ## Deployment
 
