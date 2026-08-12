@@ -278,3 +278,113 @@ export interface ActivityItem {
    */
   jump_to: [string, string] | null;
 }
+
+// ─── core/src/conversation.rs — the main chat ───────────────────────────────
+
+/**
+ * What kind of turn a message is. Mirrors the `role` column's vocabulary.
+ *
+ * Six, not two. A real thread comes back with `thinking` turns interleaved and
+ * `tool_call`/`tool_result` rows carrying `tool_name`, so a screen that assumes
+ * user-or-assistant renders a conversation that never happened.
+ */
+export type Role =
+  | "user"
+  | "assistant"
+  /** Reasoning the harness chose to surface. Kept separate from `assistant`
+   *  because most harnesses will not accept another model's thinking as input. */
+  | "thinking"
+  | "tool_call"
+  | "tool_result"
+  /** Not the agent and not the person: a runner error, or a note from Jod. */
+  | "system";
+
+export interface Message {
+  id: number;
+  /**
+   * The conversation that *minted* this message. Not a visibility filter: a
+   * fork's thread walks through messages minted by its parent.
+   */
+  conversation_id: string;
+  /** `null` only at a root. This is a real tree, not a list. */
+  parent_id: number | null;
+  role: Role;
+  /**
+   * The readable, searchable view of this turn. For a tool call this is a
+   * truncated rendering of the input; the whole thing is in `tool_input`.
+   */
+  text: string;
+  tool_name: string | null;
+  /** The structured payload, kept whole. Carries `{"is_error":true}` on a
+   *  failed tool result, which is the only thing distinguishing it. */
+  tool_input: unknown | null;
+  run_id: string | null;
+  /** `null` for a message a person typed. With `run_id` it is the idempotence
+   *  key, which is what lets a run be replayed without duplicating it. */
+  run_seq: number | null;
+  at_ms: number;
+  /** `false` once a compaction has summarised this out of the live window. It
+   *  is still stored and still searchable. */
+  active: boolean;
+}
+
+export interface Conversation {
+  id: string;
+  title: string;
+  harness: string;
+  cwd: string;
+  /** In the target harness's own spelling. `null` means the harness picks. */
+  model: string | null;
+  /**
+   * `null` is not a mode — it is the absence of one, meaning "whatever the
+   * caller passed". An old row must not suddenly acquire an opinion it never
+   * had, so this stays nullable rather than defaulting.
+   */
+  permission: string | null;
+  session_id: string | null;
+  /** The leaf being talked to. Moving this *is* switching branches. */
+  head_id: number | null;
+  forked_from: string | null;
+  forked_at_id: number | null;
+  created_at_ms: number;
+  updated_at_ms: number;
+}
+
+/** A conversation as a list renders it. */
+export interface ConversationSummary {
+  id: string;
+  /** The stored title, or the opening user message truncated — an unnamed
+   *  conversation is unfindable, and deriving one costs no model call. */
+  title: string;
+  harness: string;
+  model: string | null;
+  session_id: string | null;
+  head_id: number | null;
+  forked_from: string | null;
+  /** Messages minted by *this* conversation. A fork starts at zero even though
+   *  its thread is long, which is the honest number. */
+  message_count: number;
+  updated_at_ms: number;
+}
+
+/**
+ * `GET /v1/conversations/main` — the pinned chat, and its live window.
+ *
+ * **`conversation` is `null` before anyone has spoken.** That is a state to
+ * render, not a 404: the pinned row draws from first launch, the way the TUI's
+ * does. Reading it also does not *create* it — the GET path uses
+ * `pinned_conversation` rather than core's get-or-create `main_conversation`,
+ * because a GET that creates is a GET a prefetcher can fire.
+ */
+export interface MainChat {
+  conversation: Conversation | null;
+  messages: Message[];
+}
+
+/** What `POST /v1/conversations/main/messages` answers with. `201` on success. */
+export interface HandedOver {
+  agent: unknown;
+  conversation_id: string;
+  /** True when the thread is long enough that a compaction is owed. */
+  compaction_due: boolean;
+}

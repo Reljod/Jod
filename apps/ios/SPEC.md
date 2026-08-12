@@ -119,21 +119,59 @@ Semantics to honour rather than rediscover:
 - `needs_you` is why the activity screen exists. Surface it, and default the
   screen to it.
 
-### The gap: the pinned main chat is not on the wire
+### The main chat — on the wire as of PR #61
 
-`core/src/conversation.rs` holds the whole model — threads, forks, reverts,
-compaction, handoff — and **the API exposes none of it**. In the TUI the fleet's
-top row *is* the pinned main chat, and `⏎` there enters it.
+This was the one gap, and it is closed. Reljod assigned it to the `api/` lane and
+it shipped in `20306e0` on `feat/api-workspaces`, so the fleet's pinned top row
+is **enterable** rather than present-but-inert:
 
-The `api/` owner scoped their commit to the six read-only tables deliberately:
-the main chat is a thing you *send to*, so it is a write surface with
-audit-trail obligations, and they want Reljod's decision before designing it.
-That is the right call and this lane does not route around it.
+```
+GET  /v1/conversations?limit=        read   → ConversationSummary[]
+GET  /v1/conversations/main          read   → { conversation, messages }
+POST /v1/conversations/main/messages WRITE  → { agent, conversation_id, compaction_due }
+GET  /v1/conversations/{id}          read   → Conversation
+GET  /v1/conversations/{id}/messages read   → Message[]  (full thread, oldest first)
+```
 
-**Consequence, stated plainly:** the fleet ships with its pinned top row
-**present but not enterable**, saying why. Everything else in the fleet works.
-This is the one place the phone knowingly falls short of the TUI, and it unblocks
-the moment a conversations route exists.
+Verified: all five registered at `api/src/lib.rs:149-160`.
+
+Five semantics that decide how the row is built:
+
+- **`conversation` is `null` before anyone has spoken** — a state to render, not
+  a 404. The pinned row draws from first launch, the way the TUI's does.
+- **Reading it does not create it.** The GET path uses `pinned_conversation`
+  rather than core's get-or-create `main_conversation`, because a GET that
+  creates is a GET a prefetcher can fire.
+- **`role` has six values, not two.** Real threads interleave `thinking` turns
+  and carry `tool_call`/`tool_result` rows with `tool_name`. This app already
+  has the vocabulary for all of it — `session.ts`'s `Entry` renders the same
+  eight kinds from the event stream — so the thread reuses those renderers
+  rather than inventing a second set.
+- **`parent_id` is a real tree and `head_id` is the leaf being talked to.**
+  Moving `head_id` *is* switching branches. **Decision: render the thread flat**,
+  following `head_id`. Branching is a power-user act with no gesture on a phone,
+  and a tree drawn at 393pt is the node-link mistake `graph.rs` already argues
+  against. Stated here so it is deliberate rather than accidental.
+- **POST body is `{ instruction, harness?, cwd? }`**, `201` on success, and it
+  carries an **`Idempotency-Key`** — a replay returns `200` with the original
+  rather than starting a second run. This app already sends one on every spawn
+  for exactly that reason.
+
+**A `403` naming `accept_edits` must be surfaced verbatim, not swallowed.** The
+main chat runs at `accept_edits` by construction, because `ask` is plan mode and
+plan mode refuses the MCP calls that are the orchestrator's whole job. The route
+checks that against the daemon's `max_permission` before handing over, so a
+daemon capped at `ask` answers `403` with a detail naming both the mode and the
+setting. The operator needs to know which knob to turn, so the honest UI is the
+daemon's own text — the same rule this app already follows for a `403` on spawn.
+
+**Unproven, and to be treated as such:** the `api/` lane exercised every read
+against real data but has **not** driven a real instruction through
+`POST /v1/conversations/main/messages`, because that spawns an actual
+orchestrator run on Reljod's box. Its refusals are tested; the happy path is
+covered only insofar as it delegates to `hand_to_orchestrator`, which the CLI,
+TUI and Telegram bridge do exercise in production. **The first real send from the
+phone is the first real send, full stop** — report what it does.
 
 ## 4. Reaching the daemon — the part that was broken
 
@@ -187,16 +225,20 @@ in `api/src/lib.rs` — all registered with a literal `/v1/` — 404s; and a mou
 One origin therefore means one of:
 
 - **A1 — the daemon serves the bundle.** Single mount, `tailscale serve --bg
-  8787`, nothing stripped. `api/` would gain a `ServeDir` fallback at `/` and
-  tower-http's `fs` feature (`api/Cargo.toml:25` is `["limit","cors","trace"]`
-  today; no `ServeDir` anywhere in `api/src/`). Makes same-origin *structural* —
-  a property of the binary, not of whoever last ran `tailscale serve`.
-  **`api/`'s call, not this lane's.**
+  8787`, nothing stripped. Would need a `ServeDir` fallback in `api/` plus
+  tower-http's `fs` feature (`api/Cargo.toml:25` is `["limit","cors","trace"]`;
+  no `ServeDir` anywhere in `api/src/`). Makes same-origin *structural* — a
+  property of the binary rather than of whoever last ran `tailscale serve`.
 - **A2 — Caddy on loopback as multiplexer.** `tailscale serve --bg 8080` → Caddy
   on `127.0.0.1:8080`, `/v1/*` → `:8787`, everything else → the static dir. No
-  code change, unblocks today. Caddy on loopback behind the tailnet opens no
-  port and is a different role from Caddy as a public `:443` ingress, which the
-  exposure lane recommends against.
+  code change. Caddy on loopback behind the tailnet opens no port and is a
+  different role from Caddy as a public `:443` ingress, which the exposure lane
+  recommends against.
+
+**Decided: A2.** Put to Reljod alongside the main chat; he chose the main chat
+and not the asset-serving, so `jod-api` is not growing a `ServeDir` today and
+`api/Cargo.toml` is untouched. A1 stays available if that changes. Document both,
+lead with A2.
 
 Still needs the Tailscale VPN profile on the phone — the PWA does not remove
 that. `tailscale funnel` is ruled out (`deploy/README.md`: identity headers are
@@ -274,8 +316,9 @@ Each step keeps `npm run check` green; the suite is the runnable check.
 1. **Nav shell** — `Workspace` model ported from `workspace.rs`, tab bar in MENU
    order, chat as root, `ListState` (id-keyed selection, filter, sort) as a pure
    module. Tests mirror `workspace.rs`'s own, case for case.
-2. **Fleet** — off `/v1/agents` + `/v1/report` + `/v1/events`. Pinned top row
-   present, not enterable, says why. Sorts: running first · newest · name · spend.
+2. **Fleet** — off `/v1/agents` + `/v1/report` + `/v1/events`. Pinned top row is
+   the main chat and **enters it** (§3). Sorts: running first · newest · name ·
+   spend, with the pinned row outside the sort and outside the filter.
 3. **Slash commands** — close the gap to `command.rs`'s set, including `/open`
    for each workspace so the terminal habit works.
 4. **Activity** — `needs_you` first, `jump_to` actually navigates.
@@ -283,10 +326,13 @@ Each step keeps `npm run check` green; the suite is the runnable check.
    from `data::gloss`.
 6. **Memory + local graph** — list, then push-navigation drill-down as the visit
    stack. No node-link drawing.
-7. **README rewrite** — install paths A and B, marked unverified.
+7. **Main chat** — the pinned thread, rendered flat along `head_id`, reusing
+   `session.ts`'s existing renderers for the six roles. `403` surfaced verbatim.
+8. **README rewrite** — install paths A and B, marked unverified.
 
-Deferred, not forgotten: entering the pinned main chat, which needs a
-conversations route (§3).
+Nothing is deferred for want of an API route any more. What remains unproven is
+listed in §4 and at the end of §3, and is unproven for want of a *running
+daemon*, not a missing shape.
 
 ## 6. Definition of done
 

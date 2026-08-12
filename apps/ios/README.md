@@ -89,15 +89,16 @@ failures are silent-looking 404s:
   `api/src/lib.rs` is registered with a literal `/v1/`.
 - A mount at `/` **overrides all other paths** on precedence.
 
-Two ways that do work:
+**Use Caddy on loopback.** `tailscale serve --bg 8080` → Caddy on
+`127.0.0.1:8080`, `/v1/*` → `:8787`, everything else → the built bundle. No code
+change needed, and on loopback behind the tailnet it opens no port.
 
-- **A1 — the daemon serves the bundle.** One mount, nothing stripped, and
-  same-origin becomes a property of the binary rather than of whoever last ran
-  `tailscale serve`. Needs a `ServeDir` fallback in `api/`, which does not exist
-  yet — raised with the lane that owns `api/**`.
-- **A2 — Caddy on loopback.** `tailscale serve --bg 8080` → Caddy on
-  `127.0.0.1:8080`, `/v1/*` → `:8787`, everything else → the built bundle. No
-  code change, works today. On loopback behind the tailnet it opens no port.
+The alternative — having `jod-api` serve the bundle itself, one mount with
+nothing stripped — is tidier, because same-origin becomes a property of the
+binary rather than of whoever last ran `tailscale serve`. It needs a `ServeDir`
+fallback in `api/` that does not exist. **Reljod was asked and chose the main
+chat over the asset-serving**, so that route stays available but is not being
+built today.
 
 `tailscale funnel` is **not** an option: identity headers are not injected on
 funnel traffic (`deploy/README.md`), and this API should not be on the public
@@ -225,17 +226,27 @@ That last row is the one deliberate change, and it predates this work: on a
 terminal the return key is a considered act; under a thumb it is an accident, and
 the accident starts a real process on the box.
 
-### The one place this falls short on purpose
+### The pinned main chat
 
 In the TUI the fleet's top row **is** the pinned main chat, and `⏎` enters it.
-Here that row is present but **not enterable**, and says so.
+The same is true here: the row is the chat Jod keeps — pinned, and it never ends.
 
-`core/src/conversation.rs` holds the whole conversation model and **the API
-exposes none of it**. The main chat is a thing you *send to*, so it is a write
-surface with audit-trail obligations — the lane that owns `api/**` scoped their
-work to the read-only tables deliberately and wants Reljod's decision before
-designing it. Inventing a shape here to look complete would be the wrong call.
-It unblocks the moment a conversations route exists.
+Two deliberate choices behind it:
+
+- **It draws before anyone has spoken.** `GET /v1/conversations/main` answers
+  `{"conversation": null}` rather than a 404 until the first turn, and reading it
+  does not *create* it — a GET that creates is a GET a prefetcher can fire.
+- **The thread renders flat, following `head_id`.** `parent_id` is a real tree
+  and moving `head_id` is how you switch branches, but branching has no honest
+  gesture on a phone, and a tree drawn at 393pt is the same mistake
+  `cli/src/tui/graph.rs` argues against for graphs. Flat is a choice, not an
+  oversight.
+
+A `403` naming `accept_edits` is shown in the daemon's own words rather than
+softened. The main chat runs at `accept_edits` by construction — `ask` is plan
+mode, and plan mode refuses the MCP calls that are the orchestrator's whole job —
+so a daemon capped lower refuses, and the operator needs to know which knob that
+is.
 
 ## The API contract
 
