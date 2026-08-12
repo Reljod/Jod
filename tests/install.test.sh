@@ -205,5 +205,44 @@ export JOD_SRC="$WORK/never-installed"
 assert_fails "$REPO_ROOT/install.sh" --check
 assert_missing "$JOD_SRC" "checking an install that doesn't exist clones nothing"
 
+# --- 12. the `curl … | bash` run the README documents ------------------------
+# Piping feeds the installer in on stdin: BASH_SOURCE is *empty* and $0 is
+# "bash". Under `set -u` a bare ${BASH_SOURCE[0]} kills the one invocation
+# everyone copies out of the README, before it does a thing. Run it the way a
+# user does — down a pipe, not as an argument — or the case isn't covered.
+section "curl | bash (installer read from stdin)"
+export JOD_SRC="$WORK/piped/src"
+export JOD_BIN_DIR="$WORK/piped/bin"
+PIPED_LOG="$WORK/piped.log"
+if cat "$REPO_ROOT/install.sh" | bash > "$PIPED_LOG" 2>&1; then
+  pass "a piped install succeeds"
+else
+  fail "a piped install should succeed (see $PIPED_LOG)"
+fi
+assert_no_grep "unbound variable" "$PIPED_LOG" "no unbound variable when read from stdin"
+assert_file "$JOD_BIN_DIR/jod" "the piped run puts jod on \$JOD_BIN_DIR"
+assert_file "$JOD_BIN_DIR/jod-run" "and the supervisor beside it"
+
+# --- 13. --help prints the header and nothing under it -----------------------
+# The header comment is the help text. It was printed by a hard-coded line
+# range, which had already drifted past the end of the header and was echoing
+# `set -euo pipefail` and the internals below it back at the user.
+section "--help"
+HELP_LOG="$WORK/help.log"
+assert_ok "$REPO_ROOT/install.sh" --help
+"$REPO_ROOT/install.sh" --help > "$HELP_LOG" 2>&1
+assert_grep "JOD_WITH_API" "$HELP_LOG" "documents the env overrides"
+assert_grep "curl -fsSL" "$HELP_LOG" "and the piped invocation it is copied from"
+assert_no_grep "set -euo pipefail" "$HELP_LOG" "stops at the header, leaking no shell"
+assert_no_grep "run from a copy of ourselves" "$HELP_LOG" "nor the internals below it"
+
+PIPED_HELP="$WORK/help-piped.log"
+if cat "$REPO_ROOT/install.sh" | bash -s -- --help > "$PIPED_HELP" 2>&1; then
+  pass "--help survives a piped run, where \$0 is 'bash' and not a file"
+else
+  fail "--help should not die when piped (see $PIPED_HELP)"
+fi
+assert_no_grep "No such file" "$PIPED_HELP" "piped --help reads no file it does not have"
+
 assert_summary
 exit

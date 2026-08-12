@@ -56,8 +56,10 @@ set -euo pipefail
 # incrementally — so an update run from $JOD_SRC/install.sh would carry on
 # reading whatever landed at the same byte offset in the new version. Copy
 # first, then run that. A piped run (curl | bash) has no file to copy and no
-# checkout that could overwrite it, so it skips this.
-if [ -z "${JOD_INSTALLER_COPY:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
+# checkout that could overwrite it, so it skips this — and reads from stdin,
+# which leaves BASH_SOURCE *empty*, so the default below is what keeps `set -u`
+# from killing the one invocation the README tells people to use.
+if [ -z "${JOD_INSTALLER_COPY:-}" ] && [ -f "${BASH_SOURCE[0]:-}" ]; then
   _self_copy="$(mktemp "${TMPDIR:-/tmp}/jod-install.XXXXXX")"
   cat "${BASH_SOURCE[0]}" > "$_self_copy"
   export JOD_INSTALLER_COPY="$_self_copy"
@@ -81,7 +83,19 @@ for arg in "$@"; do
   case "$arg" in
     --check) CHECK_ONLY=1 ;;
     --force) FORCE=1 ;;
-    -h|--help) sed -n '2,55p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    # The header comment *is* the help text, so print it by shape rather than
+    # by line number — a hard-coded range silently starts leaking `set -euo
+    # pipefail` and the internals below it the first time the header grows.
+    # A piped run has no file to read it back out of ($0 is "bash"), so it
+    # says where the text lives instead of dying on a missing file.
+    -h|--help)
+      if [ -r "$0" ]; then
+        awk 'NR > 1 { if (!/^#/) exit; sub(/^# ?/, ""); print }' "$0"
+      else
+        printf 'jod installer — flags and env overrides are documented at the top of\n  %s\n' \
+          "https://raw.githubusercontent.com/Reljod/Jod/main/install.sh"
+      fi
+      exit 0 ;;
     *) printf 'error: unknown argument: %s\n' "$arg" >&2; exit 2 ;;
   esac
 done
