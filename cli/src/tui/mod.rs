@@ -3227,8 +3227,7 @@ fn apply_slash(app: &mut App, slash: command::Slash) -> Option<Action> {
             app.resume = Resume::Fresh;
             app.session = None;
             app.cost_usd = 0.0;
-            app.transcript.clear();
-            app.scroll_to_bottom();
+            go_home(app);
             app.push(Entry::Notice("new conversation".into()));
             // Jod's conversation as well as the harness's. Without this, a
             // conversation handed over by `/harness` would keep collecting the
@@ -3363,10 +3362,7 @@ fn apply_slash(app: &mut App, slash: command::Slash) -> Option<Action> {
         Slash::Attach(which) => return resolve_agent(app, &which).map(Action::Attach),
         Slash::Todo(title) => return Some(Action::AddTask(title)),
         Slash::Done(id) => return Some(Action::FinishTask(id)),
-        Slash::Clear => {
-            app.transcript.clear();
-            app.scroll_to_bottom();
-        }
+        Slash::Clear => go_home(app),
         Slash::Update { check } => return Some(Action::Update { check }),
         Slash::Jobs => app.overlay = Overlay::Jobs,
         Slash::Reload => return Some(Action::Reload),
@@ -3385,6 +3381,26 @@ fn apply_slash(app: &mut App, slash: command::Slash) -> Option<Action> {
         Slash::Refused(said) => app.push(Entry::Notice(said)),
     }
     None
+}
+
+/// Empty the chat and put the console back on the splash.
+///
+/// Clearing the transcript is not enough on its own to get you home. The splash
+/// is drawn for the chat workspace and only while nothing is being watched, so
+/// `/clear` typed from the fleet — or from inside somebody else's run — used to
+/// empty a screen you were not looking at and leave you standing where you
+/// were. Both commands mean "start again from the top", and the top is the
+/// wordmark with the mascot over it.
+///
+/// Nothing is stopped by coming home: a watched run is a detached process group
+/// reporting through the database, and this window was only ever a viewer of
+/// it. `/clear` stops looking; it does not stop the work.
+fn go_home(app: &mut App) {
+    app.watching = None;
+    app.transcript.clear();
+    app.scroll_to_bottom();
+    // Takes the overlay and the back stack with it, which is the rest of home.
+    app.go(Workspace::Chat);
 }
 
 /// Record the model this conversation is to run on from now on.
@@ -4467,6 +4483,38 @@ mod tests {
         // An unbound thread records each turn in a conversation of its own,
         // which is what every turn outside the main chat does.
         assert_eq!(Thread::default().binding(), RunConversation::New);
+    }
+
+    /// `/new` and `/clear` both mean "start again from the top", and the top is
+    /// the splash. Emptying the transcript is not enough on its own: the splash
+    /// belongs to the chat workspace and is not drawn while a run is being
+    /// watched, so either command typed from the fleet used to clear a screen
+    /// you were not looking at and leave you standing in the fleet.
+    #[test]
+    fn new_and_clear_both_land_back_on_the_splash() {
+        for slash in [command::Slash::New, command::Slash::Clear] {
+            let mut app = app_on(HarnessKind::ClaudeCode);
+            app.go(Workspace::Fleet);
+            app.watching = Some("aaa11111".into());
+            app.overlay = Overlay::Jobs;
+            app.push(Entry::You("port the parser".into()));
+
+            apply_slash(&mut app, slash.clone());
+
+            assert_eq!(app.workspace, Workspace::Chat, "{slash:?} goes home");
+            assert!(app.watching.is_none(), "{slash:?} stops watching");
+            assert!(
+                matches!(app.overlay, Overlay::None),
+                "{slash:?} drops the overlay"
+            );
+            // `/new` leaves its own notice behind, and a notice is still fresh.
+            assert!(
+                !app.transcript
+                    .iter()
+                    .any(|e| !matches!(e, Entry::Notice(_))),
+                "{slash:?} leaves nothing but notices, which is what the splash needs"
+            );
+        }
     }
 
     /// Entering the chat has to *show* it, or the pinned row is a move to a
