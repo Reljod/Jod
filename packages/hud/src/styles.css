@@ -113,7 +113,14 @@ button { cursor: pointer; background: none; border: none; }
 }
 
 .brand { display: flex; align-items: baseline; gap: 7px; }
-.brand .mark { color: var(--cyan); font-size: 14px; text-shadow: 0 0 12px var(--cyan); }
+/* An SVG has no baseline of its own, so the row's baseline alignment would drop
+   the mascot's box on the text baseline and hang the whole head below the
+   wordmark. It centres against the row instead. */
+.brand .mascot { align-self: center; color: var(--cyan); filter: drop-shadow(0 0 6px rgba(53, 224, 255, 0.55)); }
+/* The mane carries the glow; the face is a fainter line so the two read as
+   separate parts of one head rather than as two concentric rings. */
+.mascot .mascot-face { opacity: 0.5; }
+.mascot .mascot-muzzle { opacity: 0.75; }
 .brand .wordmark { font-weight: 700; letter-spacing: 0.28em; font-size: 14px; }
 .brand .sub { font-size: 9px; letter-spacing: 0.24em; color: var(--text-dim); }
 

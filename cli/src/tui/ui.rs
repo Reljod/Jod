@@ -199,6 +199,25 @@ const WORDMARK: [Glyph; 6] = [BIG_J, BIG_O, BIG_D, BIG_SPACE, BIG_A, BIG_I];
 /// How wide the assembled wordmark is: six blocks and five single-column gaps.
 const BANNER_WIDTH: u16 = 6 + 1 + 6 + 1 + 6 + 1 + 2 + 1 + 6 + 1 + 6;
 
+/// Jod's mascot: a small lion, drawn in the same block characters as the
+/// wordmark so the two read as one lockup rather than as clip-art dropped on
+/// top of a logo.
+///
+/// Deliberately four rows and seven columns — the whole face has to survive a
+/// terminal cell grid, and every stroke added past "shaggy ring, two eyes, a
+/// muzzle" stops reading as a lion and starts reading as noise. The mane is
+/// half-blocks rather than slashes because `▄▀` alternating is the only way to
+/// get a ragged edge out of a grid whose smallest unit is a rectangle.
+const MASCOT: [&str; 4] = [" ▄▀▄▀▄ ", "█ o o █", "█  w  █", " ▀▄▀▄▀ "];
+
+/// How wide the mascot is. Every row is the same width by construction; the
+/// constant exists so the splash can ask "does it fit" without measuring.
+const MASCOT_WIDTH: u16 = 7;
+
+/// The rows the mascot costs the splash: its own four, plus the blank row that
+/// keeps it off the lettering.
+const MASCOT_HEIGHT: u16 = MASCOT.len() as u16 + 1;
+
 fn banner() -> Vec<String> {
     (0..5)
         .map(|row| {
@@ -282,6 +301,22 @@ fn draw_splash(f: &mut Frame, app: &App, area: Rect) -> (usize, Rect) {
             fg(MUTED),
         )));
     }
+
+    // The mascot is the first thing to go and the last thing added: it sits
+    // above the lettering only once the caption and the input box have both
+    // been paid for, because a logo that has pushed the box off the bottom of
+    // the screen has cost more than a mascot is worth. The nine rows are the
+    // mascot and its blank, the air row, and the three-row box.
+    if area.width >= MASCOT_WIDTH && area.height >= head.len() as u16 + MASCOT_HEIGHT + 4 {
+        let mut lockup: Vec<Line> = MASCOT
+            .iter()
+            .map(|row| Line::from(Span::styled(*row, bold(USER))))
+            .collect();
+        lockup.push(Line::from(""));
+        lockup.append(&mut head);
+        head = lockup;
+    }
+
     let head_height = head.len() as u16;
 
     let (top, box_) = if anchored {
@@ -3502,6 +3537,62 @@ mod tests {
         let screen = rendered(&app(), 30, 14);
         assert!(screen.contains("Jod AI"), "{screen}");
         assert!(screen.lines().all(|l| l.chars().count() <= 30), "{screen}");
+    }
+
+    /// The mascot is the brand, so it appears on the screen the brand is for.
+    #[test]
+    fn a_new_session_shows_the_mascot_above_the_wordmark() {
+        let screen = rendered(&app(), 100, 24);
+        for row in MASCOT {
+            assert!(
+                screen.contains(row.trim_end()),
+                "mascot row missing {row:?}:\n{screen}"
+            );
+        }
+        let lion = screen.find(MASCOT[1].trim_end()).expect("the face");
+        let letters = screen.find(banner()[0].trim_end()).expect("the wordmark");
+        assert!(
+            lion < letters,
+            "the mascot sits above the lettering:\n{screen}"
+        );
+    }
+
+    /// A logo that has pushed the input box off the bottom of the screen has
+    /// cost more than a mascot is worth, so on the band of heights that fits
+    /// one but not both, the lettering is what survives: it is the thing that
+    /// says what you launched.
+    #[test]
+    fn the_mascot_is_the_first_thing_a_short_terminal_drops() {
+        let screen = rendered(&app(), 100, 15);
+        assert!(!screen.contains(MASCOT[1]), "no room for a face:\n{screen}");
+        assert!(
+            screen.contains(&banner()[0]),
+            "the wordmark stays:\n{screen}"
+        );
+        assert!(screen.contains("you"), "and somewhere to type:\n{screen}");
+    }
+
+    /// Seven columns is a cheaper logo than the block lettering, so a terminal
+    /// too narrow for the wordmark still gets a mascot over "Jod AI".
+    #[test]
+    fn the_mascot_survives_a_terminal_too_narrow_for_the_wordmark() {
+        let screen = rendered(&app(), 30, 14);
+        assert!(screen.contains("Jod AI"), "{screen}");
+        assert!(screen.contains(MASCOT[1]), "the face:\n{screen}");
+        assert!(screen.lines().all(|l| l.chars().count() <= 30), "{screen}");
+    }
+
+    /// Every row the same width, or the face comes out crooked once it is
+    /// centred and the mane no longer lines up with the chin.
+    #[test]
+    fn the_mascot_is_a_rectangle_of_the_advertised_width() {
+        for row in MASCOT {
+            assert_eq!(
+                row.chars().count(),
+                MASCOT_WIDTH as usize,
+                "row {row:?} is not {MASCOT_WIDTH} columns"
+            );
+        }
     }
 
     /// The completion popup grows upwards out of the input box and the command
