@@ -87,13 +87,21 @@ not the epics* below.
 
 Each becomes a `docs/decisions.md` entry in the epic that implements it.
 
-**D1 — the fuzzy picker is in-process; `fzf` the binary is not shelled out to.**
-`fzf` owns a whole terminal, so calling it from inside the TUI means tearing down
-and restoring the screen on every `@` — and an inline popup under the cursor is
-not something an external full-screen program can draw at all. Jod uses fzf's
-*algorithm* as a library, over a candidate list ripgrep enumerates, with a
-walker fallback when ripgrep is absent. The real binary stays available as a
-preference for the full-screen picker only.
+**D1 — Jod builds fzf's *feel*, and depends on no picker binary.** The target is
+the interaction: type a few scattered letters, see ranked matches update on every
+keystroke with the matched characters highlighted, move with the arrows, accept
+with enter. None of that requires `fzf` itself — and shelling out to it would
+actively prevent the good version, because `fzf` owns a whole terminal, so every
+`@` would tear down and restore the screen, and an inline popup under the cursor
+is not something an external full-screen program can draw at all. So: fuzzy
+matching in-process, over a candidate list ripgrep enumerates, with a walker
+fallback when ripgrep is absent. No picker binary is required, preferred, or
+supported.
+
+The UX bar this sets, which the epic is checked against: results ranked, not
+merely filtered; matched characters highlighted in every row; live on every
+keystroke with no perceptible lag on a large repo; arrows and enter; escape
+leaves what you typed alone.
 
 **D2 — cards go over MCP, with a passive lifter behind it.** Three tools —
 record a decision, ask a question, request a secret — are the supported path and
@@ -140,20 +148,25 @@ Each `Sn` is a shippable slice with its own check and its own PR.
   Existing conversations keep the directory they already had. Add, remove, list,
   and a containment test the other epics use.
 - **E1.S2 Candidates and ranking.** Enumerate files and folders per root through
-  ripgrep, falling back to a walker; rank with the fuzzy matcher. Cached briefly,
-  because `@` is typed one character at a time.
-- **E1.S3 The mention popup.** Opens on `@`, filters live, inserts a
-  root-qualified path when several roots are set. With zero roots it says so and
-  accepts nothing. A folder mention expands to a capped listing at send time.
+  ripgrep, falling back to a walker; rank in-process against D1's UX bar. Cached
+  briefly, because `@` is typed one character at a time.
+- **E1.S3 The mention popup.** Opens on `@`, ranks live under the cursor with
+  matched characters highlighted, arrows and enter, escape leaving what you typed
+  alone. Inserts a root-qualified path when several roots are set. With zero
+  roots it says so and accepts nothing. A folder mention expands to a capped
+  listing at send time.
 - **E1.S4 Setting roots.** A full-screen directory picker starting at the current
-  directory, plus add/remove/list from both the palette and the CLI, plus a
-  repeatable launch flag.
+  directory — the same matcher and the same keys as the popup, so there is one
+  picker with two sizes rather than two pickers — plus add/remove/list from both
+  the palette and the CLI, plus a repeatable launch flag.
 - **E1.S5 Ripgrep as the search path.** Grep across every root from the palette,
   and roots reaching the harness through whatever each one's directory flag is —
   measured per harness, with the degradation documented where a harness has none.
 
-**Check:** roots survive a round trip through the CLI, and the picker ranks a
-deep path above a scattered-letters match.
+**Check:** roots survive a round trip through the CLI; the picker ranks a deep
+exact path above a scattered-letters match; and a keystroke over a repo of a
+hundred thousand files still re-ranks within one frame. No picker binary is
+invoked — asserted, so nobody quietly reintroduces one.
 
 ## E2 — The decision rail
 
@@ -491,19 +504,17 @@ it below.
 
 Answers change the work; each has a default, so nothing is blocked on them.
 
-1. **The real `fzf`, or fzf's algorithm in-process?** Default: in-process (D1).
-   Say the word and the full-screen picker shells out to the binary instead.
-2. **Worktree on delegation, or on first write?** Default: **on delegation** —
+1. **Worktree on delegation, or on first write?** Default: **on delegation** —
    "once it writes" means discovering the boundary at the moment it is crossed.
-3. **Does the original checkout stay visible, read-only?** Default: **no**, it
+2. **Does the original checkout stay visible, read-only?** Default: **no**, it
    leaves the session's roots entirely, per your wording. The cost is that a
    session cannot diff against the checkout you are editing.
-4. **Secret scope default.** Default: **work**, so a key given for one project is
+3. **Secret scope default.** Default: **work**, so a key given for one project is
    not handed to every session on the box.
-5. **Rail on the left permanently, or a third column that steals from chat?**
+4. **Rail on the left permanently, or a third column that steals from chat?**
    Default: a left column, toggled, auto-opening once on the first blocker, and
    replaced by a one-line summary on a narrow terminal.
-6. **How many lanes do you actually want to run?** The plan is built for four in
+5. **How many lanes do you actually want to run?** The plan is built for four in
    wave 1 and two in waves 2–3. It degrades cleanly to two lanes throughout —
    roughly double the wall clock, none of the coordination.
 
