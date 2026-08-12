@@ -89,11 +89,22 @@ pub enum Action {
     /// Jod knows, is a collision waiting to be resolved by whoever guesses
     /// wrong first.
     Keep(Setting),
-    // There was a `NewThread` here — "stop talking into the conversation the
-    // chat box was bound to", returned by `/new` and `/resume`. It is gone
-    // because the thing it unbound from is now the only conversation the TUI
-    // has: unbinding would mean typing into a thread with no name, no pin and
-    // no way back to it. Both verbs say so instead of doing it.
+    /// Stop talking into the conversation the chat box was bound to.
+    ///
+    /// `/new` and `/resume` both move the cursor somewhere the binding does not
+    /// follow. Without this, a handed-over conversation would keep collecting
+    /// turns that belong to a different thread — see [`Thread::conversation`].
+    ///
+    /// It is also how you leave the main chat: entering it binds, and this
+    /// unbinds, so `/new` is the way back to an ordinary thread.
+    NewThread,
+    /// Put the chat box into the main chat.
+    ///
+    /// The pinned conversation is one of several the TUI can be in, and this is
+    /// the verb that goes there — `⏎` on the fleet's top row, or `/main` with
+    /// no instruction. Distinct from [`Action::Orchestrate`], which hands over a
+    /// single instruction from wherever you already are and leaves you there.
+    EnterMain,
     /// Stop an agent and close its tmux session.
     Stop(String),
     /// Put an agent's output on screen and follow it.
@@ -193,12 +204,34 @@ struct Thread {
     pending: Vec<Setting>,
 }
 
-// There was a `Thread::binding` here, answering "where does the next turn's
-// transcript go" with `New` unless a handoff had bound the chat. Nothing asks
-// any more: the chat box's turns go to the pinned conversation, which
-// `hand_to_orchestrator` resolves itself, and `/delegate` is explicitly `New`.
-// A helper whose two answers are now one constant is a decision that no longer
-// exists.
+impl Thread {
+    /// Where the next turn's transcript goes.
+    ///
+    /// `New` unless something bound this chat to a conversation — a handoff, or
+    /// entering the main chat. The harness session is what carries an ordinary
+    /// conversation forward, and Jod's graph records each turn beside it; after
+    /// a switch there is no harness session yet, so the binding is the only
+    /// thing holding the thread together.
+    fn binding(&self) -> RunConversation {
+        match &self.conversation {
+            Some(id) => RunConversation::Existing(id.clone()),
+            None => RunConversation::New,
+        }
+    }
+
+    /// Whether the chat box is currently inside the main chat.
+    ///
+    /// Asked of the store rather than remembered on a flag, because the pin can
+    /// move under this process — `/harness` mints a conversation and carries
+    /// the pin to it — and a flag set at entry would then be pointing at the
+    /// thread that was handed over.
+    fn in_main(&self, store: Option<&Store>) -> bool {
+        let (Some(store), Some(here)) = (store, self.conversation.as_deref()) else {
+            return false;
+        };
+        matches!(store.pinned_conversation(), Ok(Some(pinned)) if pinned == here)
+    }
+}
 
 /// Something the user chose that belongs to the conversation rather than to
 /// this process.
@@ -362,27 +395,11 @@ async fn event_loop(
             .to_string(),
     ));
 
-    // Which Jod conversation the chat box is talking into: the pinned one, from
-    // the first frame and for the whole session.
-    //
-    // It used to start derived — "the one the run on screen wrote" — and the
-    // chat box minted a fresh conversation per turn. That is what made the
-    // pinned chat unreachable from the interface that matters most: `/main`
-    // wrote into it, the next thing you typed did not, and `/model` wrote onto
-    // whichever one the eye happened to be on. One conversation, bound here,
-    // removes the whole class.
+    // Which Jod conversation the chat box is talking into. Starts derived —
+    // "the one the run on screen wrote" — and becomes explicit when a harness
+    // switch mints a conversation no run has reached yet, or when you enter the
+    // main chat.
     let mut thread = Thread::default();
-    if let Some(store) = jod.store() {
-        match store.main_conversation(app.harness, &opts.cwd.display().to_string()) {
-            Ok(id) => thread.conversation = Some(id),
-            // Not fatal. Without a binding the chat box still works — it just
-            // mints a conversation the way it always did — and saying so once
-            // beats discovering it when the transcript is not where you left it.
-            Err(e) => app.push(Entry::Notice(format!(
-                "could not open the main chat, so this session is unpinned: {e}"
-            ))),
-        }
-    }
 
     let mut keys = EventStream::new();
     let mut events = jod.subscribe();
@@ -576,6 +593,94 @@ fn announce(app: &mut App, id: &str) {
     )));
 }
 
+/// Put the chat box into the main chat, and the main chat on the screen.
+///
+/// This is the verb the pinned chat never had. It was reachable only by
+/// *sending* to it — `jod main "…"`, `/main <instruction>` — and readable only
+/// as a static dump, so the one conversation that never ends was the one you
+/// could not sit in. Binding is the whole of it: from here `Action::Send` sees
+/// `Thread::in_main` and routes through the orchestrator, and `/new` unbinds.
+///
+/// The transcript is replaced rather than appended to, which is the opposite of
+/// what a turn does and right for a move: you are going somewhere else, and
+/// leaving the last conversation's lines above the new one's would read as one
+/// thread that changed its mind.
+async fn enter_main(jod: &Arc<Jod>, app: &mut App, opts: &Options, thread: &mut Thread) {
+    let Some(store) = jod.store() else {
+        app.push(Entry::Notice(format!("{NO_STORE} — there is no main chat")));
+        return;
+    };
+    let id = match store.main_conversation(app.harness, &opts.cwd.display().to_string()) {
+        Ok(id) => id,
+        Err(e) => {
+            app.push(Entry::Notice(format!("could not open the main chat: {e}")));
+            return;
+        }
+    };
+    if thread.conversation.as_deref() == Some(id.as_str()) {
+        app.push(Entry::Notice("already in the main chat".into()));
+        return;
+    }
+    thread.conversation = Some(id.clone());
+    // Not carried. `carried` is a summary owed to a harness that has never seen
+    // this thread, and it belongs to the conversation being *left* — sending it
+    // into the main chat would paste another conversation's history here.
+    thread.carried = None;
+    app.go(Workspace::Chat);
+    app.transcript.clear();
+
+    // Replayed from Jod's own record rather than from a run's events: the chat
+    // spans many runs, one per instruction, and any single one of them holds
+    // only a slice.
+    match store.live_window(&id) {
+        Ok(live) => {
+            for entry in replay(&live) {
+                app.push(entry);
+            }
+        }
+        Err(e) => app.push(Entry::Notice(format!(
+            "in the main chat, but could not read it back: {e}"
+        ))),
+    }
+    app.scroll_to_bottom();
+}
+
+/// The main chat's live window as transcript entries.
+///
+/// Pure, so what the screen shows on entering is testable without a service.
+///
+/// `live_window` and not `thread`: it is what the harness would actually be
+/// sent, which is the honest thing to put on screen. A message compacted out of
+/// it is still on disk and deliberately not here — showing it would suggest the
+/// model can see something it cannot.
+fn replay(live: &[jod_core::conversation::Message]) -> Vec<Entry> {
+    use jod_core::conversation::Role;
+    if live.is_empty() {
+        return vec![Entry::Notice(
+            "the main chat — nothing said yet. Type an instruction; it decides who does the work."
+                .into(),
+        )];
+    }
+    let mut entries: Vec<Entry> = live
+        .iter()
+        .map(|message| match message.role {
+            Role::User => Entry::You(message.text.clone()),
+            _ => Entry::Agent(message.text.clone()),
+        })
+        .collect();
+    // The count is the live window's, not the conversation's, and the line says
+    // "live" so the two are not confused: a chat with a hundred messages and
+    // four live ones is a chat that was compacted, not one that lost anything.
+    entries.push(Entry::Notice(format!(
+        "the main chat · {} in the live window — /new leaves it",
+        match live.len() {
+            1 => "1 message".to_string(),
+            n => format!("{n} messages"),
+        }
+    )));
+    entries
+}
+
 /// Hand one typed line to the main chat.
 ///
 /// Every line the chat box sends arrives here — a plain turn and `/main` alike
@@ -663,11 +768,68 @@ async fn perform(
     // value a hair in the future would sit undue for a quarter of a second.
     let now = app.now_ms;
     match action {
-        // Typing into the chat box *is* talking to the main chat. There is no
-        // second thing the TUI can be a conversation with.
-        Action::Send(prompt) | Action::Orchestrate(prompt) => {
-            orchestrate(jod, app, opts, thread, prompt).await
+        // Where a typed line goes depends on which conversation you are in, and
+        // there is exactly one that is special. Inside the main chat, typing is
+        // instructing the orchestrator — that is what being in it means. In any
+        // other conversation it is what it always was: a turn to an agent whose
+        // answer fills the screen.
+        Action::Send(prompt) => {
+            if thread.in_main(jod.store().map(Arc::as_ref)) {
+                orchestrate(jod, app, opts, thread, prompt).await;
+                return;
+            }
+            // The one place Jod's own verbs are handed over from the chat box.
+            //
+            // The rule this codebase already states is "the main chat is you,
+            // present, watching" — and a turn you just typed into the TUI is
+            // exactly that. The grant used to be withheld here on the grounds
+            // that "an agent started from the chat box is doing a task, not
+            // orchestrating", which conflated two different things reached
+            // through one function: a turn you are watching, and a delegation
+            // that goes off on its own. Only the second is unattended, and only
+            // the second still gets nothing.
+            //
+            // Without this you could ask Jod to schedule something and it would
+            // answer as if it had, having no verb to do it with.
+            match spawn(
+                jod,
+                app,
+                opts,
+                prompt.clone(),
+                app.resume.clone(),
+                WATCHED,
+                // Into the conversation the chat box is bound to, which after a
+                // handoff is the one carrying the summary. Everything else is
+                // still `New`, as it was.
+                thread.binding(),
+                thread.carried.clone(),
+            )
+            .await
+            {
+                Ok(id) => {
+                    // Only once. From here the harness has a session of its own
+                    // and is holding the context itself; re-sending it every
+                    // turn would hand the model a summary of a conversation it
+                    // is already in.
+                    thread.carried = None;
+                    // The first turn is what mints a conversation, so it is the
+                    // first moment anything chosen before it can be written
+                    // down.
+                    flush_pending(jod, app, thread, &id);
+                    app.watching = Some(id);
+                    app.busy = true;
+                    app.turn_started_ms = Some(app.now_ms);
+                    app.push(Entry::You(prompt));
+                    app.scroll_to_bottom();
+                }
+                Err(e) => app.push(Entry::Notice(format!("could not start: {e}"))),
+            }
         }
+        // One instruction to the main chat from wherever you happen to be, and
+        // it leaves you there. `Action::EnterMain` is the other thing — going
+        // to live in it.
+        Action::Orchestrate(instruction) => orchestrate(jod, app, opts, thread, instruction).await,
+        Action::EnterMain => enter_main(jod, app, opts, thread).await,
         Action::Delegate(prompt) => {
             // Fresh, always: a background job that silently continued the
             // conversation on screen would inherit context nobody asked it to,
@@ -731,6 +893,10 @@ async fn perform(
             }
         }
         Action::SwitchHarness(to) => begin_crossing(jod, app, opts, thread, to).await,
+        Action::NewThread => {
+            thread.conversation = None;
+            thread.carried = None;
+        }
         Action::Stop(id) => match jod.kill_agent(&id).await {
             Ok(()) => {
                 if app.watching.as_deref() == Some(id.as_str()) {
@@ -741,12 +907,16 @@ async fn perform(
             }
             Err(e) => app.push(Entry::Notice(format!("could not stop {}: {e}", short(&id)))),
         },
-        // The binding no longer follows the eye. It used to — watching another
-        // agent unbound the chat box so the next turn continued *that*
-        // conversation — and that is precisely how a `/main` reply on screen
-        // left you typing into a different thread than the one you were
-        // reading. Watching is looking; the chat box stays on the main chat.
-        Action::Watch(id) => watch(jod, app, id).await,
+        // The binding follows the eye, like the session cursor does: watching
+        // another agent means the next turn continues *that* conversation, and
+        // `current_conversation` derives it from the run being watched. Leaving
+        // the main chat by looking away is deliberate — you cannot be reading
+        // one thread and instructing another.
+        Action::Watch(id) => {
+            thread.conversation = None;
+            thread.carried = None;
+            watch(jod, app, id).await
+        }
         Action::Attach(id) => match jod.agent(&id).await {
             Ok(agent) => {
                 app.push(Entry::Notice(format!(
@@ -2185,14 +2355,14 @@ fn on_fleet_key(app: &mut App, key: KeyEvent) -> Option<Action> {
     // the list is a key that looks broken.
     if app.main_selected() {
         match key.code {
-            KeyCode::Enter | KeyCode::Right => {
-                app.go(Workspace::Chat);
-                return None;
-            }
+            // The verb the pinned chat never had: not "watch it", which is what
+            // ⏎ does to a run, but *go into it* — the chat box binds and the
+            // transcript is replayed.
+            KeyCode::Enter | KeyCode::Right => return Some(Action::EnterMain),
             KeyCode::Char('s') | KeyCode::Char('a') | KeyCode::Char('r') => {
                 app.push(Entry::Notice(
                     "that is the main chat, not an agent — it has no process to stop or attach \
-                     to, and Enter opens it"
+                     to, and ⏎ goes into it"
                         .into(),
                 ));
                 return None;
@@ -2232,28 +2402,24 @@ fn on_fleet_key(app: &mut App, key: KeyEvent) -> Option<Action> {
             Some(Action::Stop(id))
         }
         KeyCode::Char('a') => Some(Action::Attach(app.selected_agent()?.id.clone())),
-        // Continue the selected agent, which is how an unattended run gets
-        // picked up and corrected.
-        //
-        // It used to do that by pointing the chat box at the agent's harness
-        // session. The chat box no longer goes anywhere but the main chat, so
-        // that would now be a notice claiming something that does not happen —
-        // and the orchestrator has the better verb anyway: `continue_agent`
-        // resumes the run *with its context*, which is the thing this key was
-        // reaching for. So it writes the instruction and leaves the cursor in
-        // it, rather than sending: which agent to continue is a decision the
-        // key can make, but what to say to it is not.
+        // Continue the selected agent's conversation from the input box, which
+        // is how an unattended run gets picked up and corrected.
         KeyCode::Char('r') => {
             let agent = app.selected_agent()?.clone();
             app.go(Workspace::Chat);
             match agent.session {
-                Some(_) => {
-                    app.accept_completion(&format!("follow up on {}: ", agent.name));
+                Some(session) => {
+                    app.resume = Resume::Session(session.clone());
+                    app.session = Some(session);
+                    app.harness_from_label(&agent.harness);
                     app.push(Entry::Notice(format!(
-                        "say what {} should do next — the main chat will resume it with the \
-                         context it already has",
+                        "next turn continues {} — type to carry on",
                         agent.name
                     )));
+                    // Out of the main chat, if that is where you were: the next
+                    // turn goes to this agent, and leaving the binding set
+                    // would send it to the orchestrator instead.
+                    return Some(Action::NewThread);
                 }
                 None => app.push(Entry::Notice(format!(
                     "{} never reported a conversation, so there is nothing to continue",
@@ -2914,47 +3080,53 @@ fn apply_slash(app: &mut App, slash: command::Slash) -> Option<Action> {
             }
             return Some(Action::Config(request));
         }
-        // Clears the screen and says what it did *not* do. `/new` used to mint a
-        // conversation; there is one now, it is pinned, and it does not end —
-        // so a verb that silently started a second one would be handing back
-        // exactly the split this change removed. The transcript still goes,
-        // because "I want this off my screen" is the real request behind it.
         Slash::New => {
+            app.resume = Resume::Fresh;
+            app.session = None;
+            app.cost_usd = 0.0;
             app.transcript.clear();
             app.scroll_to_bottom();
-            app.push(Entry::Notice(
-                "screen cleared — the chat itself is pinned and carries on. \
-                 `/compact` shortens it; `/delegate` starts something separate."
-                    .into(),
-            ));
+            app.push(Entry::Notice("new conversation".into()));
+            // Jod's conversation as well as the harness's. Without this, a
+            // conversation handed over by `/harness` would keep collecting the
+            // turns of the fresh one that replaced it — and it is how you leave
+            // the main chat, which binds the same field.
+            return Some(Action::NewThread);
         }
         Slash::Sessions => {
             app.go(Workspace::Fleet);
             app.push(Entry::Notice(
-                "the fleet is the agents the main chat started — Enter watches one, \
-                 and the top row is the chat itself"
+                "pick an id from the fleet, then /resume <id> — the shown prefix is enough. \
+                 The top row is the main chat; ⏎ goes into it."
                     .into(),
             ));
         }
-        // Refused, with the two verbs that do what the user was reaching for.
-        //
-        // `/resume` pointed the chat box at an arbitrary harness session. Under
-        // one pinned conversation that is not a smaller version of itself — it
-        // is the chat box talking somewhere the pin is not, which is the bug
-        // this change exists to remove. The main chat resumes itself: its
-        // session id lives on the conversation and `hand_to_orchestrator` reads
-        // it every turn, so there is nothing left here to ask for.
         Slash::Resume(id) => match app.resolve_session(&id) {
-            app::Resolved::Session(_) | app::Resolved::Verbatim(_) => {
-                app.push(Entry::Notice(format!(
-                    "the chat box is the main chat and stays there — `/watch {id}` puts that \
-                     agent's output on screen, `/main <follow-up>` asks the orchestrator to \
-                     continue it"
-                )));
+            app::Resolved::Session(session) => {
+                app.resume = Resume::Session(session.clone());
+                app.session = Some(session.clone());
+                app.push(Entry::Notice(format!("continuing {session}")));
+                // The cursor moved to a thread Jod's binding does not follow.
+                return Some(Action::NewThread);
+            }
+            app::Resolved::Verbatim(raw) => {
+                app.resume = Resume::Session(raw.clone());
+                app.session = Some(raw.clone());
+                // Say when it matched nothing on screen. A typo is otherwise
+                // indistinguishable from a real resume until the harness
+                // rejects it several seconds later.
+                if app.agents.is_empty() {
+                    app.push(Entry::Notice(format!("continuing {raw}")));
+                } else {
+                    app.push(Entry::Notice(format!(
+                        "continuing {raw} — not one of the agents listed, passing it on as typed"
+                    )));
+                }
+                return Some(Action::NewThread);
             }
             app::Resolved::NoSession(agent) => {
                 app.push(Entry::Notice(format!(
-                    "{agent} has not reported a conversation yet — there is nothing to watch"
+                    "{agent} has not reported a conversation yet — resuming it would start a fresh one"
                 )));
             }
             app::Resolved::Ambiguous(n) => {
@@ -3039,6 +3211,7 @@ fn apply_slash(app: &mut App, slash: command::Slash) -> Option<Action> {
         }
         Slash::Delegate(prompt) => return Some(Action::Delegate(prompt)),
         Slash::Main(instruction) => return Some(Action::Orchestrate(instruction)),
+        Slash::EnterMain => return Some(Action::EnterMain),
         Slash::Stop(which) => return resolve_agent(app, &which).map(Action::Stop),
         Slash::Watch(which) => return resolve_agent(app, &which).map(Action::Watch),
         Slash::Attach(which) => return resolve_agent(app, &which).map(Action::Attach),
@@ -3330,15 +3503,18 @@ fn resolve_agent(app: &mut App, typed: &str) -> Option<String> {
     }
 }
 
+/// What a turn you are sitting in front of may do to Jod itself.
+///
+/// The full set, because the condition this codebase attaches to it — "you,
+/// present, watching" — is met by definition here: this is the run whose output
+/// is filling your screen.
+const WATCHED: Option<ToolAccess> = Some(ToolAccess::Orchestrate);
+
 /// What a run that goes off on its own may do to Jod itself.
 ///
-/// It used to be one of a pair. The other, `WATCHED`, was the full orchestrating
-/// set granted to a turn typed into the chat box — and the chat box no longer
-/// spawns anything: its turns go through `hand_to_orchestrator`, which asks for
-/// [`ToolAccess::Orchestrate`] itself, beside the permission mode and the
-/// conversation it belongs with. This one remains because the distinction it
-/// marks does: nobody is looking at a delegated run, and the thing you least
-/// want unattended is an agent that can create more unattended agents.
+/// Named as a pair with [`WATCHED`] so the difference between them is one line
+/// to read rather than two call sites to find. The whole distinction is
+/// whether anybody is looking.
 const DELEGATED: Option<ToolAccess> = Some(ToolAccess::ReadOnly);
 
 /// The stricter of the launch ceiling and what is asked for.
@@ -3943,53 +4119,91 @@ mod tests {
         assert!(material.contains("port the parser"));
     }
 
-    /// The inverse of what this used to assert, and deliberately so. `/new` and
-    /// `/resume` both used to unbind the chat box — start a conversation of
-    /// their own, point it at a harness session — and with one pinned chat
-    /// that is the split this whole change removes. Neither may act; both have
-    /// to say what does.
+    /// The binding is Jod's conversation, not the harness's session, and it does
+    /// not follow the cursor when the cursor moves somewhere else. Without this,
+    /// a conversation handed over by `/harness` would keep collecting the turns
+    /// of the fresh one that replaced it — and it is also the way *out* of the
+    /// main chat, which binds the same field.
     #[test]
-    fn neither_new_nor_resume_can_take_the_chat_box_off_the_pinned_chat() {
+    fn starting_or_resuming_something_else_drops_the_binding() {
         let mut app = app_on(HarnessKind::ClaudeCode);
-
-        assert_eq!(apply_slash(&mut app, command::Slash::New), None);
+        assert_eq!(
+            apply_slash(&mut app, command::Slash::New),
+            Some(Action::NewThread)
+        );
         assert_eq!(
             apply_slash(&mut app, command::Slash::Resume("s-99".into())),
-            None
+            Some(Action::NewThread)
         );
 
-        // And says so, rather than looking like a key that did nothing.
-        for expected in ["screen cleared", "stays there"] {
-            assert!(
-                app.transcript
-                    .iter()
-                    .any(|e| matches!(e, Entry::Notice(n) if n.contains(expected))),
-                "should have said “{expected}”: {:?}",
-                app.transcript
-            );
-        }
+        // An unbound thread records each turn in a conversation of its own,
+        // which is what every turn outside the main chat does.
+        assert_eq!(Thread::default().binding(), RunConversation::New);
     }
 
-    /// The chat box talks into the pinned conversation from the first frame,
-    /// which is the property `/main` used to have alone — and the reason typing
-    /// after `/main` used to fork a new thread.
+    /// Entering the chat has to *show* it, or the pinned row is a move to a
+    /// blank screen and the conversation is still only readable from the CLI.
     #[test]
-    fn the_chat_box_is_bound_to_the_pinned_conversation() {
+    fn entering_the_chat_replays_what_is_in_it() {
+        use jod_core::conversation::{NewMessage, Role};
         let s = store();
-        let pinned = s
-            .main_conversation(HarnessKind::ClaudeCode, "/tmp")
+        let id = s.main_conversation(HarnessKind::ClaudeCode, "/tmp").unwrap();
+
+        // Empty: a sentence saying so, not a blank screen.
+        let empty = replay(&s.live_window(&id).unwrap());
+        assert!(
+            matches!(&empty[..], [Entry::Notice(n)] if n.contains("nothing said yet")),
+            "{empty:?}"
+        );
+
+        s.append_message(&id, NewMessage::new(Role::User, "count the rust files"))
             .unwrap();
-        let thread = Thread {
-            conversation: Some(pinned.clone()),
+        s.append_message(&id, NewMessage::new(Role::Assistant, "started an agent"))
+            .unwrap();
+
+        let entries = replay(&s.live_window(&id).unwrap());
+        // Your turns read as yours and the chat's as the chat's — a replay that
+        // flattened both to prose would be a transcript of nobody.
+        assert!(matches!(&entries[0], Entry::You(t) if t == "count the rust files"));
+        assert!(matches!(&entries[1], Entry::Agent(t) if t == "started an agent"));
+        assert!(
+            matches!(entries.last(), Some(Entry::Notice(n)) if n.contains("2 messages")
+                && n.contains("live window")),
+            "and says how much of it the harness is actually carrying: {entries:?}"
+        );
+    }
+
+    /// Which conversation you are in is what decides where a typed line goes,
+    /// and exactly one of them is the main chat.
+    ///
+    /// Derived from the store rather than remembered on a flag, because the pin
+    /// moves under this process — `/harness` carries it to the conversation it
+    /// mints — and a flag set on entry would then point at the thread that was
+    /// handed away.
+    #[test]
+    fn only_the_pinned_conversation_counts_as_being_in_the_main_chat() {
+        let s = store();
+        let pinned = s.main_conversation(HarnessKind::ClaudeCode, "/tmp").unwrap();
+        let other = s
+            .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
+            .unwrap();
+
+        let inside = Thread {
+            conversation: Some(pinned),
             ..Thread::default()
         };
-        assert_eq!(thread.conversation.as_deref(), Some(pinned.as_str()));
-        // And it is the same one `hand_to_orchestrator` resolves every turn.
-        assert_eq!(
-            s.main_conversation(HarnessKind::ClaudeCode, "/tmp")
-                .unwrap(),
-            pinned
-        );
+        assert!(inside.in_main(Some(&s)));
+
+        let elsewhere = Thread {
+            conversation: Some(other.id),
+            ..Thread::default()
+        };
+        assert!(!elsewhere.in_main(Some(&s)), "an ordinary conversation");
+
+        // Unbound is an ordinary thread, not the main chat.
+        assert!(!Thread::default().in_main(Some(&s)));
+        // And with no database there is no main chat to be in.
+        assert!(!inside.in_main(None));
     }
 
     fn press(app: &mut App, code: KeyCode) -> Option<Action> {
@@ -4217,52 +4431,33 @@ mod tests {
         }
     }
 
-    /// `/resume` used to repoint the chat box at any harness session — a
-    /// shortened agent id from the panel, a full session id, or one typed off
-    /// another machine. All three now refuse, because with one pinned
-    /// conversation there is nowhere for the chat box to point that is not the
-    /// chat: repointing it is exactly the split this change removes.
-    ///
-    /// The three cases are kept because they are three *resolutions*, and the
-    /// property being asserted is that none of them half-moves the cursor
-    /// before refusing.
+    /// The panel shows a shortened *agent* id and tells you to `/resume` it,
+    /// but the harness needs its own conversation id. The prefix must resolve.
     #[test]
-    fn resume_refuses_and_leaves_the_chat_box_where_it_is() {
-        let cases = [
-            // The shortened agent id the panel shows.
-            (
-                vec![agent_line("abcdef12-3456-7890", Some("sess-xyz"))],
-                "abcdef12",
-            ),
-            // A session id typed in full.
-            (
-                vec![agent_line("abcdef12-3456", Some("sess-xyz"))],
-                "sess-xyz",
-            ),
-            // One from another machine or a log, matching nothing on screen.
-            (vec![], "from-elsewhere"),
-        ];
-        for (agents, typed) in cases {
-            let mut app = app_on(HarnessKind::ClaudeCode);
-            app.agents = agents;
-            let before = app.resume.clone();
+    fn resume_accepts_the_shortened_id_the_panel_shows() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.agents = vec![agent_line("abcdef12-3456-7890", Some("sess-xyz"))];
 
-            assert_eq!(
-                apply_slash(&mut app, command::Slash::Resume(typed.into())),
-                None,
-                "`/resume {typed}` should do nothing"
-            );
+        apply_slash(&mut app, command::Slash::Resume("abcdef12".into()));
 
-            assert_eq!(app.resume, before, "`/resume {typed}` moved the cursor");
-            assert_eq!(app.session, None);
-            assert!(
-                app.transcript
-                    .iter()
-                    .any(|e| matches!(e, Entry::Notice(n) if n.contains("/watch"))),
-                "it should name the verb that does what was asked: {:?}",
-                app.transcript
-            );
-        }
+        assert_eq!(app.resume, Resume::Session("sess-xyz".into()));
+        assert_eq!(app.session.as_deref(), Some("sess-xyz"));
+    }
+
+    #[test]
+    fn resume_still_takes_a_session_id_typed_in_full() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.agents = vec![agent_line("abcdef12-3456", Some("sess-xyz"))];
+        apply_slash(&mut app, command::Slash::Resume("sess-xyz".into()));
+        assert_eq!(app.resume, Resume::Session("sess-xyz".into()));
+    }
+
+    /// An id from another machine or a log is still legitimate to type.
+    #[test]
+    fn an_unrecognised_id_is_passed_through_untouched() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        apply_slash(&mut app, command::Slash::Resume("from-elsewhere".into()));
+        assert_eq!(app.resume, Resume::Session("from-elsewhere".into()));
     }
 
     #[test]
@@ -4507,18 +4702,37 @@ mod tests {
         assert!(app.main_selected());
     }
 
-    /// The point of the pinned row: one keystroke from the fleet back into the
+    /// The point of the pinned row: one keystroke from the fleet into the
     /// conversation, without having to remember a command.
+    ///
+    /// `EnterMain` and not `Watch`. Watching a run puts its output on screen
+    /// and leaves the chat box wherever it was; this *goes into* the chat, so
+    /// what you type next is an instruction to it.
     #[test]
-    fn enter_on_the_pinned_row_opens_the_chat() {
+    fn enter_on_the_pinned_row_goes_into_the_chat() {
         for key in [KeyCode::Enter, KeyCode::Right] {
             let mut app = panel_with_agents();
             select_main(&mut app);
-            // Nothing to watch — the chat is not a run — so the verb is the
-            // move itself.
-            assert_eq!(press(&mut app, key), None, "{key:?}");
-            assert_eq!(app.workspace, Workspace::Chat, "{key:?}");
+            assert_eq!(press(&mut app, key), Some(Action::EnterMain), "{key:?}");
         }
+    }
+
+    /// `/main` with an instruction sends one; `/main` alone goes there. It used
+    /// to refuse the second form as a missing argument, which left the pinned
+    /// chat with no keyboard route into it at all.
+    #[test]
+    fn bare_main_enters_the_chat_and_main_with_words_sends_to_it() {
+        assert_eq!(command::parse("/main"), Some(command::Slash::EnterMain));
+        assert_eq!(
+            command::parse("/main count the rust files"),
+            Some(command::Slash::Main("count the rust files".into()))
+        );
+
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        assert_eq!(
+            apply_slash(&mut app, command::Slash::EnterMain),
+            Some(Action::EnterMain)
+        );
     }
 
     /// A row whose keys silently do nothing is a row that teaches people the
@@ -4626,29 +4840,19 @@ mod tests {
         );
     }
 
-    /// How an unattended run gets picked up and corrected, without leaving the
-    /// UI. It used to repoint the chat box at the agent's harness session; the
-    /// chat box goes nowhere but the main chat now, so it drafts the follow-up
-    /// instead and lets the orchestrator's `continue_agent` do the resuming —
-    /// which carries the agent's context, where the old route only carried its
-    /// session id.
+    /// How an unattended run gets picked up and corrected: point the next turn
+    /// at its conversation without leaving the UI.
     #[test]
-    fn r_drafts_a_follow_up_for_the_selected_agent() {
+    fn r_points_the_next_turn_at_the_selected_agents_conversation() {
         let mut app = panel_with_agents();
-        press(&mut app, KeyCode::Char('r'));
-
-        assert_eq!(app.workspace, Workspace::Chat);
-        assert!(
-            app.input.contains("port the parser"),
-            "the agent is named in the draft: {:?}",
-            app.input
+        // And drops the binding, so pressing it from inside the main chat sends
+        // the next turn to this agent rather than to the orchestrator.
+        assert_eq!(
+            press(&mut app, KeyCode::Char('r')),
+            Some(Action::NewThread)
         );
-        // Drafted, not sent: which agent is the key's decision, what to say is
-        // not.
-        assert_eq!(app.cursor, app.input.len());
-        // And the chat box is not quietly repointed at that agent's session.
-        assert_eq!(app.resume, Resume::Fresh);
-        assert_eq!(app.session, None);
+        assert_eq!(app.resume, Resume::Session("sess-aaa11111".into()));
+        assert_eq!(app.workspace, Workspace::Chat);
     }
 
     #[test]

@@ -69,6 +69,10 @@ pub enum Slash {
     /// already holding the context, start a new one, arm a schedule, or set a
     /// goal. The screen gets the decision and the reason for it.
     Main(String),
+    /// `/main` with nothing after it — go and live in the main chat rather than
+    /// send one instruction to it. The same destination as `⏎` on the fleet's
+    /// pinned row.
+    EnterMain,
     /// Stop an agent, by an id prefix or its name.
     Stop(String),
     /// Put an agent's output on screen.
@@ -142,10 +146,9 @@ pub fn parse(line: &str) -> Option<Slash> {
             Ok(request) => Slash::Config(request),
             Err(said) => Slash::Refused(said),
         },
-        // `/new` alone used to mean a fresh conversation. There is one now and
-        // it is pinned, so it clears the screen and says so — see the arm in
-        // `apply_slash`. `/new schedule` is the form ladder's front door and is
-        // untouched.
+        // `/new` alone is still a fresh conversation, which is what it has
+        // always meant — and now also the way out of the main chat, since both
+        // are the one binding. `/new schedule` is the form ladder's front door.
         "new" => match kind_from(arg) {
             Some(ws) => Slash::NewKind(ws),
             None if arg.is_empty() => Slash::New,
@@ -243,9 +246,13 @@ pub fn parse(line: &str) -> Option<Slash> {
         }
         // `/main` and `/jod` both, because the second is what people type when
         // they mean "you decide" and the first is what the CLI verb is called.
+        //
+        // Bare `/main` is not a missing argument. It mirrors the CLI, where
+        // `jod main "…"` sends and `jod main` opens the chat — and it is the
+        // keyboard's way to the same place `⏎` on the fleet's top row goes.
         "main" | "jod" => {
             if arg.is_empty() {
-                Slash::NeedsArgument("/main <instruction>")
+                Slash::EnterMain
             } else {
                 Slash::Main(arg.to_string())
             }
@@ -369,13 +376,15 @@ pub const HELP: &[(&str, &str)] = &[
     ),
     (
         "/new [kind]",
-        "clear the screen, or start a new schedule/goal/hook/task",
+        "a fresh conversation, or a new schedule/goal/hook/task",
     ),
-    ("/sessions", "the fleet — the agents the chat started"),
+    ("/sessions", "conversations you can pick up"),
+    ("/resume <id>", "continue one of them"),
     ("/delegate <prompt>", "run it in the background (Alt-B)"),
+    ("/main", "go into the main chat — the pinned one"),
     (
         "/main <instruction>",
-        "the same as typing it — this chat is the main chat",
+        "send it one instruction and stay where you are",
     ),
     ("/agents", "the fleet (Alt-A, Alt-K f)"),
     ("/watch <id>", "put an agent's output on screen"),
@@ -871,23 +880,14 @@ mod tests {
     /// how Enter used to be swallowed instead of running the command.
     #[test]
     fn a_command_needing_an_argument_completes_to_itself() {
-        assert_eq!(lines("/watch"), vec!["/watch "]);
+        assert_eq!(lines("/resume"), vec!["/resume "]);
         assert_eq!(lines("/harness"), vec!["/harness "]);
         // Trimmed, the only suggestion is what is already typed — so there is
         // nothing to accept and Enter must run it.
-        for input in ["/watch", "/harness"] {
+        for input in ["/resume", "/harness"] {
             let only = &completions(input, &fleet(&[]))[0].line;
             assert_eq!(only.trim_end(), input.trim_end());
         }
-    }
-
-    /// `/resume` is no longer offered — the chat box cannot be repointed at
-    /// another session — but it is still *understood*, so the muscle memory
-    /// gets the sentence naming `/watch` rather than "unknown command".
-    #[test]
-    fn resume_is_answered_even_though_it_is_no_longer_suggested() {
-        assert!(lines("/resume").is_empty(), "it is not advertised");
-        assert_eq!(parse("/resume ses-1"), Some(Slash::Resume("ses-1".into())));
     }
 
     #[test]
@@ -1107,10 +1107,11 @@ mod tests {
             parse("/jod do the thing"),
             Some(Slash::Main("do the thing".into()))
         );
-        assert_eq!(
-            parse("/main"),
-            Some(Slash::NeedsArgument("/main <instruction>"))
-        );
+        // Bare `/main` is the other verb, not a missing argument: it goes into
+        // the chat rather than sending to it, mirroring `jod main` with no
+        // words. Refusing it left the pinned chat with no keyboard route in.
+        assert_eq!(parse("/main"), Some(Slash::EnterMain));
+        assert_eq!(parse("/jod"), Some(Slash::EnterMain));
     }
 
     /// Each of these does something irreversible or unguessable without its

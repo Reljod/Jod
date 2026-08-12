@@ -1187,7 +1187,7 @@ fn draw_fleet(f: &mut Frame, app: &App, area: Rect) {
                     .borders(Borders::ALL)
                     .border_style(fg(USER))
                     .title(" the chat ")
-                    .title_bottom(fit_verbs(" ⏎ open ", right.width)),
+                    .title_bottom(fit_verbs(" ⏎ enter · /new leaves ", right.width)),
             ),
             right,
         );
@@ -1303,7 +1303,7 @@ fn main_line(
         ));
     }
     let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
-    let marker = "  ⏎ open";
+    let marker = "  ⏎ enter";
     let (name, marked) = fit_row(used, "main", marker, inner);
     spans.push(Span::styled(name, bold(USER)));
     if marked {
@@ -1323,7 +1323,7 @@ fn main_detail(app: &App, width: u16) -> Vec<Line<'static>> {
         // Short enough to survive the pane at the design width — 48 cells —
         // rather than being clipped mid-sentence.
         Line::from(Span::styled(
-            " one conversation, and it never ends",
+            " the chat Jod keeps — pinned, and it never ends",
             fg(MUTED),
         )),
         Line::from(""),
@@ -1352,9 +1352,10 @@ fn main_detail(app: &App, width: u16) -> Vec<Line<'static>> {
         Line::from(""),
     ];
     for chunk in wrap(
-        "Everything you type goes here. It never does the work itself — it \
-         delegates, continues an agent that already has the context, arms a \
-         schedule, or sets a goal, and the agents below are what came of that.",
+        "⏎ goes in, and what you type there is an instruction. It never does \
+         the work itself — it delegates, continues an agent that already has \
+         the context, arms a schedule, or sets a goal, and the agents below \
+         are what came of that. /new leaves.",
         width.saturating_sub(4) as usize,
         2,
     ) {
@@ -4463,9 +4464,9 @@ mod tests {
         let screen = rendered(&a, 100, 20);
 
         assert!(screen.contains("the chat"), "{screen}");
-        assert!(screen.contains("⏎ open"), "{screen}");
+        assert!(screen.contains("⏎ enter"), "{screen}");
         assert!(
-            screen.contains("one conversation, and it never ends"),
+            screen.contains("pinned, and it never ends"),
             "it describes a conversation, uncut at the design width:\n{screen}"
         );
         // The detail pane's own footer, which is the half that is about the

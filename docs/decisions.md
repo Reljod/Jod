@@ -1478,47 +1478,54 @@ them and is watching. This cannot widen an unattended run — those are pinned t
 read-only where they are spawned, and
 [a chat you are watching may schedule; one that wandered off may not](#a-chat-you-are-watching-may-schedule-one-that-wandered-off-may-not).
 
-## The TUI had two conversations and called one of them the main chat
 
-`jod main "…"` wrote into a pinned conversation. A line typed into `jod tui` did
-not: the chat box minted a fresh conversation per turn, and `/main` was a
-separate verb that reached the pinned one and then left you typing into
-something else. Three things followed, and none of them looked like a bug from
-inside the code:
+## The main chat was somewhere you could send to, never somewhere you could be
 
-- **Reading and writing came apart.** `/main` handed the instruction over and
-  watched the orchestrator's run, so its reply filled the screen. The next line
-  you typed started a new conversation. You were reading one thread and adding
-  to another.
-- **Settings and turns disagreed.** `current_conversation` fell back to "the
-  conversation the watched run wrote", so after `/main` a `/model` landed on the
-  pinned chat while the next *prompt* did not. Two answers to "which
-  conversation am I in", one per question asked.
-- **The pinned chat had no front door at all.** `jod main` with no argument
-  printed twenty exchanges and exited; `jod conv` offered ls/show/fork/revert
-  and no `open`. The record outlived every process and no process would let you
-  sit in it. Attaching to a run was not a substitute: main is one run per
-  instruction, so every one of them has already exited.
+One conversation is pinned, titled `main`, and never ends. Until now nothing
+could open it. `jod main "…"` sent to it; `jod main` with no argument printed
+twenty exchanges and exited; `/main <instruction>` in the TUI handed an
+instruction over and left the chat box where it was. `jod conv` offered
+ls/show/fork/revert/goto and no `open`, and the only code path that ever bound
+the chat box to an existing conversation was a harness handoff. The record
+outlived every process and no process would let you sit in it.
 
-So the TUI holds one conversation and it is the pinned one. The chat box is
-bound to it at startup, and every line — typed plainly or after `/main` — goes
-through the same `hand_to_orchestrator` the CLI calls. What that costs is worth
-stating plainly, because each was a real verb:
+Attaching was not a substitute. The chat is **one run per instruction**, resumed
+through `Store::resume_for`, so every run it has ever had has already exited —
+`tmux attach` lands you in a finished session.
 
-- **`/resume <id>` is refused.** It pointed the chat box at an arbitrary harness
-  session, which is precisely the split being removed. The main chat resumes
-  itself from the session id on its own conversation.
-- **`/new` clears the screen.** It cannot start a second chat, because there is
-  nowhere for a second one to be.
-- **`r` on a fleet row drafts a follow-up** instead of repointing the chat box.
-  The orchestrator's `continue_agent` resumes a run *with its context*, which is
-  what the key was reaching for and more than the session id ever carried.
+So the pinned conversation is a **destination**: the fleet's first row, `⏎` to
+enter, `/main` with no argument as the keyboard route, `/new` to leave. Entering
+binds `Thread::conversation` and replays `live_window` — what the harness would
+actually be sent, so a compacted message is on disk and deliberately not on
+screen. Inside it a typed line goes to the orchestrator, which is what being in
+it means; everywhere else the chat box is unchanged.
 
-Two invariants hold this together rather than convention. The pin **moves** on
-`/harness`: `switch_harness` mints a conversation, and a pin left on the thread
-it just compacted away would send the next turn back to a chat nobody can reach,
-with the handoff summary stranded in it. And the fleet shows the chat as a
-**pinned first row**, outside the sort and outside the filter, collapsing the
-chat's own runs into it — one instruction is one run, so within a day the list
-was mostly identical `main` rows, burying the delegated work the list exists for
-while none of them was the chat you wanted back.
+Three details are load-bearing and none is cosmetic.
+
+**`in_main` is derived, never remembered.** A flag set on entry would be wrong
+the moment `/harness` ran: `switch_harness` mints a conversation and the pin
+moves to it, so the flag would point at the thread that was handed away. It is
+a store lookup against `pinned_conversation` every time it is asked.
+
+**The pin follows a harness switch.** `main_conversation` is get-or-create on
+`pinned = 1`. A pin left on the conversation a switch just compacted away would
+send the next instruction back to a chat nobody can reach, with the handoff
+summary stranded in it. Cleared and re-set in the switch's own transaction,
+because the partial unique index permits exactly one pinned row. That is also
+why `hand_to_orchestrator` gained a `carried` parameter — the target harness has
+no session for the thread, so the summary has to travel in the framing.
+
+**The fleet row stands for the conversation, not for a run.** It is outside the
+sort and outside the filter — an "always on top" a search term can remove is a
+row you have to remember how to get back to — and it collapses every `main` run
+into itself. One instruction is one run, so within a day the list was mostly
+identical `main` rows burying the delegated work the list exists for, and not
+one of them was the chat. The run verbs (`s`, `a`, `r`) say why they do not
+apply rather than doing nothing, because a key that silently no-ops is how a
+footer stops being believed. The cursor still starts on the first agent:
+managing the work is what opening the fleet means.
+
+Nothing deletes a conversation — there is no such verb in the store, and the
+fleet is not an editable list, so `x` is not offered on it. The main chat's
+permanence rests on that plus get-or-create: if it were ever gone, the next
+thing to ask for it would make it again.
