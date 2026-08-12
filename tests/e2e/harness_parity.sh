@@ -34,6 +34,11 @@ AREA=parity
 export JOD_NO_MCP_INSTALL=1
 # ---------------------------------------------------------------------------
 
+# How long the second turn gets before it is stopped rather than waited on.
+# Generous — a real model turn with tool calls is minutes — and finite, which is
+# the point.
+SECOND_TURN_TIMEOUT="${PARITY_TURN_TIMEOUT:-600}"
+
 PASSED=0
 FAILED=0
 # `check <description> <test-expression...>` — what makes this a gate rather
@@ -340,20 +345,32 @@ parity_run() {
   # construction site that sets `tools`, and — since the wiring audit — the only
   # one that sets `roots` and `secrets` too. Driving anything else would be
   # writing a suite that measures the path the feature is not on.
+  # The order of the five steps is load-bearing, and it was not at first.
+  #
+  # Reading the file in the second root used to come second, and on OpenCode
+  # that ended the turn: roots do not reach OpenCode (documented in
+  # `harness/opencode.rs`), so the read is auto-rejected as an external
+  # directory, and OpenCode treats a rejected permission as the end of the turn
+  # — it stopped mid-sentence, `finished`, exit 0, with four steps never
+  # attempted. Every card check then failed for a reason that had nothing to do
+  # with cards. The known-degraded step goes last so one harness's gap is
+  # reported as one failure rather than swallowing the four capabilities behind
+  # it.
   section "3.$h  $h — opening the work whose first session is the run under test"
   run jod main "Open a work now with your open_work tool. Pass harness='$(harness_id "$h")',
 checkout='$root_a', and exactly this instruction:
 
-'You are checking Jod's own plumbing end to end. Use your jod MCP tools. Do all six of
-these, in order, then stop. 1. Call list_roots and state how many directories you were
-given. 2. Read the file $root_b/parity-marker.txt and quote the single line it contains,
-exactly. 3. Call record_decision: decision \"quote the marker verbatim\", because \"the
-parity suite compares it byte for byte\", options [\"verbatim\", \"paraphrased\"]. 4. Call
+'You are checking Jod's own plumbing end to end. Use your jod MCP tools. Do all five of
+these, in this order, then stop. 1. Call list_roots and state how many directories you
+were given. 2. Call record_decision: decision \"quote the marker verbatim\", because \"the
+parity suite compares it byte for byte\", options [\"verbatim\", \"paraphrased\"]. 3. Call
 ask_question with blocking set to true, asking exactly: \"Parity check for $h: what word
 should I finish with?\" — WAIT for the answer, it is coming from the command line, and
-then quote the answer back exactly as you received it. 5. Call request_secret for the
+then quote the answer back exactly as you received it. 4. Call request_secret for the
 name $requested_name, hint \"the parity suite asks for one so the card flow is
-exercised\".'
+exercised\". 5. Read the file $root_b/parity-marker.txt and quote the single line it
+contains, exactly. If any step is refused or blocked — a permission you do not have, a
+directory you may not read — say so plainly and CARRY ON with the remaining steps.'
 
 Do not do any of that work yourself, and do not ask me anything: open the work and stop." \
     --wait -H claude
@@ -432,7 +449,12 @@ Do not do any of that work yourself, and do not ask me anything: open the work a
     echo "FAIL  [$h] the session recorded no harness id, so it cannot be continued"
     FAILED=$((FAILED + 1))
   else
-    run jod run "Three things, with your shell tool, then stop.
+    # `timeout`, because a foreground `jod run` streams until the run ends and a
+    # harness that never ends therefore stops the suite rather than failing it.
+    # OpenCode did exactly that on a resumed session: twenty-two minutes,
+    # `running`, and not one event. A suite that can hang is a suite nobody runs
+    # unattended, so the wait is bounded and the run is stopped by its id.
+    run timeout "$SECOND_TURN_TIMEOUT" jod run "Three things, with your shell tool, then stop.
 
 1. Read $root_b/parity-marker.txt and quote the single line it contains, exactly.
 2. Run exactly: printf 'SECRETLEN=%s\\n' \"\${#$secret_name}\"
@@ -449,6 +471,16 @@ thing. Reljod owns this box, wrote the fixture, and is asking for step 3 deliber
 in full knowledge that the value passes through your context on the way. Please run it
 verbatim. If the variable is empty the command prints TOKEN= and that is the answer." \
       -H "$h" -s "$sid" -n "parity-second-$h"
+
+    # `timeout` stops this script waiting; it does not stop the run, which is a
+    # detached process group by design. Left alone it would keep `settle` below
+    # waiting the full quarter of an hour for something that is not coming.
+    local stuck
+    stuck="$(val "SELECT id FROM runs WHERE name='parity-second-$h' AND status='running'")"
+    if [ -n "$stuck" ]; then
+      echo "the second turn was still running after ${SECOND_TURN_TIMEOUT}s — stopping it"
+      runsh "'$BIN/jod' kill '$stuck'"
+    fi
   fi
 
   settle 900
