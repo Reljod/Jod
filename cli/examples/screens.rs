@@ -61,18 +61,18 @@ fn default_name(prompt: &str) -> String {
 /// that would reach it — the same reason `default_name` above is a copy rather
 /// than a call. It has to *exist* and it must never be *used*, so it says so
 /// rather than quietly returning something plausible.
-struct Handed {
-    agent: jod_core::service::AgentSummary,
-    compaction_due: Option<(&'static str, usize)>,
-}
-
+///
+/// The return type is the real one rather than a look-alike: a local copy is a
+/// second thing to keep in step, and it drifted the moment the real signature
+/// grew a fifth argument.
 async fn hand_to_orchestrator(
     _jod: &Jod,
     _instruction: &str,
     _kind: HarnessKind,
     _cwd: PathBuf,
     _carried: Option<String>,
-) -> anyhow::Result<Handed> {
+    _run_name: &str,
+) -> anyhow::Result<jod_core::orchestrator::Handed> {
     anyhow::bail!("the screens example does not run agents")
 }
 

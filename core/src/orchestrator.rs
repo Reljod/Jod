@@ -44,9 +44,13 @@
 //!
 //! Compaction itself is a delegated run too, for the same reason routing is.
 
+use std::path::PathBuf;
+
 use serde::{Deserialize, Serialize};
 
 use crate::error::{JodError, Result};
+use crate::harness::{HarnessKind, PermissionPolicy, SpawnRequest, ToolAccess};
+use crate::service::{AgentSummary, Jod, RunConversation};
 use crate::store::Store;
 
 /// How much transcript the main chat carries before it is worth compacting.
@@ -362,6 +366,138 @@ pub fn orchestrator_preamble() -> &'static str {
      Answer in one or two sentences: what you did with it, and who has it now. \
      Say plainly when you delegated to an existing run rather than a new one, \
      and why — a routing decision nobody can see is one nobody can correct."
+}
+
+/// What [`hand_to_orchestrator`] did, for a caller that has its own way of
+/// saying so. The CLI prints; the TUI pushes a notice; the Telegram bridge
+/// edits a progress bubble.
+pub struct Handed {
+    pub agent: AgentSummary,
+    /// `(reason, chars)` when the live window has grown past a threshold.
+    pub compaction_due: Option<(&'static str, usize)>,
+    /// The main chat this landed in. Returned rather than looked up again by
+    /// the caller, because "the pinned conversation" is a get-or-create and a
+    /// second resolution is a second chance to disagree with the first.
+    pub conversation_id: String,
+}
+
+/// Give an instruction to the pinned main chat.
+///
+/// **Every way into the main chat comes through here.** `jod main`, the TUI's
+/// `/main`, and the Telegram bridge all call this one function, because "which
+/// conversation, which tools, which permission mode" is a set of decisions with
+/// four bugs already behind it, and a second copy would be a second place for
+/// the fifth to hide. It lives in `core` rather than in the CLI for exactly that
+/// reason: the bridge is here, and a bridge that could not reach this function
+/// would have had to grow its own version of it.
+///
+/// `carried` is prior context the harness has no session for: after `/harness`,
+/// the pin moves to a conversation the target has never seen, so the summary of
+/// what came before has to travel in the framing or it is lost. `None` on every
+/// ordinary turn, where the harness's own session is holding the thread — and
+/// `None` from the Telegram bridge, which has no thread state of its own: a
+/// switch happens in the TUI, which holds the summary and passes it on its own
+/// next turn.
+///
+/// `run_name` is the other thing a caller varies, and it is cosmetic — the name
+/// a run answers to in `jod ls`. The console passes `main`; the bridge passes the
+/// chat's [`crate::telegram::session_key`] so a listing says which phone chat
+/// started a run. Everything load-bearing is fixed here.
+pub async fn hand_to_orchestrator(
+    jod: &Jod,
+    instruction: &str,
+    kind: HarnessKind,
+    cwd: PathBuf,
+    carried: Option<String>,
+    run_name: &str,
+) -> Result<Handed> {
+    let store = jod.store().ok_or(JodError::StoreRequired)?;
+    let id = store.main_conversation(kind, &cwd.display().to_string())?;
+    let now = chrono::Utc::now().timestamp_millis();
+
+    // Compaction is checked before the instruction goes out, not after: the
+    // right moment to summarise is *between* things, and doing it mid-turn
+    // would mean the turn that triggered it ran against the old window anyway.
+    let live = store.live_window(&id)?;
+    let chars: usize = live.iter().map(|m| m.text.len()).sum();
+    let compaction_due = should_compact(chars, store.last_human_ms(&id)?, now)
+        .map(|reason| (reason.as_str(), chars));
+
+    // The orchestrator is a harness run holding Jod's own tools, so it
+    // delegates by calling them rather than by describing what it would do.
+    // `Resume` keeps it one conversation across restarts.
+    //
+    // `spawn_agent_in(.., Existing)` and not `spawn_agent`: the plain form
+    // binds `RunConversation::New`, which minted a *second* conversation per
+    // instruction — unpinned, titled with the first line of the preamble, and
+    // holding the entire transcript, while the pinned `main` conversation this
+    // function had just fetched stayed empty. `jod main` read the pinned one
+    // and truthfully reported nothing there. A main chat that does not
+    // accumulate is not a chat.
+    let agent = jod
+        .spawn_agent_in(
+            SpawnRequest {
+                name: run_name.to_string(),
+                harness: kind,
+                prompt: instruction.to_string(),
+                // The preamble, then whatever a harness switch left the new
+                // harness needing. That order and not the other one: the
+                // preamble is the standing brief — who this run is and what its
+                // verbs are — and the summary is material it applies to. Leading
+                // with a transcript would have the model reading history before
+                // it knows what it is reading it for.
+                system: Some(match &carried {
+                    Some(context) => format!("{}\n\n{context}", orchestrator_preamble()),
+                    None => orchestrator_preamble().to_string(),
+                }),
+                cwd,
+                model: None,
+                // Not `Ask`. `Ask` is plan mode, and plan mode refuses every
+                // mutation — including the MCP tool calls that *are* this run's
+                // entire job. Caught by running it: the orchestrator dutifully
+                // called `schedule_list`, `list_agents` and `recall`, then reached
+                // for `ExitPlanMode`, could not find it, and wrote a plan file
+                // instead of arming the schedule it had been asked for.
+                //
+                // Its confinement is `ToolAccess`, not the permission mode. The
+                // mutations that matter here are Jod's own verbs, and those are
+                // already scoped by the access level; the permission axis bounds
+                // what it may do to the *machine*, which for a chat that only
+                // delegates should be little — but it cannot be nothing, or it
+                // cannot delegate at all.
+                permission: PermissionPolicy::AcceptEdits,
+                resume: store.resume_for(&id)?,
+                tools: Some(ToolAccess::Orchestrate),
+            },
+            RunConversation::Existing(id.clone()),
+        )
+        .await?;
+
+    // The spawn already recorded the instruction as this conversation's user
+    // turn; this call is what returns its id, and appending is keyed to the run
+    // so the second call finds the first row rather than writing a duplicate.
+    let message = store.append_prompt(&id, &agent.id, instruction)?;
+    store.touch_human(&id, now)?;
+    store.record_delegation(&Delegation {
+        id: 0,
+        conversation_id: id.clone(),
+        message_id: message,
+        kind: "orchestrate".into(),
+        run_id: Some(agent.id.clone()),
+        schedule_name: None,
+        goal_name: None,
+        // What it decided goes here once the run reports; this row exists from
+        // the moment the instruction is handed over, so a chat that was
+        // interrupted still shows what it was doing.
+        reason: String::new(),
+        at_ms: now,
+    })?;
+
+    Ok(Handed {
+        agent,
+        compaction_due,
+        conversation_id: id,
+    })
 }
 
 /// A delegation, as recorded.

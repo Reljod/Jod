@@ -94,9 +94,21 @@ The token is a bearer credential — anyone holding it *is* the bot. So:
    user send the bot one real message and confirm a reply comes back — that
    round trip, not the startup line, is the evidence this worked.
 
+   Then confirm the *other* half, which is the point of the bridge: `jod main`
+   in a terminal shows that message as a turn in the main chat. A message from
+   the phone is not a thread of its own — it is a turn at the same desk `jod
+   main` and the TUI sit at, resumed from the same session.
+   → [why](../../docs/decisions.md#the-phone-types-into-the-main-chat-not-into-a-chat-of-its-own)
+
 7. **Report.** What was written (say `.env` and the variable *names*, never
    the values), which ids are allowed, the harness and cwd the bridge uses,
    and the exact command to start it again.
+
+   Say two things plainly, because both surprise people. An allowlisted
+   message runs with Jod's orchestrator tools and in `accept-edits` — the
+   allowlist is the only gate, so every id on it can drive the main chat. And
+   `/new` from the phone starts the main chat over *everywhere*, not just in
+   that chat; it drops the harness session, never the transcript.
 
 ## Making it resident
 

@@ -1245,6 +1245,56 @@ codebase's own answer rather than a copy of it. A background agent that can
 create background agents has no bound at all, and it multiplies while nobody is
 reading.
 
+## The phone types into the main chat, not into a chat of its own
+
+Every Telegram message used to spawn with `RunConversation::New`. The bridge
+resumed the *harness* session out of `channel_sessions`, so a phone thread felt
+continuous — but on Jod's side each message minted a fresh one-turn
+conversation, and the main chat, the conversation Jod is actually for, heard
+none of it. Ask Jod something from the sofa and there was no trace of it at the
+desk; ask at the desk and the phone had never heard of it. `jod conv ls` showed
+a pile of one-turn rows and no phone conversation at all, and the
+`channel_sessions.conversation_id` column added to record where a chat's turns
+went was never written by anything.
+
+A second desk is the wrong model. There is one person here. The main chat is
+"the desk you sit at", and which room you are standing in when you say something
+is not a reason for Jod to file it somewhere else. So the bridge now calls the
+same `hand_to_orchestrator` that `jod main` and the TUI's `/main` call, and that
+function moved into `core` for the purpose — the bridge lives there, and a
+bridge that could not reach it would have grown its own copy of the three
+decisions it makes.
+
+**This widens what a phone message can do, and that is the part worth stating.**
+A phone message used to run with `tools: None` and in `Ask` — plan mode. It
+cannot stay that way, because the main chat's whole job is calling Jod's own
+verbs, and plan mode refuses them; a session where every other turn could not
+see those tools is a session whose transcript references tools that are gone.
+The discriminator the codebase already settled on is *whether anybody is
+looking* — and a phone message is Reljod, waiting, with a progress bubble on his
+screen. That meets the condition the TUI's chat box meets. The gate is the
+allowlist, which is default-deny and always was.
+
+Three consequences are accepted rather than worked around. A group chat's
+allowlisted members write into Reljod's main chat, because the allowlist is his
+own ids and a shared desk is the point. `/new` from a phone clears the desk
+*everywhere* — so it says so, and it drops only the harness session id, never
+the transcript, because Jod owns the transcript and a reset that destroyed the
+record would leave the main chat unauditable from whichever surface reset it
+last.
+
+**And concurrent turns on the main chat are still unserialized.** Nothing
+queues them: two `jod main` invocations seconds apart already resumed the same
+session from two processes, and the bridge now joins that — it spawns each
+message in its own task on purpose, so the poll loop keeps acknowledging while a
+run takes half an hour. The exposure is wider than it was, because a phone makes
+it easy to send a second message before the first has answered. It degrades
+rather than corrupts: both runs are bound to the conversation, so Jod's own
+transcript records both, and it is the harness's session file that may lose a
+turn. A per-conversation queue is the fix and is not written yet; it is a real
+decision with a cost — a long run would hold up the next message — and it should
+be made deliberately rather than smuggled in with the routing change.
+
 ## Six guards were green, and none of them were guarding
 
 Every one of these passed. Every one would have kept passing through the change
