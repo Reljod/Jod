@@ -21,9 +21,11 @@
 //!
 //! [`Ticker::tick_mail`] is the **authoritative** path for agent-to-agent mail:
 //! [`crate::team::wake_order`] decides who may be woken, `claim_wake` rate-limits
-//! it across ticks, and [`crate::store::Store::drain_inbox`] takes the mail off
-//! the bus in one statement. Card answers and human nudges travel a different
-//! road, [`crate::delivery`], which queues against a *conversation*.
+//! it across ticks, and `Store::take_mail` takes the mail off the bus in one
+//! statement — recording *both* that it went and that it may not go twice, which
+//! the drain-then-mark version it replaced could be, and was, half-done. Card
+//! answers and human nudges travel a different road, [`crate::delivery`], which
+//! queues against a *conversation*.
 //!
 //! Two roads is one more than the design wants, and merging them was examined
 //! and deliberately deferred. The full reasoning is at the top of
@@ -1165,7 +1167,7 @@ impl Ticker {
         // window — and, on the paths that forgot the second half, a permanent
         // state — in which a message an agent is already reading still reports
         // as waiting. See [`Store::take_mail`].
-        let taken = store.take_mail(&held.team, &held.member.name)?;
+        store.take_mail(&held.team, &held.member.name)?;
         store.set_member_status(&held.team, &held.member.name, MemberStatus::Busy)?;
         store.bind_member(&held.team, &held.member.name, Some(&agent.id), None)?;
         eprintln!(

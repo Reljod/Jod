@@ -16,6 +16,7 @@ use super::data::{
 };
 use super::delivery::Verdict;
 use super::graph::GraphView;
+use super::diff;
 use super::fleet::TreeState;
 use super::mention::Mention;
 use super::picker::Picker;
@@ -53,6 +54,14 @@ pub enum Entry {
     Done { text: String, failed: bool },
     /// Something Jod itself wants to say.
     Notice(String),
+    /// A file edit, as a diff rather than as a one-line summary.
+    ///
+    /// Its own entry rather than a decorated `Tool`, because it is the one tool
+    /// call whose *arguments* are the interesting part. Everything else is
+    /// summarised to one line on purpose; an edit summarised to one line is the
+    /// difference between watching an agent work and being able to trust it
+    /// afterwards.
+    Diff(diff::Edit),
     /// A line the harness printed that we could not classify.
     Raw(String),
 }
@@ -1712,11 +1721,20 @@ impl App {
                 }
             }
             AgentEvent::Message { text } => self.push(Entry::Agent(text.clone())),
-            AgentEvent::ToolCall { name, input } => self.push(Entry::Tool {
-                name: name.clone(),
-                detail: input.as_ref().and_then(tool_detail),
-                failed: false,
-            }),
+            AgentEvent::ToolCall { name, input } => {
+                // A file edit becomes a diff; everything else keeps its
+                // one-line summary. The call still gets its `Tool` line above
+                // the diff, so the transcript reads as "it did this, and here
+                // is what it was".
+                self.push(Entry::Tool {
+                    name: name.clone(),
+                    detail: input.as_ref().and_then(tool_detail),
+                    failed: false,
+                });
+                if let Some(edit) = input.as_ref().and_then(|i| diff::from_tool(name, i)) {
+                    self.push(Entry::Diff(edit));
+                }
+            }
             AgentEvent::ToolResult {
                 name,
                 summary,

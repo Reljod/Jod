@@ -22,6 +22,7 @@ use jod_core::PermissionPolicy;
 
 use super::app::{absolute, short_duration, since, until, App, Entry, JobState, Overlay};
 use super::data::{Outcome, Source};
+use super::diff;
 use super::graph::{self, Direction as EdgeDirection};
 use super::keys;
 use super::fleet;
@@ -1520,6 +1521,10 @@ fn draw_keybar(f: &mut Frame, app: &App, area: Rect) {
             "type to narrow · ↑↓ choose · ⏎ adds it read-only".to_string(),
             "Esc cancels",
         ),
+        Overlay::Search { .. } => (
+            "searching every transcript · ⏎ opens the conversation".to_string(),
+            "Esc closes",
+        ),
         // The rail is checked before the screen's own filter and before the
         // screen's own verbs, because while it has the keyboard the screen's
         // verbs are *not* in force — printing `s stop` beside a rail where `x`
@@ -1758,6 +1763,11 @@ fn draw_overlay(f: &mut Frame, app: &App) {
             name, scope, value, ..
         } => draw_secret(f, name, *scope, value),
         Overlay::Picker(p) => draw_picker(f, p),
+        Overlay::Search {
+            query,
+            selected,
+            hits,
+        } => draw_search(f, query, *selected, hits),
     }
 }
 
@@ -1810,6 +1820,70 @@ fn draw_jobs(f: &mut Frame, app: &App) {
                 .border_style(fg(MUTED))
                 .title(" background shells ")
                 .title_bottom(" output is in the transcript · any key closes "),
+        ),
+        panel,
+    );
+}
+
+/// Full-text search over every transcript.
+///
+/// Each row says **which conversation** the turn is in, because the search is
+/// across all of them and a line of prose with no home is not something you can
+/// decide to open. `messages_fts` covers compacted messages too, so this
+/// reaches turns that have already fallen out of every context window — which
+/// is most of the reason to have it.
+fn draw_search(f: &mut Frame, query: &str, selected: usize, hits: &[crate::tui::data::Hit]) {
+    let screen = f.area();
+    let width = screen.width.saturating_sub(8).min(110).max(40);
+    let height = (hits.len() as u16 + 6).min(screen.height.saturating_sub(2)).max(6);
+    let panel = centred(screen, width, height);
+    let room = width.saturating_sub(4) as usize;
+
+    let mut lines: Vec<Line> = vec![
+        Line::from(vec![
+            Span::styled("  ▸ ".to_string(), fg(USER)),
+            Span::styled(query.to_string(), fg(AGENT)),
+            Span::styled("▏".to_string(), fg(USER)),
+        ]),
+        Line::from(""),
+    ];
+    if query.trim().is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  type to search every conversation, compacted turns included".to_string(),
+            fg(MUTED),
+        )));
+    } else if hits.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  no turn matches".to_string(),
+            fg(MUTED),
+        )));
+    }
+    let rows = height.saturating_sub(5) as usize;
+    let first = window_start(selected, rows.max(1), hits.len());
+    for (at, hit) in hits.iter().enumerate().skip(first).take(rows.max(1)) {
+        let here = at == selected;
+        lines.push(Line::from(vec![
+            Span::styled(if here { "▸ " } else { "  " }.to_string(), bold(USER)),
+            Span::styled(
+                format!("{:<10}", cut(&hit.title, 10)),
+                if here { bold(AGENT) } else { fg(MUTED) },
+            ),
+            Span::styled(format!("{:<6}", cut(&hit.who, 6)), fg(MUTED)),
+            Span::styled(
+                cut(&hit.text, room.saturating_sub(20)),
+                if here { fg(AGENT) } else { fg(MUTED) },
+            ),
+        ]));
+    }
+
+    f.render_widget(Clear, panel);
+    f.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(fg(USER))
+                .title(" search every transcript ")
+                .title_bottom(" ⏎ opens that conversation · ↑↓ choose · Esc closes "),
         ),
         panel,
     );
@@ -3929,6 +4003,13 @@ fn draw_transcript(f: &mut Frame, app: &App, area: Rect) -> usize {
 
 /// One transcript entry as styled lines, already wrapped to `width`.
 fn render(entry: &Entry, width: u16) -> Vec<Line<'static>> {
+    // A diff is many lines with per-line styling, so it returns early rather
+    // than squeezing through the prefix/style/body shape the other entries
+    // share. That shape exists to make one-line entries uniform; a diff is the
+    // one entry whose whole point is that it is not one line.
+    if let Entry::Diff(edit) = entry {
+        return render_diff(edit, width);
+    }
     let (prefix, style, body) = match entry {
         Entry::You(t) => ("› ", bold(USER), t.clone()),
         Entry::Agent(t) => ("", fg(AGENT), t.clone()),
@@ -3977,6 +4058,44 @@ fn render(entry: &Entry, width: u16) -> Vec<Line<'static>> {
             Line::from(vec![Span::styled(lead, style), Span::styled(text, style)])
         })
         .collect()
+}
+
+/// A file edit, as a diff.
+///
+/// The path is a header rather than a prefix on every line: repeated down forty
+/// rows it would cost the width the code needs, and it is the same file
+/// throughout by construction.
+fn render_diff(edit: &diff::Edit, width: u16) -> Vec<Line<'static>> {
+    let room = (width as usize).saturating_sub(6);
+    let mut lines = vec![Line::from(vec![
+        Span::styled("  ± ".to_string(), fg(WARN)),
+        Span::styled(edit.path.clone(), bold(AGENT)),
+        Span::styled(
+            format!("  +{} -{}", edit.added(), edit.removed()),
+            fg(MUTED),
+        ),
+    ])];
+    for line in &edit.lines {
+        let colour = match line {
+            diff::Line::Added(_) => GOOD,
+            diff::Line::Removed(_) => BAD,
+            diff::Line::Context(_) => MUTED,
+        };
+        lines.push(Line::from(Span::styled(
+            // The sign is inside the styled text rather than a separate span:
+            // it has to survive `NO_COLOR`, and a reader who cannot tell red
+            // from green reads this column instead of the colour.
+            format!("    {}{}", line.sign(), cut(line.text(), room)),
+            fg(colour),
+        )));
+    }
+    if edit.elided > 0 {
+        lines.push(Line::from(Span::styled(
+            format!("    … {} more lines", edit.elided),
+            fg(MUTED),
+        )));
+    }
+    lines
 }
 
 /// Break text to fit, on word boundaries where possible.
@@ -7252,6 +7371,51 @@ mod tests {
         assert!(!card_border(&base(CardKind::Decision, Importance::Normal, false))
             .add_modifier
             .contains(Modifier::BOLD));
+    }
+
+    // ---- searching every transcript ----
+
+    /// The search is across *every* conversation, so a hit that did not say
+    /// where it came from would be a line of prose you cannot decide to open.
+    #[test]
+    fn the_search_names_the_conversation_each_hit_is_in() {
+        let mut a = app();
+        a.overlay = Overlay::Search {
+            query: "lexer".into(),
+            selected: 0,
+            hits: vec![
+                crate::tui::data::Hit {
+                    conversation_id: "conv-a".into(),
+                    title: "the parser".into(),
+                    who: "agent".into(),
+                    text: "porting the lexer now".into(),
+                },
+                crate::tui::data::Hit {
+                    conversation_id: "conv-b".into(),
+                    title: "the deploy".into(),
+                    who: "you".into(),
+                    text: "does the lexer matter here".into(),
+                },
+            ],
+        };
+        let frame = rendered(&a, 120, 24);
+        assert!(frame.contains("the parser"), "{frame}");
+        assert!(frame.contains("the deploy"), "{frame}");
+        assert!(frame.contains("porting the lexer"), "{frame}");
+        assert!(frame.contains("opens that conversation"), "{frame}");
+    }
+
+    /// An empty box says what it is for rather than listing every message ever.
+    #[test]
+    fn an_empty_search_box_says_what_it_searches() {
+        let mut a = app();
+        a.overlay = Overlay::Search {
+            query: String::new(),
+            selected: 0,
+            hits: vec![],
+        };
+        let frame = rendered(&a, 120, 24);
+        assert!(frame.contains("compacted turns included"), "{frame}");
     }
 
     // ---- the fleet tree ----

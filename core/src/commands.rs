@@ -437,17 +437,109 @@ fn describe(text: &str) -> String {
 /// front matter of a skill is hand-written and frequently not valid YAML, and a
 /// parser that rejects the whole file over an unquoted colon somewhere else
 /// would lose a description that is sitting right there in plain sight.
+///
+/// It has to understand block scalars, though, because *this repository's own
+/// skills* are written with them:
+///
+/// ```yaml
+/// description: >
+///   Use before opening or creating a pull request…
+/// ```
+///
+/// Taking whatever follows the colon gave every one of them the description
+/// `>`, which is worse than no description at all — the palette's one
+/// distinguishing column, identical on every row. It survived review and a full
+/// green suite, and was noticed the first time a caller ran `jod commands ls`
+/// against a real repository. That is the third defect in this build to hide in
+/// code nothing called yet, and the reason the entry point matters as much as
+/// the parser does.
 fn front_matter_description(text: &str) -> Option<String> {
     let block = front_matter(text)?;
-    for line in block.lines() {
-        if let Some(rest) = line.trim().strip_prefix("description:") {
-            let value = rest.trim().trim_matches(['"', '\'']).trim();
+    let lines: Vec<&str> = block.lines().collect();
+    for (i, line) in lines.iter().enumerate() {
+        let Some(rest) = line.trim_start().strip_prefix("description:") else {
+            continue;
+        };
+        let rest = rest.trim();
+        if let Some(fold) = block_scalar(rest) {
+            let value = read_block_scalar(&lines[i + 1..], indent_of(line), fold);
             if !value.is_empty() {
-                return Some(value.to_string());
+                return Some(value);
             }
+            continue;
+        }
+        let value = rest.trim_matches(['"', '\'']).trim();
+        if !value.is_empty() {
+            return Some(value.to_string());
         }
     }
     None
+}
+
+/// Whether `rest` is a block-scalar header, and whether it folds.
+///
+/// `>` folds newlines into spaces, `|` keeps them. Both may carry an indentation
+/// digit and a chomping indicator — `>-`, `|+`, `>2-` are all legal — and
+/// anything after that means this is ordinary text that merely begins with the
+/// character, so it is not a header at all.
+fn block_scalar(rest: &str) -> Option<bool> {
+    let mut chars = rest.chars();
+    let folded = match chars.next()? {
+        '>' => true,
+        '|' => false,
+        _ => return None,
+    };
+    // The digit and the chomping indicator may appear in either order in the
+    // wild; accepting at most one of each, and nothing else, keeps a line like
+    // `> not really a header` out.
+    let (mut digits, mut chomps) = (0, 0);
+    for c in chars {
+        match c {
+            '0'..='9' => digits += 1,
+            '-' | '+' => chomps += 1,
+            _ => return None,
+        }
+    }
+    (digits <= 1 && chomps <= 1).then_some(folded)
+}
+
+/// The lines of a block scalar, gathered and joined.
+///
+/// A block ends at the first line indented no further than its key — that is
+/// what separates the description from the next front-matter field. Blank lines
+/// are kept while the block continues, because a blank line inside a folded
+/// scalar is a real paragraph break, and dropped at the end where they are
+/// merely the gap before the next key.
+fn read_block_scalar(rest: &[&str], key_indent: usize, folded: bool) -> String {
+    let mut body: Vec<&str> = Vec::new();
+    for line in rest {
+        if line.trim().is_empty() {
+            body.push("");
+            continue;
+        }
+        if indent_of(line) <= key_indent {
+            break;
+        }
+        body.push(line.trim());
+    }
+    while body.last().is_some_and(|l| l.is_empty()) {
+        body.pop();
+    }
+    if folded {
+        // Newlines become spaces, which is what `>` means and what a
+        // single-line palette row wants anyway.
+        body.join(" ").split_whitespace().collect::<Vec<_>>().join(" ")
+    } else {
+        body.join("\n")
+    }
+}
+
+/// Leading spaces, counting a tab as one character.
+///
+/// Only ever compared against another line's, so the unit does not matter as
+/// long as it is consistent. YAML forbids tabs for indentation anyway.
+fn indent_of(line: &str) -> usize {
+    line.len() - line.trim_start().len()
 }
 
 /// The text between a leading `---` and the next `---`, if the file opens with
@@ -710,6 +802,114 @@ mod tests {
         assert_eq!(describe("# The Heading\n\nprose\n"), "The Heading");
         assert_eq!(describe("Just prose, no heading.\n"), "Just prose, no heading.");
         assert_eq!(describe(""), "");
+    }
+
+    /// Every skill in *this* repository must come back with a real
+    /// description.
+    ///
+    /// Against the real files rather than a fixture, deliberately. A fixture is
+    /// written from the same understanding as the parser, so it reproduces the
+    /// author's assumption instead of testing it — which is exactly how
+    /// `description: >` shipped, with a green suite, returning `>` for every
+    /// skill Jod knows about. These files are the ones that caught it.
+    #[test]
+    fn every_skill_in_this_repository_has_a_readable_description() {
+        let skills = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join(".agents/skills");
+        let entries: Vec<PathBuf> = std::fs::read_dir(&skills)
+            .expect("the repository's own skills must be there to check against")
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.join("SKILL.md").is_file())
+            .collect();
+        assert!(
+            entries.len() >= 5,
+            "expected the toolkit's skills at {}, found {}",
+            skills.display(),
+            entries.len()
+        );
+
+        for dir in entries {
+            let text = std::fs::read_to_string(dir.join("SKILL.md")).unwrap();
+            let description = describe(&text);
+            let name = dir.file_name().unwrap().to_string_lossy().to_string();
+            assert!(
+                !description.is_empty(),
+                "{name} has no description at all"
+            );
+            // The bug, named: a block-scalar header captured as the value.
+            assert!(
+                !matches!(description.as_str(), ">" | "|" | ">-" | ">+" | "|-" | "|+"),
+                "{name} kept the YAML block indicator as its description: {description:?}"
+            );
+            assert!(
+                description.len() > 20,
+                "{name}'s description is too short to be the real one: {description:?}"
+            );
+            assert!(
+                !description.contains('\n'),
+                "{name}'s folded description kept a newline: {description:?}"
+            );
+        }
+    }
+
+    /// A folded scalar becomes one line; a literal one keeps its newlines; and
+    /// both stop at the next key rather than swallowing the rest of the block.
+    #[test]
+    fn a_block_scalar_description_is_read_whole() {
+        let folded = "---\nname: x\ndescription: >\n  First line of the thing\n  and its continuation.\nother: not part of it\n---\n";
+        assert_eq!(
+            describe(folded),
+            "First line of the thing and its continuation."
+        );
+
+        let literal = "---\ndescription: |\n  Line one.\n  Line two.\nother: no\n---\n";
+        assert_eq!(describe(literal), "Line one.\nLine two.");
+    }
+
+    /// Chomping and indentation indicators are part of the header, not the
+    /// value: `>-`, `>+`, `|-`, `|+` and `>2-` all open a block.
+    #[test]
+    fn a_block_scalar_header_may_carry_indicators() {
+        for header in [">", ">-", ">+", "|-", "|+", ">2-"] {
+            let text = format!("---\ndescription: {header}\n  The real description.\n---\n");
+            assert_eq!(
+                describe(&text).replace('\n', " "),
+                "The real description.",
+                "header {header:?} was not recognised"
+            );
+        }
+    }
+
+    /// A value that merely starts with `>` is text, not a block header, and
+    /// must survive as itself.
+    #[test]
+    fn a_plain_value_beginning_with_an_angle_bracket_is_not_a_block() {
+        assert_eq!(
+            describe("---\ndescription: > 90% of runs finish\n---\n"),
+            "> 90% of runs finish"
+        );
+    }
+
+    /// The block ends where the indentation does. A description that ran on
+    /// into the next field would put `name:` and `allowed-tools:` in the
+    /// palette.
+    #[test]
+    fn a_block_scalar_stops_at_the_next_key() {
+        let text = "---\ndescription: >\n  Only this.\nname: not-this\nallowed-tools: nor-this\n---\n";
+        let got = describe(text);
+        assert_eq!(got, "Only this.");
+        assert!(!got.contains("name:"));
+    }
+
+    /// A blank line inside a folded block is a paragraph break, and the blank
+    /// lines before the next key are not part of the value.
+    #[test]
+    fn a_block_scalar_drops_the_blank_lines_that_follow_it() {
+        let text = "---\ndescription: >\n  First part.\n\n  Second part.\n\nname: x\n---\n";
+        assert_eq!(describe(text), "First part. Second part.");
     }
 
     /// Front matter that is not valid YAML must still give up its description.

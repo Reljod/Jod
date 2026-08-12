@@ -30,8 +30,8 @@
 //! It should, eventually, and the paragraph above says so — but it does not
 //! today, and a reader who assumes otherwise will look for a bug that is not
 //! there. Mail reaches an agent through [`crate::ticker::Ticker::tick_mail`],
-//! which asks [`crate::team::wake_order`] who may be woken and drains the bus
-//! with [`crate::store::Store::drain_inbox`]. This module is authoritative for
+//! which asks [`crate::team::wake_order`] who may be woken and takes the mail
+//! off the bus with [`Store::take_mail`]. This module is authoritative for
 //! **card answers and human nudges**; [`crate::team`] is authoritative for
 //! **agent mail**, including whether the recipient may be woken at all.
 //!

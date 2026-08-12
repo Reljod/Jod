@@ -28,6 +28,7 @@ mod delivery;
 pub mod data;
 mod graph;
 mod keys;
+mod diff;
 mod fleet;
 mod mention;
 mod picker;
@@ -545,8 +546,10 @@ async fn event_loop(
                         if app.rail.query(app.conversation.clone()) != asked {
                             refresh_rail(&jod, &mut app);
                         }
-                        // Cheap when no popup is up, which is almost always.
+                        // Both cheap when their overlay is shut, which is
+                        // almost always.
                         refresh_mention(&jod, &mut app);
+                        refresh_search(&jod, &mut app);
                     }
                     Event::Mouse(m) => match m.kind {
                         MouseEventKind::ScrollUp => app.scroll_up(3, app.transcript.len()),
@@ -2430,6 +2433,18 @@ fn on_chord(app: &mut App, key: KeyEvent) -> Option<Option<Action>> {
             app.rail.cycle(&ids);
             handled(None)
         }
+        // Search every transcript. `/` is the command palette in chat and the
+        // list filter everywhere else, so the one thing it could never be is
+        // this — hence a chord. Alt only: `Ctrl-S` is XON and the terminal eats
+        // it before this process sees it.
+        KeyCode::Char('s') if alt => {
+            app.overlay = Overlay::Search {
+                query: String::new(),
+                selected: 0,
+                hits: Vec::new(),
+            };
+            handled(None)
+        }
         // The full-screen picker. Alt only, and `p` because it is the picker —
         // `Ctrl-P` is a history motion in every shell that has one.
         //
@@ -2583,6 +2598,51 @@ fn on_overlay_key(app: &mut App, key: KeyEvent) -> Option<Action> {
         }
     }
 
+    // Search owns every key while it is up. The store lookup itself happens in
+    // the loop — `refresh_search` — because this function does no I/O.
+    if let Overlay::Search {
+        query,
+        selected,
+        hits,
+    } = &mut app.overlay
+    {
+        match key.code {
+            KeyCode::Char(c) => {
+                query.push(c);
+                *selected = 0;
+                return None;
+            }
+            KeyCode::Backspace => {
+                query.pop();
+                *selected = 0;
+                return None;
+            }
+            KeyCode::Up => {
+                *selected = selected.saturating_sub(1);
+                return None;
+            }
+            KeyCode::Down => {
+                if *selected + 1 < hits.len() {
+                    *selected += 1;
+                }
+                return None;
+            }
+            // Land in the conversation holding the turn. That is the whole
+            // point of the screen: finding the hit is not the job, getting to
+            // it is.
+            KeyCode::Enter => {
+                let found = hits.get(*selected).map(|h| h.conversation_id.clone());
+                app.overlay = Overlay::None;
+                return found.map(|c| Action::Sessions(sessions::Request::Open(c)));
+            }
+            KeyCode::Esc => {
+                app.overlay = Overlay::None;
+                return None;
+            }
+            _ => return None,
+        }
+    }
+
     // The full-screen picker, which owns every key while it is up for the same
     // reason the `@` popup does: it is a line being typed into plus a cursor.
     if let Overlay::Picker(p) = &mut app.overlay {
@@ -2703,7 +2763,11 @@ fn on_overlay_key(app: &mut App, key: KeyEvent) -> Option<Action> {
         // Both are handled above and cannot reach here; closing rather than
         // falling through keeps an unexpected state from stranding the
         // keyboard in an overlay nothing dismisses.
-        Overlay::Picker(_) | Overlay::Secret { .. } | Overlay::Prompt { .. } | Overlay::None => {
+        Overlay::Search { .. }
+        | Overlay::Picker(_)
+        | Overlay::Secret { .. }
+        | Overlay::Prompt { .. }
+        | Overlay::None => {
             app.overlay = Overlay::None;
             None
         }
@@ -4622,6 +4686,35 @@ fn bind_rail(jod: &Arc<Jod>, app: &mut App, thread: &Thread) {
 /// on. [`jod_core::rank::candidates_shared`] caches for a few seconds, so a
 /// burst of typing costs one walk and the rest are pointer copies — which is
 /// what makes "live on every keystroke" true rather than aspirational.
+/// Re-run the transcript search against what has been typed.
+///
+/// In the loop for the same reason `refresh_mention` is: `on_key` does no I/O,
+/// and this is a full-text query. Cheap when no search is open, which is almost
+/// always.
+fn refresh_search(jod: &Arc<Jod>, app: &mut App) {
+    let Overlay::Search { query, .. } = &app.overlay else {
+        return;
+    };
+    // An empty box searches for nothing rather than for everything: `fts_query`
+    // would return no expression anyway, and a list of every message ever is
+    // not a starting point anyone wants.
+    let found = if query.trim().is_empty() {
+        Vec::new()
+    } else {
+        data::search(jod, &query.clone(), SEARCH_HITS)
+    };
+    if let Overlay::Search { hits, selected, .. } = &mut app.overlay {
+        *hits = found;
+        if *selected >= hits.len() {
+            *selected = 0;
+        }
+    }
+}
+
+/// How many hits the search screen asks for. The store caps lower than this in
+/// its own right; the number here is what fits on a screen worth reading.
+const SEARCH_HITS: usize = 40;
+
 fn refresh_mention(jod: &Arc<Jod>, app: &mut App) {
     if app.mention.is_none() {
         return;
@@ -9222,6 +9315,94 @@ mod tests {
         app.watching = Some("run-1".into());
         app.busy = false;
         assert_eq!(press(&mut app, KeyCode::Esc), None);
+    }
+
+    // ---- searching every transcript ----
+
+    fn searching(hits: &[(&str, &str, &str)]) -> App {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        alt(&mut app, KeyCode::Char('s'));
+        if let Overlay::Search { hits: into, .. } = &mut app.overlay {
+            *into = hits
+                .iter()
+                .map(|(conversation, title, text)| data::Hit {
+                    conversation_id: (*conversation).to_string(),
+                    title: (*title).to_string(),
+                    who: "agent".into(),
+                    text: (*text).to_string(),
+                })
+                .collect();
+        }
+        app
+    }
+
+    #[test]
+    fn alt_s_opens_the_search() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        alt(&mut app, KeyCode::Char('s'));
+        assert!(matches!(app.overlay, Overlay::Search { .. }));
+    }
+
+    /// The overlay owns every key, so a query never becomes a prompt.
+    #[test]
+    fn typing_into_the_search_never_reaches_the_chat_box() {
+        let mut app = searching(&[]);
+        for c in "parser".chars() {
+            press(&mut app, KeyCode::Char(c));
+        }
+        let Overlay::Search { query, .. } = &app.overlay else {
+            panic!("still open");
+        };
+        assert_eq!(query, "parser");
+        assert_eq!(app.input, "");
+    }
+
+    /// Finding the hit is not the job; getting to it is.
+    #[test]
+    fn enter_opens_the_conversation_holding_the_hit() {
+        let mut app = searching(&[
+            ("conv-a", "the parser", "port the lexer"),
+            ("conv-b", "the deploy", "fix the CI"),
+        ]);
+        press(&mut app, KeyCode::Down);
+        assert_eq!(
+            press(&mut app, KeyCode::Enter),
+            Some(Action::Sessions(sessions::Request::Open("conv-b".into())))
+        );
+        assert_eq!(app.overlay, Overlay::None);
+    }
+
+    #[test]
+    fn the_arrows_stop_at_both_ends_of_the_hits() {
+        let mut app = searching(&[("conv-a", "one", "first"), ("conv-b", "two", "second")]);
+        press(&mut app, KeyCode::Up);
+        press(&mut app, KeyCode::Up);
+        let Overlay::Search { selected, .. } = &app.overlay else {
+            panic!("open");
+        };
+        assert_eq!(*selected, 0, "it does not run off the top");
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Down);
+        let Overlay::Search { selected, .. } = &app.overlay else {
+            panic!("open");
+        };
+        assert_eq!(*selected, 1, "nor off the bottom");
+    }
+
+    #[test]
+    fn esc_closes_the_search_without_going_anywhere() {
+        let mut app = searching(&[("conv-a", "the parser", "port the lexer")]);
+        assert_eq!(press(&mut app, KeyCode::Esc), None);
+        assert_eq!(app.overlay, Overlay::None);
+    }
+
+    /// Enter with nothing found closes rather than looking dead.
+    #[test]
+    fn enter_with_no_hits_closes_the_search() {
+        let mut app = searching(&[]);
+        assert_eq!(press(&mut app, KeyCode::Enter), None);
+        assert_eq!(app.overlay, Overlay::None);
     }
 
     // ---- the full-screen picker ----
