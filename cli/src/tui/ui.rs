@@ -4003,14 +4003,13 @@ fn draw_transcript(f: &mut Frame, app: &App, area: Rect) -> usize {
 
 /// One transcript entry as styled lines, already wrapped to `width`.
 fn render(entry: &Entry, width: u16) -> Vec<Line<'static>> {
-    // A diff is many lines with per-line styling, so it returns early rather
-    // than squeezing through the prefix/style/body shape the other entries
-    // share. That shape exists to make one-line entries uniform; a diff is the
-    // one entry whose whole point is that it is not one line.
-    if let Entry::Diff(edit) = entry {
-        return render_diff(edit, width);
-    }
     let (prefix, style, body) = match entry {
+        // Returns from inside the match rather than before it: the other
+        // entries share a prefix/style/body shape that makes one-line entries
+        // uniform, and a diff is the one entry whose whole point is that it is
+        // not one line. An arm keeps the match exhaustive, so a new `Entry`
+        // still fails the build here rather than falling through to a default.
+        Entry::Diff(edit) => return render_diff(edit, width),
         Entry::You(t) => ("› ", bold(USER), t.clone()),
         Entry::Agent(t) => ("", fg(AGENT), t.clone()),
         Entry::Thinking(t) => ("  ", fg(MUTED).add_modifier(Modifier::ITALIC), t.clone()),
@@ -7371,6 +7370,53 @@ mod tests {
         assert!(!card_border(&base(CardKind::Decision, Importance::Normal, false))
             .add_modifier
             .contains(Modifier::BOLD));
+    }
+
+    // ---- diffs render as diffs ----
+
+    /// **E7's check, the second half**: a rendered frame shows a file edit as a
+    /// diff rather than as a one-line summary.
+    #[test]
+    fn a_file_edit_renders_as_a_diff_with_the_path_as_a_header() {
+        let mut a = app();
+        a.apply(&jod_core::AgentEvent::ToolCall {
+            name: "Edit".into(),
+            input: Some(serde_json::json!({
+                "file_path": "cli/src/tui/ui.rs",
+                "old_string": "let width = 80;\nlet height = 24;\n",
+                "new_string": "let width = 100;\nlet height = 24;\n",
+            })),
+        });
+        let frame = rendered(&a, 120, 30);
+
+        assert!(frame.contains("cli/src/tui/ui.rs"), "the path is a header:\n{frame}");
+        assert!(frame.contains("+1 -1"), "and the shape of the change:\n{frame}");
+        assert!(
+            frame.contains("-let width = 80;"),
+            "the removed line, signed:\n{frame}"
+        );
+        assert!(
+            frame.contains("+let width = 100;"),
+            "the added line, signed:\n{frame}"
+        );
+        assert!(
+            frame.contains(" let height = 24;"),
+            "and unchanged context around it:\n{frame}"
+        );
+    }
+
+    /// Everything that is not an edit keeps its one-line summary, so the
+    /// transcript does not turn into a wall of diffs.
+    #[test]
+    fn a_tool_that_is_not_an_edit_still_renders_as_one_line() {
+        let mut a = app();
+        a.apply(&jod_core::AgentEvent::ToolCall {
+            name: "Bash".into(),
+            input: Some(serde_json::json!({ "command": "cargo test" })),
+        });
+        let frame = rendered(&a, 120, 30);
+        assert!(frame.contains("Bash · cargo test"), "{frame}");
+        assert!(!frame.contains('±'), "no diff header:\n{frame}");
     }
 
     // ---- searching every transcript ----
