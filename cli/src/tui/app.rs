@@ -15,6 +15,7 @@ use super::data::{
 };
 use super::delivery::Verdict;
 use super::graph::GraphView;
+use super::fleet::TreeState;
 use super::mention::Mention;
 use super::picker::Picker;
 use super::rail::RailState;
@@ -23,6 +24,8 @@ use super::workspace::{matches, ListState, Workspace};
 use jod_core::cards::Card;
 use jod_core::roots::Root;
 use jod_core::secrets::Scope;
+use jod_core::tree::{Node, NodeId};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 /// One line in the transcript, tagged with what produced it so the renderer can
@@ -325,6 +328,16 @@ pub struct App {
     pub candidates: Vec<Arc<Vec<String>>>,
     /// The `@` popup, while it is up.
     pub mention: Option<Mention>,
+
+    // ---- the fleet tree -------------------------------------------------
+    /// Works, their sessions and their runs, flattened by core in one pass.
+    /// Empty until a work exists, which is what keeps the fleet's older flat
+    /// list meaningful for a session that belongs to no work.
+    pub forest: Vec<Node>,
+    /// Which of those works are closed. Core's answer, not an inference: a
+    /// [`Node`] carries no state.
+    pub closed_works: HashSet<NodeId>,
+    pub tree: TreeState,
 }
 
 /// One background shell this console started.
@@ -698,7 +711,32 @@ impl App {
             roots: Vec::new(),
             candidates: Vec::new(),
             mention: None,
+            forest: Vec::new(),
+            closed_works: HashSet::new(),
+            tree: TreeState::default(),
         }
+    }
+
+    // ---- the fleet tree --------------------------------------------------
+
+    /// The visible tree rows, in the order they are drawn.
+    pub fn tree_rows(&self) -> Vec<NodeId> {
+        self.tree.row_ids(&self.forest, &self.closed_works)
+    }
+
+    /// The node under the cursor.
+    pub fn selected_node(&self) -> Option<&Node> {
+        let id = self.tree.selected.as_ref()?;
+        self.forest.iter().find(|n| n.id == *id)
+    }
+
+    /// Whether the fleet shows the tree rather than its older flat list.
+    ///
+    /// A session that belongs to no work has no node in the forest, so the flat
+    /// list is not legacy — it is what the screen shows when there is no tree
+    /// to show, which is every session started before works existed.
+    pub fn has_tree(&self) -> bool {
+        !self.forest.is_empty()
     }
 
     // ---- the decision rail ----------------------------------------------

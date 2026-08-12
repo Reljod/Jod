@@ -28,6 +28,7 @@ mod delivery;
 pub mod data;
 mod graph;
 mod keys;
+mod fleet;
 mod mention;
 mod picker;
 mod rail;
@@ -1038,6 +1039,20 @@ async fn perform(
         Action::NewThread => {
             thread.conversation = None;
             thread.carried = None;
+        }
+        // The transcript already says the turn ended — `on_chat_key` said so on
+        // the keypress. All that is left is ending the process, and a failure
+        // here is reported without undoing any of it: the conversation is
+        // intact either way, and a harness that outlives its interruption is a
+        // supervisor problem rather than a reason to put the user back into a
+        // turn they have already abandoned.
+        Action::Interrupt(id) => {
+            if let Err(e) = jod.kill_agent(&id).await {
+                app.push(Entry::Notice(format!(
+                    "the run would not stop ({e}) — it may still be writing; \
+                     Alt-X kills it outright"
+                )));
+            }
         }
         Action::Stop(id) => match jod.kill_agent(&id).await {
             Ok(()) => {
@@ -2893,6 +2908,91 @@ fn on_workspace_key(app: &mut App, key: KeyEvent, viewport: usize) -> Option<Act
     }
 }
 
+/// The tree's own keys. `Some` means the tree took the key.
+///
+/// Returns `Option<Option<Action>>` for the reason [`on_chord`] does: the outer
+/// layer says whether it was handled at all, so a key the tree does not know
+/// falls through to the fleet's row verbs rather than being swallowed. `s`
+/// still stops a run, `d` still delegates.
+fn on_tree_key(app: &mut App, key: KeyEvent) -> Option<Option<Action>> {
+    let handled = |a: Option<Action>| Some(a);
+    let rows = app.tree_rows();
+    match key.code {
+        KeyCode::Up | KeyCode::Char('k') => {
+            app.tree.step(-1, &rows);
+            handled(None)
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            app.tree.step(1, &rows);
+            handled(None)
+        }
+        KeyCode::Right => {
+            let (forest, closed) = (app.forest.clone(), app.closed_works.clone());
+            app.tree.expand_or_descend(&forest, &closed);
+            handled(None)
+        }
+        KeyCode::Left => {
+            let (forest, closed) = (app.forest.clone(), app.closed_works.clone());
+            app.tree.collapse_or_parent(&forest, &closed);
+            handled(None)
+        }
+        KeyCode::Char(' ') => {
+            let closed = app.closed_works.clone();
+            app.tree.toggle(&closed);
+            handled(None)
+        }
+        // Capitals, because the lower-case pair is the cursor. `E`/`C` are the
+        // two keys that make a forty-node tree navigable at all.
+        KeyCode::Char('E') => {
+            let forest = app.forest.clone();
+            app.tree.expand_all(&forest);
+            handled(None)
+        }
+        KeyCode::Char('C') => {
+            let forest = app.forest.clone();
+            app.tree.collapse_all(&forest);
+            handled(None)
+        }
+        // The archives. Off by default and off again after looking, because a
+        // tree holding everything ever done is one people stop reading.
+        KeyCode::Char('z') => {
+            app.tree.show_closed = !app.tree.show_closed;
+            app.push(Entry::Notice(
+                if app.tree.show_closed {
+                    "closed works shown, collapsed, below the live ones"
+                } else {
+                    "closed works hidden"
+                }
+                .into(),
+            ));
+            handled(None)
+        }
+        // `⏎` opens whatever the row stands for. A run is something to watch; a
+        // session is a conversation to go into; a work is a heading, so it
+        // toggles rather than pretending to open something.
+        KeyCode::Enter => {
+            let Some(node) = app.selected_node().cloned() else {
+                return handled(None);
+            };
+            match node.kind {
+                jod_core::tree::NodeKind::Run => {
+                    app.go(Workspace::Chat);
+                    handled(Some(Action::Watch(node.id.id)))
+                }
+                jod_core::tree::NodeKind::Session => {
+                    handled(Some(Action::Sessions(sessions::Request::Open(node.id.id))))
+                }
+                jod_core::tree::NodeKind::Work => {
+                    let closed = app.closed_works.clone();
+                    app.tree.toggle(&closed);
+                    handled(None)
+                }
+            }
+        }
+        _ => None,
+    }
+}
+
 /// The screens where editing and deleting mean something.
 ///
 /// A run is not edited and an activity line is not deleted, so on those screens
@@ -3044,6 +3144,15 @@ fn accept_prompt(
 }
 
 fn on_fleet_key(app: &mut App, key: KeyEvent) -> Option<Action> {
+    // With works on the board the fleet is a tree, and the arrows mean the
+    // tree's things. Without any, there is no tree to walk and the older flat
+    // list is what the screen shows — a session that belongs to no work has no
+    // node in the forest, which is every session started before works existed.
+    if app.has_tree() {
+        if let Some(action) = on_tree_key(app, key) {
+            return action;
+        }
+    }
     // The pinned row is a conversation, not a run, so the verbs that act on a
     // run are answered rather than attempted. Without this branch every one of
     // them is `selected_agent()?` — a silent `None`, which on the top row of
@@ -4464,6 +4573,14 @@ fn refresh_workspaces(jod: &Arc<Jod>, app: &mut App) {
     app.hooks = data::hooks(jod);
     app.activity = data::activity(jod);
     app.board = data::tasks(jod, app.team.as_deref());
+    // The forest, and then the cursor onto a row that still exists — the tree
+    // reshapes on every tick as runs finish, which is the whole reason the
+    // selection is an id.
+    let (forest, closed) = data::forest(jod, app.tree.show_closed);
+    app.forest = forest;
+    app.closed_works = closed;
+    let rows = app.tree_rows();
+    app.tree.reconcile(&rows);
     refresh_rail(jod, app);
 }
 
@@ -9012,6 +9129,99 @@ mod tests {
         let again = answered_card(&s, card.id, None, Some("3000"));
         assert!(again.contains("not answered"), "{again}");
         assert!(again.contains("already"), "{again}");
+    }
+
+    // ---- interrupting a turn without killing the session ----
+
+    fn mid_turn() -> App {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.agents = vec![running("run-1", "port the parser")];
+        app.watching = Some("run-1".into());
+        app.busy = true;
+        app.turn_started_ms = Some(0);
+        app.session = Some("sess-abc".into());
+        app.resume = Resume::Session("sess-abc".into());
+        app
+    }
+
+    /// **E7.S1's stated check**: the session id is unchanged across the
+    /// interruption. That is the whole difference between this and `Alt-X` —
+    /// the run is one process of many in a conversation, so ending it ends the
+    /// turn and leaves the conversation exactly where it was.
+    #[test]
+    fn escape_interrupts_the_turn_without_losing_the_session() {
+        let mut app = mid_turn();
+        let before = app.session.clone();
+
+        assert_eq!(
+            press(&mut app, KeyCode::Esc),
+            Some(Action::Interrupt("run-1".into())),
+            "Escape interrupts rather than backing out"
+        );
+
+        assert_eq!(app.session, before, "the harness conversation survives");
+        assert_eq!(
+            app.session.as_deref(),
+            Some("sess-abc"),
+            "and it is the same one, not a fresh id"
+        );
+        assert_eq!(
+            app.resume,
+            Resume::Session("sess-abc".into()),
+            "so the next turn continues it rather than starting over"
+        );
+        assert!(!app.busy, "the turn is over");
+        assert_eq!(app.turn_started_ms, None);
+    }
+
+    /// The correction is usually already half-written by the time you reach for
+    /// Escape, so the key that stops the run must not also clear the line.
+    #[test]
+    fn interrupting_leaves_you_typing_the_correction() {
+        let mut app = mid_turn();
+        type_line(&mut app, "no, use the other parser");
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(app.input, "no, use the other parser");
+        assert_eq!(app.cursor, app.input.len());
+    }
+
+    /// A partial turn dropped in silence leaves the transcript claiming the
+    /// agent simply stopped talking, and the next reader cannot tell an
+    /// interruption from a crash.
+    #[test]
+    fn an_interrupted_turn_is_recorded_as_what_it_was() {
+        let mut app = mid_turn();
+        app.now_ms = 9_000;
+        press(&mut app, KeyCode::Esc);
+        let said = format!("{:?}", app.transcript);
+        assert!(said.contains("interrupted"), "{said}");
+        assert!(
+            !said.contains("failed: true"),
+            "an interruption is not a failure: {said}"
+        );
+    }
+
+    /// The second Escape is the old behaviour, unchanged: with nothing running
+    /// it follows the tail again.
+    #[test]
+    fn a_second_escape_with_nothing_running_is_the_old_back_behaviour() {
+        let mut app = mid_turn();
+        press(&mut app, KeyCode::Esc);
+        assert!(!app.busy);
+
+        app.scroll_up(3, 10);
+        assert_eq!(press(&mut app, KeyCode::Esc), None, "nothing left to stop");
+        assert!(app.following(), "it follows the tail again");
+    }
+
+    /// Escape with nothing in flight never becomes an interrupt, or every way
+    /// out of a screen would try to kill something.
+    #[test]
+    fn escape_while_idle_interrupts_nothing() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.watching = Some("run-1".into());
+        app.busy = false;
+        assert_eq!(press(&mut app, KeyCode::Esc), None);
     }
 
     // ---- the full-screen picker ----

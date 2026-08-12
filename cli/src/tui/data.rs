@@ -22,9 +22,13 @@ use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use std::collections::HashSet;
+
 use jod_core::cards::{Card, Query};
 use jod_core::rank;
 use jod_core::roots::Root;
+use jod_core::tree::{Node, NodeId, NodeKind};
+use jod_core::works::Filter;
 use jod_core::schedule::{
     Fire, FireOutcome, Goal, GoalState as StoredGoalState, Schedule,
     ScheduleState as StoredScheduleState,
@@ -1345,6 +1349,38 @@ pub fn tasks(jod: &Arc<Jod>, team: Option<&str>) -> Vec<TaskRow> {
         .flat_map(|t| store.team_tasks(t).unwrap_or_default())
         .map(task_row)
         .collect()
+}
+
+// ---- the fleet tree -----------------------------------------------------
+
+/// The forest, with closed works after the live ones, and the set of works
+/// that are closed.
+///
+/// Two queries rather than one sort. `works()` orders by recency, so closed and
+/// live are interleaved, and E5.S3b wants the archives below — asking core
+/// twice with its own [`Filter`] gets that from core's own semantics instead of
+/// re-ordering its output here. It also answers "which of these is an archive"
+/// exactly, which a [`Node`] cannot: it carries no state, and inferring one
+/// from a label would be guessing.
+///
+/// `show_closed` off is the cheaper path *and* the default, because a tree that
+/// opens as a list of everything ever done is one people stop reading.
+pub fn forest(jod: &Arc<Jod>, show_closed: bool) -> (Vec<Node>, HashSet<NodeId>) {
+    let Some(store) = jod.store() else {
+        return (Vec::new(), HashSet::new());
+    };
+    let mut nodes = store.forest_of(Filter::Live).unwrap_or_default();
+    let mut closed = HashSet::new();
+    if show_closed {
+        let archived = store.forest_of(Filter::Closed).unwrap_or_default();
+        for node in &archived {
+            if node.kind == NodeKind::Work {
+                closed.insert(node.id.clone());
+            }
+        }
+        nodes.extend(archived);
+    }
+    (nodes, closed)
 }
 
 // ---- the decision rail, and the `@` picker ------------------------------

@@ -288,6 +288,16 @@ enum Command {
         #[command(subcommand)]
         what: SecretCommand,
     },
+    /// The slash commands and skills the repositories on this box define.
+    ///
+    /// Jod reimplements none of them. It finds them, says which harness's
+    /// convention each one follows, and forwards the name to a harness that can
+    /// resolve it — measured per harness in `docs/harness-support.md`, never
+    /// assumed.
+    Commands {
+        #[command(subcommand)]
+        what: CommandsCommand,
+    },
     /// Works: one intent, spanning several sessions.
     Work {
         #[command(subcommand)]
@@ -704,6 +714,35 @@ impl ScopeArgs {
             _ => (Scope::Global, String::new()),
         }
     }
+}
+
+#[derive(Subcommand)]
+enum CommandsCommand {
+    /// Every command and skill found under a conversation's roots and in your
+    /// own config.
+    ///
+    /// Rescans by default, because a listing that answered from a stale cache
+    /// would offer a command somebody deleted this morning. `--cached` reads
+    /// what was last found instead, which is what the palette does on every
+    /// keystroke.
+    Ls {
+        /// Whose roots to scan. Defaults to the main chat's.
+        #[arg(short, long)]
+        conversation: Option<String>,
+        /// Scan these directories instead of a conversation's roots.
+        #[arg(long = "root")]
+        roots: Vec<PathBuf>,
+        /// Only what this harness can resolve. A command is offered to the
+        /// harness whose convention it follows and to no other — Jod does not
+        /// forward one across conventions.
+        #[arg(short = 'H', long, value_enum)]
+        harness: Option<HarnessArg>,
+        /// Answer from the cache rather than looking at the disk.
+        #[arg(long)]
+        cached: bool,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1553,6 +1592,7 @@ async fn main() -> Result<()> {
         Command::Card { what } => card_command(&jod, what)?,
         Command::Root { what } => root_command(&jod, what)?,
         Command::Secret { what } => secret_command(&jod, what)?,
+        Command::Commands { what } => commands_command(&jod, what)?,
         Command::Work { what } => work_command(&jod, what)?,
         Command::Conv { what } => conv_command(&jod, what)?,
         Command::Schedule { what } => schedule_command(&jod, what)?,

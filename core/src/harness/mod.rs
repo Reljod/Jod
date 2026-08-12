@@ -275,6 +275,34 @@ pub struct SpawnRequest {
     /// reason.
     #[serde(default)]
     pub env: Vec<(String, String)>,
+    /// A repository command to invoke, named rather than pasted.
+    ///
+    /// Only OpenCode needs this, and it needs it because of a measured quirk:
+    /// alone of the three, it does *not* expand `/name` written into the
+    /// message. Given one it hands the literal text to the model, which — in
+    /// the run that found this — went looking with `ls` and `cat`, happened to
+    /// find the file in the working directory, and answered correctly. Right
+    /// answer, wrong mechanism, and it would have failed the moment the command
+    /// lived anywhere else. `opencode run --command <name>` resolves it
+    /// properly, in one step.
+    ///
+    /// Claude Code and AGY leave this `None` and put `/name` in the prompt,
+    /// which they expand themselves. So this is not a general "run a command"
+    /// verb — it is one harness's spelling of a thing the other two say in the
+    /// prompt, and [`crate::commands::Discovered::invoke`] is what decides
+    /// which spelling a given command gets.
+    ///
+    /// **With a command set, `prompt` is the command's *arguments*, not a
+    /// message.** Measured: `--command jodargs "hello world"` reached the
+    /// command as `$ARGUMENTS` = `["hello world"]`. That matters beside
+    /// [`system`](Self::system) — a harness that answers `false` to
+    /// [`Harness::takes_system_prompt`] has its framing prepended to the
+    /// prompt by the runner, and under a command that framing would arrive as
+    /// argument text. Setting both on one OpenCode spawn is therefore a caller
+    /// error rather than a supported combination, and it is written down here
+    /// because nothing at the type level stops it.
+    #[serde(default)]
+    pub command: Option<String>,
     /// Names of secrets to inject, and *only* the names.
     ///
     /// This is how a credential reaches an agent's tools without reaching the

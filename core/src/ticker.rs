@@ -971,6 +971,10 @@ impl Ticker {
         let Some(store) = self.jod.store().cloned() else {
             return Ok(TickReport::default());
         };
+        // Before anything is delivered: notice which members have finished the
+        // turn they were last woken for. See `settle_members` — without it a
+        // member is woken exactly once, ever.
+        self.settle_members(&store);
         let waiting = store.mail_waiting()?;
         let mut report = TickReport {
             claimed: waiting.len(),
@@ -1009,6 +1013,85 @@ impl Ticker {
             }
         }
         Ok(report)
+    }
+
+    /// Put back to `Ready` every member whose run has finished.
+    ///
+    /// A member is marked `Busy` the moment it is woken, and nothing marked it
+    /// back. That is not an oversight in the waking — the tick deliberately does
+    /// not wait for the run it starts, because a tick that waited on a model
+    /// would stop being a tick — it is that the run *ending* is a fact only a
+    /// later pass can notice. `jod team wake` gets away without this because it
+    /// blocks until the run finishes and settles the member itself; nothing
+    /// unattended can.
+    ///
+    /// The consequence, before this existed, was that a member could be woken
+    /// exactly once and then held its mail for ever, and showed as permanently
+    /// busy on every roster — so peers were told not to write to it. Every unit
+    /// test missed it, because none of them has a run that ends; the end-to-end
+    /// suite found it on the second wake.
+    ///
+    /// The session id is refreshed at the same time and for the same reason
+    /// `jod team wake` refreshes it: a resumed conversation can come back under
+    /// a *new* harness session id, and a member still holding the previous one
+    /// would next be resumed into a conversation that has moved on.
+    ///
+    /// **Nothing here is fatal**, on the same reasoning as [`Ticker::trim_ledger`]:
+    /// a member that cannot be reconciled is a reason to get on with delivering
+    /// the mail, not a reason for the tick that runs every schedule on this box
+    /// to fail. Failures are said out loud rather than swallowed.
+    fn settle_members(&self, store: &Store) {
+        let teams = match store.teams() {
+            Ok(teams) => teams,
+            Err(e) => {
+                eprintln!("[jod/tick] could not read the teams to settle them: {e}");
+                return;
+            }
+        };
+        for team in teams {
+            // A name is a name in one scope, so both are asked. `teams()` is a
+            // distinct list over the whole table and does not say which.
+            for scope in [team::Scope::Team, team::Scope::Work] {
+                let members = match store.members_in(scope, &team) {
+                    Ok(members) => members,
+                    Err(e) => {
+                        eprintln!("[jod/tick] could not read `{team}` to settle it: {e}");
+                        continue;
+                    }
+                };
+                for member in members {
+                    if member.status != MemberStatus::Busy {
+                        continue;
+                    }
+                    let Some(agent_id) = member.agent_id.as_deref() else {
+                        continue;
+                    };
+                    // A run this build cannot find is left alone rather than
+                    // guessed at: a member freed while its turn is still going
+                    // would be resumed mid-turn, which forks the conversation.
+                    let run = match store.run(agent_id) {
+                        Ok(Some(run)) => run,
+                        Ok(None) => continue,
+                        Err(e) => {
+                            eprintln!("[jod/tick] could not read run `{agent_id}`: {e}");
+                            continue;
+                        }
+                    };
+                    if matches!(run.status.as_str(), "running" | "starting" | "queued") {
+                        continue;
+                    }
+                    if let Err(e) =
+                        store.bind_member(&team, &member.name, Some(agent_id), run.session_id.as_deref())
+                    {
+                        eprintln!("[jod/tick] could not rebind `{}`: {e}", member.name);
+                        continue;
+                    }
+                    if let Err(e) = store.set_member_status(&team, &member.name, MemberStatus::Ready) {
+                        eprintln!("[jod/tick] could not free `{}`: {e}", member.name);
+                    }
+                }
+            }
+        }
     }
 
     /// Resume one member on its own conversation, carrying its unread mail.
@@ -2609,6 +2692,107 @@ mod tests {
                 store.envelope(waiting[0].id).unwrap().unwrap().detail,
                 None,
                 "being busy is not a fault and must not be reported as one"
+            );
+        }
+
+        /// Record a run for a member, in whatever state.
+        fn run_for(store: &Store, id: &str, status: &str, session: Option<&str>) {
+            store
+                .save_run(&crate::store::StoredRun {
+                    id: id.into(),
+                    name: "crew-scout".into(),
+                    harness: "claude_code".into(),
+                    status: status.into(),
+                    cwd: "/tmp".into(),
+                    session_id: session.map(str::to_string),
+                    pid: None,
+                    pgid: None,
+                    created_at_ms: 1,
+                    summary: serde_json::Value::Null,
+                })
+                .unwrap();
+        }
+
+        /// The bug the end-to-end suite found and every test here had missed:
+        /// waking marks a member busy, nothing marked it back, so it could be
+        /// woken exactly once and then held its mail for ever.
+        #[tokio::test]
+        async fn a_member_whose_turn_has_finished_can_be_woken_again() {
+            let store = crew(MemberStatus::Ready, Some("ses-1"));
+            run_for(&store, "run-1", "completed", Some("ses-2"));
+            store
+                .bind_member("crew", "scout", Some("run-1"), Some("ses-1"))
+                .unwrap();
+            store
+                .set_member_status("crew", "scout", MemberStatus::Busy)
+                .unwrap();
+            post(&store, "are you there?");
+
+            let report = ticker_over(&store).tick_mail(1_000_000).await.unwrap();
+
+            // It was freed and then woken in the same pass. Asserted as "it
+            // tried", the way the monitor tests above do, because a test box
+            // has no supervisor for the spawn to reach — the point is that the
+            // tick got as far as attempting it. Before `settle_members` this
+            // was `held 1` and nothing was ever attempted again.
+            assert_eq!(report.claimed, 1);
+            assert_eq!(
+                report.started + report.failed,
+                1,
+                "a member whose turn had ended was still treated as busy"
+            );
+            assert_eq!(report.held, 0);
+        }
+
+        /// The session id can change when a conversation is resumed, and a
+        /// member holding the old one would next be resumed into a conversation
+        /// that has moved on.
+        #[tokio::test]
+        async fn settling_a_member_takes_the_session_its_run_ended_on() {
+            let store = crew(MemberStatus::Ready, Some("ses-1"));
+            run_for(&store, "run-1", "completed", Some("ses-moved"));
+            store
+                .bind_member("crew", "scout", Some("run-1"), Some("ses-1"))
+                .unwrap();
+            store
+                .set_member_status("crew", "scout", MemberStatus::Busy)
+                .unwrap();
+
+            // Nothing waiting, so the tick only reconciles.
+            ticker_over(&store).tick_mail(1_000_000).await.unwrap();
+
+            let scout = store
+                .member_in(Scope::Team, "crew", "scout")
+                .unwrap()
+                .unwrap();
+            assert_eq!(scout.status, MemberStatus::Ready);
+            assert_eq!(scout.session_id.as_deref(), Some("ses-moved"));
+        }
+
+        /// The other half: freeing a member whose turn is still in flight would
+        /// resume it mid-turn and fork the conversation.
+        #[tokio::test]
+        async fn a_member_whose_run_is_still_going_is_left_busy() {
+            let store = crew(MemberStatus::Ready, Some("ses-1"));
+            run_for(&store, "run-1", "running", Some("ses-1"));
+            store
+                .bind_member("crew", "scout", Some("run-1"), Some("ses-1"))
+                .unwrap();
+            store
+                .set_member_status("crew", "scout", MemberStatus::Busy)
+                .unwrap();
+            post(&store, "hurry up");
+
+            let report = ticker_over(&store).tick_mail(1_000_000).await.unwrap();
+
+            assert_eq!(report.started, 0, "a member mid-turn had its session forked");
+            assert_eq!(
+                store
+                    .member_in(Scope::Team, "crew", "scout")
+                    .unwrap()
+                    .unwrap()
+                    .status,
+                MemberStatus::Busy
             );
         }
 
