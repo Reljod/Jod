@@ -106,8 +106,12 @@ impl Tick for Ticker {
         let goals = self.tick_goals(now_ms).await?;
         let mail = self.tick_mail(now_ms).await?;
         let queued = self.tick_deliveries(now_ms).await?;
-        // Last, because closing a work reads what its sessions did and the two
-        // steps above are what let them do it. Nothing here starts a run.
+        // Last, and after the delivery queue rather than before it — the order
+        // matters. Closing a work marks whatever is *still* queued against its
+        // stopped sessions as undeliverable; run first, it would mark answers
+        // undeliverable a moment before the step that would have delivered
+        // them. This way the queue gets its chance and only the leftovers are
+        // reported. Nothing here starts a run.
         let works = self.tick_works()?;
         Ok(TickReport {
             claimed: schedules.claimed

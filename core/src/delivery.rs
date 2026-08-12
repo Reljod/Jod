@@ -271,6 +271,20 @@ impl Store {
     /// not have to remember to label it. `ref_id` is whatever identifies the
     /// thing on the caller's side — a card id, a message id — kept as text
     /// because those two sources number themselves independently.
+    ///
+    /// **This is the entry point for a caller that has no transaction of its
+    /// own.** A caller that does — [`Store::answer_card`] queues inside the
+    /// transaction that answers the card — goes through [`insert_pending`]
+    /// instead, and must: an answered card with nothing queued to carry it
+    /// would show as *queued* in the rail for ever and the agent would never be
+    /// told. That is not two front doors; it is one insert, reachable with or
+    /// without a transaction already open. Both write the same row and there is
+    /// no third way in.
+    ///
+    /// It has no production caller yet, and the honest reason is that its two
+    /// remaining sources do not exist: nothing produces [`Kind::Human`] until
+    /// the terminal grows "nudge a session mid-turn", and [`Kind::Mail`] waits
+    /// on the queue learning to address a member (see the module docs).
     pub fn enqueue_delivery(
         &self,
         conversation_id: &str,
