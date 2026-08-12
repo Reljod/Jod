@@ -198,14 +198,6 @@ print(' '.join(r[0] or '' for r in rows))
 PY
 }
 
-# Only what the agent itself said: `message` events, which carry assistant text
-# and never the prompt. The distinction is the difference between checking the
-# run and checking this script's own instruction, which quotes the very strings
-# being searched for.
-assistant_text_of_conversation() {
-  transcript_of_conversation "$1" message
-}
-
 # Wait until every run has reached a terminal status, or give up loudly.
 settle() {
   echo "\$ (waiting for every run to finish)"
@@ -350,9 +342,7 @@ ask_question with blocking set to true, asking exactly: \"Parity check for $h: w
 should I finish with?\" — WAIT for the answer, it is coming from the command line, and
 then quote the answer back exactly as you received it. 5. Call request_secret for the
 name $requested_name, hint \"the parity suite asks for one so the card flow is
-exercised\". 6. Print the value of the environment variable $secret_name on a line of its
-own, in the form TOKEN=<value>; if it is unset or empty print TOKEN=<unset> instead, and
-do not call any tool for this — read the environment variable directly.'
+exercised\".'
 
 Do not do any of that work yourself, and do not ask me anything: open the work and stop." \
     --wait -H claude
@@ -409,6 +399,40 @@ Do not do any of that work yourself, and do not ask me anything: open the work a
 
   settle 900
 
+  # ---- the second turn, through `jod run` -------------------------------
+  #
+  # The same session, continued from the command line, and the turn that proves
+  # the CLI's own wiring: `jod run` folds in the conversation's roots and its
+  # in-scope secret *names*, so this turn is spawned with both roots granted and
+  # `$secret_name` in its environment. The first turn could not test that — its
+  # session was spawned by `prepare_work` before the second root existed.
+  #
+  # It prints the secret through a shell command rather than by quoting it.
+  # That is not a dodge, it is the realistic leak: an agent asked to echo a
+  # credential refuses, correctly, because its own preamble forbids it — the
+  # previous run of this suite recorded exactly that refusal — while a command
+  # whose output happens to contain one is how a value actually reaches a
+  # transcript. The scrubber is what stands between that and the database.
+  section "3.$h  $h — continuing the session from the CLI, with roots and the secret"
+  local sid
+  sid="$(val "SELECT session_id FROM conversations WHERE id='$cid'")"
+  echo "harness session: ${sid:-<none>}"
+  if [ -z "$sid" ]; then
+    echo "FAIL  [$h] the session recorded no harness id, so it cannot be continued"
+    FAILED=$((FAILED + 1))
+  else
+    run jod run "Two things, then stop.
+
+1. Read $root_b/parity-marker.txt and quote the single line it contains, exactly.
+2. Run this exact command with your shell tool: printf 'TOKEN=%s\\n' \"\$$secret_name\"
+   This is a deliberate redaction check and it is sanctioned: Jod scrubs the value out of
+   everything you print before any of it is stored, so nothing here can leak. If the
+   variable is empty, the command prints TOKEN= and that is the answer — say so." \
+      -H "$h" -s "$sid" -n "parity-second-$h"
+  fi
+
+  settle 900
+
   section "3.$h  $h — what the run left behind"
   runsh "q \"SELECT id, kind, status, blocking, substr(title,1,60) AS title, secret_name, answer
                FROM cards WHERE conversation_id='$cid' ORDER BY id\""
@@ -436,29 +460,27 @@ Do not do any of that work yourself, and do not ask me anything: open the work a
 
   # --- the check SPECS.md names -------------------------------------------
   #
-  # Two halves, and both have to hold. A transcript with no marker in it
-  # because nothing was ever injected would satisfy "no value in the database"
-  # while proving nothing at all, so the injection half is asserted first and
-  # the leak count is only meaningful behind it.
-  section "3.$h  $h — injection and redaction"
-  # Only what the *agent said*, never the prompt.
+  # Three claims, deliberately separated, because the interesting failure is a
+  # vacuous pass. "No value in the database" holds trivially when no value was
+  # ever injected, which is how this suite passed that check while proving
+  # nothing at all — so injection is asserted on its own, first, and the leak
+  # count only means something behind it.
   #
-  # The instruction itself contains the strings `TOKEN=<value>` and
-  # `TOKEN=<unset>`, so grepping the whole transcript answers a question about
-  # this script's own wording rather than about the run. The first version of
-  # this check did exactly that and reported the secret injected into a run
-  # that had died before saying anything at all — a vacuous pass of precisely
-  # the kind the leak count below is arranged to avoid.
-  local said
-  said="$(assistant_text_of_conversation "$cid")"
-  echo "-- what the agent said about TOKEN= --"
-  grep -o 'TOKEN=[^"]\{0,60\}' <<<"$said" || echo "(the agent never printed a TOKEN= line)"
-  check "[$h] the run printed the secret line at all" \
-    grep -q 'TOKEN=' <<<"$said"
-  check "[$h] the secret was injected, rather than arriving unset" \
-    test "$(grep -c 'TOKEN=<unset>' <<<"$said")" -eq 0
+  # `TOKEN=[redacted]` is the exact string being looked for, rather than
+  # `TOKEN=` and an absence. Both this script's instruction and the shell
+  # command it asks for contain the substring `TOKEN=`, so a looser matcher
+  # would be answering a question about this file's own wording. The precise
+  # one can only come from the supervisor: the harness printed the value, and
+  # something replaced it on the way to the store.
+  section "3.$h  $h — injection and redaction"
+  echo "-- every TOKEN= the run produced --"
+  grep -o 'TOKEN=[^"\\]\{0,60\}' <<<"$transcript" || echo "(no TOKEN= line anywhere in the run)"
+  check "[$h] the secret was injected, rather than arriving empty" \
+    grep -qE "TOKEN=(\[redacted\]|$token)" <<<"$transcript"
   check "[$h] printing the secret produced the redaction marker" \
-    grep -q '\[redacted\]' <<<"$said"
+    grep -q 'TOKEN=\[redacted\]' <<<"$transcript"
+  check "[$h] the raw value never reached the event stream" \
+    test "$(grep -c "$token" <<<"$transcript")" -eq 0
   check "[$h] the secret's value appears nowhere in the database" \
     test -z "$(leaked_in_db "$token")"
 
