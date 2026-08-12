@@ -303,6 +303,33 @@ pub fn ensure_registered() {
         return;
     }
     let home = crate::paths::jod_home();
+    // A daemon running out of somebody's scratch home does not get to rewrite
+    // their real harness configs.
+    //
+    // These files are outside the repository and shared with every tool on the
+    // machine, and registration points them at *this* binary with *this*
+    // `JOD_HOME`. Run from a build directory against a temporary home — a test,
+    // a probe, somebody trying something — that silently repoints a working
+    // Claude Code, OpenCode and Gemini at a binary that will be gone by
+    // tomorrow, and the symptom arrives much later as "Jod's tools disappeared".
+    //
+    // It has happened twice, to two different people, both of whom had to be
+    // told what had been changed before they could put it back. `JOD_NO_MCP_INSTALL`
+    // already existed and neither of them knew to set it, which is the argument
+    // for making it automatic rather than documented: a guard you have to
+    // remember is a guard for the people who already know.
+    //
+    // The default home is the only one that may register. Everything else runs
+    // perfectly well without it — registration is a convenience for
+    // hand-started sessions, and a run Jod spawns is handed its config directly.
+    if home != crate::paths::default_jod_home() {
+        eprintln!(
+            "[jod/mcp] not registering: JOD_HOME is {} rather than the default, \
+             so this is not the installation the harnesses should point at",
+            home.display()
+        );
+        return;
+    }
     for result in install_all(ToolAccess::Orchestrate, &home, false) {
         match result {
             // Silent when there was nothing to do: a daemon that restarts often

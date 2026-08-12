@@ -16,6 +16,19 @@ pub fn jod_home() -> PathBuf {
     PathBuf::from(home).join(".jod")
 }
 
+/// Where Jod keeps its things when nobody has said otherwise.
+///
+/// Separate from [`jod_home`] so that code can ask "is this the real
+/// installation?" rather than only "where am I writing?". The one caller that
+/// needs the distinction is MCP registration, which rewrites files outside the
+/// repository that every tool on the machine reads: a daemon running against a
+/// scratch home must not repoint a working Claude Code at a binary that will be
+/// gone tomorrow.
+pub fn default_jod_home() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    PathBuf::from(home).join(".jod")
+}
+
 /// The one SQLite file that holds events, run history and memory.
 pub fn db_path() -> PathBuf {
     jod_home().join("jod.db")
