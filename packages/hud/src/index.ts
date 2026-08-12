@@ -25,17 +25,8 @@ export type { TransportMode } from "./transport/factory";
 export { WorldStore } from "./state/world";
 export type { AgentNode } from "./state/world";
 
-export type {
-  AgentEnvelope,
-  AgentEvent,
-  AgentSummary,
-  AgentStatus,
-  HarnessInfo,
-  HarnessKind,
-  PermissionPolicy,
-  Report,
-  Resume,
-  SpawnRequest,
-  StoredRun,
-  Usage,
-} from "./types";
+// Re-exported wholesale rather than named one by one. `types.ts` is the checked
+// mirror of the `core/` crate's serde output, and every client needs all of it —
+// `apps/ios/src/contract.ts` re-exports this surface for the phone. A hand-kept
+// list here would silently withhold the next type core grows.
+export * from "./types";

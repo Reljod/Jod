@@ -3,21 +3,21 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
+  "description": "JOD // TACTICAL — the desktop shell over the shared @jod/hud package.",
   "scripts": {
-    "dev": "vite",
     "build": "tsc --noEmit && vite build",
-    "preview": "vite preview",
+    "check": "tsc --noEmit",
     "tauri": "tauri",
     "app:dev": "tauri dev",
     "app:build": "tauri build"
   },
   "dependencies": {
-    "@tauri-apps/api": "^2.9.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.9.1",
+    "@types/node": "^26.2.0",
     "@types/react": "^19.2.2",
     "@types/react-dom": "^19.2.2",
     "@vitejs/plugin-react": "^5.0.4",

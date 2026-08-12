@@ -18,7 +18,13 @@
     "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true,
     "exactOptionalPropertyTypes": false,
-    "types": ["vitest/globals"]
+    "types": ["vitest/globals"],
+
+    "baseUrl": ".",
+    "paths": {
+      "@jod/hud": ["../../packages/hud/src/index.ts"],
+      "@jod/hud/styles.css": ["../../packages/hud/src/styles.css"]
+    }
   },
-  "include": ["src", "test", "vite.config.ts", "../web/src/types.ts"]
+  "include": ["src", "test", "vite.config.ts", "../../packages/hud/src"]
 }

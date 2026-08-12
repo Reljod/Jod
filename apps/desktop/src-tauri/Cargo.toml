@@ -1,9 +1,27 @@
 [package]
 name = "jod-desktop"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
-description = "Jod desktop — a thin shell over jod-core."
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Jod for the desktop — a window onto a locally-served jod-api."
+
+# Its own workspace root, deliberately — the same call `apps/ios/src-tauri`
+# makes, for the same reason.
+#
+# This crate only builds where a webview does: on Linux that means
+# `libwebkit2gtk-4.1-dev`, `libsoup-3.0-dev` and friends. The VPS has none of
+# them, and pulling this into the root workspace would put that dependency tree
+# in front of every `cargo test` on the box that actually runs Jod.
+#
+# It was previously in neither state — inheriting `version.workspace` and
+# `jod-core.workspace` without being a member — so it compiled *nowhere*, and
+# rotted unnoticed until `SpawnRequest` grew three fields it never learned
+# about. Detached-and-declared is the state that keeps it honest: it builds
+# standalone, and `cargo check` here is a real check.
+#
+# The cost is that versions are spelled out rather than inherited. That is the
+# right trade for a crate the VPS never compiles.
+[workspace]
 
 [lib]
 name = "jod_desktop_lib"
@@ -13,7 +31,26 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-jod-core.workspace = true
-serde.workspace = true
-serde_json.workspace = true
+jod-core = { path = "../../../core" }
+# The desktop runs the *real* API in-process rather than reimplementing it.
+# → `src/server.rs`
+jod-api = { path = "../../../api" }
+
 tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+anyhow = "1"
+axum = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
+# The built HUD is compiled into the binary, so a bundled app has no directory
+# to lose.
+rust-embed = "8"
+mime_guess = "2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
+# The tests drive the server over real HTTP rather than calling handlers
+# directly — the launch-key gate and the token injection are only meaningful as
+# things a *client* sees.
+reqwest = { version = "0.13", default-features = false, features = ["json"] }

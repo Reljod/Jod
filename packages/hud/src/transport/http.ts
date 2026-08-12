@@ -48,8 +48,29 @@ export class HttpTransport implements Transport {
    */
   private lastSeq = new Map<string, number>();
   private scope: Scope = "read";
+  /** Aborts the fetch-based stream. Only used on the bearer-token path. */
+  private streaming: AbortController | null = null;
 
-  constructor(private readonly base = "") {}
+  /**
+   * `token`, when given, switches this driver from cookie auth to `Authorization:
+   * Bearer` on every request — including the event stream, which then runs on
+   * `fetch` instead of `EventSource`.
+   *
+   * The desktop shell needs this. It is served from the API's own origin, but
+   * the session cookie is marked `Secure`, and whether a webview honours a
+   * `Secure` cookie over `http://127.0.0.1` differs between WebKitGTK, WKWebView
+   * and Chromium. Depending on that would be depending on the platform. A header
+   * is carried identically everywhere.
+   */
+  constructor(
+    private readonly base = "",
+    private readonly token?: string,
+  ) {}
+
+  /** Auth that travels on every request, or nothing on the cookie path. */
+  private authHeaders(): Record<string, string> {
+    return this.token ? { Authorization: `Bearer ${this.token}` } : {};
+  }
 
   start(handlers: TransportHandlers): void {
     this.handlers = handlers;
@@ -62,6 +83,8 @@ export class HttpTransport implements Transport {
     this.stopped = true;
     this.sse?.close();
     this.sse = null;
+    this.streaming?.abort();
+    this.streaming = null;
     if (this.retryTimer) clearTimeout(this.retryTimer);
     if (this.reconcileTimer) clearTimeout(this.reconcileTimer);
     this.retryTimer = null;
@@ -78,8 +101,14 @@ export class HttpTransport implements Transport {
     const res = await fetch(this.url(path), {
       // Auth is a cookie session, so every call must carry credentials.
       credentials: "include",
-      headers: { "content-type": "application/json" },
       ...init,
+      // After the spread, so a caller's headers extend these rather than
+      // replacing them — dropping the bearer token here would 401 every write.
+      headers: {
+        "content-type": "application/json",
+        ...this.authHeaders(),
+        ...(init?.headers as Record<string, string> | undefined),
+      },
     });
     if (res.status === 401 || res.status === 403) {
       throw new UnauthorizedError(await problemDetail(res, path), res.status);
@@ -192,6 +221,9 @@ export class HttpTransport implements Transport {
   private async bootstrap(): Promise<void> {
     if (this.stopped) return;
     try {
+      // Before the first authorised call, so the roster is fetched with a scope
+      // already known and the UI never briefly offers writes it cannot make.
+      await this.learnScope();
       this.handlers?.onReport(await this.report());
       this.attempt = 0;
       this.handlers?.onLink({
@@ -234,8 +266,132 @@ export class HttpTransport implements Transport {
     }, 400);
   }
 
+  /**
+   * What a bearer token is allowed to do.
+   *
+   * There is no "describe this token" route, but `POST /v1/session` answers with
+   * the scope as a side effect of minting a cookie. The cookie may or may not
+   * survive (`Secure`, over loopback http) — it does not matter, because every
+   * request carries the header anyway. The scope is what we came for, and the
+   * HUD disables its write controls without it.
+   */
+  private async learnScope(): Promise<void> {
+    if (!this.token) return;
+    try {
+      const res = await fetch(this.url("/v1/session"), {
+        method: "POST",
+        credentials: "include",
+        headers: this.authHeaders(),
+      });
+      if (!res.ok) return;
+      const body = (await res.json().catch(() => ({}))) as { scope?: Scope };
+      this.scope = body.scope === "write" ? "write" : "read";
+    } catch {
+      /* fail safe: stays `read`, and the UI offers no write it cannot make */
+    }
+  }
+
+  /**
+   * The event stream, for the bearer-token path.
+   *
+   * `EventSource` cannot set an `Authorization` header — the single fact the
+   * whole cookie exchange exists to work around. Reading the same `text/event-
+   * stream` off `fetch` can, at the cost of hand-rolling the framing and the
+   * reconnect that `EventSource` gives away.
+   *
+   * Frames are separated by a blank line and `data:` may repeat within one, so
+   * the buffer is split on the boundary rather than by line.
+   */
+  private async openFetchStream(): Promise<void> {
+    if (this.stopped || this.streaming) return;
+    const ac = new AbortController();
+    this.streaming = ac;
+
+    try {
+      const res = await fetch(this.url("/v1/events"), {
+        headers: { ...this.authHeaders(), accept: "text/event-stream" },
+        signal: ac.signal,
+      });
+      if (res.status === 401 || res.status === 403) {
+        this.handlers?.onLink({
+          phase: "auth",
+          reason: await problemDetail(res, "/v1/events"),
+        });
+        return;
+      }
+      if (!res.ok || !res.body) throw new Error(await problemDetail(res, "/v1/events"));
+
+      this.attempt = 0;
+      this.handlers?.onLink({
+        phase: "live",
+        origin: this.base || location.origin,
+        scope: this.scope,
+      });
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        let boundary = buffer.indexOf("\n\n");
+        while (boundary !== -1) {
+          this.handleFrame(buffer.slice(0, boundary));
+          buffer = buffer.slice(boundary + 2);
+          boundary = buffer.indexOf("\n\n");
+        }
+      }
+      // A clean end of body is still a lost stream: the server closed it.
+      if (!this.stopped) {
+        this.streaming = null;
+        this.scheduleRetry("event stream ended");
+      }
+    } catch (err) {
+      this.streaming = null;
+      // An abort is us calling `stop()`, not a failure to report.
+      if (ac.signal.aborted || this.stopped) return;
+      this.scheduleRetry(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  /** One `event:`/`data:` frame, already split off at the blank line. */
+  private handleFrame(frame: string): void {
+    const parsed = parseSseFrame(frame);
+    if (parsed === null) return;
+
+    if (parsed.event === "lagged") {
+      this.onLagged(parsed.data);
+      return;
+    }
+    this.ingest(parsed.data);
+  }
+
+  /** The server dropped broadcasts — admit the hole and backfill it. */
+  private onLagged(payload: string): void {
+    let missed = 0;
+    try {
+      missed = Number(JSON.parse(payload)?.missed ?? 0);
+    } catch {
+      /* the count is advisory; the backfill is the point */
+    }
+    this.handlers?.onLink({
+      phase: "lost",
+      reason: `stream lagged — ${missed} event(s) missed, backfilling`,
+      retryInMs: 0,
+    });
+    void this.backfillAll();
+  }
+
   private openStream(): void {
     if (this.stopped || this.sse) return;
+    // A bearer token cannot ride on `EventSource`; take the fetch path.
+    if (this.token) {
+      void this.openFetchStream();
+      return;
+    }
     try {
       // `withCredentials` carries the session cookie; EventSource cannot set an
       // Authorization header, which is why the cookie exchange exists at all.
@@ -247,21 +403,9 @@ export class HttpTransport implements Transport {
       sse.addEventListener("agent", (ev) => this.ingest((ev as MessageEvent).data));
       // The server dropped broadcast messages: this HUD now has a hole, and
       // showing stale state confidently is worse than admitting it. Backfill.
-      sse.addEventListener("lagged", (ev) => {
-        const data = (ev as MessageEvent).data;
-        let missed = 0;
-        try {
-          missed = Number(JSON.parse(String(data))?.missed ?? 0);
-        } catch {
-          /* the count is advisory; the backfill is the point */
-        }
-        this.handlers?.onLink({
-          phase: "lost",
-          reason: `stream lagged — ${missed} event(s) missed, backfilling`,
-          retryInMs: 0,
-        });
-        void this.backfillAll();
-      });
+      sse.addEventListener("lagged", (ev) =>
+        this.onLagged(String((ev as MessageEvent).data)),
+      );
       sse.onmessage = (ev) => this.ingest(ev.data);
       sse.onerror = () => {
         // EventSource reconnects itself while readyState is CONNECTING; only
@@ -371,6 +515,39 @@ export class HttpTransport implements Transport {
     this.handlers?.onLink({ phase: "lost", reason, retryInMs });
     this.retryTimer = setTimeout(() => void this.bootstrap(), retryInMs);
   }
+}
+
+/**
+ * Parse one server-sent-events frame.
+ *
+ * Exported because it is the only piece of wire protocol this client hand-rolls.
+ * `EventSource` does this internally and is unavailable on the bearer-token
+ * path, so these rules are re-implemented here and worth pinning in tests:
+ *
+ *   · `data:` may repeat within a frame and the parts join with newlines
+ *   · a line starting `:` is a comment — servers send them as keep-alives
+ *   · exactly one leading space after the colon is framing, not payload, so
+ *     `data:  {}` carries a value that begins with a space
+ *   · a field with no colon at all is a name with an empty value
+ *   · no `data:` line means nothing to dispatch, which is not an error
+ *
+ * Returns `null` when the frame carries no data.
+ */
+export function parseSseFrame(frame: string): { event: string; data: string } | null {
+  let event = "message";
+  const data: string[] = [];
+
+  for (const line of frame.split("\n")) {
+    if (line.startsWith(":")) continue;
+    const colon = line.indexOf(":");
+    const field = colon === -1 ? line : line.slice(0, colon);
+    const value = colon === -1 ? "" : line.slice(colon + 1).replace(/^ /, "");
+    if (field === "event") event = value;
+    else if (field === "data") data.push(value);
+  }
+
+  if (!data.length) return null;
+  return { event, data: data.join("\n") };
 }
 
 /** No valid session, or one without the authority for this call. */

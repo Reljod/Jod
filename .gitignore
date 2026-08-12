@@ -14,6 +14,9 @@ tests/e2e/gaps-report.md
 # cargo workspace and drops a `target/` of its own.
 /target
 apps/ios/src-tauri/target/
+# `apps/desktop/src-tauri` is its own workspace too, for the same reason: it
+# only builds where a webview does, and the VPS has no webkit.
+apps/desktop/src-tauri/target/
 
 # Benchmarks under research/ are standalone cargo crates, so each builds a
 # `target/` the root rule cannot reach — one of them is 141 MB. The bench
