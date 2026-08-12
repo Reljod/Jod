@@ -51,7 +51,7 @@ export function TopBar({
   return (
     <header className="topbar">
       <div className="brand">
-        <Mascot size={20} />
+        <Mascot size={16} busy={report.running > 0} />
         <span className="wordmark">JOD</span>
         <span className="sub">TACTICAL</span>
       </div>

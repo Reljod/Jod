@@ -115,14 +115,107 @@ button { cursor: pointer; background: none; border: none; }
 .brand { display: flex; align-items: baseline; gap: 7px; }
 /* An SVG has no baseline of its own, so the row's baseline alignment would drop
    the mascot's box on the text baseline and hang the whole head below the
-   wordmark. It centres against the row instead. */
-.brand .mascot { align-self: center; color: var(--cyan); filter: drop-shadow(0 0 6px rgba(53, 224, 255, 0.55)); }
-/* The mane carries the glow; the face is a fainter line so the two read as
-   separate parts of one head rather than as two concentric rings. */
-.mascot .mascot-face { opacity: 0.5; }
-.mascot .mascot-muzzle { opacity: 0.75; }
+   wordmark. It centres against the row instead. The glow is warm rather than
+   the HUD's cyan: the lion is the one warm thing on this bar, and tinting it to
+   match would undo the only colour it has. */
+.brand .mascot { align-self: center; filter: drop-shadow(0 0 5px rgba(255, 135, 0, 0.45)); }
 .brand .wordmark { font-weight: 700; letter-spacing: 0.28em; font-size: 14px; }
 .brand .sub { font-size: 9px; letter-spacing: 0.24em; color: var(--text-dim); }
+
+/* ── the mascot ─────────────────────────────────────────────────────────── */
+
+/* The lion animates on the schedule the TUI uses, so the two surfaces are
+   running the same character rather than two of them: a twelve-second idle loop
+   with a blink and then a roar at the end of it, and a scratch that plays only
+   while agents are running. Every percentage below is that twelve seconds.
+
+   `transform-box: view-box` is what lets a transform-origin be written in the
+   art's own 24-unit coordinates rather than guessed in pixels at each of the
+   sizes the mark gets rendered at. */
+.mascot g {
+  transform-box: view-box;
+}
+
+/* Blink, then screw both eyes shut through the roar. One keyframe set rather
+   than two animations, because two would be fighting over `transform`. */
+.mascot-eyes {
+  transform-origin: 12px 8.9px;
+  animation: jod-eyes 12s infinite;
+}
+
+@keyframes jod-eyes {
+  0%, 85%, 89.5%, 91%, 97.5%, 100% { transform: scaleY(1); }
+  86.5%, 88%, 92%, 96% { transform: scaleY(0.1); }
+}
+
+/* The mane puffs. Only the crown scales: a roar that grew the face too would
+   read as the whole mark zooming rather than as the lion doing something. */
+.mascot-crown {
+  transform-origin: 12px 9.6px;
+  animation: jod-crown 12s infinite;
+}
+
+@keyframes jod-crown {
+  0%, 91%, 97%, 100% { transform: scale(1); }
+  93%, 95% { transform: scale(1.11); }
+}
+
+/* Shut mouth and open throat cross-fade in the same window. */
+.mascot-muzzle {
+  animation: jod-muzzle 12s infinite;
+}
+
+.mascot-maw {
+  opacity: 0;
+  animation: jod-maw 12s infinite;
+}
+
+@keyframes jod-muzzle {
+  0%, 91%, 97%, 100% { opacity: 1; }
+  92%, 96% { opacity: 0; }
+}
+
+@keyframes jod-maw {
+  0%, 91%, 97%, 100% { opacity: 0; }
+  92%, 96% { opacity: 1; }
+}
+
+/* The paw is a state readout: on screen only while work is running, bobbing
+   twice a second, which is the rate the TUI alternates its two scratch frames
+   at. The eye on that side squints, because a paw held at a cheek with a
+   wide-open eye behind it reads as a shape parked next to a lion. */
+.mascot-paw {
+  opacity: 0;
+}
+
+.mascot-busy .mascot-paw {
+  opacity: 1;
+  transform-origin: 18.4px 11.5px;
+  animation: jod-scratch 0.5s ease-in-out infinite;
+}
+
+.mascot-busy .mascot-eye-right {
+  transform-origin: 14.5px 8.9px;
+  transform: scaleY(0.18);
+}
+
+@keyframes jod-scratch {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-1.7px); }
+}
+
+/* An idle animation is decoration, and decoration is the first thing to stop.
+   The paw stays — it is the only thing on the header that says work is running,
+   so it goes still rather than going away. */
+@media (prefers-reduced-motion: reduce) {
+  .mascot-eyes,
+  .mascot-crown,
+  .mascot-muzzle,
+  .mascot-maw,
+  .mascot-busy .mascot-paw {
+    animation: none;
+  }
+}
 
 .link {
   display: flex;
