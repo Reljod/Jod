@@ -212,6 +212,13 @@ cookie. Requires no API change. Note that a `CorsLayer` would *not* rescue the
 cookie here either — `SameSite=Strict` blocks it cross-site regardless — so
 bearer is the only clean route.
 
+**`tauri-plugin-http` is the load-bearing half, not an optimisation.** Stated
+plainly so nobody wires up a token and expects it to be enough: bearer fixes the
+*credential*, not the *origin*. A cross-origin `fetch` issued from the webview
+still needs `Access-Control-Allow-Origin` on the response and there is none, so
+**bearer-alone stays blocked**. Only issuing the request from Rust — where the
+browser's CORS check does not apply — makes the combination work.
+
 **The cost, priced honestly:** `EventSource` cannot set an `Authorization`
 header, which is the whole reason the cookie exists, so a bearer client must
 hand-roll SSE over `fetch` — giving back the reconnect and resume that
