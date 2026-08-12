@@ -83,7 +83,7 @@ phone**; the ~20-node argument is stronger at 393pt than in a terminal.
 ## 3. The data, and the one real gap
 
 Seven workspaces are servable **today** against routes verified in
-`feat/api-workspaces` (`c8fa29b`, `api/src/workspaces.rs`, all ten registered in
+**PR #61** (`feat/api-workspaces`, `api/src/workspaces.rs`, all ten registered in
 `api/src/lib.rs`, all `GET`, all `Scope::Read`):
 
 ```
@@ -122,8 +122,8 @@ Semantics to honour rather than rediscover:
 ### The main chat — on the wire as of PR #61
 
 This was the one gap, and it is closed. Reljod assigned it to the `api/` lane and
-it shipped in `510ac1c` on `feat/api-workspaces`, so the fleet's pinned top row
-is **enterable** rather than present-but-inert:
+it shipped on `feat/api-workspaces` (PR #61), so the fleet's pinned top row is
+**enterable** rather than present-but-inert:
 
 ```
 GET  /v1/conversations?limit=        read   → ConversationSummary[]
@@ -133,12 +133,21 @@ GET  /v1/conversations/{id}          read   → Conversation
 GET  /v1/conversations/{id}/messages read   → Message[]  (full thread, oldest first)
 ```
 
-Verified: all five registered in `api/src/lib.rs`. That branch has been rebased
-onto `main` and force-pushed once already — the routes and shapes did not change,
-only the base — so pull it with `git reset --hard origin/feat/api-workspaces`
-rather than merging, and expect line numbers to drift. **PR #61**, which the
-merge gate correctly refuses to auto-merge: it is an API contract change of 1856
-lines, so it waits for Reljod.
+Verified: all five registered in `api/src/lib.rs`.
+
+**Cite the branch and the PR, never a SHA.** `feat/api-workspaces` has been
+rebased and force-pushed three times while this spec was being written, and each
+time the routes, shapes and field names were unchanged — only the base moved. A
+SHA pinned here goes stale by design and reads as "this was checked against
+something that no longer exists", which is worse than no citation. Pull it with
+`git fetch && git reset --hard origin/feat/api-workspaces`, never a merge, and
+expect line numbers to drift.
+
+The merge gate correctly refuses to auto-merge #61 — an API contract change of
+1856 lines — so it waits for Reljod's review. Its one `security` finding is a
+false positive: triage's regex matches the PR's own prose quoting the TUI's
+rendered-secret display string. That is left un-reworded on purpose, since
+narrowing a check to make it pass is exactly what the charter forbids.
 
 Five semantics that decide how the row is built:
 
