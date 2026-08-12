@@ -138,7 +138,7 @@ const assertSpawnable = (dir) => {
   die(
     `${dir} is not a trusted project directory.\n` +
       `A session spawned there would hang on the interactive trust/MCP prompt.\n` +
-      `Fix: \`jod orc trust ${dir}\`, or open Claude in that directory once.`,
+      `Fix: \`orc trust ${dir}\`, or open Claude in that directory once.`,
   )
 }
 
@@ -189,7 +189,7 @@ const cmdList = (args) => {
 const cmdSpawn = async (args) => {
   const [target, ...rest] = args
   const task = rest.join(' ').trim()
-  if (!target || !task) die('usage: jod orc spawn <@project|dir> <task...>')
+  if (!target || !task) die('usage: orc spawn <@project|dir> <task...>')
 
   const cwd = resolveProject(target)
   assertSpawnable(cwd)
@@ -199,7 +199,7 @@ const cmdSpawn = async (args) => {
 const cmdSend = async (args) => {
   const [ref, ...rest] = args
   const message = rest.join(' ').trim()
-  if (!ref || !message) die('usage: jod orc send <id|name> <message...>')
+  if (!ref || !message) die('usage: orc send <id|name> <message...>')
 
   const s = resolveSession(ref)
   if (!s.sessionId) die(`session ${s.shortId} has no sessionId yet — it is probably still starting`)
@@ -213,15 +213,15 @@ const cmdSend = async (args) => {
 
 /**
  * Fan one task out across several projects, or several tasks across one.
- *   jod orc fanout @Jod @Socially -- "audit the README"
- *   jod orc fanout --spec team.json      [{ "project": "@Jod", "task": "..." }]
+ *   orc fanout @Jod @Socially -- "audit the README"
+ *   orc fanout --spec team.json      [{ "project": "@Jod", "task": "..." }]
  */
 const cmdFanout = async (args) => {
   let spec
 
   if (args[0] === '--spec') {
     const src = args[1]
-    if (!src) die('usage: jod orc fanout --spec <file.json|->')
+    if (!src) die('usage: orc fanout --spec <file.json|->')
     const raw = src === '-' ? readFileSync(0, 'utf8') : readFileSync(src, 'utf8')
     try {
       spec = JSON.parse(raw)
@@ -231,7 +231,7 @@ const cmdFanout = async (args) => {
     if (!Array.isArray(spec) || !spec.length) die('spec must be a non-empty array of { project, task }')
   } else {
     const sep = args.indexOf('--')
-    if (sep < 1) die('usage: jod orc fanout <@project...> -- <task...>')
+    if (sep < 1) die('usage: orc fanout <@project...> -- <task...>')
     const task = args.slice(sep + 1).join(' ').trim()
     if (!task) die('fanout needs a task after "--"')
     spec = args.slice(0, sep).map((project) => ({ project, task }))
@@ -268,7 +268,7 @@ const cmdResult = (args) => {
 const cmdWait = async (args) => {
   const timeout = Number(args.find((a) => a.startsWith('--timeout='))?.split('=')[1] ?? 900) * 1000
   const refs = args.filter((a) => !a.startsWith('--'))
-  if (!refs.length) die('usage: jod orc wait <id|name>... [--timeout=<seconds>]')
+  if (!refs.length) die('usage: orc wait <id|name>... [--timeout=<seconds>]')
 
   const ids = refs.map((r) => resolveSession(r).shortId)
   const settled = (s) => TERMINAL.has(s) || s === 'blocked'
@@ -319,22 +319,22 @@ const cmdProjects = () => {
     .map(([d, v]) => `${v?.hasTrustDialogAccepted ? '  ' : '! '}@${basename(d)}`.padEnd(28) + d)
     .sort()
   console.log(dirs.join('\n') || '(none)')
-  console.log('\n"!" = not trusted; `jod orc trust @name` before spawning there.')
+  console.log('\n"!" = not trusted; `orc trust @name` before spawning there.')
 }
 
-const usage = `jod orc — run Claude Code background sessions as an agent team
+const usage = `orc — run Claude Code background sessions as an agent team
 
-  jod orc ls [--live] [--json]           list sessions
-  jod orc projects                       list @project references
-  jod orc spawn <@project|dir> <task>    start a session, print its id
-  jod orc send <id|name> <message>       continue a session, in context
-  jod orc fanout <@a> <@b> -- <task>     same task across projects
-  jod orc fanout --spec <file.json>      [{ "project": "@Jod", "task": "..." }]
-  jod orc result <id|name>               its final result
-  jod orc wait <id|name>... [--timeout=S]  until finished or blocked
-  jod orc logs <id|name>                 terminal output
-  jod orc stop <id|name>                 stop it
-  jod orc trust <@project|dir>           make a directory spawn-safe
+  orc ls [--live] [--json]           list sessions
+  orc projects                       list @project references
+  orc spawn <@project|dir> <task>    start a session, print its id
+  orc send <id|name> <message>       continue a session, in context
+  orc fanout <@a> <@b> -- <task>     same task across projects
+  orc fanout --spec <file.json>      [{ "project": "@Jod", "task": "..." }]
+  orc result <id|name>               its final result
+  orc wait <id|name>... [--timeout=S]  until finished or blocked
+  orc logs <id|name>                 terminal output
+  orc stop <id|name>                 stop it
+  orc trust <@project|dir>           make a directory spawn-safe
 
 Sessions appear in \`claude agents\` and the agent view like any other.`
 

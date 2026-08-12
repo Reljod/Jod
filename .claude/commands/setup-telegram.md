@@ -28,15 +28,17 @@ The token is a bearer credential — anyone holding it *is* the bot. So:
 ## Steps
 
 1. **Preflight.** `jod telegram --help`. It must list `serve` and `whoami`.
-   **Two different commands are named `jod`** and only one has `telegram`:
-   the Rust CLI (`jod-cli`), and the toolkit shim `install.sh` puts on PATH,
-   whose usage starts `jod <command> [args]` with `setup-project`. If you get
-   the shim, the Rust binary is missing or shadowed — build and install it:
+   If `jod` is missing, or is an older build without `telegram`, install or
+   update it — `install.sh` is the one way `jod` gets onto a machine:
 
    ```sh
-   cargo build --release -p jod-cli
-   sudo install -m 0755 target/release/jod /usr/local/bin/jod
+   jod update    # already installed: take the newest patch
+   curl -fsSL https://raw.githubusercontent.com/Reljod/Jod/main/install.sh | bash
    ```
+
+   From a checkout you are developing in, `cargo build --release -p jod-cli`
+   and run `./target/release/jod` directly rather than installing over the
+   binary the box is running.
 
    Then `git check-ignore -q .env && echo ignored` in the target directory.
    If `.env` is *not* ignored, add it to `.gitignore` before writing anything.

@@ -207,10 +207,10 @@ Two things worth knowing:
 
 - **The gate is a no-op in repos it finds no suites in.** It looks for
   `*.test.sh` and `*/tests/test.sh`; a project with neither is never blocked.
-- **`jod` lands on your `PATH`** while the plugin is enabled, because Claude
-  Code exposes a plugin's `bin/`. The CLI still expects a toolkit checkout at
-  `$JOD_HOME` (`~/.jod`), so run the installer below if you want it working —
-  otherwise it exits with a message telling you exactly that.
+- **The plugin puts nothing on your `PATH`.** It carries skills, subagents and
+  the hook, and no binary — so the `jod` you run is always the one
+  [`install.sh`](#install-jod-on-a-machine) built, never a shim shipped
+  alongside a plugin that would shadow it.
 
 Not included: the `SessionStart` hook that pins git identity. That one is
 project-local on purpose ([why](./docs/decisions.md)).
@@ -226,20 +226,64 @@ If `/plugin marketplace add` reports that it can't find the catalog, the usual
 cause is the ref: the marketplace files have to exist **on the branch being
 fetched**, and the shorthand fetches the default branch.
 
-### Install the toolkit on a new machine
+### Install Jod on a machine
 
-One line, on any Linux or macOS box with `git`:
+One line, on any Linux or macOS box with `git` and
+[Rust](https://rustup.rs):
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/Reljod/Jod/main/install.sh | bash
 ```
 
-This clones the toolkit to `~/.jod` and links a `jod` CLI onto your `PATH`.
-Then, in *any* repo on that machine:
+That clones the source to `~/.jod/src`, builds the workspace, and puts two
+binaries on your `PATH` (`~/.local/bin` by default, `$JOD_BIN_DIR` to change
+it):
+
+| | |
+|---|---|
+| `jod` | the CLI and the full-screen console (`jod tui`) |
+| `jod-run` | the supervisor every run is launched through — `jod` without it can read and list, but cannot start anything |
+
+`jod-api` — the HTTP daemon — is **not** installed unless you ask for it with
+`JOD_WITH_API=1`. It is an endpoint that spawns agent harnesses, so standing
+one up is a deliberate act rather than a side effect of installing a CLI.
+→ [`deploy/README.md`](./deploy/README.md)
+
+It builds from source rather than downloading a binary: releases here carry no
+prebuilt assets, and the box that runs an agent supervisor is one you want able
+to rebuild it. Re-running is free — it fetches into the existing checkout, and
+skips the build entirely when the installed binaries already match the target
+commit.
+
+Updating later is one command, and it works while the console is running:
+
+```sh
+jod update            # newest patch within the installed MAJOR.MINOR
+jod update --check    # what it would do, without doing it
+jod update --version v1.3.0   # a deliberate minor/major move
+```
+
+The new binary is *renamed* over the old one rather than written in place, so
+the running `jod tui` never blocks its own update — it keeps the build it
+started with until you restart it, which the installer reminds you to do
+(along with any `jod-daemon`/`jod-api` unit it finds running).
+
+**From inside the console**, `/update` runs the same thing as a background
+job: the build streams into the transcript, the console stays usable while it
+runs, and `Alt-J` (or `/jobs`) lists the background shells — what is running,
+what it last printed, and how the finished ones ended. When an update lands,
+the console offers to restart into it; `y` re-execs in place, keeping the same
+terminal and tmux pane. `/reload` does that at any time, and `/update check`
+just reports.
+
+#### Scaffolding another repo
+
+The project scaffolder is a skill, not a subcommand. With the plugin enabled,
+ask for `/jod:setup-project` in that repo; from a checkout, run the script:
 
 ```sh
 cd ~/code/some-other-repo
-jod setup-project
+~/.jod/src/.agents/skills/setup-project/scripts/setup-project.sh
 ```
 
 That walks you through the setup in the terminal — **↑/↓** to move through
@@ -266,14 +310,13 @@ no terminal attached (CI, a pipe) it prints the available presets/skills
 instead of hanging on a prompt:
 
 ```sh
-jod setup-project --list
-jod setup-project --preset jod --skills create-pr,setup-git-hooks,tdd-loop
+setup-project.sh --list
+setup-project.sh --preset jod --skills create-pr,setup-git-hooks,tdd-loop
 ```
 
-`jod setup-project` scaffolds `AGENTS.md`/`CLAUDE.md` plus the chosen skills
-straight into the current repo — no need to clone Jod itself into every
-project. See [`bin/jod`](./bin/jod) and [`install.sh`](./install.sh) for what
-each command does.
+It scaffolds `AGENTS.md`/`CLAUDE.md` plus the chosen skills straight into the
+current repo — no need to clone Jod itself into every project.
+→ [`.agents/skills/setup-project/`](./.agents/skills/setup-project/)
 
 #### Versioning and updates
 
@@ -323,10 +366,13 @@ latest tag by the `bump` input — the old behaviour, still there.
   curl -fsSL .../install.sh | JOD_VERSION=main bash      # bleeding edge
   ```
 - **`jod update`** only ever takes newer *patch* releases within the
-  installed `MAJOR.MINOR` — it never jumps you to a new minor/major release
-  on its own. To move to a new minor/major, re-run `install.sh` with the
-  `JOD_VERSION` you want.
-- **`jod version`** prints what's currently installed.
+  installed `MAJOR.MINOR` — it never jumps the console and the daemon to a new
+  minor/major on its own. Say `jod update --version v1.3.0` (or re-run
+  `install.sh` with `JOD_VERSION`) to make that move deliberately. Either way
+  a newer release is *named* on every run, so it is never a surprise.
+- **`jod --version`** prints the version the running binary was built from,
+  and `jod update --check` prints what is installed, what is available, and
+  what an update would do.
 
 ## Structure
 
@@ -335,8 +381,8 @@ AGENTS.md          the charter — identity, principles, conventions
 CLAUDE.md          symlink -> AGENTS.md, so every runtime reads the same source
 REVIEW.md          brief for the automated PR review — what to flag, what to ignore
 docs/              the WHYs behind the charter's guidelines
-install.sh         curlable bootstrap: clones this repo, links the `jod` CLI
-bin/jod            CLI shim — dispatches into .agents/skills/ from any repo
+install.sh         curlable bootstrap: clones this repo, builds it, installs the binaries
+bin/lib/semver.sh  tag comparison shared by install.sh and the release workflow
 .claude-plugin/    plugin manifest + marketplace catalog (installs this repo as a plugin)
 hooks/hooks.json   the TaskCompleted gate, as the plugin ships it
 agents/            the subagents, where a plugin reads them from

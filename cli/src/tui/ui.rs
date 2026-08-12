@@ -20,7 +20,7 @@ use ratatui::Frame;
 use jod_core::team::MemberStatus;
 use jod_core::PermissionPolicy;
 
-use super::app::{absolute, since, until, App, Entry, Overlay};
+use super::app::{absolute, short_duration, since, until, App, Entry, JobState, Overlay};
 use super::data::{Outcome, Source};
 use super::graph::{self, Direction as EdgeDirection};
 use super::keys;
@@ -564,6 +564,14 @@ fn draw_keybar(f: &mut Frame, app: &App, area: Rect) {
             "Esc cancels",
         ),
         Overlay::Prompt { .. } => ("⏎ accepts · Esc cancels".to_string(), "Esc cancels"),
+        Overlay::Jobs => (
+            "background shells — any key closes it".to_string(),
+            "Esc closes",
+        ),
+        Overlay::ConfirmReload => (
+            "y restarts into the new build · anything else stays".to_string(),
+            "Esc stays",
+        ),
         Overlay::None if app.here().editing_filter => (
             "typing filters this list".to_string(),
             "⏎ keeps it · Esc clears it",
@@ -604,6 +612,15 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
             badge.push_str(" · ");
         }
         badge.push_str(&format!("⚑ {} unread", app.unread()));
+    }
+    // A shell building in the background is invisible by construction — that
+    // is what backgrounding it means — so the always-on row is the only place
+    // it can be seen without being looked for.
+    if app.running_jobs() > 0 {
+        if !badge.is_empty() {
+            badge.push_str(" · ");
+        }
+        badge.push_str(&format!("⚙ {} running (Alt-J)", app.running_jobs()));
     }
     let style = if app.busy && ws == Workspace::Chat {
         fg(WARN)
@@ -776,7 +793,90 @@ fn draw_overlay(f: &mut Frame, app: &App) {
         Overlay::Keymap => draw_keymap(f, app),
         Overlay::Confirm { verb, what, .. } => draw_confirm(f, verb, what),
         Overlay::Prompt { label, value, .. } => draw_prompt(f, label, value),
+        Overlay::Jobs => draw_jobs(f, app),
+        Overlay::ConfirmReload => draw_confirm_reload(f),
     }
+}
+
+/// The background shells this console started.
+///
+/// Every job, not only the running ones: the question "did that update
+/// finish, and how did it go" is asked after the fact, and a list that emptied
+/// itself on completion would answer it with a blank box.
+fn draw_jobs(f: &mut Frame, app: &App) {
+    let mut rows: Vec<Line> = vec![Line::from("")];
+    if app.jobs.is_empty() {
+        rows.push(Line::from(Span::styled(
+            "  nothing running — /update starts one".to_string(),
+            fg(MUTED),
+        )));
+    }
+    for job in &app.jobs {
+        let colour = match job.state {
+            JobState::Running => AGENT,
+            JobState::Ok => GOOD,
+            JobState::Failed => BAD,
+        };
+        rows.push(Line::from(vec![
+            Span::styled(format!("  {} ", job.mark()), fg(colour)),
+            Span::styled(job.label.clone(), bold(colour)),
+            Span::styled(
+                format!("  {}", short_duration(job.elapsed_ms(app.now_ms))),
+                fg(MUTED),
+            ),
+        ]));
+        if let Some(last) = &job.last {
+            // Truncated by chars, not bytes: the installer prints ✓ and →.
+            let line: String = last.chars().take(64).collect();
+            rows.push(Line::from(Span::styled(format!("      {line}"), fg(MUTED))));
+        }
+    }
+    rows.push(Line::from(""));
+
+    let width = 72.min(f.area().width.saturating_sub(4)).max(30);
+    let panel = centred(
+        f.area(),
+        width,
+        (rows.len() as u16 + 2).min(f.area().height),
+    );
+    f.render_widget(Clear, panel);
+    f.render_widget(
+        Paragraph::new(rows).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(fg(MUTED))
+                .title(" background shells ")
+                .title_bottom(" output is in the transcript · any key closes "),
+        ),
+        panel,
+    );
+}
+
+/// The one question an update cannot answer for itself.
+fn draw_confirm_reload(f: &mut Frame) {
+    let panel = centred(f.area(), 62, 6);
+    f.render_widget(Clear, panel);
+    f.render_widget(
+        Paragraph::new(vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                "  restart this console into the new build?".to_string(),
+                bold(AGENT),
+            )),
+            Line::from(Span::styled(
+                "  agents keep running; the conversation is on disk".to_string(),
+                fg(MUTED),
+            )),
+        ])
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(fg(AGENT))
+                .title(" update installed ")
+                .title_bottom(" y restarts · anything else stays "),
+        ),
+        panel,
+    );
 }
 
 /// The which-key menu: every workspace, one letter each, with a **live count**
@@ -5326,5 +5426,64 @@ mod tests {
     fn cutting_a_long_string_says_it_was_cut() {
         assert_eq!(cut("short", 10), "short");
         assert_eq!(cut("a-very-long-name", 8), "a-very-…");
+    }
+
+    /// A background shell is invisible by construction, so the two places it
+    /// can be seen are the panel and the always-on status row. Both, or
+    /// backgrounding an update means losing track of it.
+    #[test]
+    fn the_jobs_panel_shows_what_is_running_and_what_it_is_doing() {
+        let mut a = populated();
+        a.now_ms = 60_000;
+        let job = a.job_start("update", 0);
+        a.job_line(job, "→ Building v1.2.3 — this takes a few minutes the first time");
+
+        let status = rendered(&a, 100, 30);
+        assert!(
+            status.contains("1 running"),
+            "a running shell is on the status row: {status}"
+        );
+
+        a.overlay = Overlay::Jobs;
+        let screen = rendered(&a, 100, 30);
+        assert!(screen.contains("background shells"), "{screen}");
+        assert!(screen.contains("update"), "the job is named: {screen}");
+        assert!(screen.contains("1m00s"), "and aged: {screen}");
+        assert!(
+            screen.contains("Building v1.2.3"),
+            "with what it is doing now: {screen}"
+        );
+    }
+
+    /// A finished job stays listed. "Did that update work" is asked after it
+    /// ended, and a panel that emptied itself on completion could not answer.
+    #[test]
+    fn a_finished_job_stays_in_the_panel_with_how_it_ended() {
+        let mut a = populated();
+        let job = a.job_start("update", 0);
+        a.job_done(job, false, 2_000);
+        a.now_ms = 90_000;
+        a.overlay = Overlay::Jobs;
+        let screen = rendered(&a, 100, 30);
+        assert!(screen.contains("✗"), "a failure is marked as one: {screen}");
+        assert!(
+            screen.contains("2s"),
+            "and its duration stopped when it did: {screen}"
+        );
+    }
+
+    /// The reload question must not borrow the delete confirmation's "this
+    /// cannot be undone" — restarting a console is neither.
+    #[test]
+    fn the_reload_question_says_what_it_costs_and_what_it_does_not() {
+        let mut a = populated();
+        a.overlay = Overlay::ConfirmReload;
+        let screen = rendered(&a, 100, 30);
+        assert!(screen.contains("restart this console"), "{screen}");
+        assert!(screen.contains("agents keep running"), "{screen}");
+        assert!(
+            !screen.contains("cannot be undone"),
+            "a reload is reversible and must not be dressed as a deletion: {screen}"
+        );
     }
 }

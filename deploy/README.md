@@ -9,8 +9,9 @@ The box is reached as `ssh jod-cloud` — an alias in `~/.ssh/config`. This repo
 public and never spells out the address.
 → [why](../docs/decisions.md#the-vps-address-lives-in-ssh-config-not-in-the-repo)
 
-This is **not** installed by `install.sh`. Standing up an RCE endpoint should be
-a deliberate act, never a side effect of installing a CLI.
+`install.sh` does **not** install `jod-api` unless asked (`JOD_WITH_API=1`).
+Standing up an RCE endpoint should be a deliberate act, never a side effect of
+installing a CLI.
 
 ## The shape
 
@@ -43,18 +44,29 @@ sudo -u jod mkdir -p /home/jod/.jod /home/jod/work
 `/home/jod/work` is the only place agents will be allowed to run. Anything the
 agent should reach — a repo checkout — goes under it.
 
-## 2. Install the binary
+## 2. Install the binaries
 
-Build on the box (or copy a matching binary in):
+`install.sh` does the whole job — clone, build, install — as the `jod` user, so
+the checkout it later updates from is one that user owns:
 
 ```sh
-sudo -u jod git clone <repo> /home/jod/src/Jod
-cd /home/jod/src/Jod && cargo build --release -p jod-api -p jod-supervisor
-sudo install -m 0755 target/release/jod-api /usr/local/bin/jod-api
-sudo install -m 0755 target/release/jod-run /usr/local/bin/jod-run
+sudo -u jod env JOD_HOME=/home/jod/.jod JOD_BIN_DIR=/usr/local/bin JOD_WITH_API=1 \
+  bash -c 'curl -fsSL https://raw.githubusercontent.com/Reljod/Jod/main/install.sh | bash'
 ```
 
-**Install both.** `jod-run` supervises every agent — it holds the run's output
+`JOD_WITH_API=1` is what adds `jod-api` to the default `jod` + `jod-run`;
+without it the daemon is not installed at all. `/usr/local/bin` is root-owned,
+so the installer escalates with `sudo` for the copy itself and says so.
+
+Later, on the box: `jod update` takes newer patches, `jod update --check` says
+what it would take first. It renames the new binaries over the old ones, so it
+works while the console is running — but a running process keeps the build it
+started with, so restart the units afterwards (the installer prints the exact
+commands for whatever it finds running). From inside the console, `/update`
+does the same thing as a background job and then offers to restart itself into
+the new build; `Alt-J` shows what is running.
+
+**Install both `jod` and `jod-run`.** `jod-run` supervises every agent — it holds the run's output
 and writes it to the store — so `jod-api` without it can serve requests but
 cannot start anything. It is looked for beside the running executable first,
 then on `PATH`; `JOD_SUPERVISOR_BIN` overrides both. Keep the two at the same
@@ -325,9 +337,6 @@ The same caveat the scheduling research carries about its own units applies
 here. Treat the first install as a test, and check the fires table before
 trusting it.
 
-**`ExecStart=/usr/local/bin/jod daemon` names a subcommand the `jod` CLI does
-not have yet.** The loop itself is `jod_core::daemon` and is tested; wiring it
-to a command line belongs to whoever owns `cli/`. Until that lands, the unit
-will start and immediately fail on an unrecognised argument. What it needs is
-`Daemon::persistent().await?.run(daemon::shutdown_signal()).await` for the
-resident form, and `run_once()` for a one-shot `jod tick`.
+`ExecStart=/usr/local/bin/jod daemon` names a subcommand the CLI does have
+(`jod daemon`, and `jod daemon --once` for a single tick) — but "the command
+parses" is not "the unit runs", which is what the paragraph above is about.

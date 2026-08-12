@@ -136,6 +136,7 @@ pub const GLOBAL: &[Key] = &[
     k("Alt-A", "fleet"),
     k("Alt-G", "team"),
     k("Alt-N", "the oldest thing unread"),
+    k("Alt-J", "background shells"),
     k("Alt-B", "delegate the typed line"),
     k("Alt-X", "stop the run being watched"),
     k("Alt-F", "the typed line in $EDITOR"),

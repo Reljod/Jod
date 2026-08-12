@@ -10,8 +10,8 @@ skill and follow it.
 Wherever that skill writes `${CLAUDE_SKILL_DIR}`, read it as
 `.agents/skills/orchestrate` — the skill's own directory in this repo.
 
-The CLI is `jod orc` (`jod orc help`), or equivalently
-`node .agents/skills/orchestrate/scripts/orc.mjs` when `jod` is not on PATH.
+The CLI is `node .agents/skills/orchestrate/scripts/orc.mjs` (`… help`).
+Where the steps below write `orc`, expand it to that.
 
 Request: $ARGUMENTS
 
@@ -21,10 +21,10 @@ is the difference from the `Agent` tool, whose subagents report once and
 vanish.
 
 Steps:
-1. **Take stock before starting anything.** `jod orc ls` — a session that is
+1. **Take stock before starting anything.** `orc ls` — a session that is
    `blocked` is waiting on a human answer, and replying to it with
-   `jod orc send` is usually cheaper than starting fresh work.
-2. **Resolve the targets.** `@Name` comes from `jod orc projects`. If a name
+   `orc send` is usually cheaper than starting fresh work.
+2. **Resolve the targets.** `@Name` comes from `orc projects`. If a name
    is ambiguous or untrusted, resolve it with the user rather than guessing —
    spawning into an untrusted directory produces a session that hangs
    silently in the agent view.
@@ -33,10 +33,10 @@ Steps:
    sequence. Independent work only.
 4. **Give every brief its own acceptance check** — "until `pnpm test`
    passes", not "make it better". A session stops when it thinks it is done.
-5. **Dispatch.** `jod orc fanout @a @b -- "<task>"` for one shared task, or
-   `jod orc fanout --spec` when each member gets a different brief. Use
-   `jod orc spawn` for a single session.
-6. **Harvest, don't re-read.** `jod orc wait <ids>`, then `jod orc result
+5. **Dispatch.** `orc fanout @a @b -- "<task>"` for one shared task, or
+   `orc fanout --spec` when each member gets a different brief. Use
+   `orc spawn` for a single session.
+6. **Harvest, don't re-read.** `orc wait <ids>`, then `orc result
    <id>` per session. Read a transcript only when a result is unclear.
 7. **Report back** the session ids, each one's state, and the synthesized
    result — plus anything left `blocked` and what it is waiting for.

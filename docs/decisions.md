@@ -237,17 +237,112 @@ not a property of a good commit — it breaks on repos with no tracker and on th
 many real commits that map to no issue. `TICKET_REGEX` ships empty; `--ticket`
 is an explicit per-repo decision.
 
-## The CLI asks; the script still takes flags
+## The scaffolder asks; the script still takes flags
 
-`jod setup-project` with no choices walks a human through them (↑/↓, space,
+`setup-project.sh` with no choices walks a human through them (↑/↓, space,
 enter) rather than making them hand-assemble `--skills`. The wizard only *fills
 in* flags, so scripts, CI, and agents keep the same deterministic entry point;
 no-tty falls back to `--list` instead of hanging on a prompt.
 
-## Toolkit distribution is a curlable installer, not a required clone
+## `install.sh` installs the binaries; the skills ship as a plugin
 
-`install.sh` + `bin/jod` bootstrap the toolkit on any Linux/macOS box and run
-`jod setup-project` against a repo without cloning Jod into every project.
+`install.sh` used to bootstrap the *toolkit* — a clone at `~/.jod` plus a bash
+`jod` that dispatched into `.agents/skills/`. It now clones the source to
+`$JOD_HOME/src`, builds the workspace, and installs the real `jod` and
+`jod-run` binaries. The skills it used to front are distributed by the Claude
+Code plugin, and reached from a checkout by running their scripts directly.
+
+One installer, two different `jod`s on `PATH` was the actual problem. Claude
+Code puts an enabled plugin's `bin/` on `PATH`, so the shell shim shadowed the
+compiled binary on exactly the machine that needed the compiled one — and the
+shim, having no `mcp`, `tui` or `daemon` subcommand, answered every such call
+with "unknown command". Deleting it removes the collision rather than ordering
+`PATH` around it. Nothing was lost: every command the shim had was a thin call
+into a script the plugin already ships.
+
+What this buys is the thing the toolkit installer never could: **the VPS
+console can update itself**. `jod update` is what a resident `jod tui` runs to
+become a newer build.
+
+## `jod update` shells out to `install.sh` rather than reimplementing it
+
+Version resolution is a set of rules about a tag list — highest patch within
+the installed `MAJOR.MINOR`, never a minor jump, a branch install
+fast-forwards. Two implementations of those rules that drifted apart would mean
+`install.sh` and `jod update` installing different things from the same tags,
+which is the one failure a versioning scheme exists to prevent. So the rules
+live in the script, and the Rust command answers only what the script cannot
+know: where the checkout is (`$JOD_SRC`, else `$JOD_HOME/src`), where the
+binaries currently live (the directory of `current_exe`, so an update replaces
+what the box is actually running, `/usr/local/bin` included), and which
+binaries this machine has — `jod-api` is opt-in at install time, and an update
+must not silently drop it from a box that chose it.
+
+Two consequences worth stating:
+
+- **The source lives *inside* the state directory** (`$JOD_HOME/src`), not
+  beside it. That is what lets `jod update` find its own checkout with no
+  configuration, including when Jod runs as a system user whose `$HOME` is not
+  the one that ran the installer.
+- **`jod update` is handled before the store is opened.** An update is how you
+  recover a build that cannot open its own database; a version of it that
+  needed a working store would be useless on the day it was needed.
+
+## The console updates itself, in the background, and asks before restarting
+
+`/update` in the TUI is the same `install.sh` run, started as a background job
+with its output streamed into the transcript. Three decisions, each paid for by
+the shape of the thing being updated:
+
+- **Backgrounded, not suspended.** The first version took the terminal the way
+  `$EDITOR` does. A cold `cargo build` is minutes, and the console is what you
+  were in the middle of using — freezing it for the duration contradicts the
+  reason the console exists. Agents keep streaming while it builds.
+- **Visible.** A job you cannot see is a promise you cannot check, so the
+  status row carries a running count and `Alt-J` (`/jobs`) lists every
+  background shell with its last line, how long it has run, and how it ended.
+  Finished jobs stay listed: "did that update work" is asked afterwards.
+- **The restart is asked for, never taken.** Replacing the file does not
+  replace the process, so a successful update offers a reload, and `/reload`
+  does it on demand. It is an `exec` of the new binary with the same
+  arguments — same terminal, same pid, same tmux pane, which is what makes it
+  usable as *the* way the always-on VPS console takes an update. Nothing is
+  lost that was not already on disk: agents are their own process groups and
+  the conversation is in SQLite. It gets its own overlay rather than the
+  delete confirmation, because "this cannot be undone" is false here and a
+  warning that cries wolf is worse than none.
+
+`/update` takes no version argument. A minor or major move changes what the
+console and the daemon *are*, and the console mid-session is the wrong place
+to decide that; `jod update --version` at a shell is.
+
+## An update renames the new binary over the old one
+
+Writing a running executable in place fails with `ETXTBSY` on Linux, and the
+binary being replaced here is routinely the one running the update — the VPS
+console is a long-lived `jod tui`. So each binary is installed under a
+temporary name and `mv`'d into place: rename swaps the directory entry while
+the running process keeps the inode it started with. It picks the new build up
+when it restarts, which the installer says out loud, naming any running
+`jod-daemon`/`jod-api` unit and any live console. A replaced binary is not a
+restarted process, and silence there reads as "the fix didn't work".
+`tests/install.test.sh` holds a process open across an update and asserts both
+halves.
+
+## Installing means building, not downloading
+
+Releases carry no binary assets, so `install.sh` runs `cargo build --release
+--locked`. The alternative — cross-compiled tarballs per platform, attached by
+the release workflow — buys a faster first install and costs a build matrix,
+asset naming, checksums and a fallback path for anything unbuilt. It is worth
+revisiting when there is a second machine that cannot build. Until then the box
+running an agent supervisor is one that should be able to rebuild it, and
+`--locked` means the build is the release rather than whatever the registry
+resolved that day.
+
+Re-running is cheap because the install is idempotent: the ref *and* the commit
+are recorded (`.jod-version`, `.jod-commit`), and a run whose target commit is
+already installed skips the build entirely and says so.
 
 ## Releases are semver tags, cut manually
 
@@ -1507,8 +1602,11 @@ Three things follow from these being *the user's* files rather than Jod's:
   config or the new one, never half of either.
 
 It runs from the `jod daemon` entrypoint, not from `install.sh` and not from
-`Daemon::run` — and both exclusions were paid for. `install.sh` links the
-*shell* toolkit `jod`, which has no `mcp` subcommand. `Daemon::run` is library
+`Daemon::run` — and both exclusions were paid for. `install.sh` puts binaries
+on `PATH`; whether a harness config should point at them is a question about
+this machine's agents, not about a file having been copied, and an installer
+that edited three configs someone else owns would be doing it on every
+re-run. `Daemon::run` is library
 code with tests, and hanging registration off it meant `cargo test` wrote three
 real harness configs on the developer's own machine, each naming a
 `target/debug/deps/jod_core-<hash>` that the next build deleted. An effect on
