@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# test.sh — deterministic tests for `jod orc`.
+# test.sh — deterministic tests for `orc.mjs`.
 # Run: .agents/skills/orchestrate/tests/test.sh
 #
 # Everything here is hermetic: a fake CLAUDE_BIN records the argv it was

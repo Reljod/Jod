@@ -28,6 +28,13 @@
 
 #[path = "../src/tui/mod.rs"]
 mod tui;
+// Compiled in for the same reason: the TUI's `/update` reaches
+// `crate::update`, and the module has to resolve even though nothing this
+// example renders will ever call it. The real one, not a stub — it is pure
+// code over paths and a subprocess, so compiling it here costs nothing and a
+// stub would be one more thing that can drift.
+#[path = "../src/update.rs"]
+mod update;
 
 use std::path::PathBuf;
 use std::sync::Arc;

@@ -150,6 +150,25 @@ pub enum Action {
     /// Open the typed line in `$EDITOR`. The TUI has to be suspended and
     /// restored around it, which only the loop can do.
     Editor,
+    /// Update the binaries this console is running from, or say what an update
+    /// would take.
+    ///
+    /// Runs as a background job with its output streamed into the transcript,
+    /// rather than taking the terminal the way [`Action::Editor`] does. An
+    /// update is minutes of `git` and `cargo`, and the console is the thing
+    /// you were in the middle of using — freezing it for the duration would
+    /// make "keep working while it builds" impossible, which is the whole
+    /// reason the console exists.
+    Update {
+        check: bool,
+    },
+    /// Restart this console into whatever `jod` is now on disk.
+    ///
+    /// The one thing an update cannot do to itself: replacing the file does
+    /// not replace the running process. Offered after an update that changed
+    /// the binary, and available as `/reload` whenever a build landed some
+    /// other way.
+    Reload,
     /// A verb the screens offer and the store cannot carry out yet. Named
     /// rather than silently ignored, and naming the missing call rather than
     /// apologising, so the gap is a to-do and not a mystery.
@@ -416,6 +435,10 @@ async fn event_loop(
     let (models_tx, mut models_rx) =
         tokio::sync::mpsc::unbounded_channel::<(HarnessKind, Vec<Model>)>();
     let mut asking_models: Option<HarnessKind> = None;
+    // `/update`, running as a background job. The channel carries the
+    // installer's own output line by line so the transcript shows a build
+    // happening rather than a console that has gone quiet.
+    let (update_tx, mut update_rx) = tokio::sync::mpsc::unbounded_channel::<UpdateMsg>();
 
     loop {
         terminal.draw(|f| viewport = ui::draw(f, &app))?;
@@ -436,6 +459,12 @@ async fn event_loop(
                             // done from here — with the same discipline as
                             // `enter`/`restore`, panic hook included.
                             Some(Action::Editor) => edit_in_editor(terminal, &mut app),
+                            // Both take something only the loop has: the
+                            // terminal, or the job slot the update occupies.
+                            Some(Action::Update { check }) => {
+                                start_update(&mut app, &update_tx, check);
+                            }
+                            Some(Action::Reload) => reload(terminal, &mut app),
                             Some(action) => perform(&jod, &mut app, &opts, &mut thread, action).await,
                             None => {}
                         }
@@ -510,6 +539,29 @@ async fn event_loop(
             // A harness answered. Kept only if it is still the harness on
             // screen: `/harness` may have moved on while it was thinking, and
             // one harness's model names are not another's.
+            Some(msg) = update_rx.recv() => {
+                match msg {
+                    // Into the transcript *and* onto the job, which are two
+                    // different questions: "what is it doing right now" is the
+                    // job's last line, and "what did it do" is scrollback that
+                    // is still readable an hour later.
+                    UpdateMsg::Line { job, line } => {
+                        app.job_line(job, &line);
+                        app.push(Entry::Notice(line));
+                    }
+                    UpdateMsg::Done { job, said, ok, replaced } => {
+                        app.job_done(job, ok, app.now_ms);
+                        app.push(Entry::Notice(said));
+                        // Asked, never taken. Reloading throws away the screen
+                        // you are looking at, and the moment an update lands is
+                        // not automatically the moment to lose it.
+                        if replaced {
+                            app.overlay = Overlay::ConfirmReload;
+                        }
+                    }
+                }
+            }
+
             Some((kind, models)) = models_rx.recv() => {
                 if app.harness == kind {
                     app.models = models;
@@ -1024,6 +1076,15 @@ async fn perform(
         // handled there rather than here. Reaching it means the loop did not.
         Action::Editor => app.push(Entry::Notice(
             "no $EDITOR handoff from here — set $EDITOR and try Alt-F in chat".into(),
+        )),
+        // Both need something only the loop holds — the job table for one, the
+        // terminal for the other. Reached only from a caller that has neither,
+        // so they say so rather than pretending to have run.
+        Action::Update { .. } => app.push(Entry::Notice(
+            "/update runs from the console's own loop — run `jod update` at a shell instead".into(),
+        )),
+        Action::Reload => app.push(Entry::Notice(
+            "/reload restarts the console, which only the console can do".into(),
         )),
         // Named rather than silently ignored: a key that appears to do nothing
         // is worse than one that says what it is waiting for.
@@ -1844,6 +1905,14 @@ fn on_chord(app: &mut App, key: KeyEvent) -> Option<Option<Action>> {
             jump_to_oldest_unread(app);
             handled(None)
         }
+        // The background shells this console started — an update building
+        // while you carry on working, and whatever joins it later. Alt only:
+        // Ctrl-J is a line feed, which most terminals send for Enter, so
+        // taking `either` here would make Enter open a panel.
+        KeyCode::Char('j') if alt => {
+            app.overlay = Overlay::Jobs;
+            handled(None)
+        }
         // `$EDITOR` on the input. Claude Code spells this `Ctrl+G`, which is
         // Jod's team panel and is documented — so `Alt-F`, with `Alt-K e` as
         // the discoverable alias.
@@ -2001,6 +2070,23 @@ fn on_overlay_key(app: &mut App, key: KeyEvent) -> Option<Action> {
             app.overlay = Overlay::None;
             None
         }
+        // A list you read, not one you act on: closing on any key is what the
+        // keymap already does, and two read-only panels that dismiss
+        // differently would be one to learn twice.
+        Overlay::Jobs => {
+            app.overlay = Overlay::None;
+            None
+        }
+        // Anything that is not a yes leaves the console on the build it
+        // started with — the safe half of the question, and the one a stray
+        // keypress should land on.
+        Overlay::ConfirmReload => {
+            app.overlay = Overlay::None;
+            match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => Some(Action::Reload),
+                _ => None,
+            }
+        }
         Overlay::WhichKey => on_which_key(app, key),
         Overlay::WhichKeyNew => {
             app.overlay = Overlay::None;
@@ -2077,6 +2163,13 @@ fn on_which_key(app: &mut App, key: KeyEvent) -> Option<Action> {
         'e' => {
             app.overlay = Overlay::None;
             Some(Action::Editor)
+        }
+        // No workspace claims `j`, so the menu can carry the jobs panel as
+        // well — the discoverable spelling of Alt-J, exactly as `e` is of
+        // Alt-F.
+        'j' => {
+            app.overlay = Overlay::Jobs;
+            None
         }
         '?' => {
             app.overlay = Overlay::Keymap;
@@ -3236,6 +3329,9 @@ fn apply_slash(app: &mut App, slash: command::Slash) -> Option<Action> {
             app.transcript.clear();
             app.scroll_to_bottom();
         }
+        Slash::Update { check } => return Some(Action::Update { check }),
+        Slash::Jobs => app.overlay = Overlay::Jobs,
+        Slash::Reload => return Some(Action::Reload),
         Slash::Exit => app.should_quit = true,
         Slash::NeedsArgument(usage) => {
             app.push(Entry::Notice(format!("usage: {usage}")));
@@ -3705,6 +3801,147 @@ fn edit_in_editor(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &m
         },
     }
     let _ = std::fs::remove_file(&path);
+}
+
+/// What a running `/update` sends back to the loop.
+enum UpdateMsg {
+    /// One line the installer wrote, as it wrote it, and the job it belongs to.
+    Line { job: usize, line: String },
+    /// It finished. `replaced` is what decides whether a reload is worth
+    /// offering — an update that found itself already current changed nothing
+    /// to reload into.
+    Done {
+        job: usize,
+        said: String,
+        ok: bool,
+        replaced: bool,
+    },
+}
+
+/// `/update` — build and install a newer Jod, from inside the Jod you are
+/// running.
+///
+/// The console on the VPS is where Jod is used, so it is where noticing that
+/// Jod is out of date happens; a command that could only be typed at a shell
+/// would mean quitting the thing you wanted to keep. It runs as a background
+/// job: the installer's output streams into the transcript, and the console
+/// stays usable — agents keep streaming, screens keep refreshing — for the
+/// several minutes a cold `cargo build` takes.
+///
+/// Safe to run against yourself. The installer renames each new binary over
+/// the old one, so nothing here is writing the file this process is executing.
+fn start_update(app: &mut App, tx: &tokio::sync::mpsc::UnboundedSender<UpdateMsg>, check: bool) {
+    // One at a time, derived from the job table rather than tracked beside it:
+    // two installers writing the same binaries and the same checkout is a race
+    // with a corrupt install at the end of it.
+    if app
+        .jobs
+        .iter()
+        .any(|j| j.is_running() && j.label.starts_with("update"))
+    {
+        app.push(Entry::Notice(
+            "an update is already running — Alt-J shows it".into(),
+        ));
+        return;
+    }
+    let label = if check { "update --check" } else { "update" };
+    let job = app.job_start(label, app.now_ms);
+    app.push(Entry::Notice(format!(
+        "{label} running in the background · Alt-J lists background shells"
+    )));
+
+    let tx = tx.clone();
+    let (lines_tx, mut lines_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    // Forwarded through this task rather than sent to the loop directly, so
+    // the loop sees one channel and every line still arrives before the
+    // `Done` that summarises it.
+    let forward = tx.clone();
+    tokio::spawn(async move {
+        while let Some(line) = lines_rx.recv().await {
+            if forward.send(UpdateMsg::Line { job, line }).is_err() {
+                break;
+            }
+        }
+    });
+    // Blocking on purpose: `install.sh` is a subprocess this waits on, and a
+    // blocking wait on a runtime worker would starve the console it is meant
+    // to leave usable.
+    tokio::task::spawn_blocking(move || {
+        let msg = match crate::update::run_streaming(check, None, false, lines_tx) {
+            Ok(o) if o.replaced => UpdateMsg::Done {
+                job,
+                said: "update installed — this console is still running the build it started with"
+                    .to_string(),
+                ok: true,
+                replaced: true,
+            },
+            Ok(_) if check => UpdateMsg::Done {
+                job,
+                said: "checked — nothing was installed".to_string(),
+                ok: true,
+                replaced: false,
+            },
+            Ok(_) => UpdateMsg::Done {
+                job,
+                said: "update finished — this console is already running that build".to_string(),
+                ok: true,
+                replaced: false,
+            },
+            Err(e) => UpdateMsg::Done {
+                job,
+                said: format!("update failed: {e:#}"),
+                ok: false,
+                replaced: false,
+            },
+        };
+        let _ = tx.send(msg);
+    });
+}
+
+/// `/reload` — become the `jod` that is on disk now.
+///
+/// An `exec`, not a spawn-and-exit: the console keeps its terminal, its
+/// process id and its place in whatever tmux window or SSH session is showing
+/// it, which is what makes this usable as *the* way the always-on VPS console
+/// takes an update. Nothing is lost that was not already on disk — agents are
+/// their own process groups, and the conversation lives in SQLite.
+///
+/// On success this function does not return.
+fn reload(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) {
+    use std::os::unix::process::CommandExt;
+
+    let exe = match crate::update::running_binary() {
+        Ok(exe) => exe,
+        Err(e) => {
+            app.push(Entry::Notice(format!("cannot reload: {e:#}")));
+            return;
+        }
+    };
+    // The same arguments this console was started with, so a reload lands on
+    // the same screen, harness and conversation rather than on the defaults.
+    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+
+    // The terminal has to go back to the shell's own state *before* the exec,
+    // because after it there is no code of ours left to do it.
+    restore();
+    let failed = std::process::Command::new(&exe).args(&args).exec();
+
+    // Only reachable if the exec failed — take the screen back and say so,
+    // rather than leaving a console that looks hung on a restored terminal.
+    match enter() {
+        Ok(fresh) => *terminal = fresh,
+        Err(e) => {
+            app.push(Entry::Notice(format!(
+                "reload failed ({failed}) and the terminal could not be taken back: {e}"
+            )));
+            return;
+        }
+    }
+    let _ = terminal.clear();
+    app.push(Entry::Notice(format!(
+        "could not reload into {}: {failed}",
+        exe.display()
+    )));
 }
 
 async fn list_agents(jod: &Arc<Jod>) -> Vec<AgentLine> {
@@ -7559,6 +7796,105 @@ mod tests {
         assert!(
             said.contains("port the parser"),
             "the run id under the cursor found its thread: {said}"
+        );
+    }
+
+    // ---- background shells: /update, /jobs, /reload ----
+
+    /// The console has to be able to update the binary it is running from.
+    /// That is what makes an always-on TUI on a VPS maintainable at all: the
+    /// alternative is quitting the thing you wanted to keep in order to
+    /// replace it.
+    #[test]
+    fn update_is_a_command_and_a_background_job() {
+        assert_eq!(
+            command::parse("/update"),
+            Some(command::Slash::Update { check: false })
+        );
+        assert_eq!(
+            command::parse("/update check"),
+            Some(command::Slash::Update { check: true })
+        );
+        assert_eq!(
+            command::parse("/update --check"),
+            Some(command::Slash::Update { check: true })
+        );
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        assert_eq!(
+            apply_slash(&mut app, command::Slash::Update { check: false }),
+            Some(Action::Update { check: false }),
+            "/update hands the work back to the loop, which owns the job table"
+        );
+    }
+
+    /// A version argument would be a minor/major move decided mid-session, in
+    /// the console the move would replace. It is refused with the sentence
+    /// that says where that decision does belong.
+    #[test]
+    fn update_refuses_a_version_rather_than_guessing_at_it() {
+        assert!(matches!(
+            command::parse("/update v2.0.0"),
+            Some(command::Slash::Refused(_))
+        ));
+    }
+
+    /// Backgrounding something and giving no way to look at it is asking to be
+    /// trusted about work that is never shown.
+    #[test]
+    fn background_shells_are_reachable_by_command_and_by_chord() {
+        assert_eq!(command::parse("/jobs"), Some(command::Slash::Jobs));
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        apply_slash(&mut app, command::Slash::Jobs);
+        assert_eq!(app.overlay, Overlay::Jobs, "/jobs opens the panel");
+
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        alt(&mut app, KeyCode::Char('j'));
+        assert_eq!(app.overlay, Overlay::Jobs, "Alt-J opens the panel");
+        // Read-only, like the keymap: any key closes it.
+        press(&mut app, KeyCode::Char('q'));
+        assert_eq!(app.overlay, Overlay::None);
+    }
+
+    #[test]
+    fn a_job_records_its_last_line_and_how_it_ended() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        let job = app.job_start("update", 1_000);
+        assert_eq!(app.running_jobs(), 1);
+        app.job_line(job, "→ Building v1.2.3");
+        app.job_line(job, "   ");
+        assert_eq!(
+            app.jobs[job].last.as_deref(),
+            Some("→ Building v1.2.3"),
+            "a blank line must not erase what the job was last seen doing"
+        );
+        app.job_done(job, true, 4_000);
+        assert_eq!(app.running_jobs(), 0);
+        assert!(!app.jobs[job].is_running());
+        assert_eq!(app.jobs[job].elapsed_ms(9_999), 3_000, "a finished job stops ageing");
+        assert_eq!(app.jobs[job].mark(), "✓");
+    }
+
+    /// The one thing an update cannot do to itself. Asked rather than taken —
+    /// and a keystroke that is not `y` leaves the console where it is.
+    #[test]
+    fn a_finished_update_offers_a_reload_and_takes_no_for_an_answer() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.overlay = Overlay::ConfirmReload;
+        assert_eq!(press(&mut app, KeyCode::Char('n')), None);
+        assert_eq!(app.overlay, Overlay::None);
+
+        app.overlay = Overlay::ConfirmReload;
+        assert_eq!(press(&mut app, KeyCode::Char('y')), Some(Action::Reload));
+        assert_eq!(app.overlay, Overlay::None);
+    }
+
+    #[test]
+    fn reload_is_also_a_command_of_its_own() {
+        assert_eq!(command::parse("/reload"), Some(command::Slash::Reload));
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        assert_eq!(
+            apply_slash(&mut app, command::Slash::Reload),
+            Some(Action::Reload)
         );
     }
 }

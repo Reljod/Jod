@@ -67,18 +67,18 @@ convenience:
   /path/to/other-repo` as shown below.
 - **Fresh machine, no clone yet**: run the curlable installer
   (`curl -fsSL https://raw.githubusercontent.com/Reljod/Jod/main/install.sh
-  | bash`, see the repo README) — it clones Jod to `~/.jod` and puts a
-  `jod` CLI on `PATH`. From there, `cd` into the target repo and run `jod
-  setup-project ...` directly; it defaults `--target` to the current
-  directory, so no path juggling is needed.
+  | bash`, see the repo README) — it leaves a Jod checkout at `~/.jod/src`.
+  Point `${CLAUDE_SKILL_DIR}` at this skill's directory inside it, `cd` into
+  the target repo, and run the script below; it defaults `--target` to the
+  current directory, so no path juggling is needed.
 
 ## How to run it
 
 The script has two front doors, and which one to use depends on who is
 driving:
 
-- **A human at a terminal** (`jod setup-project`, or the script with no
-  choice flags) gets an interactive wizard — ↑/↓ to move, space to toggle
+- **A human at a terminal** (the script with no choice flags) gets an
+  interactive wizard — ↑/↓ to move, space to toggle
   skills, enter to confirm, `q` to cancel. Point them at it rather than
   interviewing them yourself; it already shows every preset and skill with
   a one-line summary and pre-selects the recommended defaults.

@@ -85,6 +85,19 @@ pub enum Slash {
     Done(String),
     /// Clear the transcript on screen. The conversation is untouched.
     Clear,
+    /// The background shells this console started, running and finished.
+    Jobs,
+    /// Restart the console into whatever `jod` is on disk now.
+    Reload,
+    /// Update the binaries this console is running from.
+    ///
+    /// `check` is the whole difference between "tell me" and "do it", and it
+    /// is a separate word rather than a separate command because the two are
+    /// the same question asked with different consequences — a user who typed
+    /// the wrong one should be one word away from the right one.
+    Update {
+        check: bool,
+    },
     Exit,
     /// A `/word` nobody knows. Reported rather than sent to the agent.
     Unknown(String),
@@ -293,6 +306,21 @@ pub fn parse(line: &str) -> Option<Slash> {
             }
         }
         "clear" => Slash::Clear,
+        // Not `bg`: that already means `/delegate`, and a word that means
+        // "start one" on one line and "list them" on the next is a trap.
+        "jobs" | "shells" => Slash::Jobs,
+        "reload" | "restart" => Slash::Reload,
+        // Deliberately not `/upgrade <version>`: a minor or major move changes
+        // what the console and the daemon *are*, and the console mid-session is
+        // the wrong place to decide that. `jod update --version` at a shell is.
+        "update" | "upgrade" => match arg.trim_start_matches("--") {
+            "" => Slash::Update { check: false },
+            "check" | "dry-run" | "n" => Slash::Update { check: true },
+            other => Slash::Refused(format!(
+                "“{other}” is not something /update takes — /update installs the \
+                 newest patch, /update check says what it would install"
+            )),
+        },
         "exit" | "quit" | "q" => Slash::Exit,
         other => Slash::Unknown(format!("/{other}")),
     })
@@ -411,6 +439,15 @@ pub const HELP: &[(&str, &str)] = &[
     ("/todo <title>", "put a task on the team's board"),
     ("/done <task-id>", "mark one of those tasks finished"),
     ("/clear", "clear the transcript on screen"),
+    ("/jobs", "background shells — what is building (Alt-J)"),
+    (
+        "/reload",
+        "restart this console into the jod that is on disk now",
+    ),
+    (
+        "/update",
+        "build and install the newest patch of Jod; 'check' just says what it would do",
+    ),
     ("/exit", "leave; running agents keep going"),
 ];
 

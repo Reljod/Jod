@@ -8,6 +8,7 @@ mod mcp_cmd;
 mod render;
 mod render_time;
 mod tui;
+mod update;
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
@@ -389,6 +390,24 @@ enum Command {
         /// `jod-api` applies to a remote caller, and the same default.
         #[arg(long, value_parser = parse_permission_arg, default_value = "accept_edits")]
         max_permission: PermissionPolicy,
+    },
+    /// Update this machine's Jod binaries to the newest patch release.
+    ///
+    /// Rebuilds from the checkout `install.sh` left behind and renames the new
+    /// binaries over the old ones, so the console can update itself while it
+    /// is running. Patch-only by default: a minor or major move would change
+    /// what the daemon and the TUI are, and is asked for explicitly with
+    /// `--version`.
+    Update {
+        /// Say what an update would do, and change nothing.
+        #[arg(long)]
+        check: bool,
+        /// Install a specific version or branch instead of the newest patch.
+        #[arg(long)]
+        version: Option<String>,
+        /// Rebuild and reinstall even when already at the target commit.
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -956,6 +975,26 @@ fn load_dotenv() {
 async fn main() -> Result<()> {
     load_dotenv();
     let cli = Cli::parse();
+
+    // Handled before the store is opened, deliberately: an update is how you
+    // recover a build whose store it cannot open, and a command that needed a
+    // working database to fix a broken one would be no use on the day it was
+    // needed.
+    if let Command::Update {
+        check,
+        version,
+        force,
+    } = cli.command
+    {
+        let outcome = update::run(check, version, force)?;
+        if outcome.replaced {
+            // Said here rather than by the installer, because only this
+            // process knows it is *itself* the binary that just moved.
+            println!("Anything already running is still the previous build — restart it.");
+        }
+        return Ok(());
+    }
+
     // Persistent by default: an assistant that forgets every run when the
     // process exits is a task runner, not an assistant.
     let jod = Jod::persistent().context("opening ~/.jod/jod.db")?;
@@ -1521,6 +1560,10 @@ async fn main() -> Result<()> {
         } => {
             mcp_cmd::run(jod, access, max_permission.into()).await?;
         }
+
+        // Returned above, before the store was opened — an update must not
+        // need a working database to fix a broken one.
+        Command::Update { .. } => unreachable!("handled before the store is opened"),
     }
 
     Ok(())

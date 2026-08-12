@@ -64,6 +64,16 @@ pub enum Overlay {
         verb: String,
         what: String,
     },
+    /// The background shells this console started — `/jobs`, or `Alt-J`.
+    Jobs,
+    /// Offered when an update has installed a new binary: restart into it now,
+    /// or stay on the build this process started with.
+    ///
+    /// Its own overlay rather than an [`Overlay::Confirm`], because that one
+    /// is titled "this cannot be undone" and means it. Reloading is neither
+    /// destructive nor irreversible, and a question that borrows a warning it
+    /// does not need teaches people to ignore the warning.
+    ConfirmReload,
     /// Tier 1 of the form ladder: one value, typed on a line where the keybar
     /// was, with no screen change and no context lost.
     Prompt {
@@ -241,6 +251,58 @@ pub struct App {
     /// the window. It is an estimate and the screen must say so rather than
     /// print a precise-looking number nobody can check.
     pub context_tokens: u64,
+    /// Shell jobs this console started and is not watching — an update
+    /// building in the background, and whatever joins it later.
+    ///
+    /// Distinct from `agents`, which is the fleet: an agent is a harness with
+    /// a transcript, and a job is a subprocess with output. Both are "things
+    /// running that you are not looking at", and a console that can start one
+    /// without offering a way to see it is asking to be trusted about work it
+    /// never shows.
+    pub jobs: Vec<Job>,
+}
+
+/// One background shell this console started.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Job {
+    /// What it is, in the words the user typed: `update`, `update --check`.
+    pub label: String,
+    /// When it started, so the list can age it against `now_ms`.
+    pub started_ms: i64,
+    /// When it ended, or `None` while it is still going.
+    pub ended_ms: Option<i64>,
+    pub state: JobState,
+    /// The last line it printed — the difference between "still running" and
+    /// "still running, and here is what it is doing".
+    pub last: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JobState {
+    Running,
+    Ok,
+    Failed,
+}
+
+impl Job {
+    pub fn is_running(&self) -> bool {
+        self.state == JobState::Running
+    }
+
+    /// How long it has been going, or how long it took. One function so a
+    /// finished job's duration stops growing, which a bare `now - started`
+    /// would not.
+    pub fn elapsed_ms(&self, now_ms: i64) -> i64 {
+        (self.ended_ms.unwrap_or(now_ms) - self.started_ms).max(0)
+    }
+
+    pub fn mark(&self) -> &'static str {
+        match self.state {
+            JobState::Running => "•",
+            JobState::Ok => "✓",
+            JobState::Failed => "✗",
+        }
+    }
 }
 
 /// Where the context bar turns from information into advice.
@@ -564,6 +626,7 @@ impl App {
             mode: PermissionPolicy::default(),
             panel: false,
             context_tokens: 0,
+            jobs: Vec::new(),
         }
     }
 
@@ -624,6 +687,53 @@ impl App {
         if count > 0 {
             self.suggestion = (self.suggestion + count - 1) % count;
         }
+    }
+
+    /// Record a background shell as started, and answer where it lives so its
+    /// output can be routed back to it.
+    ///
+    /// Finished jobs stay in the list, oldest trimmed first: "what happened to
+    /// that update" is asked *after* it ended, and a list that forgot on
+    /// completion could never answer it.
+    pub fn job_start(&mut self, label: impl Into<String>, now_ms: i64) -> usize {
+        const KEEP: usize = 20;
+        while self.jobs.len() >= KEEP {
+            let Some(oldest) = self.jobs.iter().position(|j| !j.is_running()) else {
+                break;
+            };
+            self.jobs.remove(oldest);
+        }
+        self.jobs.push(Job {
+            label: label.into(),
+            started_ms: now_ms,
+            ended_ms: None,
+            state: JobState::Running,
+            last: None,
+        });
+        self.jobs.len() - 1
+    }
+
+    /// The most recent line a job printed. Blank lines are dropped rather than
+    /// stored: a job whose "current activity" is an empty string reads as one
+    /// that has stopped saying anything.
+    pub fn job_line(&mut self, at: usize, line: &str) {
+        if line.trim().is_empty() {
+            return;
+        }
+        if let Some(job) = self.jobs.get_mut(at) {
+            job.last = Some(line.trim().to_string());
+        }
+    }
+
+    pub fn job_done(&mut self, at: usize, ok: bool, now_ms: i64) {
+        if let Some(job) = self.jobs.get_mut(at) {
+            job.state = if ok { JobState::Ok } else { JobState::Failed };
+            job.ended_ms = Some(now_ms);
+        }
+    }
+
+    pub fn running_jobs(&self) -> usize {
+        self.jobs.iter().filter(|j| j.is_running()).count()
     }
 
     pub fn push(&mut self, entry: Entry) {
