@@ -77,9 +77,55 @@ capabilities after it were never attempted, each failing for a reason that had
 nothing to do with them. Putting the known-degraded step last turns one
 harness's gap into one failure instead of five.
 
+## Driven by hand
+
+The CLI surfaces below were run against a scratch `JOD_HOME`, on this machine,
+with the real binary. Output quoted as it came back.
+
+```console
+$ jod root add ./core
+read-only  human     /…/feat+harness-spec/core
+$ jod root ls
+read-only  human     /…/core
+read-only  human     /…/docs
+
+$ printf '…' | jod secret set HANDTEST_KEY --global --hint "a fixture, authenticates nothing"
+HANDTEST_KEY stored, global scope
+it applies from the next spawn; runs already going were built without it
+
+$ jod secret ls
+HANDTEST_KEY    global    32 ch    a fixture, authenticates nothing
+
+$ grep -ac '<the value>' $JOD_HOME/jod.db
+0
+$ ls -l $JOD_HOME/secrets/
+-rw------- 1 reljod reljod 32 HANDTEST_KEY.f48b46437247a6a990bcb7372eb9c512
+
+$ jod commands ls --root .
+  /create-pr    command  Claude Code   Build a visual-first, easily-digestible PR description…
+  /write-spec   command  Claude Code   Interview the user, then write a self-contained SPEC.md…
+  …12 commands, then the skills, attributed per harness
+```
+
+Three things that only a hand-run shows. `secret ls` reports a **length**, not a
+value. The value file is `0600`. And the value appears **zero** times in the
+database — the same check the parity suite makes, made here against a store a
+person filled in.
+
+**One friction point, found immediately.** `jod root add` on a fresh install
+fails with:
+
+> no conversation given and there is no main chat yet — pass `--conversation`,
+> or start one with `jod main "…"`
+
+The message is right and actionable, but roots cannot be set up *before* the
+first run, because a conversation only exists once something has run. Worth
+knowing on day one.
+
 ## Working directories and `@`
 
-**Tested.** A conversation owns an ordered set of roots, each writable or not.
+**Verified** from the CLI (above); the `@` popup itself is **tested** only. A
+conversation owns an ordered set of roots, each writable or not.
 
 ```
 jod root add <path>          # or Alt-P in the TUI for a fuzzy picker
