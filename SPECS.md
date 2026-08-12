@@ -399,6 +399,52 @@ a blocked count in the gutter; navigation asserted by test.
 **Check:** a repo command appears in the palette with its description and
 forwards literally; the spec's own completeness checker passes.
 
+## E7 — Parity with Claude Code as a place to code all day
+
+Added after a survey of what `jod tui` already does, because the goal is not
+"the six changes above" but "Reljod codes here instead of in `claude`". Most of
+the list came back **present**: slash commands with tab-completion, plan mode,
+per-turn cost and a context-usage bar, scrollback, session fork, rewind and
+cross-harness handoff, and a task board. These are the gaps that make a working
+day painful, and nothing here is speculative — each one was measured absent.
+
+- **E7.S1 Interrupt a turn without killing the session.** Today the only stop is
+  `Alt-X`, which kills the process group outright; there is no way to say "stop,
+  but stay". That is the single most-used key in a coding harness — you see it
+  going the wrong way in the first two seconds and you correct it. Escape
+  interrupts the run, keeps the conversation and its session id, records the
+  partial turn as what it was, and leaves you typing the correction. A second
+  Escape with nothing running is the existing back behaviour, unchanged.
+- **E7.S2 Per-tool approval, honestly scoped.** Jod runs harnesses in print
+  mode, where the permission *mode* is fixed at spawn and there is no interactive
+  callback to hang an allow/deny prompt on. So the prompt cannot be
+  reimplemented — but the need behind it can be met, and already is: an agent
+  that wants permission raises a **blocking card**, which is the rail Reljod is
+  already watching. This slice makes that the documented answer, teaches it in
+  the preamble, and states the limit plainly in the support matrix rather than
+  shipping a dialog that only works on one harness. **Measure first**: if a
+  harness does expose a mid-run permission event, lift it into a card.
+- **E7.S3 Diffs render as diffs.** An edit currently shows as a one-line tool
+  summary, which is unreadable as review. File-editing tool calls render as a
+  proper diff — added and removed lines coloured, hunks collapsed past a
+  threshold, and the path as a header. This is the difference between watching an
+  agent work and trusting it afterwards.
+- **E7.S4 The plan and the todo list live in the transcript.** The board exists
+  as its own screen, which is the wrong place while a turn is running: what you
+  want is the current plan updating in front of you. Todo and plan events from
+  the harness stream render inline and in place, one block that updates rather
+  than a new block per revision.
+- **E7.S5 Search the transcript.** `/` filters every list screen but not the
+  conversation, and `messages_fts` has been there since `0006`. Search within
+  the open conversation and across all of them, jumping to the hit.
+- **E7.S6 Yank.** Copy the selected message, the last agent reply, or a code
+  block, without relying on the terminal's own selection — which is unusable once
+  a pane has scrollback and wrapping.
+
+**Check:** a run is interrupted with Escape and then continued in the same
+session — asserted by the session id being unchanged across the interruption —
+and a rendered frame shows a file edit as a coloured diff.
+
 ---
 
 # Parallelisation

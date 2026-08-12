@@ -1852,3 +1852,85 @@ through git by session-exit cleanup, which is why they were absent from
 `git worktree list` as well as from disk, where an `rm -rf` would have left the
 administrative entry behind. The guard and its test exist because the question
 was worth being able to answer with a test instead of an assurance.
+
+## An answer is queued, never spliced into a turn already running
+
+A prompt is assembled once, at spawn. Anything that arrives afterwards reaches
+a model whose context was fixed before it existed, so an answer delivered
+mid-turn is either ignored or acted on twice — and which one you get depends on
+timing nobody controls.
+
+So answering a card is a write and a *queue*, not an interruption. The rail
+carries two independent facts about every card: `status`, what the human did,
+and `delivery`, whether the agent has heard about it yet. "Answered, queued" is
+an ordinary state rather than an inconsistency, and the UI must show it —
+pretending an answer landed immediately is a lie the user makes decisions on.
+Answer ten cards while a run is mid-turn and none of them touch it until it
+comes up for air.
+
+The queue is one table for three sources — card answers, mail from another
+agent, a nudge typed by a human — because "is this session ready to be spoken
+to" is the same question whoever is speaking, and it was already written down
+once, correctly, in `team::wake_order`. A second copy of that judgement is a
+second thing to keep right. Delivery itself stays the synthetic user turn the
+bus already uses, so nothing new has to be true on any harness.
+
+Batching is part of the design rather than an optimisation of it. Ten queued
+answers become one turn carrying ten, not ten turns: that is a cost control,
+and an agent reading everything that changed in one go also answers better than
+one woken ten times with a line each.
+
+## A secret travels as a name; only the supervisor ever holds the value
+
+Inject at exec, mask on output, reference by name — the model GitHub Actions,
+Doppler, Infisical and `op run` all arrived at separately, which is about as
+much corroboration as a design gets.
+
+`SpawnRequest` and `SpawnPlan` therefore carry secret *names*, never values.
+That is not fastidiousness: `spawn.json` is written to disk precisely so a
+person can read afterwards exactly what was launched, so a value in it would be
+a second copy of the credential sitting at ordinary permissions — the leak the
+whole design exists to prevent, created by the file meant to make the system
+auditable. The supervisor resolves each name at exec time from a file outside
+every repository at owner-only permissions, verified on read.
+
+Redaction is the belt to injection's braces. The supervisor is the only process
+holding both the values it injected and the lines the child printed, so it
+scrubs the output before anything is parsed — an agent that echoes the variable
+still cannot get the value into the transcript. It runs *before* parsing rather
+than after, because a value scrubbed after decoding has already been through a
+parser, and a parser is a thing that can log.
+
+Values below a length floor are injected and deliberately **not** redacted: a
+four-character secret would match half of ordinary output and replace
+legitimate text with the marker. The rail says so when one is stored, because a
+silent exception here is a leak nobody was told about.
+
+What this buys is narrower than "the agent cannot leak the key", and worth
+having anyway: the value is not in the database, not in the prompt, not in the
+transcript, and not in the launch record. A missing key blocks one test rather
+than a session — which is the point, and why the agent is told to treat an
+absent credential as a *blocked* ending rather than a reason to invent one.
+
+## A worktree outlives the work that cut it
+
+Deleting a work removes its sessions, their transcripts, their unanswered cards
+and their bus traffic, in one transaction — a half-deleted tree is not a state
+that should exist. It does **not** remove the git worktrees or their branches,
+and the `leases` row survives with a null work rather than cascading.
+
+The asymmetry is the whole point. Jod's records are cheap to recreate; a branch
+with uncommitted work on it is not. And the moment somebody deletes a session's
+history is exactly the moment nobody is left to remember what was on that
+branch — so the cheap thing goes and the expensive thing stays. The paths are
+printed so nothing is orphaned silently, `work_title` is kept on the row so an
+orphaned lease can still say what it was for, and removing a tree is a separate
+deliberate flag that still refuses one that is dirty or unmerged.
+
+The delete itself refuses the first time whenever a work holds a worktree,
+printing each lease's path, branch, and whether it is dirty or merged, and
+proceeds only when the same command is repeated. The confirmation is bound to
+that work and expires, so a stale one cannot arm a later delete. A work with no
+leases deletes on the first command, because there is nothing on disk to lose —
+a confirmation that fires when there is no risk is one people learn to type
+through without reading.
