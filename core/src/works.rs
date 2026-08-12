@@ -512,8 +512,9 @@ impl Doomed {
     /// The lines a refusal prints.
     pub fn report(&self) -> String {
         let mut out = format!(
-            "deleting `{}` would remove {} session(s), {} message(s) and {} unanswered card(s)\n",
-            self.title, self.sessions, self.transcripts, self.unanswered_cards
+            "deleting `{}` would remove {} session(s), {} message(s), {} unanswered card(s) \
+             and {} message(s) of agent traffic\n",
+            self.title, self.sessions, self.transcripts, self.unanswered_cards, self.mail
         );
         for c in &self.leases {
             out.push_str(&format!(
@@ -544,6 +545,31 @@ pub struct Confirmation {
 impl Confirmation {
     pub fn work_id(&self) -> &str {
         &self.work_id
+    }
+
+    /// When this stops arming anything, so a caller can say "repeat within a
+    /// minute" rather than "repeat".
+    pub fn expires_at_ms(&self) -> i64 {
+        self.issued_at_ms + CONFIRMATION_TTL_MS
+    }
+
+    /// How an armed confirmation is remembered between two commands.
+    ///
+    /// Two fields, one line, no serde: this is written into the `settings`
+    /// table — see [`Store::delete_work`] — and a value there is read by
+    /// anything that lists settings, so it stays something a person can look
+    /// at and understand.
+    fn encode(&self) -> String {
+        format!("{}:{}", self.issued_at_ms, self.fingerprint)
+    }
+
+    fn decode(work_id: &str, text: &str) -> Option<Confirmation> {
+        let (issued, fingerprint) = text.split_once(':')?;
+        Some(Confirmation {
+            work_id: work_id.to_string(),
+            issued_at_ms: issued.parse().ok()?,
+            fingerprint: fingerprint.to_string(),
+        })
     }
 
     /// Whether this still arms a delete of `doomed`.
@@ -908,7 +934,19 @@ impl Store {
         }
         let id = uuid::Uuid::new_v4().to_string();
         let at = now_ms();
-        self.write(|tx| insert_task(tx, work_id, &id, &title, at))?;
+        self.write(|tx| {
+            insert_task(tx, work_id, &id, &title, at)?;
+            // A work with an open task is not closed, whatever it was a moment
+            // ago. The invariant this epic rests on is that *closed* means
+            // every task is complete; a closed work carrying an open task would
+            // make that sentence false and every reader of it wrong.
+            tx.execute(
+                "UPDATE works SET state = 'open', closed_at_ms = NULL, updated_at_ms = ?2
+                  WHERE id = ?1 AND state != 'open'",
+                params![work_id, at],
+            )?;
+            Ok(())
+        })?;
         Ok(id)
     }
 
@@ -1032,6 +1070,19 @@ impl Store {
             Ok(())
         })?;
 
+        // Idle sessions are stopped; running ones are left alone to finish.
+        // "Stopped" is all core can honestly mean here — there is no process to
+        // signal for a session with nothing in flight — so it is said in the
+        // one place that decides whether anything ever wakes it again. A
+        // running session is not touched: interrupting an agent between
+        // deciding to commit and committing is how work is lost.
+        for session in &sessions {
+            if session.running || session.name.is_empty() {
+                continue;
+            }
+            self.set_member_status(work_id, &session.name, crate::team::MemberStatus::Shutdown)?;
+        }
+
         // Raised against the work's root session, which is the one the
         // orchestrator opened: its rail is where every descendant's cards
         // already cascade to, so the closing lands beside them. A work with no
@@ -1133,23 +1184,43 @@ impl Store {
     /// or a branch: Jod's records are cheap to recreate and a branch with
     /// uncommitted work on it is not — and the moment of deleting a session's
     /// history is exactly the moment nobody is left to remember what was on it.
+    ///
+    /// The refusal both **returns** a [`Confirmation`] and **arms** one in the
+    /// database, because the two callers are shaped differently and D8 has to
+    /// hold for both. The TUI holds the returned value between two keystrokes
+    /// of one process; `jod work delete` is two processes and has nothing to
+    /// hold, so the second command presents nothing and the armed one answers
+    /// for it. Neither weakens the rule: it is still the same command, typed
+    /// again, inside [`CONFIRMATION_TTL_MS`], against a lease set that has not
+    /// changed in between.
+    ///
+    /// It is kept in `settings` rather than in a table of its own only because
+    /// the schema for this epic is already migrated; it is short-lived, keyed
+    /// by work, and cleared the moment it is used.
     pub fn delete_work(&self, work_id: &str, confirmation: Option<&Confirmation>) -> Result<Deletion> {
         let doomed = self.work_deletion_preview(work_id)?;
         let now = now_ms();
         if !doomed.leases.is_empty() {
-            let armed = confirmation.is_some_and(|c| c.arms(&doomed, now));
+            let presented = match confirmation {
+                Some(c) => Some(c.clone()),
+                None => self.armed_deletion(work_id)?,
+            };
+            let armed = presented.is_some_and(|c| c.arms(&doomed, now));
             if !armed {
                 let confirmation = Confirmation {
                     work_id: work_id.to_string(),
                     issued_at_ms: now,
                     fingerprint: doomed.fingerprint(),
                 };
+                self.set_setting(&armed_key(work_id), &confirmation.encode())?;
                 return Ok(Deletion::Refused {
                     doomed: Box::new(doomed),
                     confirmation,
                 });
             }
         }
+        // Spent on use, so one refusal arms exactly one delete.
+        self.clear_setting(&armed_key(work_id))?;
         let worktrees_left = doomed
             .leases
             .iter()
@@ -1198,6 +1269,46 @@ impl Store {
             doomed: Box::new(doomed),
             worktrees_left,
         })
+    }
+
+    /// The confirmation a previous refusal armed, if it has not expired.
+    ///
+    /// Read by anything that wants to tell a person where they stand — "armed,
+    /// repeat within four minutes" is a far better prompt than "refused"
+    /// twice. An expired one is not returned and is cleared on sight, so a
+    /// stale row cannot arm a later delete even if the fingerprint still
+    /// matched.
+    pub fn armed_deletion(&self, work_id: &str) -> Result<Option<Confirmation>> {
+        let Some(text) = self.setting(&armed_key(work_id))? else {
+            return Ok(None);
+        };
+        let Some(confirmation) = Confirmation::decode(work_id, &text) else {
+            self.clear_setting(&armed_key(work_id))?;
+            return Ok(None);
+        };
+        if (now_ms() - confirmation.issued_at_ms).abs() > CONFIRMATION_TTL_MS {
+            self.clear_setting(&armed_key(work_id))?;
+            return Ok(None);
+        }
+        Ok(Some(confirmation))
+    }
+
+    /// Which work a conversation belongs to, if any.
+    ///
+    /// Small enough to be tempting to inline, and it is here precisely so that
+    /// it is not: a card denormalises this so it keeps its colour after its
+    /// session is gone, and two readers of the column would eventually disagree
+    /// about what an empty string means.
+    pub fn work_for_conversation(&self, conversation_id: &str) -> Result<Option<String>> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        Ok(conn
+            .query_row(
+                "SELECT work_id FROM conversations WHERE id = ?1",
+                params![conversation_id],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten())
     }
 
     // ---- small reads the above needs --------------------------------------
@@ -1264,6 +1375,11 @@ fn insert_task(
         params![task_id, work_id, title, at],
     )?;
     Ok(())
+}
+
+/// Where an armed delete is remembered between two commands.
+fn armed_key(work_id: &str) -> String {
+    format!("work-delete-armed:{work_id}")
 }
 
 fn now_ms() -> i64 {
@@ -1377,7 +1493,7 @@ mod tests {
             .into_iter()
             .map(|w| w.id)
             .collect();
-        assert_eq!(live, [open.id.clone()]);
+        assert_eq!(live, vec![open.id.clone()]);
         assert_eq!(s.works(Filter::Closed).unwrap().len(), 1);
         assert_eq!(s.works(Filter::All).unwrap().len(), 2);
     }
@@ -1534,7 +1650,16 @@ mod tests {
         let work = s.create_work("ship the thing").unwrap();
         let conversation = session(&s, &work.id, None, "worker");
         let second = s.add_work_task(&work.id, "write the docs").unwrap();
-        let first = s.work_tasks(&work.id).unwrap()[0].id.clone();
+        // By title, not by position: two tasks added in the same millisecond
+        // tie on `created_at_ms` and fall back to a uuid, so "the first row" is
+        // not reliably the instruction's task.
+        let first = s
+            .work_tasks(&work.id)
+            .unwrap()
+            .into_iter()
+            .find(|t| t.id != second)
+            .expect("the instruction's own task")
+            .id;
 
         assert!(
             s.complete_work_task(&first).unwrap().is_none(),
@@ -1547,9 +1672,18 @@ mod tests {
             .unwrap()
             .expect("the last task closes the work");
         assert_eq!(closing.state, State::Closed);
-        assert_eq!(closing.idle_sessions, [conversation.clone()]);
+        assert_eq!(closing.idle_sessions, vec![conversation.clone()]);
         assert_eq!(s.work(&work.id).unwrap().unwrap().state, State::Closed);
         assert!(s.work(&work.id).unwrap().unwrap().closed_at_ms.is_some());
+
+        assert_eq!(
+            s.member_in(crate::team::Scope::Work, &work.id, "worker")
+                .unwrap()
+                .unwrap()
+                .status,
+            crate::team::MemberStatus::Shutdown,
+            "an idle session of a closed work is stopped, so nothing wakes it again"
+        );
 
         let card = s
             .card(closing.card_id.expect("a closing card"))
@@ -1573,8 +1707,16 @@ mod tests {
         let closing = s.complete_work_task(&task.id).unwrap().unwrap();
 
         assert_eq!(closing.state, State::Finishing);
-        assert_eq!(closing.running_sessions, [busy.clone()]);
+        assert_eq!(closing.running_sessions, vec![busy.clone()]);
         assert!(closing.idle_sessions.is_empty());
+        assert_eq!(
+            s.member_in(crate::team::Scope::Work, &work.id, "worker")
+                .unwrap()
+                .unwrap()
+                .status,
+            crate::team::MemberStatus::Ready,
+            "a running session is left alone to finish"
+        );
         assert_eq!(s.work(&work.id).unwrap().unwrap().state, State::Finishing);
         assert!(s.work(&work.id).unwrap().unwrap().closed_at_ms.is_none());
 
@@ -1585,6 +1727,23 @@ mod tests {
         );
         s.set_run_status("run-1", "completed").unwrap();
         assert_eq!(s.refresh_work_state(&work.id).unwrap(), State::Closed);
+    }
+
+    /// *Closed* means every task is complete. A closed work carrying an open
+    /// task would make that sentence false and every reader of it wrong.
+    #[test]
+    fn adding_a_task_to_a_closed_work_opens_it_again() {
+        let s = store();
+        let work = s.create_work("thought we were done").unwrap();
+        let task = s.work_tasks(&work.id).unwrap().remove(0);
+        s.complete_work_task(&task.id).unwrap();
+        assert_eq!(s.work(&work.id).unwrap().unwrap().state, State::Closed);
+
+        s.add_work_task(&work.id, "one more thing").unwrap();
+
+        let reopened = s.work(&work.id).unwrap().unwrap();
+        assert_eq!(reopened.state, State::Open);
+        assert!(reopened.closed_at_ms.is_none());
     }
 
     #[test]
@@ -1699,6 +1858,88 @@ mod tests {
         );
     }
 
+    /// `jod work delete <id>` twice is two processes, and the second one has
+    /// nothing in its memory to present. D8 says the repeated command
+    /// completes it, so the arming has to outlive the process that was
+    /// refused.
+    #[test]
+    fn the_same_command_repeated_from_another_process_completes_the_delete() {
+        let (_env, dir) = crate::leases::scratch("two-processes");
+        let Some(repo) = crate::leases::fixture_repo(&dir.join("repo")) else {
+            return;
+        };
+        let db = dir.join("jod.db");
+
+        let work_id = {
+            let first = Store::open(&db).unwrap();
+            let work = first.create_work("a job with a branch").unwrap();
+            let c = first
+                .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
+                .unwrap();
+            first
+                .attach_conversation(&c.id, &work.id, None, Origin::Orchestrator)
+                .unwrap();
+            first.claim_lease(&work.id, &c.id, &repo).unwrap();
+            let refused = first.delete_work(&work.id, None).unwrap();
+            assert!(!refused.happened(), "the first command is refused");
+            work.id
+        };
+
+        // A second process: nothing shared but the database.
+        let second = Store::open(&db).unwrap();
+        assert!(
+            second.armed_deletion(&work_id).unwrap().is_some(),
+            "the refusal armed the repeat"
+        );
+        assert!(second.delete_work(&work_id, None).unwrap().happened());
+        assert!(second.work(&work_id).unwrap().is_none());
+        assert!(
+            second.armed_deletion(&work_id).unwrap().is_none(),
+            "one refusal arms exactly one delete"
+        );
+    }
+
+    /// The stored arming is bound to the lease set it was shown for, so a
+    /// worktree that appeared in between is one nobody was warned about.
+    #[test]
+    fn a_lease_cut_between_the_two_commands_disarms_the_repeat() {
+        let (_env, dir) = crate::leases::scratch("disarm");
+        let Some(one) = crate::leases::fixture_repo(&dir.join("one")) else {
+            return;
+        };
+        let Some(two) = crate::leases::fixture_repo(&dir.join("two")) else {
+            return;
+        };
+        let s = store();
+        let work = s.create_work("a job").unwrap();
+        let c = session(&s, &work.id, None, "worker");
+        s.claim_lease(&work.id, &c, &one).unwrap();
+        assert!(!s.delete_work(&work.id, None).unwrap().happened());
+
+        s.claim_lease(&work.id, &c, &two).unwrap();
+
+        let again = s.delete_work(&work.id, None).unwrap();
+        assert!(
+            !again.happened(),
+            "a second worktree appeared, so the refusal has to be shown again"
+        );
+        assert!(s.delete_work(&work.id, None).unwrap().happened());
+    }
+
+    #[test]
+    fn a_conversations_work_is_readable_and_empty_when_it_has_none() {
+        let s = store();
+        let work = s.create_work("a job").unwrap();
+        let c = session(&s, &work.id, None, "worker");
+        let loose = s
+            .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
+            .unwrap();
+
+        assert_eq!(s.work_for_conversation(&c).unwrap().as_deref(), Some(work.id.as_str()));
+        assert!(s.work_for_conversation(&loose.id).unwrap().is_none());
+        assert!(s.work_for_conversation("no-such-conversation").unwrap().is_none());
+    }
+
     /// The whole of E4's check, in the words the spec wrote it in.
     #[test]
     fn one_instruction_becomes_a_titled_work_a_claim_a_tree_a_closing_and_a_delete() {
@@ -1768,7 +2009,7 @@ mod tests {
         let task = s.work_tasks(&work.id).unwrap().remove(0);
         let closing = s.complete_work_task(&task.id).unwrap().expect("closed");
         assert_eq!(closing.state, State::Closed);
-        assert_eq!(closing.branches, [lease.branch.clone()]);
+        assert_eq!(closing.branches, vec![lease.branch.clone()]);
         let card = s.card(closing.card_id.unwrap()).unwrap().unwrap();
         assert!(card.body.contains(&lease.branch), "{}", card.body);
 

@@ -794,6 +794,14 @@ enum ConvCommand {
         /// whoever ran the summarising agent.
         summary: String,
     },
+    /// Delete a conversation and everything it holds: its transcript, its
+    /// cards, its roots, its queued answers.
+    ///
+    /// Refuses two things, and both refusals are the point. The main chat is
+    /// the one conversation that is always there. And a session belonging to a
+    /// work can only go when the work does — removing one on its own would
+    /// leave a tree pointing at a session that is gone.
+    Rm { id: String },
     /// What this conversation would be handed to another harness as.
     ///
     /// Prints the carrier rather than moving anything, because seeing what
@@ -2068,6 +2076,19 @@ fn conv_command(jod: &Jod, what: ConvCommand) -> Result<()> {
                 done.before_chars, done.after_chars
             );
         }
+        ConvCommand::Rm { id } => {
+            let id = resolve(&id)?;
+            // Unrecoverable, so it says what went rather than "ok". The counts
+            // are read before the delete because afterwards there is nothing
+            // left to count.
+            let messages = store.thread(&id)?.len();
+            let (open, _) = store.count_open_cards(&id, false)?;
+            store.delete_conversation(&id)?;
+            println!(
+                "deleted {} — {messages} message(s), {open} unanswered card(s)",
+                short_id(&id)
+            );
+        }
         ConvCommand::Handoff { id, to } => {
             let id = resolve(&id)?;
             let carrier = store.handoff(&id, HarnessKind::from(to))?;
@@ -2483,23 +2504,35 @@ fn work_command(jod: &Jod, what: WorkCommand) -> Result<()> {
         }
         WorkCommand::Delete { id } => {
             let id = resolve_work(store, &id)?;
-            // INTEGRATION POINT (lane-a-works): `works::Confirmation` has
-            // private fields, no serde, and is only ever minted inside
-            // `delete_work`, so this second process has nothing to present and
-            // a work holding a worktree cannot be deleted from here. D8's
-            // "repeating the identical command completes it" needs the
-            // confirmation to live in the database rather than in a caller's
-            // memory. Until it does, this prints the refusal in full and stops
-            // — which is the safe half of the behaviour, not a substitute for
-            // it. A work with no leases deletes on the first command today.
+            // `None` on both attempts, deliberately. The refusal arms a
+            // confirmation in the database and the second call finds it, so
+            // D8's "the same command, repeated" is literally the same command
+            // — two processes sharing nothing but the file. Passing a
+            // confirmation from here would put the expiry in the CLI's hands,
+            // which is exactly what the store is refusing to allow.
+            let armed = store.armed_deletion(&id)?.is_some();
             match store.delete_work(&id, None)? {
                 Deletion::Refused { doomed, .. } => {
                     print!("{}", doomed.report());
+                    // Said only when it is true. A refusal that promised a
+                    // repeat would go through, when a lease cut in between had
+                    // silently disarmed it, would teach somebody to type the
+                    // command twice without reading it.
+                    let seconds = store
+                        .armed_deletion(&id)?
+                        .map(|c| {
+                            (c.expires_at_ms() - chrono::Utc::now().timestamp_millis()).max(0) / 1000
+                        })
+                        .unwrap_or(0);
                     bail!(
-                        "refused: this work holds a worktree. Repeating the command is not yet \
-                         wired up from the command line — delete it from `jod tui`, or release \
-                         its leases first with `jod work leases {}`",
-                        short_id(&id)
+                        "refused: nothing was touched. Repeat the identical command within {seconds}s \
+                         to go ahead — the worktrees and branches above are left on disk either way{}",
+                        if armed {
+                            ", and the lease set changed since the last attempt, so that \
+                             confirmation no longer stands"
+                        } else {
+                            ""
+                        }
                     );
                 }
                 Deletion::Done {
@@ -3832,6 +3865,55 @@ mod tests {
         if second.id.starts_with(&shared) {
             assert!(resolve_work(&store, &shared).is_err());
         }
+    }
+
+    /// Both refusals are the point, and neither is the CLI's to relax: the main
+    /// chat is the one conversation that is always there, and a session cut out
+    /// of a work leaves a tree pointing at something that is gone.
+    #[test]
+    fn deleting_a_conversation_refuses_the_main_chat_and_anything_inside_a_work() {
+        let store = Store::in_memory().unwrap();
+        let main = store
+            .main_conversation(HarnessKind::ClaudeCode, "/tmp/repo")
+            .unwrap();
+        assert!(store.delete_conversation(&main).is_err());
+
+        let work = store.create_work("port the parser").unwrap();
+        let session = store
+            .new_conversation(HarnessKind::ClaudeCode, "/tmp/repo", None)
+            .unwrap()
+            .id;
+        store
+            .attach_conversation(&session, &work.id, None, jod_core::works::Origin::Orchestrator)
+            .unwrap();
+        assert!(store.delete_conversation(&session).is_err());
+
+        // An ordinary one goes.
+        let loose = store
+            .new_conversation(HarnessKind::ClaudeCode, "/tmp/repo", None)
+            .unwrap()
+            .id;
+        store.delete_conversation(&loose).unwrap();
+        assert!(store.conversation(&loose).unwrap().is_none());
+    }
+
+    /// D8: a work with nothing on disk deletes on the *first* command, because
+    /// there is nothing to lose by it. The repeat exists to protect worktrees,
+    /// and making every delete need two commands would teach people to type it
+    /// twice without reading the first answer.
+    // `Jod::with_store` starts the task that drains the event channel, so this
+    // needs a runtime even though nothing here is awaited.
+    #[tokio::test]
+    async fn deleting_a_work_that_holds_no_worktree_goes_through_first_time() {
+        let store = std::sync::Arc::new(Store::in_memory().unwrap());
+        let jod = Jod::with_store(store.clone());
+        let work = store.create_work("port the parser").unwrap();
+
+        work_command(&jod, WorkCommand::Delete { id: work.id.clone() }).unwrap();
+        assert!(store.work(&work.id).unwrap().is_none());
+        // And the id stops resolving, so a repeat says so rather than
+        // reporting a second success.
+        assert!(work_command(&jod, WorkCommand::Delete { id: work.id }).is_err());
     }
 
     #[test]

@@ -291,6 +291,19 @@ pub struct SpawnRequest {
     /// the name — enough to use the variable, never enough to print it.
     #[serde(default)]
     pub secrets: Vec<String>,
+    /// The run's id — filled in by the launcher, never by the caller.
+    ///
+    /// Every other field on this struct is a *request*: something the caller
+    /// asked for. This one is an answer, and it is here for one reason —
+    /// [`Harness::args`] needs it to hand the harness a per-run MCP config, and
+    /// `args` is given nothing but this struct.
+    ///
+    /// It carries the run's identity to Jod's own MCP server, which is how the
+    /// messaging tools know which member is calling. A caller that set this
+    /// itself would be naming a run it does not own, so [`crate::runner::launch`]
+    /// overwrites whatever is here.
+    #[serde(default)]
+    pub run_id: Option<String>,
 }
 
 impl Default for SpawnRequest {
@@ -311,6 +324,7 @@ impl Default for SpawnRequest {
             roots: Vec::new(),
             env: Vec::new(),
             secrets: Vec::new(),
+            run_id: None,
         }
     }
 }

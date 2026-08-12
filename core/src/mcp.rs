@@ -423,6 +423,12 @@ pub fn catalogue() -> Vec<Tool> {
                  argument. Reljod stores it outside every repository and Jod injects it into \
                  the environment of the *next* run, so it will not reach this one: if you need \
                  it now, you are blocked, and saying so is the correct ending.",
+            // `read_only` for a credential request looks alarming and is not:
+            // **asking is not getting.** A person answers, the value goes to a
+            // file the model cannot read, and the agent is told a name. An
+            // untrusted agent asking for a credential is a request Reljod can
+            // simply decline — which is strictly better than the two things it
+            // would otherwise do, invent one or fail without saying why.
             needs: ToolAccess::ReadOnly,
             schema: obj(
                 json!({
@@ -436,6 +442,55 @@ pub fn catalogue() -> Vec<Tool> {
                     }
                 }),
                 &["name", "hint"],
+            ),
+        },
+        // ---- works and roots ----------------------------------------------
+        Tool {
+            name: "list_roots",
+            description:
+                "The directories this session may work in, and which of them it may write to. \
+                 Read this before editing anything: a read-only root is Reljod's real checkout \
+                 and changing it is the one thing you were told not to do.",
+            needs: ToolAccess::ReadOnly,
+            schema: obj(json!({}), &[]),
+        },
+        Tool {
+            name: "open_work",
+            description:
+                "Open a work — one intent, its own board, its own colour — and start the first \
+                 session on it against a checkout it may read and not write. Returns as soon as \
+                 that session is launched; it is titled in the background and it claims a \
+                 worktree itself the moment it needs one. Use this rather than `delegate` when \
+                 the instruction is about a repository and will take more than one session.",
+            // **This tool is what makes E4.S4 reachable at all.** The
+            // orchestrator acts through MCP tools rather than through a parsed
+            // JSON `Decision`, so a routing outcome with no tool behind it
+            // cannot be chosen by the model — it would be a `core` function
+            // only Jod-side code could call, present in the codebase and never
+            // invoked. Written down because "the orchestrator can already
+            // delegate" is exactly the argument that would remove it.
+            //
+            // The line `delegate` sits on, and for the same reason: this starts
+            // an agent, and the thing you least want an unattended run to hold
+            // is the power to create more unattended runs. A webhook-triggered
+            // agent must not be able to open works.
+            needs: ToolAccess::Delegate,
+            schema: obj(
+                json!({
+                    "instruction": text("What the work is, in Reljod's own words. It becomes the first task on the board."),
+                    "checkout": text(
+                        "The repository this happens in, as an absolute path. Defaults to your \
+                         own first root — `list_roots` says what that is."
+                    ),
+                    "harness": one_of("Which harness runs the first session. Default claude_code.", &HARNESS_IDS),
+                    "model": text("Model override, in the harness's own spelling."),
+                    "tools": one_of(
+                        "How much of Jod the first session may reach. Capped at your own. \
+                         Default delegate, so it can talk to its siblings and start its own.",
+                        &ACCESS_IDS,
+                    )
+                }),
+                &["instruction"],
             ),
         },
         // ---- the bus ------------------------------------------------------
@@ -766,6 +821,8 @@ impl Server {
             "record_decision" => self.record_decision(args),
             "ask_question" => self.ask_question(args).await,
             "request_secret" => self.request_secret(args),
+            "list_roots" => self.list_roots(),
+            "open_work" => self.open_work(args).await,
             "roster" => self.roster(),
             "read_messages" => self.read_messages(),
             "send_message" => self.send_message(args),
@@ -1245,7 +1302,10 @@ impl Server {
                 ))
             })?;
         Ok(Raiser {
-            work_id: work_of(store, &conversation_id),
+            // A card carries its work so it keeps that work's colour after the
+            // session that raised it is gone. Unresolvable is not a failure —
+            // a conversation outside any work is the ordinary case.
+            work_id: store.work_for_conversation(&conversation_id).ok().flatten(),
             conversation_id,
             run_id: run_id.to_string(),
         })
@@ -1281,9 +1341,28 @@ impl Server {
                 title: title.clone(),
                 body: opt_str(args, "why").unwrap_or_default(),
                 options,
-                chosen: Some(chosen),
                 source: Some(Source::Mcp),
-                dedupe_key: Some(dedupe_key(CardKind::Decision, &title)),
+                // Keyed on the **choice and the subject**, not on the prose,
+                // and the choice leads. Both halves are deliberate.
+                //
+                // The subject is in it because an agent that records the same
+                // decision twice — a retried turn, a rewritten `why` — should
+                // produce one row: `read_only` is a wide door and a full rail
+                // is an unread rail.
+                //
+                // The choice is in it, and first, because a decision that was
+                // *reconsidered* is not a repeat. Keyed on the subject alone,
+                // "chat DB → postgres" would be swallowed by the earlier "chat
+                // DB → sqlite" and the rail would show a choice that is no
+                // longer in force, which is worse than either a duplicate or a
+                // missing card. It leads so that the truncation `dedupe_key`
+                // applies can only ever cost the subject's tail, never the part
+                // that changes when an agent changes its mind.
+                dedupe_key: Some(dedupe_key(
+                    CardKind::Decision,
+                    &format!("{chosen} for {title}"),
+                )),
+                chosen: Some(chosen),
                 ..NewCard::default()
             })
             .map_err(|e| ToolError::Refused(format!("could not raise that: {e}")))?;
@@ -1480,6 +1559,125 @@ impl Server {
                  you are blocked: say so and stop. Do not invent a value, and do not work \
                  around it."
             ),
+        }))
+    }
+
+    // ---- works and roots --------------------------------------------------
+
+    /// Where this session may work, and which of it is writable.
+    fn list_roots(&self) -> Result<String, ToolError> {
+        let raiser = self.raiser()?;
+        let roots = self
+            .store()?
+            .roots(&raiser.conversation_id)
+            .map_err(|e| ToolError::Refused(format!("could not read your roots: {e}")))?;
+        as_json(
+            &roots
+                .iter()
+                .map(|r| {
+                    json!({
+                        "path": r.path.to_string_lossy(),
+                        "writable": r.writable,
+                        "origin": r.origin.as_str(),
+                    })
+                })
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    /// Open a work and put its first session on a checkout.
+    ///
+    /// **Returns as soon as the session is spawned.** That is the property the
+    /// whole orchestrator design exists to protect: the main chat is what you
+    /// reach for while something is already running, so a routing tool that
+    /// waited for the work would make it useless at the one moment it matters.
+    /// Nothing here reads the session's output, and the titler runs detached.
+    ///
+    /// The new session hangs under the *caller's* conversation, which is what
+    /// makes the tree deeper than two levels and what makes the caller's rail
+    /// show everything raised below it. Taken from the run, never from an
+    /// argument — a caller that could name its own parent could graft a session
+    /// onto a tree it has nothing to do with.
+    async fn open_work(&self, args: &Value) -> Result<String, ToolError> {
+        let raiser = self.raiser()?;
+        let instruction = required_str(args, "instruction")?;
+        let harness = match opt_str(args, "harness") {
+            Some(h) => parse_harness(&h)
+                .ok_or_else(|| ToolError::BadParams(format!("unknown harness `{h}`")))?,
+            None => HarnessKind::ClaudeCode,
+        };
+        // A work session that cannot talk to its siblings is not a member of
+        // anything, so this defaults higher than `delegate`'s child does — and
+        // is still capped at the caller's own, which is the half that matters.
+        let tools = match opt_str(args, "tools") {
+            Some(t) => parse_access(&t)
+                .ok_or_else(|| ToolError::BadParams(format!("unknown tool access `{t}`")))?,
+            None => ToolAccess::Delegate,
+        };
+        if !allows(self.access, tools) {
+            return Err(ToolError::Refused(format!(
+                "`{}` tool access exceeds your own `{}`",
+                tools.as_str(),
+                self.access.as_str()
+            )));
+        }
+
+        let checkout = match opt_str(args, "checkout") {
+            Some(path) => PathBuf::from(path),
+            None => {
+                let roots = self
+                    .store()?
+                    .roots(&raiser.conversation_id)
+                    .map_err(|e| ToolError::Refused(format!("could not read your roots: {e}")))?;
+                // Refused rather than defaulted to this process's directory: a
+                // work opened in whatever directory the daemon happens to be
+                // started in is a run editing something nobody meant.
+                roots.first().map(|r| r.path.clone()).ok_or_else(|| {
+                    ToolError::Refused(
+                        "say which directory this work happens in — `checkout` — because this \
+                         session has no roots of its own to inherit one from"
+                            .into(),
+                    )
+                })?
+            }
+        };
+
+        if !self.jod.supervisor_available() {
+            return Err(ToolError::Refused(
+                "`jod-run` is not installed on this machine, and it supervises every agent".into(),
+            ));
+        }
+
+        // Capped rather than refused. The session's default is `accept_edits`
+        // — it is here to change code — but a server started with a lower
+        // ceiling means what it says, and refusing outright would make this
+        // tool unusable rather than safer.
+        let permission = if permits(self.max_permission, PermissionPolicy::AcceptEdits) {
+            PermissionPolicy::AcceptEdits
+        } else {
+            self.max_permission
+        };
+        let mut opening = crate::orchestrator::Opening::new(instruction, checkout)
+            .on(harness)
+            .with_permission(permission)
+            .under(raiser.conversation_id);
+        opening.tools = tools;
+        if let Some(model) = opt_str(args, "model") {
+            opening = opening.with_model(model);
+        }
+
+        let opened = crate::orchestrator::open_work(&self.jod, opening)
+            .await
+            .map_err(|e| ToolError::Refused(format!("could not open that work: {e}")))?;
+        as_json(&json!({
+            "work_id": opened.work.id,
+            "title": opened.work.title,
+            "colour": opened.work.colour,
+            "conversation_id": opened.conversation_id,
+            "session": opened.name,
+            "run_id": opened.agent.id,
+            "note": "opened and running. The checkout is a read-only root; the session claims a \
+                     worktree itself if it needs to write. Its cards will arrive on your rail.",
         }))
     }
 
@@ -1827,23 +2025,6 @@ pub struct Raiser {
     pub work_id: Option<String>,
 }
 
-/// The work a conversation belongs to, or none.
-///
-/// A one-column read rather than a store method, because the alternative is
-/// waiting for one: works land in a lane this file does not own. Collapse it
-/// into that lane's `work_for_conversation` when it exists — this is the only
-/// caller.
-fn work_of(store: &Store, conversation_id: &str) -> Option<String> {
-    let conn = store.conn.lock().expect("store lock poisoned");
-    conn.query_row(
-        "SELECT work_id FROM conversations WHERE id = ?1",
-        rusqlite::params![conversation_id],
-        |r| r.get::<_, Option<String>>(0),
-    )
-    .ok()
-    .flatten()
-}
-
 /// The key the two emission paths must agree on, computed from what they both
 /// have: the kind, and the words of the question.
 ///
@@ -2051,7 +2232,7 @@ pub fn lift_into_cards(
         return Ok(vec![]);
     };
     let raiser = Raiser {
-        work_id: work_of(store, &conversation_id),
+        work_id: store.work_for_conversation(&conversation_id)?,
         conversation_id,
         run_id: run_id.to_string(),
     };
@@ -2541,7 +2722,7 @@ mod tests {
     /// agree with any mistake made there, and the whole question is whether the
     /// line falls where the design says it does — reading is free and visible,
     /// delegating spends money now, scheduling spends it at 2am for ever.
-    const READ_ONLY_TOOLS: [&str; 12] = [
+    const READ_ONLY_TOOLS: [&str; 13] = [
         "list_agents",
         "schedule_list",
         "goal_list",
@@ -2560,11 +2741,14 @@ mod tests {
         "record_decision",
         "ask_question",
         "request_secret",
+        // Knowing where you may write is the precondition for not writing
+        // where you may not.
+        "list_roots",
     ];
     // Writing to a peer spends a turn of theirs, which is money now — the same
     // line `delegate` sits on. What stops it running away is not the access
     // level but the bounds in `team`: depth, budget, and a deadline on a wait.
-    const DELEGATE_TOOLS: [&str; 7] = [
+    const DELEGATE_TOOLS: [&str; 8] = [
         "delegate",
         "continue_agent",
         "stop_agent",
@@ -2572,6 +2756,10 @@ mod tests {
         "reply",
         "ask",
         "handoff",
+        // Opening a work starts an agent, so it sits on `delegate`'s line: the
+        // thing you least want an unattended run to hold is the power to create
+        // more unattended runs.
+        "open_work",
     ];
     const ORCHESTRATE_TOOLS: [&str; 5] = [
         "schedule_create",
@@ -3445,6 +3633,78 @@ mod tests {
         assert_eq!(only_card(&store, &conversation).title, "chat DB");
     }
 
+    // ---- works and roots -------------------------------------------------
+
+    #[tokio::test]
+    async fn a_session_can_read_where_it_may_write_and_where_it_may_not() {
+        let (store, server, conversation) = working(ToolAccess::ReadOnly);
+        store
+            .add_root(&conversation, crate::roots::NewRoot::reading("/tmp"))
+            .unwrap();
+        store
+            .add_root(&conversation, crate::roots::NewRoot::lease("/tmp/worktree"))
+            .unwrap();
+
+        let seen: Value =
+            serde_json::from_str(&said(&call(&server, "list_roots", json!({})).await)).unwrap();
+        let rows = seen.as_array().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["writable"], false);
+        assert_eq!(rows[1]["writable"], true);
+        assert_eq!(rows[1]["origin"], "lease");
+    }
+
+    /// A work opened in whatever directory the daemon happens to have been
+    /// started in is a run editing something nobody meant, so this is refused
+    /// rather than defaulted.
+    #[tokio::test]
+    async fn opening_a_work_with_no_checkout_and_no_root_to_inherit_one_from_is_refused() {
+        let (_, server, _) = working(ToolAccess::Delegate);
+        let answer = call(
+            &server,
+            "open_work",
+            json!({ "instruction": "port the parser" }),
+        )
+        .await;
+        assert!(is_error_result(&answer), "{answer}");
+        assert!(said(&answer).contains("checkout"), "{}", said(&answer));
+    }
+
+    #[tokio::test]
+    async fn opening_a_work_cannot_give_its_session_more_of_jod_than_the_caller_holds() {
+        let (_, server, _) = working(ToolAccess::Delegate);
+        let answer = call(
+            &server,
+            "open_work",
+            json!({
+                "instruction": "port the parser",
+                "checkout": "/tmp",
+                "tools": "orchestrate"
+            }),
+        )
+        .await;
+        assert!(is_error_result(&answer), "{answer}");
+        assert!(said(&answer).contains("exceeds"), "{}", said(&answer));
+    }
+
+    /// A work with nothing on its board can never be complete, so an
+    /// instruction that says nothing is refused before anything is started.
+    #[tokio::test]
+    async fn opening_a_work_with_no_instruction_starts_nothing() {
+        let (store, server, _) = working(ToolAccess::Delegate);
+        let answer = call(
+            &server,
+            "open_work",
+            json!({ "instruction": "   ", "checkout": "/tmp" }),
+        )
+        .await;
+        assert!(is_error_result(&answer), "{answer}");
+        assert!(
+            store.works(crate::works::Filter::All).unwrap().is_empty(),
+            "a refused instruction left a work behind"
+        );
+    }
+
     // ---- the passive lifter ----------------------------------------------
 
     fn tool_call(name: &str, input: Value) -> AgentEvent {
@@ -3615,6 +3875,69 @@ mod tests {
         )
         .unwrap();
         assert!(raised.is_empty());
+    }
+
+    /// `read_only` is a wide door, so a repeat has to collapse: an agent that
+    /// records the same decision twice — a retried turn, a rewritten `why` —
+    /// produces one row, because a full rail is an unread rail.
+    #[tokio::test]
+    async fn recording_one_decision_twice_in_different_words_is_one_card() {
+        let (store, server, conversation) = working(ToolAccess::ReadOnly);
+        for why in ["no server to run", "sqlite needs no server, and we deploy to one box"] {
+            call(
+                &server,
+                "record_decision",
+                json!({ "title": "chat DB", "chosen": "sqlite", "why": why }),
+            )
+            .await;
+        }
+        assert_eq!(
+            only_card(&store, &conversation).body,
+            "no server to run",
+            "the first card stands rather than being rewritten"
+        );
+    }
+
+    /// And the other half, which is why the key carries the *choice*: a
+    /// decision that was reconsidered is a second card, not a silent no-op on
+    /// the first. Collapsing it would leave the rail showing a choice that is
+    /// no longer in force — worse than either a duplicate or a missing row.
+    #[tokio::test]
+    async fn reconsidering_a_decision_raises_a_second_card_rather_than_vanishing() {
+        let (store, server, conversation) = working(ToolAccess::ReadOnly);
+        for chosen in ["sqlite", "postgres"] {
+            call(
+                &server,
+                "record_decision",
+                json!({ "title": "chat DB", "chosen": chosen }),
+            )
+            .await;
+        }
+        let both = store
+            .cards(&Query {
+                conversation_id: Some(conversation),
+                ..Query::default()
+            })
+            .unwrap();
+        assert_eq!(both.len(), 2, "the second decision was swallowed by the first");
+        assert_eq!(both[0].chosen.as_deref(), Some("postgres"));
+    }
+
+    /// Asking twice for one credential is one card, though: the second request
+    /// says nothing the first did not, and two rows for one variable are two
+    /// places to type the same key.
+    #[tokio::test]
+    async fn asking_twice_for_one_credential_is_one_card() {
+        let (store, server, conversation) = working(ToolAccess::ReadOnly);
+        for hint in ["the live key", "the live key, from the dashboard"] {
+            call(
+                &server,
+                "request_secret",
+                json!({ "name": "STRIPE_API_KEY", "hint": hint }),
+            )
+            .await;
+        }
+        assert_eq!(only_card(&store, &conversation).body, "the live key");
     }
 
     #[test]

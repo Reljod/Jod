@@ -111,6 +111,15 @@ pub enum Action {
     EnterMain,
     /// Stop an agent and close its tmux session.
     Stop(String),
+    /// End the turn in flight and stay in the conversation.
+    ///
+    /// The same call as [`Action::Stop`] at the process level — Jod runs one
+    /// process per turn, so there is nothing else to end — and a different act
+    /// at every level above it. `Stop` is "I am done with this agent"; this is
+    /// "not like that, try again". The state that makes it the second one is
+    /// set in the key handler, so the session survives whether or not the kill
+    /// succeeds.
+    Interrupt(String),
     /// Put an agent's output on screen and follow it.
     Watch(String),
     /// Arm or disarm a run's heartbeat — see [`command::Slash::Heartbeat`].
@@ -3696,6 +3705,43 @@ fn on_chat_key(app: &mut App, key: KeyEvent, viewport: usize) -> Option<Action> 
         KeyCode::Down => app.history_next(),
         KeyCode::PageUp => app.scroll_up(viewport.max(1), max_scroll),
         KeyCode::PageDown => app.scroll_down(viewport.max(1)),
+        // **Stop, but stay.** The most-used key in a coding harness: you see a
+        // turn going the wrong way in the first two seconds and you correct it.
+        //
+        // Everything that makes this "interrupt" rather than `Alt-X`'s "kill"
+        // happens *here*, in a pure handler, and none of it touches
+        // `App::session` or `App::resume`. Those two are the harness's
+        // conversation id and how the next turn continues it — the run is one
+        // process of many in that conversation, so ending the process ends the
+        // turn and leaves the conversation exactly where it was. The next thing
+        // typed carries on the same session, which is the whole point and is
+        // what `escape_interrupts_the_turn_without_losing_the_session` pins.
+        //
+        // Only the kill itself travels as an `Action`, because only the loop
+        // has the service. Marking the turn over here rather than there is
+        // deliberate: the reader gets the input box back on the keypress rather
+        // than after a round trip through the supervisor.
+        KeyCode::Esc if app.busy && app.watching.is_some() => {
+            let id = app.watching.clone().expect("just checked");
+            // Recorded as what it was. A partial turn silently dropped would
+            // leave the transcript claiming the agent simply stopped talking,
+            // and the next reader cannot tell an interruption from a crash.
+            app.push(Entry::Done {
+                text: match app.elapsed() {
+                    Some(t) => format!("interrupted after {t}"),
+                    None => "interrupted".to_string(),
+                },
+                failed: false,
+            });
+            app.push(Entry::Notice(
+                "stopped — the conversation is kept, so just say what to do instead".into(),
+            ));
+            app.busy = false;
+            app.turn_started_ms = None;
+            // The line being typed is left alone: the correction is usually
+            // already half-written by the time you reach for Escape.
+            return Some(Action::Interrupt(id));
+        }
         KeyCode::Esc => app.back(),
         // `?` on an *empty* input opens the keymap; with anything typed it is
         // the character it looks like. Backspacing down to a lone `?` therefore

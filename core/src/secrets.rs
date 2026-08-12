@@ -483,7 +483,7 @@ fn now_ms() -> i64 {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -513,15 +513,27 @@ mod tests {
     /// once would write each other's secrets into each other's directories —
     /// and the test that greps the database for a leaked value would be
     /// grepping somebody else's database.
-    struct Home {
+    /// Shared beyond this module on purpose. Any test anywhere that stores a
+    /// secret needs exactly this dance — take the lock, point `JOD_HOME`
+    /// somewhere temporary, put it back afterwards — and the one test that
+    /// wrote its own version of it forgot the lock and wrote a credential file
+    /// into a real `~/.jod`. One guard, used everywhere, is the only version of
+    /// this that stays correct.
+    pub(crate) struct Home {
         dir: std::path::PathBuf,
-        store: Store,
+        pub(crate) store: Store,
+        /// What `JOD_HOME` was before this test took it, put back on drop.
+        /// Unsetting instead would leave the rest of the suite resolving
+        /// `~/.jod` — which on the box Jod actually runs on is a real home with
+        /// real secrets in it.
+        previous: Option<String>,
         _guard: std::sync::MutexGuard<'static, ()>,
     }
 
     impl Home {
-        fn new(tag: &str) -> Home {
+        pub(crate) fn new(tag: &str) -> Home {
             let guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let previous = std::env::var("JOD_HOME").ok();
             let dir = std::env::temp_dir().join(format!(
                 "jod-secrets-{tag}-{}-{}",
                 std::process::id(),
@@ -533,6 +545,7 @@ mod tests {
             Home {
                 dir,
                 store,
+                previous,
                 _guard: guard,
             }
         }
@@ -566,7 +579,10 @@ mod tests {
 
     impl Drop for Home {
         fn drop(&mut self) {
-            std::env::remove_var("JOD_HOME");
+            match self.previous.take() {
+                Some(value) => std::env::set_var("JOD_HOME", value),
+                None => std::env::remove_var("JOD_HOME"),
+            }
             std::fs::remove_dir_all(&self.dir).ok();
         }
     }

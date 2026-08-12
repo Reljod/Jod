@@ -131,12 +131,45 @@ pub fn browser_python() -> PathBuf {
 mod tests {
     use super::*;
 
+    /// Point `JOD_HOME` somewhere for the length of one test, and put it back
+    /// exactly as it was found.
+    ///
+    /// Restoring rather than unsetting, because `JOD_HOME` is genuinely set on
+    /// the box Jod runs on: a test that ends with `remove_var` leaves the rest
+    /// of the suite resolving `~/.jod` instead of the configured home, and the
+    /// difference only shows up as a file written somewhere nobody looked.
+    /// Holds [`crate::ENV_LOCK`] and restores on drop, so a panicking test
+    /// cannot leave the variable pointing at its scratch directory.
+    struct Override {
+        previous: Option<String>,
+        _guard: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl Override {
+        fn to(path: &str) -> Override {
+            let guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let previous = std::env::var("JOD_HOME").ok();
+            std::env::set_var("JOD_HOME", path);
+            Override {
+                previous,
+                _guard: guard,
+            }
+        }
+    }
+
+    impl Drop for Override {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => std::env::set_var("JOD_HOME", value),
+                None => std::env::remove_var("JOD_HOME"),
+            }
+        }
+    }
+
     #[test]
     fn jod_home_honours_an_explicit_override() {
-        let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        std::env::set_var("JOD_HOME", "/tmp/jod-test-home");
+        let _home = Override::to("/tmp/jod-test-home");
         assert_eq!(jod_home(), PathBuf::from("/tmp/jod-test-home"));
-        std::env::remove_var("JOD_HOME");
     }
 
     /// The installed layout, which is not the layout this started out
@@ -186,8 +219,7 @@ mod tests {
 
     #[test]
     fn every_run_file_lives_under_that_run_s_directory() {
-        let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        std::env::set_var("JOD_HOME", "/tmp/jod-test-home");
+        let _home = Override::to("/tmp/jod-test-home");
         let dir = run_dir("abc");
         for p in [
             prompt_path("abc"),
@@ -197,6 +229,17 @@ mod tests {
         ] {
             assert!(p.starts_with(&dir), "{p:?} escaped {dir:?}");
         }
-        std::env::remove_var("JOD_HOME");
+    }
+
+    #[test]
+    fn the_secrets_directory_is_under_the_home_it_is_told_about() {
+        // The one path where getting this wrong writes a credential into a
+        // directory nobody meant — which is exactly what an unlocked caller
+        // resolving `JOD_HOME` mid-test does.
+        let _home = Override::to("/tmp/jod-test-home");
+        assert_eq!(
+            secrets_dir(),
+            PathBuf::from("/tmp/jod-test-home").join("secrets")
+        );
     }
 }

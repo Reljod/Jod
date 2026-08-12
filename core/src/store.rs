@@ -3680,7 +3680,7 @@ mod tests {
         let m = &s.drain_inbox("crew", "scout").unwrap()[0];
         assert_eq!(m.from, "lead");
         assert_eq!(m.to, "scout");
-        assert_eq!(m.as_prompt(), "[message from lead]\nstatus?");
+        assert_eq!(m.as_prompt(), "[message from lead · message #1]\nstatus?");
     }
 
     #[test]

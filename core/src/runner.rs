@@ -136,6 +136,18 @@ pub async fn launch(
     };
     tokio::fs::write(paths::prompt_path(agent_id), &prompt).await?;
 
+    // The run's own id, stamped over whatever the caller supplied.
+    //
+    // `args` is handed nothing but the request, and it needs the id to write a
+    // per-run MCP config — that config is how Jod's own tools know which member
+    // is calling them. Overwritten rather than trusted, because a caller that
+    // set this would be naming a run it does not own, and sender identity is
+    // the one thing on this path that must not be an argument.
+    let req = &SpawnRequest {
+        run_id: Some(agent_id.to_string()),
+        ..req.clone()
+    };
+
     let plan = SpawnPlan {
         run_id: agent_id.to_string(),
         harness: harness.kind(),

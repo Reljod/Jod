@@ -1,0 +1,77 @@
+==============================================================
+== 0. what this box can actually run
+==============================================================
+$ jod --version
+jod 0.1.0
+
+$ cat '/tmp/jod-a2a/bin2/COMMIT' 2>/dev/null || echo '(binaries staged from the working tree, not a commit)'
+(binaries staged from the working tree, not a commit)
+
+$ jod harnesses --json
+[
+  {
+    "id": "claude_code",
+    "label": "Claude Code",
+    "available": true,
+    "path": "/home/reljod/.local/bin/claude"
+  },
+  {
+    "id": "open_code",
+    "label": "OpenCode",
+    "available": true,
+    "path": "/home/reljod/.opencode/bin/opencode"
+  },
+  {
+    "id": "agy",
+    "label": "AGY",
+    "available": true,
+    "path": "/home/reljod/.local/bin/agy"
+  }
+]
+
+-- who may take part --
+  claude_code: eligible — takes a per-run MCP config
+  open_code: eligible — registering it in a scratch XDG_CONFIG_HOME
+$ jod mcp install --harness opencode --access delegate
+OpenCode     added          /tmp/jod-a2a/home3/a2a/xdg/opencode/opencode.json
+
+Registered as `jod` with delegate access. Restart any open session to pick it up.
+
+$ find '/tmp/jod-a2a/home3/a2a/xdg' -type f
+/tmp/jod-a2a/home3/a2a/xdg/opencode/opencode.json
+
+  SKIPPED: agy is installed, but its MCP config lives under $HOME and
+           redirecting $HOME would take its credentials with it. It
+           cannot be given Jod's tools without editing the real machine.
+
+roles: asker=claude  answerer=opencode
+This is the cross-harness case: the two agents are different programs,
+coordinating only through Jod. No harness's own team feature can do it.
+==============================================================
+== 1. a team of two
+==============================================================
+$ jod team join crew asker -H claude -r asks the questions
+asker joined crew
+
+$ jod team join crew answerer -H opencode -r answers them
+answerer joined crew
+
+$ jod team show crew
+asker        ready     Claude Code   asks the questions
+answerer     ready     OpenCode      answers them
+
+==============================================================
+== 2. one turn each, so both have a conversation to resume
+==============================================================
+$ jod team start crew answerer You are `answerer`, a teammate on the Jod team `crew`. Standing instruction for
+   the rest of this session: whenever a message from another agent arrives, answer it
+   with your jod `reply` tool, passing the message id shown in the brackets of the
+   message you are answering. The parser lives in core/src/harness. Right now, reply
+   with exactly READY and nothing else.
+answerer started on OpenCode as a0a2b6b3
+answerer is idle again, ready to be woken
+
+$ jod team start crew asker You are `asker`, a teammate on the Jod team `crew`. Standing instruction for the
+   rest of this session: do what the messages you are given say, using your jod MCP
+   tools. Right now, reply with exactly READY and nothing else.
+asker started on Claude Code as 152c534f

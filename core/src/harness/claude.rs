@@ -175,7 +175,24 @@ impl Harness for ClaudeCode {
         // `req.tools` no longer decides *whether* there is a config, only what
         // is in it: a run granted none of Jod's verbs still gets the browser,
         // because reading a web page is not one of them.
-        if let Ok(Some(path)) = crate::mcp_config::config_for(req.tools, &crate::paths::jod_home()) {
+        //
+        // Per-run when the launcher stamped an id, shared otherwise.
+        //
+        // The per-run document names the run in the server's environment,
+        // which gives `mcp::identify` a second, agreeing source for who is
+        // calling. It is not the authoritative one — the process group is,
+        // because a model cannot argue its way into a different one — and
+        // `identify` refuses outright if the two disagree rather than picking a
+        // winner.
+        //
+        // The shared config remains correct for anything with no run: a session
+        // somebody started by hand, or `jod mcp install`.
+        let home = crate::paths::jod_home();
+        let config = match &req.run_id {
+            Some(run_id) => crate::mcp_config::config_for_run(req.tools, &home, run_id, None),
+            None => crate::mcp_config::config_for(req.tools, &home),
+        };
+        if let Ok(Some(path)) = config {
             args.push(ArgPart::lit("--mcp-config"));
             args.push(ArgPart::lit(path.to_string_lossy()));
             args.push(ArgPart::lit("--strict-mcp-config"));

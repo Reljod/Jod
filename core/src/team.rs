@@ -106,8 +106,19 @@ impl Message {
     /// The sender is named in the text rather than trusted from anywhere else —
     /// a teammate reading this is being told who claims to have sent it, which
     /// is all Jod can honestly assert.
+    ///
+    /// **The id is not decoration.** It is the only thing a woken agent has to
+    /// reply *into this thread* with: waking drains the inbox, so a follow-up
+    /// read comes back empty and there is nowhere else to learn it. Without it
+    /// the recipient can only send afresh, every answer starts a thread of its
+    /// own at depth zero, and the depth bound — the one that stops two polite
+    /// agents spending money in a loop — can never be reached. That was
+    /// observed live: a question and its answer landing in two threads.
     pub fn as_prompt(&self) -> String {
-        format!("[message from {}]\n{}", self.from, self.text)
+        format!(
+            "[message from {} · message #{}]\n{}",
+            self.from, self.id, self.text
+        )
     }
 }
 
@@ -1384,7 +1395,7 @@ mod tests {
         assert_eq!(order.harness, HarnessKind::OpenCode);
         assert_eq!(order.messages, 1);
         assert!(order.prompt.contains("start on the parser"));
-        assert!(order.prompt.contains("[message from lead]"));
+        assert!(order.prompt.contains("[message from lead · message #1]"));
     }
 
     #[test]
@@ -1442,16 +1453,19 @@ mod tests {
     }
 
     #[test]
-    fn a_delivered_message_names_its_sender() {
+    fn a_delivered_message_names_its_sender_and_carries_the_id_to_reply_to() {
         let m = Message {
-            id: 1,
+            id: 42,
             team: "crew".into(),
             from: "lead".into(),
             to: "scout".into(),
             text: "look at the parser".into(),
             at_ms: 0,
         };
-        assert_eq!(m.as_prompt(), "[message from lead]\nlook at the parser");
+        assert_eq!(
+            m.as_prompt(),
+            "[message from lead · message #42]\nlook at the parser"
+        );
     }
 
     #[test]
@@ -2191,6 +2205,102 @@ mod tests {
         assert_eq!(
             closing.waiting_mail, 1,
             "and the closing card says so, because it is the last chance to"
+        );
+    }
+
+    /// Read an id out of a prompt the way the recipient has to: from the text,
+    /// because by the time it reads it there is nowhere else to look.
+    fn id_in(prompt: &str) -> Option<i64> {
+        ids_in(prompt).into_iter().next()
+    }
+
+    fn ids_in(prompt: &str) -> Vec<i64> {
+        prompt
+            .split("message #")
+            .skip(1)
+            .filter_map(|rest| {
+                rest.chars()
+                    .take_while(char::is_ascii_digit)
+                    .collect::<String>()
+                    .parse()
+                    .ok()
+            })
+            .collect()
+    }
+
+    /// The defect this test exists for was found live: a question and its
+    /// answer landed in two threads, because waking drains the inbox and the
+    /// prompt carried no id, so the recipient could only send afresh. Every
+    /// hop then starts at depth zero and the depth bound — the money bound —
+    /// is never reached.
+    ///
+    /// Deliberately routed the long way round: the reply is sent with an id
+    /// **parsed out of the rendered prompt**, never one the test happened to
+    /// be holding. Passing `reply` an id directly is exactly how the unit
+    /// tests missed this.
+    #[test]
+    fn a_woken_agent_can_reply_in_thread_using_only_what_its_prompt_carried() {
+        let s = Store::in_memory().unwrap();
+        let (work, _lead, _worker) = work_of_two(&s);
+        let asked = s
+            .post(
+                &Post::new(Scope::Work, &work, "the-lead", "where does the parser live?")
+                    .to("the-worker"),
+            )
+            .unwrap();
+        let (ids, thread, _) = queued(&asked);
+
+        let waiting = s.mail_waiting().unwrap();
+        let held = &waiting[0];
+        let order = wake_order(&held.member, &held.pending).expect("the worker is woken");
+        // Exactly what the ticker does next, and the reason the id has nowhere
+        // else to come from.
+        s.drain_inbox(&held.team, &held.member.name).unwrap();
+        assert!(
+            s.team_unread(&work, "the-worker").unwrap().is_empty(),
+            "the wake drained the inbox, so a second read tells the agent nothing"
+        );
+
+        let id = id_in(&order.prompt).expect("the prompt names the message to reply to");
+        assert_eq!(id, ids[0]);
+
+        let answered = s
+            .post(
+                &Post::new(Scope::Work, &work, "the-worker", "in core/src/harness")
+                    .to("the-lead")
+                    .replying_to(id),
+            )
+            .unwrap();
+        let (_, reply_thread, depth) = queued(&answered);
+        assert_eq!(
+            reply_thread, thread,
+            "a question and its answer are one thread, not two"
+        );
+        assert_eq!(depth, 1, "and the second hop counts, so the bound is reachable");
+    }
+
+    /// A batch of five with one id between them would leave four of them
+    /// unrepliable, which is the same bug wearing a different hat.
+    #[test]
+    fn every_message_in_one_woken_batch_carries_its_own_id() {
+        let s = Store::in_memory().unwrap();
+        let (work, _lead, _worker) = work_of_two(&s);
+        let mut sent = Vec::new();
+        for text in ["first", "second", "third"] {
+            let out = s
+                .post(&Post::new(Scope::Work, &work, "the-lead", text).to("the-worker"))
+                .unwrap();
+            sent.extend(queued(&out).0);
+        }
+
+        let waiting = s.mail_waiting().unwrap();
+        let order = wake_order(&waiting[0].member, &waiting[0].pending).expect("woken");
+
+        assert_eq!(order.messages, 3, "one turn carrying three, not three turns");
+        assert_eq!(
+            ids_in(&order.prompt),
+            sent,
+            "each message in the batch is separately repliable"
         );
     }
 

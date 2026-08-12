@@ -364,7 +364,21 @@ pub fn orchestrator_preamble() -> &'static str {
      - `schedule_create` when the instruction says *when*. `goal_create` when it \
        says *keep* or *until*.\n\
      - `recall` and `related` before asking Reljod something he has already told \
-       you.\n\n\
+       you.\n\
+     - `record_decision` and `ask_question` for anything Reljod should see. \
+       Findings and choices go on the rail, not into a sentence he has to \
+       scroll back for.\n\n\
+     The words below mean particular things here, and using them loosely is how \
+     a tree stops making sense:\n\
+     - a **work** is one intent, spanning several sessions, with a title, a \
+       colour and a board. It is over when its board is empty.\n\
+     - a **session** is a conversation inside a work. Sessions start their own \
+       sessions, which is why the tree is deeper than two levels.\n\
+     - a **root** is a directory a session may read. A session begins on \
+       Reljod's real checkout, read-only, and claims a **lease** — a worktree of \
+       its own — the moment it needs to change anything.\n\
+     - a **card** is one row on Reljod's rail. Every card raised anywhere below \
+       you arrives on yours, so this is where the fleet's questions surface.\n\n\
      Answer in one or two sentences: what you did with it, and who has it now. \
      Say plainly when you delegated to an existing run rather than a new one, \
      and why — a routing decision nobody can see is one nobody can correct."
@@ -612,6 +626,18 @@ fn bus_lines(brief: &Brief) -> Vec<PreambleLine> {
         out.push(PreambleLine::shared(
             "You cannot reach them from this session — it holds none of Jod's tools. Work \
              alone, and leave anything another session needs to know in your final answer.",
+        ));
+        return out;
+    }
+    if brief.tools == Some(ToolAccess::ReadOnly) {
+        // Honest about the half it has. A read-only session can look at the
+        // roster and drain its own inbox and cannot answer, and telling it to
+        // reply would cost it a turn discovering a tool it was never given.
+        out.push(PreambleLine::shared(
+            "You can see who is here with `roster` and take your mail with `read_messages`, and \
+             you cannot send: this session was given read-only access to Jod. Read your inbox \
+             anyway — somebody may have told you something you were about to ask for — and put \
+             anything you need to pass on into a card, which does reach a person.",
         ));
         return out;
     }
@@ -1500,6 +1526,23 @@ mod tests {
         assert!(said.contains("Report up, ask sideways"));
     }
 
+    /// A session told to reply with a tool it was never given spends a turn
+    /// discovering that, and reads the refusal as Jod being broken.
+    #[test]
+    fn a_read_only_session_is_not_told_to_send_messages_it_cannot_send() {
+        let peers = ["scout".to_string()];
+        let said = worker_preamble(&Brief {
+            harness: HarnessKind::ClaudeCode,
+            roots: &[],
+            secrets: &[],
+            peers: &peers,
+            tools: Some(ToolAccess::ReadOnly),
+        });
+        assert!(said.contains("you cannot send"), "{said}");
+        assert!(!said.contains("`send_message`"));
+        assert!(said.contains("read_messages"), "reading is still worth doing");
+    }
+
     #[test]
     fn a_worker_alone_on_a_work_is_told_to_check_rather_than_assume() {
         let said = worker_preamble(&brief(HarnessKind::ClaudeCode, &[], &[], &[]));
@@ -1519,6 +1562,18 @@ mod tests {
     fn a_session_nobody_gave_a_directory_is_told_to_say_so_rather_than_guess() {
         let said = worker_preamble(&brief(HarnessKind::ClaudeCode, &[], &[], &[]));
         assert!(said.contains("Nobody has given this session a directory"), "{said}");
+    }
+
+    /// A drifting noun is a bug, so the orchestrator is given the vocabulary
+    /// the rest of the system uses rather than left to invent synonyms for it.
+    #[test]
+    fn the_orchestrator_is_taught_the_words_the_rest_of_jod_uses() {
+        let said = orchestrator_preamble();
+        for word in ["**work**", "**session**", "**root**", "**lease**", "**card**"] {
+            assert!(said.contains(word), "{word} is not defined for the orchestrator");
+        }
+        assert!(said.contains("read-only"));
+        assert!(said.contains("**You do not do the work.**"));
     }
 
     // ---- opening a work ----
@@ -1592,6 +1647,22 @@ mod tests {
     /// facts about *this* session and reach it nowhere else.
     #[test]
     fn the_first_session_is_launched_with_its_brief() {
+        // `put_secret` writes a real file under the process-wide `JOD_HOME`, so
+        // this test has to own that variable for as long as it runs.
+        //
+        // Without the lock and the override it landed in whichever temporary
+        // home another test happened to have set — and, when none had, in the
+        // developer's actual `~/.jod/secrets/`. That was observed: an ordinary
+        // `cargo test` left a `STRIPE_API_KEY.<hash>` file in a real Jod home.
+        // Nothing was exposed, because the value is this test's own, but
+        // `put_secret` upserts by name, so on a box with that key genuinely
+        // stored the suite would have overwritten a live credential.
+        //
+        // The guard restores the previous value rather than unsetting it: on a
+        // machine where `JOD_HOME` is configured, unsetting it would send every
+        // later reader to `~/.jod` instead of the home it was told about.
+        let _home = crate::secrets::tests::Home::new("jod-brief");
+
         let s = store();
         s.put_secret(
             "STRIPE_API_KEY",
