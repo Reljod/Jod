@@ -23,6 +23,7 @@
 pub mod audit;
 pub mod auth;
 pub mod config;
+pub mod conversations;
 pub mod error;
 pub mod idempotency;
 pub mod routes;
@@ -142,6 +143,23 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/hooks", get(workspaces::list_hooks))
         .route("/v1/tasks", get(workspaces::list_tasks))
         .route("/v1/activity", get(workspaces::list_activity))
+        // Conversations, and the pinned main chat. The `main` routes are
+        // static, so they win over `{id}` on axum's static-first matching —
+        // there is no conversation whose id is the word "main". → [`conversations`]
+        .route("/v1/conversations", get(conversations::list_conversations))
+        .route("/v1/conversations/main", get(conversations::get_main))
+        .route(
+            "/v1/conversations/main/messages",
+            axum::routing::post(conversations::send_to_main),
+        )
+        .route(
+            "/v1/conversations/{id}",
+            get(conversations::get_conversation),
+        )
+        .route(
+            "/v1/conversations/{id}/messages",
+            get(conversations::get_messages),
+        )
         .route("/v1/session", axum::routing::delete(routes::end_session))
         // Layers apply to the routes declared above them. The state is captured
         // by the closure rather than extracted, which keeps the middleware's

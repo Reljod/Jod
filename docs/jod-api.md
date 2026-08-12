@@ -151,6 +151,11 @@ All JSON, all under `/v1`. Errors are
 | `GET` | `/v1/hooks` | `read` | Webhook rules with their deliveries, `?limit=`. |
 | `GET` | `/v1/tasks` | `read` | A team's board, `?team=`. |
 | `GET` | `/v1/activity` | `read` | Fires and goal iterations, `?limit=&needs_you=`. |
+| `GET` | `/v1/conversations` | `read` | Every conversation, `?limit=`. |
+| `GET` | `/v1/conversations/main` | `read` | The pinned main chat and its thread. |
+| `POST` | `/v1/conversations/main/messages` | `write` | Give the main chat an instruction. |
+| `GET` | `/v1/conversations/{id}` | `read` | One conversation. |
+| `GET` | `/v1/conversations/{id}/messages` | `read` | Its thread, oldest first. |
 | `POST` | `/v1/session` | bearer | Trade a token for a browser cookie. |
 | `DELETE` | `/v1/session` | any | Sign this browser out. |
 
@@ -199,6 +204,43 @@ would make two clients disagree about it.
 An empty store answers with an empty list, never a 404 and never a 500. "There
 are no goals" is a fact, and the screen that asks wants to draw *no goals yet*
 rather than an error banner.
+
+### The main chat has one way in, and this is not a second one
+
+The fleet's top row *is* the main chat. `POST /v1/conversations/main/messages`
+drives it — and it does so by calling
+`jod_core::orchestrator::hand_to_orchestrator`, the same function behind
+`jod main`, the TUI's `/main` and the Telegram bridge. That function's own note
+says why there is only one: *which conversation, which tools, which permission
+mode* is a set of decisions with four bugs already behind it, and a second copy
+would be a second place for the fifth to hide. The API assembles no
+`SpawnRequest` of its own. → `api/src/conversations.rs`
+
+**The permission ceiling needs an explicit check here, and it is easy to miss.**
+`hand_to_orchestrator` fixes `accept_edits` internally, and is right to: `ask`
+is plan mode, and plan mode refuses the very MCP calls that are the
+orchestrator's job — the run once wrote a plan file instead of arming the
+schedule it was asked for. But that reasoning belongs to a person at a terminal.
+Across a socket, calling through without a check would hand `accept_edits` to
+anyone holding a write token, on a daemon whose `max_permission` might be `ask`
+— a ceiling with a hole in it that only this one path could find. So the route
+tests `accept_edits` against the ceiling *before* handing over, and refuses by
+naming both the mode and the setting. Every other bound `POST /v1/agents`
+applies — scope, cwd allowlist, concurrency cap, idempotency, audit — applies
+here too, in the same order.
+
+**Reads never create.** `main_conversation` in core is get-or-create;
+`GET /v1/conversations/main` deliberately uses `pinned_conversation`, which only
+looks, because a `GET` that creates is a `GET` a link prefetcher can fire.
+Before anyone has spoken, it answers `{"conversation":null,"messages":[]}`
+rather than 404 — the console draws that pinned row from first launch, captioned
+*the chat Jod keeps — pinned, and it never ends*, and a client wants to draw the
+same thing.
+
+`{id}/messages` returns the full `thread`, not the `live_window`. The window is
+what the harness is handed on the next turn, which is smaller than what someone
+scrolling wants; serving it here would make a transcript look like it had lost
+messages.
 
 ### Spawning
 

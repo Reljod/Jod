@@ -100,6 +100,10 @@ const PROTECTED_GETS: &[&str] = &[
     "/v1/hooks",
     "/v1/tasks",
     "/v1/activity",
+    "/v1/conversations",
+    "/v1/conversations/main",
+    "/v1/conversations/some-id",
+    "/v1/conversations/some-id/messages",
 ];
 
 #[tokio::test]
