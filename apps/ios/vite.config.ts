@@ -1,5 +1,9 @@
+import { fileURLToPath, URL } from "node:url";
+
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
+
+const hud = fileURLToPath(new URL("../../packages/hud/src", import.meta.url));
 
 /**
  * The daemon this app talks to. In development it is proxied so the browser
@@ -11,6 +15,12 @@ const apiOrigin = process.env.JOD_API_ORIGIN ?? "http://127.0.0.1:8787";
 
 export default defineConfig({
   plugins: [react()],
+
+  resolve: {
+    // Types only — see the note in `tsconfig.json`. This app takes the wire
+    // contract from the shared package and renders it its own way.
+    alias: { "@jod/hud/types": `${hud}/types` },
+  },
 
   server: {
     // `tauri ios dev` runs the app on a real device or simulator, which reaches
@@ -28,9 +38,9 @@ export default defineConfig({
       },
     },
     fs: {
-      // `src/contract.ts` re-exports the shared API types from `apps/web`, one
-      // directory up and outside this project's root.
-      allow: [".", ".."],
+      // `src/contract.ts` re-exports the shared API types from `packages/hud`,
+      // two directories up and outside this project's root.
+      allow: [".", "../.."],
     },
   },
 

@@ -53,6 +53,16 @@ export interface Transport {
   history(limit: number): Promise<StoredRun[]>;
 }
 
+/**
+ * How a shell supplies its own driver.
+ *
+ * The browser shell has no reason to pass one — `createTransport` probes
+ * `/v1/health` and picks. The desktop shell always does: it talks to `jod-api`
+ * through the Tauri process rather than from the webview, because the API sets
+ * no CORS headers and its session cookie is `SameSite=Strict`, both on purpose.
+ */
+export type TransportFactory = () => Transport | Promise<Transport>;
+
 export const EMPTY_REPORT: Report = {
   running: 0,
   completed: 0,

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { WorldStore } from "../state/world";
-import type { Transport } from "../transport";
+import type { Transport, TransportFactory } from "../transport";
 import { createTransport, modeFromLocation } from "../transport/factory";
 import type { AgentSummary, HarnessInfo, SpawnRequest } from "../types";
 
@@ -30,19 +30,25 @@ export interface JodApi {
  * second. The tactical canvas ignores React entirely and reads `store.world`
  * on every frame.
  */
-export function useJod(): JodApi {
+export function useJod(makeTransport?: TransportFactory): JodApi {
   const store = useMemo(() => new WorldStore(), []);
   const transportRef = useRef<Transport | null>(null);
   const [transportLabel, setTransportLabel] = useState("…");
   const [harnesses, setHarnesses] = useState<HarnessInfo[]>([]);
   const [lastError, setLastError] = useState<string | null>(null);
 
+  // Pinned on first render. A shell that passes an inline arrow would otherwise
+  // change this every paint, and the effect below would tear the connection
+  // down and rebuild it each time — reconnecting the SSE stream forever.
+  const makeRef = useRef(makeTransport);
+
   useEffect(() => {
     let disposed = false;
     let active: Transport | null = null;
 
     void (async () => {
-      const transport = await createTransport(modeFromLocation());
+      const factory = makeRef.current;
+      const transport = await (factory ? factory() : createTransport(modeFromLocation()));
       if (disposed) return;
       active = transport;
       transportRef.current = transport;
