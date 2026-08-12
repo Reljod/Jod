@@ -1477,3 +1477,55 @@ Interactive sessions get `orchestrate`, the full set, because someone opened
 them and is watching. This cannot widen an unattended run — those are pinned to
 read-only where they are spawned, and
 [a chat you are watching may schedule; one that wandered off may not](#a-chat-you-are-watching-may-schedule-one-that-wandered-off-may-not).
+
+
+## The main chat was somewhere you could send to, never somewhere you could be
+
+One conversation is pinned, titled `main`, and never ends. Until now nothing
+could open it. `jod main "…"` sent to it; `jod main` with no argument printed
+twenty exchanges and exited; `/main <instruction>` in the TUI handed an
+instruction over and left the chat box where it was. `jod conv` offered
+ls/show/fork/revert/goto and no `open`, and the only code path that ever bound
+the chat box to an existing conversation was a harness handoff. The record
+outlived every process and no process would let you sit in it.
+
+Attaching was not a substitute. The chat is **one run per instruction**, resumed
+through `Store::resume_for`, so every run it has ever had has already exited —
+`tmux attach` lands you in a finished session.
+
+So the pinned conversation is a **destination**: the fleet's first row, `⏎` to
+enter, `/main` with no argument as the keyboard route, `/new` to leave. Entering
+binds `Thread::conversation` and replays `live_window` — what the harness would
+actually be sent, so a compacted message is on disk and deliberately not on
+screen. Inside it a typed line goes to the orchestrator, which is what being in
+it means; everywhere else the chat box is unchanged.
+
+Three details are load-bearing and none is cosmetic.
+
+**`in_main` is derived, never remembered.** A flag set on entry would be wrong
+the moment `/harness` ran: `switch_harness` mints a conversation and the pin
+moves to it, so the flag would point at the thread that was handed away. It is
+a store lookup against `pinned_conversation` every time it is asked.
+
+**The pin follows a harness switch.** `main_conversation` is get-or-create on
+`pinned = 1`. A pin left on the conversation a switch just compacted away would
+send the next instruction back to a chat nobody can reach, with the handoff
+summary stranded in it. Cleared and re-set in the switch's own transaction,
+because the partial unique index permits exactly one pinned row. That is also
+why `hand_to_orchestrator` gained a `carried` parameter — the target harness has
+no session for the thread, so the summary has to travel in the framing.
+
+**The fleet row stands for the conversation, not for a run.** It is outside the
+sort and outside the filter — an "always on top" a search term can remove is a
+row you have to remember how to get back to — and it collapses every `main` run
+into itself. One instruction is one run, so within a day the list was mostly
+identical `main` rows burying the delegated work the list exists for, and not
+one of them was the chat. The run verbs (`s`, `a`, `r`) say why they do not
+apply rather than doing nothing, because a key that silently no-ops is how a
+footer stops being believed. The cursor still starts on the first agent:
+managing the work is what opening the fleet means.
+
+Nothing deletes a conversation — there is no such verb in the store, and the
+fleet is not an editable list, so `x` is not offered on it. The main chat's
+permanence rests on that plus get-or-create: if it were ever gone, the next
+thing to ask for it would make it again.

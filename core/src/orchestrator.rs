@@ -675,6 +675,48 @@ mod tests {
         assert_eq!(first, second);
     }
 
+    /// A pin left on the thread a switch compacted away is a main chat you
+    /// cannot reach: the next instruction goes to the handed-over conversation
+    /// and the summary sits in one nobody opens again.
+    #[test]
+    fn the_pin_follows_a_harness_switch() {
+        use crate::conversation::{NewMessage, Role};
+        let s = store();
+        let id = s.main_conversation(crate::harness::HarnessKind::ClaudeCode, "/tmp").unwrap();
+        s.append_message(&id, NewMessage::new(Role::User, "count the rust files")).unwrap();
+
+        let switch = s
+            .switch_harness(&id, crate::harness::HarnessKind::OpenCode, "counted 47 rust files", "harness")
+            .unwrap();
+
+        assert_eq!(
+            s.pinned_conversation().unwrap().as_deref(),
+            Some(switch.conversation.id.as_str()),
+            "the pin should have moved to the conversation the switch minted"
+        );
+        // And the get-or-create agrees, which is the call every turn makes.
+        assert_eq!(
+            s.main_conversation(crate::harness::HarnessKind::OpenCode, "/tmp").unwrap(),
+            switch.conversation.id
+        );
+    }
+
+    /// Only the pinned thread carries the pin. Switching an ordinary
+    /// conversation must not mint a second main chat.
+    #[test]
+    fn an_unpinned_switch_leaves_the_pin_alone() {
+        use crate::conversation::{NewMessage, Role};
+        let s = store();
+        let main = s.main_conversation(crate::harness::HarnessKind::ClaudeCode, "/tmp").unwrap();
+        let other = s.new_conversation(crate::harness::HarnessKind::ClaudeCode, "/tmp", None).unwrap();
+        s.append_message(&other.id, NewMessage::new(Role::User, "something else")).unwrap();
+
+        s.switch_harness(&other.id, crate::harness::HarnessKind::OpenCode, "the other thing", "harness")
+            .unwrap();
+
+        assert_eq!(s.pinned_conversation().unwrap().as_deref(), Some(main.as_str()));
+    }
+
     #[test]
     fn the_human_clock_is_separate_from_the_conversations_own() {
         let s = store();

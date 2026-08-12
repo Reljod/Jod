@@ -71,6 +71,7 @@ async fn hand_to_orchestrator(
     _instruction: &str,
     _kind: HarnessKind,
     _cwd: PathBuf,
+    _carried: Option<String>,
 ) -> anyhow::Result<Handed> {
     anyhow::bail!("the screens example does not run agents")
 }

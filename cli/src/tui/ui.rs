@@ -1041,7 +1041,16 @@ fn filter_line(app: &App) -> Option<Line<'static>> {
     // A filter that is open but empty hides nothing, so it says so rather than
     // claiming a match count that is really the whole list.
     let what = if list.filtering() {
-        format!("   ▸ filter · {} match", app.row_ids(app.workspace).len())
+        // Rows, less the ones a filter cannot exclude. The fleet's pinned chat
+        // is always in `row_ids` and never a match, so counting rows there
+        // claimed one more hit than the filter had actually found.
+        let unfilterable = usize::from(app.workspace == Workspace::Fleet);
+        format!(
+            "   ▸ filter · {} match",
+            app.row_ids(app.workspace)
+                .len()
+                .saturating_sub(unfilterable)
+        )
     } else {
         "   ▸ type to filter".to_string()
     };
@@ -1086,7 +1095,10 @@ fn draw_fleet(f: &mut Frame, app: &App, area: Rect) {
     let selected = app
         .list(Workspace::Fleet)
         .index(&app.row_ids(Workspace::Fleet));
-    let (first, height) = window(left, selected, rows.len());
+    // One longer than the agents: the pinned chat holds index 0, which is why
+    // `row_ids` puts it there too. The two orderings have to agree, or the
+    // cursor lands one row off its own highlight.
+    let (first, height) = window(left, selected, rows.len() + 1);
     // Declared drop order: detail pane → harness → id, name last.
     //
     // Each threshold is one higher than it was, because the delivery gutter
@@ -1097,54 +1109,67 @@ fn draw_fleet(f: &mut Frame, app: &App, area: Rect) {
     let show_id = inner >= 35;
     let show_harness = inner >= 31;
 
-    let items: Vec<ListItem> = if rows.is_empty() {
-        empty("no agents yet — Alt-B delegates one")
-    } else {
-        rows.iter()
-            .enumerate()
-            .skip(first)
-            .take(height)
-            .map(|(i, a)| {
-                let chosen = i == selected;
-                let age = super::app::short_duration(app.now_ms.saturating_sub(a.created_at_ms));
-                let watched = app.watching.as_deref() == Some(a.id.as_str());
-                let mut spans = vec![
-                    delivery_gutter(a.delivery),
-                    Span::styled(if chosen { "▸ " } else { "  " }, fg(USER)),
-                    Span::styled(
-                        format!("{} ", run_glyph(&a.status)),
-                        fg(status_colour(&a.status)),
-                    ),
-                ];
-                if show_id {
-                    spans.push(Span::styled(format!("{:<9}", short(&a.id)), fg(MUTED)));
-                }
-                spans.push(Span::styled(
-                    format!("{:<9}", a.status),
-                    fg(status_colour(&a.status)),
-                ));
-                spans.push(Span::styled(format!("{age:>7} "), fg(MUTED)));
-                if show_harness {
-                    spans.push(Span::styled(format!("{:<4}", code(&a.harness)), fg(MUTED)));
-                }
-                // The name was clipped by the widget with nothing saying so —
-                // `port the p` at the design width. It is cut with an ellipsis
-                // now, and the marker beside it is reserved first.
-                let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
-                let marker = if watched { "  \u{2190} on screen" } else { "" };
-                let (name, marked) = fit_row(used, &a.name, marker, inner);
-                spans.push(Span::styled(
-                    name,
-                    if chosen { bold(USER) } else { fg(AGENT) },
-                ));
-                if marked {
-                    spans.push(Span::styled(marker.to_string(), fg(USER)));
-                }
-                ListItem::new(Line::from(spans))
-            })
-            .collect()
-    };
-    let mut items = items;
+    // Index 0 is the pinned chat and the rest are agents, so the loop walks
+    // positions rather than the agent vector. Everything below the first row
+    // reads its agent at `i - 1`.
+    let mut items: Vec<ListItem> = Vec::new();
+    for i in first..(first + height).min(rows.len() + 1) {
+        let chosen = i == selected;
+        if i == 0 {
+            items.push(ListItem::new(Line::from(main_line(
+                app,
+                chosen,
+                inner,
+                show_id,
+                show_harness,
+            ))));
+            continue;
+        }
+        let a = rows[i - 1];
+        let age = super::app::short_duration(app.now_ms.saturating_sub(a.created_at_ms));
+        let watched = app.watching.as_deref() == Some(a.id.as_str());
+        let mut spans = vec![
+            delivery_gutter(a.delivery),
+            Span::styled(if chosen { "▸ " } else { "  " }, fg(USER)),
+            Span::styled(
+                format!("{} ", run_glyph(&a.status)),
+                fg(status_colour(&a.status)),
+            ),
+        ];
+        if show_id {
+            spans.push(Span::styled(format!("{:<9}", short(&a.id)), fg(MUTED)));
+        }
+        spans.push(Span::styled(
+            format!("{:<9}", a.status),
+            fg(status_colour(&a.status)),
+        ));
+        spans.push(Span::styled(format!("{age:>7} "), fg(MUTED)));
+        if show_harness {
+            spans.push(Span::styled(format!("{:<4}", code(&a.harness)), fg(MUTED)));
+        }
+        // The name was clipped by the widget with nothing saying so —
+        // `port the p` at the design width. It is cut with an ellipsis
+        // now, and the marker beside it is reserved first.
+        let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+        let marker = if watched { "  \u{2190} on screen" } else { "" };
+        let (name, marked) = fit_row(used, &a.name, marker, inner);
+        spans.push(Span::styled(
+            name,
+            if chosen { bold(USER) } else { fg(AGENT) },
+        ));
+        if marked {
+            spans.push(Span::styled(marker.to_string(), fg(USER)));
+        }
+        items.push(ListItem::new(Line::from(spans)));
+    }
+    // Said under the pinned row rather than instead of the list, because the
+    // list is no longer empty — the chat is always in it, and "no agents yet"
+    // as the only line would now be a claim the row above it contradicts.
+    if rows.is_empty() {
+        // Short enough to survive the master pane at the design width, which is
+        // 44 cells inside its border — the longer form was clipped mid-word.
+        items.extend(empty("  nothing delegated yet — Alt-B starts one"));
+    }
     if let Some(line) = filter_line(app) {
         items.push(ListItem::new(Line::from("")));
         items.push(ListItem::new(line));
@@ -1152,6 +1177,22 @@ fn draw_fleet(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(body(Workspace::Fleet, items, left.width), left);
 
     let Some(right) = right else { return };
+    // Its own pane, and its own footer: none of `s stop · r resume · a attach`
+    // means anything to a conversation, and offering keys that quietly do
+    // nothing is how a list teaches people not to trust its footer.
+    if app.main_selected() {
+        f.render_widget(
+            Paragraph::new(main_detail(app, right.width)).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(fg(USER))
+                    .title(" the chat ")
+                    .title_bottom(fit_verbs(" ⏎ enter · /new leaves ", right.width)),
+            ),
+            right,
+        );
+        return;
+    }
     let lines = match app.selected_agent() {
         None => vec![Line::from(Span::styled(" nothing selected", fg(MUTED)))],
         Some(a) => {
@@ -1210,10 +1251,117 @@ fn draw_fleet(f: &mut Frame, app: &App, area: Rect) {
                 .borders(Borders::ALL)
                 .border_style(fg(MUTED))
                 .title(" run ")
-                .title_bottom(fit_verbs(" ⏎ watch · s stop · r resume · a attach ", right.width)),
+                .title_bottom(fit_verbs(
+                    " ⏎ watch · s stop · r resume · a attach ",
+                    right.width,
+                )),
         ),
         right,
     );
+}
+
+/// The pinned chat's row, in the fleet's own columns.
+///
+/// It borrows the agent columns rather than inventing a layout, because two
+/// column schemes in one list is two things to read. The id column carries the
+/// word `pinned` — the row stands for a conversation and has no run id to show
+/// — and the age is time since the last instruction, which is the number you
+/// want: how long since you last said anything.
+fn main_line(
+    app: &App,
+    chosen: bool,
+    inner: usize,
+    show_id: bool,
+    show_harness: bool,
+) -> Vec<Span<'static>> {
+    let row = app.main_row();
+    let mut spans = vec![
+        // No delivery gutter: a conversation owes nobody a reply. A blank keeps
+        // the columns under it aligned.
+        Span::raw(" "),
+        Span::styled(if chosen { "▸ " } else { "  " }, fg(USER)),
+        Span::styled("★ ", fg(USER)),
+    ];
+    if show_id {
+        spans.push(Span::styled(format!("{:<9}", "pinned"), fg(MUTED)));
+    }
+    spans.push(Span::styled(
+        format!("{:<9}", row.status),
+        fg(if row.is_running() { WARN } else { MUTED }),
+    ));
+    // A chat nothing has been said to has no age, and `0s` would be a claim
+    // that something just happened.
+    let age = match row.last_ms {
+        0 => "—".to_string(),
+        at => super::app::short_duration(app.now_ms.saturating_sub(at)),
+    };
+    spans.push(Span::styled(format!("{age:>7} "), fg(MUTED)));
+    if show_harness {
+        spans.push(Span::styled(
+            format!("{:<4}", code(&row.harness)),
+            fg(MUTED),
+        ));
+    }
+    let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+    let marker = "  ⏎ enter";
+    let (name, marked) = fit_row(used, "main", marker, inner);
+    spans.push(Span::styled(name, bold(USER)));
+    if marked {
+        spans.push(Span::styled(marker.to_string(), fg(USER)));
+    }
+    spans
+}
+
+/// The pinned chat's detail pane.
+///
+/// Says the three things the row cannot: that this is where typing goes, how
+/// much of the window is spoken for, and how many instructions it has routed.
+fn main_detail(app: &App, width: u16) -> Vec<Line<'static>> {
+    let row = app.main_row();
+    let mut lines = vec![
+        Line::from(Span::styled(" main", bold(USER))),
+        // Short enough to survive the pane at the design width — 48 cells —
+        // rather than being clipped mid-sentence.
+        Line::from(Span::styled(
+            " the chat Jod keeps — pinned, and it never ends",
+            fg(MUTED),
+        )),
+        Line::from(""),
+        field("harness", &row.harness),
+        field("status", &row.status),
+        // "last said" is exactly the width `field` pads its label to, which
+        // left it touching its own value — `last saidnothing yet`.
+        field(
+            "last",
+            &match row.last_ms {
+                0 => "nothing yet".to_string(),
+                at => format!(
+                    "{} ago",
+                    super::app::short_duration(app.now_ms.saturating_sub(at))
+                ),
+            },
+        ),
+        field(
+            "turns",
+            &match row.turns {
+                0 => "none yet".to_string(),
+                1 => "1 instruction routed".to_string(),
+                n => format!("{n} instructions routed"),
+            },
+        ),
+        Line::from(""),
+    ];
+    for chunk in wrap(
+        "⏎ goes in, and what you type there is an instruction. It never does \
+         the work itself — it delegates, continues an agent that already has \
+         the context, arms a schedule, or sets a goal, and the agents below \
+         are what came of that. /new leaves.",
+        width.saturating_sub(4) as usize,
+        2,
+    ) {
+        lines.push(Line::from(Span::styled(format!("  {chunk}"), fg(MUTED))));
+    }
+    lines
 }
 
 /// A row's variable text and its trailing marker, fitted together.
@@ -1411,7 +1559,10 @@ fn draw_memory(f: &mut Frame, app: &App, area: Rect) {
                 .borders(Borders::ALL)
                 .border_style(fg(MUTED))
                 .title(" node ")
-                .title_bottom(fit_verbs(" g local graph · e edit · x forget ", right.width)),
+                .title_bottom(fit_verbs(
+                    " g local graph · e edit · x forget ",
+                    right.width,
+                )),
         ),
         right,
     );
@@ -2090,7 +2241,11 @@ fn draw_activity(f: &mut Frame, app: &App, area: Rect) {
             fg(source_colour(item.source)),
         ));
         let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
-        let marker = if item.needs_you { "  \u{2190} needs you" } else { "" };
+        let marker = if item.needs_you {
+            "  \u{2190} needs you"
+        } else {
+            ""
+        };
         let (text, marked) = fit_row(used, &item.text, marker, width);
         spans.push(Span::styled(
             text,
@@ -3570,7 +3725,10 @@ mod tests {
                     text.contains(&left),
                     "{ws:?} at {width}: a left half of exactly the budget was elided: {text:?}"
                 );
-                assert!(text.contains(right), "{ws:?} at {width}: the exit went: {text:?}");
+                assert!(
+                    text.contains(right),
+                    "{ws:?} at {width}: the exit went: {text:?}"
+                );
                 assert!(
                     text.chars().count() <= width as usize,
                     "{ws:?} at {width}: overflowed: {text:?}"
@@ -3584,13 +3742,21 @@ mod tests {
     #[test]
     fn the_two_halves_of_a_bar_never_run_together() {
         for width in [200u16, 150, 100, 80, 60, 40, 24, 12] {
-            let line = two_ends("Alt-B delegate · Alt-K menu", "Alt-X stop · Ctrl-C quit", width, MUTED);
+            let line = two_ends(
+                "Alt-B delegate · Alt-K menu",
+                "Alt-X stop · Ctrl-C quit",
+                width,
+                MUTED,
+            );
             let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
             assert!(
                 text.chars().count() <= width as usize,
                 "{width}: overflowed with {text:?}"
             );
-            assert!(!text.contains("menuAlt-X"), "{width}: they touched: {text:?}");
+            assert!(
+                !text.contains("menuAlt-X"),
+                "{width}: they touched: {text:?}"
+            );
             // The exit survives every width that can hold it at all.
             if "Alt-X stop · Ctrl-C quit".len() + 2 <= width as usize {
                 assert!(
@@ -3725,15 +3891,31 @@ mod tests {
 
         for w in [40u16, 60, 80, 100, 110, 120, 150, 200] {
             let mut fleet = app();
-            fleet.agents = vec![agent_line("aaa11111", "port the parser to the new AST", "completed")];
+            fleet.agents = vec![agent_line(
+                "aaa11111",
+                "port the parser to the new AST",
+                "completed",
+            )];
             fleet.watching = Some("aaa11111".into());
             fleet.go(Workspace::Fleet);
-            check(&rendered(&fleet, w, 14), "aaa11111", "← on screen", "fleet", w);
+            check(
+                &rendered(&fleet, w, 14),
+                "aaa11111",
+                "← on screen",
+                "fleet",
+                w,
+            );
 
             let mut feed = activity_app();
             feed.activity[2].text =
                 "inbox-to-zero iteration 118 stalled on a decision nobody has made yet".into();
-            check(&rendered(&feed, w, 20), "stalled", "← needs you", "activity", w);
+            check(
+                &rendered(&feed, w, 20),
+                "stalled",
+                "← needs you",
+                "activity",
+                w,
+            );
 
             let mut graph = memory_app();
             graph.graph = GraphView::new("linear-is-truth");
@@ -3820,10 +4002,10 @@ mod tests {
         a.agents = vec![owing("aaa11111", "answer the telegram", Verdict::Lost)];
         a.go(Workspace::Fleet);
         let screen = rendered(&a, 100, 16);
-        let row = screen
-            .lines()
-            .find(|l| l.contains("answer the telegram"))
-            .unwrap();
+        // By id rather than by name: the detail pane on the right prints the
+        // name too, and at this width it shares a screen line with the pinned
+        // chat's row — so matching on the name finds the wrong row.
+        let row = screen.lines().find(|l| l.contains("aaa11111")).unwrap();
         assert!(row.contains('⊘'), "the lost mark belongs on the row: {row}");
     }
 
@@ -3896,7 +4078,15 @@ mod tests {
             .map(|i| owing(&format!("id{i:06}"), &format!("job {i}"), Verdict::Lost))
             .collect();
         a.go(Workspace::Fleet);
-        for (w, h) in [(150u16, 20u16), (100, 16), (80, 14), (60, 12), (40, 10), (20, 6), (12, 5)] {
+        for (w, h) in [
+            (150u16, 20u16),
+            (100, 16),
+            (80, 14),
+            (60, 12),
+            (40, 10),
+            (20, 6),
+            (12, 5),
+        ] {
             let screen = rendered(&a, w, h);
             assert!(
                 screen.lines().all(|l| l.chars().count() <= w as usize),
@@ -4235,11 +4425,84 @@ mod tests {
         assert!(out.contains("abcdef12"), "the id is shortened:\n{out}");
     }
 
+    /// The pinned chat is drawn above the agents, in the agents' own columns,
+    /// and the cursor is not on it — three separate claims that together are
+    /// what "always pinned on top" has to mean on screen.
     #[test]
-    fn an_empty_fleet_says_so_rather_than_showing_a_blank_box() {
+    fn the_pinned_chat_is_drawn_above_the_agents() {
+        let mut a = app();
+        a.agents = vec![agent_line("aaa11111", "port the parser", "running")];
+        a.go(Workspace::Fleet);
+        a.reconcile();
+        let screen = rendered(&a, 100, 16);
+        let lines: Vec<&str> = screen.lines().collect();
+
+        let pinned = lines
+            .iter()
+            .position(|l| l.contains("pinned"))
+            .expect("the pinned row is drawn");
+        let agent = lines
+            .iter()
+            .position(|l| l.contains("aaa11111"))
+            .expect("the agent row is drawn");
+        assert!(pinned < agent, "the chat belongs above the work:\n{screen}");
+
+        // The cursor marker is on the agent, not on the chat.
+        assert!(!lines[pinned].contains('▸'), "{screen}");
+        assert!(lines[agent].contains('▸'), "{screen}");
+    }
+
+    /// Selecting it swaps the detail pane for one about a conversation, keys
+    /// included: `s stop · r resume · a attach` are meaningless here and
+    /// offering them is how a footer stops being trusted.
+    #[test]
+    fn the_pinned_rows_detail_pane_describes_a_chat_not_a_run() {
+        let mut a = app();
+        a.agents = vec![agent_line("aaa11111", "port the parser", "running")];
+        a.go(Workspace::Fleet);
+        a.list_mut(Workspace::Fleet).selected = Some(crate::tui::app::MAIN_ROW.to_string());
+        let screen = rendered(&a, 100, 20);
+
+        assert!(screen.contains("the chat"), "{screen}");
+        assert!(screen.contains("⏎ enter"), "{screen}");
+        assert!(
+            screen.contains("pinned, and it never ends"),
+            "it describes a conversation, uncut at the design width:\n{screen}"
+        );
+        // The detail pane's own footer, which is the half that is about the
+        // selected row. The list keeps `s stop · r resume` because those still
+        // apply to every other row on the screen.
+        let pane: String = screen
+            .lines()
+            .filter_map(|l| l.split("││").nth(1))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !pane.contains("s stop"),
+            "stop must not be offered for a conversation:\n{pane}"
+        );
+        // And no field runs into its own value.
+        assert!(
+            pane.contains("last "),
+            "the label column is padded:\n{pane}"
+        );
+    }
+
+    /// A fleet with nothing delegated is not an empty screen any more — the
+    /// pinned chat is in it, above the line saying nothing has been started.
+    /// Both have to be there: the row, so there is always somewhere to go, and
+    /// the sentence, so a list holding one row does not read as the whole story.
+    #[test]
+    fn an_empty_fleet_shows_the_pinned_chat_and_says_nothing_is_delegated() {
         let mut a = app();
         a.go(Workspace::Fleet);
-        assert!(rendered(&a, 80, 16).contains("no agents yet"));
+        let out = rendered(&a, 80, 16);
+        assert!(out.contains("nothing delegated yet"), "{out}");
+        assert!(
+            out.contains("main"),
+            "the pinned row is always drawn:\n{out}"
+        );
+        assert!(out.contains("pinned"), "{out}");
     }
 
     /// The screen is a control surface, not a list of names: it has to say what

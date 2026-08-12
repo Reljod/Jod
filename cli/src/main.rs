@@ -1547,7 +1547,7 @@ async fn main_chat(
         return show_main_chat(jod, &id, limit, now);
     }
 
-    let handed = hand_to_orchestrator(jod, &instruction, kind, cwd).await?;
+    let handed = hand_to_orchestrator(jod, &instruction, kind, cwd, None).await?;
     if let Some((reason, chars)) = handed.compaction_due {
         println!("· the chat is due for compaction ({reason}) — {chars} chars in the live window");
         println!("  `jod conv compact {}` summarises it", &id[..8.min(id.len())]);
@@ -1572,15 +1572,21 @@ struct Handed {
 
 /// Give an instruction to the pinned main chat.
 ///
-/// Shared by `jod main` and the TUI's `/main`, because two copies of "which
-/// conversation, which tools, which permission mode" is two things to keep in
-/// step, and the TUI is the interface that matters most — a divergence there
-/// would mean the tested path is not the used one.
+/// Shared by `jod main` and every turn typed into the TUI, because two copies
+/// of "which conversation, which tools, which permission mode" is two things to
+/// keep in step, and the TUI is the interface that matters most — a divergence
+/// there would mean the tested path is not the used one.
+///
+/// `carried` is prior context the harness has no session for: after `/harness`,
+/// the pin moves to a conversation the target has never seen, so the summary of
+/// what came before has to travel in the framing or it is lost. `None` on every
+/// ordinary turn, where the harness's own session is holding the thread.
 async fn hand_to_orchestrator(
     jod: &Jod,
     instruction: &str,
     kind: HarnessKind,
     cwd: PathBuf,
+    carried: Option<String>,
 ) -> Result<Handed> {
     let store = jod.store().context("this command needs the database")?;
     let id = store.main_conversation(kind, &cwd.display().to_string())?;
@@ -1613,7 +1619,19 @@ async fn hand_to_orchestrator(
             name: "main".into(),
             harness: kind,
             prompt: instruction.clone(),
-            system: Some(jod_core::orchestrator::orchestrator_preamble().to_string()),
+            // The preamble, then whatever a harness switch left the new harness
+            // needing. That order and not the other one: the preamble is the
+            // standing brief — who this run is and what its verbs are — and the
+            // summary is material it applies to. Leading with a transcript
+            // would have the model reading history before it knows what it is
+            // reading it for.
+            system: Some(match &carried {
+                Some(context) => format!(
+                    "{}\n\n{context}",
+                    jod_core::orchestrator::orchestrator_preamble()
+                ),
+                None => jod_core::orchestrator::orchestrator_preamble().to_string(),
+            }),
             cwd,
             model: None,
             // Not `Ask`. `Ask` is plan mode, and plan mode refuses every

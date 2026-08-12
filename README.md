@@ -91,6 +91,14 @@ delegates the typed line to an agent that runs in the background and reports
 back when it ends; the panel is where those runs are watched, stopped, resumed
 or attached to.
 
+**Its top row is the main chat.** The panel's first row is not a run — it is the
+one conversation Jod keeps for itself, pinned above the agents, outside the sort
+and outside the filter, and there whether or not anything has been said to it.
+`⏎` on it goes *into* the chat: the transcript is replayed and what you type
+next is an instruction to the orchestrator rather than a turn to an agent.
+`/main` with no argument does the same from the keyboard, and `/new` leaves
+again. Every other conversation in the TUI works exactly as it did.
+
 ### `jod main` — the pinned chat
 
 One conversation is pinned and never ends. It is where you say what you want,
@@ -102,6 +110,10 @@ jod main "keep working until the README explains what jod main does, then stop"
 jod main "count the Rust files in the repo and tell me"
 jod main                                  # read the chat back
 ```
+
+There is exactly one of it, it cannot be deleted, and every route reaches the
+same conversation: `jod main "…"` from a shell, `/main …` from the TUI, and
+sitting in it after `⏎` on the fleet's top row all write the same thread.
 
 **It does not do the work.** It is a harness run holding Jod's own tools over
 MCP, so it delegates by *calling* rather than by describing, and it returns
