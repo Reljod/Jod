@@ -336,6 +336,37 @@ using Tailscale for the private one.
 
 ---
 
+## If the app you mean is the Jod HUD — three facts in the current code
+
+Prompted by the `apps/ios` session asking how a phone reaches `jod-api`. These
+are read from the source, not observed at runtime, and they constrain the
+ingress design more than the tunnel choice does.
+
+**TLS is a correctness requirement, not just hardening.** `api/src/session.rs`
+sets the browser session cookie `HttpOnly; Secure; SameSite=Strict`. A `Secure`
+cookie is not stored or sent over plain HTTP — so any documented setup that
+points a client at `http://<host>:8787` gets a cookie the client silently drops.
+`tailscale serve` supplies a real `*.ts.net` certificate, which fixes this for
+free and removes the need for any cleartext exception on the client side. It
+also makes the origin a secure context, so a browser add-to-home-screen install
+becomes viable.
+
+**There is no CORS layer.** `api/Cargo.toml` enables tower-http's `cors`
+feature, but `CorsLayer` is never constructed anywhere in `api/src/`, so no
+`Access-Control-Allow-Origin` is ever sent. A browser front-end served from a
+different origin than the API will fail every request. `SameSite=Strict` points
+the same way independently: a cross-site request would not carry the session
+cookie even if CORS were added. **Serve the front-end and the API from one
+origin** — `tailscale serve` can front both — and both problems disappear
+without touching the auth design.
+
+**Bearer auth is the native path; the cookie is a workaround.** The module doc
+is explicit that the cookie exists only because `EventSource` cannot set an
+`Authorization` header, and that native clients never need it. Sessions are
+in-memory, so a daemon restart signs every browser out — deliberate, for a
+credential that executes code, but front-ends must treat a 401 as "re-open a
+session" rather than "the token is bad".
+
 ## Baseline hardening, whichever option you choose
 
 These are independent of the ingress decision. Ordered by value per unit effort.
@@ -386,6 +417,10 @@ Stated plainly so none of it reads as checked:
   classify it; I did not review its source for XSS, dependency CVEs, or how it
   would store an API token in a browser. For a Class B app that review is
   necessary before any exposure, private or not.
+- **The three code facts above are read, not run.** The `Secure`-cookie and
+  missing-`CorsLayer` conclusions come from the source and the relevant specs;
+  I did not stand up the daemon and watch a browser drop a cookie or fail a
+  preflight. Both are cheap to confirm empirically once something is running.
 - **`vite preview` is a dev server**, not a production one. Serving a built
   Vite app in production means static files behind a real server; nothing here
   covers that build-and-serve pipeline.
