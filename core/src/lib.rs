@@ -27,6 +27,7 @@ pub mod discovery;
 pub mod error;
 pub mod event;
 pub mod harness;
+pub mod heartbeat;
 pub mod ledger;
 pub mod mcp;
 pub mod mcp_config;

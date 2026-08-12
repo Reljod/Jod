@@ -63,6 +63,21 @@ enum Command {
         /// Return as soon as the agent is launched instead of waiting for it.
         #[arg(long)]
         detach: bool,
+        /// Watch this run for signs of life, and reap it if it wedges.
+        ///
+        /// For work measured in hours. A run that stops producing output for
+        /// longer than its stall window is stopped and marked failed by the
+        /// scheduler, rather than sitting there looking busy for ever. Needs
+        /// `jod daemon` to be running — the sweep happens on its tick.
+        #[arg(long)]
+        watch: bool,
+        /// How long this run may go silent before it counts as stalled.
+        ///
+        /// Minutes. Defaults to 20, which is deliberately generous: killing a
+        /// slow run costs work somebody waited for, while noticing a wedged one
+        /// late costs an idle process.
+        #[arg(long, value_name = "MINUTES", requires = "watch")]
+        stall_after: Option<i64>,
         /// Emit raw event JSON, one per line, instead of formatted output.
         #[arg(long)]
         json: bool,
@@ -1019,6 +1034,8 @@ async fn main() -> Result<()> {
             continue_last,
             session,
             detach,
+            watch,
+            stall_after,
             json,
             thinking,
         } => {
@@ -1054,6 +1071,23 @@ async fn main() -> Result<()> {
             // Subscribe *before* spawning, so no early event is missed.
             let events = jod.subscribe();
             let agent = jod.spawn_agent(req).await?;
+
+            if watch {
+                // Registered after the spawn, because a heartbeat for a run
+                // that failed to start would be a row watching nothing — and
+                // the cascade only cleans up rows whose run exists.
+                let store = jod.store().context("watching a run needs a store")?;
+                let mut hb = jod_core::heartbeat::Heartbeat::starting(
+                    &agent.id,
+                    jod_core::heartbeat::Watching::Run,
+                    chrono::Utc::now().timestamp_millis(),
+                );
+                if let Some(minutes) = stall_after {
+                    hb = hb.with_stall_ms(minutes.saturating_mul(60_000));
+                }
+                store.watch_run(&hb)?;
+                render::watching(&agent.id, hb.stall_ms);
+            }
 
             if detach {
                 render::launched(&agent);

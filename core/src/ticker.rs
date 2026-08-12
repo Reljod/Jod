@@ -20,6 +20,7 @@ use std::sync::Arc;
 
 use crate::error::Result;
 use crate::harness::{HarnessKind, PermissionPolicy, Resume, SpawnRequest};
+use crate::heartbeat::{self, Beat, Heartbeat, Observed, SweepReport, Verdict, Watching};
 use crate::monitor::{self, LocalProbes, Observation, Probes};
 use crate::schedule::{self, Fire, FireOutcome, Goal, Misfire, Overlap, Schedule};
 use crate::service::{AgentStatus, Jod};
@@ -644,6 +645,151 @@ impl Ticker {
         }
     }
 
+    /// Ask every watched run whether it is still working, and reap the ones
+    /// that are not.
+    ///
+    /// **This runs before schedules and goals, and moving it is a bug.**
+    /// [`Ticker::tick_goals`] settles the previous iteration by reading its
+    /// run's status, and a wedged run's status is `running` — permanently,
+    /// because the only process that ever writes a terminal status is the
+    /// supervisor watching a harness that is never going to exit. Sweeping
+    /// first means the goal asks *after* the stall has been turned into a
+    /// `failed`, so it moves on this tick. Sweeping afterwards would cost a
+    /// whole extra tick in the ordinary case and, in the case this exists for,
+    /// would never resolve at all.
+    ///
+    /// **Nothing here is fatal.** A run whose reaping fails is logged into the
+    /// goal's memory and skipped; the sweep goes on to the next one. The
+    /// alternative — an early return — would let one unkillable process group
+    /// stop every other watched run from ever being checked, which is the
+    /// failure this module was written to prevent, reintroduced one level up.
+    ///
+    /// **There is no claim and no lease here, unlike schedules and goals.**
+    /// Those guard a *spawn*: two processes acting on one schedule start two
+    /// harnesses and cost real money. A sweep starts nothing. Its worst case
+    /// under two daemons is that both observe the same stall and both signal
+    /// the same process group, which is idempotent — `terminate_group` treats
+    /// an already-dead group as success — and both write `failed` to a row that
+    /// already says `failed`. Paying for a claim to prevent that would add a
+    /// contended write per tick to buy nothing.
+    pub async fn tick_heartbeats(&self, now_ms: i64) -> Result<SweepReport> {
+        let Some(store) = self.jod.store().cloned() else {
+            return Ok(SweepReport::default());
+        };
+        let watched = store.heartbeats()?;
+        let mut report = SweepReport::default();
+
+        for hb in watched {
+            report.checked += 1;
+
+            // The three observed facts. Status is read first and decides
+            // whether the pgid is probed at all: pids are recycled, and asking
+            // about a finished run's long-dead group is how a stranger's
+            // process gets mistaken for an agent.
+            let run = store.run(&hb.run_id)?;
+            let status = run.as_ref().map(|r| r.status.clone());
+            let alive = match (&status, run.as_ref().and_then(|r| r.pgid)) {
+                (Some(s), Some(pgid)) if s == "running" => crate::proc::group_alive(pgid),
+                _ => false,
+            };
+            let observed = Observed {
+                status,
+                alive,
+                last_seq: store.last_event_seq(&hb.run_id)?,
+            };
+
+            let verdict = heartbeat::decide(&hb, &observed, now_ms);
+
+            if !verdict.retires() {
+                if matches!(verdict, Verdict::Beating { .. }) {
+                    report.beating += 1;
+                }
+                store.record_beat(&Beat::after(&hb, &verdict, now_ms))?;
+                continue;
+            }
+
+            // Retiring. Say why *before* tidying up, so a crash between the two
+            // leaves the explanation rather than the bookkeeping.
+            self.record_verdict(&store, &hb, &verdict);
+
+            if verdict.fails_the_run() {
+                if verdict.terminates() {
+                    report.stopped += 1;
+                }
+                if let Err(e) = self.jod.fail_agent(&hb.run_id, verdict.terminates()).await {
+                    // Logged into memory rather than returned: see above.
+                    self.note(
+                        &store,
+                        &hb,
+                        "reap-failed",
+                        &format!("could not reap {}: {e}", hb.run_id),
+                    );
+                }
+            }
+
+            store.unwatch_run(&hb.run_id)?;
+            report.retired += 1;
+        }
+        Ok(report)
+    }
+
+    /// Write down why a heartbeat retired.
+    ///
+    /// For a goal this lands in the goal's own memory scope, which is the scope
+    /// [`Ticker::spawn_iteration`] reads to build the next iteration's prompt —
+    /// so a stalled iteration is not merely recorded, it is handed to whatever
+    /// runs next. That is the difference between a loop that repeats a hang and
+    /// one that knows it hung last time.
+    fn record_verdict(&self, store: &Store, hb: &Heartbeat, verdict: &Verdict) {
+        // An ordinary ending is not news. Writing a fact for every run that
+        // finished normally would fill a goal's memory with rows saying
+        // "nothing went wrong", which is the noise that makes the rows that
+        // matter unreadable.
+        if matches!(verdict, Verdict::Ended) {
+            return;
+        }
+        self.note(store, hb, verdict.tag(), &verdict.detail());
+    }
+
+    /// One line into whichever memory this run belongs to.
+    ///
+    /// Never fatal, and deliberately so: a sweep that cannot write its note has
+    /// still got a wedged process to stop, and that is the more important half.
+    fn note(&self, store: &Store, hb: &Heartbeat, predicate: &str, detail: &str) {
+        let (subject, scope) = match hb.watching.goal_name() {
+            // The goal's scope is keyed by its *id*, so the name has to be
+            // resolved. A goal deleted while its last iteration was still
+            // running leaves nothing to resolve, and the note falls back to the
+            // run — which is the honest place for it once the goal is gone.
+            Some(name) => match store.goal_named(name) {
+                Ok(Some(goal)) => (format!("goal/{}", goal.name), goal.memory_scope()),
+                _ => (format!("run/{}", hb.run_id), "default".to_string()),
+            },
+            None => (format!("run/{}", hb.run_id), "default".to_string()),
+        };
+        if let Err(e) = store.remember(
+            NewFact::new(subject, predicate, detail.to_string())
+                .in_scope(&scope)
+                .from(Origin::System),
+        ) {
+            eprintln!("[jod] heartbeat note for {} failed: {e}", hb.run_id);
+        }
+    }
+
+    /// Start watching a run, with the defaults for what it is doing.
+    ///
+    /// Registration is a separate step from spawning rather than part of it,
+    /// because a heartbeat is not free: it is a row and a probe every tick, and
+    /// most runs are minutes long and report their own ending. Watching every
+    /// run would pay that for the overwhelming majority of runs to learn
+    /// something the supervisor was already going to say.
+    pub fn watch_run(&self, run_id: &str, watching: Watching, now_ms: i64) -> Result<()> {
+        let Some(store) = self.jod.store() else {
+            return Ok(());
+        };
+        store.watch_run(&Heartbeat::starting(run_id, watching, now_ms))
+    }
+
     /// Advance every goal whose next iteration is due.
     ///
     /// A goal's progress lives in the fact store rather than in its own
@@ -780,7 +926,10 @@ impl Ticker {
                 continue;
             }
 
-            match self.spawn_iteration(&store, &goal, &subject, &scope).await {
+            match self
+                .spawn_iteration(&store, &goal, &subject, &scope, now_ms)
+                .await
+            {
                 Ok(()) => report.started += 1,
                 Err(_) => report.failed += 1,
             }
@@ -843,6 +992,7 @@ impl Ticker {
         goal: &Goal,
         subject: &str,
         scope: &str,
+        now_ms: i64,
     ) -> Result<()> {
         // What happened last time, so iteration N+1 does not rediscover what N
         // already learned. Bounded, because a goal that has run for a month has
@@ -907,6 +1057,19 @@ impl Ticker {
                 tools: Some(crate::harness::ToolAccess::unattended()),
             })
             .await?;
+
+        // Watch it. This is the charter's "activate the heartbeat if the
+        // session has a goal", and it is automatic rather than a flag because a
+        // goal is precisely the case that cannot survive being left unwatched:
+        // `tick_goals` will not start iteration N+1 until iteration N has
+        // settled, so one hung iteration stops the objective for ever.
+        //
+        // A failure to register is not a failure to spawn. The iteration is
+        // already running and doing useful work; refusing it here would trade a
+        // run that might hang for a run that certainly never happened.
+        if let Err(e) = self.watch_run(&agent.id, Watching::Goal(goal.name.clone()), now_ms) {
+            eprintln!("[jod] could not watch {} for goal {}: {e}", agent.id, goal.name);
+        }
 
         // Supersede rather than insert, so the current run is one lookup and
         // every previous one stays answerable.
@@ -1673,6 +1836,312 @@ mod tests {
     }
 
     // ---- trimming the delivery ledger --------------------------------------
+
+    /// The sweep, against a real store and — where it matters — a real process
+    /// group.
+    ///
+    /// The stalled case spawns an actual detached `sleep` rather than faking
+    /// liveness, because faking it would skip the only part that can hurt:
+    /// `fail_agent` signals a process group, and a test that never produces one
+    /// proves nothing about whether the right group is signalled. It also means
+    /// these tests fail loudly if the reap stops working, instead of passing
+    /// against a mock that agrees with whatever the code does.
+    mod heartbeats {
+        use super::*;
+        use crate::store::StoredRun;
+
+        fn ticker_over(store: &Arc<Store>) -> Ticker {
+            Ticker::new(Jod::with_store(store.clone())).as_owner("t")
+        }
+
+        fn stored(id: &str, status: &str, pgid: Option<u32>) -> StoredRun {
+            StoredRun {
+                id: id.into(),
+                name: "iteration".into(),
+                harness: "claude-code".into(),
+                status: status.into(),
+                cwd: "/tmp".into(),
+                session_id: None,
+                pid: pgid,
+                pgid,
+                created_at_ms: 0,
+                summary: serde_json::json!({"id": id}),
+            }
+        }
+
+        /// A real detached process group that will sit there until it is killed.
+        fn a_living_group() -> u32 {
+            let dir = std::env::temp_dir().join(format!("jod-hb-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            crate::proc::spawn_detached(
+                std::path::Path::new("/bin/sleep"),
+                &["300".to_string()],
+                &dir,
+                &dir.join("log"),
+            )
+            .expect("could not spawn a test process group")
+        }
+
+        /// Silent past its window, and alive — the case the module exists for,
+        /// and the one nothing else in Jod can detect.
+        #[tokio::test]
+        async fn a_stalled_run_is_stopped_marked_failed_and_unwatched() {
+            let store = Arc::new(Store::in_memory().unwrap());
+            let pgid = a_living_group();
+            store.save_run(&stored("r1", "running", Some(pgid))).unwrap();
+
+            let now = 10_000_000_000;
+            let hb = Heartbeat::starting("r1", Watching::Run, now - heartbeat::DEFAULT_STALL_MS - 1);
+            store.watch_run(&hb).unwrap();
+
+            let report = ticker_over(&store).tick_heartbeats(now).await.unwrap();
+
+            assert_eq!(report.checked, 1);
+            assert_eq!(report.stopped, 1, "a stalled run must actually be stopped");
+            assert_eq!(report.retired, 1);
+            assert_eq!(
+                store.run("r1").unwrap().unwrap().status,
+                "failed",
+                "a wedged run must stop claiming to be running"
+            );
+            assert!(
+                store.heartbeat("r1").unwrap().is_none(),
+                "the heartbeat outlived the run it was watching"
+            );
+
+            // The group was signalled, proved by how it died rather than by
+            // `group_alive`.
+            //
+            // `group_alive` is the wrong instrument *here specifically*, and the
+            // reason is worth writing down because it looks like a bug in the
+            // code under test: this test process is the child's parent, so a
+            // killed child becomes a **zombie** — and `kill(pid, 0)` succeeds on
+            // a zombie, because the pid is still in the table until somebody
+            // reaps it. The sweep would look like it had done nothing. Waiting
+            // on it both reaps the zombie and says exactly how it ended, which
+            // is the thing actually being asserted.
+            //
+            // This does not affect the sweep in production: `decide` reads a
+            // run's recorded status before it probes anything, so a supervisor
+            // that exited is `Ended` long before its pgid is consulted.
+            let mut status: libc::c_int = 0;
+            let mut reaped = 0;
+            for _ in 0..100 {
+                reaped = unsafe { libc::waitpid(pgid as i32, &mut status, libc::WNOHANG) };
+                if reaped != 0 {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            assert_eq!(reaped, pgid as i32, "the stalled process group was never signalled");
+            assert!(
+                libc::WIFSIGNALED(status),
+                "the group exited by itself rather than being stopped"
+            );
+
+            // And the reason survived the row.
+            let why = store.facts_about("run/r1").unwrap();
+            assert!(
+                why.iter().any(|f| f.predicate == "stalled"),
+                "nothing recorded why the run was reaped: {why:?}"
+            );
+        }
+
+        /// Alive and producing events. The expensive mistake would be killing
+        /// this one, so it gets its own test.
+        #[tokio::test]
+        async fn a_working_run_is_left_alone_and_its_cursor_advances() {
+            let store = Arc::new(Store::in_memory().unwrap());
+            let pgid = a_living_group();
+            store.save_run(&stored("r1", "running", Some(pgid))).unwrap();
+            let now = 10_000_000_000;
+            store
+                .watch_run(&Heartbeat::starting(
+                    "r1",
+                    Watching::Run,
+                    now - heartbeat::DEFAULT_STALL_MS - 1,
+                ))
+                .unwrap();
+            // It said something since the last sweep, which is the whole
+            // difference between this test and the one above.
+            store
+                .append_event(&crate::event::AgentEnvelope {
+                    agent_id: "r1".into(),
+                    at_ms: now,
+                    seq: 0,
+                    event: crate::event::AgentEvent::Message { text: "working".into() },
+                })
+                .unwrap();
+
+            let report = ticker_over(&store).tick_heartbeats(now).await.unwrap();
+
+            assert_eq!(report.beating, 1);
+            assert_eq!(report.stopped, 0);
+            assert_eq!(report.retired, 0);
+            assert_eq!(store.run("r1").unwrap().unwrap().status, "running");
+            let hb = store.heartbeat("r1").unwrap().unwrap();
+            assert_eq!(hb.last_seq, 0, "seq 0 is a real event");
+            assert_eq!(hb.last_progress_ms, now);
+            assert!(crate::proc::group_alive(pgid), "a working run was killed");
+            let _ = crate::proc::signal_group(pgid, crate::proc::SIGKILL);
+        }
+
+        /// The supervisor died without recording an ending. There is nothing to
+        /// signal — the pgid may since belong to somebody else — but the run is
+        /// lying about being alive and must be corrected.
+        #[tokio::test]
+        async fn a_run_whose_group_is_gone_is_corrected_rather_than_signalled() {
+            let store = Arc::new(Store::in_memory().unwrap());
+            // Pid 1 rather than a large number: `group_alive` answers false for
+            // it by refusing to interpret it, with no chance of a live process
+            // having recycled into the number.
+            store.save_run(&stored("r1", "running", Some(1))).unwrap();
+            let now = 10_000_000_000;
+            store
+                .watch_run(&Heartbeat::starting("r1", Watching::Run, now))
+                .unwrap();
+
+            let report = ticker_over(&store).tick_heartbeats(now).await.unwrap();
+
+            assert_eq!(report.stopped, 0, "there was nothing left to stop");
+            assert_eq!(report.retired, 1);
+            assert_eq!(store.run("r1").unwrap().unwrap().status, "failed");
+            assert!(store
+                .facts_about("run/r1")
+                .unwrap()
+                .iter()
+                .any(|f| f.predicate == "vanished"));
+        }
+
+        /// The ordinary ending, and the charter's "clean up when the session is
+        /// done". No fact: a run that finished normally is not news, and a note
+        /// per completed run would bury the ones that matter.
+        #[tokio::test]
+        async fn a_finished_run_is_unwatched_quietly() {
+            let store = Arc::new(Store::in_memory().unwrap());
+            store.save_run(&stored("r1", "completed", Some(1))).unwrap();
+            let now = 10_000_000_000;
+            store
+                .watch_run(&Heartbeat::starting("r1", Watching::Run, now))
+                .unwrap();
+
+            let report = ticker_over(&store).tick_heartbeats(now).await.unwrap();
+
+            assert_eq!(report.retired, 1);
+            assert_eq!(report.stopped, 0);
+            assert!(store.heartbeat("r1").unwrap().is_none());
+            assert_eq!(
+                store.run("r1").unwrap().unwrap().status,
+                "completed",
+                "a clean ending was rewritten as a failure"
+            );
+            assert!(
+                store.facts_about("run/r1").unwrap().is_empty(),
+                "an uneventful ending should not be written down"
+            );
+        }
+
+        /// One wedged run must not stop the others being checked. This is the
+        /// same failure the module exists to prevent, one level up.
+        #[tokio::test]
+        async fn one_bad_run_does_not_stop_the_sweep_reaching_the_others() {
+            let store = Arc::new(Store::in_memory().unwrap());
+            let now = 10_000_000_000;
+            for id in ["a", "b", "c"] {
+                store.save_run(&stored(id, "running", Some(1))).unwrap();
+                store
+                    .watch_run(&Heartbeat::starting(id, Watching::Run, now))
+                    .unwrap();
+            }
+            // `b`'s run row is deleted out from under the sweep, which is the
+            // orphan case — it must be tidied, not fatal.
+            store
+                .write(|tx| {
+                    tx.execute("DELETE FROM runs WHERE id = 'b'", [])?;
+                    Ok(())
+                })
+                .unwrap();
+
+            let report = ticker_over(&store).tick_heartbeats(now).await.unwrap();
+
+            // `b`'s heartbeat went with its run via the cascade, so two remain
+            // to be checked and both are reached.
+            assert_eq!(report.checked, 2);
+            assert_eq!(report.retired, 2);
+            assert!(store.heartbeats().unwrap().is_empty());
+        }
+
+        /// A goal's stall lands in the goal's own memory, which is the scope
+        /// `spawn_iteration` reads to build the next prompt — so the next
+        /// iteration is told that the last one hung.
+        #[tokio::test]
+        async fn a_goal_iteration_that_stalls_is_reported_into_the_goals_memory() {
+            let store = Arc::new(Store::in_memory().unwrap());
+            let goal = Goal {
+                id: "g-green-ci".into(),
+                name: "green-ci".into(),
+                objective: "get CI green".into(),
+                done_when: None,
+                harness: "claude-code".into(),
+                cwd: "/tmp".into(),
+                model: None,
+                cron: "0 * * * *".into(),
+                timezone: "UTC".into(),
+                state: crate::schedule::GoalState::Running,
+                iteration: 0,
+                max_iterations: None,
+                budget_usd: None,
+                spent_usd: 0.0,
+                stall_after: 6,
+                no_progress: 0,
+                next_fire_at_ms: None,
+                created_at_ms: 0,
+            };
+            store.add_goal(&goal).unwrap();
+            store.save_run(&stored("r1", "running", Some(1))).unwrap();
+            let now = 10_000_000_000;
+            store
+                .watch_run(&Heartbeat::starting(
+                    "r1",
+                    Watching::Goal("green-ci".into()),
+                    now,
+                ))
+                .unwrap();
+
+            ticker_over(&store).tick_heartbeats(now).await.unwrap();
+
+            let noted = store.facts_about("goal/green-ci").unwrap();
+            assert!(
+                noted.iter().any(|f| f.predicate == "vanished"),
+                "the goal was not told its iteration died: {noted:?}"
+            );
+            assert_eq!(
+                noted[0].scope,
+                goal.memory_scope(),
+                "the note must land in the scope the next iteration reads"
+            );
+        }
+
+        /// The wiring, not just the method: the daemon's own tick has to run
+        /// the sweep, or every test above is about a function nothing calls.
+        #[tokio::test]
+        async fn the_daemons_tick_sweeps_heartbeats() {
+            use crate::daemon::Tick;
+
+            let store = Arc::new(Store::in_memory().unwrap());
+            store.save_run(&stored("r1", "running", Some(1))).unwrap();
+            let now = 10_000_000_000;
+            store
+                .watch_run(&Heartbeat::starting("r1", Watching::Run, now))
+                .unwrap();
+
+            let report = Tick::tick(&ticker_over(&store), now).await.unwrap();
+
+            assert_eq!(store.run("r1").unwrap().unwrap().status, "failed");
+            assert!(store.heartbeat("r1").unwrap().is_none());
+            assert_eq!(report.failed, 0, "a vanished run stopped nothing");
+        }
+    }
 
     mod ledger_retention {
         use super::*;

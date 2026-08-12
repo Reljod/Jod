@@ -30,6 +30,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::{JodError, Result};
 use crate::event::AgentEnvelope;
 use crate::harness::HarnessKind;
+use crate::heartbeat::{Beat, Heartbeat, Watching};
 use crate::schedule::{Fire, FireOutcome, Goal, GoalState, Schedule, ScheduleState};
 use crate::team::{Member, MemberStatus, Message, TeamTask};
 
@@ -779,6 +780,69 @@ const MIGRATIONS: &[(&str, &str)] = &[
     ALTER TABLE delivery_ledger ADD COLUMN recovered_at_ms INTEGER;
     "#,
     ),
+    (
+        "0013_heartbeats",
+        r#"
+    -- Liveness for a run that is supposed to take hours. See
+    -- [`crate::heartbeat`] for what the columns mean and why the checks are
+    -- ordered the way they are.
+    --
+    -- One row per *watched* run, not per run. Most runs are minutes long and
+    -- their supervisor reports their ending; watching them would be a row and a
+    -- probe per tick to learn something already known. A heartbeat is for the
+    -- case where nothing else will ever say what happened.
+    CREATE TABLE heartbeats (
+      -- The run, and the cascade that is most of this feature's cleanup story:
+      -- the store runs with `PRAGMA foreign_keys = ON`, so deleting a run
+      -- deletes its heartbeat without any code having to remember to.
+      run_id            TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
+      -- The goal this run is an iteration of, or NULL for a plain delegation.
+      -- Kept so a stall is reported against the name a person chose rather than
+      -- against a run id they have never seen.
+      goal_name         TEXT,
+      started_at_ms     INTEGER NOT NULL,
+      -- How long this run may produce nothing before it is declared stalled.
+      -- Per row rather than a constant: a nightly build and a research sweep
+      -- are silent for very different lengths of time, and one global number
+      -- would have to be the larger of them, which makes it useless for the
+      -- other.
+      stall_ms          INTEGER NOT NULL,
+      -- A hard ceiling, or NULL for "as long as it takes". Null is the default
+      -- for a delegation, because long-running is the premise; a goal iteration
+      -- gets one, because an increment that has taken six hours is not one.
+      max_lifetime_ms   INTEGER,
+      -- The high-water event seq the last sweep saw. -1, not 0: seq 0 is a real
+      -- event, and starting at 0 would score a run's first event as silence.
+      last_seq          INTEGER NOT NULL DEFAULT -1,
+      -- When the run last produced an event, and when it was last looked at.
+      -- Two columns because they answer different questions: "this run has been
+      -- silent since Tuesday" and "the scheduler has not looked at this run
+      -- since Tuesday" are different failures, and the silence window is
+      -- measured from the first so that a scheduler outage cannot launder a run
+      -- that stalled during it.
+      last_progress_ms  INTEGER NOT NULL,
+      last_beat_ms      INTEGER NOT NULL,
+      beats             INTEGER NOT NULL DEFAULT 0
+    );
+
+    -- There is deliberately no `state` column and no retired row. A heartbeat
+    -- that has said its piece is deleted, because "clean up when the run is
+    -- deleted, fails, or is done" is the requirement, and a table of tombstones
+    -- is not cleanup. Why the outcome is not lost: the sweep writes it to the
+    -- run's own event stream, which is where a person already looks to find out
+    -- what a run did, and where `jod watch` will replay it.
+    --
+    -- Deleting also makes the crash path self-healing rather than something to
+    -- reason about. If the sweep dies between stopping a run and tidying up,
+    -- the row is still `alive` and the next sweep re-decides from scratch: the
+    -- group is gone, so it reads as `Vanished`, the run's status is corrected,
+    -- and the row goes. A state column would have had to be crash-correct
+    -- instead, and would only ever be read by the code that wrote it.
+    --
+    -- No index either. This table holds one row per *watched* run — a handful,
+    -- not a history — so the primary key is the whole access plan.
+    "#,
+    ),
 ];
 
 /// Who asserted a fact. Kept out of the fact's text so that content Jod
@@ -1213,6 +1277,127 @@ impl Store {
                 |r| r.get(0),
             )
             .optional()?)
+    }
+
+    // ---- heartbeats -----------------------------------------------------
+
+    /// Start watching a run, or replace the watch it already had.
+    ///
+    /// `INSERT … ON CONFLICT DO UPDATE` rather than a plain insert, because
+    /// re-registering must be how a caller *changes* a window. The alternative
+    /// — failing on a duplicate — makes "watch this run, with a longer stall
+    /// window this time" into a delete-then-insert that is not atomic.
+    ///
+    /// The cursor fields are reset on re-registration. A new window measured
+    /// against progress observed under the old one would be measuring two
+    /// different promises at once.
+    pub fn watch_run(&self, hb: &Heartbeat) -> Result<()> {
+        self.write(|tx| {
+            tx.execute(
+                "INSERT INTO heartbeats
+                   (run_id, goal_name, started_at_ms, stall_ms, max_lifetime_ms,
+                    last_seq, last_progress_ms, last_beat_ms, beats)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                 ON CONFLICT(run_id) DO UPDATE SET
+                   goal_name = excluded.goal_name,
+                   stall_ms = excluded.stall_ms,
+                   max_lifetime_ms = excluded.max_lifetime_ms,
+                   last_seq = excluded.last_seq,
+                   last_progress_ms = excluded.last_progress_ms,
+                   last_beat_ms = excluded.last_beat_ms",
+                params![
+                    hb.run_id,
+                    hb.watching.goal_name(),
+                    hb.started_at_ms,
+                    hb.stall_ms,
+                    hb.max_lifetime_ms,
+                    hb.last_seq,
+                    hb.last_progress_ms,
+                    hb.last_beat_ms,
+                    hb.beats,
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Every run currently being watched, oldest beat first.
+    ///
+    /// Oldest first so that a sweep which runs out of time — a probe that
+    /// hangs, a machine under load — has looked at the most neglected runs
+    /// rather than the same few every pass.
+    pub fn heartbeats(&self) -> Result<Vec<Heartbeat>> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT run_id, goal_name, started_at_ms, stall_ms, max_lifetime_ms,
+                    last_seq, last_progress_ms, last_beat_ms, beats
+               FROM heartbeats ORDER BY last_beat_ms ASC",
+        )?;
+        let rows = stmt.query_map([], heartbeat_from_row)?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// One run's heartbeat, or `None` if it is not being watched.
+    pub fn heartbeat(&self, run_id: &str) -> Result<Option<Heartbeat>> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        Ok(conn
+            .query_row(
+                "SELECT run_id, goal_name, started_at_ms, stall_ms, max_lifetime_ms,
+                        last_seq, last_progress_ms, last_beat_ms, beats
+                   FROM heartbeats WHERE run_id = ?1",
+                params![run_id],
+                heartbeat_from_row,
+            )
+            .optional()?)
+    }
+
+    /// The highest event `seq` this run has written, or `-1` if it has written
+    /// nothing yet.
+    ///
+    /// `-1` and not `NULL`: the caller is comparing it against a stored cursor
+    /// that also starts at `-1`, and an `Option` here would push that same
+    /// "nothing yet" case into every comparison.
+    pub fn last_event_seq(&self, run_id: &str) -> Result<i64> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        let seq: Option<i64> = conn.query_row(
+            "SELECT MAX(seq) FROM events WHERE run_id = ?1",
+            params![run_id],
+            |r| r.get(0),
+        )?;
+        Ok(seq.unwrap_or(-1))
+    }
+
+    /// Record that a sweep looked at this run and it is still going.
+    pub fn record_beat(&self, beat: &Beat) -> Result<()> {
+        self.write(|tx| {
+            tx.execute(
+                "UPDATE heartbeats
+                    SET last_seq = ?2,
+                        last_progress_ms = ?3,
+                        last_beat_ms = ?4,
+                        beats = beats + 1
+                  WHERE run_id = ?1",
+                params![
+                    beat.run_id,
+                    beat.last_seq,
+                    beat.last_progress_ms,
+                    beat.last_beat_ms
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Stop watching a run. Returns whether there was anything to stop.
+    ///
+    /// The explicit half of cleanup. The implicit half is the foreign key:
+    /// deleting the run deletes this row, so code that has never heard of
+    /// heartbeats cannot leave one behind.
+    pub fn unwatch_run(&self, run_id: &str) -> Result<bool> {
+        self.write(|tx| {
+            let gone = tx.execute("DELETE FROM heartbeats WHERE run_id = ?1", params![run_id])?;
+            Ok(gone > 0)
+        })
     }
 
     // ---- contended state ----------------------------------------------
@@ -2801,6 +2986,20 @@ fn run_from_row(r: &rusqlite::Row) -> rusqlite::Result<StoredRun> {
     })
 }
 
+fn heartbeat_from_row(r: &rusqlite::Row) -> rusqlite::Result<Heartbeat> {
+    Ok(Heartbeat {
+        run_id: r.get(0)?,
+        watching: Watching::from_goal(r.get(1)?),
+        started_at_ms: r.get(2)?,
+        stall_ms: r.get(3)?,
+        max_lifetime_ms: r.get(4)?,
+        last_seq: r.get(5)?,
+        last_progress_ms: r.get(6)?,
+        last_beat_ms: r.get(7)?,
+        beats: r.get(8)?,
+    })
+}
+
 fn event_kind(env: &AgentEnvelope) -> String {
     serde_json::to_value(&env.event)
         .ok()
@@ -3518,6 +3717,163 @@ mod tests {
         s.save_run(&run("new", "agy", 2)).unwrap();
         let ids: Vec<String> = s.runs(10).unwrap().into_iter().map(|r| r.id).collect();
         assert_eq!(ids, vec!["new", "old"]);
+    }
+
+    // ---- heartbeats -----------------------------------------------------
+
+    use crate::heartbeat::{self, Verdict};
+
+    fn watched(s: &Store, id: &str, at: i64) -> Heartbeat {
+        s.save_run(&run(id, "claude-code", at)).unwrap();
+        let hb = Heartbeat::starting(id, Watching::Run, at);
+        s.watch_run(&hb).unwrap();
+        hb
+    }
+
+    #[test]
+    fn a_watched_run_reads_back_exactly_as_it_was_written() {
+        let s = store();
+        let hb = watched(&s, "r1", 1_000);
+        assert_eq!(s.heartbeat("r1").unwrap().unwrap(), hb);
+    }
+
+    #[test]
+    fn a_run_nobody_is_watching_has_no_heartbeat() {
+        let s = store();
+        s.save_run(&run("r1", "claude-code", 1)).unwrap();
+        assert!(s.heartbeat("r1").unwrap().is_none());
+    }
+
+    /// Most of the cleanup story, and the half that needs no code to remember
+    /// it: the foreign key does it. This deletes the run the way any other part
+    /// of the system would — with no idea heartbeats exist.
+    #[test]
+    fn deleting_a_run_deletes_its_heartbeat() {
+        let s = store();
+        watched(&s, "r1", 1_000);
+        s.write(|tx| {
+            tx.execute("DELETE FROM runs WHERE id = 'r1'", [])?;
+            Ok(())
+        })
+        .unwrap();
+        assert!(
+            s.heartbeat("r1").unwrap().is_none(),
+            "the cascade did not fire — is PRAGMA foreign_keys still on?"
+        );
+        assert!(s.heartbeats().unwrap().is_empty());
+    }
+
+    /// A goal's iterations are the case heartbeats were written for, so the
+    /// name has to survive the round trip — a stall reported against a run id
+    /// nobody has seen is a stall nobody acts on.
+    #[test]
+    fn a_goal_iteration_remembers_which_goal_it_belongs_to() {
+        let s = store();
+        s.save_run(&run("r1", "claude-code", 1)).unwrap();
+        s.watch_run(&Heartbeat::starting(
+            "r1",
+            Watching::Goal("green-ci".into()),
+            1,
+        ))
+        .unwrap();
+        let back = s.heartbeat("r1").unwrap().unwrap();
+        assert_eq!(back.watching, Watching::Goal("green-ci".into()));
+        assert_eq!(back.max_lifetime_ms, Some(heartbeat::GOAL_MAX_LIFETIME_MS));
+    }
+
+    #[test]
+    fn watching_again_replaces_the_window_rather_than_failing() {
+        let s = store();
+        watched(&s, "r1", 1_000);
+        let longer = Heartbeat::starting("r1", Watching::Run, 1_000).with_stall_ms(9_999_999);
+        s.watch_run(&longer).unwrap();
+        assert_eq!(s.heartbeat("r1").unwrap().unwrap().stall_ms, 9_999_999);
+        assert_eq!(s.heartbeats().unwrap().len(), 1, "a duplicate row appeared");
+    }
+
+    #[test]
+    fn a_beat_advances_the_cursor_and_counts_itself() {
+        let s = store();
+        let hb = watched(&s, "r1", 1_000);
+        s.record_beat(&Beat::after(&hb, &Verdict::Beating { seq: 4 }, 2_000))
+            .unwrap();
+        let back = s.heartbeat("r1").unwrap().unwrap();
+        assert_eq!(back.last_seq, 4);
+        assert_eq!(back.last_progress_ms, 2_000);
+        assert_eq!(back.beats, 1);
+    }
+
+    /// The distinction the two columns exist for: the sweep happened, but the
+    /// run still has not produced anything, and the stall window must keep
+    /// running from the last *event*.
+    #[test]
+    fn a_quiet_beat_moves_the_sweep_clock_but_not_the_progress_clock() {
+        let s = store();
+        let hb = watched(&s, "r1", 1_000);
+        s.record_beat(&Beat::after(&hb, &Verdict::Quiet { silence_ms: 60 }, 61_000))
+            .unwrap();
+        let back = s.heartbeat("r1").unwrap().unwrap();
+        assert_eq!(back.last_progress_ms, 1_000, "silence was scored as progress");
+        assert_eq!(back.last_beat_ms, 61_000);
+    }
+
+    #[test]
+    fn unwatching_removes_the_row_and_says_whether_there_was_one() {
+        let s = store();
+        watched(&s, "r1", 1_000);
+        assert!(s.unwatch_run("r1").unwrap());
+        assert!(s.heartbeat("r1").unwrap().is_none());
+        assert!(!s.unwatch_run("r1").unwrap(), "a second unwatch invented a row");
+    }
+
+    /// Oldest first, so a sweep that runs out of time has looked at the most
+    /// neglected runs rather than the same few every pass.
+    #[test]
+    fn heartbeats_come_back_least_recently_swept_first() {
+        let s = store();
+        let a = watched(&s, "a", 3_000);
+        let b = watched(&s, "b", 1_000);
+        let c = watched(&s, "c", 2_000);
+        for hb in [&a, &b, &c] {
+            s.record_beat(&Beat::after(hb, &Verdict::Quiet { silence_ms: 0 }, hb.started_at_ms))
+                .unwrap();
+        }
+        let order: Vec<String> = s.heartbeats().unwrap().into_iter().map(|h| h.run_id).collect();
+        assert_eq!(order, vec!["b", "c", "a"]);
+    }
+
+    /// `-1`, not `None` — the caller compares it against a cursor that also
+    /// starts at `-1`, and seq 0 is a real event that must outrank "nothing".
+    #[test]
+    fn a_run_with_no_events_reports_minus_one_and_seq_zero_beats_it() {
+        let s = store();
+        s.save_run(&run("r1", "claude-code", 1)).unwrap();
+        assert_eq!(s.last_event_seq("r1").unwrap(), -1);
+        s.append_event(&envelope("r1", 0, "first")).unwrap();
+        assert_eq!(s.last_event_seq("r1").unwrap(), 0);
+    }
+
+    #[test]
+    fn the_event_cursor_is_the_high_water_mark_not_the_count() {
+        let s = store();
+        s.save_run(&run("r1", "claude-code", 1)).unwrap();
+        for seq in [0, 1, 5, 2] {
+            s.append_event(&envelope("r1", seq, "x")).unwrap();
+        }
+        assert_eq!(s.last_event_seq("r1").unwrap(), 5);
+    }
+
+    /// One run's silence must not be hidden by another run's chatter.
+    #[test]
+    fn the_event_cursor_is_per_run() {
+        let s = store();
+        s.save_run(&run("quiet", "claude-code", 1)).unwrap();
+        s.save_run(&run("busy", "claude-code", 1)).unwrap();
+        for seq in 0..5 {
+            s.append_event(&envelope("busy", seq, "x")).unwrap();
+        }
+        assert_eq!(s.last_event_seq("quiet").unwrap(), -1);
+        assert_eq!(s.last_event_seq("busy").unwrap(), 4);
     }
 
     #[test]
