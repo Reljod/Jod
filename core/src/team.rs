@@ -1277,10 +1277,61 @@ impl Store {
         })
     }
 
+    /// Take every waiting message for a member, and record that it went.
+    ///
+    /// **The only sanctioned way to take mail off the bus.** Both facts — the
+    /// `delivered` flag that stops a message being injected into a second turn,
+    /// and the `state` a traffic view reads — are written by one statement in
+    /// one transaction, so there is no order of events in which a message is
+    /// handed to an agent and still reports as waiting.
+    ///
+    /// It exists because the two-call version did not survive contact with its
+    /// callers. `drain_inbox` sets the flag; [`Store::mark_mail_delivered`]
+    /// sets the state beside it; and remembering the second one is a convention
+    /// that was already half-followed — `jod team wake` and `jod team inbox`
+    /// drain without it, so mail those paths delivered reported `queued` for
+    /// ever afterwards. A message the system says it did not deliver when it
+    /// did is worse than a duplicated line of SQL, and a wrapper that cannot be
+    /// half-used beats a convention that can.
+    ///
+    /// The single-transaction drain underneath is unchanged and is still the
+    /// reason the same instruction is never injected into two turns.
+    pub fn take_mail(&self, team: &str, member: &str) -> Result<Vec<Message>> {
+        self.write(|tx| {
+            let mut stmt = tx.prepare(
+                "SELECT id, team, sender, recipient, body, at_ms FROM team_messages
+                  WHERE team = ?1 AND recipient = ?2 AND delivered = 0 ORDER BY id",
+            )?;
+            let taken: Vec<Message> = stmt
+                .query_map(params![team, member], |r| {
+                    Ok(Message {
+                        id: r.get(0)?,
+                        team: r.get(1)?,
+                        from: r.get(2)?,
+                        to: r.get(3)?,
+                        text: r.get(4)?,
+                        at_ms: r.get(5)?,
+                    })
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            drop(stmt);
+            // The same predicate the read used, inside the same transaction —
+            // not the ids it returned. A message that arrived between the two
+            // would otherwise be marked without being handed over.
+            tx.execute(
+                "UPDATE team_messages SET delivered = 1, state = ?3
+                  WHERE team = ?1 AND recipient = ?2 AND delivered = 0",
+                params![team, member, MailState::Delivered.as_str()],
+            )?;
+            Ok(taken)
+        })
+    }
+
     /// Mark drained messages as delivered in the richer vocabulary.
     ///
-    /// The drain already set the `delivered` flag — this is the state column
-    /// beside it, which is what a traffic view reads.
+    /// The repair half of the old two-call sequence, kept for a caller that
+    /// already drained — [`Store::take_mail`] is what new code wants, because
+    /// it cannot be called without the drain it belongs to.
     pub fn mark_mail_delivered(&self, ids: &[i64]) -> Result<()> {
         if ids.is_empty() {
             return Ok(());
@@ -2072,6 +2123,74 @@ mod tests {
         }
         assert_eq!(Scope::parse("from_the_future"), Scope::Team);
         assert_eq!(MailState::parse(""), MailState::Queued);
+    }
+
+    /// The bug this exists for was found by the live cross-harness run, not by
+    /// a unit test: a reply that a real agent had already read still reported
+    /// `queued`, because the path that delivered it drained the bus and forgot
+    /// the second call that writes the state beside it.
+    ///
+    /// A message the system says it did not deliver, when it did, is worse than
+    /// a duplicated line of SQL.
+    #[test]
+    fn taking_mail_records_both_facts_at_once() {
+        let s = crew();
+        s.post(&Post::new(Scope::Team, "crew", "lead", "start on the parser").to("scout"))
+            .unwrap();
+
+        let taken = s.take_mail("crew", "scout").unwrap();
+
+        assert_eq!(taken.len(), 1);
+        let after = &s.traffic(Scope::Team, "crew").unwrap()[0];
+        assert_eq!(
+            after.state,
+            MailState::Delivered,
+            "the state a traffic view reads has to move with the flag that stops \
+             re-injection, or the bus reports mail it has already handed over as waiting"
+        );
+        assert!(
+            s.team_unread("crew", "scout").unwrap().is_empty(),
+            "and the flag moved too"
+        );
+    }
+
+    /// The property the single transaction is for: two turns of the same agent
+    /// must not both pick up one instruction.
+    #[test]
+    fn taking_mail_twice_takes_it_once() {
+        let s = crew();
+        s.post(&Post::new(Scope::Team, "crew", "lead", "only once").to("scout"))
+            .unwrap();
+
+        assert_eq!(s.take_mail("crew", "scout").unwrap().len(), 1);
+        assert!(s.take_mail("crew", "scout").unwrap().is_empty());
+    }
+
+    /// The invariant, stated so a future path that drains without marking is a
+    /// failing test rather than a wrong answer in a transcript weeks later.
+    #[test]
+    fn no_message_is_ever_handed_over_while_still_reporting_as_waiting() {
+        let s = crew();
+        for text in ["one", "two"] {
+            s.post(&Post::new(Scope::Team, "crew", "lead", text).to("scout"))
+                .unwrap();
+        }
+        s.take_mail("crew", "scout").unwrap();
+
+        let stranded: i64 = {
+            let conn = s.conn.lock().unwrap();
+            conn.query_row(
+                "SELECT COUNT(*) FROM team_messages WHERE delivered = 1 AND state = 'queued'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            stranded, 0,
+            "`delivered = 1` with `state = 'queued'` is the shape of the bug: handed to \
+             an agent, and still reported as waiting"
+        );
     }
 
     /// The two queues store the same four words in two tables. They were two

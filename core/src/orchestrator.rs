@@ -963,6 +963,26 @@ pub fn prepare_work(store: &Store, opening: &Opening) -> Result<Prepared> {
         permission: opening.permission,
         resume: Resume::Fresh,
         tools: Some(opening.tools),
+        // The same roots and secrets the preamble describes, actually handed
+        // to the run.
+        //
+        // These were fetched above and used only to write the prose. So the
+        // brief told the agent that `$STRIPE_API_KEY` existed and nothing ever
+        // put it in the environment, and it named directories no `--add-dir`
+        // ever granted. Every construction site in the workspace ended
+        // `..SpawnRequest::default()`, so the supervisor's injection and
+        // redaction — both tested, both correct — were being handed an empty
+        // list on every real run.
+        //
+        // Worth stating because the failure was invisible in the worst way: a
+        // run told to print a secret printed nothing, and "the value appears
+        // nowhere in the database" passed *trivially*, because no value had
+        // ever been near it. A green check that is green for the wrong reason
+        // is the one thing this repo keeps producing.
+        //
+        // Names only, never values — the supervisor resolves them at exec.
+        roots: roots.iter().map(|r| r.path.clone()).collect(),
+        secrets: secrets.iter().map(|s| s.name.clone()).collect(),
         ..SpawnRequest::default()
     };
     Ok(Prepared {
@@ -1688,6 +1708,60 @@ mod tests {
         // Plan mode refuses every mutation, including the tool calls that are
         // the session's whole job.
         assert_ne!(opened.request.permission, PermissionPolicy::Plan);
+    }
+
+    /// The brief and the request must agree, because the brief is a promise.
+    ///
+    /// This test exists because they did not. `prepare_work` fetched the roots
+    /// and the secrets, wrote both into the preamble, and then built a
+    /// `SpawnRequest` that carried neither — so the agent was told a
+    /// credential existed and the supervisor was handed an empty list to
+    /// inject. Both halves were tested and correct in isolation; nothing
+    /// asserted that the thing describing them also *passed* them.
+    ///
+    /// Asserting the request rather than the prose is the point. A test that
+    /// only read the preamble would have gone on passing throughout.
+    #[test]
+    fn the_session_is_handed_the_roots_and_secrets_its_brief_promises() {
+        let _home = crate::secrets::tests::Home::new("jod-wiring");
+
+        let s = store();
+        s.put_secret(
+            "STRIPE_API_KEY",
+            crate::secrets::Scope::Global,
+            "",
+            "sk-test-not-a-real-key",
+            "the test key",
+        )
+        .unwrap();
+        let opened = prepare_work(&s, &Opening::new("port the parser", "/tmp/repo")).unwrap();
+
+        let brief = opened.request.system.as_deref().unwrap();
+
+        // The name the brief advertises is the name the supervisor is asked to
+        // resolve. Not the value: nothing on this path ever holds one.
+        assert!(brief.contains("$STRIPE_API_KEY"));
+        assert!(
+            opened.request.secrets.contains(&"STRIPE_API_KEY".to_string()),
+            "the brief promised a credential the request does not carry: {:?}",
+            opened.request.secrets
+        );
+
+        // Likewise the directories. A root the harness is never granted is a
+        // root Jod claimed to have given and did not.
+        assert!(
+            !opened.request.roots.is_empty(),
+            "a session was handed no roots at all"
+        );
+        assert!(
+            opened
+                .request
+                .roots
+                .iter()
+                .any(|r| r.to_string_lossy().contains("repo")),
+            "the checkout named in the brief is missing from the request: {:?}",
+            opened.request.roots
+        );
     }
 
     #[test]

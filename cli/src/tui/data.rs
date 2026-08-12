@@ -1351,6 +1351,45 @@ pub fn tasks(jod: &Arc<Jod>, team: Option<&str>) -> Vec<TaskRow> {
         .collect()
 }
 
+// ---- searching the transcript -------------------------------------------
+
+/// One hit, flattened to what the screen draws.
+///
+/// A view model rather than `conversation::SearchHit` because that carries a
+/// window and two bookends — everything needed to *open* a hit — and the list
+/// draws one line per hit. Keeping the id means opening it is still one step.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Hit {
+    pub conversation_id: String,
+    /// What the conversation is called, so a hit says where it is from.
+    pub title: String,
+    pub who: String,
+    pub text: String,
+}
+
+/// Full-text search across every conversation.
+///
+/// Across *all* of them, which is what `search_messages` offers: it takes a
+/// query and a limit and nothing else. Narrowing the query to one conversation
+/// would need a parameter the store does not have — see `search` in the TUI for
+/// why filtering the results here instead would under-report.
+pub fn search(jod: &Arc<Jod>, query: &str, limit: usize) -> Vec<Hit> {
+    let Some(store) = jod.store() else {
+        return Vec::new();
+    };
+    store
+        .search_messages(query, limit)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|hit| Hit {
+            who: hit.message.role.as_str().to_string(),
+            text: one_line(&hit.message.text),
+            conversation_id: hit.conversation_id,
+            title: hit.title,
+        })
+        .collect()
+}
+
 // ---- the fleet tree -----------------------------------------------------
 
 /// The forest, with closed works after the live ones, and the set of works

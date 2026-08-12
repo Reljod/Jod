@@ -11,7 +11,8 @@ use jod_core::team::{Member, TeamTask};
 use jod_core::{AgentEvent, HarnessKind, Model, PermissionPolicy, Resume};
 
 use super::data::{
-    ActivityItem, GoalRow, HookRow, MemoryKind, MemoryNode, ScheduleRow, Source, TaskRow, TaskState,
+    ActivityItem, GoalRow, Hit, HookRow, MemoryKind, MemoryNode, ScheduleRow, Source, TaskRow,
+    TaskState,
 };
 use super::delivery::Verdict;
 use super::graph::GraphView;
@@ -117,6 +118,18 @@ pub enum Overlay {
     /// The full-screen directory picker — the big half of the one picker `@`
     /// is the small half of. See `picker.rs`.
     Picker(Picker),
+    /// Full-text search over every transcript.
+    ///
+    /// An overlay rather than a workspace because it is a way *to* somewhere:
+    /// you open it, find the turn, and land in the conversation holding it. A
+    /// screen you navigate to would be a place you then have to leave.
+    Search {
+        query: String,
+        selected: usize,
+        /// Filled by the loop, which is the only layer that may touch the
+        /// store. Empty until the first keystroke has been searched for.
+        hits: Vec<Hit>,
+    },
 }
 
 /// What a tier-1 prompt is collecting.

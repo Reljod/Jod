@@ -1158,10 +1158,14 @@ impl Ticker {
             })
             .await?;
 
-        // Drained only once the spawn succeeded, so a failure leaves the mail
+        // Taken only once the spawn succeeded, so a failure leaves the mail
         // waiting rather than losing it.
-        let taken = store.drain_inbox(&held.team, &held.member.name)?;
-        store.mark_mail_delivered(&taken.iter().map(|m| m.id).collect::<Vec<_>>())?;
+        //
+        // One call, not a drain followed by a mark: the two-step version left a
+        // window — and, on the paths that forgot the second half, a permanent
+        // state — in which a message an agent is already reading still reports
+        // as waiting. See [`Store::take_mail`].
+        let taken = store.take_mail(&held.team, &held.member.name)?;
         store.set_member_status(&held.team, &held.member.name, MemberStatus::Busy)?;
         store.bind_member(&held.team, &held.member.name, Some(&agent.id), None)?;
         eprintln!(

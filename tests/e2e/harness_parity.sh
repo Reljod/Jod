@@ -114,6 +114,23 @@ sys.exit(0)
 PY
 }
 
+# Every event payload one run produced, concatenated.
+#
+# Its own reader rather than `val`, which slices the third line out of db.py's
+# output: a payload carrying a newline would make that read half an event and
+# quietly weaken every `grep` below it.
+transcript_of() {
+  JOD_RUN_NAME="$1" python3 - <<'PY'
+import sqlite3, os
+db = os.environ['JOD_HOME'] + '/jod.db'
+con = sqlite3.connect(f'file:{db}?mode=ro', uri=True)
+rows = con.execute(
+    "SELECT e.payload FROM events e JOIN runs r ON r.id = e.run_id "
+    "WHERE r.name = ? ORDER BY e.seq", (os.environ['JOD_RUN_NAME'],)).fetchall()
+print(' '.join(r[0] or '' for r in rows))
+PY
+}
+
 # Wait until every run has reached a terminal status, or give up loudly.
 settle() {
   echo "\$ (waiting for every run to finish)"
@@ -308,9 +325,7 @@ Do all six of these, in this order, then stop:
               WHERE conversation_id='$cid' AND role='assistant' ORDER BY id DESC LIMIT 3\""
 
   local transcript
-  transcript="$(python3 "$REPO/tests/e2e/jod/db.py" "$DB" \
-    "SELECT group_concat(payload, ' ') FROM events e JOIN runs r ON r.id=e.run_id WHERE r.name='$tag'" \
-    | sed -n 3p)"
+  transcript="$(transcript_of "$tag")"
 
   # --- the six things, each asserted on its own ---------------------------
   check "[$h] the run recorded a decision" \

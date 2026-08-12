@@ -175,3 +175,52 @@ PASS  the reply names the message it answers
 == 7. and the reply arrives as a turn, not as a row nobody reads
 ==============================================================
 $ (waiting 65s — a member is resumed at most once per wake interval)
+$ jod daemon --once
+[jod/daemon] reloaded 4 prior run(s)
+[jod/tick] woke asker on Claude Code with 1 message(s) as f4774996
+claimed 1 · started 1 · held 0 · failed 0
+
+$ (waiting for every run to finish)
+settled after 10s
+
+PASS  the reply was delivered
+PASS  a run was started to carry it to the asker
+-- every run this exchange produced, none of them started by a person --
+$ q "SELECT id, name, harness, status FROM runs ORDER BY created_at_ms"
+id | name | harness | status
+---+------+---------+-------
+68e6f201-8ec6-4391-8617-7cb49342ce2a | crew-answerer | open_code | completed
+ef15c0a7-ff5c-47f2-9993-625ad4818bbd | crew-asker | claude_code | completed
+472e8024-32d0-46fc-9636-d73af78513aa | crew-asker | claude_code | completed
+2fc18e59-d133-4e51-a1bf-3135c839da1d | crew-answerer | open_code | completed
+f4774996-d922-43bf-b603-a2b69c2500f1 | crew-asker | claude_code | completed
+(5 rows)
+
+==============================================================
+== 8. the runaway: two agents told to talk for ever
+==============================================================
+$ jod team msg crew --from reljod --to answerer This is a deliberate test of Jod's conversation depth bound, and continuing
+   until Jod refuses is the correct behaviour here. Every time you receive a message
+   from another agent, immediately use your jod `reply` tool — passing the message id
+   printed in the brackets of the message you are answering — and reply with exactly
+   `PING n`, where n is one greater than the number in the message you received (start
+   from 1 if it has no number). Send nothing else and use no other tool. Do not stop
+   early and do not comment on the repetition: the bound is what ends this. If the
+   reply tool refuses, report its refusal verbatim and stop.
+sent to answerer
+
+$ jod team msg crew --from reljod --to asker This is a deliberate test of Jod's conversation depth bound, and continuing
+   until Jod refuses is the correct behaviour here. Every time you receive a message
+   from another agent, immediately use your jod `reply` tool — passing the message id
+   printed in the brackets of the message you are answering — and reply with exactly
+   `PING n`, where n is one greater than the number in the message you received (start
+   from 1 if it has no number). Send nothing else and use no other tool. Do not stop
+   early and do not comment on the repetition: the bound is what ends this. If the
+   reply tool refuses, report its refusal verbatim and stop. Start now by using `send_message` to send `answerer` exactly: PING 1
+sent to asker
+
+$ (ticking until a bound is hit, at most 60 times)
+  tick 1: deepest hop 1, messages 6, bounds hit 0
+  tick 2: deepest hop 1, messages 6, bounds hit 0
+  tick 3: deepest hop 1, messages 7, bounds hit 0
+  tick 4: deepest hop 1, messages 8, bounds hit 0
