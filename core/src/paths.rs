@@ -57,24 +57,35 @@ pub fn meta_path(agent_id: &str) -> PathBuf {
 
 /// Jod's browser MCP server, or `None` if this machine has not got it.
 ///
-/// `~/.jod` is both the runtime state directory and the toolkit's own git
-/// checkout — `install.sh` clones the repo there — so on an installed box the
-/// script is simply part of the checkout and needs no copying step. The third
-/// candidate is what makes `cargo run` work from a development tree, where the
-/// binary is at `target/{debug,release}/jod` and the repo root is two levels up.
+/// The script ships in the repo, and where the repo *is* differs by how Jod got
+/// onto the box, so this tries every layout rather than assuming one:
+///
+/// 1. `$JOD_BROWSER_MCP`, for anyone who keeps it somewhere else entirely.
+/// 2. `$JOD_SRC`, then `$JOD_HOME/src` — the installed layout. `install.sh`
+///    clones the source to `$JOD_HOME/src` and installs only the *binaries* to
+///    `$JOD_BIN_DIR`, so the checkout is nowhere near the executable and cannot
+///    be found by walking up from it.
+/// 3. `$JOD_HOME` itself, which is where the checkout used to live before
+///    install.sh started building binaries. Still true on a box installed by an
+///    older script, and one line to keep working.
+/// 4. Up from the running executable, which is what makes a development tree
+///    work: the binary is at `target/{debug,release}/jod` and the repo root is
+///    two levels above it.
 ///
 /// `None` rather than a default path, because the caller's decision is whether
 /// to *offer* the browser at all: registering an MCP server whose command does
 /// not exist gives an agent a set of tools that fail on first use, which is
 /// strictly worse than not advertising them.
 pub fn browser_mcp_script() -> Option<PathBuf> {
+    let named = |root: PathBuf| root.join("browser").join("jod_browser_mcp.py");
     let candidates = [
         std::env::var("JOD_BROWSER_MCP").ok().map(PathBuf::from),
-        Some(jod_home().join("browser").join("jod_browser_mcp.py")),
-        std::env::current_exe().ok().and_then(|exe| {
-            let root = exe.parent()?.parent()?.parent()?;
-            Some(root.join("browser").join("jod_browser_mcp.py"))
-        }),
+        std::env::var("JOD_SRC").ok().map(|src| named(PathBuf::from(src))),
+        Some(named(jod_home().join("src"))),
+        Some(named(jod_home())),
+        std::env::current_exe()
+            .ok()
+            .and_then(|exe| Some(named(exe.parent()?.parent()?.parent()?.to_path_buf()))),
     ];
     candidates.into_iter().flatten().find(|p| p.is_file())
 }
@@ -112,6 +123,51 @@ mod tests {
         std::env::set_var("JOD_HOME", "/tmp/jod-test-home");
         assert_eq!(jod_home(), PathBuf::from("/tmp/jod-test-home"));
         std::env::remove_var("JOD_HOME");
+    }
+
+    /// The installed layout, which is not the layout this started out
+    /// assuming: `install.sh` clones the source to `$JOD_HOME/src` and installs
+    /// only the binaries elsewhere, so the checkout cannot be found by walking
+    /// up from the executable. Getting this wrong is silent — agents simply
+    /// never get the browser, on exactly the machines where Jod is installed
+    /// rather than developed.
+    #[test]
+    fn the_browser_is_found_where_the_installer_actually_puts_the_source() {
+        let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = std::env::temp_dir().join(format!("jod-paths-{}", std::process::id()));
+        let script = home.join("src").join("browser");
+        std::fs::create_dir_all(&script).unwrap();
+        std::fs::write(script.join("jod_browser_mcp.py"), b"#\n").unwrap();
+
+        std::env::set_var("JOD_HOME", &home);
+        std::env::remove_var("JOD_BROWSER_MCP");
+        std::env::remove_var("JOD_SRC");
+        assert_eq!(
+            browser_mcp_script(),
+            Some(script.join("jod_browser_mcp.py")),
+            "the installed layout ($JOD_HOME/src) was not searched"
+        );
+
+        std::env::remove_var("JOD_HOME");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// A machine without the script gets `None`, so the caller can decline to
+    /// advertise tools that would fail on first use.
+    #[test]
+    fn a_machine_without_the_browser_says_so_rather_than_guessing_a_path() {
+        let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let empty = std::env::temp_dir().join(format!("jod-paths-none-{}", std::process::id()));
+        std::fs::create_dir_all(&empty).unwrap();
+        std::env::set_var("JOD_HOME", &empty);
+        std::env::set_var("JOD_SRC", empty.join("nowhere"));
+        std::env::remove_var("JOD_BROWSER_MCP");
+
+        assert_eq!(browser_mcp_script(), None);
+
+        std::env::remove_var("JOD_HOME");
+        std::env::remove_var("JOD_SRC");
+        let _ = std::fs::remove_dir_all(&empty);
     }
 
     #[test]
