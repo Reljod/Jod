@@ -61,7 +61,8 @@ pub trait Tick: Send + Sync {
 
 impl Tick for Ticker {
     /// Heartbeats first, then schedules, then goals, then the mail, then the
-    /// delivery queue, then the works — every step every pass.
+    /// delivery queue, then the works, then the pull requests — every step
+    /// every pass.
     ///
     /// Separate claims rather than one, because they are different contended
     /// resources — a process holding a goal must not thereby hold a schedule —
@@ -89,11 +90,21 @@ impl Tick for Ticker {
     /// queued and never spoken. [`Ticker::tick_works`] is the third of the
     /// same kind: without it a work whose board has emptied stays open until a
     /// person closes it by hand, and *finishing* is a state nothing reaches.
+    /// [`Ticker::tick_pull_requests`] is the fourth: the stream half of E6.S3
+    /// records a pull request the moment a run prints its URL, but a URL is not
+    /// a status, and one merged an hour after the session ended produces no
+    /// event anywhere — without this line nothing ever asks the forge, and
+    /// every pull request Jod knows about stays `unknown` for ever. It is also
+    /// the only step here that leaves the machine, so it keeps its own interval
+    /// and does real work on roughly one tick in five.
     ///
-    /// **This function is the whole wiring.** Both of those were built and
-    /// tested against nothing for a while, and unit tests on an uncalled
-    /// function stay green for ever; the test that guards this one calls
-    /// `Tick::tick` rather than the steps, so removing a line here fails it.
+    /// **This function is the whole wiring.** All four were built and tested
+    /// against nothing for a while, and unit tests on an uncalled function stay
+    /// green for ever. Each step has its own guard test that calls `Tick::tick`
+    /// rather than the step, so removing a line here fails one of them — but
+    /// note that they are *per step* and assert a state change only that step
+    /// causes. A sixth step added without its own guard would be covered by
+    /// none of them, however well it was unit-tested.
     async fn tick(&self, now_ms: i64) -> Result<TickReport> {
         let swept = match self.tick_heartbeats(now_ms).await {
             Ok(report) => report,
@@ -113,18 +124,24 @@ impl Tick for Ticker {
         // them. This way the queue gets its chance and only the leftovers are
         // reported. Nothing here starts a run.
         let works = self.tick_works()?;
+        // Last, because it is the only step that waits on a network round trip
+        // and nothing else in a tick depends on what it learns. It keeps its
+        // own interval, so on most passes this returns having done nothing.
+        let prs = self.tick_pull_requests(now_ms).await?;
         Ok(TickReport {
             claimed: schedules.claimed
                 + goals.claimed
                 + mail.claimed
                 + queued.claimed
-                + works.claimed,
+                + works.claimed
+                + prs.claimed,
             started: schedules.started
                 + goals.started
                 + mail.started
                 + queued.started
-                + works.started,
-            held: schedules.held + goals.held + mail.held + queued.held + works.held,
+                + works.started
+                + prs.started,
+            held: schedules.held + goals.held + mail.held + queued.held + works.held + prs.held,
             // A reaped run is a failure that happened, and the daemon's own log
             // line is where a person finds out that anything did. Counting it
             // here rather than in a fourth field keeps `TickReport` meaning
@@ -134,6 +151,7 @@ impl Tick for Ticker {
                 + mail.failed
                 + queued.failed
                 + works.failed
+                + prs.failed
                 + swept.stopped,
         })
     }

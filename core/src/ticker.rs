@@ -95,6 +95,45 @@ const PRUNE_EVERY_MS: i64 = 60 * 60 * 1_000;
 /// startup".
 const PRUNED_AT_KEY: &str = "ledger.pruned_at_ms";
 
+/// How often GitHub is asked about pull requests. See
+/// [`Ticker::tick_pull_requests`].
+///
+/// Five minutes rather than the tick's minute, because this is the only step
+/// that leaves the machine. It bounds how stale a state column can be, and
+/// nothing acts on that column — it is read by a panel — so the cost of the
+/// interval is a display being briefly out of date.
+const POLL_EVERY_MS: i64 = 5 * 60 * 1_000;
+
+/// Where the last poll is remembered, for the same reason as
+/// [`PRUNED_AT_KEY`].
+const POLLED_AT_KEY: &str = "pull_requests.polled_at_ms";
+
+/// How much one sweep will ask about: this many stale pull requests, and this
+/// many held leases.
+///
+/// Bounded because each one is a process and a network round trip against an
+/// hourly budget. A backlog is not lost by the bound — `stale_pull_requests`
+/// hands back the least recently asked first, so a queue longer than this
+/// drains over the next few sweeps rather than starving.
+const PR_SWEEP_LIMIT: usize = 20;
+
+/// Whether enough time has passed to ask the forge again.
+///
+/// A clock that went backwards — a VM restored from a snapshot, an NTP
+/// correction — must not lock polling out until it catches up, which is why
+/// `at > now_ms` is due rather than not.
+fn due_to_poll(store: &Store, now_ms: i64) -> bool {
+    match store
+        .setting(POLLED_AT_KEY)
+        .ok()
+        .flatten()
+        .and_then(|v| v.parse::<i64>().ok())
+    {
+        Some(at) => now_ms.saturating_sub(at) >= POLL_EVERY_MS || at > now_ms,
+        None => true,
+    }
+}
+
 /// How long a claim is believed before another process may take it.
 ///
 /// Comfortably longer than a tick, so an ordinary slow tick never loses its own
@@ -889,7 +928,10 @@ impl Ticker {
                                     .in_scope(&scope)
                                     .from(Origin::System),
                             )?;
-                            store.set_goal_state(&goal.name, crate::schedule::GoalState::Satisfied)?;
+                            store.set_goal_state(
+                                &goal.name,
+                                crate::schedule::GoalState::Satisfied,
+                            )?;
                             store.release_goal(&goal.id)?;
                             continue;
                         }
@@ -907,7 +949,8 @@ impl Ticker {
                         // With no check there is nothing to observe, and the
                         // honest answer is no: a goal nobody can measure should
                         // stall and ask rather than run for ever.
-                        let progressed = match (&verdict, self.last_fingerprint(&store, &subject)?) {
+                        let progressed = match (&verdict, self.last_fingerprint(&store, &subject)?)
+                        {
                             (Some(v), Some(previous)) => v.fingerprint != previous,
                             (Some(_), None) => true,
                             (None, _) => false,
@@ -1096,7 +1139,10 @@ impl Ticker {
                 works::State::Finishing => match store.refresh_work_state(&work.id) {
                     Ok(works::State::Closed) => {
                         report.started += 1;
-                        eprintln!("[jod/tick] work `{}` finished and is now closed", work.title);
+                        eprintln!(
+                            "[jod/tick] work `{}` finished and is now closed",
+                            work.title
+                        );
                     }
                     Ok(_) => report.held += 1,
                     Err(e) => {
@@ -1109,7 +1155,10 @@ impl Ticker {
                         Ok(tasks) => tasks.iter().filter(|t| !t.is_done()).count(),
                         Err(e) => {
                             report.failed += 1;
-                            eprintln!("[jod/tick] could not read the board of `{}`: {e}", work.title);
+                            eprintln!(
+                                "[jod/tick] could not read the board of `{}`: {e}",
+                                work.title
+                            );
                             continue;
                         }
                     };
@@ -1138,6 +1187,85 @@ impl Ticker {
             }
         }
         Ok(report)
+    }
+
+    /// Ask GitHub what became of the pull requests this fleet opened.
+    ///
+    /// **The poll half of E6.S3.** The stream half already records a pull
+    /// request the moment a run prints its URL, in the service's event loop —
+    /// but a URL is not a status, and a pull request merged an hour after the
+    /// session ended produces no event anywhere. Nothing except asking the
+    /// forge will ever discover it, which is what this is for. It also
+    /// *discovers*: a pull request opened by hand, or by an agent whose output
+    /// nobody parsed, exists to Jod only if a held lease's branch is asked
+    /// about.
+    ///
+    /// **Not every tick**, unlike everything else here. The tick is a minute
+    /// and this one leaves the machine: every sweep is one `gh` invocation per
+    /// stale row and per held lease, against an API with an hourly budget.
+    /// [`POLL_EVERY_MS`] at [`PR_SWEEP_LIMIT`] each is a couple of hundred
+    /// calls an hour at the worst, against five thousand allowed — and the cost
+    /// of the interval is that a merged pull request can read as open for a few
+    /// minutes, which is a panel being briefly out of date rather than anything
+    /// acting on it.
+    ///
+    /// Stamped **before** the sweep and persisted in `settings`, for both of
+    /// the reasons [`Ticker::trim_ledger`] gives: a field on this struct would
+    /// reset every restart and turn "every few minutes" into "every startup",
+    /// and stamping afterwards would retry a failing sweep every single tick
+    /// for as long as it kept failing.
+    ///
+    /// The counters read as: `claimed` is pull requests looked at, `started` is
+    /// ones nobody had seen before, `held` is a sweep that ran into tooling it
+    /// could not use.
+    pub async fn tick_pull_requests(&self, now_ms: i64) -> Result<TickReport> {
+        let Some(store) = self.jod.store().cloned() else {
+            return Ok(TickReport::default());
+        };
+        if !due_to_poll(&store, now_ms) {
+            return Ok(TickReport::default());
+        }
+        if let Err(e) = store.set_setting(POLLED_AT_KEY, &now_ms.to_string()) {
+            eprintln!("[jod/tick] could not record a pull request poll, so skipping it: {e}");
+            return Ok(TickReport::default());
+        }
+
+        // `sweep` spawns `gh` and waits for a network round trip. On a runtime
+        // thread that would stall every other task the daemon is running —
+        // and the symptom would read as the scheduler being slow rather than
+        // as GitHub being slow, which is the kind of misattribution that costs
+        // an afternoon.
+        let swept =
+            match tokio::task::spawn_blocking(move || crate::prs::sweep(&store, PR_SWEEP_LIMIT))
+                .await
+            {
+                Ok(swept) => swept?,
+                Err(joined) => {
+                    eprintln!("[jod/tick] the pull request poll did not come back: {joined}");
+                    return Ok(TickReport {
+                        failed: 1,
+                        ..Default::default()
+                    });
+                }
+            };
+
+        if swept.discovered > 0 {
+            eprintln!(
+                "[jod/tick] found {} pull request(s) nobody had parsed out of a stream",
+                swept.discovered
+            );
+        }
+        Ok(TickReport {
+            claimed: swept.reconciled + swept.discovered,
+            started: swept.discovered,
+            // Not `failed`: no `gh`, or a `gh` nobody has logged in, is a fact
+            // about the machine rather than something that went wrong, and it
+            // has already said so once. Counting it as a failure would put a
+            // line in the daemon's tally for every tick of a box that simply
+            // has no GitHub CLI on it.
+            held: usize::from(swept.quiet.is_some()),
+            ..Default::default()
+        })
     }
 
     /// Say to each idle session whatever has been queued for it.
@@ -1212,7 +1340,10 @@ impl Ticker {
             };
 
             let mut req = SpawnRequest {
-                name: format!("answers-{}", &conversation_id[..conversation_id.len().min(8)]),
+                name: format!(
+                    "answers-{}",
+                    &conversation_id[..conversation_id.len().min(8)]
+                ),
                 harness,
                 prompt: injection.prompt.clone(),
                 // The session's framing arrived with the turn that started it
@@ -1330,13 +1461,18 @@ impl Ticker {
                     if matches!(run.status.as_str(), "running" | "starting" | "queued") {
                         continue;
                     }
-                    if let Err(e) =
-                        store.bind_member(&team, &member.name, Some(agent_id), run.session_id.as_deref())
-                    {
+                    if let Err(e) = store.bind_member(
+                        &team,
+                        &member.name,
+                        Some(agent_id),
+                        run.session_id.as_deref(),
+                    ) {
                         eprintln!("[jod/tick] could not rebind `{}`: {e}", member.name);
                         continue;
                     }
-                    if let Err(e) = store.set_member_status(&team, &member.name, MemberStatus::Ready) {
+                    if let Err(e) =
+                        store.set_member_status(&team, &member.name, MemberStatus::Ready)
+                    {
                         eprintln!("[jod/tick] could not free `{}`: {e}", member.name);
                     }
                 }
@@ -1345,7 +1481,12 @@ impl Ticker {
     }
 
     /// Resume one member on its own conversation, carrying its unread mail.
-    async fn wake(&self, store: &Store, held: &team::Waiting, order: team::WakeOrder) -> Result<()> {
+    async fn wake(
+        &self,
+        store: &Store,
+        held: &team::Waiting,
+        order: team::WakeOrder,
+    ) -> Result<()> {
         // Where it was working. A resumed session that reappears in a different
         // directory is a session whose paths have all silently changed.
         let cwd = held
@@ -1709,7 +1850,9 @@ mod tests {
     fn every_skipped_instant_is_accounted_for() {
         let s = sched(Misfire::Skip, Overlap::Skip);
         let decisions = decide(&s, &[1, 2, 3, 4], None);
-        let held = decisions.iter().filter(|d| matches!(d, Decision::Hold { .. }));
+        let held = decisions
+            .iter()
+            .filter(|d| matches!(d, Decision::Hold { .. }));
         assert_eq!(held.count(), 3);
     }
 
@@ -1990,14 +2133,19 @@ mod tests {
         store.add_schedule(&s).unwrap();
         store
             .write(|tx| {
-                tx.execute("UPDATE schedules SET next_fire_at_ms = 1", []).unwrap();
+                tx.execute("UPDATE schedules SET next_fire_at_ms = 1", [])
+                    .unwrap();
                 Ok(())
             })
             .unwrap();
 
         let jod = Jod::with_store(store.clone());
         let now = chrono::Utc::now().timestamp_millis();
-        let first = Ticker::new(jod.clone()).as_owner("a").tick(now).await.unwrap();
+        let first = Ticker::new(jod.clone())
+            .as_owner("a")
+            .tick(now)
+            .await
+            .unwrap();
         let second = Ticker::new(jod).as_owner("b").tick(now).await.unwrap();
 
         assert_eq!(first.claimed, 1);
@@ -2990,6 +3138,79 @@ mod tests {
         }
     }
 
+    mod pull_requests {
+        use super::*;
+        use crate::daemon::Tick;
+        use crate::store::Store;
+
+        fn ticker_over(store: &Arc<Store>) -> Ticker {
+            Ticker::new(Jod::with_store(store.clone())).as_owner("t")
+        }
+
+        /// The guard, and it had to be written rather than inherited.
+        ///
+        /// The other steps' guards each assert a state change only *their* step
+        /// causes; none of them would notice this one disappearing, and the
+        /// composite `TickReport` would not either, because a sweep over an
+        /// empty store contributes zero to every counter. So this asserts the
+        /// one thing the step does unconditionally: it records that it ran.
+        ///
+        /// Delete the `tick_pull_requests` line from `impl Tick for Ticker` and
+        /// this fails.
+        ///
+        /// No network: an empty store has no stale pull request and no held
+        /// lease, so `sweep` finds nothing to ask about and never spawns `gh`.
+        #[tokio::test]
+        async fn the_daemons_tick_asks_the_forge_about_pull_requests() {
+            let store = Arc::new(Store::in_memory().unwrap());
+
+            Tick::tick(&ticker_over(&store), 1_000_000).await.unwrap();
+
+            assert_eq!(
+                store.setting(POLLED_AT_KEY).unwrap().as_deref(),
+                Some("1000000"),
+                "the composite tick never polled for pull requests"
+            );
+        }
+
+        /// The interval is the whole reason this step is not like the others:
+        /// it is the only one that leaves the machine, and a tick is a minute.
+        #[tokio::test]
+        async fn a_second_tick_a_minute_later_does_not_ask_again() {
+            let store = Arc::new(Store::in_memory().unwrap());
+            let ticker = ticker_over(&store);
+
+            ticker.tick_pull_requests(1_000_000).await.unwrap();
+            ticker.tick_pull_requests(1_060_000).await.unwrap();
+
+            assert_eq!(
+                store.setting(POLLED_AT_KEY).unwrap().as_deref(),
+                Some("1000000"),
+                "a minute later is not five minutes later"
+            );
+
+            ticker
+                .tick_pull_requests(1_000_000 + POLL_EVERY_MS)
+                .await
+                .unwrap();
+            assert_eq!(
+                store.setting(POLLED_AT_KEY).unwrap().as_deref(),
+                Some(&(1_000_000 + POLL_EVERY_MS).to_string()).map(String::as_str)
+            );
+        }
+
+        /// A VM restored from a snapshot, or an NTP correction, must not lock
+        /// polling out until the clock catches up.
+        #[tokio::test]
+        async fn a_clock_that_went_backwards_does_not_stop_the_poll() {
+            let store = Arc::new(Store::in_memory().unwrap());
+            store
+                .set_setting(POLLED_AT_KEY, &9_000_000_i64.to_string())
+                .unwrap();
+            assert!(due_to_poll(&store, 1_000_000));
+        }
+    }
+
     mod deliveries {
         use super::*;
         use crate::cards::NewCard;
@@ -3023,7 +3244,9 @@ mod tests {
                     ..NewCard::default()
                 })
                 .unwrap();
-            store.answer_card(card.id, None, Some("yes, go ahead")).unwrap();
+            store
+                .answer_card(card.id, None, Some("yes, go ahead"))
+                .unwrap();
             card.id
         }
 
@@ -3330,7 +3553,10 @@ mod tests {
             post(&store, "when you get a moment");
 
             let report = ticker_over(&store).tick_mail(1_000_000).await.unwrap();
-            assert_eq!(report.started, 0, "a member mid-turn had its session forked");
+            assert_eq!(
+                report.started, 0,
+                "a member mid-turn had its session forked"
+            );
             assert_eq!(report.held, 1);
 
             let waiting = store.team_unread("crew", "scout").unwrap();
@@ -3431,7 +3657,10 @@ mod tests {
 
             let report = ticker_over(&store).tick_mail(1_000_000).await.unwrap();
 
-            assert_eq!(report.started, 0, "a member mid-turn had its session forked");
+            assert_eq!(
+                report.started, 0,
+                "a member mid-turn had its session forked"
+            );
             assert_eq!(
                 store
                     .member_in(Scope::Team, "crew", "scout")

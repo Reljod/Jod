@@ -85,9 +85,33 @@ esac
 # such — a file that did not exist before must not exist after either.
 CONFIGS=("$HOME/.claude.json" "$HOME/.config/opencode/opencode.jsonc"
          "$HOME/.config/opencode/opencode.json" "$HOME/.gemini/config/mcp_config.json")
+
+# The *server section* of each config, not the whole file.
+#
+# Whole-file checksums were the first version and they cried wolf: Claude Code
+# keeps its own counters in `~/.claude.json` and rewrites them on every
+# invocation, so a suite that runs `claude` at all always saw that file change
+# and reported a rewrite that had not happened. What a stray
+# `ensure_registered()` would actually do is repoint the MCP entry at a scratch
+# `JOD_HOME`, so that entry is what is compared — narrow enough to be quiet,
+# and exactly wide enough to catch the thing it exists for.
 fingerprint() {
   for f in "${CONFIGS[@]}"; do
-    if [ -f "$f" ]; then echo "$f $(cksum < "$f")"; else echo "$f absent"; fi
+    if [ ! -f "$f" ]; then echo "$f absent"; continue; fi
+    echo "$f $(JOD_CFG="$f" python3 - <<'PY'
+import json, os
+path = os.environ['JOD_CFG']
+raw = open(path, encoding='utf-8', errors='replace').read()
+try:
+    doc = json.loads(raw)
+    print(json.dumps({k: doc.get(k) for k in ('mcpServers', 'mcp')}, sort_keys=True))
+except Exception:
+    # JSONC, or anything else json refuses. Every line naming Jod is a coarser
+    # comparison than the parsed section and still moves the moment an entry is
+    # repointed, which is the only change being watched for.
+    print(' | '.join(sorted(l.strip() for l in raw.splitlines() if 'jod' in l.lower())))
+PY
+)"
   done
 }
 BEFORE="$(fingerprint)"
@@ -149,10 +173,11 @@ harness_id() {
 # Its own reader rather than `val`, which reads one line: a payload carrying a
 # newline would make that half an event and quietly weaken every `grep` below.
 transcript_of_conversation() {
-  JOD_CID="$1" python3 - <<'PY'
+  JOD_CID="$1" JOD_KIND="${2:-}" python3 - <<'PY'
 import sqlite3, os
 db = os.environ['JOD_HOME'] + '/jod.db'
 cid = os.environ['JOD_CID']
+kind = os.environ.get('JOD_KIND') or ''
 con = sqlite3.connect(f'file:{db}?mode=ro', uri=True)
 runs = {r[0] for r in con.execute(
     "SELECT DISTINCT run_id FROM messages WHERE conversation_id = ? AND run_id IS NOT NULL",
@@ -163,11 +188,22 @@ runs |= {r[0] for r in con.execute(
 if not runs:
     print(''); raise SystemExit
 marks = ','.join('?' * len(runs))
-rows = con.execute(
-    f"SELECT payload FROM events WHERE run_id IN ({marks}) ORDER BY run_id, seq",
-    tuple(runs)).fetchall()
+sql = f"SELECT payload FROM events WHERE run_id IN ({marks})"
+args = list(runs)
+if kind:
+    sql += " AND kind = ?"
+    args.append(kind)
+rows = con.execute(sql + " ORDER BY run_id, seq", tuple(args)).fetchall()
 print(' '.join(r[0] or '' for r in rows))
 PY
+}
+
+# Only what the agent itself said: `message` events, which carry assistant text
+# and never the prompt. The distinction is the difference between checking the
+# run and checking this script's own instruction, which quotes the very strings
+# being searched for.
+assistant_text_of_conversation() {
+  transcript_of_conversation "$1" message
 }
 
 # Wait until every run has reached a terminal status, or give up loudly.
@@ -405,13 +441,24 @@ Do not do any of that work yourself, and do not ask me anything: open the work a
   # while proving nothing at all, so the injection half is asserted first and
   # the leak count is only meaningful behind it.
   section "3.$h  $h — injection and redaction"
-  echo "-- what the run printed for TOKEN= --"
-  runsh "q \"SELECT substr(text,1,200) FROM messages
-              WHERE conversation_id='$cid' AND text LIKE '%TOKEN=%' ORDER BY id\""
-  check "[$h] the secret was injected into the run" \
-    test "$(grep -c 'TOKEN=<unset>' <<<"$transcript")" -eq 0
+  # Only what the *agent said*, never the prompt.
+  #
+  # The instruction itself contains the strings `TOKEN=<value>` and
+  # `TOKEN=<unset>`, so grepping the whole transcript answers a question about
+  # this script's own wording rather than about the run. The first version of
+  # this check did exactly that and reported the secret injected into a run
+  # that had died before saying anything at all — a vacuous pass of precisely
+  # the kind the leak count below is arranged to avoid.
+  local said
+  said="$(assistant_text_of_conversation "$cid")"
+  echo "-- what the agent said about TOKEN= --"
+  grep -o 'TOKEN=[^"]\{0,60\}' <<<"$said" || echo "(the agent never printed a TOKEN= line)"
+  check "[$h] the run printed the secret line at all" \
+    grep -q 'TOKEN=' <<<"$said"
+  check "[$h] the secret was injected, rather than arriving unset" \
+    test "$(grep -c 'TOKEN=<unset>' <<<"$said")" -eq 0
   check "[$h] printing the secret produced the redaction marker" \
-    grep -q '\[redacted\]' <<<"$transcript"
+    grep -q '\[redacted\]' <<<"$said"
   check "[$h] the secret's value appears nowhere in the database" \
     test -z "$(leaked_in_db "$token")"
 

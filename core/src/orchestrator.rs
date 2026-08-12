@@ -934,10 +934,23 @@ pub fn prepare_work(store: &Store, opening: &Opening) -> Result<Prepared> {
     let work = store.create_work(&opening.instruction)?;
     let checkout = crate::roots::normalise(&opening.checkout);
 
+    // The third parameter is the *model*, not a name.
+    //
+    // It used to be `Some(&work.title)`, and the cost of that one substitution
+    // was the entire feature: a fresh work's title is the truncated
+    // instruction, `prefer_conversation_settings` copies the conversation's
+    // model onto every request, and so every work session was launched with
+    // `--model "You are checking Jod's own plumbing end to"`. Both harnesses
+    // refused it and exited 1. No work session had ever successfully started.
+    //
+    // It survived because `prepare_work`'s tests inspect the `SpawnRequest` it
+    // returns and never spawn anything — the field was populated, so it looked
+    // right, and nothing asked whether the value was a model. Found by an
+    // end-to-end script that actually launched a harness.
     let conversation = store.new_conversation(
         opening.harness,
         &checkout.to_string_lossy(),
-        Some(&work.title),
+        opening.model.as_deref(),
     )?;
     let session = store.attach_conversation(
         &conversation.id,
@@ -1771,6 +1784,56 @@ mod tests {
         // Plan mode refuses every mutation, including the tool calls that are
         // the session's whole job.
         assert_ne!(opened.request.permission, PermissionPolicy::Plan);
+    }
+
+    /// A work's session is launched with a model, not with its own title.
+    ///
+    /// This test exists because it was not. `new_conversation`'s third
+    /// parameter is `model: Option<&str>` and it was being handed
+    /// `Some(&work.title)` — so every session ever opened for a work was
+    /// launched with `--model` set to the truncated instruction, and every one
+    /// of them was refused by its harness and exited 1. The feature had never
+    /// once worked outside a test.
+    ///
+    /// Asserting the *absence* of the title matters as much as the presence of
+    /// the model: a later refactor that reaches for a human-readable string
+    /// here would be reintroducing exactly this, and a test that only checked
+    /// `model == Some("opus")` would pass while `None` quietly became the
+    /// title again.
+    #[test]
+    fn a_work_session_is_launched_with_a_model_rather_than_with_its_own_title() {
+        let s = store();
+        let opened = prepare_work(
+            &s,
+            &Opening {
+                model: Some("opus".into()),
+                ..Opening::new("port the parser to the new lexer", "/tmp/repo")
+            },
+        )
+        .unwrap();
+
+        assert_eq!(opened.request.model.as_deref(), Some("opus"));
+
+        let title = &s.work(&opened.request.name).ok().flatten().map(|w| w.title);
+        let _ = title;
+        assert!(
+            !opened
+                .request
+                .model
+                .as_deref()
+                .unwrap_or_default()
+                .contains("port the parser"),
+            "the instruction reached the model field: {:?}",
+            opened.request.model
+        );
+
+        // And with no model asked for, none is invented.
+        let bare = prepare_work(&s, &Opening::new("port the parser", "/tmp/repo")).unwrap();
+        assert_eq!(
+            bare.request.model, None,
+            "a work with no model chose one for itself: {:?}",
+            bare.request.model
+        );
     }
 
     /// The brief and the request must agree, because the brief is a promise.

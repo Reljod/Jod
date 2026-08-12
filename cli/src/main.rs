@@ -1382,6 +1382,24 @@ async fn main() -> Result<()> {
             }
             require_supervisor(&jod)?;
 
+            let resume = match session {
+                Some(id) => Resume::Session(id),
+                None if continue_last => Resume::Last,
+                None => Resume::Fresh,
+            };
+            // What this run may reach, folded in from the conversation it
+            // continues — the same move `prefer_conversation_settings` makes
+            // for the model and the permission, and for the same reason: these
+            // are facts about the thread, not about the command line.
+            //
+            // Secret *names*, never values. The value is read at exec time by
+            // the supervisor, out of a file only its owner can open; nothing in
+            // this process, this argv or `spawn.json` ever holds one.
+            let (roots, secrets) = match jod.store() {
+                Some(store) => grants_for_run(store, &resume, harness.into())?,
+                None => (Vec::new(), Vec::new()),
+            };
+
             let req = SpawnRequest {
                 name: name.unwrap_or_else(|| default_name(&prompt)),
                 harness: harness.into(),
@@ -1390,11 +1408,9 @@ async fn main() -> Result<()> {
                 cwd: cwd.unwrap_or_else(jod_core::service::default_cwd),
                 model,
                 permission: permission.into(),
-                resume: match session {
-                    Some(id) => Resume::Session(id),
-                    None if continue_last => Resume::Last,
-                    None => Resume::Fresh,
-                },
+                resume,
+                roots,
+                secrets,
                 // `jod run` is one task, not an orchestrator. Handing it Jod's
                 // own verbs would let a one-liner create schedules that spend
                 // money nightly, which is a decision that should be made on
@@ -3646,6 +3662,77 @@ fn require_supervisor(jod: &Jod) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// The roots and secret names a `jod run` should carry into its request.
+///
+/// Both are properties of the *thread*, not of the command line, so a run that
+/// continues a conversation inherits what that conversation was given — exactly
+/// as [`jod_core::service::prefer_conversation_settings`] does for the model and
+/// the permission. Without this the two features are storage and nothing else:
+/// `jod root add` records a directory no harness is ever granted, and
+/// `jod secret set` records a name no run is ever given.
+///
+/// **Names, never values.** The list handed over is what the supervisor
+/// resolves at exec, out of a file only its owner can read. A value in this
+/// process would be a value in `spawn.json`, in `ps`, and in whatever logs the
+/// launcher writes.
+///
+/// A fresh run has no conversation yet and therefore no roots — but it does get
+/// the global secrets, because "every session on this box" is what global
+/// means. Anything narrower would need a thread to be narrow *about*.
+fn grants_for_run(
+    store: &Store,
+    resume: &Resume,
+    harness: jod_core::HarnessKind,
+) -> Result<(Vec<PathBuf>, Vec<String>)> {
+    let Some(conversation) = continuing_conversation(store, resume, harness)? else {
+        let names = store.secrets_for(None, None)?;
+        return Ok((Vec::new(), names.into_iter().map(|s| s.name).collect()));
+    };
+    let roots = store
+        .roots(&conversation)?
+        .into_iter()
+        .map(|r| r.path)
+        .collect();
+    // The work matters: a key given for one project is not handed to every
+    // session on the box, and a session's work is where that scoping lives.
+    let work = store.work_for_conversation(&conversation)?;
+    let secrets = store
+        .secrets_for(Some(&conversation), work.as_deref())?
+        .into_iter()
+        .map(|s| s.name)
+        .collect();
+    Ok((roots, secrets))
+}
+
+/// Which conversation a `--continue` or `--session` run is rejoining.
+///
+/// `jod run` binds its *transcript* to a new conversation every time
+/// ([`RunConversation::New`]), so this is not that question. It asks the other
+/// one: which existing thread is the harness being resumed into, and therefore
+/// whose roots and secrets apply.
+fn continuing_conversation(
+    store: &Store,
+    resume: &Resume,
+    harness: jod_core::HarnessKind,
+) -> Result<Option<String>> {
+    let recent = store.conversations(200)?;
+    Ok(match resume {
+        Resume::Fresh => None,
+        // The harness's own id for the session, which is what `--session` takes.
+        Resume::Session(id) => recent
+            .into_iter()
+            .find(|c| c.session_id.as_deref() == Some(id.as_str()))
+            .map(|c| c.id),
+        // Newest first, and filtered by harness: `--continue` resumes *this*
+        // harness's last session, so picking the newest conversation of any
+        // harness would hand one harness's roots to another.
+        Resume::Last => recent
+            .into_iter()
+            .find(|c| c.harness == harness.id() && c.session_id.is_some())
+            .map(|c| c.id),
+    })
 }
 
 /// One conversation, many turns.
