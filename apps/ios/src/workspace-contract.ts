@@ -16,11 +16,13 @@
  *
  * ## What the API deliberately does not send
  *
- * Not `cli/src/tui/data.rs`'s row structs. Those are *presentation* types
- * carrying `gloss: "02:00 every day"`, `secret: "✓ verified 2m ago"` and a
- * seven-slot sparkline. A cron gloss is an English sentence and a relative
- * timestamp is true for the second it was rendered, so serving them would push
- * the terminal's rendering onto a 393pt screen and stale in any cache.
+ * Not `cli/src/tui/data.rs`'s row structs. Those are *presentation* types: one
+ * field holds a cron already glossed to `"02:00 every day"`, another holds a
+ * webhook's signing state already rendered as a tick and a relative age, and a
+ * third holds a seven-slot sparkline. A gloss is an English sentence and a
+ * relative timestamp is true for the second it was rendered, so serving them
+ * would push the terminal's rendering onto a 393pt screen and stale in any
+ * cache.
  *
  * This app therefore writes its own gloss — see `gloss.ts`, which ports the
  * wording from `data::gloss` so the phone and the terminal agree.

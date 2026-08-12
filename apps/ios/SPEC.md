@@ -83,8 +83,8 @@ phone**; the ~20-node argument is stronger at 393pt than in a terminal.
 ## 3. The data, and the one real gap
 
 Seven workspaces are servable **today** against routes verified in
-`feat/api-workspaces` (`82e5603`, `api/src/workspaces.rs`, all ten registered at
-`api/src/lib.rs:135-144`, all `GET`, all `Scope::Read`):
+`feat/api-workspaces` (`c8fa29b`, `api/src/workspaces.rs`, all ten registered in
+`api/src/lib.rs`, all `GET`, all `Scope::Read`):
 
 ```
 /v1/memory?scope=&limit=            → { nodes, node_count, edge_count }
@@ -122,7 +122,7 @@ Semantics to honour rather than rediscover:
 ### The main chat — on the wire as of PR #61
 
 This was the one gap, and it is closed. Reljod assigned it to the `api/` lane and
-it shipped in `20306e0` on `feat/api-workspaces`, so the fleet's pinned top row
+it shipped in `510ac1c` on `feat/api-workspaces`, so the fleet's pinned top row
 is **enterable** rather than present-but-inert:
 
 ```
@@ -133,7 +133,12 @@ GET  /v1/conversations/{id}          read   → Conversation
 GET  /v1/conversations/{id}/messages read   → Message[]  (full thread, oldest first)
 ```
 
-Verified: all five registered at `api/src/lib.rs:149-160`.
+Verified: all five registered in `api/src/lib.rs`. That branch has been rebased
+onto `main` and force-pushed once already — the routes and shapes did not change,
+only the base — so pull it with `git reset --hard origin/feat/api-workspaces`
+rather than merging, and expect line numbers to drift. **PR #61**, which the
+merge gate correctly refuses to auto-merge: it is an API contract change of 1856
+lines, so it waits for Reljod.
 
 Five semantics that decide how the row is built:
 

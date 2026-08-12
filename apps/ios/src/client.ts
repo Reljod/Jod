@@ -45,7 +45,22 @@ import type {
   Resume,
   TeamView,
 } from "./contract";
-import type { HarnessKind, PermissionPolicy } from "./contract";
+import type { HarnessKind, PermissionPolicy, TeamTask } from "./contract";
+import type {
+  ActivityItem,
+  Conversation,
+  ConversationSummary,
+  Goal,
+  HandedOver,
+  HookView,
+  LocalGraph,
+  MainChat,
+  MemoryNodeView,
+  MemoryPage,
+  Message,
+  Schedule,
+  ScheduleView,
+} from "./workspace-contract";
 
 /** A token's authority. An absent scope is treated as `read` — fail safe. */
 export type Scope = "read" | "write";
@@ -252,6 +267,151 @@ export class JodClient {
     return { events: page.events ?? [], last_seq: page.last_seq ?? null };
   }
 
+  // ─── the seven read-only workspaces ──────────────────────────────────────
+  //
+  // `api/src/workspaces.rs`, all `GET`, all `Scope::Read` — so a read token
+  // reaches every one of these, and the composer is the only thing a read scope
+  // takes away.
+  //
+  // Each returns core types rather than the TUI's presentation rows: no cron
+  // gloss, no "✓ verified 2m ago", no sparkline. See `gloss.ts` for why that is
+  // the right seam and where the wording comes from instead.
+
+  /**
+   * A page of memory nodes, plus counts for the **whole** graph.
+   *
+   * `limit=0` is honoured rather than snapped to a default, and the counts still
+   * describe everything — so it is a cheap counts-only call rather than a
+   * mistake to guard against.
+   */
+  async memory(options: { scope?: string; limit?: number } = {}): Promise<MemoryPage> {
+    return this.json<MemoryPage>(`/v1/memory${query(options)}`);
+  }
+
+  /** One node with its edges in both directions. */
+  async memoryNode(id: number, limit?: number): Promise<MemoryNodeView> {
+    return this.json<MemoryNodeView>(`/v1/memory/${id}${query({ limit })}`);
+  }
+
+  /**
+   * One node's neighbourhood.
+   *
+   * `depth` is 1 or 2 and nothing else is worth offering: two hops answers a
+   * different question — "what is this near?" — and past that the answer stops
+   * fitting on a phone at all.
+   */
+  async memoryGraph(
+    id: number,
+    options: { depth?: number; limit?: number } = {},
+  ): Promise<LocalGraph> {
+    return this.json<LocalGraph>(`/v1/memory/${id}/graph${query(options)}`);
+  }
+
+  async schedules(): Promise<Schedule[]> {
+    return this.json<Schedule[]>("/v1/schedules");
+  }
+
+  /** One schedule with its recent fires, newest first. */
+  async schedule(name: string, limit?: number): Promise<ScheduleView> {
+    return this.json<ScheduleView>(
+      `/v1/schedules/${encodeURIComponent(name)}${query({ limit })}`,
+    );
+  }
+
+  async goals(): Promise<Goal[]> {
+    return this.json<Goal[]>("/v1/goals");
+  }
+
+  async goal(name: string): Promise<Goal> {
+    return this.json<Goal>(`/v1/goals/${encodeURIComponent(name)}`);
+  }
+
+  /** Every webhook rule, each with its recent deliveries. */
+  async hooks(limit?: number): Promise<HookView[]> {
+    return this.json<HookView[]>(`/v1/hooks${query({ limit })}`);
+  }
+
+  /**
+   * A team's board.
+   *
+   * With no `team`, the daemon picks the first team that has a member — the same
+   * rule as `/v1/teams`, which means a board whose team nobody joined is
+   * unreachable without naming it.
+   */
+  async tasks(team?: string): Promise<TeamTask[]> {
+    return this.json<TeamTask[]>(`/v1/tasks${query({ team })}`);
+  }
+
+  /**
+   * The activity feed.
+   *
+   * `needsYou` filters to the lines this screen exists for: a schedule Jod could
+   * not start, one whose claimant died, or a goal ending. Nothing else in the
+   * product reports those, so they surface here or not at all.
+   */
+  async activity(
+    options: { limit?: number; needsYou?: boolean } = {},
+  ): Promise<ActivityItem[]> {
+    return this.json<ActivityItem[]>(
+      `/v1/activity${query({ limit: options.limit, needs_you: options.needsYou })}`,
+    );
+  }
+
+  // ─── conversations, and the pinned main chat ──────────────────────────────
+
+  async conversations(limit?: number): Promise<ConversationSummary[]> {
+    return this.json<ConversationSummary[]>(`/v1/conversations${query({ limit })}`);
+  }
+
+  /**
+   * The pinned main chat, and its live window.
+   *
+   * **`conversation` is `null` until someone has spoken** — a state to render,
+   * not a 404, so the pinned fleet row draws from first launch. Reading this
+   * also does not create the conversation: the route uses `pinned_conversation`
+   * rather than core's get-or-create, because a GET that creates is a GET a
+   * prefetcher can fire.
+   */
+  async mainChat(): Promise<MainChat> {
+    return this.json<MainChat>("/v1/conversations/main");
+  }
+
+  /**
+   * Hand an instruction to the main chat.
+   *
+   * Carries an `Idempotency-Key` for the same reason `spawn` does, and the
+   * daemon honours it the same way: a replay answers `200` with the original
+   * rather than starting a second run, and does not consume a concurrency slot.
+   *
+   * A `403` here is expected rather than exceptional and arrives as
+   * `UnauthorizedError`. The main chat runs at `accept_edits` by construction —
+   * `ask` is plan mode, which refuses the MCP calls that are the orchestrator's
+   * whole job — so a daemon capped lower refuses, naming the mode and the
+   * setting. **Show that text.** A paraphrase would drop the one thing the
+   * operator needs: which knob to turn.
+   */
+  async sendToMain(
+    body: { instruction: string; harness?: string; cwd?: string },
+    key = this.newKey(),
+  ): Promise<HandedOver> {
+    return this.json<HandedOver>("/v1/conversations/main/messages", {
+      method: "POST",
+      headers: { "idempotency-key": key },
+      body: JSON.stringify(body),
+    });
+  }
+
+  async conversation(id: string): Promise<Conversation> {
+    return this.json<Conversation>(`/v1/conversations/${encodeURIComponent(id)}`);
+  }
+
+  /** One conversation's full thread, oldest first. */
+  async conversationMessages(id: string): Promise<Message[]> {
+    return this.json<Message[]>(
+      `/v1/conversations/${encodeURIComponent(id)}/messages`,
+    );
+  }
+
   // ─── SSE ─────────────────────────────────────────────────────────────────
 
   /**
@@ -363,6 +523,26 @@ export function parseMissed(data: unknown): number {
   } catch {
     return 0;
   }
+}
+
+/**
+ * Build a query string from the parameters that were actually given.
+ *
+ * `undefined` and `null` are dropped, but **`0` and `false` are kept**: the
+ * daemon honours `limit=0` as "no rows, but still tell me the counts", so
+ * treating it as absent would silently turn a cheap counts-only call into a full
+ * page. Returns `""` rather than a bare `?` when nothing survives.
+ */
+export function query(
+  params: Record<string, string | number | boolean | undefined | null>,
+): string {
+  const search = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (value === undefined || value === null) continue;
+    search.set(key, String(value));
+  }
+  const text = search.toString();
+  return text === "" ? "" : `?${text}`;
 }
 
 function defaultKey(): string {
