@@ -4021,6 +4021,143 @@ mod tests {
         assert_eq!(named, Sort::ALL.to_vec());
     }
 
+    /// A temporary `JOD_HOME`, held for one test.
+    ///
+    /// `put_secret` writes the value to a file under `$JOD_HOME/secrets`, so a
+    /// test that stores one without redirecting the variable writes a
+    /// credential file into the developer's real Jod home — which is exactly
+    /// what an orchestrator test did until this session, and it went unnoticed
+    /// because the row it asserted on lived in an in-memory database while the
+    /// file did not. `JOD_HOME` is process-wide, so the lock is what stops two
+    /// of these from landing in each other's directory.
+    struct TempHome {
+        dir: PathBuf,
+        previous: Option<String>,
+        _guard: std::sync::MutexGuard<'static, ()>,
+    }
+
+    static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    impl TempHome {
+        fn new(tag: &str) -> TempHome {
+            let guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let previous = std::env::var("JOD_HOME").ok();
+            let dir = std::env::temp_dir().join(format!(
+                "jod-cli-{tag}-{}-{:?}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or_default()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            std::env::set_var("JOD_HOME", &dir);
+            TempHome {
+                dir,
+                previous,
+                _guard: guard,
+            }
+        }
+    }
+
+    impl Drop for TempHome {
+        fn drop(&mut self) {
+            // Restored rather than unset: on the box Jod runs on `JOD_HOME` is
+            // set, and clearing it would send every later reader to `~/.jod`.
+            match self.previous.take() {
+                Some(value) => std::env::set_var("JOD_HOME", value),
+                None => std::env::remove_var("JOD_HOME"),
+            }
+            std::fs::remove_dir_all(&self.dir).ok();
+        }
+    }
+
+    /// The bug this pins: `jod root add` and `jod secret set` both wrote rows
+    /// that no run ever read, so the two features were storage and nothing
+    /// else. It asserts the **request** — what the harness is actually handed —
+    /// because a test that read the conversation back would have gone on
+    /// passing for as long as the wiring was missing.
+    #[test]
+    fn a_continued_run_is_handed_the_conversation_s_roots_and_secret_names() {
+        let _home = TempHome::new("grants");
+        let store = Store::in_memory().unwrap();
+        let conversation = store
+            .new_conversation(HarnessKind::ClaudeCode, "/tmp/repo", None)
+            .unwrap()
+            .id;
+        store
+            .set_conversation_session(&conversation, Some("sess-abc"))
+            .unwrap();
+        store
+            .add_root(&conversation, jod_core::roots::NewRoot::reading("/tmp/repo"))
+            .unwrap();
+        store
+            .add_root(&conversation, jod_core::roots::NewRoot::reading("/tmp/notes"))
+            .unwrap();
+        store
+            .put_secret(
+                "OPENAI_API_KEY",
+                jod_core::secrets::Scope::Global,
+                "",
+                "a-value-long-enough-to-redact",
+                "",
+            )
+            .unwrap();
+
+        let (roots, secrets) = grants_for_run(
+            &store,
+            &Resume::Session("sess-abc".into()),
+            HarnessKind::ClaudeCode,
+        )
+        .unwrap();
+        assert_eq!(
+            roots,
+            vec![PathBuf::from("/tmp/repo"), PathBuf::from("/tmp/notes")],
+            "both roots must reach the request, in the user's order"
+        );
+        assert_eq!(secrets, vec!["OPENAI_API_KEY".to_string()]);
+
+        // `--continue` finds the same thread through the harness rather than
+        // through an id, and must not reach across harnesses to do it.
+        let (roots, _) = grants_for_run(&store, &Resume::Last, HarnessKind::ClaudeCode).unwrap();
+        assert_eq!(roots.len(), 2);
+        let (roots, secrets) = grants_for_run(&store, &Resume::Last, HarnessKind::OpenCode).unwrap();
+        assert!(
+            roots.is_empty(),
+            "one harness's roots were handed to another: {roots:?}"
+        );
+        assert_eq!(
+            secrets,
+            vec!["OPENAI_API_KEY".to_string()],
+            "a run with no thread still gets the globals — that is what global means"
+        );
+    }
+
+    /// The rule the whole design rests on, asserted where it would be easiest
+    /// to break: what leaves this process is a list of names.
+    #[test]
+    fn what_a_run_carries_is_names_and_never_values() {
+        let _home = TempHome::new("names-only");
+        let store = Store::in_memory().unwrap();
+        let value = "sk-not-a-real-key-but-long-enough";
+        store
+            .put_secret(
+                "STRIPE_API_KEY",
+                jod_core::secrets::Scope::Global,
+                "",
+                value,
+                "",
+            )
+            .unwrap();
+
+        let (_, secrets) = grants_for_run(&store, &Resume::Fresh, HarnessKind::ClaudeCode).unwrap();
+        assert_eq!(secrets, vec!["STRIPE_API_KEY".to_string()]);
+        assert!(
+            !secrets.iter().any(|s| s.contains(value)),
+            "a value reached the spawn request, which is written to spawn.json"
+        );
+    }
+
     /// Deleting the wrong work takes every transcript in it, so an ambiguous
     /// prefix is refused rather than guessed.
     #[test]
