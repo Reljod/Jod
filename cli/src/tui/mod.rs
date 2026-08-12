@@ -2809,6 +2809,14 @@ fn apply_slash(app: &mut App, slash: command::Slash) -> Option<Action> {
                 None => "model: the harness default".to_string(),
             };
             app.model = model.clone();
+            // The last run's model stops being the answer the moment another
+            // one is asked for. `status` prefers what the harness reported over
+            // what was requested — rightly, for a run that has happened — but
+            // nothing had cleared it here, so `/model haiku` printed "model:
+            // haiku" while the status bar went on saying `claude-opus-5` until
+            // some later turn overwrote it. Two lines disagreeing about the
+            // model is indistinguishable from the switch not working.
+            app.reported_model = None;
             app.push(Entry::Notice(said));
             return Some(remember_model(model));
         }
@@ -3661,6 +3669,44 @@ mod tests {
         assert_eq!(app.reported_model.as_deref(), Some("claude-opus-5"));
         assert_eq!(app.model, None);
         assert!(app.status().contains("claude-opus-5"));
+    }
+
+    /// And it stops showing the moment another model is asked for. `status`
+    /// prefers the reported model over the requested one, so leaving the old
+    /// one in place made `/model` print "model: haiku" into a transcript whose
+    /// status bar still read `claude-opus-5` — the switch had worked, and every
+    /// visible sign said it had not.
+    #[test]
+    fn choosing_a_model_retires_the_one_the_last_run_reported() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.apply(&AgentEvent::Started {
+            session_id: Some("s1".into()),
+            model: Some("claude-opus-5".into()),
+        });
+
+        apply_slash(&mut app, command::Slash::Model(Some("haiku".into())));
+        assert_eq!(app.model.as_deref(), Some("haiku"));
+        assert_eq!(app.reported_model, None);
+        let status = app.status();
+        assert!(status.contains("haiku"), "{status}");
+        assert!(!status.contains("claude-opus-5"), "{status}");
+    }
+
+    /// Handing the choice back to the harness is the same rule: the model the
+    /// last run reported is not what the next one will pick, so the status bar
+    /// must claim nothing rather than claim the old name.
+    #[test]
+    fn clearing_the_model_retires_the_reported_one_too() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.apply(&AgentEvent::Started {
+            session_id: Some("s1".into()),
+            model: Some("claude-opus-5".into()),
+        });
+
+        apply_slash(&mut app, command::Slash::Model(None));
+        assert_eq!(app.model, None);
+        assert_eq!(app.reported_model, None);
+        assert!(!app.status().contains("claude-opus-5"), "{}", app.status());
     }
 
     /// Re-selecting the harness you are on must change nothing at all. It used

@@ -131,7 +131,7 @@ impl Harness for OpenCode {
                 out.push(AgentEvent::Error {
                     message: v
                         .get("error")
-                        .map(|e| summarize(e, 400))
+                        .map(error_message)
                         .unwrap_or_else(|| line.to_string()),
                 });
             }
@@ -210,6 +210,35 @@ impl OpenCode {
 
 fn str_at(v: &Value, key: &str) -> Option<String> {
     v.get(key).and_then(Value::as_str).map(str::to_string)
+}
+
+/// What an OpenCode error actually says, rather than the object it says it in.
+///
+/// Every error OpenCode defines — `ProviderAuthError`, `UnknownError`,
+/// `MessageAbortedError`, `APIError` — is `{name, data: {message, ...}}`, and
+/// the sentence a person needs is always `data.message`. Serialising the whole
+/// object instead buries it: a 401 from a workspace with no payment method
+/// arrived on screen as four hundred characters of escaped JSON with the
+/// response headers, the response body and the request URL in front of "add a
+/// payment method here". That is the difference between a billing problem you
+/// fix in a minute and a harness that looks broken for no stated reason.
+///
+/// `name` is kept in front of it because the message alone does not say whether
+/// the run was refused, aborted or cut short, and those are different problems.
+/// The whole object is still the fallback: an error shape nobody anticipated is
+/// better shown raw than swallowed.
+fn error_message(error: &Value) -> String {
+    let said = error
+        .get("data")
+        .and_then(|d| d.get("message"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|m| !m.is_empty());
+    match (said, str_at(error, "name")) {
+        (Some(said), Some(name)) => summarize(&Value::String(format!("{name}: {said}")), 400),
+        (Some(said), None) => summarize(&Value::String(said.to_string()), 400),
+        (None, _) => summarize(error, 400),
+    }
 }
 
 fn usage_from(part: &Value) -> Usage {
@@ -478,6 +507,69 @@ mod tests {
             }
             other => panic!("expected Finished, got {other:?}"),
         }
+    }
+
+    /// Captured verbatim from `opencode run --format json` against a workspace
+    /// with no payment method. Every model in the picker failed this way, so
+    /// changing model looked like it did nothing — and the one sentence that
+    /// explained why sat behind the response headers, the response body and the
+    /// request URL, past the point the transcript truncates.
+    #[test]
+    fn an_api_error_reads_as_its_message_not_as_its_json() {
+        let mut h = OpenCode::default();
+        let out = h.parse_line(
+            r#"{"type":"error","timestamp":1786520295803,"sessionID":"ses_1","error":{
+                "name":"APIError","data":{
+                "message":"No payment method. Add a payment method here: https://opencode.ai/workspace/wrk_1/billing",
+                "statusCode":401,"isRetryable":false,
+                "responseHeaders":{"cf-ray":"a29dd1c78a8023ba-LAX","content-length":"175"},
+                "responseBody":"{\"type\":\"error\"}","metadata":{"url":"https://opencode.ai/zen/v1/messages"}}}}"#,
+        );
+        let messages: Vec<_> = out
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::Error { message } => Some(message.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            messages,
+            vec![
+                "APIError: No payment method. Add a payment method here: \
+                 https://opencode.ai/workspace/wrk_1/billing"
+            ]
+        );
+    }
+
+    /// The other error shapes OpenCode defines carry the sentence in the same
+    /// place, so one rule covers all of them.
+    #[test]
+    fn every_error_shape_puts_its_sentence_in_the_same_place() {
+        let mut h = OpenCode::default();
+        let out = h.parse_line(
+            r#"{"type":"error","error":{"name":"ProviderAuthError",
+                "data":{"providerID":"opencode","message":"not logged in"}}}"#,
+        );
+        assert_eq!(
+            out,
+            vec![AgentEvent::Error {
+                message: "ProviderAuthError: not logged in".into()
+            }]
+        );
+    }
+
+    /// An error shape nobody anticipated is still shown. Reporting nothing
+    /// because a field was missing is how a failed run becomes a silent one.
+    #[test]
+    fn an_error_with_no_message_is_still_reported_in_full() {
+        let mut h = OpenCode::default();
+        let out = h.parse_line(r#"{"type":"error","error":{"name":"Odd","data":{"code":7}}}"#);
+        assert_eq!(
+            out,
+            vec![AgentEvent::Error {
+                message: r#"{"data":{"code":7},"name":"Odd"}"#.into()
+            }]
+        );
     }
 
     #[test]
