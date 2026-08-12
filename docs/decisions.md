@@ -2054,3 +2054,27 @@ from what it was just handed, not from what it was told once.
 The failure mode is worth naming because it is invisible from inside a test
 suite. Every unit test gives its agent the instruction and the stimulus in the
 same breath, so the gap between them — which is where this lives — never opens.
+
+## A repair belongs in a migration, not on the read path
+
+When a bug leaves rows wrong, the data is often recoverable from something
+durable nearby — and the tempting fix is to fold the repair into the reader, so
+the wrong value silently becomes right the next time anyone asks.
+
+Do not. Put it in a migration that runs once, or behind an explicit repair
+command.
+
+Two costs, and the second is the one that matters. A fold makes a hot read into
+a query that sometimes writes, so it acquires new failure modes — a locked
+database now breaks a lookup that used to only ever read. And it **permanently
+masks the bug it was written for**: if whatever should have populated the value
+ever stops again, the reader keeps producing the right answer and nothing
+surfaces until something further downstream, with less context, fails instead.
+
+That is the worst failure shape this repository has: silently correct. A
+migration is auditable, ordered with the rest of the schema, and — crucially —
+does not run tomorrow. If the writer regresses, resume breaks loudly, which is
+what makes it fixable.
+
+The general rule: **a fallback that hides a missing writer is not resilience,
+it is a second implementation of the writer with nobody watching it.**

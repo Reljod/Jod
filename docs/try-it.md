@@ -48,15 +48,34 @@ not a lowered one.
 It is slow because nearly all of it is that runaway climbing to the bound with
 real model turns. `A2A_MAX_TICKS` and `A2A_WAKE_WAIT` are the knobs.
 
-**`harness_parity.sh` — verified for Claude Code (12/12).** One run that sets
-two roots, reads a file in the second, records a decision, asks a blocking
-question answered from the CLI mid-turn, requests a secret by name, and prints
-it. The store then contains `TOKEN=[redacted]` and the value appears nowhere in
+**`harness_parity.sh` — 24 passed, 3 failed.** One run per harness that sets two
+roots, reads a file in the second, records a decision, asks a blocking question
+answered from the CLI mid-turn, requests a secret by name, and prints it. The
+store then contains `TOKEN=[redacted]`, and the value appears nowhere in
 `jod.db`, its write-ahead log, or its shared-memory file.
 
-AGY is skipped **by name, with its reason** — its MCP config derives from
-`$HOME`, and redirecting `$HOME` would take its credentials with it. A harness
-that is not installed is never silently passed.
+**Claude Code: 12 of 12, on three consecutive runs.** OpenCode: 9 of 12. AGY is
+skipped **by name, with its reason** — its MCP config derives from `$HOME`, and
+redirecting `$HOME` would take its credentials with it. A harness that is not
+installed is never silently passed.
+
+The three OpenCode failures each have a named cause, and neither is the card
+rail or the secret machinery:
+
+- **the file in the second root** — the documented `--dir` degradation.
+- **the injection and redaction pair** — not the scrubber. A resumed OpenCode
+  run (`jod run -s <session>`) emits a single `finished` event with no content
+  and never terminates on its own; observed twice, at ten and twenty-two
+  minutes. Its session id is now recorded correctly and the resumed run still
+  says nothing, so this is a separate problem from the one that fix solved, and
+  it is the next thing to look at on that harness.
+
+One test-design note worth carrying into any suite like this. The read of the
+second root used to run early, and on OpenCode a **rejected permission ends the
+turn** — so the one known-degraded step stopped the run mid-sentence and the four
+capabilities after it were never attempted, each failing for a reason that had
+nothing to do with them. Putting the known-degraded step last turns one
+harness's gap into one failure instead of five.
 
 ## Working directories and `@`
 
