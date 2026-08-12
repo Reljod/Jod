@@ -395,6 +395,7 @@ impl SpawnTask {
             // payload into the next stranger's run.
             resume: Resume::Fresh,
             tools: None,
+            ..SpawnRequest::default()
         };
 
         // `spawn_from_untrusted`, not `spawn_agent`. The prompt was built from

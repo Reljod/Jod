@@ -1118,6 +1118,7 @@ mod tests {
             permission: PermissionPolicy::default(),
             resume: Resume::Fresh,
             tools: None,
+            ..SpawnRequest::default()
         }
     }
 }

@@ -226,6 +226,8 @@ impl Fixture {
             program: harness,
             args: vec![],
             cwd: dir.clone(),
+            env: Vec::new(),
+            secrets: Vec::new(),
         };
 
         // The row has to exist before the supervisor updates it, exactly as

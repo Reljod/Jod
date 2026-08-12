@@ -269,6 +269,7 @@ mod tests {
             permission,
             resume: Resume::Fresh,
             tools: None,
+            ..SpawnRequest::default()
         }
     }
 

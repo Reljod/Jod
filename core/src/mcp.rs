@@ -570,6 +570,7 @@ impl Server {
             permission,
             resume: Resume::Fresh,
             tools: Some(tools),
+            ..SpawnRequest::default()
         };
         let agent = self
             .jod
@@ -637,6 +638,7 @@ impl Server {
             permission: agent.permission,
             resume: Resume::Session(session),
             tools: Some(tools),
+            ..SpawnRequest::default()
         };
         let next = self
             .jod

@@ -1437,6 +1437,7 @@ mod tests {
                 permission: PermissionPolicy::Ask,
                 resume: crate::harness::Resume::Fresh,
                 tools: None,
+                ..SpawnRequest::default()
             })
             .await;
 
@@ -1463,6 +1464,7 @@ mod tests {
                 permission: PermissionPolicy::Ask,
                 resume: crate::harness::Resume::Fresh,
                 tools: None,
+                ..SpawnRequest::default()
             })
             .await;
         assert!(matches!(result, Err(JodError::StoreRequired)));
@@ -1499,6 +1501,7 @@ mod tests {
             permission: PermissionPolicy::Ask,
             resume: crate::harness::Resume::Fresh,
             tools: None,
+            ..SpawnRequest::default()
         }
     }
 

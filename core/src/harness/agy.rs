@@ -380,6 +380,7 @@ mod tests {
             permission: PermissionPolicy::Ask,
             resume: Resume::Fresh,
             tools: None,
+            ..SpawnRequest::default()
         }
     }
 

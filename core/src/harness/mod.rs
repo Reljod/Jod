@@ -254,6 +254,65 @@ pub struct SpawnRequest {
     /// anything untrusted, and the reason this is opt-in rather than automatic.
     #[serde(default)]
     pub tools: Option<ToolAccess>,
+    /// Directories this run may read, beyond [`cwd`](Self::cwd).
+    ///
+    /// A conversation can be pointed at several repositories at once, and the
+    /// one the process happens to start in is not the only one it may look at.
+    /// Each harness spells this differently and one of them cannot spell it at
+    /// all, so [`Harness::args`] translates and the gap is documented rather
+    /// than pretended away — a directory a harness will not accept is a
+    /// directory Jod must not claim to have granted.
+    ///
+    /// Not a sandbox. Passing a root grants reading; withholding one does not
+    /// prevent it.
+    #[serde(default)]
+    pub roots: Vec<PathBuf>,
+    /// Ordinary, non-secret environment variables for the harness process.
+    ///
+    /// Safe to read, log and write into the run's `spawn.json`, because
+    /// nothing confidential is permitted here. Credentials go in
+    /// [`secrets`](Self::secrets), which is a different field for exactly that
+    /// reason.
+    #[serde(default)]
+    pub env: Vec<(String, String)>,
+    /// Names of secrets to inject, and *only* the names.
+    ///
+    /// This is how a credential reaches an agent's tools without reaching the
+    /// agent's context. The value is never here, never in `spawn.json`, and
+    /// never in this process: the supervisor looks each name up in the
+    /// owner-only secret file at exec time, puts it in the child's
+    /// environment, and uses the same values to scrub the child's output
+    /// before anything is parsed or stored.
+    ///
+    /// Carrying names rather than values is the whole safety property. A plan
+    /// is written to disk so a person can read it afterwards; a value in it
+    /// would be a second copy of the credential at ordinary permissions, which
+    /// is the leak the design exists to prevent. The model, meanwhile, is told
+    /// the name — enough to use the variable, never enough to print it.
+    #[serde(default)]
+    pub secrets: Vec<String>,
+}
+
+impl Default for SpawnRequest {
+    /// Exists so a caller that cares about three fields does not have to name
+    /// nine. Every field added here after the fact is one that would otherwise
+    /// have to be threaded through every construction site in the workspace.
+    fn default() -> Self {
+        SpawnRequest {
+            name: String::new(),
+            harness: HarnessKind::ClaudeCode,
+            prompt: String::new(),
+            system: None,
+            cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            model: None,
+            permission: PermissionPolicy::default(),
+            resume: Resume::default(),
+            tools: None,
+            roots: Vec::new(),
+            env: Vec::new(),
+            secrets: Vec::new(),
+        }
+    }
 }
 
 /// What an agent may do to Jod itself.

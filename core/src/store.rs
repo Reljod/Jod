@@ -843,6 +843,369 @@ const MIGRATIONS: &[(&str, &str)] = &[
     -- not a history — so the primary key is the whole access plan.
     "#,
     ),
+    (
+        "0013_roots_and_cards",
+        r#"
+    -- The directories a conversation may work in, and the left rail that
+    -- carries the agent's decisions, its open questions, and its requests for
+    -- credentials.
+
+    -- A conversation's working directories. Plural, ordered, and each one
+    -- separately writable or not.
+    --
+    -- `conversations.cwd` stays exactly what it was: the directory the harness
+    -- process is started in. This is a different fact — the set of places the
+    -- agent may read and mention. Overloading `cwd` to mean both would make
+    -- "where does the process start" unanswerable the moment there are two.
+    --
+    -- `writable` is the whole point of the read-only-by-default design: a
+    -- session is pointed at the real checkout with `writable = 0`, and only a
+    -- worktree it claimed for itself is ever set to 1. See `leases`.
+    CREATE TABLE IF NOT EXISTS conversation_roots (
+      id              INTEGER PRIMARY KEY,
+      conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+      path            TEXT NOT NULL,
+      writable        INTEGER NOT NULL DEFAULT 0,
+      -- Order is the user's, not the database's: the first root is the one an
+      -- unqualified mention resolves against.
+      position        INTEGER NOT NULL DEFAULT 0,
+      -- How this root arrived, so the UI can explain one nobody remembers
+      -- adding: 'human', 'inherited' (the conversation's original cwd),
+      -- 'lease' (a worktree this session claimed).
+      origin          TEXT NOT NULL DEFAULT 'human',
+      added_at_ms     INTEGER NOT NULL,
+      UNIQUE(conversation_id, path)
+    );
+    CREATE INDEX IF NOT EXISTS ix_conversation_roots
+      ON conversation_roots(conversation_id, position);
+
+    -- One row in the left rail.
+    --
+    -- Three kinds share this table rather than getting one each, because the
+    -- rail's whole behaviour — filter, sort, cycle, expand, answer — is
+    -- identical across them, and every query the rail, the CLI and the MCP
+    -- tool make would otherwise be written three times and kept in step.
+    --
+    -- `status` and `delivery` are deliberately two columns. `status` is what
+    -- the human did (open, answered, dismissed); `delivery` is whether the
+    -- agent has heard about it yet. Answering a card does not interrupt a
+    -- running turn, so "answered but not yet delivered" is an ordinary state
+    -- the rail must be able to show, not an inconsistency.
+    CREATE TABLE IF NOT EXISTS cards (
+      id              INTEGER PRIMARY KEY,
+      conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+      -- Denormalised from the conversation so the orchestrator's cascading
+      -- query is one index scan rather than a walk up the session tree, and so
+      -- a card keeps its colour when its session is gone.
+      work_id         TEXT,
+      -- Which run raised it. Provenance the expanded card shows, because "who
+      -- is asking me this" is the first question a blocking card provokes.
+      run_id          TEXT,
+      kind            TEXT NOT NULL,                   -- decision | question | secret
+      importance      TEXT NOT NULL DEFAULT 'normal',  -- low | normal | high
+      -- Separate from importance: a blocking card is one the agent said it
+      -- cannot proceed past, which is a fact about the run, not a priority.
+      blocking        INTEGER NOT NULL DEFAULT 0,
+      status          TEXT NOT NULL DEFAULT 'open',    -- open | answered | dismissed
+      -- none | queued | delivered | undeliverable. See `pending_deliveries`.
+      delivery        TEXT NOT NULL DEFAULT 'none',
+      title           TEXT NOT NULL,
+      body            TEXT NOT NULL DEFAULT '',
+      -- JSON array of strings. A decision card carries the alternatives it
+      -- chose between, which is what makes "switch it out" a keystroke.
+      options         TEXT NOT NULL DEFAULT '[]',
+      chosen          TEXT,
+      answer          TEXT,
+      -- kind = 'secret' only. The *name* of the environment variable, never a
+      -- value: no column in this database ever holds a secret's value.
+      secret_name     TEXT,
+      secret_scope    TEXT,
+      -- 'mcp' when the agent called Jod's tool, 'lifted' when the passive
+      -- reader recognised the harness's own question in its output.
+      source          TEXT NOT NULL DEFAULT 'mcp',
+      -- What the two paths agree on, so a harness that both calls the tool and
+      -- prints the question does not produce two cards.
+      dedupe_key      TEXT,
+      created_at_ms   INTEGER NOT NULL,
+      updated_at_ms   INTEGER NOT NULL,
+      answered_at_ms  INTEGER,
+      delivered_at_ms INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS ix_cards_conversation ON cards(conversation_id, id);
+    CREATE INDEX IF NOT EXISTS ix_cards_work ON cards(work_id, id);
+    -- The rail's default query: what is still open, most pressing first.
+    CREATE INDEX IF NOT EXISTS ix_cards_open
+      ON cards(status, blocking DESC, importance, created_at_ms DESC);
+    CREATE UNIQUE INDEX IF NOT EXISTS ux_cards_dedupe
+      ON cards(conversation_id, dedupe_key) WHERE dedupe_key IS NOT NULL;
+
+    -- Filtering the rail is a search, not a LIKE scan, for the same reason
+    -- `messages_fts` exists: it is filtered while somebody is typing.
+    CREATE VIRTUAL TABLE IF NOT EXISTS cards_fts USING fts5(
+      title, body, answer, content='cards', content_rowid='id'
+    );
+    CREATE TRIGGER IF NOT EXISTS cards_ai AFTER INSERT ON cards BEGIN
+      INSERT INTO cards_fts(rowid, title, body, answer)
+      VALUES (new.id, new.title, new.body, coalesce(new.answer, ''));
+    END;
+    CREATE TRIGGER IF NOT EXISTS cards_ad AFTER DELETE ON cards BEGIN
+      INSERT INTO cards_fts(cards_fts, rowid, title, body, answer)
+      VALUES ('delete', old.id, old.title, old.body, coalesce(old.answer, ''));
+    END;
+    CREATE TRIGGER IF NOT EXISTS cards_au AFTER UPDATE ON cards BEGIN
+      INSERT INTO cards_fts(cards_fts, rowid, title, body, answer)
+      VALUES ('delete', old.id, old.title, old.body, coalesce(old.answer, ''));
+      INSERT INTO cards_fts(rowid, title, body, answer)
+      VALUES (new.id, new.title, new.body, coalesce(new.answer, ''));
+    END;
+
+    -- The queue between "somebody said something to an agent" and "the agent
+    -- was told".
+    --
+    -- Nothing may be spliced into a turn already in flight. A prompt is
+    -- assembled once, at spawn; an answer arriving afterwards is either
+    -- ignored or acted on twice, and both are worse than waiting. So every
+    -- inbound thing — a card answer, a message from another agent, a nudge
+    -- typed by Reljod — lands here first, and one handler decides when it is
+    -- injected, batching whatever accumulated into a single turn.
+    --
+    -- One table for all three sources rather than a queue each, because "is
+    -- this session ready to be spoken to" is the same question regardless of
+    -- who is speaking, and it is already written down once in
+    -- `team::wake_order`.
+    CREATE TABLE IF NOT EXISTS pending_deliveries (
+      id              INTEGER PRIMARY KEY,
+      conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+      kind            TEXT NOT NULL,                   -- card_answer | mail | human
+      -- The card id or team_messages id this came from. Text because the two
+      -- sources number themselves independently.
+      ref_id          TEXT NOT NULL DEFAULT '',
+      -- Rendered at enqueue time, not at delivery time: what the human
+      -- answered is a fact about the moment they answered it, and
+      -- re-rendering later would let a since-edited card silently change what
+      -- was already promised.
+      body            TEXT NOT NULL,
+      state           TEXT NOT NULL DEFAULT 'queued',  -- queued | delivered | undeliverable
+      -- Which run finally carried it, so "did it actually arrive" is
+      -- answerable afterwards.
+      run_id          TEXT,
+      detail          TEXT,
+      queued_at_ms    INTEGER NOT NULL,
+      delivered_at_ms INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS ix_pending_deliveries_open
+      ON pending_deliveries(conversation_id, id) WHERE state = 'queued';
+
+    -- What secrets exist, what they are for, and nothing else.
+    --
+    -- Values are not here and never will be. They live in a file outside every
+    -- repository at owner-only permissions, and the only process that reads
+    -- them is the one that puts them in the harness's environment. This table
+    -- holds what the agent, the rail and the CLI are allowed to know: a name,
+    -- a scope, and a hint.
+    --
+    -- `length` is stored because redaction needs it and the scrubber must not
+    -- read values to decide which are too short to redact safely. A
+    -- four-character secret would match half of ordinary output, so it is
+    -- injected and not redacted, and the rail says so when it is stored.
+    CREATE TABLE IF NOT EXISTS secrets (
+      id             INTEGER PRIMARY KEY,
+      name           TEXT NOT NULL,
+      scope          TEXT NOT NULL DEFAULT 'work',  -- global | work | conversation
+      -- The work or conversation id; empty for global.
+      scope_id       TEXT NOT NULL DEFAULT '',
+      hint           TEXT NOT NULL DEFAULT '',
+      length         INTEGER NOT NULL DEFAULT 0,
+      redactable     INTEGER NOT NULL DEFAULT 1,
+      created_at_ms  INTEGER NOT NULL,
+      updated_at_ms  INTEGER NOT NULL,
+      UNIQUE(scope, scope_id, name)
+    );
+    "#,
+    ),
+    (
+        "0014_works_and_leases",
+        r#"
+    -- A work: one intent spanning several conversations, with a board that
+    -- says when it is finished and the worktrees its sessions write in.
+
+    CREATE TABLE IF NOT EXISTS works (
+      id             TEXT PRIMARY KEY,
+      title          TEXT NOT NULL DEFAULT '',
+      summary        TEXT NOT NULL DEFAULT '',
+      -- What Reljod actually asked for, kept verbatim. The title and the
+      -- summary are both a model's paraphrase; when they are wrong, this is
+      -- what says so.
+      instruction    TEXT NOT NULL DEFAULT '',
+      -- Distinguishes one work from another at a glance in the tree and on
+      -- every cascaded card. Assigned at creation, never reused while live.
+      colour         TEXT NOT NULL DEFAULT '',
+      -- open | finishing | closed. `finishing` is tasks done but sessions
+      -- still running: a real state, because it is the one where deleting the
+      -- work would interrupt an agent mid-commit.
+      state          TEXT NOT NULL DEFAULT 'open',
+      -- Bounds on agent-to-agent traffic, per work. Null means the default.
+      -- Two agents in a polite loop spend money at machine speed and every
+      -- individual message looks reasonable, so the count has to live
+      -- somewhere the agents cannot argue with.
+      message_budget INTEGER,
+      messages_used  INTEGER NOT NULL DEFAULT 0,
+      max_depth      INTEGER,
+      created_at_ms  INTEGER NOT NULL,
+      updated_at_ms  INTEGER NOT NULL,
+      closed_at_ms   INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS ix_works_state ON works(state, updated_at_ms DESC);
+
+    -- A conversation's place in the forest.
+    --
+    -- `parent_conversation_id` is not `forked_from`. A fork shares history; a
+    -- child is a session another session spawned, sharing nothing but a reason
+    -- for existing. Conflating them would make the fleet tree draw
+    -- edit-and-retry branches as delegation.
+    ALTER TABLE conversations ADD COLUMN work_id TEXT REFERENCES works(id) ON DELETE SET NULL;
+    ALTER TABLE conversations ADD COLUMN parent_conversation_id TEXT REFERENCES conversations(id) ON DELETE SET NULL;
+    -- 'human' | 'orchestrator' | 'agent' | 'titler'. A titler conversation is
+    -- deleted as soon as it has answered, and this is how a sweeper recognises
+    -- one that a crash orphaned.
+    ALTER TABLE conversations ADD COLUMN origin TEXT NOT NULL DEFAULT 'human';
+    CREATE INDEX IF NOT EXISTS ix_conversations_work ON conversations(work_id, created_at_ms);
+    CREATE INDEX IF NOT EXISTS ix_conversations_parent ON conversations(parent_conversation_id);
+
+    -- The board is the existing `tasks` table, given a work to belong to.
+    --
+    -- Deliberately not a second board: claiming is already one atomic
+    -- statement here, and that statement is the reason two agents racing
+    -- produce one winner. A new table would reimplement it worse.
+    ALTER TABLE tasks ADD COLUMN work_id TEXT REFERENCES works(id) ON DELETE CASCADE;
+    ALTER TABLE tasks ADD COLUMN created_at_ms INTEGER;
+    ALTER TABLE tasks ADD COLUMN completed_at_ms INTEGER;
+    CREATE INDEX IF NOT EXISTS ix_tasks_work ON tasks(work_id, status);
+
+    -- A git worktree a session claimed to write in.
+    --
+    -- Note what does *not* cascade: deleting a work nulls `work_id` and leaves
+    -- the row. Jod's records are cheap to recreate and a branch with
+    -- uncommitted work on it is not, so a lease outlives the work that cut it
+    -- and `jod work leases` can still find it afterwards. `work_title` is
+    -- remembered for exactly that moment — an orphaned lease that cannot say
+    -- what it was for is one nobody dares delete.
+    CREATE TABLE IF NOT EXISTS leases (
+      id              INTEGER PRIMARY KEY,
+      work_id         TEXT REFERENCES works(id) ON DELETE SET NULL,
+      work_title      TEXT NOT NULL DEFAULT '',
+      conversation_id TEXT REFERENCES conversations(id) ON DELETE SET NULL,
+      -- The real checkout this was cut from; stays a read-only root of the
+      -- session that claimed it.
+      repo_path       TEXT NOT NULL,
+      worktree_path   TEXT NOT NULL UNIQUE,
+      branch          TEXT NOT NULL,
+      base_ref        TEXT NOT NULL DEFAULT '',
+      state           TEXT NOT NULL DEFAULT 'held',   -- held | released | removed
+      created_at_ms   INTEGER NOT NULL,
+      released_at_ms  INTEGER
+    );
+    -- One live lease per work and repository, which is what makes a sibling
+    -- session reuse it rather than cut a second branch for the same job.
+    CREATE UNIQUE INDEX IF NOT EXISTS ux_leases_live
+      ON leases(work_id, repo_path) WHERE state = 'held';
+    CREATE INDEX IF NOT EXISTS ix_leases_work ON leases(work_id, state);
+
+    -- Pull requests a run opened. Detected from the event stream for
+    -- immediacy and reconciled by polling for authority, which is why `source`
+    -- and the two timestamps are separate: the stream says one appeared, the
+    -- poll says what it is now.
+    CREATE TABLE IF NOT EXISTS pull_requests (
+      id               INTEGER PRIMARY KEY,
+      work_id          TEXT REFERENCES works(id) ON DELETE SET NULL,
+      conversation_id  TEXT REFERENCES conversations(id) ON DELETE SET NULL,
+      lease_id         INTEGER REFERENCES leases(id) ON DELETE SET NULL,
+      repo             TEXT NOT NULL DEFAULT '',
+      number           INTEGER,
+      url              TEXT NOT NULL UNIQUE,
+      title            TEXT NOT NULL DEFAULT '',
+      branch           TEXT NOT NULL DEFAULT '',
+      -- draft | open | merged | closed | unknown. `unknown` is honest and
+      -- common: a URL parsed out of a stream before any poll has happened.
+      state            TEXT NOT NULL DEFAULT 'unknown',
+      source           TEXT NOT NULL DEFAULT 'stream',  -- stream | poll
+      detected_at_ms   INTEGER NOT NULL,
+      reconciled_at_ms INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS ix_pull_requests_work
+      ON pull_requests(work_id, detected_at_ms DESC);
+
+    -- Slash commands and skills found under a root or in the user's own
+    -- config, so Jod's palette can offer what a repo already defines instead
+    -- of making Reljod remember which harness knows about which.
+    CREATE TABLE IF NOT EXISTS discovered_commands (
+      id            INTEGER PRIMARY KEY,
+      -- The directory it was found under; empty for user-level config.
+      root          TEXT NOT NULL DEFAULT '',
+      scope         TEXT NOT NULL,              -- root | user | plugin
+      kind          TEXT NOT NULL,              -- command | skill
+      name          TEXT NOT NULL,
+      description   TEXT NOT NULL DEFAULT '',
+      path          TEXT NOT NULL,
+      -- Whose convention it follows; empty when every harness would find it.
+      harness       TEXT NOT NULL DEFAULT '',
+      -- Kept only for harnesses that cannot expand a command themselves, so
+      -- Jod can inline the text instead. Whether any harness needs this is
+      -- measured before the code that uses it is written.
+      body          TEXT NOT NULL DEFAULT '',
+      scanned_at_ms INTEGER NOT NULL,
+      UNIQUE(scope, root, kind, name, harness)
+    );
+    "#,
+    ),
+    (
+        "0015_agent_mail",
+        r#"
+    -- Threads, bounds and delivery state on the existing bus.
+    --
+    -- The bus itself is not new: `team_messages` has carried addressed
+    -- messages since 0002, drained in one transaction so the same instruction
+    -- is never injected into two turns. What was missing is everything needed
+    -- to let *agents* use it rather than only humans — a thread to reply into,
+    -- a depth to bound, and a delivery state that can say "failed" instead of
+    -- going quiet.
+
+    -- Which grouping the `team` column names. Works are addressing scopes too,
+    -- and a session in a work is a member of it with no join step, so one bus
+    -- serves both: `scope` says how to read `team`.
+    --
+    -- A second bus was the obvious alternative and is the wrong one: it would
+    -- mean a second drain, a second set of tools, and two places for a message
+    -- to be lost.
+    ALTER TABLE team_messages ADD COLUMN scope TEXT NOT NULL DEFAULT 'team';
+    -- The original message every reply descends from. Null on one that started
+    -- a thread.
+    ALTER TABLE team_messages ADD COLUMN thread_id TEXT;
+    ALTER TABLE team_messages ADD COLUMN in_reply_to INTEGER;
+    -- Hops from the thread's first message. What the depth bound counts, and
+    -- the only thing standing between two polite agents and an unbounded bill.
+    ALTER TABLE team_messages ADD COLUMN depth INTEGER NOT NULL DEFAULT 0;
+    -- message | handoff. A handoff moves ownership of a task or a lease, which
+    -- is a different act from asking a question and must not depend on both
+    -- sides having read the same prose.
+    ALTER TABLE team_messages ADD COLUMN kind TEXT NOT NULL DEFAULT 'message';
+    -- queued | delivered | failed | undeliverable. `delivered` already exists
+    -- as a flag; this is the richer state, because mail to an agent that
+    -- cannot receive it has to become visible rather than silent.
+    ALTER TABLE team_messages ADD COLUMN state TEXT NOT NULL DEFAULT 'queued';
+    ALTER TABLE team_messages ADD COLUMN detail TEXT;
+    CREATE INDEX IF NOT EXISTS ix_team_messages_thread ON team_messages(thread_id, id);
+
+    -- A member of a work is a session, not a joined role. Same table, because
+    -- "who can I address from here" is one question with one answer shape.
+    ALTER TABLE team_members ADD COLUMN scope TEXT NOT NULL DEFAULT 'team';
+    ALTER TABLE team_members ADD COLUMN conversation_id TEXT;
+    -- When this member was last resumed to read its mail. The rate limit reads
+    -- it, so ten messages arriving together become one turn carrying ten
+    -- rather than ten turns — a cost control and a coherence one.
+    ALTER TABLE team_members ADD COLUMN last_woken_at_ms INTEGER;
+    "#,
+    ),
 ];
 
 /// Who asserted a fact. Kept out of the fact's text so that content Jod

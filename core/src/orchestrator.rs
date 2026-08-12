@@ -468,6 +468,7 @@ pub async fn hand_to_orchestrator(
                 permission: PermissionPolicy::AcceptEdits,
                 resume: store.resume_for(&id)?,
                 tools: Some(ToolAccess::Orchestrate),
+                ..SpawnRequest::default()
             },
             RunConversation::Existing(id.clone()),
         )

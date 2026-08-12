@@ -80,6 +80,7 @@ two lanes that will conflict.
 | The MCP server | The card tools, opening a work, listing roots | **C** |
 | The orchestrator | Preambles rewritten; the router learns to open a work | **C** |
 | The conversation store | Deleting a conversation, which does not exist today | **A** |
+| The delivery handler | Queued card answers and team mail injected at a turn boundary by one component, never mid-turn | **A** |
 | The task board and work lifecycle | Tasks per work, closing when the board empties, cascading delete with its confirmation | **A** |
 | Command discovery and pull requests | Scanning, caching, detection, reconciliation | **C** / **A** |
 | **Every TUI file** — rail, picker, tree, and the shared renderer, keymap, mode switch and app state | The screens themselves, and registering them | **B, alone** |
@@ -114,6 +115,27 @@ record a decision, ask a question, request a secret — are the supported path a
 behave identically on all three harnesses. Emission never blocks the agent: a
 question returns a card id immediately unless it is explicitly blocking, and even
 a blocking one gives up after a bounded wait rather than hanging the run.
+
+**Neither raising a card nor answering one may perturb a running turn.** Both
+directions are queued. Raising is a write and a return — the agent does not wait
+to see whether anyone is looking. Answering enqueues a *pending delivery* against
+the conversation; it does not interrupt the turn in flight, because an answer
+spliced into the middle of a turn arrives in a context that was assembled before
+it existed, and the agent either ignores it or acts on it twice.
+
+**A single small handler owns the timing** — when a queued answer is injected,
+and whether several are batched into one. Its rules are the ones `wake_order`
+already encodes for team mail: deliver to an idle session now, hold for a running
+one until the turn ends, batch what accumulated in between into one turn rather
+than one turn each, and never deliver into a session that has no context to
+receive it. Delivery itself is the synthetic user turn the bus already uses, so
+card answers and agent mail travel the same road and there is exactly one place
+in Jod that decides when an agent is spoken to.
+
+The consequence worth stating plainly: **a card answer is asynchronous, and the
+UI must not pretend otherwise.** An answered card shows as *answered, queued*
+until the handler delivers it, then as *delivered*. Reljod can answer ten cards
+while a run is mid-turn and none of them touch it until it comes up for air.
 
 **D3 — a secret's value is never in the model's context.** Stored outside every
 repo at owner-only permissions, injected as an environment variable at spawn,
@@ -228,9 +250,20 @@ invoked — asserted, so nobody quietly reintroduces one.
   created or updated, kind filter, all surviving navigation away and back.
 - **E2.S6 CLI parity.** List, show and answer cards from the command line, so a
   headless or phone-side answer is possible.
+- **E2.S7 The delivery handler.** Per D2, answering a card enqueues rather than
+  interrupts. One handler decides when a queued answer reaches its session —
+  immediately if idle, at the end of the current turn if running — batches
+  everything that accumulated into a single turn, and marks each answer
+  *delivered* only once it is actually in a prompt. It is the same road team mail
+  travels, so this slice generalises the existing delivery rather than adding a
+  second mechanism. A session that ends before its answers are delivered reports
+  them as undelivered instead of dropping them.
 
 **Check:** a rendered frame showing three cards, one bordered `blocked`, the
-answered one hidden until toggled.
+answered one hidden until toggled. Separately: answering a card against a session
+with a turn in flight leaves that turn's prompt untouched and marks the card
+*queued*; the answer appears in the next turn, and ten answers queued during one
+turn arrive as one turn carrying ten, not ten turns.
 
 ## E3 — Secrets the agent cannot read
 

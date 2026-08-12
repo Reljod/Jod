@@ -1055,6 +1055,7 @@ impl Ticker {
                 // to see what else is going on and decline to duplicate it.
                 // Not more than that — see `ToolAccess::unattended`.
                 tools: Some(crate::harness::ToolAccess::unattended()),
+                ..SpawnRequest::default()
             })
             .await?;
 
@@ -1119,6 +1120,7 @@ impl Ticker {
                 // to see what else is going on and decline to duplicate it.
                 // Not more than that — see `ToolAccess::unattended`.
                 tools: Some(crate::harness::ToolAccess::unattended()),
+                ..SpawnRequest::default()
             })
             .await?;
         let _ = due_at_ms;

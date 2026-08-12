@@ -1374,6 +1374,7 @@ async fn begin_crossing(
                 },
                 // No Jod verbs. This run answers a question, it does not act.
                 tools: None,
+                ..SpawnRequest::default()
             };
             // Detached: its prompt is a request to summarise, and recording that
             // in the conversation being handed over would put "summarise this"
@@ -3750,6 +3751,7 @@ async fn spawn(
                 // Decided by the caller — see the parameter's own doc. Each of the
                 // two call sites says which situation it is in and why.
                 tools,
+                ..SpawnRequest::default()
             },
             conversation,
         )
@@ -7022,6 +7024,7 @@ mod tests {
             permission: PermissionPolicy::Bypass,
             resume: Resume::Fresh,
             tools: None,
+            ..SpawnRequest::default()
         };
         let row = s.conversation(conversation).unwrap().unwrap();
         jod_core::service::prefer_conversation_settings(&mut req, &row);

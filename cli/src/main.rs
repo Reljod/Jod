@@ -1066,6 +1066,7 @@ async fn main() -> Result<()> {
                 // money nightly, which is a decision that should be made on
                 // purpose rather than inherited from a default.
                 tools: None,
+                ..SpawnRequest::default()
             };
 
             // Subscribe *before* spawning, so no early event is missed.
@@ -1472,6 +1473,7 @@ async fn main() -> Result<()> {
                                 permission: permission.into(),
                                 resume: Resume::Session(order.session_id),
                                 tools: None,
+                                ..SpawnRequest::default()
                             })
                             .await?;
                         // Drain only once the spawn succeeded, so a failure
@@ -1531,6 +1533,7 @@ async fn main() -> Result<()> {
                             permission: permission.into(),
                             resume: Resume::Fresh,
                             tools: None,
+                            ..SpawnRequest::default()
                         })
                         .await?;
                     store.set_member_status(&team, &member, MemberStatus::Busy)?;
@@ -2813,6 +2816,7 @@ async fn chat(
                     permission: permission.into(),
                     resume: resume.clone(),
                     tools: None,
+                    ..SpawnRequest::default()
                 },
                 conversation.clone(),
             )
