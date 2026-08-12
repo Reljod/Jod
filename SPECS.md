@@ -23,9 +23,10 @@ becoming a harness. Six user-visible changes:
    scrubbed out of everything the harness prints. The agent is told a *name*,
    never a value — so a missing key blocks one test, not the session.
 4. **The main chat is an orchestrator over a tree of sessions.** "Work on
-   @some-repo, do X" opens a *work*: a titled group of sessions, each pointed at a
-   git worktree it owns, none able to touch the original checkout. The
-   orchestrator never blocks; it delegates and comes back.
+   @some-repo, do X" opens a *work*: a titled group of sessions that read your
+   real checkout and, the moment one needs to change something, claim a git
+   worktree of their own to write in. The orchestrator never blocks; it delegates
+   and comes back.
 5. **Fleet becomes that tree.** Arrows walk it, expand and collapse, enter opens.
    Every node shows whether it is running and what it is doing. Cards from every
    descendant cascade up to the orchestrator's rail, colour-coded per work.
@@ -40,11 +41,11 @@ Fixed here because six epics use these words, and a drifting noun is a bug.
 
 | Word | Means |
 |---|---|
-| **root** | A directory a conversation may read. A conversation has zero or more. |
+| **root** | A directory a conversation may read, marked writable or read-only. A conversation has zero or more. |
 | **work** | One intent, spanning several conversations. Titled and summarised by a throwaway model call. Owns a colour. |
 | **project-session** | A conversation belonging to a work. Not a new type — an existing conversation with a work attached. |
 | **card** | One row in the left rail: a decision, a question, or a secret request. |
-| **lease** | A git worktree bound to one conversation, tracked so siblings can reuse it. |
+| **lease** | A git worktree a session claimed to write in, tracked so siblings can reuse it. |
 | **redaction** | The supervisor step that replaces a live secret's value in every line before it is stored. |
 
 ## The two seams
@@ -121,11 +122,26 @@ transcript.
 second session type, and the fleet tree becomes a self-join over what already
 exists.
 
-**D5 — a delegated session works in a worktree it leases, never in the root.**
-The original checkout is not among the session's roots, so the mention picker
-cannot reach it. Leases are per work-and-repo and reusable: a second session on
-the same repo in the same work is offered the existing lease before a new one is
-cut.
+**D5 — a session reads the real checkout and writes only in a worktree it
+claims.** It starts pointed at your actual repo, marked read-only. The moment it
+needs to change something it claims a lease — a fresh branch and worktree — and
+that becomes its only *writable* root. The original stays in its roots as a
+read-only one, so it can still read and diff against what you are editing.
+Leases are per work-and-repo and reusable: a second session on the same repo in
+the same work is offered the existing lease before a new one is cut.
+
+Claiming is an explicit step the agent takes, not something Jod infers, because
+"detect the first write" has no harness-agnostic implementation — every harness
+spells its pre-write hook differently, and two of the three barely have one. So
+the agent is told: this root is read-only, claim a worktree before changing
+anything. A watcher on the read-only root is the backstop, and a write that
+lands there anyway raises a card rather than being silently kept.
+
+**This is a convention, not a sandbox.** Jod passes a deny rule where a harness
+supports one, but nothing here stops a determined agent writing outside its
+roots. What the design actually guarantees is narrower and still worth having:
+work happens on a branch by default, so your checkout is not where a run's
+half-finished state accumulates.
 
 **D6 — the titler is a throwaway conversation that is then deleted.** Cheap
 model, one turn, then removed. This is why deleting a conversation is in scope at
@@ -144,9 +160,10 @@ Each `Sn` is a shippable slice with its own check and its own PR.
 
 ## E1 — Roots, mentions and ripgrep
 
-- **E1.S1 Roots exist.** A conversation owns an ordered set of directories.
-  Existing conversations keep the directory they already had. Add, remove, list,
-  and a containment test the other epics use.
+- **E1.S1 Roots exist.** A conversation owns an ordered set of directories, each
+  marked writable or read-only — the flag E4 sets when a session claims a
+  worktree. Existing conversations keep the directory they already had. Add,
+  remove, list, and a containment test the other epics use.
 - **E1.S2 Candidates and ranking.** Enumerate files and folders per root through
   ripgrep, falling back to a walker; rank in-process against D1's UX bar. Cached
   briefly, because `@` is typed one character at a time.
@@ -223,21 +240,29 @@ value appears nowhere in the database.
   then the conversation is deleted. Deleting a conversation is new here, and
   refuses the pinned main chat. A titler outage falls back to the first few words
   of the instruction rather than blocking the work.
-- **E4.S3 Worktree leases.** On delegation, a branch and worktree are cut and
-  recorded; the session's roots become the worktree alone. Leases are reusable
-  within a work. Releasing removes the tree only when it is clean and merged,
-  and otherwise keeps it and says why. A non-git root is handled by a card, not a
-  crash.
+- **E4.S3 Claiming a worktree.** A session starts with the real checkout as a
+  read-only root. An explicit claim — the agent's own step, per D5 — cuts a
+  branch and worktree, records the lease, and adds it as the session's writable
+  root while the original stays read-only beside it. Leases are reusable within a
+  work: a sibling on the same repo is offered the existing one first. Releasing
+  removes the tree only when it is clean and merged, and otherwise keeps it and
+  says why. A non-git root cannot be claimed and raises a card, not a crash.
+- **E4.S3b The read-only backstop.** A watcher over each read-only root turns an
+  unclaimed write into a card naming the file, so the convention failing is
+  visible rather than silent. It reports; it does not revert.
 - **E4.S4 The orchestrator opens works.** The preamble is rewritten around the
-  new vocabulary; a new routing decision opens a work, titles it, leases a tree
-  and spawns the first session, returning as soon as it is spawned. Sessions may
-  spawn their own children, which is what makes the tree deeper than two levels.
+  new vocabulary; a new routing decision opens a work, titles it and spawns the
+  first session against the read-only checkout, returning as soon as it is
+  spawned — no worktree is cut until the session asks for one. Sessions may spawn
+  their own children, which is what makes the tree deeper than two levels.
 - **E4.S5 Cascading cards.** Card queries gain subtree scope; the main rail shows
   every descendant's cards, tinted by work; cascade is upward only; every card
   names the session it came from so an answer never lands on the wrong agent.
 
-**Check:** one instruction naming a folder produces a titled work, a session, a
-lease on a fresh branch, and a printed two-level tree.
+**Check:** one instruction naming a folder produces a titled work and a session
+with the folder as a read-only root and **no worktree yet**; the session's first
+claim cuts a branch, and after it the original root is still readable and no
+longer writable. A printed two-level tree shows both.
 
 ## E5 — Fleet as a tree
 
@@ -260,9 +285,11 @@ a blocked count in the gutter; navigation asserted by test.
 
 ## E6 — Parity: prompts, commands, pull requests
 
-- **E6.S1 Preambles.** One worker preamble naming the roots, the secret names and
-  the card tools; skills and the charter pointed at under every root; the body
-  asserted identical across harnesses except for documented per-harness lines.
+- **E6.S1 Preambles.** One worker preamble naming the roots and which of them are
+  read-only, the rule that changing anything means claiming a worktree first, the
+  available secret names, and the card tools; skills and the charter pointed at
+  under every root; the body asserted identical across harnesses except for
+  documented per-harness lines.
 - **E6.S2 Harness commands in the palette.** Discover commands and skills under
   each root and in the user's own config, cache the discovery, list them in Jod's
   palette marked with their source, and forward them per D7. **The forwarding
@@ -285,7 +312,18 @@ forwards literally; the spec's own completeness checker passes.
 # Parallelisation
 
 The epics are **not** a queue. Below is what actually blocks what, and how to
-run five or six sessions without them colliding.
+run several sessions at once without them colliding.
+
+**A lane is one agent session, working alone, on a set of files nobody else is
+allowed to touch.** Four lanes means four `jod` sessions running at the same
+time on four branches. The number is not about speed — it is about how many
+non-overlapping piles of files this spec can be cut into. Cut it into more piles
+than that and the lanes start editing the same file, and you spend the time you
+saved resolving conflicts.
+
+**A wave is a synchronisation point.** Every lane in a wave starts from the same
+base and finishes before the next wave starts, because the next wave's lanes
+need what this one produced. Waves are where the plan is allowed to be serial.
 
 ## What forces order
 
@@ -500,23 +538,41 @@ it below.
   whole design exists to protect
 - a capability or dependency that isn't present in the environment
 
-## Open questions
+## Answered, and what each answer changed
 
-Answers change the work; each has a default, so nothing is blocked on them.
+Settled with Reljod; recorded because two of them changed the design rather than
+just confirming it.
 
-1. **Worktree on delegation, or on first write?** Default: **on delegation** —
-   "once it writes" means discovering the boundary at the moment it is crossed.
-2. **Does the original checkout stay visible, read-only?** Default: **no**, it
-   leaves the session's roots entirely, per your wording. The cost is that a
-   session cannot diff against the checkout you are editing.
-3. **Secret scope default.** Default: **work**, so a key given for one project is
-   not handed to every session on the box.
-4. **Rail on the left permanently, or a third column that steals from chat?**
-   Default: a left column, toggled, auto-opening once on the first blocker, and
-   replaced by a one-line summary on a narrow terminal.
-5. **How many lanes do you actually want to run?** The plan is built for four in
-   wave 1 and two in waves 2–3. It degrades cleanly to two lanes throughout —
-   roughly double the wall clock, none of the coordination.
+1. **Worktree on delegation, or on first write?** → **On first write.** This is
+   the answer that changed the most: a session now starts in your real checkout
+   rather than a copy of it, and D5 grew a *claim* step, a read-only root flag
+   (E1.S1) and a backstop watcher (E4.S3b). The reason it costs that much is that
+   "first write" has no harness-agnostic detector, so the claim has to be
+   something the agent does rather than something Jod notices.
+2. **Does the original checkout stay visible, read-only?** → **Yes.** It stays in
+   the session's roots, readable and mentionable, so a session can diff against
+   what you are editing. It pairs with the answer above: read the real thing,
+   write on a branch.
+3. **Secret scope default.** → **Work**, so a key given for one project is not
+   handed to every session on the box.
+4. **Rail on the left permanently, or a third column?** → **Default**: a left
+   column, toggled, auto-opening once on the first blocker, and replaced by a
+   one-line summary on a narrow terminal.
+
+## The one open question
+
+**How many lanes?** A lane is one `jod` session working alone on files no other
+lane may touch (see *Parallelisation*). The number is bounded by how many
+non-overlapping piles of files this spec cuts into, not by how fast you want it.
+
+**Recommendation: start with two, widen to four only if the first wave is
+comfortable.** Two lanes — one on the store and core modules, one on the TUI —
+have almost no coordination cost and get the whole spec done. Four is the most
+this spec can absorb, and it only pays off if wave 0's contracts are solid;
+otherwise the extra two lanes spend their time waiting or conflicting.
+
+Everything else in the plan works unchanged at either width. Two lanes is
+roughly double the wall clock and a fraction of the coordination.
 
 ## Decision log
 
