@@ -45,6 +45,25 @@ impl Harness for ClaudeCode {
             // stream-json in headless mode requires --verbose.
             ArgPart::lit("--verbose"),
         ];
+        // One `--add-dir` per root. Measured rather than assumed: repeating the
+        // flag accumulates, and a run given two of them reported its cwd and
+        // both roots when asked what it had access to.
+        //
+        // The flag is variadic — `claude --help` spells it
+        // `--add-dir <directories...>` — so it keeps swallowing words until it
+        // meets another flag. That makes the position of `ArgPart::Prompt`
+        // above load-bearing: emitted first, it can never trail one of these.
+        // Moved to the end, it would be eaten as a directory and the run would
+        // die with "Input must be provided either through stdin or as a prompt
+        // argument", which names neither this flag nor the prompt. There is a
+        // test pinning the ordering for that reason.
+        //
+        // Granting is not confining. A root Claude Code was never handed is
+        // still a root it can read; see `docs/harness-support.md`.
+        for root in &req.roots {
+            args.push(ArgPart::lit("--add-dir"));
+            args.push(ArgPart::lit(root.to_string_lossy().to_string()));
+        }
         if let Some(model) = &req.model {
             args.push(ArgPart::lit("--model"));
             args.push(ArgPart::lit(model));
@@ -355,6 +374,59 @@ mod tests {
                 ArgPart::Prompt => "<PROMPT>".into(),
             })
             .collect()
+    }
+
+    /// Every root reaches the command line as its own `--add-dir`.
+    ///
+    /// Repeating the flag accumulates rather than overwriting — measured
+    /// against claude 2.1.228, which listed the cwd and both added directories
+    /// when asked what it could reach.
+    #[test]
+    fn every_root_is_granted_with_its_own_add_dir() {
+        let mut r = req(PermissionPolicy::Bypass, None);
+        r.roots = vec![PathBuf::from("/work/one"), PathBuf::from("/work/two")];
+        let args = flat(&r);
+        let granted: Vec<&String> = args
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| *a == "--add-dir")
+            .map(|(i, _)| &args[i + 1])
+            .collect();
+        assert_eq!(
+            granted,
+            vec!["/work/one", "/work/two"],
+            "both roots must be granted, in order"
+        );
+    }
+
+    /// A request with no roots must not mention the flag at all, so an empty
+    /// set cannot become a stray `--add-dir` swallowing whatever follows it.
+    #[test]
+    fn no_roots_means_no_directory_flag() {
+        let args = flat(&req(PermissionPolicy::Bypass, None));
+        assert!(!args.iter().any(|a| a == "--add-dir"));
+    }
+
+    /// `--add-dir` is variadic — `claude --help` spells it
+    /// `<directories...>` — so it consumes every following word until the next
+    /// flag. With the prompt trailing it, the prompt becomes a directory and
+    /// the run dies with "Input must be provided either through stdin or as a
+    /// prompt argument when using --print", which is a real observed failure
+    /// and names neither the flag nor the prompt.
+    ///
+    /// Emitting the prompt at the front avoids it, so this pins that ordering
+    /// rather than trusting the next person to rediscover why it matters.
+    #[test]
+    fn the_prompt_never_trails_a_variadic_directory_flag() {
+        let mut r = req(PermissionPolicy::Bypass, Some("sonnet"));
+        r.roots = vec![PathBuf::from("/work/one"), PathBuf::from("/work/two")];
+        let args = flat(&r);
+        let prompt = args.iter().position(|a| a == "<PROMPT>").unwrap();
+        let first_dir = args.iter().position(|a| a == "--add-dir").unwrap();
+        assert!(
+            prompt < first_dir,
+            "the prompt must come before any --add-dir, or the flag eats it"
+        );
     }
 
     /// Every mode maps to a spelling this build accepts.

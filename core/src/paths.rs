@@ -21,6 +21,20 @@ pub fn db_path() -> PathBuf {
     jod_home().join("jod.db")
 }
 
+/// Secret values, one file each, at owner-only permissions.
+///
+/// Deliberately *beside* `jod.db` rather than inside it. A value in SQLite is a
+/// value in every backup, every `jod conv show` and every screen share, and a
+/// row cannot carry file permissions. Here the operating system enforces the
+/// rule instead: the directory is `0700`, each file is `0600`, and
+/// [`crate::secrets::read_secret_value`] refuses to read one whose mode has
+/// since been widened. Being under `$JOD_HOME` rather than a repository is the
+/// other half of it — nothing here can be committed by an agent working in a
+/// checkout.
+pub fn secrets_dir() -> PathBuf {
+    jod_home().join("secrets")
+}
+
 pub fn runs_dir() -> PathBuf {
     jod_home().join("runs")
 }

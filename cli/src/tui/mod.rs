@@ -28,6 +28,8 @@ mod delivery;
 pub mod data;
 mod graph;
 mod keys;
+mod mention;
+mod rail;
 mod sessions;
 pub mod ui;
 mod workspace;
@@ -171,6 +173,23 @@ pub enum Action {
     /// the binary, and available as `/reload` whenever a build landed some
     /// other way.
     Reload,
+    /// Answer a card in the rail: an option chosen by digit, prose typed at
+    /// the prompt, or both.
+    ///
+    /// Never applied here, and that is the design rather than a convenience.
+    /// Answering *queues* — [`Store::answer_card`] writes the answer and a
+    /// pending delivery in one transaction, and a handler in core decides when
+    /// the agent is told. A turn in flight is untouched, because its prompt was
+    /// assembled before the answer existed. See decision D2.
+    AnswerCard {
+        id: i64,
+        chosen: Option<String>,
+        answer: Option<String>,
+    },
+    /// Read a card and deliberately not answer it. Queues nothing: an agent
+    /// told about a dismissal could not tell it from an answer, and would act
+    /// on a decision nobody made.
+    DismissCard(i64),
     /// A verb the screens offer and the store cannot carry out yet. Named
     /// rather than silently ignored, and naming the missing call rather than
     /// apologising, so the gap is a to-do and not a mystery.
@@ -406,6 +425,16 @@ async fn event_loop(
     app.now_ms = now_ms();
     app.agents = list_agents(&jod).await;
     refresh_team(&jod, &mut app);
+    // Which Jod conversation the chat box is talking into. Starts derived —
+    // "the one the run on screen wrote" — and becomes explicit when a harness
+    // switch mints a conversation no run has reached yet, or when you enter the
+    // main chat.
+    //
+    // Declared before the first refresh because the rail is read against it: a
+    // refresh that ran first would ask for one conversation's cards and then be
+    // told it was looking at another.
+    let mut thread = Thread::default();
+    bind_rail(&jod, &mut app, &thread);
     refresh_workspaces(&jod, &mut app);
     app.reconcile();
     // No harness name here: this line is frozen into the scrollback, so naming
@@ -415,12 +444,6 @@ async fn event_loop(
         "Alt-K opens every screen · / for commands · Enter send · Alt-B delegate in the background · ? for keys · Ctrl-C quit"
             .to_string(),
     ));
-
-    // Which Jod conversation the chat box is talking into. Starts derived —
-    // "the one the run on screen wrote" — and becomes explicit when a harness
-    // switch mints a conversation no run has reached yet, or when you enter the
-    // main chat.
-    let mut thread = Thread::default();
 
     let mut keys = EventStream::new();
     let mut events = jod.subscribe();
@@ -456,6 +479,15 @@ async fn event_loop(
             Some(Ok(ev)) = keys.next() => {
                 match ev {
                     Event::Key(key) if key.kind == KeyEventKind::Press => {
+                        // What the rail is asking the store for, before the key
+                        // is allowed to change it. A filter, a sort or a stack
+                        // toggle has to re-read *now* — the tick that would
+                        // eventually catch up is a second away, and a filter
+                        // box that lags a second behind the letters is one
+                        // nobody trusts. Everything else must not pay for a
+                        // query per keystroke, which is what the comparison
+                        // buys.
+                        let asked = app.rail.query(app.conversation.clone());
                         match on_key(&mut app, key, viewport) {
                             // The editor takes the terminal, so it can only be
                             // done from here — with the same discipline as
@@ -470,6 +502,11 @@ async fn event_loop(
                             Some(action) => perform(&jod, &mut app, &opts, &mut thread, action).await,
                             None => {}
                         }
+                        if app.rail.query(app.conversation.clone()) != asked {
+                            refresh_rail(&jod, &mut app);
+                        }
+                        // Cheap when no popup is up, which is almost always.
+                        refresh_mention(&jod, &mut app);
                     }
                     Event::Mouse(m) => match m.kind {
                         MouseEventKind::ScrollUp => app.scroll_up(3, app.transcript.len()),
@@ -586,6 +623,11 @@ async fn event_loop(
                 // shows a fleet that stopped moving minutes ago.
                 if app.tick.is_multiple_of(4) {
                     app.agents = list_agents(&jod).await;
+                    // Before the refresh, because the chat box may have been
+                    // rebound since the last one — `/resume`, a harness switch,
+                    // entering the main chat — and the rail would otherwise
+                    // spend a second showing the previous conversation's cards.
+                    bind_rail(&jod, &mut app, &thread);
                     refresh_workspaces(&jod, &mut app);
                     if matches!(app.workspace, Workspace::Team | Workspace::Tasks) {
                         refresh_team(&jod, &mut app);
@@ -1062,6 +1104,19 @@ async fn perform(
         Action::ToggleHook(name) => on_store(jod, app, |store| toggle_hook(store, &name)),
         Action::DeleteHook(name) => on_store(jod, app, |store| delete_hook(store, &name)),
         Action::Forget(subject) => on_store(jod, app, |store| forget_about(store, &subject)),
+        // Both card verbs go through `on_store` like every other store verb,
+        // and the sentence they hand back is the whole feature: `Store::
+        // answer_card` writes the answer *and* a pending delivery in one
+        // transaction, so what actually happened is "recorded, and the agent
+        // will be told when it comes up for air". Saying "answered" alone would
+        // be the lie D2 is written against.
+        Action::AnswerCard { id, chosen, answer } => on_store(jod, app, |store| {
+            answered_card(store, id, chosen.as_deref(), answer.as_deref())
+        }),
+        Action::DismissCard(id) => on_store(jod, app, |store| match store.dismiss_card(id) {
+            Ok(()) => format!("card #{id} dismissed — the agent is told nothing"),
+            Err(e) => format!("card #{id} not dismissed: {e}"),
+        }),
         Action::Remember {
             subject,
             predicate,
@@ -1713,6 +1768,28 @@ fn delete_hook(store: &Store, name: &str) -> String {
 /// The bare name survives, with no edges: `facts` cascades into `relations` but
 /// not into `entities`, so the row stays until the graph is rebuilt. Said out
 /// loud, because the row not disappearing otherwise reads as a key that failed.
+/// Answer a card, and say what that actually did.
+///
+/// The sentence is the feature. "Answered" alone would be the lie decision D2
+/// is written against: the answer is *recorded and queued*, and the agent hears
+/// it at the next turn boundary — immediately if it is idle, at the end of the
+/// current turn if it is not. A reader told only "answered" goes back to
+/// watching the transcript for a change that is not due yet, decides the key
+/// did not work, and answers again.
+fn answered_card(store: &Store, id: i64, chosen: Option<&str>, answer: Option<&str>) -> String {
+    match store.answer_card(id, chosen, answer) {
+        Ok(card) => {
+            let what = card.chosen.or(card.answer).unwrap_or_default();
+            format!(
+                "card #{id} answered “{}” — queued; it reaches the agent at the end of the turn \
+                 in flight",
+                app::one_line(&what, 60)
+            )
+        }
+        Err(e) => format!("card #{id} not answered: {e}"),
+    }
+}
+
 fn forget_about(store: &Store, subject: &str) -> String {
     let facts = match store.facts_about(subject) {
         Ok(facts) => facts,
@@ -1851,10 +1928,159 @@ fn on_key(app: &mut App, key: KeyEvent, viewport: usize) -> Option<Action> {
         }
         _ => {}
     }
+    // The rail sits above both of the layers below it, because it is drawn
+    // beside both and `Alt-C` may have been pressed on either. It only owns the
+    // keyboard once it has been given it, which is what keeps a rail that is
+    // merely *visible* from stealing the letters you are typing.
+    if app.rail.focused && app.rail.shown {
+        return on_rail_key(app, key);
+    }
     if app.workspace.is_list() {
         return on_workspace_key(app, key, viewport);
     }
     on_chat_key(app, key, viewport)
+}
+
+/// Keys while the decision rail has the keyboard.
+///
+/// Every one of these is a bare letter, which is only safe because the focus is
+/// explicit and printed: `Alt-C` gives the rail the keyboard, the keybar
+/// changes to the rail's verbs while it holds it, and `Esc` gives it back with
+/// the typed line untouched. See [`keys::RAIL`].
+fn on_rail_key(app: &mut App, key: KeyEvent) -> Option<Action> {
+    // A `/` line being typed owns the keyboard, letters and all — otherwise
+    // filtering for "sqlite" would try to sort, then dismiss a card.
+    if app.rail.editing_filter {
+        match key.code {
+            KeyCode::Char(c) => {
+                if let Some(f) = app.rail.filter.as_mut() {
+                    f.push(c);
+                }
+            }
+            KeyCode::Backspace => {
+                if let Some(f) = app.rail.filter.as_mut() {
+                    f.pop();
+                }
+            }
+            // Accepting keeps the filter and hands the letters back to being
+            // verbs. `Esc` is the one that clears it.
+            KeyCode::Enter => app.rail.editing_filter = false,
+            KeyCode::Esc => {
+                app.rail.filter = None;
+                app.rail.editing_filter = false;
+            }
+            _ => {}
+        }
+        return None;
+    }
+
+    let ids = app.card_ids();
+    match key.code {
+        KeyCode::Esc => {
+            app.rail.back();
+            None
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            app.rail.step(-1, &ids);
+            None
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            app.rail.step(1, &ids);
+            None
+        }
+        KeyCode::Home => {
+            app.rail.selected = ids.first().copied();
+            None
+        }
+        KeyCode::End => {
+            app.rail.selected = ids.last().copied();
+            None
+        }
+        // `→` expands and `←` collapses, spelled spatially, because the
+        // expanded card is wider than the collapsed one and the movement reads
+        // as the shape it makes. `⏎` is the same verb on the primary key.
+        KeyCode::Enter | KeyCode::Right => {
+            if app.rail.selected.is_some() {
+                app.rail.expanded = !app.rail.expanded;
+            }
+            None
+        }
+        KeyCode::Left => {
+            app.rail.expanded = false;
+            None
+        }
+        KeyCode::Char('/') => {
+            app.rail.filter = Some(String::new());
+            app.rail.editing_filter = true;
+            None
+        }
+        KeyCode::Char('S') => {
+            let sort = app.rail.cycle_sort();
+            app.push(Entry::Notice(format!("rail sorted by {}", sort.as_str())));
+            None
+        }
+        KeyCode::Char('t') => {
+            let stack = app.rail.cycle_stack();
+            app.push(Entry::Notice(format!("rail showing {} cards", stack.as_str())));
+            None
+        }
+        KeyCode::Char('f') => {
+            let kind = app.rail.cycle_kind();
+            let what = kind.map(|k| k.as_str()).unwrap_or("every kind of");
+            app.push(Entry::Notice(format!("rail showing {what} card")));
+            None
+        }
+        KeyCode::Char('?') => {
+            app.overlay = Overlay::Keymap;
+            None
+        }
+        // No confirmation, unlike `x` on a list screen. Dismissing is a state
+        // change and not a deletion — the card stays, findable under the
+        // answered/dismissed toggle — and a card that took two keys to put down
+        // is a rail nobody clears.
+        KeyCode::Char('x') => app.selected_card().map(|c| Action::DismissCard(c.id)),
+        KeyCode::Char('a') => {
+            let card = app.selected_card()?;
+            let (id, title) = (card.id, card.title.clone());
+            app.overlay = Overlay::Prompt {
+                label: format!("answer #{id} · {}", app::one_line(&title, 40)),
+                value: String::new(),
+                intent: PromptIntent::AnswerCard(id),
+            };
+            None
+        }
+        KeyCode::Char(c) if c.is_ascii_digit() => answer_by_digit(app, c),
+        _ => None,
+    }
+}
+
+/// A digit in the rail picks the numbered option under the cursor.
+///
+/// A digit that names no option says so rather than doing nothing: the options
+/// are printed numbered beside the card, so pressing `4` on a card with three
+/// of them is a misread, and silence would leave the reader believing the
+/// answer went in.
+fn answer_by_digit(app: &mut App, c: char) -> Option<Action> {
+    let card = app.selected_card()?;
+    let (id, options) = (card.id, card.options.clone());
+    let at = c.to_digit(10)? as usize;
+    if at == 0 || at > options.len() {
+        app.push(Entry::Notice(if options.is_empty() {
+            format!("card #{id} offers no options — `a` answers it in prose")
+        } else {
+            format!(
+                "card #{id} offers {} — press 1–{}",
+                app::plural(options.len(), "option"),
+                options.len()
+            )
+        }));
+        return None;
+    }
+    Some(Action::AnswerCard {
+        id,
+        chosen: Some(options[at - 1].clone()),
+        answer: None,
+    })
 }
 
 /// Refuse to leave silently while work is in flight; a second press goes
@@ -1967,6 +2193,30 @@ fn on_chord(app: &mut App, key: KeyEvent) -> Option<Option<Action>> {
                 "tool output {}",
                 if app.show_details { "shown" } else { "hidden" }
             )));
+            handled(None)
+        }
+        // The rail, on Alt only. `Ctrl-R` is readline's reverse search and
+        // `Ctrl-C` is quit, so claiming either spelling would be re-making the
+        // collision the move to Alt undid.
+        //
+        // A visibility toggle, deliberately separate from `Alt-C`: hiding the
+        // rail must not depend on where the cursor is, and showing it must not
+        // cost you the keyboard. Hiding it also hands the keyboard back, or the
+        // bare keys would still be the rail's with no rail on screen.
+        KeyCode::Char('r') if alt => {
+            app.rail.shown = !app.rail.shown;
+            if !app.rail.shown {
+                app.rail.focused = false;
+                app.rail.expanded = false;
+            }
+            handled(None)
+        }
+        // Focus the rail, and step through the cards. Safe in the middle of a
+        // sentence — this is the property E2.S3 asks for by name — because a
+        // chord never reaches `App::insert`.
+        KeyCode::Char('c') if alt => {
+            let ids = app.card_ids();
+            app.rail.cycle(&ids);
             handled(None)
         }
         // Delegate: the typed line becomes an agent that runs without taking
@@ -2469,6 +2719,14 @@ fn accept_prompt(
         PromptIntent::New(ws) => Some(Action::Pending {
             verb: format!("new {} “{typed}”", ws.menu_name()),
             needs: "the $EDITOR form ladder — tier 3 of the report's §5.4",
+        }),
+        // Prose, against the card the prompt was opened on rather than against
+        // whatever the cursor is on now — the rail re-queries underneath an
+        // overlay, so the two are not the same card.
+        PromptIntent::AnswerCard(id) => Some(Action::AnswerCard {
+            id,
+            chosen: None,
+            answer: Some(typed.clone()),
         }),
         // Edges are derived from facts rather than written directly, so linking
         // two nodes by hand means asserting the fact the edge would come from —
@@ -3011,6 +3269,47 @@ fn on_team_key(app: &mut App, key: KeyEvent) -> Option<Action> {
 fn on_chat_key(app: &mut App, key: KeyEvent, viewport: usize) -> Option<Action> {
     let max_scroll = app.transcript.len();
 
+    // The `@` popup owns the arrows and `⏎` while it is up, and `Esc` closes it
+    // *without* touching the line — D1's fourth requirement, and the one people
+    // notice: a picker that wipes what you typed when you change your mind is a
+    // picker you stop opening.
+    //
+    // Everything else falls through to the ordinary editing keys and then
+    // re-derives the popup from the line, so typing, backspacing and moving the
+    // cursor all keep it honest without each one having to remember to.
+    if app.mention.is_some() {
+        match key.code {
+            KeyCode::Up => {
+                if let Some(popup) = &mut app.mention {
+                    popup.prev();
+                }
+                return None;
+            }
+            KeyCode::Down => {
+                if let Some(popup) = &mut app.mention {
+                    popup.next();
+                }
+                return None;
+            }
+            KeyCode::Tab | KeyCode::Enter => {
+                // With no roots there is nothing to accept, so the key does
+                // nothing at all rather than closing the popup on a shrug — the
+                // message stays up, which is the answer to "why is this empty".
+                if app.accept_mention() {
+                    return None;
+                }
+                if app.mention.as_ref().is_some_and(|p| !p.rooted) {
+                    return None;
+                }
+            }
+            KeyCode::Esc => {
+                app.mention = None;
+                return None;
+            }
+            _ => {}
+        }
+    }
+
     // While the completion popup is up it owns Tab and the arrows, and Enter
     // finishes the word rather than sending a half-typed command.
     let suggestions = command::completions(&app.input, app);
@@ -3111,13 +3410,24 @@ fn on_chat_key(app: &mut App, key: KeyEvent, viewport: usize) -> Option<Action> 
         // never fires it, which is the edge case that makes the rule usable.
         KeyCode::Char('?') if app.input.is_empty() => app.overlay = Overlay::Keymap,
         KeyCode::Char(c) => {
+            // `@` opens the picker under the cursor. The index is taken before
+            // the insert because the popup replaces the sign along with the
+            // query, so it has to know where the sign landed.
+            let at = app.cursor;
             app.insert(c);
+            if c == '@' {
+                app.open_mention(at);
+            }
             // Typing means the recalled line is now the user's own draft, so
             // ↓ must not silently replace what they are editing.
             app.history_at = None;
         }
         _ => {}
     }
+    // Derived rather than tracked: every edit key above would otherwise have to
+    // remember to keep the popup in step with the line, and the one that forgot
+    // would leave it ranking a query the line no longer holds.
+    app.sync_mention();
     None
 }
 
@@ -3800,6 +4110,57 @@ fn refresh_workspaces(jod: &Arc<Jod>, app: &mut App) {
     app.hooks = data::hooks(jod);
     app.activity = data::activity(jod);
     app.board = data::tasks(jod, app.team.as_deref());
+    refresh_rail(jod, app);
+}
+
+/// Re-read the rail, and open it the first time something is blocked.
+///
+/// The whole rail travels as one query — filter, sort, kind and stack are all
+/// in it — so this is one indexed read however the rail is set up, which is why
+/// it can run on every keystroke of the filter box as well as on the tick.
+fn refresh_rail(jod: &Arc<Jod>, app: &mut App) {
+    app.cards = data::cards(jod, &app.rail.query(app.conversation.clone()));
+    app.reconcile_rail();
+    // Once per session, and said out loud when it happens: a column that
+    // appears on its own without explanation reads as a rendering fault.
+    if app.rail.auto_open(&app.cards) {
+        app.push(Entry::Notice(
+            "a run is blocked — the rail is open; Alt-C answers, Alt-R hides it".into(),
+        ));
+    }
+}
+
+/// Which conversation the rail and the `@` picker belong to.
+///
+/// The conversation the chat box is bound to, falling back to the pinned main
+/// chat. The fallback is what makes the rail useful before the first turn: an
+/// unbound chat box has no conversation of its own yet, and the cards worth
+/// looking at in that state are the orchestrator's — which is where anything
+/// delegated from here reports back to.
+fn bind_rail(jod: &Arc<Jod>, app: &mut App, thread: &Thread) {
+    app.conversation = jod.store().and_then(|store| {
+        current_conversation(store, app, thread)
+            .or_else(|| store.pinned_conversation().ok().flatten())
+    });
+}
+
+/// Give the `@` popup something to search, and re-rank it against it.
+///
+/// Loaded here rather than in `on_key`, which does no I/O by design:
+/// enumerating a hundred thousand paths is not something a keystroke may block
+/// on. [`jod_core::rank::candidates_shared`] caches for a few seconds, so a
+/// burst of typing costs one walk and the rest are pointer copies — which is
+/// what makes "live on every keystroke" true rather than aspirational.
+fn refresh_mention(jod: &Arc<Jod>, app: &mut App) {
+    if app.mention.is_none() {
+        return;
+    }
+    app.roots = data::roots(jod, app.conversation.as_deref());
+    app.candidates = data::candidates(&app.roots);
+    let (roots, candidates) = (app.roots.clone(), app.candidates.clone());
+    if let Some(popup) = &mut app.mention {
+        popup.refresh(&roots, &candidates);
+    }
 }
 
 /// Hand the typed line to `$EDITOR`, and take back whatever comes out.
@@ -7985,5 +8346,433 @@ mod tests {
             apply_slash(&mut app, command::Slash::Reload),
             Some(Action::Reload)
         );
+    }
+    // ---- the decision rail ----
+
+    fn a_card(id: i64, title: &str, blocking: bool, options: &[&str]) -> jod_core::cards::Card {
+        jod_core::cards::Card {
+            id,
+            conversation_id: "conv".into(),
+            work_id: None,
+            run_id: None,
+            kind: jod_core::cards::CardKind::Question,
+            importance: jod_core::cards::Importance::Normal,
+            blocking,
+            status: jod_core::cards::Status::Open,
+            delivery: jod_core::cards::Delivery::None,
+            title: title.into(),
+            body: String::new(),
+            options: options.iter().map(|o| (*o).to_string()).collect(),
+            chosen: None,
+            answer: None,
+            secret_name: None,
+            secret_scope: None,
+            source: jod_core::cards::Source::Mcp,
+            created_at_ms: 0,
+            updated_at_ms: 0,
+            answered_at_ms: None,
+            delivered_at_ms: None,
+        }
+    }
+
+    fn with_cards() -> App {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.cards = vec![
+            a_card(1, "which port for the API?", true, &["8080", "3000"]),
+            a_card(2, "chat DB: chose SQLite", false, &[]),
+        ];
+        app.reconcile_rail();
+        app
+    }
+
+    fn last_notice(app: &App) -> String {
+        match app.transcript.last() {
+            Some(Entry::Notice(text)) => text.clone(),
+            other => panic!("expected a notice, got {other:?}"),
+        }
+    }
+
+    /// The constraint E2.S3 states outright: the cycle key must not cost the
+    /// sentence you were typing. A chord cannot reach `App::insert`, which is
+    /// the whole reason the rail's way in is one.
+    #[test]
+    fn alt_c_focuses_the_rail_without_touching_the_typed_line() {
+        let mut app = with_cards();
+        type_line(&mut app, "ship the parser");
+
+        alt(&mut app, KeyCode::Char('c'));
+        assert!(app.rail.shown && app.rail.focused);
+        assert_eq!(app.rail.selected, Some(1), "on the most pressing card");
+        assert_eq!(app.input, "ship the parser", "the sentence is untouched");
+
+        alt(&mut app, KeyCode::Char('c'));
+        assert_eq!(app.rail.selected, Some(2), "and again steps on");
+        assert_eq!(app.input, "ship the parser");
+    }
+
+    /// Hiding the rail has to hand the keyboard back with it, or the bare keys
+    /// stay the rail's with no rail on screen to explain them.
+    #[test]
+    fn alt_r_shows_and_hides_the_rail_and_takes_the_focus_with_it() {
+        let mut app = with_cards();
+        alt(&mut app, KeyCode::Char('c'));
+        assert!(app.rail.focused);
+
+        alt(&mut app, KeyCode::Char('r'));
+        assert!(!app.rail.shown);
+        assert!(!app.rail.focused, "no rail, no rail keys");
+
+        type_line(&mut app, "hello");
+        assert_eq!(app.input, "hello", "the letters are the chat's again");
+    }
+
+    /// The focus is what makes the bare letters safe, and it has to be total:
+    /// a letter that reached both would be a letter that did two things.
+    #[test]
+    fn letters_typed_at_a_focused_rail_do_not_reach_the_input_box() {
+        let mut app = with_cards();
+        alt(&mut app, KeyCode::Char('c'));
+        type_line(&mut app, "jk");
+        assert_eq!(app.input, "");
+    }
+
+    /// `Esc` peels the rail's layers and gives the keyboard back, with the line
+    /// exactly as it was.
+    #[test]
+    fn esc_gives_the_keyboard_back_with_the_line_intact() {
+        let mut app = with_cards();
+        type_line(&mut app, "half a sentence");
+        alt(&mut app, KeyCode::Char('c'));
+        press(&mut app, KeyCode::Enter);
+        assert!(app.rail.expanded);
+
+        press(&mut app, KeyCode::Esc);
+        assert!(!app.rail.expanded, "the expanded card first");
+        press(&mut app, KeyCode::Esc);
+        assert!(!app.rail.focused, "then the focus");
+        assert!(app.rail.shown, "and the rail stays on screen");
+        assert_eq!(app.input, "half a sentence");
+    }
+
+    /// A digit picks the option it is printed beside. The label on screen *is*
+    /// the keystroke, so nobody counts rows to find out what `2` does.
+    #[test]
+    fn a_digit_in_the_rail_answers_the_option_it_names() {
+        let mut app = with_cards();
+        alt(&mut app, KeyCode::Char('c'));
+        assert_eq!(
+            press(&mut app, KeyCode::Char('2')),
+            Some(Action::AnswerCard {
+                id: 1,
+                chosen: Some("3000".into()),
+                answer: None,
+            })
+        );
+    }
+
+    /// A digit naming no option says so. Silence would leave the reader
+    /// believing the answer went in — and the run is still blocked.
+    #[test]
+    fn a_digit_that_names_no_option_says_so_rather_than_doing_nothing() {
+        let mut app = with_cards();
+        alt(&mut app, KeyCode::Char('c'));
+        assert_eq!(press(&mut app, KeyCode::Char('7')), None);
+        let said = last_notice(&app);
+        assert!(said.contains("press 1–2"), "{said}");
+
+        // ...and on a card with no options at all, it points at the prose key.
+        app.rail.selected = Some(2);
+        assert_eq!(press(&mut app, KeyCode::Char('1')), None);
+        let said = last_notice(&app);
+        assert!(said.contains("in prose"), "{said}");
+    }
+
+    /// No confirmation, unlike `x` on a list screen: dismissing is a state
+    /// change and not a deletion, and a card that costs two keys to put down is
+    /// a rail nobody clears.
+    #[test]
+    fn x_in_the_rail_dismisses_without_a_confirmation() {
+        let mut app = with_cards();
+        alt(&mut app, KeyCode::Char('c'));
+        assert_eq!(
+            press(&mut app, KeyCode::Char('x')),
+            Some(Action::DismissCard(1))
+        );
+        assert_eq!(app.overlay, Overlay::None, "nothing to confirm");
+    }
+
+    /// The prose answer goes to the card the prompt was opened on, not to
+    /// whatever the cursor is on when `⏎` lands — the rail re-queries
+    /// underneath an overlay, and an answer on the wrong card wakes the wrong
+    /// agent.
+    #[test]
+    fn a_prose_answer_lands_on_the_card_the_prompt_was_opened_on() {
+        let mut app = with_cards();
+        alt(&mut app, KeyCode::Char('c'));
+        press(&mut app, KeyCode::Char('a'));
+        let Overlay::Prompt { intent, .. } = app.overlay.clone() else {
+            panic!("`a` opens a prompt, got {:?}", app.overlay);
+        };
+        assert_eq!(intent, PromptIntent::AnswerCard(1));
+
+        // The rail moves under the overlay, as a tick would move it.
+        app.rail.selected = Some(2);
+        for c in "8080".chars() {
+            press(&mut app, KeyCode::Char(c));
+        }
+        assert_eq!(
+            press(&mut app, KeyCode::Enter),
+            Some(Action::AnswerCard {
+                id: 1,
+                chosen: None,
+                answer: Some("8080".into()),
+            }),
+            "the id came from the prompt, not from the cursor"
+        );
+    }
+
+    /// E2.S5, through the keys: the filter, the sort and both filters are held
+    /// in state, so leaving the rail and coming back finds them where they were.
+    #[test]
+    fn the_rails_filter_and_sort_survive_leaving_it_and_coming_back() {
+        let mut app = with_cards();
+        alt(&mut app, KeyCode::Char('c'));
+        press(&mut app, KeyCode::Char('S'));
+        press(&mut app, KeyCode::Char('t'));
+        press(&mut app, KeyCode::Char('f'));
+        press(&mut app, KeyCode::Char('/'));
+        type_line(&mut app, "port");
+        press(&mut app, KeyCode::Enter);
+        let asked = app.rail.query(Some("conv".into()));
+
+        // Away to another screen, and back. Deliberately not by `Esc`, which
+        // clears the filter on purpose — it is the key that undoes one level,
+        // and undoing the filter is exactly what it should do there.
+        alt(&mut app, KeyCode::Char('a'));
+        assert_eq!(app.workspace, Workspace::Fleet);
+        app.go(Workspace::Chat);
+        alt(&mut app, KeyCode::Char('c'));
+
+        assert_eq!(app.rail.query(Some("conv".into())), asked);
+        assert_eq!(asked.text.as_deref(), Some("port"));
+        assert_ne!(asked.sort, jod_core::cards::Sort::default());
+        assert!(asked.kind.is_some());
+        assert_ne!(asked.status, Some(jod_core::cards::Status::Open));
+    }
+
+    /// A `/` line being typed into owns the letters, or filtering for "stop"
+    /// would sort, toggle and dismiss on the way past.
+    #[test]
+    fn the_rails_filter_line_owns_the_letters_while_it_is_being_typed() {
+        let mut app = with_cards();
+        alt(&mut app, KeyCode::Char('c'));
+        press(&mut app, KeyCode::Char('/'));
+        type_line(&mut app, "sqlite");
+        assert_eq!(app.rail.filter.as_deref(), Some("sqlite"));
+        assert_eq!(app.rail.stack_now(), jod_core::cards::Status::Open);
+        assert_eq!(app.input, "");
+    }
+
+    /// D2, end to end and against a real store: answering a card while a turn
+    /// is in flight records the answer, *queues* the delivery, and touches
+    /// nothing about the run. Ten answers during one turn all sit queued.
+    #[test]
+    fn answering_queues_the_answer_rather_than_interrupting_the_turn() {
+        let s = store();
+        let conversation = s
+            .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
+            .expect("a conversation")
+            .id;
+        let ids: Vec<i64> = (0..10)
+            .map(|n| {
+                s.raise_card(jod_core::cards::NewCard {
+                    conversation_id: conversation.clone(),
+                    title: format!("question {n}"),
+                    ..Default::default()
+                })
+                .expect("a card")
+                .id
+            })
+            .collect();
+
+        for id in &ids {
+            let said = answered_card(&s, *id, None, Some("yes"));
+            assert!(said.contains("queued"), "{said}");
+        }
+
+        for id in &ids {
+            let card = s.card(*id).unwrap().expect("the card");
+            assert_eq!(card.status, jod_core::cards::Status::Answered);
+            assert_eq!(
+                card.delivery,
+                jod_core::cards::Delivery::Queued,
+                "answered is not delivered"
+            );
+        }
+        assert_eq!(
+            s.pending_for(&conversation).unwrap().len(),
+            10,
+            "ten answers are ten queued deliveries, waiting for one turn boundary"
+        );
+    }
+
+    /// Dismissing queues nothing. A dismissal the agent heard would be
+    /// indistinguishable from an answer, and it would act on a decision nobody
+    /// made.
+    #[test]
+    fn dismissing_tells_the_agent_nothing_at_all() {
+        let s = store();
+        let conversation = s
+            .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
+            .expect("a conversation")
+            .id;
+        let card = s
+            .raise_card(jod_core::cards::NewCard {
+                conversation_id: conversation.clone(),
+                title: "shall I rename the column?".into(),
+                ..Default::default()
+            })
+            .expect("a card");
+        s.dismiss_card(card.id).expect("dismissing");
+        assert!(s.pending_for(&conversation).unwrap().is_empty());
+    }
+
+    /// A refusal from the store reaches the reader as a sentence rather than as
+    /// silence — answering twice is refused, and the second press must say why
+    /// rather than looking like a key that stopped working.
+    #[test]
+    fn a_refused_answer_says_why() {
+        let s = store();
+        let conversation = s
+            .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
+            .expect("a conversation")
+            .id;
+        let card = s
+            .raise_card(jod_core::cards::NewCard {
+                conversation_id: conversation,
+                title: "which port?".into(),
+                ..Default::default()
+            })
+            .expect("a card");
+        answered_card(&s, card.id, None, Some("8080"));
+        let again = answered_card(&s, card.id, None, Some("3000"));
+        assert!(again.contains("not answered"), "{again}");
+        assert!(again.contains("already"), "{again}");
+    }
+
+    // ---- the `@` picker ----
+
+    fn with_a_root() -> App {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.roots = vec![jod_core::roots::Root {
+            id: 1,
+            conversation_id: "conv".into(),
+            path: PathBuf::from("/home/reljod/repo/jod"),
+            writable: false,
+            position: 0,
+            origin: jod_core::roots::Origin::Human,
+            added_at_ms: 0,
+        }];
+        app.candidates = vec![Arc::new(vec![
+            "cli/src/tui/mod.rs".to_string(),
+            "core/src/rank.rs".to_string(),
+        ])];
+        app
+    }
+
+    #[test]
+    fn typing_at_opens_the_picker_and_every_keystroke_re_ranks_it() {
+        let mut app = with_a_root();
+        type_line(&mut app, "look at @");
+        assert!(app.mention.is_some(), "the sign opens it");
+
+        type_line(&mut app, "rank");
+        let popup = app.mention.as_ref().expect("still open");
+        assert_eq!(popup.query, "rank");
+        assert_eq!(
+            popup.rows[0].path, "core/src/rank.rs",
+            "ranked, not filtered"
+        );
+        assert!(
+            !popup.rows[0].positions.is_empty(),
+            "and it says which characters matched"
+        );
+    }
+
+    /// D1's fourth requirement, and the one people notice: a picker that wipes
+    /// the line when you change your mind is a picker you stop opening.
+    #[test]
+    fn esc_closes_the_picker_and_leaves_what_you_typed_alone() {
+        let mut app = with_a_root();
+        type_line(&mut app, "look at @rank");
+        press(&mut app, KeyCode::Esc);
+        assert!(app.mention.is_none());
+        assert_eq!(app.input, "look at @rank");
+    }
+
+    #[test]
+    fn enter_puts_the_chosen_path_into_the_line() {
+        let mut app = with_a_root();
+        type_line(&mut app, "read @rank");
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.input, "read @core/src/rank.rs ");
+        assert_eq!(app.cursor, app.input.len());
+        assert!(app.mention.is_none());
+    }
+
+    /// With several roots the inserted path says which one it is from, because
+    /// `src/main.rs` names two files when a session can see two repositories.
+    #[test]
+    fn several_roots_insert_a_root_qualified_path() {
+        let mut app = with_a_root();
+        app.roots.push(jod_core::roots::Root {
+            id: 2,
+            conversation_id: "conv".into(),
+            path: PathBuf::from("/home/reljod/repo/notes"),
+            writable: false,
+            position: 1,
+            origin: jod_core::roots::Origin::Human,
+            added_at_ms: 0,
+        });
+        app.candidates.push(Arc::new(vec!["rank.md".to_string()]));
+        type_line(&mut app, "read @rank.md");
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.input, "read @notes/rank.md ");
+    }
+
+    /// E1.S3 in one line: with no roots it says so and accepts nothing. `⏎`
+    /// must not fall through and send the half-written line either.
+    #[test]
+    fn with_no_roots_the_picker_accepts_nothing_and_sends_nothing() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        type_line(&mut app, "read @main");
+        let popup = app.mention.as_ref().expect("the popup is up");
+        assert!(!popup.rooted);
+        assert!(popup.rows.is_empty());
+
+        assert_eq!(press(&mut app, KeyCode::Enter), None, "nothing is sent");
+        assert_eq!(app.input, "read @main", "and nothing is inserted");
+    }
+
+    /// A mention is a word, so whitespace ends it — otherwise the popup stays
+    /// up ranking the rest of the sentence.
+    #[test]
+    fn a_space_ends_the_mention() {
+        let mut app = with_a_root();
+        type_line(&mut app, "@rank and");
+        assert!(app.mention.is_none());
+    }
+
+    /// Backspacing over the sign closes it, which is the other way out and the
+    /// one people find by accident.
+    #[test]
+    fn backspacing_over_the_sign_closes_the_picker() {
+        let mut app = with_a_root();
+        type_line(&mut app, "@r");
+        assert!(app.mention.is_some());
+        press(&mut app, KeyCode::Backspace);
+        press(&mut app, KeyCode::Backspace);
+        assert!(app.mention.is_none());
+        assert_eq!(app.input, "");
     }
 }

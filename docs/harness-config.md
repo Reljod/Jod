@@ -105,6 +105,37 @@ AGY's stream has no reasoning message type at all, only `agent_response` and
 `tool` steps, so there is nothing to show there and Jod does not pretend
 otherwise.
 
+## Directories and commands: what was measured
+
+Two things a conversation needs from a harness — the directories it may reach
+beyond its working directory, and whether it will expand a repository's own
+slash commands — differ enough between the three that Jod measured them against
+the real binaries rather than reading their documentation. The full write-up,
+with every command run and its actual output, is
+[`harness-support.md`](harness-support.md). The short version:
+
+| Harness | Extra directories | `/name` in a print-mode prompt |
+| --- | --- | --- |
+| Claude Code | `--add-dir`, repeatable | Expands — commands and skills both |
+| OpenCode | `--dir`, exactly one; a second aborts the run | Does **not** expand; `run --command <name>` does |
+| AGY | `--add-dir`, repeatable | Expands its skills; unknown names are refused |
+
+Two consequences you can see from the outside.
+
+**An OpenCode conversation's extra roots do not reach the binary.** Its one
+directory flag holds the working directory, and a second one crashes the process
+outright, so Jod passes the roots as prose in the run's preamble instead of
+pretending to have granted them. The agent can still read those directories; it
+simply has not been handed them. Under Claude Code and AGY each root arrives as
+its own `--add-dir`.
+
+**Roots are not a sandbox, under any of the three.** Passing a directory puts it
+in the agent's context and in whatever allowlist the harness keeps. Withholding
+one does not stop the agent reading it — measured directly, and worth stating
+here because the palette's wording could otherwise be read as a permission
+boundary. If you need a real boundary, it has to come from the machine: a
+container, a user account, filesystem permissions. Not from this list.
+
 ## Terminal configuration: Option on macOS
 
 Jod's global chords are on Alt — `Alt-K` for the workspace menu, `Alt-B` to

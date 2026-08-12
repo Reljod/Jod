@@ -22,6 +22,9 @@ use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use jod_core::cards::{Card, Query};
+use jod_core::rank;
+use jod_core::roots::Root;
 use jod_core::schedule::{
     Fire, FireOutcome, Goal, GoalState as StoredGoalState, Schedule,
     ScheduleState as StoredScheduleState,
@@ -1341,6 +1344,53 @@ pub fn tasks(jod: &Arc<Jod>, team: Option<&str>) -> Vec<TaskRow> {
         .iter()
         .flat_map(|t| store.team_tasks(t).unwrap_or_default())
         .map(task_row)
+        .collect()
+}
+
+// ---- the decision rail, and the `@` picker ------------------------------
+
+/// The cards the rail is showing.
+///
+/// The whole filter travels as a [`Query`] rather than being applied here,
+/// which is the rule E2.S5 sets: the text filter is full-text search through
+/// the same index `jod card ls` and the MCP tool go through, so a card found in
+/// the terminal is the card found on a phone. A filter re-implemented in Rust
+/// would drift from those two on the first keystroke.
+pub fn cards(jod: &Arc<Jod>, query: &Query) -> Vec<Card> {
+    match jod.store() {
+        Some(store) => store.cards(query).unwrap_or_default(),
+        None => Vec::new(),
+    }
+}
+
+/// The directories a conversation may work in, in the user's own order.
+///
+/// Empty with no conversation *and* empty with no roots, which are the same
+/// thing to the picker: both mean there is nothing to search, and E1.S3 says
+/// the popup must say so rather than fall back to the process's own directory.
+pub fn roots(jod: &Arc<Jod>, conversation: Option<&str>) -> Vec<Root> {
+    let (Some(store), Some(conversation)) = (jod.store(), conversation) else {
+        return Vec::new();
+    };
+    store.roots(conversation).unwrap_or_default()
+}
+
+/// Every root's candidate paths, positionally aligned with `roots`.
+///
+/// Loaded on the tick rather than when `@` is pressed. The enumeration is
+/// cached inside [`rank::candidates_shared`] with a short TTL, so this is
+/// usually a lock and a pointer copy — but *usually* is not a guarantee, and
+/// the one call that misses the cache walks a repository. Doing that from the
+/// key handler would stall the keystroke that opened the popup; doing it here
+/// costs a frame of a background refresh instead.
+///
+/// A root that cannot be read contributes an empty list rather than failing the
+/// lot: a conversation with two roots and one unmounted disk should still be
+/// able to mention a file in the other.
+pub fn candidates(roots: &[Root]) -> Vec<Arc<Vec<String>>> {
+    roots
+        .iter()
+        .map(|root| rank::candidates_shared(&root.path).unwrap_or_default())
         .collect()
 }
 

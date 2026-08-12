@@ -15,7 +15,12 @@ use super::data::{
 };
 use super::delivery::Verdict;
 use super::graph::GraphView;
+use super::mention::Mention;
+use super::rail::RailState;
 use super::workspace::{matches, ListState, Workspace};
+use jod_core::cards::Card;
+use jod_core::roots::Root;
+use std::sync::Arc;
 
 /// One line in the transcript, tagged with what produced it so the renderer can
 /// style it without re-inspecting the event.
@@ -102,6 +107,16 @@ pub enum PromptIntent {
     /// left. Without it those branches are listed, numbered, and unreachable,
     /// which is a worse state than not listing them at all.
     Branch,
+    /// Answer a card in prose rather than by picking one of its options.
+    ///
+    /// Carries the card id rather than reading it off the rail's cursor, which
+    /// is the one place here that departs from the "an overlay owns the
+    /// keyboard, so the selection cannot have moved" rule that `confirmed` and
+    /// [`PromptIntent::Branch`] rely on. It has to: the rail re-queries on the
+    /// tick *underneath* the prompt, so an answer that landed on whatever card
+    /// had sorted to the cursor by the time `⏎` was pressed would be an answer
+    /// given to the wrong agent.
+    AnswerCard(i64),
 }
 
 impl Overlay {
@@ -260,6 +275,31 @@ pub struct App {
     /// without offering a way to see it is asking to be trusted about work it
     /// never shows.
     pub jobs: Vec<Job>,
+
+    // ---- the decision rail, and the `@` picker --------------------------
+    /// The conversation the rail and the `@` picker belong to.
+    ///
+    /// Kept here rather than derived at each use because both need it and
+    /// neither may do I/O: the loop works it out — the conversation the chat
+    /// box is bound to, or the pinned main chat when it is bound to nothing —
+    /// and writes it down.
+    pub conversation: Option<String>,
+    /// The cards the rail is showing, already filtered and ordered by the
+    /// store. Refreshed on the tick, off the render path, so `draw()` stays a
+    /// pure function of state.
+    pub cards: Vec<Card>,
+    pub rail: RailState,
+    /// The conversation's roots, in the user's own order. The first is the one
+    /// an unqualified mention resolves against.
+    pub roots: Vec<Root>,
+    /// Every root's candidate paths, positionally aligned with `roots`.
+    ///
+    /// Shared rather than owned: a hundred thousand paths is a few megabytes,
+    /// and `@` re-ranks on every keystroke. `Arc` is what makes that a pointer
+    /// copy rather than a stall — see [`jod_core::rank::candidates_shared`].
+    pub candidates: Vec<Arc<Vec<String>>>,
+    /// The `@` popup, while it is up.
+    pub mention: Option<Mention>,
 }
 
 /// One background shell this console started.
@@ -485,7 +525,7 @@ fn tool_detail(input: &serde_json::Value) -> Option<String> {
 }
 
 /// Collapse to one line and truncate, so a payload cannot own the transcript.
-fn one_line(s: &str, max: usize) -> String {
+pub fn one_line(s: &str, max: usize) -> String {
     let flat = s.split_whitespace().collect::<Vec<_>>().join(" ");
     if flat.chars().count() <= max {
         return flat;
@@ -627,7 +667,114 @@ impl App {
             panel: false,
             context_tokens: 0,
             jobs: Vec::new(),
+            conversation: None,
+            cards: Vec::new(),
+            rail: RailState::default(),
+            roots: Vec::new(),
+            candidates: Vec::new(),
+            mention: None,
         }
+    }
+
+    // ---- the decision rail ----------------------------------------------
+
+    /// The cards on screen, by id, in the order they are drawn. This is what
+    /// the rail's cursor moves over.
+    pub fn card_ids(&self) -> Vec<i64> {
+        self.cards.iter().map(|c| c.id).collect()
+    }
+
+    pub fn selected_card(&self) -> Option<&Card> {
+        let id = self.rail.selected?;
+        self.cards.iter().find(|c| c.id == id)
+    }
+
+    /// Keep the rail's cursor on a card that still exists.
+    ///
+    /// Separate from [`App::reconcile`], which walks the workspaces: the rail
+    /// is drawn beside all of them and refreshes on its own query, so it is
+    /// reconciled whenever *its* cards change rather than whenever a list does.
+    pub fn reconcile_rail(&mut self) {
+        let ids = self.card_ids();
+        self.rail.reconcile(&ids);
+    }
+
+    // ---- the `@` picker --------------------------------------------------
+
+    /// Open the popup for an `@` that has just been typed.
+    ///
+    /// `at` is the byte index of the `@` itself, which is the cursor *before*
+    /// the character was inserted — the popup replaces the sign along with the
+    /// query, so it has to know where the sign is.
+    pub fn open_mention(&mut self, at: usize) {
+        let mut popup = Mention::new(at);
+        popup.refresh(&self.roots, &self.candidates);
+        self.mention = Some(popup);
+    }
+
+    /// Re-derive the popup from the line as it now stands, closing it if the
+    /// text no longer supports one.
+    ///
+    /// Derived rather than tracked, because every edit key would otherwise have
+    /// to remember to keep the popup in step — and the one that forgot would
+    /// leave a popup ranking a query the line no longer contains. The rule is
+    /// that a mention runs from its `@` to the cursor and holds no whitespace;
+    /// backspacing over the `@`, or moving the cursor before it, ends it.
+    pub fn sync_mention(&mut self) {
+        let Some(popup) = &self.mention else {
+            return;
+        };
+        let at = popup.at;
+        let ended = at >= self.cursor
+            || !self.input.is_char_boundary(at)
+            || self.input[at..].chars().next() != Some('@')
+            || self.input[at + 1..self.cursor]
+                .chars()
+                .any(char::is_whitespace);
+        if ended {
+            self.mention = None;
+            return;
+        }
+        let query = self.input[at + 1..self.cursor].to_string();
+        let Some(popup) = &mut self.mention else {
+            return;
+        };
+        if popup.query == query {
+            return;
+        }
+        popup.query = query;
+        let (roots, candidates) = (self.roots.clone(), self.candidates.clone());
+        if let Some(popup) = &mut self.mention {
+            popup.refresh(&roots, &candidates);
+        }
+    }
+
+    /// Put the highlighted path into the line, replacing the `@` and the query.
+    ///
+    /// A trailing space is added because a mention is a word in a sentence and
+    /// the next thing typed is the rest of it. Answers `false` when there was
+    /// nothing to accept — which is what zero roots means, per E1.S3.
+    pub fn accept_mention(&mut self) -> bool {
+        let Some(popup) = &self.mention else {
+            return false;
+        };
+        let Some(row) = popup.acceptable() else {
+            return false;
+        };
+        let span = popup.span();
+        let inserted = format!("@{} ", row.insertion());
+        // Clamped rather than trusted: the span is derived from the line, but
+        // an edit key that landed between the derivation and this call would
+        // otherwise panic on a slice that is no longer inside the string.
+        let end = span.end.min(self.input.len());
+        if span.start > end || !self.input.is_char_boundary(span.start) {
+            self.mention = None;
+            return false;
+        }
+        self.input.replace_range(span.start..end, &inserted);
+        self.cursor = span.start + inserted.len();
+        self.mention = None;
+        true
     }
 
     /// Move to the next permission mode, and say what happened.

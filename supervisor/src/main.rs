@@ -17,13 +17,21 @@
 //! It reports failure loudly. A run that could not start, could not be parsed,
 //! or was killed all end with a terminal event and a recorded status, because a
 //! run that simply stops being mentioned looks exactly like one that succeeded.
+//!
+//! It is also the only process that ever holds a secret's value. It reads the
+//! value out of its owner-only file, puts it in the child's environment, and
+//! scrubs it back out of everything the child prints — see [`inject`]. That
+//! works only because this one process sits on both sides of the harness at
+//! once; nothing upstream of it, and nothing downstream, sees the value at all.
 
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
 
 use jod_core::event::{AgentEnvelope, AgentEvent};
+use jod_core::redact::Scrubber;
 use jod_core::runner::SpawnPlan;
+use jod_core::secrets::read_secret_value;
 use jod_core::service::AgentStatus;
 use jod_core::store::Store;
 
@@ -64,9 +72,17 @@ async fn run(plan_path: &PathBuf) -> Result<(), String> {
     let mut writer = EventWriter::new(plan.run_id.clone(), store.clone());
     let mut harness = plan.harness.build();
 
+    // Resolved before the child exists, because both halves of the promise are
+    // built from the same list: what goes into the environment is exactly what
+    // comes back out of the output.
+    let injected = inject(&store, &plan, &mut writer);
+    let scrubber = Scrubber::new(injected.iter().map(|(_, value)| value.clone()));
+
     let child = Command::new(&plan.program)
         .args(&plan.args)
         .current_dir(&plan.cwd)
+        .envs(plan.env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+        .envs(injected.iter().map(|(k, v)| (k.as_str(), v.as_str())))
         // Nothing may read a terminal: this process has none, and a harness
         // that stops to ask a question would hang for an answer that can never
         // come. `agy --conversation` does exactly that on a resumed run.
@@ -74,6 +90,10 @@ async fn run(plan_path: &PathBuf) -> Result<(), String> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn();
+
+    // The child has them now, and the scrubber has its own copies. Nothing else
+    // in this process needs the values, so it stops holding them.
+    drop(injected);
 
     let mut child = match child {
         Ok(c) => c,
@@ -118,6 +138,16 @@ async fn run(plan_path: &PathBuf) -> Result<(), String> {
 
             line = lines.recv() => match line {
                 Some(line) => {
+                    // Before the parser, not after. A value scrubbed after the
+                    // JSON is decoded has already passed through code that can
+                    // log, and `Raw` would carry the undecoded line verbatim
+                    // into the transcript. `is_empty` is the common case — no
+                    // secrets in play — and costs one branch.
+                    let line = if scrubber.is_empty() {
+                        line
+                    } else {
+                        scrubber.scrub(&line)
+                    };
                     for event in harness.parse_line(&line) {
                         if let AgentEvent::Started { session_id: Some(id), .. } = &event {
                             writer.set_session(id);
@@ -163,6 +193,52 @@ async fn run(plan_path: &PathBuf) -> Result<(), String> {
     });
 
     Ok(())
+}
+
+/// Turn the plan's secret *names* into environment pairs.
+///
+/// This is the only place in Jod that reads a secret's value, and it is the
+/// only place that can be: the plan on disk names secrets, the database records
+/// what exists, and the value itself lives in a `0600` file that
+/// [`read_secret_value`] refuses to open if its mode has widened. The pairs
+/// returned here go straight into the child's environment and into the
+/// scrubber, and nowhere else.
+///
+/// Applied *after* `plan.env`, so a secret always beats a plain variable of the
+/// same name. The alternative — last writer wins by list order — would make
+/// whether a credential arrived depend on the order two unrelated pieces of
+/// code appended to a vector.
+///
+/// **A name that will not resolve is not fatal.** A missing key blocks one
+/// test, not a session: the run proceeds without the variable, the reason is
+/// recorded as an event and in `supervisor.log`, and the agent is expected to
+/// end *blocked* rather than invent a credential. Killing the run here would
+/// instead lose everything it had already been asked to do.
+fn inject(store: &Store, plan: &SpawnPlan, writer: &mut EventWriter) -> Vec<(String, String)> {
+    let mut resolved = Vec::new();
+    for name in &plan.secrets {
+        let outcome = store
+            .secret_by_name(name)
+            .map_err(|e| format!("looking it up: {e}"))
+            .and_then(|meta| meta.ok_or_else(|| "no secret of that name is stored".to_string()))
+            .and_then(|meta| read_secret_value(&meta).map_err(|e| e.to_string()));
+
+        match outcome {
+            Ok(value) => resolved.push((name.clone(), value)),
+            Err(why) => {
+                // `why` is built from the store's and the reader's errors, both
+                // of which name paths and modes but never contents — a refusal
+                // that quoted the value would be the leak it exists to stop.
+                let message = format!(
+                    "secret `{name}` was not available and was not injected ({why}); \
+                     the run continues without it"
+                );
+                eprintln!("jod-run: {message}");
+                writer.emit(AgentEvent::Error { message });
+            }
+        }
+    }
+    resolved
 }
 
 /// How the harness ended.

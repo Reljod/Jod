@@ -60,11 +60,12 @@ pub trait Tick: Send + Sync {
 }
 
 impl Tick for Ticker {
-    /// Heartbeats first, then schedules, then goals, and all three every pass.
+    /// Heartbeats first, then schedules, then goals, then the mail — every step
+    /// every pass.
     ///
     /// Separate claims rather than one, because they are different contended
     /// resources — a process holding a goal must not thereby hold a schedule —
-    /// and a failure in one must not stop the other. A goal whose harness is
+    /// and a failure in one must not stop the others. A goal whose harness is
     /// wedged should not silently stop the nightly backup.
     ///
     /// **The sweep goes first, and the order is load-bearing.**
@@ -78,6 +79,12 @@ impl Tick for Ticker {
     /// A sweep that fails does not stop the pass. It watches runs that are
     /// already going; schedules that are due are a separate promise, and one
     /// unkillable process group must not become a scheduler that stopped.
+    ///
+    /// The mail is last and deliberately so: it resumes agents that are already
+    /// working, and nothing else in a tick waits on it. It is also the half
+    /// that turns the bus from something a person operates into something that
+    /// runs — without this call, a teammate's message sits in an inbox until
+    /// somebody types `jod team wake`.
     async fn tick(&self, now_ms: i64) -> Result<TickReport> {
         let swept = match self.tick_heartbeats(now_ms).await {
             Ok(report) => report,
@@ -88,15 +95,16 @@ impl Tick for Ticker {
         };
         let schedules = Ticker::tick(self, now_ms).await?;
         let goals = self.tick_goals(now_ms).await?;
+        let mail = self.tick_mail(now_ms).await?;
         Ok(TickReport {
-            claimed: schedules.claimed + goals.claimed,
-            started: schedules.started + goals.started,
-            held: schedules.held + goals.held,
+            claimed: schedules.claimed + goals.claimed + mail.claimed,
+            started: schedules.started + goals.started + mail.started,
+            held: schedules.held + goals.held + mail.held,
             // A reaped run is a failure that happened, and the daemon's own log
             // line is where a person finds out that anything did. Counting it
             // here rather than in a fourth field keeps `TickReport` meaning
             // "what went wrong this pass", which is what reads it.
-            failed: schedules.failed + goals.failed + swept.stopped,
+            failed: schedules.failed + goals.failed + mail.failed + swept.stopped,
         })
     }
 }

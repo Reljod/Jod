@@ -37,6 +37,7 @@ use crate::harness::ToolAccess;
 use crate::schedule::{Goal, GoalState, Schedule, ScheduleState};
 use crate::service::{default_cwd, AgentStatus, RunConversation};
 use crate::store::{NewFact, Origin, Store, DEFAULT_SCOPE};
+use crate::team::{Caller, Kind, Post, Sent};
 use crate::{HarnessKind, Jod, PermissionPolicy, Resume, SpawnRequest};
 
 /// The revision of MCP this server answers with when the client asks for one it
@@ -52,6 +53,25 @@ const SUPPORTED_PROTOCOLS: [&str; 3] = ["2024-11-05", "2025-03-26", PROTOCOL_VER
 /// every listing would be empty and `stop_agent` would claim every id is
 /// unknown. Matches what `jod ls` uses.
 const REHYDRATE: usize = 200;
+
+/// How long [`Tool::ask`] waits for a reply when nobody says otherwise.
+///
+/// Long enough for a peer to be woken by the next tick and take a turn — which
+/// is the shortest honest answer to "how long does a colleague take" — and
+/// short enough that a run blocked on a dead peer is stuck for two minutes
+/// rather than for ever. **There is deliberately no way to wait without a
+/// deadline**: A5 exists because an agent that can hang waiting for a peer can
+/// hang for ever, and that is how a fleet deadlocks.
+pub const ASK_DEADLINE_SECS: i64 = 120;
+
+/// The longest wait a caller may ask for. A cap rather than a default, because
+/// the argument is the model's and the bound is not.
+pub const MAX_ASK_DEADLINE_SECS: i64 = 600;
+
+/// How often a wait looks for its answer. Cheap — one indexed read of a local
+/// SQLite file — so this is about how quickly a reply is noticed, not about
+/// load.
+const ASK_POLL: std::time::Duration = std::time::Duration::from_millis(500);
 
 // JSON-RPC 2.0 error codes. Spelled out because a wrong one here reads to the
 // client as a different failure than the one that happened.
@@ -294,6 +314,96 @@ pub fn catalogue() -> Vec<Tool> {
                 &["subject"],
             ),
         },
+        // ---- the bus ------------------------------------------------------
+        //
+        // Reading is free; writing costs a peer a turn, which is money spent
+        // now — the same line `delegate` sits on. Note what does *not* appear
+        // in any schema below: who is sending. That comes from the run, and an
+        // agent that could name its own sender could send as anyone.
+        Tool {
+            name: "roster",
+            description:
+                "Who you can reach from here, with each one's role, harness, whether it is idle, \
+                 and how much mail it already has waiting. Read this before writing to a name: a \
+                 message to a name nobody answers to is a message nobody reads.",
+            needs: ToolAccess::ReadOnly,
+            schema: obj(json!({}), &[]),
+        },
+        Tool {
+            name: "read_messages",
+            description:
+                "Take everything waiting in your inbox. Each message comes back with its id and \
+                 thread, so you can reply into the conversation it belongs to. Messages are \
+                 handed over once — read them before asking a peer something they may already \
+                 have answered.",
+            needs: ToolAccess::ReadOnly,
+            schema: obj(json!({}), &[]),
+        },
+        Tool {
+            name: "send_message",
+            description:
+                "Send to one teammate by name, or to everyone here if you omit `to`. Returns as \
+                 soon as it is on the bus — the recipient reads it on its next turn, which Jod \
+                 starts for it. Questions, findings and handoffs belong here; ownership of code \
+                 does not — that is a lease or a branch, never a message saying you are editing \
+                 something.",
+            needs: ToolAccess::Delegate,
+            schema: obj(
+                json!({
+                    "to": text("Who to send it to, as the roster spells it. Omit to tell everybody."),
+                    "text": text("What to say.")
+                }),
+                &["text"],
+            ),
+        },
+        Tool {
+            name: "reply",
+            description:
+                "Answer a message you were sent, keeping it in the same thread. Prefer this to \
+                 send_message when you are answering: a thread is what makes an exchange readable \
+                 afterwards and what the depth bound counts.",
+            needs: ToolAccess::Delegate,
+            schema: obj(
+                json!({
+                    "message_id": int("The message you are answering, as read_messages reported it."),
+                    "text": text("Your answer.")
+                }),
+                &["message_id", "text"],
+            ),
+        },
+        Tool {
+            name: "ask",
+            description:
+                "Send a question and wait for the answer, up to a deadline. Returns the reply, or \
+                 says plainly that none came — it never waits for ever, because the peer might be \
+                 dead. Costs a turn of theirs and blocks yours, so use send_message when you do \
+                 not need the answer to carry on.",
+            needs: ToolAccess::Delegate,
+            schema: obj(
+                json!({
+                    "to": text("Who to ask, as the roster spells it."),
+                    "text": text("The question."),
+                    "timeout_seconds": int("How long to wait. Default 120, capped at 600.")
+                }),
+                &["to", "text"],
+            ),
+        },
+        Tool {
+            name: "handoff",
+            description:
+                "Give a task to somebody else: moves ownership on the board and tells them, in \
+                 one call. Use this rather than asking them to pick it up, so who owns it never \
+                 depends on both of you having read the same sentence.",
+            needs: ToolAccess::Delegate,
+            schema: obj(
+                json!({
+                    "to": text("Who is taking it over."),
+                    "text": text("What they need to know to carry it on."),
+                    "task_id": text("The task on the board to move. Omit to hand over something that is not a task.")
+                }),
+                &["to", "text"],
+            ),
+        },
         Tool {
             name: "conversations",
             description: "Conversations Jod owns, newest first.",
@@ -415,6 +525,16 @@ pub struct Server {
     jod: Arc<Jod>,
     access: ToolAccess,
     max_permission: PermissionPolicy,
+    /// Which run this server speaks as, worked out by [`identify`] from the
+    /// process group it is in.
+    ///
+    /// **This is sender identity, and it is why it lives on the server rather
+    /// than in any tool's arguments.** A server that belongs to a run answers
+    /// as that run's member and can answer as nothing else; one that belongs to
+    /// no run — a session somebody opened by hand — cannot send at all, which
+    /// is the honest refusal. There is deliberately no way to set it from a
+    /// tool call.
+    identity: Identity,
 }
 
 impl Server {
@@ -429,12 +549,39 @@ impl Server {
             jod,
             access: ToolAccess::ReadOnly,
             max_permission: PermissionPolicy::Ask,
+            identity: Identity::Unknown,
         }
     }
 
     pub fn with_access(mut self, access: ToolAccess) -> Self {
         self.access = access;
         self
+    }
+
+    /// Take the identity [`identify`] worked out.
+    ///
+    /// Set by whatever launched the server — never by anything the model can
+    /// reach. See [`Server::identity`].
+    pub fn as_identity(mut self, identity: Identity) -> Self {
+        self.identity = identity;
+        self
+    }
+
+    /// Speak as one run. The shorthand tests use, and the honest name for what
+    /// [`Server::as_identity`] does with an already-resolved run.
+    pub fn for_run(self, run_id: impl Into<String>) -> Self {
+        self.as_identity(Identity::Run(run_id.into()))
+    }
+
+    pub fn identity(&self) -> &Identity {
+        &self.identity
+    }
+
+    pub fn run(&self) -> Option<&str> {
+        match &self.identity {
+            Identity::Run(id) => Some(id),
+            _ => None,
+        }
     }
 
     /// The most permissive policy `delegate` may ask for.
@@ -492,6 +639,12 @@ impl Server {
             "related" => self.related(args),
             "conversations" => self.conversations(args),
             "conversation_search" => self.conversation_search(args),
+            "roster" => self.roster(),
+            "read_messages" => self.read_messages(),
+            "send_message" => self.send_message(args),
+            "reply" => self.reply(args),
+            "ask" => self.ask(args).await,
+            "handoff" => self.handoff(args),
             // Unreachable while the catalogue and this match agree, which is
             // what `every_advertised_tool_is_dispatchable` exists to hold.
             other => Err(ToolError::Unknown(other.to_string())),
@@ -905,6 +1058,371 @@ impl Server {
             .search_messages(&query, limit)
             .map_err(|e| ToolError::Refused(format!("could not search: {e}")))?;
         as_json(&hits)
+    }
+
+    // ---- the bus ----------------------------------------------------------
+
+    /// Which member is calling, resolved from the run and from nothing else.
+    ///
+    /// Both refusals are deliberate and different. A server with no run behind
+    /// it is a session somebody opened by hand: it may read Jod, but it cannot
+    /// be anybody's teammate, and pretending otherwise would mean letting the
+    /// caller say who it is. A run that belongs to no scope has nobody to talk
+    /// to, which is a fact about the fleet rather than about this call.
+    pub fn caller(&self) -> Result<Caller, ToolError> {
+        let run_id = match &self.identity {
+            Identity::Run(id) => id.as_str(),
+            Identity::Unknown => {
+                return Err(ToolError::Refused(
+                    "this session has no run behind it, so Jod cannot say who would be sending. \
+                     Messaging works from agents Jod started; a hand-started session can read but \
+                     not send."
+                        .into(),
+                ))
+            }
+            // Neither answer is preferred, on purpose. Two sources disagreeing
+            // about who this is means something is wrong upstream, and picking
+            // one would make a wrong sender permanent and silent.
+            Identity::Disputed { group, claimed } => {
+                return Err(ToolError::Refused(format!(
+                    "this server cannot say who it is: its process group belongs to {}, but its \
+                     environment claims run `{claimed}`. Nothing will be sent until they agree — \
+                     a message from the wrong sender is worse than no message.",
+                    match group {
+                        Some(id) => format!("run `{id}`"),
+                        None => "no run at all".to_string(),
+                    }
+                )))
+            }
+        };
+        self.store()?
+            .caller_for_run(run_id)
+            .map_err(|e| ToolError::Refused(format!("could not resolve who is calling: {e}")))?
+            .ok_or_else(|| {
+                ToolError::Refused(format!(
+                    "run `{run_id}` is not a member of any team or work, so there is nobody it \
+                     could be writing to. Teams are joined with `jod team join`."
+                ))
+            })
+    }
+
+    fn roster(&self) -> Result<String, ToolError> {
+        let caller = self.caller()?;
+        let who = self
+            .store()?
+            .roster(caller.scope, &caller.team, &caller.name)
+            .map_err(|e| ToolError::Refused(format!("could not read the roster: {e}")))?;
+        as_json(&json!({
+            "you": caller.name,
+            "scope": caller.scope,
+            "of": caller.team,
+            "members": who,
+        }))
+    }
+
+    fn read_messages(&self) -> Result<String, ToolError> {
+        let caller = self.caller()?;
+        let store = self.store()?;
+        // The existing single-transaction drain, unchanged. It is the reason
+        // the same instruction is never injected into two turns, and reusing it
+        // rather than writing a second one is the whole point.
+        let taken = store
+            .drain_inbox(&caller.team, &caller.name)
+            .map_err(|e| ToolError::Refused(format!("could not read your inbox: {e}")))?;
+        let ids: Vec<i64> = taken.iter().map(|m| m.id).collect();
+        store
+            .mark_mail_delivered(&ids)
+            .map_err(|e| ToolError::Refused(format!("could not mark your mail read: {e}")))?;
+        // Read back for the thread each message belongs to, which is what a
+        // reply needs and what the bare delivered message does not carry.
+        let envelopes = store
+            .envelopes(&ids)
+            .map_err(|e| ToolError::Refused(format!("could not read your inbox: {e}")))?;
+        as_json(&envelopes)
+    }
+
+    fn send_message(&self, args: &Value) -> Result<String, ToolError> {
+        let caller = self.caller()?;
+        let text = required_str(args, "text")?;
+        if text.trim().is_empty() {
+            return Err(ToolError::BadParams("`text` is empty".into()));
+        }
+        let to = opt_str(args, "to");
+        let mut post = Post::new(caller.scope, &caller.team, &caller.name, &text);
+        if let Some(to) = &to {
+            post = post.to(to);
+        }
+        self.post(&post)
+    }
+
+    fn reply(&self, args: &Value) -> Result<String, ToolError> {
+        let caller = self.caller()?;
+        let text = required_str(args, "text")?;
+        let message_id = opt_i64(args, "message_id")?
+            .ok_or_else(|| ToolError::BadParams("`message_id` is required".into()))?;
+        let store = self.store()?;
+        let answering = store
+            .envelope(message_id)
+            .map_err(|e| ToolError::Refused(format!("could not read message #{message_id}: {e}")))?
+            .ok_or_else(|| ToolError::Refused(format!("there is no message #{message_id}")))?;
+        // Replies go back to whoever sent it. Taken from the message rather
+        // than from an argument, so `reply` cannot be used to address a
+        // stranger under cover of a thread.
+        let to = answering.message.from.clone();
+        self.post(
+            &Post::new(caller.scope, &caller.team, &caller.name, &text)
+                .to(&to)
+                .replying_to(message_id),
+        )
+    }
+
+    async fn ask(&self, args: &Value) -> Result<String, ToolError> {
+        let caller = self.caller()?;
+        let to = required_str(args, "to")?;
+        let text = required_str(args, "text")?;
+        // Bounded whatever the caller asks for. A5 exists because an agent that
+        // can wait without a deadline is an agent that can hang for ever — the
+        // peer it is waiting on may be dead, and nothing would ever say so.
+        let seconds = opt_i64(args, "timeout_seconds")?
+            .unwrap_or(ASK_DEADLINE_SECS)
+            .clamp(1, MAX_ASK_DEADLINE_SECS);
+        let store = self.store()?;
+
+        let sent = store
+            .post(&Post::new(caller.scope, &caller.team, &caller.name, &text).to(&to))
+            .map_err(|e| ToolError::Refused(format!("could not send that: {e}")))?;
+        let Sent::Queued { ids, thread_id, .. } = &sent else {
+            return self.rendered(sent);
+        };
+
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_secs(seconds as u64);
+        loop {
+            let answer = store
+                .reply_to(ids)
+                .map_err(|e| ToolError::Refused(format!("could not watch for a reply: {e}")))?;
+            if let Some(answer) = answer {
+                // Taken off the bus here, or it would be delivered again as a
+                // synthetic turn later and the answer would arrive twice.
+                store
+                    .mark_mail_delivered(&[answer.message.id])
+                    .map_err(|e| ToolError::Refused(format!("could not settle the reply: {e}")))?;
+                return as_json(&json!({
+                    "replied": true,
+                    "from": answer.message.from,
+                    "text": answer.message.text,
+                    "message_id": answer.message.id,
+                    "thread_id": answer.thread_id,
+                }));
+            }
+            if std::time::Instant::now() >= deadline {
+                // An answer, not an error: the asker is told plainly and
+                // decides for itself what to do about the silence.
+                return as_json(&json!({
+                    "replied": false,
+                    "waited_seconds": seconds,
+                    "thread_id": thread_id,
+                    "note": format!(
+                        "no reply from `{to}` within {seconds}s. It may be busy, or holding no \
+                         session to resume — the roster says which. Carry on without it, or ask \
+                         again later; the question is on the bus either way."
+                    ),
+                }));
+            }
+            tokio::time::sleep(ASK_POLL).await;
+        }
+    }
+
+    fn handoff(&self, args: &Value) -> Result<String, ToolError> {
+        let caller = self.caller()?;
+        let to = required_str(args, "to")?;
+        let text = required_str(args, "text")?;
+        let task_id = opt_str(args, "task_id");
+        let store = self.store()?;
+
+        // The board first, and the message second. Ownership is the claim, not
+        // the telling — so if the message is refused by a bound, the task has
+        // still moved and the record still says who holds it.
+        let mut moved = None;
+        if let Some(task) = &task_id {
+            let ok = store
+                .hand_over_task(task, &caller.name, &to)
+                .map_err(|e| ToolError::Refused(format!("could not move `{task}`: {e}")))?;
+            if !ok {
+                return Err(ToolError::Refused(format!(
+                    "`{task}` is not yours to hand over — it is either somebody else's or not on \
+                     the board"
+                )));
+            }
+            moved = Some(task.clone());
+        }
+        let body = match &moved {
+            Some(task) => format!("handing `{task}` to you.\n\n{text}"),
+            None => text.clone(),
+        };
+        let sent = store
+            .post(
+                &Post::new(caller.scope, &caller.team, &caller.name, &body)
+                    .to(&to)
+                    .of_kind(Kind::Handoff),
+            )
+            .map_err(|e| ToolError::Refused(format!("could not send the handoff: {e}")))?;
+        match &sent {
+            Sent::Queued { ids, thread_id, .. } => as_json(&json!({
+                "handed_over": moved,
+                "to": to,
+                "message_id": ids.first(),
+                "thread_id": thread_id,
+            })),
+            _ => {
+                let rendered = self.rendered(sent);
+                match moved {
+                    // Said plainly, because the two halves ended differently
+                    // and a caller told only about the message would believe
+                    // the task did not move.
+                    Some(task) => Err(ToolError::Refused(format!(
+                        "`{task}` is now `{to}`'s on the board, but they were not told: {}",
+                        rendered.err().map(|e| refusal_text(&e)).unwrap_or_default()
+                    ))),
+                    None => rendered,
+                }
+            }
+        }
+    }
+
+    /// Put one message on the bus and answer for it.
+    fn post(&self, post: &Post) -> Result<String, ToolError> {
+        let sent = self
+            .store()?
+            .post(post)
+            .map_err(|e| ToolError::Refused(format!("could not send that: {e}")))?;
+        self.rendered(sent)
+    }
+
+    /// How every ending of a send reads to the agent that attempted it.
+    ///
+    /// A bound and an undeliverable address both come back as refusals rather
+    /// than as errors, because they are answers: the model should read them and
+    /// choose differently, which is exactly what it cannot do with a protocol
+    /// error.
+    fn rendered(&self, sent: Sent) -> Result<String, ToolError> {
+        match sent {
+            Sent::Queued {
+                ids,
+                thread_id,
+                depth,
+                recipients,
+            } => as_json(&json!({
+                "sent": true,
+                "message_ids": ids,
+                "thread_id": thread_id,
+                "depth": depth,
+                "to": recipients,
+            })),
+            Sent::Bounded {
+                bound,
+                limit,
+                reached,
+                thread_id,
+                ..
+            } => {
+                // Logged as well as answered: a thread that stopped is a thing
+                // a person should be able to find afterwards without reading
+                // the transcript of either agent.
+                //
+                // TODO(E2 cards): raise this as a card — "these two have
+                // exchanged N messages without closing a task; continue,
+                // redirect, or stop?" — once the card store lands. The card is
+                // the escalation surface the spec names; until it exists this
+                // line and the paused thread state are how a human finds out.
+                eprintln!(
+                    "[jod/mcp] thread {thread_id} paused: {} bound of {limit} reached at {reached}",
+                    bound.as_str()
+                );
+                Err(ToolError::Refused(format!(
+                    "this thread has hit its {} bound of {limit} and is paused — the work and \
+                     both sessions carry on, but this exchange needs a person to say whether to \
+                     continue. Say what you have concluded so far rather than asking again.",
+                    bound.as_str()
+                )))
+            }
+            Sent::Undeliverable { detail, .. } => Err(ToolError::Refused(detail)),
+        }
+    }
+}
+
+/// Who this MCP server is entitled to speak as.
+///
+/// Three answers rather than two, because "we cannot tell" and "we are being
+/// told two different things" are different situations and only one of them is
+/// ordinary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Identity {
+    /// The process group belongs to no run at all. A session somebody opened by
+    /// hand: it may read Jod and it is nobody's teammate.
+    Unknown,
+    /// Resolved from the process group this server is in.
+    Run(String),
+    /// The environment claims one run and the process group says another.
+    /// Nothing is guessed — see [`identify`].
+    Disputed {
+        /// What the kernel says, which may be nothing.
+        group: Option<String>,
+        /// What the environment claimed.
+        claimed: String,
+    },
+}
+
+/// Work out which run this MCP server belongs to.
+///
+/// **Read this before simplifying it.** The obvious version of this function
+/// takes the run id as an argument, and that version is wrong in a way that is
+/// invisible until it matters: sender identity is the one thing an agent must
+/// not be able to choose, and an argument — or a flag, or an environment
+/// variable it can reach — is only as trustworthy as whatever set it. A model
+/// that can write its own `from` can send as anyone on the team.
+///
+/// So the authority here is the **process group**, and nothing else is. The
+/// supervisor `setsid`s itself into its own session and leads that group; the
+/// harness runs in it, and so does every MCP server the harness starts. A
+/// process cannot move itself into another session's group — that is a kernel
+/// rule, not a convention — so the group id *is* the run, and no amount of
+/// arguing changes which group a process is in.
+///
+/// [`crate::mcp_config::RUN_ID_ENV`] is **enrichment, never authority**. It is
+/// pinned by whatever launched the run, before the model existed, and it is
+/// useful for exactly one case: a group the store has no row for. Where both
+/// answer and they **disagree**, this returns [`Identity::Disputed`] and every
+/// tool that needs a sender refuses. Quietly preferring either one would turn a
+/// misconfiguration — or an attempt at one — into a wrong answer that keeps
+/// working, which is the failure mode worth spending a refusal on.
+pub fn identify(store: &Store, claimed: Option<&str>) -> Identity {
+    // SAFETY: `getpgrp` takes no arguments, touches no memory and cannot fail.
+    let pgid = unsafe { libc::getpgrp() };
+    let group = if pgid > 0 {
+        store.run_by_pgid(pgid as u32).ok().flatten()
+    } else {
+        None
+    };
+    let claimed = claimed.map(str::trim).filter(|c| !c.is_empty());
+    match (group, claimed) {
+        (Some(group), None) => Identity::Run(group),
+        (Some(group), Some(claimed)) if group == claimed => Identity::Run(group),
+        (group, Some(claimed)) => Identity::Disputed {
+            group,
+            claimed: claimed.to_string(),
+        },
+        (None, None) => Identity::Unknown,
+    }
+}
+
+/// The words inside a refusal, for a caller that has to quote one.
+fn refusal_text(e: &ToolError) -> String {
+    match e {
+        ToolError::Unknown(s)
+        | ToolError::Forbidden(s)
+        | ToolError::BadParams(s)
+        | ToolError::Refused(s) => s.clone(),
     }
 }
 
@@ -1331,7 +1849,7 @@ mod tests {
     /// agree with any mistake made there, and the whole question is whether the
     /// line falls where the design says it does — reading is free and visible,
     /// delegating spends money now, scheduling spends it at 2am for ever.
-    const READ_ONLY_TOOLS: [&str; 7] = [
+    const READ_ONLY_TOOLS: [&str; 9] = [
         "list_agents",
         "schedule_list",
         "goal_list",
@@ -1339,8 +1857,23 @@ mod tests {
         "related",
         "conversations",
         "conversation_search",
+        // Reading your own inbox and looking at who is here costs nothing and
+        // hides nothing.
+        "roster",
+        "read_messages",
     ];
-    const DELEGATE_TOOLS: [&str; 3] = ["delegate", "continue_agent", "stop_agent"];
+    // Writing to a peer spends a turn of theirs, which is money now — the same
+    // line `delegate` sits on. What stops it running away is not the access
+    // level but the bounds in `team`: depth, budget, and a deadline on a wait.
+    const DELEGATE_TOOLS: [&str; 7] = [
+        "delegate",
+        "continue_agent",
+        "stop_agent",
+        "send_message",
+        "reply",
+        "ask",
+        "handoff",
+    ];
     const ORCHESTRATE_TOOLS: [&str; 5] = [
         "schedule_create",
         "schedule_pause",
@@ -1800,6 +2333,420 @@ mod tests {
         assert_eq!(answers[0]["id"], 1);
         assert_eq!(answers[1]["id"], 2);
         assert!(!answers[1]["result"]["tools"].as_array().unwrap().is_empty());
+    }
+
+    // ---- the bus ---------------------------------------------------------
+
+    use crate::team::{MailState, Scope};
+
+    /// A two-member team, and a server answering as `lead`'s run.
+    fn crew(access: ToolAccess) -> (Arc<Store>, Server) {
+        let store = Arc::new(Store::in_memory().unwrap());
+        for (name, run) in [("lead", "run-lead"), ("scout", "run-scout")] {
+            store
+                .join_scope(Scope::Team, "crew", name, HarnessKind::ClaudeCode, "", None)
+                .unwrap();
+            store
+                .bind_member("crew", name, Some(run), Some("ses-1"))
+                .unwrap();
+        }
+        let server = Server::new(Jod::with_store(store.clone()))
+            .with_access(access)
+            .for_run("run-lead");
+        (store, server)
+    }
+
+    /// The property the whole design of sender identity exists for.
+    #[tokio::test]
+    async fn a_message_is_sent_as_the_run_that_is_calling_whatever_the_arguments_say() {
+        let (store, server) = crew(ToolAccess::Delegate);
+        call(
+            &server,
+            "send_message",
+            // Every spelling an agent might try. None of them is read: there is
+            // no argument for the sender, and this is the reason there is not.
+            json!({
+                "to": "scout",
+                "text": "look at the parser",
+                "from": "reljod",
+                "sender": "reljod",
+                "as": "reljod"
+            }),
+        )
+        .await;
+        let inbox = store.team_unread("crew", "scout").unwrap();
+        assert_eq!(inbox.len(), 1);
+        assert_eq!(
+            inbox[0].from, "lead",
+            "an agent named its own sender and Jod believed it"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_session_with_no_run_behind_it_cannot_send_as_anybody() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        store
+            .join_scope(Scope::Team, "crew", "lead", HarnessKind::ClaudeCode, "", None)
+            .unwrap();
+        // No `for_run`: this is a session somebody opened by hand.
+        let server = Server::new(Jod::with_store(store)).with_access(ToolAccess::Delegate);
+        let answer = call(&server, "send_message", json!({ "to": "lead", "text": "hi" })).await;
+        assert!(is_error_result(&answer), "{answer}");
+        assert!(said(&answer).contains("no run behind it"), "{}", said(&answer));
+    }
+
+    /// The refusal that keeps a misconfiguration from becoming a wrong sender
+    /// that works. Two sources disagreeing is a fault, not a choice.
+    #[tokio::test]
+    async fn a_claimed_run_that_disagrees_with_the_process_group_sends_nothing() {
+        let (store, _) = crew(ToolAccess::Delegate);
+        let server = Server::new(Jod::with_store(store.clone()))
+            .with_access(ToolAccess::Delegate)
+            .as_identity(Identity::Disputed {
+                group: Some("run-lead".into()),
+                claimed: "run-scout".into(),
+            });
+        let answer = call(
+            &server,
+            "send_message",
+            json!({ "to": "scout", "text": "trust me" }),
+        )
+        .await;
+        assert!(is_error_result(&answer), "{answer}");
+        let why = said(&answer);
+        assert!(why.contains("run-lead") && why.contains("run-scout"), "{why}");
+        assert!(
+            store.team_unread("crew", "scout").unwrap().is_empty(),
+            "a server that cannot say who it is sent a message anyway"
+        );
+    }
+
+    /// The process group is the authority; the environment only ever agrees
+    /// with it or is refused. Asserted on `identify` itself, because this is
+    /// the function somebody will later be tempted to replace with a parameter.
+    #[test]
+    fn identity_prefers_the_process_group_and_refuses_to_pick_a_winner() {
+        let store = Store::in_memory().unwrap();
+        // This test process is in some process group the store knows nothing
+        // about, which is exactly the hand-started case.
+        assert_eq!(identify(&store, None), Identity::Unknown);
+        assert_eq!(
+            identify(&store, Some("run-claimed")),
+            Identity::Disputed {
+                group: None,
+                claimed: "run-claimed".into()
+            },
+            "an environment claim with no group to agree with is not identity on its own"
+        );
+        assert_eq!(
+            identify(&store, Some("   ")),
+            Identity::Unknown,
+            "an empty claim is not a claim"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_run_that_is_nobodys_teammate_is_told_so_rather_than_given_a_bus() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let server = Server::new(Jod::with_store(store))
+            .with_access(ToolAccess::Delegate)
+            .for_run("run-alone");
+        let answer = call(&server, "roster", json!({})).await;
+        assert!(is_error_result(&answer), "{answer}");
+        assert!(said(&answer).contains("not a member"), "{}", said(&answer));
+    }
+
+    #[tokio::test]
+    async fn reading_the_inbox_hands_each_message_over_exactly_once() {
+        let (store, server) = crew(ToolAccess::Delegate);
+        store
+            .post(&Post::new(Scope::Team, "crew", "scout", "the parser is in core").to("lead"))
+            .unwrap();
+
+        let first: Value = serde_json::from_str(&said(
+            &call(&server, "read_messages", json!({})).await,
+        ))
+        .unwrap();
+        assert_eq!(first.as_array().unwrap().len(), 1);
+        assert_eq!(first[0]["text"], "the parser is in core");
+        assert!(
+            first[0]["thread_id"].is_string(),
+            "a message you cannot reply into is a dead end: {first}"
+        );
+
+        let again: Value =
+            serde_json::from_str(&said(&call(&server, "read_messages", json!({})).await)).unwrap();
+        assert!(
+            again.as_array().unwrap().is_empty(),
+            "the same instruction was handed over twice: {again}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_roster_names_who_is_addressable_and_never_the_caller() {
+        let (_, server) = crew(ToolAccess::ReadOnly);
+        let seen: Value =
+            serde_json::from_str(&said(&call(&server, "roster", json!({})).await)).unwrap();
+        assert_eq!(seen["you"], "lead");
+        let names: Vec<&str> = seen["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, vec!["scout"]);
+        assert_eq!(seen["members"][0]["harness"], "claude_code");
+        assert_eq!(seen["members"][0]["idle"], true);
+    }
+
+    #[tokio::test]
+    async fn a_reply_goes_back_to_the_sender_in_the_thread_it_answers() {
+        let (store, server) = crew(ToolAccess::Delegate);
+        store
+            .post(&Post::new(Scope::Team, "crew", "scout", "where is the parser?").to("lead"))
+            .unwrap();
+        let read: Value =
+            serde_json::from_str(&said(&call(&server, "read_messages", json!({})).await)).unwrap();
+        let asked_id = read[0]["id"].as_i64().unwrap();
+        let thread = read[0]["thread_id"].as_str().unwrap().to_string();
+
+        let answer: Value = serde_json::from_str(&said(
+            &call(
+                &server,
+                "reply",
+                json!({ "message_id": asked_id, "text": "in core" }),
+            )
+            .await,
+        ))
+        .unwrap();
+        assert_eq!(answer["thread_id"], thread, "a reply left its own thread");
+        assert_eq!(answer["depth"], 1);
+        assert_eq!(answer["to"][0], "scout");
+        assert_eq!(store.mail_thread(&thread).unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_message_to_a_name_nobody_answers_to_is_refused_by_name() {
+        let (_, server) = crew(ToolAccess::Delegate);
+        let answer = call(
+            &server,
+            "send_message",
+            json!({ "to": "ghost", "text": "hello?" }),
+        )
+        .await;
+        assert!(is_error_result(&answer), "{answer}");
+        assert!(said(&answer).contains("ghost"), "{}", said(&answer));
+    }
+
+    /// G4 through the tools: an exchange that will not stop is stopped for it.
+    #[tokio::test]
+    async fn an_exchange_that_never_ends_is_refused_at_the_bound() {
+        let (store, server) = crew(ToolAccess::Delegate);
+        let bounds = store.bounds_for(Scope::Team, "crew").unwrap();
+        // The scout keeps asking; the lead — this server — keeps answering.
+        let mut last = match store
+            .post(&Post::new(Scope::Team, "crew", "scout", "hop 0").to("lead"))
+            .unwrap()
+        {
+            Sent::Queued { ids, .. } => ids[0],
+            other => panic!("{other:?}"),
+        };
+        for hop in 1..(bounds.max_depth + 5) {
+            let answer = call(
+                &server,
+                "reply",
+                json!({ "message_id": last, "text": format!("hop {hop}") }),
+            )
+            .await;
+            if is_error_result(&answer) {
+                let why = said(&answer);
+                assert!(why.contains("bound"), "{why}");
+                assert!(why.contains("paused"), "{why}");
+                return;
+            }
+            let sent: Value = serde_json::from_str(&said(&answer)).unwrap();
+            let id = sent["message_ids"][0].as_i64().unwrap();
+            // The scout answers straight back, which is what makes this a loop
+            // rather than a monologue.
+            last = match store
+                .post(
+                    &Post::new(Scope::Team, "crew", "scout", "and?")
+                        .to("lead")
+                        .replying_to(id),
+                )
+                .unwrap()
+            {
+                Sent::Queued { ids, .. } => ids[0],
+                Sent::Bounded { .. } => return,
+                other => panic!("{other:?}"),
+            };
+        }
+        panic!("the exchange ran past every bound");
+    }
+
+    #[tokio::test]
+    async fn asking_returns_the_answer_when_one_comes_back() {
+        let (store, server) = crew(ToolAccess::Delegate);
+        // The peer, answering as a peer does: it finds the question in its
+        // inbox and replies to it.
+        let peer = store.clone();
+        tokio::spawn(async move {
+            loop {
+                let waiting = peer.team_unread("crew", "scout").unwrap();
+                if let Some(question) = waiting.first() {
+                    peer.post(
+                        &Post::new(Scope::Team, "crew", "scout", "in core")
+                            .to("lead")
+                            .replying_to(question.id),
+                    )
+                    .unwrap();
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        });
+
+        let answered: Value = serde_json::from_str(&said(
+            &call(
+                &server,
+                "ask",
+                json!({ "to": "scout", "text": "where is the parser?", "timeout_seconds": 10 }),
+            )
+            .await,
+        ))
+        .unwrap();
+        assert_eq!(answered["replied"], true, "{answered}");
+        assert_eq!(answered["text"], "in core");
+        assert_eq!(answered["from"], "scout");
+    }
+
+    /// A5. The peer might be dead, and an agent that can wait for ever is how a
+    /// fleet deadlocks.
+    #[tokio::test]
+    async fn asking_gives_up_at_its_deadline_rather_than_waiting_for_ever() {
+        let (store, server) = crew(ToolAccess::Delegate);
+        let started = std::time::Instant::now();
+        let answered: Value = serde_json::from_str(&said(
+            &call(
+                &server,
+                "ask",
+                json!({ "to": "scout", "text": "still there?", "timeout_seconds": 1 }),
+            )
+            .await,
+        ))
+        .unwrap();
+        assert_eq!(answered["replied"], false, "{answered}");
+        assert!(answered["note"].as_str().unwrap().contains("no reply"));
+        assert!(started.elapsed() < std::time::Duration::from_secs(30));
+        // The question is still on the bus: giving up waiting is not unsending.
+        assert_eq!(store.team_unread("crew", "scout").unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_wait_can_never_be_asked_to_last_longer_than_the_cap() {
+        // The argument is the model's; the bound is not. Asserted on the
+        // constants rather than by waiting ten minutes for it.
+        assert!(ASK_DEADLINE_SECS <= MAX_ASK_DEADLINE_SECS);
+        assert_eq!(
+            (MAX_ASK_DEADLINE_SECS + 10_000).clamp(1, MAX_ASK_DEADLINE_SECS),
+            MAX_ASK_DEADLINE_SECS
+        );
+    }
+
+    #[tokio::test]
+    async fn a_handoff_moves_the_task_and_tells_the_recipient_in_one_call() {
+        let (store, server) = crew(ToolAccess::Delegate);
+        store.add_team_task("crew", "t1", "port the parser").unwrap();
+        assert!(store.claim_task("t1", "lead").unwrap());
+
+        let done: Value = serde_json::from_str(&said(
+            &call(
+                &server,
+                "handoff",
+                json!({ "to": "scout", "task_id": "t1", "text": "the tests are green" }),
+            )
+            .await,
+        ))
+        .unwrap();
+        assert_eq!(done["handed_over"], "t1");
+
+        let task = store
+            .team_tasks("crew")
+            .unwrap()
+            .into_iter()
+            .find(|t| t.id == "t1")
+            .unwrap();
+        assert_eq!(
+            task.owner.as_deref(),
+            Some("scout"),
+            "ownership must move on the board, not only in the prose"
+        );
+        let told = store.team_unread("crew", "scout").unwrap();
+        assert_eq!(told.len(), 1);
+        assert!(told[0].text.contains("t1"), "{}", told[0].text);
+        assert_eq!(
+            store.envelope(told[0].id).unwrap().unwrap().kind,
+            Kind::Handoff
+        );
+    }
+
+    #[tokio::test]
+    async fn a_handoff_of_a_task_somebody_else_holds_is_refused() {
+        let (store, server) = crew(ToolAccess::Delegate);
+        store.add_team_task("crew", "t1", "port the parser").unwrap();
+        assert!(store.claim_task("t1", "scout").unwrap());
+
+        let answer = call(
+            &server,
+            "handoff",
+            json!({ "to": "scout", "task_id": "t1", "text": "yours" }),
+        )
+        .await;
+        assert!(is_error_result(&answer), "{answer}");
+        assert!(said(&answer).contains("not yours"), "{}", said(&answer));
+    }
+
+    #[tokio::test]
+    async fn a_broadcast_reaches_every_teammate_and_never_the_sender() {
+        let (store, server) = crew(ToolAccess::Delegate);
+        store
+            .join_scope(
+                Scope::Team,
+                "crew",
+                "builder",
+                HarnessKind::OpenCode,
+                "",
+                None,
+            )
+            .unwrap();
+        let sent: Value = serde_json::from_str(&said(
+            &call(&server, "send_message", json!({ "text": "standup in five" })).await,
+        ))
+        .unwrap();
+        assert_eq!(sent["to"].as_array().unwrap().len(), 2);
+        assert!(store.team_unread("crew", "lead").unwrap().is_empty());
+        assert_eq!(store.team_unread("crew", "builder").unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn mail_that_has_been_read_is_marked_delivered_rather_than_only_flagged() {
+        let (store, server) = crew(ToolAccess::Delegate);
+        let sent = store
+            .post(&Post::new(Scope::Team, "crew", "scout", "hello").to("lead"))
+            .unwrap();
+        let Sent::Queued { ids, .. } = sent else {
+            panic!("{sent:?}")
+        };
+        assert_eq!(
+            store.envelope(ids[0]).unwrap().unwrap().state,
+            MailState::Queued
+        );
+        call(&server, "read_messages", json!({})).await;
+        assert_eq!(
+            store.envelope(ids[0]).unwrap().unwrap().state,
+            MailState::Delivered,
+            "the traffic log would still call a read message unread"
+        );
     }
 
     #[tokio::test]

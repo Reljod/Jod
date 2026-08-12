@@ -25,6 +25,20 @@ use std::path::{Path, PathBuf};
 use crate::error::Result;
 use crate::harness::ToolAccess;
 
+/// Where the server reads the run it belongs to.
+///
+/// An environment variable rather than an argument, and pinned by the config
+/// rather than inherited, for the same reason `JOD_HOME` is: a value a run
+/// depends on should not be whatever the process tree happened to be carrying.
+/// It is *identity*, so it is set by whoever launches the run and by nothing
+/// the model can reach.
+pub const RUN_ID_ENV: &str = "JOD_RUN_ID";
+
+/// The conversation that run belongs to, when it is known at launch. Advisory:
+/// the run id is the identity, and the conversation is resolved from it when
+/// this is absent.
+pub const CONVERSATION_ID_ENV: &str = "JOD_CONVERSATION_ID";
+
 /// The MCP config for one access level, written under `~/.jod/mcp/`.
 ///
 /// Returns the path to hand a harness, or `None` when there is nothing to
@@ -73,22 +87,121 @@ pub fn config_with(
     // so that two runs at different levels never race each other's rewrite.
     let level = access.map(|a| a.as_str()).unwrap_or("none");
     let path = dir.join(format!("{level}.json"));
+    // No run identity at all — a session somebody started by hand, and
+    // `jod mcp install`. Use [`config_for_run`] wherever the run is known.
+    write_config(&path, access, jod_home, browser, None, None)
+}
 
+/// The MCP config for one *run*, written beside that run's own files.
+///
+/// **NOT YET CALLED FROM ANYWHERE — its call site is
+/// `core/src/harness/claude.rs`, where `args()` currently reaches for
+/// [`config_for`] beside `--mcp-config`.** Left unwired deliberately: that file
+/// was being rewritten by another lane when this landed, and a concurrent edit
+/// to argv ordering there is exactly the collision worth avoiding. Swapping the
+/// call is the whole of the wiring; nothing else has to change.
+///
+/// Nothing is broken while it waits. [`crate::mcp::identify`] resolves the run
+/// from the server's own process group, which is authoritative and works on
+/// every harness — including the two that read a globally installed config and
+/// so have no per-run document at all. What this adds is a second, agreeing
+/// source for the case where the store has no row for the group.
+///
+/// The reason it exists at all is sender identity. Jod's messaging tools have
+/// to know which member is calling, and the only honest answer is the run — an
+/// agent that could name its own sender could send as anyone. The access level
+/// already travels in the argv and the database already travels in the
+/// environment; the run travels the same way, set by the launcher and readable
+/// by nothing the model can reach.
+///
+/// **In the run's directory, not in the shared `mcp/` one.** A per-run file in
+/// a shared directory is a cleanup problem and, worse, a grant left on disk by
+/// a killed run. Here it is created and removed with everything else that run
+/// wrote.
+///
+/// `access` is `Option` and returns `Option` for the same reason
+/// [`config_for`] does: a run granted none of Jod's verbs may still browse, and
+/// a run offered neither gets no `--mcp-config` flag rather than a document
+/// declaring no servers.
+pub fn config_for_run(
+    access: Option<ToolAccess>,
+    jod_home: &Path,
+    run_id: &str,
+    conversation_id: Option<&str>,
+) -> Result<Option<PathBuf>> {
+    config_for_run_with(
+        access,
+        jod_home,
+        run_id,
+        conversation_id,
+        crate::paths::browser_mcp_script()
+            .map(|script| (crate::paths::browser_python(), script)),
+    )
+}
+
+/// [`config_for_run`], with the browser passed in rather than discovered — the
+/// same injection, and for the same reason, as [`config_with`].
+pub fn config_for_run_with(
+    access: Option<ToolAccess>,
+    jod_home: &Path,
+    run_id: &str,
+    conversation_id: Option<&str>,
+    browser: Option<(PathBuf, PathBuf)>,
+) -> Result<Option<PathBuf>> {
+    if access.is_none() && browser.is_none() {
+        return Ok(None);
+    }
+    let dir = crate::paths::run_dir(run_id);
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join("mcp.json");
+    write_config(
+        &path,
+        access,
+        jod_home,
+        browser,
+        Some(run_id),
+        conversation_id,
+    )
+}
+
+fn write_config(
+    path: &Path,
+    access: Option<ToolAccess>,
+    jod_home: &Path,
+    browser: Option<(PathBuf, PathBuf)>,
+    run_id: Option<&str>,
+    conversation_id: Option<&str>,
+) -> Result<Option<PathBuf>> {
     // The running executable, not a name looked up on PATH. A daemon started
     // from a build directory must point agents at *that* binary, or they get
     // whichever `jod` a shell would have found — possibly an older install,
     // possibly none.
     let exe = std::env::current_exe()?;
 
+    // The child must open the same database this process is using. Inheriting
+    // the environment would work today and break the moment a daemon runs with
+    // a JOD_HOME its children do not.
+    let mut env = serde_json::Map::new();
+    env.insert(
+        "JOD_HOME".to_string(),
+        jod_home.to_string_lossy().to_string().into(),
+    );
+    if let Some(run_id) = run_id {
+        env.insert(RUN_ID_ENV.to_string(), run_id.to_string().into());
+    }
+    if let Some(conversation_id) = conversation_id {
+        env.insert(
+            CONVERSATION_ID_ENV.to_string(),
+            conversation_id.to_string().into(),
+        );
+    }
+
     let mut servers = serde_json::json!({});
     if let Some(access) = access {
         servers["jod"] = serde_json::json!({
             "command": exe.to_string_lossy(),
             "args": ["mcp", "--access", access.as_str()],
-            // The child must open the same database this process is using.
-            // Inheriting the environment would work today and break the
-            // moment a daemon runs with a JOD_HOME its children do not.
-            "env": { "JOD_HOME": jod_home.to_string_lossy() },
+            "env": env,
         });
     }
 
@@ -117,8 +230,8 @@ pub fn config_with(
     }
 
     let doc = serde_json::json!({ "mcpServers": servers });
-    std::fs::write(&path, serde_json::to_vec_pretty(&doc)?)?;
-    Ok(Some(path))
+    std::fs::write(path, serde_json::to_vec_pretty(&doc)?)?;
+    Ok(Some(path.to_path_buf()))
 }
 
 /// Whether this machine can offer the browser at all.
@@ -270,6 +383,73 @@ mod tests {
                 .collect();
             assert_eq!(args, vec!["mcp", "--access", access.as_str()]);
         }
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// The whole point of a per-run config: the server can say who is calling
+    /// without being told by the caller.
+    #[test]
+    fn a_runs_config_pins_the_run_so_the_server_knows_who_is_calling() {
+        let home = scratch("run");
+        let path = config_for_run_with(
+            Some(ToolAccess::Delegate),
+            &home,
+            "run-42",
+            Some("conv-7"),
+            None,
+        )
+        .unwrap()
+        .unwrap();
+        let doc: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let env = &doc["mcpServers"]["jod"]["env"];
+        assert_eq!(env[RUN_ID_ENV].as_str().unwrap(), "run-42");
+        assert_eq!(env[CONVERSATION_ID_ENV].as_str().unwrap(), "conv-7");
+        // The level still travels in the argv, unchanged: identity says who you
+        // are, never what you may do.
+        let args: Vec<&str> = doc["mcpServers"]["jod"]["args"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a.as_str().unwrap())
+            .collect();
+        assert_eq!(args, vec!["mcp", "--access", "delegate"]);
+        let _ = std::fs::remove_dir_all(&home);
+        let _ = std::fs::remove_dir_all(crate::paths::run_dir("run-42"));
+    }
+
+    /// A grant left on disk by a killed run is exactly what the shared
+    /// directory was kept free of, so a per-run config lives with the run.
+    #[test]
+    fn a_runs_config_lives_with_that_runs_own_files() {
+        let home = scratch("run-dir");
+        let path = config_for_run_with(Some(ToolAccess::ReadOnly), &home, "run-43", None, None)
+            .unwrap()
+            .unwrap();
+        assert!(
+            path.starts_with(crate::paths::run_dir("run-43")),
+            "{path:?} is not in the run's own directory"
+        );
+        let doc: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert!(
+            doc["mcpServers"]["jod"]["env"][CONVERSATION_ID_ENV].is_null(),
+            "a conversation nobody knew yet must not be invented"
+        );
+        let _ = std::fs::remove_dir_all(&home);
+        let _ = std::fs::remove_dir_all(crate::paths::run_dir("run-43"));
+    }
+
+    /// Anything with no run behind it keeps the shared config, unchanged.
+    #[test]
+    fn a_shared_config_names_no_run_at_all() {
+        let home = scratch("shared");
+        let path = config_with(Some(ToolAccess::ReadOnly), &home, None)
+            .unwrap()
+            .unwrap();
+        let doc: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert!(doc["mcpServers"]["jod"]["env"][RUN_ID_ENV].is_null());
         let _ = std::fs::remove_dir_all(&home);
     }
 

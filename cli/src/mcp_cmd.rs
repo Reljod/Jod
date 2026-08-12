@@ -23,18 +23,30 @@ use jod_core::{Jod, PermissionPolicy};
 /// the daemon spawning a scheduled run knows it should not be able to schedule
 /// more, and a webhook-triggered run knows it was started by a stranger.
 pub async fn run(jod: Arc<Jod>, access: ToolAccess, max_permission: PermissionPolicy) -> Result<()> {
+    let identity = who_this_is(&jod);
     let server = Server::new(jod)
         .with_access(access)
-        .with_max_permission(max_permission);
+        .with_max_permission(max_permission)
+        .as_identity(identity);
 
     // Said on stderr before the first request, so a misconfigured launch is
     // visible in the harness's own log rather than only as tools that are
-    // mysteriously absent.
+    // mysteriously absent. The run is named too: "this agent could not send a
+    // message" is otherwise a silence with no cause anywhere in the log.
     eprintln!(
-        "jod mcp · {} access · permission ceiling {} · {} tools",
+        "jod mcp · {} access · permission ceiling {} · {} tools · {}",
         access.as_str(),
         permission_id(max_permission),
-        server.tools().len()
+        server.tools().len(),
+        match server.identity() {
+            mcp::Identity::Run(id) => format!("run {id}"),
+            mcp::Identity::Unknown => "no run — this session cannot send messages".to_string(),
+            mcp::Identity::Disputed { group, claimed } => format!(
+                "DISPUTED — process group says {}, {} says `{claimed}`; messaging is refused",
+                group.as_deref().unwrap_or("no run"),
+                jod_core::mcp_config::RUN_ID_ENV
+            ),
+        }
     );
 
     mcp::serve(&server, std::io::stdin().lock(), std::io::stdout().lock())
@@ -45,6 +57,27 @@ pub async fn run(jod: Arc<Jod>, access: ToolAccess, max_permission: PermissionPo
 /// The spelling `parse_permission` reads back, from the one definition of it.
 fn permission_id(p: PermissionPolicy) -> &'static str {
     p.as_str()
+}
+
+/// Which run this server is serving — and therefore who its tools speak as.
+///
+/// **Neither input here is an argument, and that is the whole point.** Sender
+/// identity is the one thing an agent must not be able to choose: a `--run`
+/// flag would let any agent that can read its own command line send as anybody
+/// on its team. The authority is the process group, which the kernel will not
+/// let a process change; the environment variable is enrichment and is never
+/// preferred over it. [`jod_core::mcp::identify`] carries the full reasoning,
+/// including why a disagreement between the two is refused rather than
+/// resolved.
+///
+/// Without a store there is nothing to resolve against, and the honest answer
+/// is that this server is nobody.
+fn who_this_is(jod: &Jod) -> mcp::Identity {
+    let Some(store) = jod.store() else {
+        return mcp::Identity::Unknown;
+    };
+    let claimed = std::env::var(jod_core::mcp_config::RUN_ID_ENV).ok();
+    mcp::identify(store, claimed.as_deref())
 }
 
 /// `jod mcp install` — register this binary with the harnesses on this machine.

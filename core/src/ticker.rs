@@ -25,6 +25,7 @@ use crate::monitor::{self, LocalProbes, Observation, Probes};
 use crate::schedule::{self, Fire, FireOutcome, Goal, Misfire, Overlap, Schedule};
 use crate::service::{AgentStatus, Jod};
 use crate::store::{NewFact, Origin, Store};
+use crate::team::{self, MemberStatus};
 
 /// What a goal's done-when command said.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -938,6 +939,161 @@ impl Ticker {
             store.release_goal(&goal.id)?;
         }
         Ok(report)
+    }
+
+    /// Deliver waiting mail by resuming the members holding it.
+    ///
+    /// The sibling of [`Ticker::tick_goals`], and the thing that turns the bus
+    /// from something a human operates into something that runs. Until this
+    /// existed, a message sat in an inbox until somebody typed
+    /// `jod team wake` — which is fine for a demonstration and useless for two
+    /// agents working overnight.
+    ///
+    /// **The judgement is not here.** [`team::wake_order`] already decides who
+    /// may be woken and with what, and it was already correct and already
+    /// tested; this gives it a caller that is not a person. Everything below it
+    /// is bookkeeping: claim the wake, start the run, take the mail off the bus.
+    ///
+    /// Three properties worth stating, because each is a bug that would
+    /// otherwise be invisible:
+    ///
+    /// - **One wake per interval per member.** Ten messages arriving together
+    ///   become one turn carrying ten, not ten turns. A cost control — every
+    ///   wake is a model call — and a coherence one.
+    /// - **Nothing here waits for a run.** The spawn returns as soon as the
+    ///   supervisor is up and the tick moves on; the run reports through the
+    ///   database whether or not anybody is watching.
+    /// - **Mail that cannot be delivered says so on itself.** A member with no
+    ///   session is left asleep — resuming it would start a fresh context and
+    ///   it would answer having forgotten everything — and the mail is
+    ///   annotated rather than left silently sitting there.
+    pub async fn tick_mail(&self, now_ms: i64) -> Result<TickReport> {
+        let Some(store) = self.jod.store().cloned() else {
+            return Ok(TickReport::default());
+        };
+        let waiting = store.mail_waiting()?;
+        let mut report = TickReport {
+            claimed: waiting.len(),
+            ..Default::default()
+        };
+
+        for held in waiting {
+            let Some(order) = team::wake_order(&held.member, &held.pending) else {
+                report.held += 1;
+                self.note_why_it_waits(&store, &held);
+                continue;
+            };
+            // One statement, so two ticks racing produce one wake rather than
+            // two turns reading the same mail.
+            if !store.claim_wake(
+                held.scope,
+                &held.team,
+                &held.member.name,
+                now_ms,
+                team::WAKE_INTERVAL_MS,
+            )? {
+                report.held += 1;
+                continue;
+            }
+            match self.wake(&store, &held, order).await {
+                Ok(()) => report.started += 1,
+                Err(e) => {
+                    report.failed += 1;
+                    // The mail is still on the bus — nothing is drained until
+                    // the spawn has worked — so the next tick tries again.
+                    eprintln!(
+                        "[jod/tick] could not wake {} on {}: {e}",
+                        held.member.name, held.team
+                    );
+                }
+            }
+        }
+        Ok(report)
+    }
+
+    /// Resume one member on its own conversation, carrying its unread mail.
+    async fn wake(&self, store: &Store, held: &team::Waiting, order: team::WakeOrder) -> Result<()> {
+        // Where it was working. A resumed session that reappears in a different
+        // directory is a session whose paths have all silently changed.
+        let cwd = held
+            .member
+            .agent_id
+            .as_deref()
+            .and_then(|id| store.run(id).ok().flatten())
+            .map(|r| std::path::PathBuf::from(r.cwd))
+            .unwrap_or_else(crate::service::default_cwd);
+
+        let agent = self
+            .jod
+            .spawn_agent(SpawnRequest {
+                name: format!("{}-{}", held.team, order.member),
+                harness: order.harness,
+                prompt: order.prompt,
+                // The member's framing arrived with the turn that started it
+                // and is already in the session being resumed.
+                system: None,
+                cwd,
+                model: None,
+                permission: PermissionPolicy::default(),
+                resume: Resume::Session(order.session_id),
+                // Enough of Jod to answer. A teammate that can read its mail
+                // and not reply to it is decoration, and this is deliberately
+                // more than `ToolAccess::unattended()` gives a scheduled run:
+                // a member is part of a crew a person assembled for a job,
+                // and what stops it running away is not the access level but
+                // the bounds on the traffic itself — depth, budget, and a
+                // deadline on every wait.
+                tools: Some(crate::harness::ToolAccess::Delegate),
+                ..SpawnRequest::default()
+            })
+            .await?;
+
+        // Drained only once the spawn succeeded, so a failure leaves the mail
+        // waiting rather than losing it.
+        let taken = store.drain_inbox(&held.team, &held.member.name)?;
+        store.mark_mail_delivered(&taken.iter().map(|m| m.id).collect::<Vec<_>>())?;
+        store.set_member_status(&held.team, &held.member.name, MemberStatus::Busy)?;
+        store.bind_member(&held.team, &held.member.name, Some(&agent.id), None)?;
+        eprintln!(
+            "[jod/tick] woke {} on {} with {} message(s) as {}",
+            order.member,
+            order.harness.label(),
+            order.messages,
+            &agent.id[..agent.id.len().min(8)]
+        );
+        Ok(())
+    }
+
+    /// Say, on the mail itself, why nobody has read it.
+    ///
+    /// Per A8: a message to an agent that cannot receive it becomes visible,
+    /// never a silence. Said once — `note_mail_stuck` only writes where nothing
+    /// has been said — so a tick that finds the same stuck mail every minute
+    /// does not fill the log with it.
+    ///
+    /// A *busy* member is not stuck and gets no note: it reads its inbox on its
+    /// next turn, which is the ordinary case and not a fault.
+    fn note_why_it_waits(&self, store: &Store, held: &team::Waiting) {
+        let detail = match (&held.member.session_id, held.member.status) {
+            (_, MemberStatus::Shutdown | MemberStatus::ShutdownRequested | MemberStatus::Error) => {
+                format!(
+                    "`{}` is {} — nobody will read this until it is started again",
+                    held.member.name,
+                    held.member.status.as_str()
+                )
+            }
+            (None, _) => format!(
+                "`{}` has no session to resume, so this is waiting rather than being delivered \
+                 into a fresh context it would answer from with no memory of the work",
+                held.member.name
+            ),
+            _ => return,
+        };
+        match store.note_mail_stuck(held.scope, &held.team, &held.member.name, &detail) {
+            Ok(0) => {}
+            Ok(n) => eprintln!("[jod/tick] {n} message(s) waiting: {detail}"),
+            Err(e) => eprintln!("[jod/tick] could not record why mail is waiting: {e}"),
+        }
     }
 
     /// What a goal's done-when check says right now.
@@ -2309,6 +2465,157 @@ mod tests {
                 store.obligations(10).unwrap().is_empty(),
                 "a future stamp wedged the trim"
             );
+        }
+    }
+
+    // ---- delivering the mail ------------------------------------------------
+
+    /// A tick that wakes teammates.
+    ///
+    /// Note what these assert and what they cannot: a test machine has no
+    /// supervisor for the spawn to talk to, so "it woke somebody" is asserted
+    /// as `started + failed`, exactly as the monitor tests above do. Everything
+    /// that decides *whether* to wake — the rate limit, the no-session rule,
+    /// the busy rule — happens before the spawn and is asserted exactly.
+    mod mail {
+        use super::*;
+        use crate::harness::HarnessKind;
+        use crate::team::{MemberStatus, Post, Scope};
+
+        /// A team with a sender and one recipient, described by what the
+        /// recipient can do about its mail.
+        fn crew(status: MemberStatus, session: Option<&str>) -> Arc<Store> {
+            let store = Arc::new(Store::in_memory().unwrap());
+            for name in ["lead", "scout"] {
+                store
+                    .join_scope(Scope::Team, "crew", name, HarnessKind::ClaudeCode, "", None)
+                    .unwrap();
+            }
+            store.bind_member("crew", "scout", None, session).unwrap();
+            store.set_member_status("crew", "scout", status).unwrap();
+            store
+        }
+
+        fn post(store: &Store, text: &str) {
+            store
+                .post(&Post::new(Scope::Team, "crew", "lead", text).to("scout"))
+                .unwrap();
+        }
+
+        fn ticker_over(store: &Arc<Store>) -> Ticker {
+            Ticker::new(Jod::with_store(store.clone())).as_owner("t")
+        }
+
+        #[tokio::test]
+        async fn a_tick_with_no_mail_wakes_nobody() {
+            let store = crew(MemberStatus::Ready, Some("ses-1"));
+            let report = ticker_over(&store).tick_mail(1_000_000).await.unwrap();
+            assert_eq!(report.claimed, 0);
+            assert_eq!(report.started + report.failed, 0);
+        }
+
+        /// G2.S3, and the reason the rate limit exists: ten messages arriving
+        /// together must be one resumed turn carrying ten, not ten turns.
+        #[tokio::test]
+        async fn ten_messages_arriving_together_produce_one_resumed_turn() {
+            let store = crew(MemberStatus::Ready, Some("ses-1"));
+            for i in 0..10 {
+                post(&store, &format!("message {i}"));
+            }
+            let ticker = ticker_over(&store);
+
+            let first = ticker.tick_mail(1_000_000).await.unwrap();
+            assert_eq!(first.claimed, 1, "one member is holding mail, not ten");
+            assert_eq!(first.started + first.failed, 1, "it tried exactly once");
+
+            // Whether or not the spawn found a supervisor, no second turn is
+            // started for the same burst.
+            let second = ticker.tick_mail(1_000_001).await.unwrap();
+            assert_eq!(
+                second.started, 0,
+                "a second wake inside the interval is a second model call for mail already carried"
+            );
+        }
+
+        #[tokio::test]
+        async fn a_member_is_due_to_be_woken_again_once_the_interval_has_passed() {
+            let store = crew(MemberStatus::Ready, Some("ses-1"));
+            post(&store, "first");
+            let ticker = ticker_over(&store);
+            ticker.tick_mail(1_000_000).await.unwrap();
+
+            let later = ticker
+                .tick_mail(1_000_000 + crate::team::WAKE_INTERVAL_MS)
+                .await
+                .unwrap();
+            // The mail is still there — the spawn had no supervisor to talk to —
+            // so the only question is whether the tick was willing to try again.
+            assert_eq!(
+                later.started + later.failed,
+                1,
+                "the rate limit became a permanent silence"
+            );
+        }
+
+        /// G2.S4. Delivering into a fresh context would have it answer having
+        /// forgotten the work, which is worse than waiting.
+        #[tokio::test]
+        async fn mail_for_a_member_with_no_session_waits_visibly() {
+            let store = crew(MemberStatus::Ready, None);
+            post(&store, "carry on");
+
+            let report = ticker_over(&store).tick_mail(1_000_000).await.unwrap();
+            assert_eq!(report.started, 0, "it was woken into an empty context");
+            assert_eq!(report.held, 1);
+
+            let waiting = store.team_unread("crew", "scout").unwrap();
+            assert_eq!(waiting.len(), 1, "the mail was consumed rather than kept");
+            let detail = store.envelope(waiting[0].id).unwrap().unwrap().detail;
+            assert!(
+                detail.as_deref().unwrap_or_default().contains("no session"),
+                "mail nobody can read must say so: {detail:?}"
+            );
+        }
+
+        #[tokio::test]
+        async fn mail_for_a_member_that_has_stopped_is_reported_rather_than_left_silent() {
+            let store = crew(MemberStatus::Shutdown, Some("ses-1"));
+            post(&store, "one more thing");
+
+            ticker_over(&store).tick_mail(1_000_000).await.unwrap();
+
+            let waiting = store.team_unread("crew", "scout").unwrap();
+            let detail = store.envelope(waiting[0].id).unwrap().unwrap().detail;
+            assert!(
+                detail.as_deref().unwrap_or_default().contains("shutdown"),
+                "{detail:?}"
+            );
+        }
+
+        /// A busy member is not stuck: it reads its inbox on its next turn, and
+        /// annotating that as a problem would be crying wolf on the ordinary
+        /// case.
+        #[tokio::test]
+        async fn a_busy_member_is_left_to_read_its_own_inbox() {
+            let store = crew(MemberStatus::Busy, Some("ses-1"));
+            post(&store, "when you get a moment");
+
+            let report = ticker_over(&store).tick_mail(1_000_000).await.unwrap();
+            assert_eq!(report.started, 0, "a member mid-turn had its session forked");
+            assert_eq!(report.held, 1);
+
+            let waiting = store.team_unread("crew", "scout").unwrap();
+            assert_eq!(
+                store.envelope(waiting[0].id).unwrap().unwrap().detail,
+                None,
+                "being busy is not a fault and must not be reported as one"
+            );
+        }
+
+        #[tokio::test]
+        async fn a_jod_with_no_database_ticks_the_mail_without_complaining() {
+            let ticker = Ticker::new(Jod::new());
+            assert_eq!(ticker.tick_mail(1).await.unwrap().claimed, 0);
         }
     }
 }

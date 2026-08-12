@@ -66,6 +66,26 @@ impl Harness for OpenCode {
         if req.permission == PermissionPolicy::Bypass {
             args.push(ArgPart::lit("--auto"));
         }
+        // `req.roots` is deliberately dropped here, and this is the documented
+        // degradation rather than an oversight.
+        //
+        // OpenCode has exactly one directory flag and it takes exactly one
+        // directory. Passing `--dir` twice does not append and does not take
+        // the last one — it kills the process before any model call, with
+        // `The "paths[1]" property must be of type string, got array`. Nothing
+        // else in `opencode run --help` grants a directory.
+        //
+        // Overwriting the `--dir` above with a root would be worse than doing
+        // nothing: it would move the project the run happens in, and the run
+        // would look like it had worked. So an OpenCode conversation's extra
+        // roots reach the agent as prose in the preamble instead, and Jod does
+        // not claim to have granted them.
+        //
+        // Losing nothing that a grant would have bought, incidentally: a root
+        // Jod withholds is still readable, here as everywhere. The flag is a
+        // convenience, never a boundary — `docs/harness-support.md` measures
+        // both halves of that.
+
         // The message is positional and must come last.
         args.push(ArgPart::Prompt);
         args
@@ -279,6 +299,38 @@ mod tests {
         assert_eq!(a.last(), Some(&ArgPart::Prompt));
         assert!(a.contains(&ArgPart::lit("run")));
         assert!(a.contains(&ArgPart::lit("json")));
+    }
+
+    /// The documented degradation, pinned so nobody "fixes" it into a crash.
+    ///
+    /// OpenCode's `--dir` takes one directory. A second one does not append and
+    /// does not win — it aborts the process before any model call, with
+    /// `The "paths[1]" property must be of type string, got array`. So roots
+    /// are dropped here on purpose and reach an OpenCode run as prose in its
+    /// preamble instead. See `docs/harness-support.md`.
+    #[test]
+    fn roots_do_not_reach_opencode_because_it_has_nowhere_to_put_them() {
+        let mut r = req(PermissionPolicy::Ask, None);
+        r.roots = vec![PathBuf::from("/work/one"), PathBuf::from("/work/two")];
+        let args: Vec<String> = OpenCode::default()
+            .args(&r)
+            .iter()
+            .map(|a| match a {
+                ArgPart::Literal(s) => s.clone(),
+                ArgPart::Prompt => "<PROMPT>".into(),
+            })
+            .collect();
+        assert_eq!(
+            args.iter().filter(|a| *a == "--dir").count(),
+            1,
+            "a second --dir aborts the process, so there must never be one"
+        );
+        let at = args.iter().position(|a| a == "--dir").unwrap();
+        assert_eq!(args[at + 1], "/work", "--dir must stay the working directory");
+        assert!(
+            !args.iter().any(|a| a == "/work/one" || a == "/work/two"),
+            "a root must not silently move the project the run happens in"
+        );
     }
 
     #[test]
