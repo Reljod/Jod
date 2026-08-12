@@ -173,6 +173,19 @@ pub struct WakeOrder {
 ///   without a session id would silently start a *fresh* context, so the member
 ///   would answer having forgotten everything. Staying asleep and visibly
 ///   holding unread mail is better than answering with amnesia.
+/// What a woken agent needs in order to answer what it has just been handed.
+///
+/// Kept beside [`wake_order`] rather than in a preamble because a preamble is
+/// delivered once and this has to be true on every turn that carries mail. The
+/// message id is already in each message's own line; this says what to do with
+/// it.
+pub const REPLY_PROTOCOL: &str = "To answer any of the messages above, call \
+    `reply` with the message number shown in its brackets — that is what keeps \
+    a reply in the same thread as the question, and a thread is what the depth \
+    bound counts. Use `send_message` only to start something new. Replying in \
+    prose reaches nobody: these came from another agent, not from a person \
+    reading your output.";
+
 pub fn wake_order(member: &Member, pending: &[Message]) -> Option<WakeOrder> {
     if pending.is_empty() || member.status != MemberStatus::Ready {
         return None;
@@ -183,6 +196,20 @@ pub fn wake_order(member: &Member, pending: &[Message]) -> Option<WakeOrder> {
         .map(Message::as_prompt)
         .collect::<Vec<_>>()
         .join("\n\n");
+    // The turn carries the verb it needs, once, after the messages.
+    //
+    // A woken session's framing is several turns back, and an agent does not
+    // reliably reach for a tool it was told about once at the start. Measured:
+    // an answerer briefed at session start on how to use the bus was asked a
+    // question some turns later, answered **in prose**, and never touched the
+    // bus — so the asker waited, the answer existed, and nothing Jod could see
+    // had gone wrong. An agent that has forgotten a protocol is an agent
+    // behaving reasonably in the absence of one.
+    //
+    // After rather than before, so the reminder is the last thing read and the
+    // messages are not buried under instructions; once rather than per
+    // message, because ten copies of the same sentence is its own noise.
+    let prompt = format!("{prompt}\n\n{REPLY_PROTOCOL}");
     Some(WakeOrder {
         member: member.name.clone(),
         harness: member.harness,

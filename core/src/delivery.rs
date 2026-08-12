@@ -248,11 +248,45 @@ impl Injection {
 /// like one framed message, which is what `wake_order` already delivers for
 /// mail on its own.
 pub fn render_injection(items: &[Pending]) -> String {
-    items
+    let body = items
         .iter()
         .map(|p| format!("{}\n{}", p.kind.label(), p.body))
         .collect::<Vec<_>>()
-        .join("\n\n")
+        .join("\n\n");
+
+    match protocol_for(items) {
+        Some(reminder) => format!("{body}\n\n{reminder}"),
+        None => body,
+    }
+}
+
+/// What the recipient needs in order to *act* on what it has just been handed.
+///
+/// A turn like this arrives in a session whose framing is several turns back,
+/// and an agent does not reliably reach for a verb it was told about once at
+/// the start. Measured, not assumed: an answerer briefed at session start on
+/// how to use the bus was asked a question some turns later, replied in prose,
+/// and never touched the bus at all. Nothing failed loudly, because nothing
+/// failed — an agent that has forgotten a protocol is an agent behaving
+/// reasonably in the absence of one.
+///
+/// So the turn carries its own instructions. This is the same argument that
+/// put the message id into the body of a delivered message rather than leaving
+/// the recipient to look it up: **whatever is needed to respond travels with
+/// the thing being responded to.**
+///
+/// Deliberately short, and only for the kinds that need a verb. A card answer
+/// needs none — the agent asked a question and is being told the answer, which
+/// it acts on by carrying on. Mail needs one, because replying is a tool call
+/// the agent has to choose to make.
+fn protocol_for(items: &[Pending]) -> Option<&'static str> {
+    items.iter().any(|p| p.kind == Kind::Mail).then_some(
+        "To answer any of the messages above, call `reply` with the message \
+         number shown in its brackets — that is what keeps a reply in the same \
+         thread as the question. Use `send_message` only to start something \
+         new. Replying in prose here reaches nobody: this is a message from \
+         another agent, not from a person reading your output.",
+    )
 }
 
 // ---- the store ---------------------------------------------------------
@@ -781,9 +815,48 @@ mod tests {
         s.enqueue_delivery(&c, Kind::Human, "", "second").unwrap();
 
         let injection = s.plan_injection(&c, false).unwrap().unwrap();
-        assert_eq!(
-            injection.prompt,
-            "[message from another agent]\nfrom lead: first\n\n[message from Reljod]\nsecond"
+        assert!(
+            injection.prompt.starts_with(
+                "[message from another agent]\nfrom lead: first\n\n[message from Reljod]\nsecond"
+            ),
+            "{}",
+            injection.prompt
+        );
+    }
+
+    /// A turn carrying mail says how to answer it; a turn carrying only an
+    /// answer does not.
+    ///
+    /// The reminder exists because a session's framing is several turns back by
+    /// the time mail arrives, and an agent does not reliably reach for a verb
+    /// it was told about once at the start — measured, in a real cross-harness
+    /// run, as an answerer replying in prose and never touching the bus.
+    ///
+    /// Both halves are asserted. Adding it everywhere would be its own noise: a
+    /// card answer needs no verb, because the agent asked a question and is
+    /// being told the answer, which it acts on by carrying on.
+    #[test]
+    fn a_turn_carrying_mail_says_how_to_answer_it_and_one_carrying_an_answer_does_not() {
+        let s = store();
+
+        let with_mail = conversation(&s);
+        s.enqueue_delivery(&with_mail, Kind::Mail, "1", "which port?")
+            .unwrap();
+        let mail = s.plan_injection(&with_mail, false).unwrap().unwrap();
+        assert!(
+            mail.prompt.contains("call `reply`"),
+            "mail arrived with no way to answer it: {}",
+            mail.prompt
+        );
+
+        let with_answer = conversation(&s);
+        s.enqueue_delivery(&with_answer, Kind::CardAnswer, "2", "use SQLite")
+            .unwrap();
+        let answer = s.plan_injection(&with_answer, false).unwrap().unwrap();
+        assert!(
+            !answer.prompt.contains("call `reply`"),
+            "an answer to the agent's own question told it to reply to somebody: {}",
+            answer.prompt
         );
     }
 
@@ -817,7 +890,7 @@ mod tests {
 
         let injection = s.plan_injection(&c, false).unwrap().unwrap();
         assert!(injection.prompt.starts_with(Kind::Mail.label()));
-        assert!(injection.prompt.ends_with("which port do you want"));
+        assert!(injection.prompt.contains("which port do you want"));
     }
 
     // ---- settling ------------------------------------------------------
