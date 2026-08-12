@@ -98,7 +98,20 @@ rm -rf "$JOD_HOME"; mkdir -p "$JOD_HOME"
 DB="$JOD_HOME/jod.db"
 q() { python3 "$REPO/tests/e2e/jod/db.py" "$DB" "$1"; }
 # One value out of the store, unadorned, for a shell test to compare.
-val() { python3 "$REPO/tests/e2e/jod/db.py" "$DB" "$1" | sed -n 3p | sed 's/ *$//'; }
+#
+# Not `db.py | sed -n 3p`, which is how the other suites spell this: with no
+# rows, the third line of that output is the literal `(0 rows)`, and a poll
+# waiting for a card to appear therefore sees a card id immediately and answers
+# a card called `(0 rows)`. Empty has to mean empty.
+val() {
+  JOD_SQL="$1" python3 - <<'PY'
+import sqlite3, os
+db = os.environ['JOD_HOME'] + '/jod.db'
+con = sqlite3.connect(f'file:{db}?mode=ro', uri=True)
+row = con.execute(os.environ['JOD_SQL']).fetchone()
+print('' if row is None or row[0] is None else str(row[0]).strip())
+PY
+}
 
 # Every byte of the store, including the write-ahead log: a value sitting in
 # `jod.db-wal` is as leaked as one in a table, and a check that opened the
@@ -114,19 +127,45 @@ sys.exit(0)
 PY
 }
 
-# Every event payload one run produced, concatenated.
+# What the CLI calls a harness, as the database and `open_work` spell it.
+harness_id() {
+  case "$1" in
+    claude) echo claude_code ;;
+    opencode) echo open_code ;;
+    agy) echo agy ;;
+    *) echo "$1" ;;
+  esac
+}
+
+# Every event payload one conversation's runs produced, concatenated.
 #
-# Its own reader rather than `val`, which slices the third line out of db.py's
-# output: a payload carrying a newline would make that read half an event and
-# quietly weaken every `grep` below it.
-transcript_of() {
-  JOD_RUN_NAME="$1" python3 - <<'PY'
+# Keyed by conversation rather than by run name: a work session's run is named
+# after the work's *model-generated* title, which is not something this script
+# can predict. Two routes to the same rows, unioned, because which one is
+# populated depends on who was still holding the run when it ended — a run's
+# events are always in `events`, but the fold into `messages` belongs to
+# whichever process was following.
+#
+# Its own reader rather than `val`, which reads one line: a payload carrying a
+# newline would make that half an event and quietly weaken every `grep` below.
+transcript_of_conversation() {
+  JOD_CID="$1" python3 - <<'PY'
 import sqlite3, os
 db = os.environ['JOD_HOME'] + '/jod.db'
+cid = os.environ['JOD_CID']
 con = sqlite3.connect(f'file:{db}?mode=ro', uri=True)
+runs = {r[0] for r in con.execute(
+    "SELECT DISTINCT run_id FROM messages WHERE conversation_id = ? AND run_id IS NOT NULL",
+    (cid,))}
+runs |= {r[0] for r in con.execute(
+    "SELECT r.id FROM runs r JOIN conversations c ON c.session_id = r.session_id "
+    "WHERE c.id = ? AND r.session_id IS NOT NULL", (cid,))}
+if not runs:
+    print(''); raise SystemExit
+marks = ','.join('?' * len(runs))
 rows = con.execute(
-    "SELECT e.payload FROM events e JOIN runs r ON r.id = e.run_id "
-    "WHERE r.name = ? ORDER BY e.seq", (os.environ['JOD_RUN_NAME'],)).fetchall()
+    f"SELECT payload FROM events WHERE run_id IN ({marks}) ORDER BY run_id, seq",
+    tuple(runs)).fetchall()
 print(' '.join(r[0] or '' for r in rows))
 PY
 }
@@ -224,7 +263,6 @@ echo "harnesses under test: ${HARNESSES[*]}"
 # ---------------------------------------------------------------------------
 parity_run() {
   local h="$1"
-  local tag="parity-$h"
   local work="$JOD_HOME/work/$h"
   local root_a="$work/checkout"
   local root_b="$work/notes"
@@ -251,47 +289,66 @@ parity_run() {
   check "[$h] the stored secret's value is not in the database" \
     test -z "$(leaked_in_db "$token")"
 
-  # A conversation has to exist before roots can be attached to it, and nothing
-  # in Jod mints one without a run — `jod conv new` does not exist. So this
-  # cheap turn is what the roots are then hung on; the run *under test* is the
-  # second one, and it is the only one asked to do anything.
-  section "3.$h  $h — a first turn, so there is a conversation to put roots on"
-  run jod run "Reply with exactly READY and nothing else." -H "$h" -n "$tag-open"
-  local cid
-  cid="$(val "SELECT id FROM conversations ORDER BY created_at_ms DESC LIMIT 1")"
-  echo "conversation: ${cid:-<none>}"
+  # The run under test is a **work session**, opened from the main chat, and
+  # that is not an implementation detail — it is the only path in Jod that hands
+  # a run Jod's own tools.
+  #
+  # `jod run` and `jod team start` both build their request with `tools: None`,
+  # and `harness/claude.rs` writes no `--mcp-config` without it: a run started
+  # that way has no `record_decision`, no `ask_question` and no
+  # `request_secret`, so five of the six things below are not merely untested
+  # there, they are impossible. `orchestrator::prepare_work` is the one
+  # construction site that sets `tools`, and — since the wiring audit — the only
+  # one that sets `roots` and `secrets` too. Driving anything else would be
+  # writing a suite that measures the path the feature is not on.
+  section "3.$h  $h — opening the work whose first session is the run under test"
+  run jod main "Open a work now with your open_work tool. Pass harness='$(harness_id "$h")',
+checkout='$root_a', and exactly this instruction:
+
+'You are checking Jod's own plumbing end to end. Use your jod MCP tools. Do all six of
+these, in order, then stop. 1. Call list_roots and state how many directories you were
+given. 2. Read the file $root_b/parity-marker.txt and quote the single line it contains,
+exactly. 3. Call record_decision: decision \"quote the marker verbatim\", because \"the
+parity suite compares it byte for byte\", options [\"verbatim\", \"paraphrased\"]. 4. Call
+ask_question with blocking set to true, asking exactly: \"Parity check for $h: what word
+should I finish with?\" — WAIT for the answer, it is coming from the command line, and
+then quote the answer back exactly as you received it. 5. Call request_secret for the
+name $requested_name, hint \"the parity suite asks for one so the card flow is
+exercised\". 6. Print the value of the environment variable $secret_name on a line of its
+own, in the form TOKEN=<value>; if it is unset or empty print TOKEN=<unset> instead, and
+do not call any tool for this — read the environment variable directly.'
+
+Do not do any of that work yourself, and do not ask me anything: open the work and stop." \
+    --wait -H claude
+
+  # The session is spawned by `open_work` inside the orchestrator's own run, so
+  # it exists within seconds of that turn ending — but "within seconds" is not
+  # "before the next line", and a poll that gave up immediately would report a
+  # missing session that was about to appear.
+  local cid=""
+  local waited=0
+  while [ "$waited" -lt 120 ]; do
+    cid="$(val "SELECT id FROM conversations
+                 WHERE work_id IS NOT NULL AND harness='$(harness_id "$h")'
+                 ORDER BY created_at_ms DESC LIMIT 1")"
+    [ -n "$cid" ] && break
+    sleep 5
+    waited=$((waited + 5))
+  done
+  echo "work session conversation: ${cid:-<none>} (after ${waited}s)"
   if [ -z "$cid" ]; then
-    echo "FAIL  [$h] the opening turn produced no conversation; nothing further can run"
+    echo "FAIL  [$h] the orchestrator opened no work for $h, so there is no run to check"
     FAILED=$((FAILED + 1))
     return 0
   fi
 
-  runsh "'$BIN/jod' root add '$root_a' -c '$cid'"
+  # `prepare_work` adds the checkout as the session's first root. The second is
+  # added here, which is also the CLI half of E1: a root a person attached to a
+  # session that is already running.
   runsh "'$BIN/jod' root add '$root_b' -c '$cid'"
   run jod root ls -c "$cid"
-  check "[$h] both roots are on the conversation" \
+  check "[$h] both roots are on the session" \
     test "$(val "SELECT count(*) FROM conversation_roots WHERE conversation_id='$cid'")" = 2
-
-  section "3.$h  $h — the one run under test"
-  # Detached, because step 4 of the instruction blocks inside the harness until
-  # this script answers the card. A foreground run would deadlock: the answer
-  # has to come from a shell that is not waiting on the run.
-  run jod run "You are checking Jod's own plumbing end to end. Use your jod MCP tools.
-Do all six of these, in this order, then stop:
-
-1. Call \`list_roots\` and state how many directories you were given.
-2. Read the file $root_b/parity-marker.txt and quote the single line it contains, exactly.
-3. Call \`record_decision\`: decision 'quote the marker verbatim', because 'the parity
-   suite compares it byte for byte', options ['verbatim', 'paraphrased'].
-4. Call \`ask_question\` with blocking set to true, asking exactly: 'Parity check for $h:
-   what word should I finish with?'. WAIT for the answer — it is coming from the command
-   line — and then quote the answer back exactly as you received it.
-5. Call \`request_secret\` for the name $requested_name, hint 'the parity suite asks for
-   one so the card flow is exercised'.
-6. Print the value of the environment variable $secret_name on a line of its own, in
-   the form TOKEN=<value>. If it is unset or empty, print TOKEN=<unset> instead. Do not
-   call any tool for this — read the environment variable directly.
-" -H "$h" -n "$tag" -C --detach
 
   # The blocking question, answered from the command line, which is the half of
   # D2 no unit test can reach: `ask_question` polls the card row from inside the
@@ -325,7 +382,7 @@ Do all six of these, in this order, then stop:
               WHERE conversation_id='$cid' AND role='assistant' ORDER BY id DESC LIMIT 3\""
 
   local transcript
-  transcript="$(transcript_of "$tag")"
+  transcript="$(transcript_of_conversation "$cid")"
 
   # --- the six things, each asserted on its own ---------------------------
   check "[$h] the run recorded a decision" \

@@ -36,6 +36,7 @@ mod rail;
 mod secret;
 mod sessions;
 mod todo;
+mod yank;
 pub mod ui;
 mod workspace;
 
@@ -114,6 +115,13 @@ pub enum Action {
     EnterMain,
     /// Stop an agent and close its tmux session.
     Stop(String),
+    /// Put text on the terminal's clipboard.
+    ///
+    /// An `Action` because it writes an escape sequence to stdout, which the
+    /// key handler may not do. What to copy is decided in `yank.rs`, off the
+    /// transcript rather than off the screen — the screen has wrapping and
+    /// borders in it.
+    Yank(String),
     /// End the turn in flight and stay in the conversation.
     ///
     /// The same call as [`Action::Stop`] at the process level — Jod runs one
@@ -1050,6 +1058,26 @@ async fn perform(
         // intact either way, and a harness that outlives its interruption is a
         // supervisor problem rather than a reason to put the user back into a
         // turn they have already abandoned.
+        // Straight to stdout, past ratatui: this is a message for the terminal
+        // emulator rather than something to draw, and the next frame repaints
+        // over anything the draw buffer thought was there.
+        //
+        // A failure is reported and nothing else — the clipboard cannot be read
+        // back, so there is no state to repair, and the notice has already gone
+        // out saying what was copied.
+        Action::Yank(sequence) => {
+            use std::io::Write as _;
+            let mut out = io::stdout();
+            if out
+                .write_all(sequence.as_bytes())
+                .and_then(|()| out.flush())
+                .is_err()
+            {
+                app.push(Entry::Notice(
+                    "the terminal would not take the clipboard sequence".into(),
+                ));
+            }
+        }
         Action::Interrupt(id) => {
             if let Err(e) = jod.kill_agent(&id).await {
                 app.push(Entry::Notice(format!(
@@ -2434,6 +2462,19 @@ fn on_chord(app: &mut App, key: KeyEvent) -> Option<Option<Action>> {
             app.rail.cycle(&ids);
             handled(None)
         }
+        // Copy the last reply. The terminal's own selection stops working the
+        // moment a pane has scrollback and wrapping, which is always.
+        KeyCode::Char('y') if alt => handled(match yank::from_transcript(&app.transcript) {
+            Some(found) => {
+                let sequence = yank::osc52(&found.text);
+                app.push(Entry::Notice(yank::note(&found)));
+                Some(Action::Yank(sequence))
+            }
+            None => {
+                app.push(Entry::Notice("nothing to copy yet".into()));
+                None
+            }
+        }),
         // Search every transcript. `/` is the command palette in chat and the
         // list filter everywhere else, so the one thing it could never be is
         // this — hence a chord. Alt only: `Ctrl-S` is XON and the terminal eats

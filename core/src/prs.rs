@@ -24,6 +24,26 @@
 //! [`Source::Poll`] exists as a way of first hearing about one rather than only
 //! as a way of refreshing.
 //!
+//! ## One path here has never been run
+//!
+//! [`run_gh`] actually spawning `gh` is **not exercised by any test**, and that
+//! is deliberate rather than an oversight to be tidied up later. Exercising it
+//! end to end means opening a pull request, which is externally visible and
+//! which SPECS.md lists as stop-and-ask; it has not been authorised, so it has
+//! not been done.
+//!
+//! What *is* held to reality either side of that gap: the argv, run verbatim
+//! against a real `gh` and confirmed accepted; the JSON it prints, pasted into
+//! the tests as fixtures rather than invented; the three failure messages it
+//! produces, captured from real runs with no host configured, with a stale
+//! token, and against a number that does not exist; and the fold from an answer
+//! into a row, through [`Store::absorb_view`] and [`Store::absorb_list`], which
+//! exist as separate functions precisely so that most of what could go wrong
+//! here needs no process. The untested seam is the dozen lines that turn an
+//! `Output` into a `String`.
+//!
+//! Nobody should read the green suite as covering it.
+//!
 //! ## Absent tooling is a machine, not an error
 //!
 //! No `gh`, or a `gh` nobody has logged in, is a fact about the box. It makes
@@ -1155,7 +1175,9 @@ pub fn sweep_with(store: &Store, limit: usize, gh: Option<&Path>) -> Result<Swep
         )? {
             match outcome {
                 Reconciliation::Updated(_) => swept.discovered += 1,
-                Reconciliation::Unavailable(why @ (Unavailable::NotInstalled | Unavailable::NotAuthenticated)) => {
+                Reconciliation::Unavailable(
+                    why @ (Unavailable::NotInstalled | Unavailable::NotAuthenticated),
+                ) => {
                     swept.quiet = Some(why);
                     return Ok(swept);
                 }
@@ -1280,7 +1302,7 @@ mod tests {
                 "INSERT INTO leases
                    (work_id, work_title, conversation_id, repo_path, worktree_path, branch,
                     base_ref, state, created_at_ms)
-                 VALUES (?1, 'a work', ?2, '/tmp/repo', ?3, ?4, 'main', 'held', 1)",
+                 VALUES (?1, 'a work', ?2, ?5, ?3, ?4, 'main', 'held', 1)",
                 params![
                     work_id,
                     conversation_id,
@@ -1288,7 +1310,12 @@ mod tests {
                     // twice, and `worktree_path` is the column that may not
                     // repeat.
                     format!("/tmp/wt/{}", uuid::Uuid::new_v4()),
-                    branch
+                    branch,
+                    // One *held* lease per work and repository, so a test that
+                    // wants two of them needs two repositories. That index is
+                    // what makes a sibling session reuse a lease rather than
+                    // cut a second branch for the same job.
+                    format!("/tmp/repo/{branch}"),
                 ],
             )?;
             Ok(tx.last_insert_rowid())
@@ -1938,6 +1965,154 @@ thing for the MCP server.
             [Reconciliation::Unavailable(Unavailable::NotInstalled)]
         );
         assert!(s.stale_pull_requests(10).unwrap().is_empty());
+    }
+
+    // ---- the two callers ------------------------------------------------
+
+    /// This runs on every event of every run, so the common case has to be
+    /// nearly free — and, more importantly, has to record nothing.
+    #[test]
+    fn an_event_that_mentions_no_pull_request_records_nothing() {
+        let s = store();
+        for event in [
+            AgentEvent::Message {
+                text: "I have finished the refactor and pushed the branch.".into(),
+            },
+            AgentEvent::ToolCall {
+                name: "Bash".into(),
+                input: None,
+            },
+            AgentEvent::Started {
+                session_id: Some("s".into()),
+                model: None,
+            },
+        ] {
+            assert!(note_from_stream(&s, None, &event).unwrap().is_empty());
+        }
+        assert!(s.stale_pull_requests(10).unwrap().is_empty());
+    }
+
+    /// The stream half, end to end through the entry point the service calls:
+    /// a `gh pr create` URL in a tool result, attributed to the work and the
+    /// worktree the session was actually writing in.
+    #[test]
+    fn a_pull_request_in_the_stream_lands_on_the_sessions_work_and_lease() {
+        let s = store();
+        let c = conversation(&s);
+        work(&s, "w1");
+        s.write(|tx| {
+            tx.execute(
+                "UPDATE conversations SET work_id = 'w1' WHERE id = ?1",
+                params![c],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let id = lease(&s, "w1", &c, "feat/x");
+
+        let event = AgentEvent::ToolResult {
+            name: "Bash".into(),
+            summary: Some("https://github.com/Reljod/Jod/pull/61".into()),
+            is_error: false,
+        };
+        let saved = note_from_stream(&s, Some(&c), &event).unwrap();
+
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].conversation_id.as_deref(), Some(c.as_str()));
+        assert_eq!(saved[0].work_id.as_deref(), Some("w1"));
+        assert_eq!(
+            saved[0].lease_id,
+            Some(id),
+            "the branch the session holds is how it reaches the worktree"
+        );
+        assert_eq!(saved[0].state, State::Unknown);
+    }
+
+    #[test]
+    fn attribution_survives_a_conversation_with_no_work_and_no_lease() {
+        let s = store();
+        let c = conversation(&s);
+        let found = s.attribution_for(&c).unwrap();
+        assert_eq!(found.conversation_id.as_deref(), Some(c.as_str()));
+        assert_eq!(found.work_id, None);
+        assert_eq!(found.branch, None);
+    }
+
+    /// A released lease's branch is somebody else's business now, and asking
+    /// about it every minute for ever is how a poller becomes the reason for a
+    /// rate limit.
+    #[test]
+    fn only_held_leases_are_asked_about() {
+        let s = store();
+        let c = conversation(&s);
+        work(&s, "w1");
+        lease(&s, "w1", &c, "feat/live");
+        let done = lease(&s, "w1", &c, "feat/released");
+        s.write(|tx| {
+            tx.execute(
+                "UPDATE leases SET state = 'released' WHERE id = ?1",
+                params![done],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        let asking: Vec<String> = s
+            .leases_to_ask(10)
+            .unwrap()
+            .into_iter()
+            .map(|a| a.branch)
+            .collect();
+        assert_eq!(asking, ["feat/live"]);
+    }
+
+    /// The poll half's entry point on a machine with no `gh`: it stops at the
+    /// first sign nobody can be asked, writes nothing, and does not go on to
+    /// spawn a process per lease to be told the same thing.
+    #[test]
+    fn a_sweep_with_no_gh_stops_at_the_first_answer_and_writes_nothing() {
+        let s = store();
+        let c = conversation(&s);
+        work(&s, "w1");
+        lease(&s, "w1", &c, "feat/x");
+        s.note_pull_requests(
+            "https://github.com/Reljod/Jod/pull/61",
+            &Attribution::default(),
+        )
+        .unwrap();
+        let before = s
+            .pull_request("https://github.com/Reljod/Jod/pull/61")
+            .unwrap();
+
+        let swept = sweep_with(&s, 10, None).unwrap();
+
+        assert_eq!(swept.reconciled, 0);
+        assert_eq!(swept.discovered, 0);
+        assert_eq!(swept.quiet, Some(Unavailable::NotInstalled));
+        assert_eq!(
+            s.pull_request("https://github.com/Reljod/Jod/pull/61")
+                .unwrap(),
+            before,
+            "an unasked question changes nothing"
+        );
+    }
+
+    /// With nothing to refresh, the sweep still gets as far as the leases —
+    /// which is the half that discovers a pull request nobody parsed.
+    #[test]
+    fn a_sweep_with_nothing_to_refresh_still_asks_the_leases() {
+        let s = store();
+        let c = conversation(&s);
+        work(&s, "w1");
+        lease(&s, "w1", &c, "feat/x");
+
+        let swept = sweep_with(&s, 10, None).unwrap();
+        assert_eq!(
+            swept.quiet,
+            Some(Unavailable::NotInstalled),
+            "it reached the lease pass and stopped there, rather than returning \
+             empty-handed with nothing attempted"
+        );
     }
 
     // ---- auto-PR --------------------------------------------------------

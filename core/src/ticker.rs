@@ -16,8 +16,14 @@
 //! fold is pure too, so "unchanged suppresses the run" is tested from a value
 //! rather than from a process.
 //!
-//! ## The tick is also what delivers agent mail, and why that is not
-//! [`crate::delivery`]
+//! ## The tick is also what speaks to agents, by two roads
+//!
+//! [`Ticker::tick_deliveries`] injects what the queue in [`crate::delivery`]
+//! holds for a conversation — card answers and human nudges — and
+//! [`Ticker::tick_mail`] wakes members holding mail. Both were built before
+//! anything called them, which is why the composite [`crate::daemon::Tick`]
+//! impl is guarded by a test that goes through it rather than through the
+//! steps.
 //!
 //! [`Ticker::tick_mail`] is the **authoritative** path for agent-to-agent mail:
 //! [`crate::team::wake_order`] decides who may be woken, `claim_wake` rate-limits
@@ -27,13 +33,14 @@
 //! answers and human nudges travel a different road, [`crate::delivery`], which
 //! queues against a *conversation*.
 //!
-//! Two roads is one more than the design wants, and merging them was examined
-//! and deliberately deferred. The full reasoning is at the top of
-//! [`crate::delivery`]; the short of it is that this queue addresses a
+//! Two roads is one more than the design wants, and they are being merged in
+//! order rather than at once. The full reasoning is at the top of
+//! [`crate::delivery`]; the short of it is that this road addresses a
 //! **member** and that one addresses a **conversation**, an explicit team's
 //! member has no stable conversation to be addressed by, and closing that gap
 //! needs a schema change. The state vocabulary *was* unified, so both tables
-//! now mean the same thing by the same word.
+//! now mean the same thing by the same word, and the queue that had no caller
+//! now has one.
 //!
 //! Two rules for whoever does merge them:
 //!
@@ -55,6 +62,7 @@ use crate::schedule::{self, Fire, FireOutcome, Goal, Misfire, Overlap, Schedule}
 use crate::service::{AgentStatus, Jod, RunConversation};
 use crate::store::{NewFact, Origin, Store};
 use crate::team::{self, MemberStatus};
+use crate::works;
 
 /// What a goal's done-when command said.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -996,6 +1004,142 @@ impl Ticker {
     ///   session is left asleep — resuming it would start a fresh context and
     ///   it would answer having forgotten everything — and the mail is
     ///   annotated rather than left silently sitting there.
+    pub async fn tick_mail(&self, now_ms: i64) -> Result<TickReport> {
+        let Some(store) = self.jod.store().cloned() else {
+            return Ok(TickReport::default());
+        };
+        // Before anything is delivered: notice which members have finished the
+        // turn they were last woken for. See `settle_members` — without it a
+        // member is woken exactly once, ever.
+        self.settle_members(&store);
+        let waiting = store.mail_waiting()?;
+        let mut report = TickReport {
+            claimed: waiting.len(),
+            ..Default::default()
+        };
+
+        for held in waiting {
+            let Some(order) = team::wake_order(&held.member, &held.pending) else {
+                report.held += 1;
+                self.note_why_it_waits(&store, &held);
+                continue;
+            };
+            // One statement, so two ticks racing produce one wake rather than
+            // two turns reading the same mail.
+            if !store.claim_wake(
+                held.scope,
+                &held.team,
+                &held.member.name,
+                now_ms,
+                team::WAKE_INTERVAL_MS,
+            )? {
+                report.held += 1;
+                continue;
+            }
+            match self.wake(&store, &held, order).await {
+                Ok(()) => report.started += 1,
+                Err(e) => {
+                    report.failed += 1;
+                    // The mail is still on the bus — nothing is drained until
+                    // the spawn has worked — so the next tick tries again.
+                    eprintln!(
+                        "[jod/tick] could not wake {} on {}: {e}",
+                        held.member.name, held.team
+                    );
+                }
+            }
+        }
+        Ok(report)
+    }
+
+    /// Close the works whose boards have emptied, and finish the ones whose
+    /// last run has stopped.
+    ///
+    /// **D8's other half.** A work opens with a task on its board — that part
+    /// was wired, in `create_work` — but nothing ever asked afterwards whether
+    /// the board had emptied, so the chain the spec describes (last task
+    /// completes → the work closes → the closing card is raised) never ran, and
+    /// [`crate::works::State::Finishing`] was a state nothing could reach. The
+    /// only thing that closed a work was a person typing `jod work close`.
+    ///
+    /// **Derived here rather than at the moment a task is ticked off**, and
+    /// that is the design decision worth defending. A task can be completed
+    /// from the board's atomic claim, from an MCP tool, from the CLI, or by an
+    /// agent handing work to a peer — and a rule that lives at *one* of those
+    /// call sites is a rule the other three forget. This asks the question of
+    /// every live work on every tick, so a work closes whoever emptied it.
+    /// It is the same reasoning that put the *whether* of waking in
+    /// [`team::wake_order`] rather than in its callers.
+    ///
+    /// Both transitions are cheap and neither destroys anything: closing keeps
+    /// the record, the tree and the worktrees, and raises a card summarising
+    /// what came out of the work. Deleting is a separate, explicit act that a
+    /// tick will never perform.
+    ///
+    /// The counters read as: `claimed` is works examined, `started` is works
+    /// that changed state, `held` is works with something still open.
+    pub fn tick_works(&self) -> Result<TickReport> {
+        let Some(store) = self.jod.store().cloned() else {
+            return Ok(TickReport::default());
+        };
+        let live = store.works(crate::works::Filter::Live)?;
+        let mut report = TickReport {
+            claimed: live.len(),
+            ..Default::default()
+        };
+
+        for work in live {
+            match work.state {
+                // Tasks done, sessions still running. Only something watching
+                // the runs can notice the moment that stops being true, which
+                // is exactly what a tick is.
+                works::State::Finishing => match store.refresh_work_state(&work.id) {
+                    Ok(works::State::Closed) => {
+                        report.started += 1;
+                        eprintln!("[jod/tick] work `{}` finished and is now closed", work.title);
+                    }
+                    Ok(_) => report.held += 1,
+                    Err(e) => {
+                        report.failed += 1;
+                        eprintln!("[jod/tick] could not settle work `{}`: {e}", work.title);
+                    }
+                },
+                works::State::Open => {
+                    let open = match store.work_tasks(&work.id) {
+                        Ok(tasks) => tasks.iter().filter(|t| !t.is_done()).count(),
+                        Err(e) => {
+                            report.failed += 1;
+                            eprintln!("[jod/tick] could not read the board of `{}`: {e}", work.title);
+                            continue;
+                        }
+                    };
+                    if open > 0 {
+                        report.held += 1;
+                        continue;
+                    }
+                    match store.close_work(&work.id) {
+                        Ok(closing) => {
+                            report.started += 1;
+                            eprintln!(
+                                "[jod/tick] work `{}` is {} — {} branch(es), {} unanswered card(s)",
+                                work.title,
+                                closing.state.as_str(),
+                                closing.branches.len(),
+                                closing.unanswered_cards
+                            );
+                        }
+                        Err(e) => {
+                            report.failed += 1;
+                            eprintln!("[jod/tick] could not close work `{}`: {e}", work.title);
+                        }
+                    }
+                }
+                works::State::Closed => {}
+            }
+        }
+        Ok(report)
+    }
+
     /// Say to each idle session whatever has been queued for it.
     ///
     /// **The missing half of E2.S7**, and the reason it was missing is worth
@@ -1025,6 +1169,15 @@ impl Ticker {
     /// ([`RunConversation::Existing`]), never a new one. A fresh conversation
     /// would resume the harness session while forking Jod's record of it, and
     /// the transcript the human is reading would stop growing.
+    ///
+    /// There is no rate limit here, and `now_ms` is unused for that reason —
+    /// kept for symmetry with the other three steps, and because a limit would
+    /// need it. `tick_mail` needs `claim_wake` because mail arrives at machine
+    /// speed and one message per tick would otherwise buy one turn per tick.
+    /// This queue fills at the speed a person answers cards, and it empties
+    /// completely into a single turn each time, so the only thing that could
+    /// make it spend twice is a session that is not busy — which is the state
+    /// where speaking is what it is supposed to do.
     pub async fn tick_deliveries(&self, _now_ms: i64) -> Result<TickReport> {
         let Some(store) = self.jod.store().cloned() else {
             return Ok(TickReport::default());
@@ -1106,54 +1259,6 @@ impl Ticker {
                     // Still queued, so the next tick tries again. Nothing was
                     // marked delivered to a run that does not exist.
                     eprintln!("[jod/tick] could not deliver to {conversation_id}: {e}");
-                }
-            }
-        }
-        Ok(report)
-    }
-
-    pub async fn tick_mail(&self, now_ms: i64) -> Result<TickReport> {
-        let Some(store) = self.jod.store().cloned() else {
-            return Ok(TickReport::default());
-        };
-        // Before anything is delivered: notice which members have finished the
-        // turn they were last woken for. See `settle_members` — without it a
-        // member is woken exactly once, ever.
-        self.settle_members(&store);
-        let waiting = store.mail_waiting()?;
-        let mut report = TickReport {
-            claimed: waiting.len(),
-            ..Default::default()
-        };
-
-        for held in waiting {
-            let Some(order) = team::wake_order(&held.member, &held.pending) else {
-                report.held += 1;
-                self.note_why_it_waits(&store, &held);
-                continue;
-            };
-            // One statement, so two ticks racing produce one wake rather than
-            // two turns reading the same mail.
-            if !store.claim_wake(
-                held.scope,
-                &held.team,
-                &held.member.name,
-                now_ms,
-                team::WAKE_INTERVAL_MS,
-            )? {
-                report.held += 1;
-                continue;
-            }
-            match self.wake(&store, &held, order).await {
-                Ok(()) => report.started += 1,
-                Err(e) => {
-                    report.failed += 1;
-                    // The mail is still on the bus — nothing is drained until
-                    // the spawn has worked — so the next tick tries again.
-                    eprintln!(
-                        "[jod/tick] could not wake {} on {}: {e}",
-                        held.member.name, held.team
-                    );
                 }
             }
         }
@@ -2889,10 +2994,11 @@ mod tests {
             }
         }
 
-        /// A queue that outlived its conversation would be counted as waiting
-        /// on every tick from now until the end of time.
+        /// A queue never outlives its conversation: the rows cascade with it.
+        /// Worth pinning, because the tick would otherwise count them as
+        /// waiting on every pass from now until the end of time.
         #[tokio::test]
-        async fn a_queue_whose_conversation_is_gone_is_marked_undeliverable() {
+        async fn deleting_a_conversation_takes_its_queue_with_it() {
             let store = Arc::new(Store::in_memory().unwrap());
             let c = store
                 .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)

@@ -145,6 +145,7 @@ pub const GLOBAL: &[Key] = &[
     k("Alt-C", "the rail's next card"),
     k("Alt-P", "add a directory to work in"),
     k("Alt-S", "search every transcript"),
+    k("Alt-Y", "copy the last reply"),
     k("Alt-B", "delegate the typed line"),
     k("Alt-X", "stop the run being watched"),
     k("Alt-F", "the typed line in $EDITOR"),

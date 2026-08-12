@@ -1524,6 +1524,54 @@ mod tests {
         assert!(said.contains("**blocked** ending"));
     }
 
+    /// **Every verb the brief names has to exist.** A preamble that tells an
+    /// agent to call something the catalogue does not advertise costs it a turn
+    /// discovering that, and reads to it as Jod being broken — and there is no
+    /// compiler and no test that would otherwise notice, because a prompt is a
+    /// string. This is the check that would have caught `claim_worktree` being
+    /// described and never registered.
+    #[test]
+    fn every_tool_the_preamble_tells_an_agent_to_call_is_one_that_exists() {
+        let roots = [root("/repo", false), root("/repo-worktree", true)];
+        let secrets = [secret("STRIPE_API_KEY", "the live key")];
+        let peers = ["scout".to_string()];
+        let registered: Vec<&str> = crate::mcp::catalogue().iter().map(|t| t.name).collect();
+
+        for harness in [HarnessKind::ClaudeCode, HarnessKind::OpenCode, HarnessKind::Agy] {
+            for tools in [
+                Some(ToolAccess::ReadOnly),
+                Some(ToolAccess::Delegate),
+                Some(ToolAccess::Orchestrate),
+                None,
+            ] {
+                let said = worker_preamble(&Brief {
+                    harness,
+                    roots: &roots,
+                    secrets: &secrets,
+                    peers: &peers,
+                    tools,
+                });
+                // Anything in backticks that looks like a tool name: lower
+                // case, underscores, no path separators or spaces.
+                for span in said.split('`').skip(1).step_by(2) {
+                    let looks_like_a_tool = !span.is_empty()
+                        && span
+                            .chars()
+                            .all(|c| c.is_ascii_lowercase() || c == '_')
+                        && span.contains('_');
+                    if looks_like_a_tool {
+                        assert!(
+                            registered.contains(&span),
+                            "the brief tells a {} session to call `{span}`, which no tool is \
+                             registered under",
+                            harness.label()
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn a_worker_is_told_the_card_tools_and_when_each_one_is_right() {
         let said = worker_preamble(&brief(HarnessKind::ClaudeCode, &[], &[], &[]));
@@ -1711,7 +1759,7 @@ mod tests {
 
         let brief = opened.request.system.unwrap();
         assert!(brief.contains("/tmp/repo` — **read-only**"), "{brief}");
-        assert!(brief.contains("claim a worktree"));
+        assert!(brief.contains("`claim_worktree`"));
         assert!(brief.contains("$STRIPE_API_KEY"));
         assert!(brief.contains("record_decision"));
         assert!(

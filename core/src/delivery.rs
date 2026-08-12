@@ -25,18 +25,20 @@
 //! reading everything that changed in one go responds more coherently than one
 //! woken ten times with a line each.
 //!
-//! ## Why agent mail does not come through here yet
+//! ## What comes through here, and what does not
 //!
-//! It should, eventually, and the paragraph above says so — but it does not
-//! today, and a reader who assumes otherwise will look for a bug that is not
-//! there. Mail reaches an agent through [`crate::ticker::Ticker::tick_mail`],
+//! Card answers and human nudges do: [`Ticker::tick_deliveries`] walks this
+//! queue on every tick and injects what is waiting as one turn. **Agent mail
+//! does not**, and a reader who assumes otherwise will look for a bug that is
+//! not there. Mail reaches an agent through [`crate::ticker::Ticker::tick_mail`],
 //! which asks [`crate::team::wake_order`] who may be woken and takes the mail
 //! off the bus with [`Store::take_mail`]. This module is authoritative for
 //! **card answers and human nudges**; [`crate::team`] is authoritative for
 //! **agent mail**, including whether the recipient may be woken at all.
 //!
-//! The merge was examined in full and deliberately not done. Three things are
-//! in the way, and all three are cheap to state and expensive to discover:
+//! The merge was examined in full and is being done in order rather than at
+//! once. One of the three things in the way has been removed; two remain, and
+//! both are cheap to state and expensive to discover:
 //!
 //! 1. **This queue addresses a conversation; a team member has not got one.**
 //!    A member of a work *is* a conversation and would fit straight away. A
@@ -49,28 +51,29 @@
 //!    on the bus, visibly, which is a property A8 asks for by name.
 //!    Fixing it properly means letting the queue address a *member*, which is
 //!    a schema change and therefore a stop-and-ask.
-//! 2. **Nothing calls [`Store::plan_injection`] in production.** It is E2.S7's
-//!    handler, written and tested as a value; the turn-boundary injector that
-//!    would call it does not exist yet. Card answers currently reach an agent
-//!    when it *asks* — the blocking card tool returns the answer and settles
-//!    the queued row. So merging mail into this path would move the one
-//!    delivery route that works onto the one that has never run.
-//! 3. **`wake_order` asks a question this module cannot.** `plan_injection`
+//! 2. **`wake_order` asks a question this module cannot.** `plan_injection`
 //!    knows only whether a turn is in flight; `wake_order` also refuses a
 //!    member that is shutting down, or that has no session to resume — where
 //!    waking would start a fresh context and the agent would answer having
 //!    forgotten the work. Until that judgement moves too, merging the queues
 //!    would leave two decisions in two modules and only look unified.
 //!
-//! What *was* unified, because it cost nothing and the drift was real: both
-//! queues now speak one [`State`], so `pending_deliveries.state` and
-//! `team_messages.state` cannot mean different things by the same word.
+//! **Removed:** this queue used to have no caller at all, and that was the
+//! largest of the three. [`Ticker::tick_deliveries`] now drains it on every
+//! tick, so a card answered from the rail reaches its session in a turn
+//! without anybody typing anything — E2.S7's other half, and the thing
+//! Reljod asked for most directly. Before that, an answer nobody fetched over
+//! MCP sat queued for ever and the rail said *queued* about answers the agent
+//! already had.
 //!
-//! The order to do the rest in, when somebody does: build the injector that
-//! calls `plan_injection` for card answers (it is the missing half of E2.S7);
-//! then move `wake_order`'s eligibility here; then, with a migration, let this
-//! queue address a member. Mail moves last, when there is something proven to
-//! move it onto.
+//! Also unified, because it cost nothing and the drift was real: both queues
+//! speak one [`State`], so `pending_deliveries.state` and `team_messages.state`
+//! cannot mean different things by the same word.
+//!
+//! The order to do the rest in: move `wake_order`'s eligibility here, so there
+//! is one answer to "may this be spoken to"; then, with a migration, let this
+//! queue address a member as well as a conversation. Mail moves last — it is
+//! the path that works, and it should be the last thing asked to change.
 
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};

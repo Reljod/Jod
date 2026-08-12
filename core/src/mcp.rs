@@ -3900,6 +3900,272 @@ mod tests {
         assert!(said(&answer).contains("exceeds"), "{}", said(&answer));
     }
 
+    // ---- claiming somewhere to write -------------------------------------
+
+    /// A session on a real git repository, and the two things that make it
+    /// safe to drive.
+    ///
+    /// These tests are synchronous on purpose. They hold `ENV_LOCK` — a
+    /// worktree is cut under the process-wide `JOD_HOME`, so two of them at
+    /// once would each get the other's — and a `std::sync::MutexGuard` must not
+    /// be held across an `.await`. Owning a runtime and stepping into it keeps
+    /// every await inside `block_on`, so the lock never crosses a suspension
+    /// point.
+    struct OnARepo {
+        _guard: std::sync::MutexGuard<'static, ()>,
+        runtime: tokio::runtime::Runtime,
+        store: Arc<Store>,
+        server: Server,
+        repo: PathBuf,
+        conversation: String,
+    }
+
+    impl OnARepo {
+        fn call(&self, name: &str, args: Value) -> Value {
+            self.runtime.block_on(call(&self.server, name, args))
+        }
+    }
+
+    /// A current-thread runtime, entered so that anything constructed under it
+    /// — `Jod::with_store` spawns a task — has a reactor to attach to.
+    fn runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime")
+    }
+
+    /// A run in a work, on a real git repository, answering as its own session.
+    ///
+    /// Deliberately built through the same calls the orchestrator makes, so
+    /// this exercises the arrangement a real session is actually in rather than
+    /// one assembled to make the test pass.
+    fn on_a_repo(name: &str) -> Option<OnARepo> {
+        let (guard, scratch) = crate::leases::scratch(name);
+        let repo = crate::leases::fixture_repo(&scratch.join("repo"))?;
+        let runtime = runtime();
+        let entered = runtime.enter();
+        let store = Arc::new(Store::in_memory().unwrap());
+        let work = store.create_work("tidy the parser").unwrap();
+        let conversation = store
+            .new_conversation(HarnessKind::ClaudeCode, &repo.to_string_lossy(), None)
+            .unwrap();
+        store
+            .attach_conversation(
+                &conversation.id,
+                &work.id,
+                None,
+                crate::works::Origin::Orchestrator,
+            )
+            .unwrap();
+        store
+            .add_root(&conversation.id, crate::roots::NewRoot::reading(&repo))
+            .unwrap();
+        store
+            .append_prompt(&conversation.id, "run-1", "tidy the parser")
+            .unwrap();
+        let server = Server::new(Jod::with_store(store.clone()))
+            .with_access(ToolAccess::Delegate)
+            .for_run("run-1");
+        // The guard borrows the runtime, so it goes before the runtime moves
+        // into the value. The task `Jod::with_store` spawned stays on the
+        // runtime and runs whenever `block_on` drives it.
+        drop(entered);
+        Some(OnARepo {
+            _guard: guard,
+            runtime,
+            store,
+            server,
+            repo,
+            conversation: conversation.id,
+        })
+    }
+
+    /// **The test the lead asked for, and the one that matters.** `claim_lease`
+    /// was written, tested and had no caller outside its own tests, which made
+    /// D5 — read-only checkout, claim before writing — absent from the running
+    /// system while every unit test stayed green. This goes through `call()`,
+    /// so removing the tool from the catalogue fails it.
+    #[test]
+    fn claiming_a_worktree_is_reachable_through_the_tool_and_rebinds_the_roots() {
+        let Some(on) = on_a_repo("mcp-claim") else {
+            return;
+        };
+        let (store, repo, conversation) = (&on.store, &on.repo, &on.conversation);
+        let answer = on.call("claim_worktree", json!({}));
+        assert!(!is_error_result(&answer), "{}", said(&answer));
+        let claimed: Value = serde_json::from_str(&said(&answer)).unwrap();
+
+        assert_eq!(claimed["reused"], false);
+        assert!(claimed["branch"].as_str().unwrap().starts_with("jod/"));
+        let worktree = PathBuf::from(claimed["worktree"].as_str().unwrap());
+        assert!(worktree.is_dir(), "the tool reported a worktree it did not cut");
+
+        // D5's actual promise: the worktree is the one writable root and the
+        // real checkout is still there, readable, so the session can diff
+        // against what Reljod is editing.
+        let roots = store.roots(conversation).unwrap();
+        let writable: Vec<&crate::roots::Root> = roots.iter().filter(|r| r.writable).collect();
+        assert_eq!(writable.len(), 1, "{roots:?}");
+        assert_eq!(writable[0].path, worktree);
+        let checkout = roots
+            .iter()
+            .find(|r| &r.path == repo)
+            .expect("the checkout must stay in the session's roots");
+        assert!(!checkout.writable, "the real checkout became writable");
+    }
+
+    /// A second session on the same repository in the same work is *offered*
+    /// the existing worktree. Reported as reuse rather than hidden: a session
+    /// that believes it cut a fresh branch will commit over a sibling's work
+    /// and describe it as its own.
+    #[test]
+    fn a_sibling_is_offered_the_worktree_rather_than_a_second_branch() {
+        let Some(on) = on_a_repo("mcp-reuse") else {
+            return;
+        };
+        let (store, repo) = (&on.store, &on.repo);
+        let first: Value =
+            serde_json::from_str(&said(&on.call("claim_worktree", json!({})))).unwrap();
+
+        // A sibling: another conversation in the same work, another run.
+        let work_id = store
+            .works(crate::works::Filter::All)
+            .unwrap()
+            .remove(0)
+            .id;
+        let sibling = store
+            .new_conversation(HarnessKind::ClaudeCode, &repo.to_string_lossy(), None)
+            .unwrap();
+        store
+            .attach_conversation(&sibling.id, &work_id, None, crate::works::Origin::Agent)
+            .unwrap();
+        store
+            .add_root(&sibling.id, crate::roots::NewRoot::reading(repo))
+            .unwrap();
+        store.append_prompt(&sibling.id, "run-2", "and the tests").unwrap();
+        let theirs = {
+            // `Jod::with_store` spawns, so it is built inside the runtime this
+            // fixture owns rather than on a bare thread.
+            let _entered = on.runtime.enter();
+            Server::new(Jod::with_store(store.clone()))
+                .with_access(ToolAccess::Delegate)
+                .for_run("run-2")
+        };
+
+        let second: Value = serde_json::from_str(&said(
+            &on.runtime.block_on(call(&theirs, "claim_worktree", json!({}))),
+        ))
+        .unwrap();
+        assert_eq!(second["reused"], true, "{second}");
+        assert_eq!(second["lease_id"], first["lease_id"]);
+        assert_eq!(second["branch"], first["branch"]);
+        assert!(
+            second["note"].as_str().unwrap().contains("sharing"),
+            "reuse has to be said out loud: {second}"
+        );
+    }
+
+    /// A non-git root raises a card and leaves the session running. It is not
+    /// an error the agent should retry, and it is certainly not a crash.
+    #[test]
+    fn claiming_somewhere_that_is_not_a_repository_raises_a_card() {
+        let (_guard, scratch) = crate::leases::scratch("mcp-not-git");
+        let plain = scratch.join("not-a-repo");
+        std::fs::create_dir_all(&plain).unwrap();
+        let runtime = runtime();
+        let entered = runtime.enter();
+        let store = Arc::new(Store::in_memory().unwrap());
+        let work = store.create_work("tidy the parser").unwrap();
+        let conversation = store
+            .new_conversation(HarnessKind::ClaudeCode, &plain.to_string_lossy(), None)
+            .unwrap();
+        store
+            .attach_conversation(
+                &conversation.id,
+                &work.id,
+                None,
+                crate::works::Origin::Orchestrator,
+            )
+            .unwrap();
+        store
+            .add_root(&conversation.id, crate::roots::NewRoot::reading(&plain))
+            .unwrap();
+        store
+            .append_prompt(&conversation.id, "run-1", "tidy the parser")
+            .unwrap();
+        let server = Server::new(Jod::with_store(store.clone()))
+            .with_access(ToolAccess::Delegate)
+            .for_run("run-1");
+
+        drop(entered);
+        let answer = runtime.block_on(call(&server, "claim_worktree", json!({})));
+        assert!(!is_error_result(&answer), "a card is an answer, not an error");
+        let said: Value = serde_json::from_str(&said(&answer)).unwrap();
+        assert_eq!(said["claimed"], false);
+        let card = store
+            .card(said["card_id"].as_i64().unwrap())
+            .unwrap()
+            .expect("the refusal must be on the rail, not only in the answer");
+        assert!(card.blocking);
+        assert!(store.work_leases(&work.id).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_session_outside_a_work_is_told_why_it_cannot_claim() {
+        // A lease is per work *and* repository — that is what makes it
+        // shareable — so there is nothing to key one to here.
+        let (_, server, _) = working(ToolAccess::Delegate);
+        let answer = call(&server, "claim_worktree", json!({})).await;
+        assert!(is_error_result(&answer), "{answer}");
+        assert!(said(&answer).contains("open_work"), "{}", said(&answer));
+    }
+
+    /// Releasing keeps anything that would be lost, and says why. Not a
+    /// failure — an agent told this is an error will try to force it.
+    #[test]
+    fn releasing_a_worktree_with_uncommitted_work_keeps_it_and_says_why() {
+        let Some(on) = on_a_repo("mcp-release-dirty") else {
+            return;
+        };
+        let claimed: Value =
+            serde_json::from_str(&said(&on.call("claim_worktree", json!({})))).unwrap();
+        let worktree = PathBuf::from(claimed["worktree"].as_str().unwrap());
+        std::fs::write(worktree.join("half-done.rs"), "fn main() {}\n").unwrap();
+
+        let released: Value =
+            serde_json::from_str(&said(&on.call("release_worktree", json!({})))).unwrap();
+        assert_eq!(released["removed"], false, "{released}");
+        assert_eq!(released["dirty"], true);
+        assert!(worktree.is_dir(), "uncommitted work was destroyed");
+        assert!(released["note"].as_str().unwrap().contains("on purpose"));
+    }
+
+    #[test]
+    fn releasing_a_clean_merged_worktree_removes_it() {
+        let Some(on) = on_a_repo("mcp-release-clean") else {
+            return;
+        };
+        let claimed: Value =
+            serde_json::from_str(&said(&on.call("claim_worktree", json!({})))).unwrap();
+        let worktree = PathBuf::from(claimed["worktree"].as_str().unwrap());
+
+        let released: Value =
+            serde_json::from_str(&said(&on.call("release_worktree", json!({})))).unwrap();
+        assert_eq!(released["removed"], true, "{released}");
+        assert!(!worktree.exists());
+    }
+
+    #[test]
+    fn releasing_when_you_hold_nothing_says_so_rather_than_failing_obscurely() {
+        let Some(on) = on_a_repo("mcp-release-none") else {
+            return;
+        };
+        let answer = on.call("release_worktree", json!({}));
+        assert!(is_error_result(&answer), "{answer}");
+        assert!(said(&answer).contains("hold no worktree"), "{}", said(&answer));
+    }
+
     /// A work with nothing on its board can never be complete, so an
     /// instruction that says nothing is refused before anything is started.
     #[tokio::test]

@@ -67,8 +67,23 @@ CONFIGS_BEFORE="$(fingerprint_configs)"
 rm -rf "$JOD_HOME"; mkdir -p "$JOD_HOME"
 DB="$JOD_HOME/jod.db"
 q() { python3 "$REPO/tests/e2e/jod/db.py" "$DB" "$1"; }
-# One value out of the store, unadorned, for a shell test to compare.
-val() { python3 "$REPO/tests/e2e/jod/db.py" "$DB" "$1" | sed -n 3p | sed 's/ *$//'; }
+
+# One value out of the store, or nothing at all.
+#
+# Not `db.py | sed -n 3p`: that prints `(0 rows)` for an empty result, which is
+# a non-empty string. Every `test -n` against it passed, and the junk was then
+# interpolated into the next query — a check that reported success for a reply
+# that did not exist. A helper that cannot say "no answer" is worse than no
+# helper.
+val() {
+  JOD_SQL="$1" python3 - <<'PY'
+import sqlite3, os
+con = sqlite3.connect(f"file:{os.environ['JOD_HOME']}/jod.db?mode=ro", uri=True)
+row = con.execute(os.environ['JOD_SQL']).fetchone()
+if row and row[0] is not None:
+    print(row[0])
+PY
+}
 
 # Long enough to clear `team::WAKE_INTERVAL_MS`, which is what stops ten
 # messages becoming ten turns. A tick inside that window deliberately holds the
@@ -276,6 +291,24 @@ check "and it was never delivered to anybody" \
   test "$(val "SELECT count(*) FROM team_messages WHERE recipient='nobody-here' AND delivered=0")" = 0
 
 section "6. the tick delivers the question, and the answer comes back in-thread"
+# The protocol reminder rides in the same wake as the question.
+#
+# Not decoration, and not the suite propping up a result: a standing
+# instruction given on a member's *first* turn is several turns back by the
+# time mail arrives, and an agent that has drifted from it answers in prose
+# instead of using `reply` — observed, on OpenCode, in a run where the answerer
+# said "The parser lives in core/src/harness." to nobody at all. Nothing on the
+# bus, and the exchange silently half-happened.
+#
+# This is what G6.S1 is for: the protocol belongs in what every agent is told,
+# not in a sentence somebody remembered to say once. Until that preamble
+# exists, the suite says it again — and the saying is itself a demonstration,
+# because the reminder and the question are drained into **one** turn by the
+# batching the wake already does.
+run jod team msg crew --from reljod --to answerer \
+  "Reminder of your standing instruction: answer the message below using your jod
+   \`reply\` tool, passing the message id printed in its brackets. Do not answer in
+   prose — an answer that does not go through the tool never reaches anybody."
 run jod daemon --once
 settle 300
 runsh "q \"SELECT id, sender, recipient, substr(body,1,60) AS body, in_reply_to, thread_id, depth, state FROM team_messages ORDER BY id\""
