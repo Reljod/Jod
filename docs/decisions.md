@@ -1988,3 +1988,36 @@ The counting error underneath all of it is worth naming: a test count measures
 how much code has been exercised, and it is routinely read as measuring how
 much of the product works. Those diverge silently, and the gap between them is
 invisible from inside the suite.
+
+## A protocol given once at session start does not survive into a later turn
+
+Jod briefs an agent when its run begins. That brief is one user turn among
+many, and by the time something arrives that depends on it — a message from a
+peer, an answer to a card — it may be several turns back in a resumed
+conversation.
+
+Measured, not theorised. In a cross-harness exchange the answerer was told at
+session start how to use the bus, and when a question arrived some turns later
+it replied **in prose and never touched the bus at all**. The exchange
+half-happened, in silence: the asker waited, the answer existed, and nothing
+Jod could see had gone wrong. Nothing failed loudly, because nothing failed —
+an agent that has forgotten a protocol is an agent behaving reasonably in the
+absence of one.
+
+Two consequences.
+
+**A standing protocol belongs in the standing framing**, re-sent every turn,
+rather than in the opening prompt. That is what a system prompt is for, and the
+harnesses that have one (`--append-system-prompt`) should carry it there; the
+ones that do not need it prepended to each prompt rather than only the first.
+
+**Anything delivered as a synthetic turn should carry what the recipient needs
+to act on it.** A message that says "reply with `reply(message_id=…)`" is
+self-describing; one that assumes the recipient remembers the verb is a message
+that works on turn two and quietly stops working on turn twelve. The same
+argument the message-id fix already made: the recipient must be able to act
+from what it was just handed, not from what it was told once.
+
+The failure mode is worth naming because it is invisible from inside a test
+suite. Every unit test gives its agent the instruction and the stimulus in the
+same breath, so the gap between them — which is where this lives — never opens.
