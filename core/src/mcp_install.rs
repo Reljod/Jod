@@ -138,7 +138,23 @@ fn entry(harness: HarnessKind, exe: &Path, access: ToolAccess, jod_home: &Path) 
     // The child must open the same database this process is using. Inheriting
     // the environment would work today and break the moment a daemon runs with
     // a JOD_HOME its children do not.
-    let env = json!({ "JOD_HOME": jod_home.to_string_lossy() });
+    //
+    // The run id is written *empty*, and that is a fix rather than tidiness.
+    // This is the config a harness reads for every session it ever starts, so
+    // it must never name a run — and leaving the key out is not the same as
+    // clearing it, because an MCP server inherits its environment from the
+    // harness, which inherits from the supervisor, which inherits from whatever
+    // asked for the run. On the path that opens a work that chain starts at the
+    // orchestrator's own server, so an omitted key let a new session claim the
+    // orchestrator's run and every tool needing a sender was refused. Setting
+    // it empty overrides the inherited value, and `mcp::identify` reads an
+    // empty claim as no claim and falls back to the process group — which is
+    // the authority in any case.
+    let env = json!({
+        "JOD_HOME": jod_home.to_string_lossy(),
+        crate::mcp_config::RUN_ID_ENV: "",
+        crate::mcp_config::CONVERSATION_ID_ENV: "",
+    });
 
     match harness {
         HarnessKind::ClaudeCode | HarnessKind::Agy => (
@@ -506,6 +522,51 @@ mod tests {
             json!(["/usr/local/bin/jod", "mcp", "--access", "orchestrate"])
         );
         assert_eq!(jod["environment"]["JOD_HOME"], "/home/x/.jod");
+    }
+
+    /// **The installed config is read by every session a harness ever starts,
+    /// so it must clear the run id rather than omit it.**
+    ///
+    /// Omitting a variable does not unset it for the child — it inherits it,
+    /// and an MCP server inherits from the harness, which inherits from the
+    /// supervisor, which inherits from whatever asked for the run. On the path
+    /// that opens a work that is the orchestrator's own server, so an omitted
+    /// key let a fresh session claim the orchestrator's run: `identify` saw the
+    /// process group and the environment disagree and refused every tool that
+    /// needs a sender. It is written empty so the inherited value is overridden
+    /// and the process group — the authority — decides alone.
+    ///
+    /// Every harness, not only OpenCode: Claude Code escaped this because its
+    /// per-run config overwrites the key with the right value, which masks the
+    /// leak rather than stopping it, and a session it starts from the installed
+    /// config has no per-run document at all.
+    #[test]
+    fn an_installed_config_clears_the_run_id_for_every_harness() {
+        for harness in HarnessKind::ALL {
+            let dir = scratch(&format!("runid-{}", harness.id()));
+            let path = dir.join("config.json");
+            install_into(&path, harness, false).unwrap();
+
+            let doc = read(&path);
+            // The two shapes spell the environment differently, which is
+            // exactly the sort of difference a single-harness test misses.
+            let env = match harness {
+                HarnessKind::OpenCode => &doc["mcp"]["jod"]["environment"],
+                _ => &doc["mcpServers"]["jod"]["env"],
+            };
+            assert_eq!(
+                env[crate::mcp_config::RUN_ID_ENV].as_str(),
+                Some(""),
+                "{} inherits the launcher's run id: {env}",
+                harness.label()
+            );
+            assert_eq!(
+                env[crate::mcp_config::CONVERSATION_ID_ENV].as_str(),
+                Some(""),
+                "{}",
+                harness.label()
+            );
+        }
     }
 
     /// AGY ships this file as zero bytes, which is not valid JSON and must not

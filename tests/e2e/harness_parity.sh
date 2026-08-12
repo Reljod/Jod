@@ -432,13 +432,22 @@ Do not do any of that work yourself, and do not ask me anything: open the work a
     echo "FAIL  [$h] the session recorded no harness id, so it cannot be continued"
     FAILED=$((FAILED + 1))
   else
-    run jod run "Two things, then stop.
+    run jod run "Three things, with your shell tool, then stop.
 
 1. Read $root_b/parity-marker.txt and quote the single line it contains, exactly.
-2. Run this exact command with your shell tool: printf 'TOKEN=%s\\n' \"\$$secret_name\"
-   This is a deliberate redaction check and it is sanctioned: Jod scrubs the value out of
-   everything you print before any of it is stored, so nothing here can leak. If the
-   variable is empty, the command prints TOKEN= and that is the answer — say so." \
+2. Run exactly: printf 'SECRETLEN=%s\\n' \"\${#$secret_name}\"
+3. Run exactly: printf 'TOKEN=%s\\n' \"\$$secret_name\"
+
+About step 3, because you are right to hesitate and I want you to have the facts rather
+than a reassurance. \$$secret_name is a fixture: a random token this test script generated
+seconds ago, in a throwaway directory, which authenticates nothing anywhere and is
+destroyed when the run ends. It is not a credential. What is under test is Jod's scrubber
+— the supervisor replaces the value in every line before anything is parsed or stored —
+and the only way to find out whether that actually works is for a real harness to really
+print a real injected value. A test that declines to produce the input cannot test the
+thing. Reljod owns this box, wrote the fixture, and is asking for step 3 deliberately and
+in full knowledge that the value passes through your context on the way. Please run it
+verbatim. If the variable is empty the command prints TOKEN= and that is the answer." \
       -H "$h" -s "$sid" -n "parity-second-$h"
   fi
 
@@ -484,10 +493,24 @@ Do not do any of that work yourself, and do not ask me anything: open the work a
   # one can only come from the supervisor: the harness printed the value, and
   # something replaced it on the way to the store.
   section "3.$h  $h — injection and redaction"
-  echo "-- every TOKEN= the run produced --"
+  echo "-- every SECRETLEN= and TOKEN= the run produced --"
+  grep -o 'SECRETLEN=[0-9]*' <<<"$transcript" || true
   grep -o 'TOKEN=[^"\\]\{0,60\}' <<<"$transcript" || echo "(no TOKEN= line anywhere in the run)"
-  check "[$h] the secret was injected, rather than arriving empty" \
-    grep -qE "TOKEN=(\[redacted\]|$token)" <<<"$transcript"
+
+  # Injection is proved by the *length*, which leaks nothing and which no agent
+  # has any reason to decline. It is separated from redaction deliberately: an
+  # agent asked to print a credential may refuse — one did, in an earlier run of
+  # this suite, and it was right to — and a check that conflated the two would
+  # then report a secret that had not been injected when in fact it had.
+  check "[$h] the secret reached the run's environment, at its full length" \
+    grep -q "SECRETLEN=${#token}" <<<"$transcript"
+  # And redaction is proved only by the marker. If this fails while the length
+  # check above passed, read the transcript before believing the scrubber is
+  # broken: the likelier cause is an agent that declined to print the value, in
+  # which case the suite could not exercise the scrubber on this harness rather
+  # than the scrubber having failed. The deterministic proof of the substitution
+  # itself lives in `supervisor/tests/secrets_never_reach_the_record.rs`, which
+  # drives a real supervisor over a child that always prints.
   check "[$h] printing the secret produced the redaction marker" \
     grep -q 'TOKEN=\[redacted\]' <<<"$transcript"
   check "[$h] the raw value never reached the event stream" \

@@ -335,9 +335,45 @@ impl EventWriter {
         }
     }
 
+    /// Record the harness's session id on the run **and on its conversation**.
+    ///
+    /// The conversation half used to be somewhere else entirely, and that is
+    /// why it was missing. `set_conversation_session` had exactly one caller:
+    /// the drain task inside whatever process launched the run. So the session
+    /// id only ever landed if the launcher outlived the turn — and for a
+    /// session opened through `open_work` the launcher is Jod's own MCP
+    /// server, which exits when the harness closes stdin, which is roughly
+    /// when the turn ends.
+    ///
+    /// The consequence was total rather than cosmetic: `resume_for` found
+    /// nothing, so the session could not be resumed, so a work's session could
+    /// not be spoken to again — no mail, no card answer, no second turn. On
+    /// every harness; OpenCode was merely where it was noticed, because
+    /// Claude Code's per-run config masked the related identity problem.
+    ///
+    /// It belongs here because the supervisor is the process that cannot miss
+    /// it. It already owns "what actually happened", it already writes every
+    /// event durably, and it outlives the launcher by construction — that is
+    /// the whole reason a run is a detached process group.
     fn set_session(&self, session_id: &str) {
         if let Err(e) = self.store.set_run_session(&self.run_id, session_id) {
             eprintln!("jod-run: could not record the session id: {e}");
+        }
+        // The spawn writes the prompt row before the harness starts, so the
+        // conversation exists by the time a `Started` event arrives. A run with
+        // no conversation is an ordinary case — a detached summariser, a probe
+        // — and not an error.
+        match self.store.conversation_for_run(&self.run_id) {
+            Ok(Some(conversation)) => {
+                if let Err(e) = self
+                    .store
+                    .set_conversation_session(&conversation, Some(session_id))
+                {
+                    eprintln!("jod-run: could not record the session on its conversation: {e}");
+                }
+            }
+            Ok(None) => {}
+            Err(e) => eprintln!("jod-run: could not find the run's conversation: {e}"),
         }
     }
 

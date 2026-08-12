@@ -186,15 +186,32 @@ fn write_config(
         "JOD_HOME".to_string(),
         jod_home.to_string_lossy().to_string().into(),
     );
-    if let Some(run_id) = run_id {
-        env.insert(RUN_ID_ENV.to_string(), run_id.to_string().into());
-    }
-    if let Some(conversation_id) = conversation_id {
-        env.insert(
-            CONVERSATION_ID_ENV.to_string(),
-            conversation_id.to_string().into(),
-        );
-    }
+    // **Written even when there is no run, as an empty string, because leaving
+    // a variable out does not unset it — it inherits it.** An MCP server is
+    // started by the harness, the harness by the supervisor, the supervisor by
+    // whatever asked for the run: on the path that opens a work, that chain
+    // begins at the *orchestrator's* own MCP server, whose environment names
+    // the orchestrator's run. Omitting the key here let that value fall all the
+    // way through, so a fresh session's server claimed the run that started it.
+    //
+    // Observed rather than theorised: the parity suite's OpenCode leg refused
+    // every tool with "its process group belongs to run 9aeabbb1…, but its
+    // environment claims run 8a82f92b…", and `8a82f92b` was the main chat.
+    // Claude Code was unaffected only because its per-run config happens to
+    // overwrite the key with the right value — masking the leak rather than
+    // stopping it.
+    //
+    // `identify` reads an empty claim as no claim, so a cleared variable means
+    // "ask the process group", which is the authority anyway. Nothing about
+    // `identify` had to be relaxed to fix this, and nothing should be.
+    env.insert(
+        RUN_ID_ENV.to_string(),
+        run_id.unwrap_or_default().to_string().into(),
+    );
+    env.insert(
+        CONVERSATION_ID_ENV.to_string(),
+        conversation_id.unwrap_or_default().to_string().into(),
+    );
 
     let mut servers = serde_json::json!({});
     if let Some(access) = access {
@@ -432,25 +449,58 @@ mod tests {
         );
         let doc: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        assert!(
-            doc["mcpServers"]["jod"]["env"][CONVERSATION_ID_ENV].is_null(),
-            "a conversation nobody knew yet must not be invented"
+        assert_eq!(
+            doc["mcpServers"]["jod"]["env"][CONVERSATION_ID_ENV].as_str(),
+            Some(""),
+            "a conversation nobody knew yet must be cleared, never invented and never inherited"
         );
         let _ = std::fs::remove_dir_all(&home);
         let _ = std::fs::remove_dir_all(crate::paths::run_dir("run-43"));
     }
 
-    /// Anything with no run behind it keeps the shared config, unchanged.
+    /// **A shared config must clear the run id, not omit it.**
+    ///
+    /// Omitting a variable does not unset it for the child — it inherits it.
+    /// The chain that produced the bug: an MCP server is started by the
+    /// harness, the harness by the supervisor, the supervisor by whatever asked
+    /// for the run, and on the path that opens a work that is the
+    /// *orchestrator's* own MCP server, whose environment names the
+    /// orchestrator's run. So a fresh session's server claimed the run that
+    /// started it, `identify` saw the process group and the environment
+    /// disagree, and every tool needing a sender was refused.
+    ///
+    /// Asserting the key is present *and* empty rather than merely absent is
+    /// the whole of the fix: revert `write_config` to skipping the key and this
+    /// fails.
     #[test]
-    fn a_shared_config_names_no_run_at_all() {
+    fn a_shared_config_clears_the_run_id_rather_than_leaving_it_to_be_inherited() {
         let home = scratch("shared");
         let path = config_with(Some(ToolAccess::ReadOnly), &home, None)
             .unwrap()
             .unwrap();
         let doc: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        assert!(doc["mcpServers"]["jod"]["env"][RUN_ID_ENV].is_null());
+        let env = &doc["mcpServers"]["jod"]["env"];
+        assert_eq!(
+            env[RUN_ID_ENV].as_str(),
+            Some(""),
+            "an absent key inherits the launcher's run; an empty one overrides it"
+        );
+        assert_eq!(env[CONVERSATION_ID_ENV].as_str(), Some(""));
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// And the empty value has to mean what the fix assumes it means. Asserted
+    /// against `identify` itself rather than trusted, because the two halves
+    /// live in different files and only their agreement makes this work.
+    #[test]
+    fn an_empty_claim_is_no_claim_so_the_process_group_decides() {
+        let store = crate::store::Store::in_memory().unwrap();
+        assert_eq!(
+            crate::mcp::identify(&store, Some("")),
+            crate::mcp::Identity::Unknown,
+            "a cleared run id must fall back to the process group, not dispute with it"
+        );
     }
 
     /// Rewritten every call, so an upgraded binary does not leave agents
