@@ -9,12 +9,18 @@ import { SigintFeed } from "./components/SigintFeed";
 import { CommandPalette } from "./components/CommandPalette";
 import { AuthGate } from "./components/AuthGate";
 import type { AgentNode } from "./state/world";
+import type { TransportFactory } from "./transport";
 import type { HarnessKind, Resume, SpawnRequest } from "./types";
 
 type Seed = { resume: Resume; cwd: string; harness: HarnessKind; name: string } | null;
 
-export default function App() {
-  const jod = useJod();
+export interface HudProps {
+  /** Override the driver. Omitted, the HUD probes `/v1/health` and picks one. */
+  makeTransport?: TransportFactory;
+}
+
+export default function App({ makeTransport }: HudProps = {}) {
+  const jod = useJod(makeTransport);
   const world = jod.store.world;
 
   const [selectedId, setSelectedId] = useState<string | null>(null);

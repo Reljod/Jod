@@ -3,14 +3,12 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "JOD // TACTICAL — live agent-graph HUD for the Jod orchestrator.",
+  "description": "JOD // TACTICAL — the browser shell over the shared @jod/hud package.",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
-    "test": "vitest run",
-    "test:watch": "vitest",
-    "check": "tsc --noEmit && vitest run"
+    "check": "tsc --noEmit"
   },
   "dependencies": {
     "react": "^19.2.0",
@@ -22,7 +20,6 @@
     "@types/react-dom": "^19.2.2",
     "@vitejs/plugin-react": "^5.0.4",
     "typescript": "^5.9.3",
-    "vite": "^7.1.9",
-    "vitest": "^3.2.4"
+    "vite": "^7.1.9"
   }
 }
