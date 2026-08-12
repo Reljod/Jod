@@ -41,13 +41,47 @@ proxy-alone belief the single most expensive misconception in this market.
 | Camoufox 0.5.4 (patched Firefox 152) | `~/.cache/camoufox` | **installed** |
 | Python venv + Playwright 1.60 | `~/.jod/browser-venv` | **installed** |
 | Firefox runtime libs (`libgtk-3-0` et al) | system | **installed** |
-| Wrapper | [`browser/jodbrowser.py`](../browser/jodbrowser.py) | **installed** |
-| Webshare ISP proxy | `~/.jod/browser.env` | **needs credentials** |
+| MCP server | [`browser/jod_browser_mcp.py`](../browser/jod_browser_mcp.py) | **installed** |
+| One-shot wrapper | [`browser/jodbrowser.py`](../browser/jodbrowser.py) | **installed** |
+| Webshare ISP proxy | `~/.jod/browser.env` | **configured** |
 
 Verified working headless: loads pages, reports a Windows Firefox user agent,
-and `navigator.webdriver` is `false`.
+and `navigator.webdriver` is `false`. Egress verified through the proxy — see
+"Proving it" below.
 
-## Using it
+## How agents reach it
+
+**As MCP tools, automatically.** Every run Jod spawns on Claude Code is handed a
+`browser` MCP server alongside `jod`'s own, and its framing tells it to prefer
+those tools over any built-in fetch. Nothing has to be asked for or remembered.
+
+| Tool | For |
+|---|---|
+| `browse` | fetch one page and read it — the 90% case |
+| `browser_open` / `browser_read` | navigate, then read after it settles |
+| `browser_click` / `browser_type` | drive a page; cookies persist between calls |
+| `browser_screenshot` | save a PNG |
+| `browser_status` | which proxy, and which IP the world actually sees |
+| `browser_close` | release the browser early in a long run |
+
+The browser is offered at **every** access level, including to a run granted no
+Jod tools at all. Reading a page is not one of Jod's verbs — it touches no run,
+no schedule, no memory — so it is not bounded by the level that governs them.
+→ [why](decisions.md#reading-a-web-page-is-not-one-of-jods-verbs)
+
+The server is resident: one Firefox launch serves many pages, started lazily on
+first use so runs that never browse pay nothing. It speaks line-delimited
+JSON-RPC on stdio and depends on nothing but camoufox — the protocol is
+hand-rolled, as it is on the Rust side.
+
+### Setup and the one-shot script
+
+```sh
+browser/setup.sh            # venv + camoufox + Firefox, then prove it works
+browser/setup.sh --check    # prove it only; change nothing
+```
+
+The one-shot CLI still exists for a shell:
 
 ```sh
 ~/.jod/browser-venv/bin/python browser/jodbrowser.py https://example.com
@@ -55,11 +89,12 @@ and `navigator.webdriver` is `false`.
 ~/.jod/browser-venv/bin/python browser/jodbrowser.py https://example.com --screenshot /tmp/shot.png
 ```
 
-It prints `innerText` by default rather than the DOM, because an agent reading
+Both print `innerText` by default rather than the DOM, because an agent reading
 the output pays for every token and the markup is rarely what it needs.
 
-Agents reach it by running that command. Nothing in `jod-core` knows about the
-browser — it stays a tool an agent may use, not a capability Jod itself has.
+`jod-core` knows only how to *launch* the server and where it lives
+(`core/src/paths.rs`, `core/src/mcp_config.rs`). It never drives a browser
+itself — that stays a tool an agent uses, not a capability Jod has.
 
 ## Wiring the proxy
 
@@ -80,6 +115,24 @@ Then confirm the exit address changed:
 ```
 
 The `org` field should no longer name a hosting company.
+
+### Proving it
+
+A configured proxy and a *working* proxy are different facts, and only the
+second is worth anything. `browser_status` answers the second by reading the IP
+back through the browser rather than asking the proxy what it claims:
+
+```
+proxy: http://<host>:<port> as <user>
+egress: {"ip":"<the address the world sees>"}
+```
+
+This is not a formality. The first live run of it reported `direct` while
+traffic was in fact going through the proxy: `describe()` read the environment
+but never loaded `browser.env`, so its answer depended on whether a fetch had
+happened yet. Harmless in the one-shot CLI, where it always had — and exactly
+backwards in the tool whose job is to say whether traffic is proxied. Fixed by
+loading the file in `proxy_config()` itself.
 
 Credentials are read from that file or the environment and never passed on the
 command line, because argv is world-readable through `/proc`.

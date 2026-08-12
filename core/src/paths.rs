@@ -55,6 +55,53 @@ pub fn meta_path(agent_id: &str) -> PathBuf {
     run_dir(agent_id).join("agent.json")
 }
 
+/// Jod's browser MCP server, or `None` if this machine has not got it.
+///
+/// `~/.jod` is both the runtime state directory and the toolkit's own git
+/// checkout — `install.sh` clones the repo there — so on an installed box the
+/// script is simply part of the checkout and needs no copying step. The third
+/// candidate is what makes `cargo run` work from a development tree, where the
+/// binary is at `target/{debug,release}/jod` and the repo root is two levels up.
+///
+/// `None` rather than a default path, because the caller's decision is whether
+/// to *offer* the browser at all: registering an MCP server whose command does
+/// not exist gives an agent a set of tools that fail on first use, which is
+/// strictly worse than not advertising them.
+pub fn browser_mcp_script() -> Option<PathBuf> {
+    let candidates = [
+        std::env::var("JOD_BROWSER_MCP").ok().map(PathBuf::from),
+        Some(jod_home().join("browser").join("jod_browser_mcp.py")),
+        std::env::current_exe().ok().and_then(|exe| {
+            let root = exe.parent()?.parent()?.parent()?;
+            Some(root.join("browser").join("jod_browser_mcp.py"))
+        }),
+    ];
+    candidates.into_iter().flatten().find(|p| p.is_file())
+}
+
+/// The interpreter that runs it.
+///
+/// A virtualenv is preferred over the system `python3` because camoufox is a
+/// heavy dependency with a pinned Firefox build, and installing that into a
+/// system Python is the kind of thing that breaks a machine's other Python.
+/// `browser/setup.sh` creates it; falling back to `python3` keeps a
+/// hand-managed environment working.
+///
+/// `browser-venv` is not a name chosen here — it is where the box Jod runs on
+/// already has one, per [`docs/browser.md`]. Picking a tidier path would have
+/// meant a second multi-hundred-megabyte Firefox on a machine that already had
+/// one, to no benefit.
+pub fn browser_python() -> PathBuf {
+    if let Ok(explicit) = std::env::var("JOD_BROWSER_PYTHON") {
+        return PathBuf::from(explicit);
+    }
+    let venv = jod_home().join("browser-venv").join("bin").join("python");
+    if venv.is_file() {
+        return venv;
+    }
+    PathBuf::from("python3")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

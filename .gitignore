@@ -34,3 +34,7 @@ apps/desktop/src-tauri/gen/
 # on the Mac that builds rather than tracked.
 apps/ios/src-tauri/gen/
 .env
+
+# Python bytecode, from the browser MCP server and its tests.
+__pycache__/
+*.pyc

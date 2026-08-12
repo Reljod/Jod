@@ -129,6 +129,14 @@ impl Harness for ClaudeCode {
         if req.tools.is_some() {
             allowed.push(format!("mcp__{}", crate::mcp_config::SERVER_NAME));
         }
+        // The browser, whatever `req.tools` says. Reading a page is not one of
+        // Jod's verbs, so it is not bounded by the level that governs them —
+        // see `mcp_config::config_for`. Granted here rather than left to the
+        // permission mode because `--allowedTools` is what stops the run being
+        // asked to approve a fetch that nobody is present to approve.
+        if crate::mcp_config::browser_available() {
+            allowed.push(format!("mcp__{}", crate::mcp_config::BROWSER_SERVER_NAME));
+        }
         if !allowed.is_empty() {
             args.push(ArgPart::lit("--allowedTools"));
             args.push(ArgPart::lit(allowed.join(",")));
@@ -144,17 +152,19 @@ impl Harness for ClaudeCode {
         // configuration names, so an agent Jod meant to hold read-only tools
         // could quietly inherit a filesystem server from `~/.claude.json`. The
         // grant has to be exactly what Jod granted.
-        if let Some(access) = req.tools {
-            if let Ok(path) = crate::mcp_config::config_for(access, &crate::paths::jod_home()) {
-                args.push(ArgPart::lit("--mcp-config"));
-                args.push(ArgPart::lit(path.to_string_lossy()));
-                args.push(ArgPart::lit("--strict-mcp-config"));
-            }
-            // A failure to write the config is deliberately not fatal. The run
-            // still does its work with no Jod tools, which is worse than
-            // intended and far better than refusing to start at all — and the
-            // agent will say it has no tools rather than pretending otherwise.
+        //
+        // `req.tools` no longer decides *whether* there is a config, only what
+        // is in it: a run granted none of Jod's verbs still gets the browser,
+        // because reading a web page is not one of them.
+        if let Ok(Some(path)) = crate::mcp_config::config_for(req.tools, &crate::paths::jod_home()) {
+            args.push(ArgPart::lit("--mcp-config"));
+            args.push(ArgPart::lit(path.to_string_lossy()));
+            args.push(ArgPart::lit("--strict-mcp-config"));
         }
+        // A failure to write the config is deliberately not fatal. The run
+        // still does its work with no Jod tools, which is worse than
+        // intended and far better than refusing to start at all — and the
+        // agent will say it has no tools rather than pretending otherwise.
         args
     }
 
@@ -489,11 +499,29 @@ mod tests {
         }
     }
 
+    /// An agent granted nothing gets none of *Jod's* verbs.
+    ///
+    /// This used to assert that no `--mcp-config` was written at all, which is
+    /// no longer the same statement: a run granted nothing may still be handed
+    /// the browser, because reading a web page is not one of Jod's verbs. The
+    /// invariant worth keeping is the one about Jod's own tools, and it is now
+    /// asserted directly rather than inferred from the flag's absence — which
+    /// also makes it independent of whether the machine running the test
+    /// happens to have the browser installed.
     #[test]
-    fn an_agent_granted_nothing_is_handed_no_mcp_config() {
+    fn an_agent_granted_nothing_reaches_none_of_jods_own_tools() {
         let args = ClaudeCode::default().args(&req(PermissionPolicy::Ask, None));
-        assert!(!args.contains(&ArgPart::lit("--mcp-config")));
-        assert!(!args.contains(&ArgPart::lit("--strict-mcp-config")));
+        let granted: Vec<String> = args
+            .iter()
+            .filter_map(|a| match a {
+                ArgPart::Literal(s) => Some(s.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !granted.iter().any(|s| s.contains("mcp__jod")),
+            "a run granted nothing reached Jod's tools: {args:?}"
+        );
     }
 
     /// The level has to travel in the config the harness is handed, because the
