@@ -16,10 +16,13 @@ use super::data::{
 use super::delivery::Verdict;
 use super::graph::GraphView;
 use super::mention::Mention;
+use super::picker::Picker;
 use super::rail::RailState;
+use super::secret::Typed;
 use super::workspace::{matches, ListState, Workspace};
 use jod_core::cards::Card;
 use jod_core::roots::Root;
+use jod_core::secrets::Scope;
 use std::sync::Arc;
 
 /// One line in the transcript, tagged with what produced it so the renderer can
@@ -89,6 +92,28 @@ pub enum Overlay {
         /// What to do with it once `⏎` is pressed.
         intent: PromptIntent,
     },
+    /// A credential being collected for a `Secret` card.
+    ///
+    /// Deliberately **not** an `Overlay::Prompt`. A prompt's `value` is an
+    /// ordinary `String` that the renderer echoes and that `accept_prompt`
+    /// hands around as text — both correct for a schedule's name and both
+    /// disqualifying for a token. This variant masks its field, keeps the value
+    /// in a [`Typed`] that cannot print itself, and moves rather than copies it
+    /// on the way out. See `secret.rs` for the full rule.
+    Secret {
+        /// The card this answers, carried rather than read off the rail's
+        /// cursor for the reason [`PromptIntent::AnswerCard`] gives.
+        card: i64,
+        /// The environment variable's name, already validated by whoever
+        /// raised the card.
+        name: String,
+        scope: Scope,
+        /// The value, so far. Never rendered, never logged, never recalled.
+        value: Typed,
+    },
+    /// The full-screen directory picker — the big half of the one picker `@`
+    /// is the small half of. See `picker.rs`.
+    Picker(Picker),
 }
 
 /// What a tier-1 prompt is collecting.

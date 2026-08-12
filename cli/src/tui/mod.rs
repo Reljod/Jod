@@ -29,7 +29,9 @@ pub mod data;
 mod graph;
 mod keys;
 mod mention;
+mod picker;
 mod rail;
+mod secret;
 mod sessions;
 pub mod ui;
 mod workspace;
@@ -190,6 +192,34 @@ pub enum Action {
     /// told about a dismissal could not tell it from an answer, and would act
     /// on a decision nobody made.
     DismissCard(i64),
+    /// Store a credential collected by a `Secret` card, and answer the card
+    /// with its *name*.
+    ///
+    /// The value rides in a [`secret::Typed`], which cannot print itself — this
+    /// enum derives `Debug`, and one diagnostic on a dispatched action would
+    /// otherwise be a live credential in a log file. It is written once and
+    /// dropped; nothing downstream of `put_secret` ever sees it, and the card's
+    /// answer says only that a name was stored.
+    PutSecret {
+        card: i64,
+        name: String,
+        scope: jod_core::secrets::Scope,
+        /// The work or conversation the scope refers to; empty for global.
+        scope_id: String,
+        value: secret::Typed,
+    },
+    /// Give this conversation another directory to work in, read-only.
+    ///
+    /// Read-only is not a default that could as easily have been the other
+    /// way: per D5 a session reads your real checkout and writes only in a
+    /// worktree it claims, so a root added by hand is somewhere to read until
+    /// something explicitly claims it.
+    AddRoot(PathBuf),
+    RemoveRoot(PathBuf),
+    /// Print this conversation's roots, in the user's own order, saying which
+    /// is writable — the one fact that decides whether an agent may change
+    /// anything there.
+    ListRoots,
     /// A verb the screens offer and the store cannot carry out yet. Named
     /// rather than silently ignored, and naming the missing call rather than
     /// apologising, so the gap is a to-do and not a mystery.
@@ -1113,6 +1143,93 @@ async fn perform(
         Action::AnswerCard { id, chosen, answer } => on_store(jod, app, |store| {
             answered_card(store, id, chosen.as_deref(), answer.as_deref())
         }),
+        // The one place a credential is revealed, and it goes straight to the
+        // store. `scope_id` is filled in here rather than in the key handler
+        // because only the loop knows which conversation the rail is bound to.
+        //
+        // Nothing about this arm logs, formats or returns the value: the
+        // sentence `on_store` pushes comes from `secret::stored_note`, which
+        // takes a `SecretMeta` — a type that cannot reconstruct a value.
+        Action::PutSecret {
+            card,
+            name,
+            scope,
+            scope_id,
+            value,
+        } => {
+            let scope_id = if scope_id.is_empty() {
+                app.conversation.clone().unwrap_or_default()
+            } else {
+                scope_id
+            };
+            on_store(jod, app, move |store| {
+                stored_secret(store, card, &name, scope, &scope_id, value)
+            })
+        }
+        Action::AddRoot(path) => {
+            let conversation = app.conversation.clone();
+            on_store(jod, app, move |store| match conversation {
+                Some(conversation) => {
+                    match store.add_root(&conversation, jod_core::roots::NewRoot::reading(&path)) {
+                        // The label rather than the path: `roots` normalises,
+                        // so what was typed and what was stored can differ, and
+                        // the stored one is the one that will be matched
+                        // against later.
+                        Ok(root) => format!(
+                            "added {} — read-only, as every root is until something claims it",
+                            root.path.display()
+                        ),
+                        Err(e) => format!("{} not added: {e}", path.display()),
+                    }
+                }
+                // Roots hang off a conversation, so there has to be one. Said
+                // rather than silently dropped: the picker just spent the
+                // user's attention.
+                None => "no conversation to add a root to yet — say something first".to_string(),
+            })
+        }
+        Action::RemoveRoot(path) => {
+            let conversation = app.conversation.clone();
+            on_store(jod, app, move |store| match conversation {
+                Some(conversation) => match store.remove_root(&conversation, &path) {
+                    Ok(true) => format!("removed {}", path.display()),
+                    Ok(false) => format!("{} was not one of this session's roots", path.display()),
+                    Err(e) => format!("{} not removed: {e}", path.display()),
+                },
+                None => NO_STORE.to_string(),
+            })
+        }
+        // Multi-line, like `/config` and `/sessions`: folding a list of roots
+        // into one notice is several directories in a paragraph.
+        Action::ListRoots => {
+            let lines = match (jod.store(), app.conversation.clone()) {
+                (Some(store), Some(conversation)) => {
+                    let roots = store.roots(&conversation).unwrap_or_default();
+                    if roots.is_empty() {
+                        vec![
+                            "no roots — Alt-P picks a directory, and `@` says so until there is one"
+                                .to_string(),
+                        ]
+                    } else {
+                        roots
+                            .iter()
+                            .map(|r| {
+                                format!(
+                                    "{}  {}  {}",
+                                    if r.writable { "rw" } else { "ro" },
+                                    r.label(),
+                                    r.path.display()
+                                )
+                            })
+                            .collect()
+                    }
+                }
+                _ => vec!["no conversation yet, so no roots to list".to_string()],
+            };
+            for line in lines {
+                app.push(Entry::Notice(line));
+            }
+        }
         Action::DismissCard(id) => on_store(jod, app, |store| match store.dismiss_card(id) {
             Ok(()) => format!("card #{id} dismissed — the agent is told nothing"),
             Err(e) => format!("card #{id} not dismissed: {e}"),
@@ -1768,6 +1885,40 @@ fn delete_hook(store: &Store, name: &str) -> String {
 /// The bare name survives, with no edges: `facts` cascades into `relations` but
 /// not into `entities`, so the row stays until the graph is rebuilt. Said out
 /// loud, because the row not disappearing otherwise reads as a key that failed.
+/// Write a credential, answer its card with a *name*, and say what happened.
+///
+/// The value is consumed here and reaches exactly one call. Note what the card
+/// is answered with: `secret::stored_summary`, a name and a scope. That string
+/// becomes the agent's delivery via `Card::answer_body`, so it is the sentence
+/// the model will read — which is precisely why it must not contain, hint at,
+/// or measure the value. The agent is told a name; it reads the value as an
+/// environment variable or not at all.
+///
+/// A failed write does **not** answer the card. A card marked answered against
+/// a secret that was never stored would take the request out of the rail and
+/// leave the run blocked on a credential nobody is going to supply.
+fn stored_secret(
+    store: &Store,
+    card: i64,
+    name: &str,
+    scope: jod_core::secrets::Scope,
+    scope_id: &str,
+    value: secret::Typed,
+) -> String {
+    let meta = match store.put_secret(name, scope, scope_id, value.reveal(), "") {
+        Ok(meta) => meta,
+        // The error is the store's own and names the rule that was broken —
+        // an illegal variable name, an empty value, a NUL byte. None of them
+        // can quote the value, because none of them were given it to quote.
+        Err(e) => return format!("`{name}` not stored: {e}"),
+    };
+    let said = secret::stored_note(&meta);
+    match store.answer_card(card, None, Some(&secret::stored_summary(name, scope))) {
+        Ok(_) => said,
+        Err(e) => format!("{said}. The card could not be closed, though: {e}"),
+    }
+}
+
 /// Answer a card, and say what that actually did.
 ///
 /// The sentence is the feature. "Answered" alone would be the lie decision D2
@@ -2030,6 +2181,21 @@ fn on_rail_key(app: &mut App, key: KeyEvent) -> Option<Action> {
             app.push(Entry::Notice(format!("rail showing {what} card")));
             None
         }
+        // The subtree scope. Cascade is upward only, so this widens to "this
+        // session and everything it started" and narrows back to "this session
+        // alone" — it can never show a parent's cards to a child.
+        KeyCode::Char('c') => {
+            app.rail.cascade = !app.rail.cascade;
+            app.push(Entry::Notice(
+                if app.rail.cascade {
+                    "rail showing this session and everything below it"
+                } else {
+                    "rail showing this session only"
+                }
+                .into(),
+            ));
+            None
+        }
         KeyCode::Char('?') => {
             app.overlay = Overlay::Keymap;
             None
@@ -2042,10 +2208,31 @@ fn on_rail_key(app: &mut App, key: KeyEvent) -> Option<Action> {
         KeyCode::Char('a') => {
             let card = app.selected_card()?;
             let (id, title) = (card.id, card.title.clone());
-            app.overlay = Overlay::Prompt {
-                label: format!("answer #{id} · {}", app::one_line(&title, 40)),
-                value: String::new(),
-                intent: PromptIntent::AnswerCard(id),
+            // A credential takes a different field from an answer, and the
+            // difference is not cosmetic: `Overlay::Prompt` echoes what is
+            // typed and hands it on as an ordinary `String`, which is right
+            // for a schedule's name and disqualifying for a token. See
+            // `secret.rs`.
+            app.overlay = if card.kind == jod_core::cards::CardKind::Secret {
+                Overlay::Secret {
+                    card: id,
+                    name: card.secret_name.clone().unwrap_or_else(|| title.clone()),
+                    scope: card
+                        .secret_scope
+                        .as_deref()
+                        .map(jod_core::secrets::Scope::parse)
+                        // Work, matching the store's own default: a key given
+                        // for one project must not be handed to every session
+                        // on the box because a field was left blank.
+                        .unwrap_or_default(),
+                    value: secret::Typed::new(),
+                }
+            } else {
+                Overlay::Prompt {
+                    label: format!("answer #{id} · {}", app::one_line(&title, 40)),
+                    value: String::new(),
+                    intent: PromptIntent::AnswerCard(id),
+                }
             };
             None
         }
@@ -2219,6 +2406,20 @@ fn on_chord(app: &mut App, key: KeyEvent) -> Option<Option<Action>> {
             app.rail.cycle(&ids);
             handled(None)
         }
+        // The full-screen picker. Alt only, and `p` because it is the picker —
+        // `Ctrl-P` is a history motion in every shell that has one.
+        //
+        // Enumerating from the key handler is the one place this file does
+        // I/O, and it is deliberate: the walk is bounded and happens once, on
+        // an explicit keystroke, rather than on the tick — a background walk of
+        // the filesystem to keep a picker warm that is opened twice a day is a
+        // cost nobody asked for. Every *keystroke* after this ranks in memory.
+        KeyCode::Char('p') if alt => {
+            let base = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            let (entries, truncated) = picker::directories(&base);
+            app.overlay = Overlay::Picker(picker::Picker::new(base, entries, truncated));
+            handled(None)
+        }
         // Delegate: the typed line becomes an agent that runs without taking
         // the screen. This is the key that makes several jobs at once possible
         // without leaving the UI — and the one the move to Alt was really for,
@@ -2305,6 +2506,94 @@ fn jump_to_oldest_unread(app: &mut App) {
 
 /// Keys while an overlay is up. `Esc` always cancels exactly this overlay.
 fn on_overlay_key(app: &mut App, key: KeyEvent) -> Option<Action> {
+    // A credential field, ahead of the ordinary prompt because it must never
+    // fall through to one. Every route out of here either moves the value to
+    // the store or drops it: there is no branch that keeps it.
+    if let Overlay::Secret {
+        card,
+        name,
+        scope,
+        value,
+    } = &mut app.overlay
+    {
+        match key.code {
+            KeyCode::Char(c) => {
+                value.push(c);
+                return None;
+            }
+            KeyCode::Backspace => {
+                value.pop();
+                return None;
+            }
+            KeyCode::Enter => {
+                if value.is_empty() {
+                    // Refused rather than stored. `put_secret` rejects an empty
+                    // value anyway, but a card answered with nothing would look
+                    // answered while the run stayed blocked.
+                    return None;
+                }
+                // Moved, not copied, and the overlay is closed in the same
+                // breath — so no frame drawn after this keypress has the value
+                // in it to draw.
+                let action = Action::PutSecret {
+                    card: *card,
+                    name: name.clone(),
+                    scope: *scope,
+                    // Filled in by the loop, which is the only layer that knows
+                    // which work or conversation this card belongs to.
+                    scope_id: String::new(),
+                    value: value.take(),
+                };
+                app.overlay = Overlay::None;
+                return Some(action);
+            }
+            KeyCode::Esc => {
+                // Cleared explicitly rather than left for the overlay to be
+                // overwritten: the value is the one piece of state in this
+                // program whose lifetime is worth being deliberate about.
+                value.clear();
+                app.overlay = Overlay::None;
+                return None;
+            }
+            _ => return None,
+        }
+    }
+
+    // The full-screen picker, which owns every key while it is up for the same
+    // reason the `@` popup does: it is a line being typed into plus a cursor.
+    if let Overlay::Picker(p) = &mut app.overlay {
+        match key.code {
+            KeyCode::Char(c) => {
+                p.push(c);
+                return None;
+            }
+            KeyCode::Backspace => {
+                p.pop();
+                return None;
+            }
+            KeyCode::Up => {
+                p.prev();
+                return None;
+            }
+            KeyCode::Down => {
+                p.next();
+                return None;
+            }
+            KeyCode::Enter => {
+                let chosen = p.chosen();
+                app.overlay = Overlay::None;
+                // Nothing matched means nothing to add. Closing anyway is the
+                // right answer: the alternative is an `⏎` that appears dead.
+                return chosen.map(Action::AddRoot);
+            }
+            KeyCode::Esc => {
+                app.overlay = Overlay::None;
+                return None;
+            }
+            _ => return None,
+        }
+    }
+
     // A prompt is a line being typed, so it takes characters before anything
     // else looks at them.
     if let Overlay::Prompt {
@@ -2387,7 +2676,10 @@ fn on_overlay_key(app: &mut App, key: KeyEvent) -> Option<Action> {
                 _ => None,
             }
         }
-        Overlay::Prompt { .. } | Overlay::None => {
+        // Both are handled above and cannot reach here; closing rather than
+        // falling through keeps an unexpected state from stranding the
+        // keyboard in an overlay nothing dismisses.
+        Overlay::Picker(_) | Overlay::Secret { .. } | Overlay::Prompt { .. } | Overlay::None => {
             app.overlay = Overlay::None;
             None
         }
@@ -3545,6 +3837,22 @@ fn apply_slash(app: &mut App, slash: command::Slash) -> Option<Action> {
             // turns of the fresh one that replaced it — and it is how you leave
             // the main chat, which binds the same field.
             return Some(Action::NewThread);
+        }
+        Slash::Root(what) => {
+            return match what {
+                command::RootCmd::List => Some(Action::ListRoots),
+                // No path means the picker, which is the same screen `Alt-P`
+                // opens — one picker, reached two ways, rather than a second
+                // one that would drift.
+                command::RootCmd::Add(None) => {
+                    let base = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+                    let (entries, truncated) = picker::directories(&base);
+                    app.overlay = Overlay::Picker(picker::Picker::new(base, entries, truncated));
+                    None
+                }
+                command::RootCmd::Add(Some(path)) => Some(Action::AddRoot(PathBuf::from(path))),
+                command::RootCmd::Remove(path) => Some(Action::RemoveRoot(PathBuf::from(path))),
+            }
         }
         Slash::Sessions => {
             app.go(Workspace::Fleet);
@@ -8658,6 +8966,271 @@ mod tests {
         let again = answered_card(&s, card.id, None, Some("3000"));
         assert!(again.contains("not answered"), "{again}");
         assert!(again.contains("already"), "{again}");
+    }
+
+    // ---- the full-screen picker ----
+
+    fn at_the_picker() -> App {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.conversation = Some("conv".into());
+        app.overlay = Overlay::Picker(picker::Picker::new(
+            PathBuf::from("/home/reljod/repo"),
+            vec![".".into(), "Jod/cli".into(), "Jod/core".into()],
+            false,
+        ));
+        app
+    }
+
+    /// The chord opens it against the directory you launched in, which is what
+    /// E1.S4 means by "starting at the current directory".
+    #[test]
+    fn alt_p_opens_the_picker_at_the_current_directory() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        alt(&mut app, KeyCode::Char('p'));
+        let Overlay::Picker(p) = &app.overlay else {
+            panic!("Alt-P opens the picker, got {:?}", app.overlay);
+        };
+        assert_eq!(
+            p.base,
+            std::env::current_dir().expect("a working directory")
+        );
+        assert!(
+            p.rows.iter().any(|r| r.path == "."),
+            "the directory you are in is the first offer"
+        );
+    }
+
+    /// The same four keys as the `@` popup, which is the whole claim of "one
+    /// picker at two sizes".
+    #[test]
+    fn the_picker_narrows_on_every_keystroke_and_moves_with_the_arrows() {
+        let mut app = at_the_picker();
+        for c in "cli".chars() {
+            press(&mut app, KeyCode::Char(c));
+        }
+        let Overlay::Picker(p) = &app.overlay else {
+            panic!("still up");
+        };
+        assert_eq!(p.query, "cli");
+        assert_eq!(p.rows[0].path, "Jod/cli", "{:?}", p.rows);
+        assert_eq!(app.input, "", "and none of it reached the chat box");
+    }
+
+    #[test]
+    fn enter_adds_the_highlighted_directory_as_a_read_only_root() {
+        let mut app = at_the_picker();
+        for c in "core".chars() {
+            press(&mut app, KeyCode::Char(c));
+        }
+        assert_eq!(
+            press(&mut app, KeyCode::Enter),
+            Some(Action::AddRoot(PathBuf::from("/home/reljod/repo/Jod/core")))
+        );
+        assert_eq!(app.overlay, Overlay::None);
+    }
+
+    /// Escape leaves nothing behind — the same promise the popup makes.
+    #[test]
+    fn escape_closes_the_picker_without_adding_anything() {
+        let mut app = at_the_picker();
+        for c in "cli".chars() {
+            press(&mut app, KeyCode::Char(c));
+        }
+        assert_eq!(press(&mut app, KeyCode::Esc), None);
+        assert_eq!(app.overlay, Overlay::None);
+        assert_eq!(app.input, "");
+    }
+
+    /// Nothing matched means nothing to add, and `⏎` still closes — an enter
+    /// that appeared dead would be worse than one that does nothing visible.
+    #[test]
+    fn enter_with_no_match_closes_without_adding() {
+        let mut app = at_the_picker();
+        for c in "zzzz".chars() {
+            press(&mut app, KeyCode::Char(c));
+        }
+        assert_eq!(press(&mut app, KeyCode::Enter), None);
+        assert_eq!(app.overlay, Overlay::None);
+    }
+
+    // ---- the secret card ----
+    //
+    // These assert the *terminal's* half of E3.S4: that a credential never
+    // becomes part of the UI. The storage half — that the value reaches the
+    // file and appears nowhere in the database — is core's, and is asserted
+    // against a real `JOD_HOME` in `core/src/secrets.rs` and
+    // `supervisor/tests/secrets_never_reach_the_record.rs`. Repeating it here
+    // would mean setting `JOD_HOME` from a test thread that runs in parallel
+    // with every other test in this binary, which is a race, and a racy
+    // security test is worse than none: it goes green for the wrong reason.
+
+    fn secret_card(id: i64, name: &str) -> jod_core::cards::Card {
+        let mut card = a_card(id, "a credential is needed", true, &[]);
+        card.kind = jod_core::cards::CardKind::Secret;
+        card.secret_name = Some(name.into());
+        card.secret_scope = Some("work".into());
+        card
+    }
+
+    fn at_a_secret_card() -> App {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.cards = vec![secret_card(9, "GITHUB_TOKEN")];
+        app.reconcile_rail();
+        alt(&mut app, KeyCode::Char('c'));
+        press(&mut app, KeyCode::Char('a'));
+        app
+    }
+
+    /// `Overlay::Prompt` echoes what is typed and hands it on as an ordinary
+    /// `String`. Correct for a schedule's name, disqualifying for a token.
+    #[test]
+    fn a_secret_card_opens_a_masked_field_rather_than_the_ordinary_prompt() {
+        let app = at_a_secret_card();
+        match &app.overlay {
+            Overlay::Secret { card, name, scope, .. } => {
+                assert_eq!(*card, 9);
+                assert_eq!(name, "GITHUB_TOKEN");
+                assert_eq!(*scope, jod_core::secrets::Scope::Work);
+            }
+            other => panic!("a secret card must not open a plain prompt: {other:?}"),
+        }
+    }
+
+    /// The copies people forget about: the input line, the transcript, and the
+    /// `↑` history. A credential in any of them can be sent to an agent by
+    /// pressing enter twice.
+    #[test]
+    fn the_typed_credential_reaches_no_part_of_the_ui() {
+        let mut app = at_a_secret_card();
+        for c in "sk-live-abcdef123456".chars() {
+            press(&mut app, KeyCode::Char(c));
+        }
+
+        assert_eq!(app.input, "", "not the input line");
+        assert!(app.history.is_empty(), "not the recall history");
+        let transcript = format!("{:?}", app.transcript);
+        assert!(!transcript.contains("sk-live"), "not the transcript");
+        // And not a `{:?}` of the overlay, which is one stray diagnostic away
+        // from a log file.
+        let printed = format!("{:?}", app.overlay);
+        assert!(!printed.contains("sk-live"), "not a Debug rendering: {printed}");
+        assert!(printed.contains("20 chars"), "only its length: {printed}");
+    }
+
+    /// Enter moves the value into the action and leaves the overlay empty, so
+    /// no frame drawn afterwards has anything left to draw.
+    #[test]
+    fn storing_moves_the_value_out_and_closes_the_field() {
+        let mut app = at_a_secret_card();
+        for c in "sk-live-abcdef123456".chars() {
+            press(&mut app, KeyCode::Char(c));
+        }
+        let Some(Action::PutSecret { card, name, scope, value, .. }) =
+            press(&mut app, KeyCode::Enter)
+        else {
+            panic!("⏎ stores the credential");
+        };
+        assert_eq!(card, 9);
+        assert_eq!(name, "GITHUB_TOKEN");
+        assert_eq!(scope, jod_core::secrets::Scope::Work);
+        assert_eq!(value.reveal(), "sk-live-abcdef123456");
+        assert_eq!(app.overlay, Overlay::None, "the field is gone");
+        // The action itself must not print the value either — it is the thing
+        // that travels furthest from here.
+        let printed = format!("{:?}", Action::PutSecret {
+            card,
+            name: "GITHUB_TOKEN".into(),
+            scope,
+            scope_id: String::new(),
+            value,
+        });
+        assert!(!printed.contains("sk-live"), "{printed}");
+    }
+
+    /// An empty field is refused rather than stored: `put_secret` would reject
+    /// it anyway, but a card answered with nothing looks answered while the run
+    /// stays blocked.
+    #[test]
+    fn an_empty_credential_is_refused_rather_than_stored() {
+        let mut app = at_a_secret_card();
+        assert_eq!(press(&mut app, KeyCode::Enter), None);
+        assert!(matches!(app.overlay, Overlay::Secret { .. }), "the field stays up");
+    }
+
+    #[test]
+    fn escape_discards_the_credential_and_keeps_no_copy() {
+        let mut app = at_a_secret_card();
+        for c in "sk-live-abc".chars() {
+            press(&mut app, KeyCode::Char(c));
+        }
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(app.overlay, Overlay::None);
+        assert_eq!(app.input, "");
+        let whole = format!("{:?} {:?}", app.overlay, app.transcript);
+        assert!(!whole.contains("sk-live"), "{whole}");
+    }
+
+    #[test]
+    fn backspace_shortens_the_credential_rather_than_leaking_it() {
+        let mut app = at_a_secret_card();
+        for c in "abcd".chars() {
+            press(&mut app, KeyCode::Char(c));
+        }
+        press(&mut app, KeyCode::Backspace);
+        let Overlay::Secret { value, .. } = &app.overlay else {
+            panic!("still collecting");
+        };
+        assert_eq!(value.len(), 3);
+    }
+
+    /// The sentence the *model* reads. `Card::answer_body` turns a card's
+    /// answer into the delivery, so whatever is stored as the answer is what
+    /// the agent is told — which is why it is a name and a scope and nothing
+    /// that could reconstruct a value.
+    #[test]
+    fn what_the_agent_is_told_about_a_secret_is_a_name_and_a_scope() {
+        let s = store();
+        let conversation = s
+            .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
+            .expect("a conversation")
+            .id;
+        let card = s
+            .raise_card(jod_core::cards::NewCard {
+                conversation_id: conversation.clone(),
+                kind: Some(jod_core::cards::CardKind::Secret),
+                title: "GITHUB_TOKEN is missing".into(),
+                secret_name: Some("GITHUB_TOKEN".into()),
+                secret_scope: Some("work".into()),
+                ..Default::default()
+            })
+            .expect("a card");
+
+        // Exactly what `stored_secret` writes once the value is safely down.
+        let answered = s
+            .answer_card(
+                card.id,
+                None,
+                Some(&secret::stored_summary(
+                    "GITHUB_TOKEN",
+                    jod_core::secrets::Scope::Work,
+                )),
+            )
+            .expect("answering");
+
+        let told = answered.answer_body();
+        assert!(told.contains("GITHUB_TOKEN"), "the name, so it knows what to reach for");
+        assert!(told.contains("work scope"), "{told}");
+        assert!(!told.contains('•'), "not even a masked value: {told}");
+
+        // And the queued delivery — the thing that actually reaches a prompt —
+        // carries the same words and no others.
+        let pending = s.pending_for(&conversation).expect("queued");
+        assert_eq!(pending.len(), 1);
+        assert!(
+            pending[0].body.contains("stored GITHUB_TOKEN"),
+            "{}",
+            pending[0].body
+        );
     }
 
     // ---- the `@` picker ----

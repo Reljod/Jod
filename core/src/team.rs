@@ -551,6 +551,39 @@ fn now_ms() -> i64 {
 /// better than one woken per line.
 pub const WAKE_INTERVAL_MS: i64 = 60_000;
 
+/// The longest a generated member name may be.
+///
+/// A name is typed by one agent to address another, and it appears in every
+/// line of the traffic log. Past this it stops being an address and starts
+/// being a sentence.
+pub const MAX_NAME_CHARS: usize = 24;
+
+/// Turn a session's short title into something addressable.
+///
+/// Lower case, hyphenated, no punctuation an agent would have to quote. A
+/// title that yields nothing usable — empty, emoji, another alphabet — becomes
+/// `session`, and the caller's uniquifier makes it `session-2` and so on. That
+/// is deliberately boring: an unaddressable member is worse than a dull name.
+pub fn member_name(title: &str) -> String {
+    let mut out = String::new();
+    for ch in title.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.extend(ch.to_lowercase());
+        } else if !out.is_empty() && !out.ends_with('-') {
+            out.push('-');
+        }
+        if out.chars().count() >= MAX_NAME_CHARS {
+            break;
+        }
+    }
+    let trimmed = out.trim_matches('-').to_string();
+    if trimmed.is_empty() {
+        "session".to_string()
+    } else {
+        trimmed
+    }
+}
+
 impl Store {
     // ---- reading the bus -------------------------------------------------
 
@@ -930,6 +963,72 @@ impl Store {
         })
     }
 
+    /// Make a session a member of its work, with no join step.
+    ///
+    /// A work *is* an addressing scope — asking the sessions the orchestrator
+    /// opened for one intent to join the thing they are already part of would
+    /// be a tax on every delegation. So this runs when a conversation is
+    /// attached to a work, and afterwards its siblings can address it by name.
+    ///
+    /// The name is assigned once and never changes. A member that renames
+    /// itself when its conversation is retitled would be a message delivered to
+    /// the wrong agent — or to nobody — halfway through a thread, and that
+    /// failure is invisible from both ends.
+    pub fn enrol_session(
+        &self,
+        work_id: &str,
+        conversation_id: &str,
+        title: &str,
+        harness: HarnessKind,
+        role: &str,
+    ) -> Result<String> {
+        if let Some(existing) = self.work_member_name(work_id, conversation_id)? {
+            return Ok(existing);
+        }
+        let taken: Vec<String> = {
+            let conn = self.conn.lock().expect("store lock poisoned");
+            let mut stmt = conn.prepare("SELECT name FROM team_members WHERE team = ?1")?;
+            let rows = stmt.query_map(params![work_id], |r| r.get(0))?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()?
+        };
+        let base = member_name(title);
+        // Uniqueness within the scope is not a nicety: an ambiguous name is a
+        // message delivered to whichever agent the database happened to return
+        // first, and the sender is told it was delivered.
+        let mut name = base.clone();
+        let mut n = 2;
+        while taken.iter().any(|t| *t == name) {
+            name = format!("{base}-{n}");
+            n += 1;
+        }
+        self.join_scope(
+            Scope::Work,
+            work_id,
+            &name,
+            harness,
+            role,
+            Some(conversation_id),
+        )?;
+        Ok(name)
+    }
+
+    /// What a work's sessions address this conversation as.
+    pub fn work_member_name(
+        &self,
+        work_id: &str,
+        conversation_id: &str,
+    ) -> Result<Option<String>> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        Ok(conn
+            .query_row(
+                "SELECT name FROM team_members
+                  WHERE scope = 'work' AND team = ?1 AND conversation_id = ?2",
+                params![work_id, conversation_id],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
     /// One member of a scope.
     pub fn member_in(&self, scope: Scope, team: &str, name: &str) -> Result<Option<Member>> {
         let conn = self.conn.lock().expect("store lock poisoned");
@@ -1052,6 +1151,52 @@ impl Store {
     /// list is short — it is bounded by the number of agents on the box — and
     /// the alternative is a join that has to reproduce the inbox query.
     pub fn mail_waiting(&self) -> Result<Vec<Waiting>> {
+        self.waiting(true)
+    }
+
+    /// Mail that is waiting and will not be delivered, because the work it was
+    /// addressed into is over.
+    ///
+    /// Reported rather than delivered, and reported rather than deleted. A
+    /// work's bus ends with the work: injecting a message into a session that
+    /// is finishing would restart an agent that has just been allowed to stop,
+    /// and dropping it silently would lose the last thing somebody said.
+    pub fn mail_held(&self) -> Result<Vec<Waiting>> {
+        self.waiting(false)
+    }
+
+    fn waiting(&self, deliverable: bool) -> Result<Vec<Waiting>> {
+        Ok(self
+            .all_waiting()?
+            .into_iter()
+            .filter(|w| self.scope_accepts_delivery(w.scope, &w.team).unwrap_or(true) == deliverable)
+            .collect())
+    }
+
+    /// Whether mail into this scope still reaches anybody.
+    ///
+    /// An explicit team always does; a work does only while it is open.
+    /// Closing is where this bites: the board is empty, the sessions are
+    /// stopping, and waking one of them to read a message is the one thing
+    /// that would give the work something new to do.
+    fn scope_accepts_delivery(&self, scope: Scope, team: &str) -> Result<bool> {
+        if scope != Scope::Work {
+            return Ok(true);
+        }
+        let conn = self.conn.lock().expect("store lock poisoned");
+        let state: Option<String> = conn
+            .query_row(
+                "SELECT state FROM works WHERE id = ?1",
+                params![team],
+                |r| r.get(0),
+            )
+            .optional()?;
+        // A work that is gone accepts nothing, and mail addressed into one is
+        // mail its own deletion should already have taken.
+        Ok(state.as_deref() == Some("open"))
+    }
+
+    fn all_waiting(&self) -> Result<Vec<Waiting>> {
         let addresses: Vec<(String, String, String)> = {
             let conn = self.conn.lock().expect("store lock poisoned");
             let mut stmt = conn.prepare(
@@ -1930,5 +2075,152 @@ mod tests {
         }
         assert_eq!(Scope::parse("from_the_future"), Scope::Team);
         assert_eq!(MailState::parse(""), MailState::Queued);
+    }
+
+    // ---- a work is a team (G3) -------------------------------------------
+
+    /// A work, two sessions in it, and nobody joined anything.
+    fn work_of_two(s: &Store) -> (String, String, String) {
+        let work = s.create_work("port the parser").unwrap();
+        let mut ids = Vec::new();
+        for title in ["the lead", "the worker"] {
+            let c = s
+                .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
+                .unwrap();
+            s.set_conversation_title(&c.id, title).unwrap();
+            s.attach_conversation(&c.id, &work.id, None, crate::works::Origin::Agent)
+                .unwrap();
+            s.bind_member(&work.id, &member_name(title), Some(&format!("run-{title}")), Some("ses-1"))
+                .unwrap();
+            ids.push(c.id);
+        }
+        (work.id, ids.remove(0), ids.remove(0))
+    }
+
+    #[test]
+    fn a_title_becomes_something_an_agent_can_address() {
+        assert_eq!(member_name("The Parser!"), "the-parser");
+        assert_eq!(member_name("  "), "session");
+        assert_eq!(member_name("порт"), "session");
+        assert!(member_name(&"long ".repeat(40)).chars().count() <= MAX_NAME_CHARS);
+    }
+
+    /// G3's check: two sessions the orchestrator opened for one work message
+    /// each other by name, having never been joined to a team.
+    #[test]
+    fn two_sessions_of_one_work_message_each_other_with_no_join_step() {
+        let s = Store::in_memory().unwrap();
+        let (work, _lead, _worker) = work_of_two(&s);
+
+        let roster = s.roster(Scope::Work, &work, "the-lead").unwrap();
+        assert_eq!(roster.len(), 1);
+        assert_eq!(roster[0].name, "the-worker");
+
+        let sent = s
+            .post(&Post::new(Scope::Work, &work, "the-lead", "take the lexer").to("the-worker"))
+            .unwrap();
+        assert!(matches!(sent, Sent::Queued { .. }), "got {sent:?}");
+        let waiting = s.mail_waiting().unwrap();
+        assert_eq!(waiting.len(), 1);
+        assert_eq!(waiting[0].scope, Scope::Work);
+        assert_eq!(waiting[0].member.name, "the-worker");
+    }
+
+    /// An ambiguous name is a message delivered to whichever agent the database
+    /// happened to return first, and the sender is told it arrived.
+    #[test]
+    fn two_sessions_with_the_same_title_get_different_names() {
+        let s = Store::in_memory().unwrap();
+        let work = s.create_work("a job").unwrap();
+        let mut names = Vec::new();
+        for _ in 0..3 {
+            let c = s
+                .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
+                .unwrap();
+            s.set_conversation_title(&c.id, "worker").unwrap();
+            names.push(
+                s.attach_conversation(&c.id, &work.id, None, crate::works::Origin::Agent)
+                    .unwrap()
+                    .name,
+            );
+        }
+        assert_eq!(names, ["worker", "worker-2", "worker-3"]);
+    }
+
+    /// A name that moves is a message delivered to nobody halfway through a
+    /// thread, and the failure is invisible from both ends.
+    #[test]
+    fn a_members_name_does_not_change_when_its_session_is_retitled() {
+        let s = Store::in_memory().unwrap();
+        let work = s.create_work("a job").unwrap();
+        let c = s
+            .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
+            .unwrap();
+        s.set_conversation_title(&c.id, "first name").unwrap();
+        s.attach_conversation(&c.id, &work.id, None, crate::works::Origin::Agent)
+            .unwrap();
+
+        s.set_conversation_title(&c.id, "something else").unwrap();
+        let again = s
+            .attach_conversation(&c.id, &work.id, None, crate::works::Origin::Agent)
+            .unwrap();
+        assert_eq!(again.name, "first-name");
+        assert_eq!(s.members_in(Scope::Work, &work.id).unwrap().len(), 1);
+    }
+
+    /// G3.S6. Waking a session that has just been allowed to stop is the one
+    /// thing that would give a closed work something new to do.
+    #[test]
+    fn closing_a_work_stops_delivery_into_it_and_reports_the_mail_instead() {
+        let s = Store::in_memory().unwrap();
+        let (work, _lead, _worker) = work_of_two(&s);
+        s.post(&Post::new(Scope::Work, &work, "the-lead", "one more thing").to("the-worker"))
+            .unwrap();
+        assert_eq!(s.mail_waiting().unwrap().len(), 1);
+
+        let task = s.work_tasks(&work).unwrap().remove(0);
+        let closing = s.complete_work_task(&task.id).unwrap().unwrap();
+
+        assert!(
+            s.mail_waiting().unwrap().is_empty(),
+            "a work's bus ends with the work"
+        );
+        let held = s.mail_held().unwrap();
+        assert_eq!(held.len(), 1, "reported, not delivered and not dropped");
+        assert_eq!(held[0].member.name, "the-worker");
+        assert_eq!(
+            closing.waiting_mail, 1,
+            "and the closing card says so, because it is the last chance to"
+        );
+    }
+
+    /// Everything `jod team` does today keeps doing it: this is additive.
+    #[test]
+    fn an_explicit_team_delivers_whatever_the_works_are_doing() {
+        let s = crew();
+        s.post(&Post::new(Scope::Team, "crew", "lead", "start").to("scout"))
+            .unwrap();
+        let waiting = s.mail_waiting().unwrap();
+        assert_eq!(waiting.len(), 1);
+        assert_eq!(waiting[0].scope, Scope::Team);
+        assert!(s.mail_held().unwrap().is_empty());
+    }
+
+    /// In the same transaction as the sessions, so no thread outlives its
+    /// participants.
+    #[test]
+    fn deleting_a_work_takes_its_traffic_and_its_members_with_it() {
+        let s = Store::in_memory().unwrap();
+        let (work, _lead, _worker) = work_of_two(&s);
+        s.post(&Post::new(Scope::Work, &work, "the-lead", "take the lexer").to("the-worker"))
+            .unwrap();
+        assert_eq!(s.traffic(Scope::Work, &work).unwrap().len(), 1);
+
+        assert!(s.delete_work(&work, None).unwrap().happened());
+
+        assert!(s.traffic(Scope::Work, &work).unwrap().is_empty());
+        assert!(s.members_in(Scope::Work, &work).unwrap().is_empty());
+        assert!(s.mail_waiting().unwrap().is_empty());
+        assert!(s.mail_held().unwrap().is_empty());
     }
 }

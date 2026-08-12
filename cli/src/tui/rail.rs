@@ -92,6 +92,17 @@ pub struct RailState {
     /// arrives is a rail people turn off, and then the *next* blocker is
     /// invisible — the failure the auto-open exists to prevent.
     pub auto_opened: bool,
+    /// Whether the rail shows the whole subtree or only this conversation.
+    ///
+    /// On by default, and that is the orchestrator's whole case for existing:
+    /// the sessions doing the work are the ones with questions, and a rail that
+    /// showed only the conversation you happen to be looking at would hide
+    /// every blocker in the fleet behind a keystroke nobody knew to press.
+    ///
+    /// Cascade is **upward only** — a parent sees its descendants' cards and
+    /// never the reverse — which falls out of `Query::subtree_of` walking down
+    /// from the root rather than up from each card.
+    pub cascade: bool,
 }
 
 impl Default for RailState {
@@ -109,6 +120,7 @@ impl Default for RailState {
             kind: 0,
             stack: 0,
             auto_opened: false,
+            cascade: true,
         }
     }
 }
@@ -142,9 +154,17 @@ impl RailState {
     /// A filter that is open but empty is not a search — it hides nothing,
     /// exactly as `/` does on every list screen.
     pub fn query(&self, conversation_id: Option<String>) -> Query {
+        // Exactly one of the two is ever set. Both together would be a filter
+        // that says "in this subtree, and also only this one conversation",
+        // which is the subtree scope silently doing nothing.
+        let (conversation_id, subtree_of) = if self.cascade {
+            (None, conversation_id)
+        } else {
+            (conversation_id, None)
+        };
         Query {
             conversation_id,
-            subtree_of: None,
+            subtree_of,
             work_id: None,
             kind: self.kind_now(),
             status: Some(self.stack_now()),
@@ -316,6 +336,34 @@ pub fn delivery_note(card: &Card) -> Option<&'static str> {
 /// the only channel in this program, and this is the other one.
 pub const BLOCKED: &str = "blocked";
 
+/// Which session raised a card, short enough for a thirty-four column rail.
+///
+/// Printed on **every** cascaded card, and it is not decoration: with the
+/// subtree scope on, the rail holds cards from sessions all over the fleet, and
+/// answering is a write against one specific agent. A card that did not say
+/// whose question it was would make "answer the top one" a coin flip about
+/// which agent gets unblocked.
+pub fn raised_by(card: &Card) -> String {
+    let session: String = card.conversation_id.chars().take(8).collect();
+    match &card.run_id {
+        Some(run) => format!("{session}·{}", run.chars().take(4).collect::<String>()),
+        None => session,
+    }
+}
+
+/// The work a card belongs to, as a short tag.
+///
+/// A tag rather than the tint E4.S5 asks for, because the colour belongs to
+/// the *work* — `works::Work::colour` — and there is no store query returning a
+/// work yet. **Integration point:** once lane A lands one, look the work up and
+/// colour the row with it; the tag stays either way, because colour is never
+/// the only channel in this program.
+pub fn work_tag(card: &Card) -> Option<String> {
+    card.work_id
+        .as_ref()
+        .map(|id| id.chars().take(6).collect::<String>())
+}
+
 /// The glyph that says what kind of card this is without relying on colour.
 pub fn kind_glyph(kind: CardKind) -> &'static str {
     match kind {
@@ -411,6 +459,56 @@ mod tests {
         );
     }
 
+    /// E4.S5: the main rail shows the whole subtree. Exactly one of the two
+    /// scopes is ever set — both would be a subtree filter silently doing
+    /// nothing, because a conversation filter on top of it narrows back to one.
+    #[test]
+    fn the_rail_asks_for_the_whole_subtree_and_narrows_to_one_session_on_a_toggle() {
+        let mut rail = RailState::default();
+        assert!(rail.cascade, "the orchestrator's rail is the point of it");
+
+        let wide = rail.query(Some("conv".into()));
+        assert_eq!(wide.subtree_of.as_deref(), Some("conv"));
+        assert_eq!(wide.conversation_id, None, "both would cancel out");
+
+        rail.cascade = false;
+        let narrow = rail.query(Some("conv".into()));
+        assert_eq!(narrow.conversation_id.as_deref(), Some("conv"));
+        assert_eq!(narrow.subtree_of, None);
+    }
+
+    /// Answering writes against one specific agent, so a cascaded card that did
+    /// not say whose question it was would make "answer the top one" a coin
+    /// flip about which agent gets unblocked.
+    #[test]
+    fn a_cascaded_card_names_the_session_that_raised_it() {
+        let mut c = card(1, false);
+        c.conversation_id = "7c09d454-aaaa-bbbb".into();
+        c.run_id = Some("3f2ab1c0".into());
+        let said = raised_by(&c);
+        assert!(said.starts_with("7c09d454"), "{said}");
+        assert!(said.contains("3f2a"), "and which run of it: {said}");
+    }
+
+    #[test]
+    fn a_card_with_no_run_still_names_its_session() {
+        let mut c = card(1, false);
+        c.conversation_id = "7c09d454-aaaa".into();
+        c.run_id = None;
+        assert_eq!(raised_by(&c), "7c09d454");
+    }
+
+    /// The work tag stands in for the tint until there is a query returning a
+    /// work. Colour is never the only channel here, so the tag is what the
+    /// design actually needs and the colour is the improvement on top.
+    #[test]
+    fn a_card_belonging_to_a_work_carries_its_tag() {
+        let mut c = card(1, false);
+        c.work_id = Some("w-abcdef-123".into());
+        assert_eq!(work_tag(&c).as_deref(), Some("w-abcd"));
+        assert_eq!(work_tag(&card(2, false)), None, "no work, no tag");
+    }
+
     /// The text filter has to reach the store, or it is not full-text search —
     /// it is a scan someone will one day write in Rust because the query did
     /// not carry it.
@@ -420,7 +518,12 @@ mod tests {
         rail.filter = Some("sqlite".into());
         let q = rail.query(Some("conv".into()));
         assert_eq!(q.text.as_deref(), Some("sqlite"));
-        assert_eq!(q.conversation_id.as_deref(), Some("conv"));
+        // The scope the search runs over is the subtree by default — which of
+        // the two id fields carries it is pinned by
+        // `the_rail_asks_for_the_whole_subtree_and_narrows_to_one_session_on_a_toggle`.
+        // What matters here is that the conversation reaches the query at all,
+        // so a filter cannot silently search the whole database.
+        assert_eq!(q.subtree_of.as_deref(), Some("conv"));
         assert_eq!(q.limit, Some(LIMIT));
     }
 

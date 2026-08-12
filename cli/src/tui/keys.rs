@@ -143,6 +143,7 @@ pub const GLOBAL: &[Key] = &[
     // written. See [`RAIL`].
     k("Alt-R", "show or hide the rail"),
     k("Alt-C", "the rail's next card"),
+    k("Alt-P", "add a directory to work in"),
     k("Alt-B", "delegate the typed line"),
     k("Alt-X", "stop the run being watched"),
     k("Alt-F", "the typed line in $EDITOR"),
@@ -315,6 +316,7 @@ pub const RAIL: &[Key] = &[
     k("a", "answer in prose"),
     k("x", "dismiss"),
     k("t", "open / answered / dismissed"),
+    k("c", "this session / everything below"),
     k("f", "kind"),
     k("/", "filter"),
     k("S", "sort"),

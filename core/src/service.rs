@@ -413,6 +413,19 @@ impl Jod {
                     if let Some(id) = &conversation {
                         record_in_conversation(store, id, &envelope);
                     }
+                    // The passive half of D2: a run launched without Jod's MCP
+                    // server still puts its questions on the rail, lifted out
+                    // of what the harness prints. Cheap on the ordinary event —
+                    // `lift` matches a tool name and returns — and idempotent
+                    // through the card's dedupe key, so a harness that both
+                    // calls Jod's tool and prints its own question produces one
+                    // card rather than two.
+                    if let Err(e) = crate::mcp::lift_into_cards(store, &envelope.agent_id, &envelope.event) {
+                        // Reported, never fatal. A card that could not be
+                        // raised is a question nobody sees; a run taken down by
+                        // one is work nobody gets.
+                        eprintln!("[jod] could not raise a card from the stream: {e}");
+                    }
                 }
                 // A closed broadcast channel just means no client is attached.
                 let _ = broadcast_tx.send(envelope);

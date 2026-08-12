@@ -484,6 +484,57 @@ impl Store {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
+    /// Remove a conversation and everything hanging off it.
+    ///
+    /// New with the throwaway titler, which is the case it exists for: a cheap
+    /// one-turn conversation that names a work and is then gone. Nothing else
+    /// in Jod had ever needed to delete one, and it stays deliberately narrow.
+    ///
+    /// Two conversations are refused, and neither refusal may be widened into
+    /// a flag:
+    ///
+    /// - **The pinned main chat.** It is the desk instructions arrive at.
+    ///   Deleting it does not free anything; it loses the thread every other
+    ///   thread was opened from.
+    /// - **Any conversation that belongs to a work.** Deleting the *work* is
+    ///   the only sanctioned way to remove those, so that a session cannot be
+    ///   quietly cut out of a tree that still points at it — its siblings still
+    ///   name it as a parent, its cards still carry its work, and its member
+    ///   row is still addressable.
+    ///
+    /// Messages, cards, roots, delegations and queued deliveries all cascade
+    /// from the row, so one statement takes the lot.
+    pub fn delete_conversation(&self, id: &str) -> Result<()> {
+        self.write(|tx| {
+            let found: Option<(i64, Option<String>)> = tx
+                .query_row(
+                    "SELECT pinned, work_id FROM conversations WHERE id = ?1",
+                    params![id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?;
+            let Some((pinned, work_id)) = found else {
+                return Err(JodError::Invalid(format!("no conversation `{id}`")));
+            };
+            if pinned == 1 {
+                return Err(JodError::Invalid(
+                    "the main chat cannot be deleted: it is the one conversation that is \
+                     always there, and every other one was opened from it"
+                        .into(),
+                ));
+            }
+            if let Some(work_id) = work_id {
+                return Err(JodError::Invalid(format!(
+                    "conversation `{id}` belongs to work `{work_id}`: delete the work, which \
+                     takes every session in it — removing one on its own would leave a tree \
+                     pointing at a session that is gone"
+                )));
+            }
+            tx.execute("DELETE FROM conversations WHERE id = ?1", params![id])?;
+            Ok(())
+        })
+    }
+
     pub fn set_conversation_title(&self, id: &str, title: &str) -> Result<bool> {
         self.write(|tx| {
             Ok(tx.execute(
@@ -2125,6 +2176,34 @@ mod tests {
         while chrono::Utc::now().timestamp_millis() == start {
             std::hint::spin_loop();
         }
+    }
+
+    // ---- deleting ------------------------------------------------------
+
+    /// The throwaway titler is why this exists, and the transcript going with
+    /// the row is the whole of it: a deleted conversation whose messages stayed
+    /// would leave the store growing for ever with text nothing can reach.
+    #[test]
+    fn deleting_a_conversation_takes_its_transcript_with_it() {
+        let s = store();
+        let c = s
+            .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
+            .unwrap();
+        s.append_message(&c.id, NewMessage::user("name this work")).unwrap();
+
+        s.delete_conversation(&c.id).unwrap();
+
+        assert!(s.conversation(&c.id).unwrap().is_none());
+        assert!(
+            s.search_messages("name this work", 10).unwrap().is_empty(),
+            "the messages went with the row, index and all"
+        );
+    }
+
+    #[test]
+    fn deleting_a_conversation_that_is_not_there_says_so_rather_than_reporting_success() {
+        let err = store().delete_conversation("no-such-conversation").unwrap_err();
+        assert!(matches!(err, JodError::Invalid(_)), "got {err:?}");
     }
 
     // ---- listing -------------------------------------------------------

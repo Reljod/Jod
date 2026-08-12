@@ -31,6 +31,12 @@ pub enum Slash {
     Details,
     /// Read or change a preference that outlives the session.
     Config(config::Request),
+    /// The directories this conversation may work in.
+    ///
+    /// One command with three shapes rather than three commands, because they
+    /// are one subject and the palette is already long: `/root` lists, `/root
+    /// add` opens the picker, `/root rm <path>` removes.
+    Root(RootCmd),
     /// Start a fresh conversation, forgetting the session cursor.
     New,
     /// List conversations that can be resumed.
@@ -127,6 +133,16 @@ pub enum Slash {
 /// with leading whitespace, so a prompt that happens to start with a slash
 /// (`/usr/bin/foo is missing`) still reaches the agent as long as it is a real
 /// path rather than a single word.
+/// What `/root` was asked to do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RootCmd {
+    List,
+    /// `None` opens the picker; a path adds it without one, which is what a
+    /// script or a paste wants.
+    Add(Option<String>),
+    Remove(String),
+}
+
 pub fn parse(line: &str) -> Option<Slash> {
     let rest = line.strip_prefix('/')?;
     let mut parts = rest.split_whitespace();
@@ -175,6 +191,28 @@ pub fn parse(line: &str) -> Option<Slash> {
             None => Slash::Unknown(format!("/new {arg}")),
         },
         "sessions" => Slash::Sessions,
+        "root" | "roots" => {
+            let mut words = arg.split_whitespace();
+            match words.next() {
+                None | Some("ls") | Some("list") => Slash::Root(RootCmd::List),
+                // The picker with no argument, a literal path with one. Both
+                // are "add", because which of the two you meant is obvious from
+                // whether you typed a path.
+                Some("add") => {
+                    let path = words.collect::<Vec<_>>().join(" ");
+                    Slash::Root(RootCmd::Add((!path.is_empty()).then_some(path)))
+                }
+                Some("rm") | Some("remove") => {
+                    let path = words.collect::<Vec<_>>().join(" ");
+                    if path.is_empty() {
+                        Slash::Unknown("/root rm needs a path".into())
+                    } else {
+                        Slash::Root(RootCmd::Remove(path))
+                    }
+                }
+                Some(other) => Slash::Unknown(format!("/root {other}")),
+            }
+        }
         "memory" | "memories" => {
             if arg.is_empty() {
                 Slash::Memory(None)
@@ -438,6 +476,10 @@ pub const HELP: &[(&str, &str)] = &[
     (
         "/new [kind]",
         "a fresh conversation, or a new schedule/goal/hook/task",
+    ),
+    (
+        "/root [add|rm]",
+        "the directories this session works in (Alt-P picks one)",
     ),
     ("/sessions", "conversations you can pick up"),
     ("/resume <id>", "continue one of them"),
@@ -1112,6 +1154,24 @@ mod tests {
         assert_eq!(parse("/reasoning"), Some(Slash::Thinking));
         assert_eq!(parse("/new"), Some(Slash::New));
         assert_eq!(parse("/sessions"), Some(Slash::Sessions));
+        // One command, three shapes. Bare and `ls` both list, because half the
+        // people who type `/root` mean "show me" and the other half will type
+        // the subcommand out of habit.
+        assert_eq!(parse("/root"), Some(Slash::Root(RootCmd::List)));
+        assert_eq!(parse("/roots"), Some(Slash::Root(RootCmd::List)));
+        assert_eq!(parse("/root ls"), Some(Slash::Root(RootCmd::List)));
+        assert_eq!(parse("/root add"), Some(Slash::Root(RootCmd::Add(None))));
+        assert_eq!(
+            parse("/root add /home/reljod/repo/Jod"),
+            Some(Slash::Root(RootCmd::Add(Some("/home/reljod/repo/Jod".into()))))
+        );
+        assert_eq!(
+            parse("/root rm /home/reljod/repo/Jod"),
+            Some(Slash::Root(RootCmd::Remove("/home/reljod/repo/Jod".into())))
+        );
+        // A removal with nothing to remove is refused by name rather than
+        // silently becoming a list, which would look like the key did nothing.
+        assert!(matches!(parse("/root rm"), Some(Slash::Unknown(_))));
         // `/agents` and `/team` now name workspaces rather than panels, which
         // is what lets one variant cover all nine screens.
         assert_eq!(parse("/agents"), Some(Slash::Open(Workspace::Fleet)));

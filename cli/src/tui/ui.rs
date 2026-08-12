@@ -25,7 +25,9 @@ use super::data::{Outcome, Source};
 use super::graph::{self, Direction as EdgeDirection};
 use super::keys;
 use super::mention;
+use super::picker;
 use super::rail;
+use super::secret;
 use super::workspace::Workspace;
 use jod_core::cards::{Card, CardKind, Delivery, Importance, Sort, Status};
 
@@ -348,15 +350,28 @@ fn draw_rail_stack(f: &mut Frame, app: &App, area: Rect) {
             // would cost every card two cells of title to mark one card.
             .title(if here { " ▸ " } else { "" });
         f.render_widget(
-            Paragraph::new(card_lines(card, box_.width.saturating_sub(2) as usize, here))
-                .block(block),
+            Paragraph::new(card_lines(
+                card,
+                box_.width.saturating_sub(2) as usize,
+                here,
+                app.rail.cascade,
+            ))
+            .block(block),
             box_,
         );
     }
 }
 
 /// The two lines of a collapsed card: what it says, and what state it is in.
-fn card_lines(card: &Card, width: usize, here: bool) -> Vec<Line<'static>> {
+///
+/// `cascading` decides whether the second line has to name the session. With
+/// the subtree scope on, the rail holds cards from agents all over the fleet
+/// and answering writes against one specific one, so the provenance is not
+/// optional — it is what stops "answer the top one" being a coin flip about
+/// which agent gets unblocked. With the scope narrowed to one conversation
+/// every card came from the same place, and printing it would spend a third of
+/// a thirty-four column line saying so.
+fn card_lines(card: &Card, width: usize, here: bool, cascading: bool) -> Vec<Line<'static>> {
     let title = Line::from(vec![
         Span::styled(
             format!("{} ", rail::kind_glyph(card.kind)),
@@ -368,8 +383,18 @@ fn card_lines(card: &Card, width: usize, here: bool) -> Vec<Line<'static>> {
         ),
     ]);
 
-    let mut spans = vec![Span::styled(format!("#{} ", card.id), fg(MUTED))];
-    let mut used = format!("#{} ", card.id).chars().count();
+    // The session leads the line when cascading, ahead of the id: which agent
+    // is asking outranks which card number it is.
+    let stamp = if cascading {
+        match rail::work_tag(card) {
+            Some(work) => format!("{work}/{} ", rail::raised_by(card)),
+            None => format!("{} ", rail::raised_by(card)),
+        }
+    } else {
+        format!("#{} ", card.id)
+    };
+    let mut spans = vec![Span::styled(stamp.clone(), fg(MUTED))];
+    let mut used = stamp.chars().count();
     // The literal word, beside the coloured border. Colour is never the only
     // channel in this program, and on the one card that stopped a run that
     // rule is not a nicety.
@@ -419,6 +444,19 @@ fn rail_header(app: &App) -> Line<'static> {
         ),
         fg(MUTED),
     ));
+    // The scope rides the always-drawn header rather than the settings line,
+    // which is only drawn when something is non-default. A rail narrowed to one
+    // conversation and a fleet that has gone quiet look identical, and the
+    // difference between them is the whole reason the orchestrator's rail
+    // exists — so it is never something the reader has to infer.
+    spans.push(Span::styled(
+        if app.rail.cascade {
+            " · subtree".to_string()
+        } else {
+            " · here".to_string()
+        },
+        fg(MUTED),
+    ));
     if blocking > 0 {
         spans.push(Span::styled(
             format!(" · {blocking} {}", rail::BLOCKED),
@@ -437,6 +475,7 @@ fn rail_settings(app: &App) -> Option<Line<'static>> {
         return None;
     }
     let kind = kind.map(|k| k.as_str()).unwrap_or("any");
+    // The scope is on the header, which is always drawn — see `rail_header`.
     Some(Line::from(Span::styled(
         format!(" S {} · f {kind}", sort.as_str()),
         fg(MUTED),
@@ -495,6 +534,32 @@ fn draw_card(f: &mut Frame, app: &App, card: &Card, area: Rect) {
         lines.push(Line::from(""));
         for wrapped in wrap(&card.body, width, 3) {
             lines.push(Line::from(Span::styled(wrapped, fg(AGENT))));
+        }
+    }
+
+    // A secret card explains where the value will live before `a` is ever
+    // pressed. E3.S4 asks for this on the card and not only in the field,
+    // because the card is what somebody reads while deciding whether to hand
+    // over a production token at all.
+    if card.kind == CardKind::Secret {
+        let scope = card
+            .secret_scope
+            .as_deref()
+            .map(jod_core::secrets::Scope::parse)
+            .unwrap_or_default();
+        let name = card.secret_name.as_deref().unwrap_or(&card.title);
+        lines.push(Line::from(""));
+        for said in secret::destination(name, scope) {
+            lines.push(Line::from(Span::styled(format!("   {said}"), fg(MUTED))));
+        }
+        // Once it is stored the card carries a name and a scope and nothing
+        // else — `card.answer` holds `secret::stored_summary`, never a value.
+        if card.status == Status::Open {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "   a — type the value; it is masked and never echoed".to_string(),
+                fg(WARN),
+            )));
         }
     }
 
@@ -1442,6 +1507,18 @@ fn draw_keybar(f: &mut Frame, app: &App, area: Rect) {
             "y restarts into the new build · anything else stays".to_string(),
             "Esc stays",
         ),
+        // Named for what they do rather than borrowing the prompt's wording:
+        // "accepts" is the wrong verb for a credential, where the question a
+        // reader has at that moment is what pressing enter is about to commit
+        // them to and whether escape really throws it away.
+        Overlay::Secret { .. } => (
+            "typing is hidden · ⏎ stores it outside every repo".to_string(),
+            "Esc discards it",
+        ),
+        Overlay::Picker(_) => (
+            "type to narrow · ↑↓ choose · ⏎ adds it read-only".to_string(),
+            "Esc cancels",
+        ),
         // The rail is checked before the screen's own filter and before the
         // screen's own verbs, because while it has the keyboard the screen's
         // verbs are *not* in force — printing `s stop` beside a rail where `x`
@@ -1676,6 +1753,10 @@ fn draw_overlay(f: &mut Frame, app: &App) {
         Overlay::Prompt { label, value, .. } => draw_prompt(f, label, value),
         Overlay::Jobs => draw_jobs(f, app),
         Overlay::ConfirmReload => draw_confirm_reload(f),
+        Overlay::Secret {
+            name, scope, value, ..
+        } => draw_secret(f, name, *scope, value),
+        Overlay::Picker(p) => draw_picker(f, p),
     }
 }
 
@@ -1733,6 +1814,63 @@ fn draw_jobs(f: &mut Frame, app: &App) {
     );
 }
 
+/// The big half of the one picker.
+///
+/// Rows are drawn by [`mention_line`] — the same function the inline popup
+/// uses — so the matched characters are highlighted identically in both. That
+/// shared call is what makes "one picker at two sizes" true in the rendering
+/// as well as in the matcher.
+fn draw_picker(f: &mut Frame, p: &picker::Picker) {
+    let screen = f.area();
+    let width = (screen.width.saturating_sub(8)).min(96).max(40);
+    let height = (picker::ROWS as u16 + 6).min(screen.height.saturating_sub(2));
+    let panel = centred(screen, width, height);
+
+    let mut lines: Vec<Line> = vec![
+        Line::from(Span::styled(
+            format!("  in {}", p.base.display()),
+            fg(MUTED),
+        )),
+        Line::from(vec![
+            Span::styled("  ▸ ".to_string(), fg(USER)),
+            Span::styled(p.query.clone(), fg(AGENT)),
+            Span::styled("▏".to_string(), fg(USER)),
+        ]),
+        Line::from(""),
+    ];
+    if p.rows.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  no directory matches".to_string(),
+            fg(MUTED),
+        )));
+    }
+    for (at, row) in p.rows.iter().enumerate() {
+        lines.push(mention_line(row, at == p.selected));
+    }
+    // A list that is quietly partial is one you trust and should not.
+    if p.truncated {
+        lines.push(Line::from(Span::styled(
+            format!(
+                "  … more than {} directories here; type to narrow",
+                picker::MAX_DIRS
+            ),
+            fg(WARN),
+        )));
+    }
+
+    f.render_widget(Clear, panel);
+    f.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(fg(USER))
+                .title(" a directory to work in ")
+                .title_bottom(" ⏎ adds it read-only · ↑↓ choose · Esc cancels "),
+        ),
+        panel,
+    );
+}
+
 /// The one question an update cannot answer for itself.
 fn draw_confirm_reload(f: &mut Frame) {
     let panel = centred(f.area(), 62, 6);
@@ -1755,6 +1893,60 @@ fn draw_confirm_reload(f: &mut Frame) {
                 .border_style(fg(AGENT))
                 .title(" update installed ")
                 .title_bottom(" y restarts · anything else stays "),
+        ),
+        panel,
+    );
+}
+
+/// The credential field.
+///
+/// Three things distinguish it from [`draw_prompt`], and each is a rule from
+/// `secret.rs` made visible:
+///
+/// - the field shows `secret::masked`, never the characters — a shoulder, a
+///   screen share and a recorded terminal are all ordinary, and this is the
+///   one part of the flow a user cannot undo afterwards;
+/// - the destination is printed *above* the field, because the moment to learn
+///   where a production token is going is before pasting it, not after;
+/// - the border is `WARN` rather than `USER`, so the one overlay in this
+///   program that must not be typed into absent-mindedly does not look like
+///   the one that asks for a schedule's name.
+fn draw_secret(f: &mut Frame, name: &str, scope: jod_core::secrets::Scope, value: &secret::Typed) {
+    let destination = secret::destination(name, scope);
+    let mut lines: Vec<Line> = vec![Line::from("")];
+    for said in &destination {
+        lines.push(Line::from(Span::styled(format!("  {said}"), fg(MUTED))));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled(format!("  {name} ▸ "), fg(WARN)),
+        // The dots are the whole point: they prove the keystrokes are landing
+        // without saying what they were.
+        Span::styled(secret::masked(value), fg(AGENT)),
+        Span::styled("▏", fg(USER)),
+    ]));
+    lines.push(Line::from(Span::styled(
+        "  the value is not echoed, not stored in the transcript, and not shown to the agent"
+            .to_string(),
+        fg(MUTED),
+    )));
+
+    let width = destination
+        .iter()
+        .map(|l| l.chars().count())
+        .max()
+        .unwrap_or(40)
+        .max(64)
+        + 6;
+    let panel = centred(f.area(), width as u16, lines.len() as u16 + 2);
+    f.render_widget(Clear, panel);
+    f.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(fg(WARN))
+                .title(" a credential ")
+                .title_bottom(" ⏎ stores it · Esc discards it "),
         ),
         panel,
     );
@@ -4183,6 +4375,11 @@ mod tests {
     fn the_completion_hints_line_up_in_a_column() {
         let mut a = app();
         a.input = "/".into();
+        // Tall enough to hold the whole palette. The two rows sampled below
+        // are the first and the last, deliberately — alignment is only worth
+        // checking across the full width of the list — so the viewport has to
+        // fit every command, and it grows when the palette does. Nothing about
+        // the assertion changes with it.
         let screen = rendered(&a, 100, popup_height());
         // Counted in characters, not bytes: the selection marker is three bytes
         // wide and one column wide, and a byte index would call the two rows
@@ -4582,6 +4779,9 @@ mod tests {
     fn the_splash_yields_to_the_completion_popup_rather_than_clipping_it() {
         let mut a = app();
         a.input = "/".into();
+        // Sized to the palette, as in `the_completion_hints_line_up_in_a_column`:
+        // `/team` is the sentinel for "the far end of the list is reachable",
+        // so the screen has to be tall enough to hold the list it is the end of.
         let screen = rendered(&a, 100, popup_height());
         assert!(screen.contains("this list"), "/help:\n{screen}");
         assert!(
@@ -6847,6 +7047,118 @@ mod tests {
         assert!(!card_border(&base(CardKind::Decision, Importance::Normal, false))
             .add_modifier
             .contains(Modifier::BOLD));
+    }
+
+    // ---- the secret card ----
+
+    /// The moment to learn where a production token is going is before pasting
+    /// it, so the destination is on the card as well as in the field.
+    #[test]
+    fn an_expanded_secret_card_says_where_the_value_will_live() {
+        let store = RealStore::in_memory().expect("an in-memory store");
+        let conversation = store
+            .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
+            .expect("a conversation")
+            .id;
+        store
+            .raise_card(NewCard {
+                conversation_id: conversation.clone(),
+                kind: Some(CardKind::Secret),
+                title: "GITHUB_TOKEN is missing".into(),
+                secret_name: Some("GITHUB_TOKEN".into()),
+                secret_scope: Some("work".into()),
+                ..Default::default()
+            })
+            .expect("a card");
+
+        let mut rail = RailState {
+            expanded: true,
+            ..Default::default()
+        };
+        rail.shown = true;
+        let a = rail_app(&store, &conversation, rail);
+        // Fragments short enough to survive the pane's wrap. The *wording* is
+        // pinned in `secret::tests`, which reads the unwrapped source; what
+        // this asserts is that the block reaches the screen at all.
+        let frame = rendered(&a, 150, 40);
+        assert!(frame.contains("stored outside"), "{frame}");
+        assert!(frame.contains("0600"), "{frame}");
+        assert!(
+            frame.contains("only this work's sessions"),
+            "the scope as who can use it: {frame}"
+        );
+        assert!(
+            frame.contains("never echoed"),
+            "and how the field will behave: {frame}"
+        );
+    }
+
+    /// The one part of this flow a user cannot undo afterwards. A shoulder, a
+    /// screen share and a recorded terminal are all ordinary.
+    #[test]
+    fn the_credential_field_shows_dots_and_never_the_value() {
+        let mut a = app();
+        a.transcript.push(Entry::Notice("hello".into()));
+        let mut value = secret::Typed::new();
+        for c in "sk-live-abcdef".chars() {
+            value.push(c);
+        }
+        a.overlay = Overlay::Secret {
+            card: 9,
+            name: "GITHUB_TOKEN".into(),
+            scope: jod_core::secrets::Scope::Work,
+            value,
+        };
+        let frame = rendered(&a, 120, 34);
+        assert!(!frame.contains("sk-live"), "the value is on screen: {frame}");
+        assert!(frame.contains("••••••••••••••"), "{frame}");
+        assert!(frame.contains("GITHUB_TOKEN"), "the name is not a secret: {frame}");
+        assert!(frame.contains("Esc discards it"), "{frame}");
+    }
+
+    // ---- cascading cards ----
+
+    /// E4.S5: with the subtree scope on, the rail holds cards from agents all
+    /// over the fleet and answering writes against one of them, so every row
+    /// has to say whose question it is.
+    #[test]
+    fn a_cascaded_rail_names_the_session_on_every_card() {
+        let store = RealStore::in_memory().expect("an in-memory store");
+        let conversation = store
+            .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
+            .expect("a conversation")
+            .id;
+        store
+            .raise_card(NewCard {
+                conversation_id: conversation.clone(),
+                run_id: Some("3f2ab1c0".into()),
+                title: "which port for the API?".into(),
+                ..Default::default()
+            })
+            .expect("a card");
+
+        let mut a = rail_app(&store, &conversation, RailState::default());
+        assert!(a.rail.cascade, "the orchestrator's rail is the default");
+        let frame = rendered(&a, 150, 40);
+        let session: String = conversation.chars().take(8).collect();
+        assert!(frame.contains(&session), "the session that raised it: {frame}");
+        assert!(frame.contains("3f2a"), "and which run: {frame}");
+        assert!(
+            frame.contains("· subtree"),
+            "the scope is on the header, always: {frame}"
+        );
+
+        // Narrowed to one conversation, every card came from the same place,
+        // so the line spends its columns on the card instead — and the header
+        // says which of the two states this is, because a narrowed rail and a
+        // quiet fleet look identical otherwise.
+        a.rail.cascade = false;
+        let frame = rendered(&a, 150, 40);
+        assert!(frame.contains("· here"), "{frame}");
+        assert!(
+            !frame.contains(&session),
+            "narrowed, every card came from here, so the columns go to the card: {frame}"
+        );
     }
 
     // ---- the `@` picker ----

@@ -260,6 +260,39 @@ enum Command {
         #[arg(short, long, default_value_t = 20)]
         limit: usize,
     },
+    /// The decision rail, from the command line.
+    ///
+    /// The same cards the terminal shows, answered the same way — which is the
+    /// point: a blocker raised at midnight is answerable over SSH from a phone
+    /// without opening the full-screen interface.
+    Card {
+        #[command(subcommand)]
+        what: CardCommand,
+    },
+    /// The directories a conversation may work in.
+    ///
+    /// A session can be pointed at several repositories at once. Exactly one of
+    /// them is ever writable — a worktree the session claimed — and the real
+    /// checkout stays beside it, readable.
+    Root {
+        #[command(subcommand)]
+        what: RootCommand,
+    },
+    /// Credentials an agent can use and cannot read.
+    ///
+    /// Values live outside every repository at owner-only permissions, are
+    /// injected into the agent's environment at spawn, and are scrubbed out of
+    /// everything it prints. The agent is told a *name*, so a missing key
+    /// blocks one test rather than a session.
+    Secret {
+        #[command(subcommand)]
+        what: SecretCommand,
+    },
+    /// Works: one intent, spanning several sessions.
+    Work {
+        #[command(subcommand)]
+        what: WorkCommand,
+    },
     /// Conversations Jod owns: list them, fork one, take one back.
     ///
     /// A conversation here is a tree, not a line. Two of the three harnesses
@@ -455,6 +488,260 @@ enum McpCommand {
         /// Say what would be written, and write nothing.
         #[arg(long)]
         dry_run: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum CardCommand {
+    /// Cards, most pressing first. Open ones only, unless you say otherwise.
+    Ls {
+        /// Only this conversation's. A prefix of its id is enough.
+        #[arg(short, long)]
+        conversation: Option<String>,
+        /// This conversation's *and every session below it* — what the
+        /// orchestrator's rail shows. Cascade is upward only.
+        #[arg(long, conflicts_with = "conversation")]
+        subtree: Option<String>,
+        #[arg(short, long)]
+        work: Option<String>,
+        #[arg(short, long, value_enum)]
+        kind: Option<KindArg>,
+        #[arg(short, long, value_enum, default_value_t = StatusArg::Open)]
+        status: StatusArg,
+        /// Only the ones that stopped a run.
+        #[arg(short, long)]
+        blocking: bool,
+        /// Full-text match over title, body and answer.
+        #[arg(short, long)]
+        text: Option<String>,
+        #[arg(long, value_enum, default_value_t = SortArg::Pressing)]
+        sort: SortArg,
+        #[arg(short, long, default_value_t = 30)]
+        limit: u32,
+        #[arg(long)]
+        json: bool,
+    },
+    /// One card in full, with its options and where it came from.
+    Show {
+        id: i64,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Answer it. The agent is told at the end of its current turn, never
+    /// mid-turn — see `jod card show` for whether it has heard yet.
+    ///
+    /// For a secret card this asks for the value on the terminal and writes it
+    /// straight through to the secret store; it never appears in an argument,
+    /// in this database, or in the agent's context.
+    Answer {
+        id: i64,
+        /// Pick one of the card's numbered options.
+        #[arg(short = 'o', long)]
+        option: Option<usize>,
+        /// Answer in prose. Combined with --option when both are given.
+        text: Vec<String>,
+    },
+    /// Read it and deliberately leave it unanswered. The agent is told nothing,
+    /// which is the difference between this and an empty answer.
+    Dismiss { id: i64 },
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, ValueEnum)]
+enum KindArg {
+    Decision,
+    Question,
+    Secret,
+}
+
+impl From<KindArg> for jod_core::cards::CardKind {
+    fn from(a: KindArg) -> Self {
+        use jod_core::cards::CardKind;
+        match a {
+            KindArg::Decision => CardKind::Decision,
+            KindArg::Question => CardKind::Question,
+            KindArg::Secret => CardKind::Secret,
+        }
+    }
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, ValueEnum)]
+enum StatusArg {
+    Open,
+    Answered,
+    Dismissed,
+}
+
+impl From<StatusArg> for jod_core::cards::Status {
+    fn from(a: StatusArg) -> Self {
+        use jod_core::cards::Status;
+        match a {
+            StatusArg::Open => Status::Open,
+            StatusArg::Answered => Status::Answered,
+            StatusArg::Dismissed => Status::Dismissed,
+        }
+    }
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, ValueEnum)]
+enum SortArg {
+    /// Blocking first, then importance, then newest.
+    Pressing,
+    Importance,
+    Created,
+    Updated,
+}
+
+impl From<SortArg> for jod_core::cards::Sort {
+    fn from(a: SortArg) -> Self {
+        use jod_core::cards::Sort;
+        match a {
+            SortArg::Pressing => Sort::Pressing,
+            SortArg::Importance => Sort::Importance,
+            SortArg::Created => Sort::Created,
+            SortArg::Updated => Sort::Updated,
+        }
+    }
+}
+
+#[derive(Subcommand)]
+enum RootCommand {
+    /// Every directory this conversation may work in, in its own order.
+    Ls {
+        #[arg(short, long)]
+        conversation: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Add a directory, read-only.
+    ///
+    /// Read-only is not a flag you can lift here: a root becomes writable only
+    /// by a session claiming a worktree, which is what keeps a run's
+    /// half-finished state off your checkout.
+    Add {
+        path: PathBuf,
+        #[arg(short, long)]
+        conversation: Option<String>,
+    },
+    /// Drop a directory. Its files are not touched.
+    Rm {
+        path: PathBuf,
+        #[arg(short, long)]
+        conversation: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum SecretCommand {
+    /// The names a run here would be given, and nothing else about them.
+    ///
+    /// With no scope, the globals. With `--work`, what a session on that work
+    /// resolves — narrower scopes overriding wider ones by name, exactly as
+    /// the spawn path resolves them.
+    Ls {
+        #[arg(short, long)]
+        work: Option<String>,
+        #[arg(short, long)]
+        conversation: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Store a value.
+    ///
+    /// **The value is never an argument.** Anything on a command line is
+    /// world-readable through `/proc` for as long as the process lives, and it
+    /// is in your shell history for ever afterwards. This asks for it on the
+    /// terminal with the echo off, or reads it from stdin when you pipe one in
+    /// — `printf %s "$KEY" | jod secret set NAME --global`, with `printf` and
+    /// not `echo`, because a trailing newline becomes part of the credential.
+    Set {
+        /// A legal environment variable name: a letter or underscore, then
+        /// letters, digits and underscores.
+        name: String,
+        /// What it is for. Shown to the agent, which is how it knows which
+        /// variable to reach for.
+        #[arg(long, default_value = "")]
+        hint: String,
+        #[command(flatten)]
+        scope: ScopeArgs,
+    },
+    /// Forget a value. The file holding it is removed.
+    Rm {
+        name: String,
+        #[command(flatten)]
+        scope: ScopeArgs,
+    },
+}
+
+/// Who a secret is for — asked for explicitly, every time.
+///
+/// Deliberately without a default. The scope is the blast radius if the value
+/// leaks, and a default would make the widest choice the quiet one: `--global`
+/// hands a key to every session on the box, and that should be a thing somebody
+/// typed rather than a thing they omitted.
+#[derive(clap::Args)]
+#[group(required = true, multiple = false)]
+struct ScopeArgs {
+    /// Every session on this machine.
+    #[arg(long)]
+    global: bool,
+    /// One work. The scope to prefer: a key given for one project is not then
+    /// handed to every session on the box.
+    #[arg(long)]
+    work: Option<String>,
+    /// One conversation.
+    #[arg(long)]
+    conversation: Option<String>,
+}
+
+impl ScopeArgs {
+    fn resolve(&self) -> (jod_core::secrets::Scope, String) {
+        use jod_core::secrets::Scope;
+        match (&self.work, &self.conversation) {
+            (Some(work), _) => (Scope::Work, work.clone()),
+            (_, Some(conversation)) => (Scope::Conversation, conversation.clone()),
+            // The group is `required = true` and mutually exclusive, so this is
+            // `--global` and clap has already refused every other shape.
+            _ => (Scope::Global, String::new()),
+        }
+    }
+}
+
+#[derive(Subcommand)]
+enum WorkCommand {
+    /// Works, most recently touched first. Live ones by default.
+    Ls {
+        #[arg(long, conflicts_with = "closed")]
+        all: bool,
+        #[arg(long)]
+        closed: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// One work: its sessions, its board, its leases and its open cards.
+    Show {
+        id: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// End it now, without waiting for its board to empty.
+    ///
+    /// Closing destroys nothing — the record, the tree and the worktrees all
+    /// stay. A work whose sessions are still running becomes *finishing*
+    /// rather than closed.
+    Close { id: String },
+    /// Remove the work and every session in it: transcripts, cards, bus
+    /// traffic. Its worktrees and branches are left exactly where they are.
+    Delete { id: String },
+    /// The worktrees works have claimed, and what state each one is in.
+    Leases {
+        /// One work's. Omit for every lease Jod knows about.
+        id: Option<String>,
+        /// Only those whose work has been deleted — the ones nothing else will
+        /// ever mention again.
+        #[arg(long)]
+        orphaned: bool,
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -1255,6 +1542,10 @@ async fn main() -> Result<()> {
         } => {
             main_chat(&jod, instruction.join(" "), wait, harness, cwd, limit).await?;
         }
+        Command::Card { what } => card_command(&jod, what)?,
+        Command::Root { what } => root_command(&jod, what)?,
+        Command::Secret { what } => secret_command(&jod, what)?,
+        Command::Work { what } => work_command(&jod, what)?,
         Command::Conv { what } => conv_command(&jod, what)?,
         Command::Schedule { what } => schedule_command(&jod, what)?,
         Command::Webhook { what } => webhook_command(&jod, what)?,
@@ -1806,6 +2097,481 @@ fn conv_command(jod: &Jod, what: ConvCommand) -> Result<()> {
         }
     }
     Ok(())
+}
+
+// ---- the rail, the roots, the secrets and the works ----------------------
+
+/// Carry out a `jod card …` subcommand.
+///
+/// Everything here goes through the same [`jod_core::cards::Query`] the
+/// terminal rail uses, so a card listed on a phone is the card that is on the
+/// screen at home, sorted the same way. A second query builder here would drift
+/// within a week — that is the whole reason the store takes a filter rather
+/// than offering a function per caller.
+fn card_command(jod: &Jod, what: CardCommand) -> Result<()> {
+    use jod_core::cards::{Query, Sort};
+    let store = jod.store().context("this command needs the database")?;
+    let now = chrono::Utc::now().timestamp_millis();
+    match what {
+        CardCommand::Ls {
+            conversation,
+            subtree,
+            work,
+            kind,
+            status,
+            blocking,
+            text,
+            sort,
+            limit,
+            json,
+        } => {
+            let query = Query {
+                conversation_id: conversation
+                    .map(|c| resolve_conversation(store, &c))
+                    .transpose()?,
+                subtree_of: subtree.map(|c| resolve_conversation(store, &c)).transpose()?,
+                work_id: work,
+                kind: kind.map(Into::into),
+                status: Some(status.into()),
+                blocking_only: blocking,
+                text,
+                sort: Sort::from(sort),
+                limit: Some(limit),
+            };
+            let cards = store.cards(&query)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&cards)?);
+            } else if cards.is_empty() {
+                println!("no cards");
+            } else {
+                render::cards(&cards, now);
+            }
+        }
+        CardCommand::Show { id, json } => {
+            let card = require_card(store, id)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&card)?);
+            } else {
+                render::card(&card, now);
+            }
+        }
+        CardCommand::Answer { id, option, text } => {
+            let card = require_card(store, id)?;
+            let chosen = match option {
+                // One-based, because that is how the rail numbers them and how
+                // the card prints them. Refused rather than clamped: answering
+                // the wrong option is worse than being told to look again.
+                Some(n) => Some(
+                    card.options
+                        .get(n.checked_sub(1).context("options are numbered from 1")?)
+                        .with_context(|| {
+                            format!(
+                                "card #{id} has {} option(s); `jod card show {id}` lists them",
+                                card.options.len()
+                            )
+                        })?
+                        .clone(),
+                ),
+                None => None,
+            };
+            let text = text.join(" ");
+            let answered = match card.kind {
+                jod_core::cards::CardKind::Secret => answer_secret_card(store, &card)?,
+                _ => store.answer_card(
+                    id,
+                    chosen.as_deref(),
+                    Some(text.as_str()).filter(|t| !t.is_empty()),
+                )?,
+            };
+            render::card(&answered, now);
+            // The asynchrony is stated rather than implied. Somebody who
+            // answered ten cards during one turn should not be waiting for
+            // something to happen.
+            println!(
+                "\nqueued for {} — it reaches the agent at the end of its current turn, \
+                 not now",
+                short_id(&answered.conversation_id)
+            );
+        }
+        CardCommand::Dismiss { id } => {
+            store.dismiss_card(id)?;
+            println!("card #{id} dismissed — the agent is told nothing");
+        }
+    }
+    Ok(())
+}
+
+fn require_card(store: &Store, id: i64) -> Result<jod_core::cards::Card> {
+    store
+        .card(id)?
+        .with_context(|| format!("no card #{id} — `jod card ls` lists them"))
+}
+
+/// Answer a secret card by storing the value, never by carrying it.
+///
+/// The value goes from the terminal to [`Store::put_secret`] and nowhere else.
+/// What is written on the card is a confirmation — the name and the scope —
+/// because that card is delivered to the agent, and the whole of D3 is that the
+/// agent is told a name and never a value.
+fn answer_secret_card(store: &Store, card: &jod_core::cards::Card) -> Result<jod_core::cards::Card> {
+    use jod_core::secrets::{Scope, MIN_REDACTABLE_LEN};
+    let name = card
+        .secret_name
+        .as_deref()
+        .context("this secret card carries no variable name, so there is nothing to store")?;
+    let scope = Scope::parse(card.secret_scope.as_deref().unwrap_or("work"));
+    // The card records where the value *would* go; the id comes from the card's
+    // own conversation and work, which is the only place it could honestly come
+    // from — the agent that asked has no say in how widely it is shared.
+    let scope_id = match scope {
+        Scope::Global => String::new(),
+        Scope::Work => card.work_id.clone().unwrap_or_default(),
+        Scope::Conversation => card.conversation_id.clone(),
+    };
+    if scope != Scope::Global && scope_id.is_empty() {
+        bail!(
+            "card #{} asks for a {} secret and has no {} to attach it to — \
+             `jod secret set {name} --global` stores it for every session instead",
+            card.id,
+            scope.as_str(),
+            scope.as_str()
+        );
+    }
+
+    let value = read_secret_value(&format!("value for {name}"))?;
+    let meta = store.put_secret(name, scope, &scope_id, &value, &card.body)?;
+    drop(value);
+    if !meta.redactable {
+        // Said out loud, because a silent exception here is a leak nobody was
+        // told about: a value this short would match half of ordinary output,
+        // so it is injected and not scrubbed.
+        println!(
+            "note: {name} is shorter than {MIN_REDACTABLE_LEN} characters, so it is injected \
+             but NOT redacted from what the agent prints"
+        );
+    }
+    Ok(store.answer_card(
+        card.id,
+        None,
+        Some(&format!(
+            "{name} is stored, {} scope. It is injected into the environment of the next run \
+             — not the one in flight — and you will never be shown its value.",
+            scope.as_str()
+        )),
+    )?)
+}
+
+/// Carry out a `jod root …` subcommand.
+fn root_command(jod: &Jod, what: RootCommand) -> Result<()> {
+    use jod_core::roots::NewRoot;
+    let store = jod.store().context("this command needs the database")?;
+    match what {
+        RootCommand::Ls { conversation, json } => {
+            let id = which_conversation(store, conversation)?;
+            let roots = store.roots(&id)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&roots)?);
+            } else if roots.is_empty() {
+                println!("no roots on {} — `jod root add <path>` sets one", short_id(&id));
+            } else {
+                render::roots(&roots);
+            }
+        }
+        RootCommand::Add { path, conversation } => {
+            let id = which_conversation(store, conversation)?;
+            let root = store.add_root(&id, NewRoot::reading(&path))?;
+            render::roots(&[root]);
+        }
+        RootCommand::Rm { path, conversation } => {
+            let id = which_conversation(store, conversation)?;
+            if store.remove_root(&id, &path)? {
+                println!("{} is no longer a root of {}", path.display(), short_id(&id));
+            } else {
+                bail!("{} is not a root of {}", path.display(), short_id(&id));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The conversation a root command acts on: the one named, or the main chat.
+///
+/// The main chat is not created here if it is missing. `jod root ls` on a fresh
+/// machine should say there is nothing rather than mint a conversation as a
+/// side effect of looking.
+fn which_conversation(store: &Store, typed: Option<String>) -> Result<String> {
+    match typed {
+        Some(typed) => resolve_conversation(store, &typed),
+        None => store.pinned_conversation()?.context(
+            "no conversation given and there is no main chat yet — pass --conversation, \
+             or start one with `jod main \"…\"`",
+        ),
+    }
+}
+
+/// Carry out a `jod secret …` subcommand.
+fn secret_command(jod: &Jod, what: SecretCommand) -> Result<()> {
+    let store = jod.store().context("this command needs the database")?;
+    match what {
+        SecretCommand::Ls {
+            work,
+            conversation,
+            json,
+        } => {
+            // The resolution the spawn path performs, not a raw listing:
+            // "which `OPENAI_API_KEY` would a run here actually get" is the
+            // question somebody is asking, and two rows of the same name would
+            // not answer it.
+            let names = store.secrets_for(conversation.as_deref(), work.as_deref())?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&names)?);
+            } else if names.is_empty() {
+                println!("no secrets in scope — `jod secret set <NAME> --global` stores one");
+            } else {
+                render::secrets(&names);
+            }
+        }
+        SecretCommand::Set { name, hint, scope } => {
+            let (scope, scope_id) = scope.resolve();
+            let value = read_secret_value(&format!("value for {name}"))?;
+            let meta = store.put_secret(&name, scope, &scope_id, &value, &hint)?;
+            drop(value);
+            println!("{} stored, {} scope", meta.name, meta.scope.as_str());
+            if !meta.redactable {
+                println!(
+                    "note: shorter than {} characters, so it is injected but NOT redacted \
+                     from what an agent prints — redacting something this short would mangle \
+                     ordinary output",
+                    jod_core::secrets::MIN_REDACTABLE_LEN
+                );
+            }
+            println!("it applies from the next spawn; runs already going were built without it");
+        }
+        SecretCommand::Rm { name, scope } => {
+            let (scope, scope_id) = scope.resolve();
+            if store.remove_secret(&name, scope, &scope_id)? {
+                println!("{name} forgotten");
+            } else {
+                bail!("no {} secret named {name}", scope.as_str());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Read a credential from the terminal without echoing it, or from stdin.
+///
+/// Two paths because both are real. At a terminal the value is typed and must
+/// not appear on screen or in the scrollback; in a script it arrives on stdin,
+/// where there is nothing to echo. What neither path is, ever, is an argument:
+/// `/proc/<pid>/cmdline` is world-readable for the life of the process, and the
+/// shell keeps a copy in its history for ever after that.
+///
+/// Read exactly as given, with only a trailing newline removed — the one the
+/// terminal adds when you press enter. Everything else is part of the value.
+fn read_secret_value(prompt: &str) -> Result<String> {
+    use std::io::IsTerminal;
+    if !std::io::stdin().is_terminal() {
+        let piped = read_stdin()?;
+        let value = piped.strip_suffix('\n').unwrap_or(&piped);
+        if value.is_empty() {
+            bail!("nothing arrived on stdin — pipe the value in, or run this at a terminal");
+        }
+        return Ok(value.to_string());
+    }
+    eprint!("{prompt}: ");
+    std::io::Write::flush(&mut std::io::stderr()).ok();
+    let value = read_without_echo();
+    eprintln!();
+    let value = value?;
+    if value.trim().is_empty() {
+        bail!("nothing typed");
+    }
+    Ok(value)
+}
+
+/// One line from the terminal with the echo off.
+///
+/// Raw mode rather than a crate: `crossterm` is already here for the
+/// full-screen interface and this is a dozen lines against a dependency whose
+/// whole job is to turn one flag off. Raw mode is disabled on every path out,
+/// including the error ones — a terminal left raw is a terminal that stops
+/// responding to Ctrl-C, which for a command that has just failed is a worse
+/// outcome than the failure.
+fn read_without_echo() -> Result<String> {
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    crossterm::terminal::enable_raw_mode().context("could not turn the terminal's echo off")?;
+    let mut value = String::new();
+    let outcome = loop {
+        match crossterm::event::read() {
+            Ok(Event::Key(KeyEvent { code, modifiers, .. })) => match code {
+                KeyCode::Enter => break Ok(()),
+                KeyCode::Backspace => {
+                    value.pop();
+                }
+                // Ctrl-C at a password prompt means "stop", and it must not
+                // leave a half-typed credential behind to be stored.
+                KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
+                    value.clear();
+                    break Err(anyhow::anyhow!("cancelled"));
+                }
+                KeyCode::Char(c) => value.push(c),
+                _ => {}
+            },
+            Ok(_) => {}
+            Err(e) => break Err(anyhow::anyhow!("could not read the value: {e}")),
+        }
+    };
+    crossterm::terminal::disable_raw_mode().ok();
+    outcome.map(|()| value)
+}
+
+/// Carry out a `jod work …` subcommand.
+fn work_command(jod: &Jod, what: WorkCommand) -> Result<()> {
+    use jod_core::works::{Deletion, Filter};
+    let store = jod.store().context("this command needs the database")?;
+    let now = chrono::Utc::now().timestamp_millis();
+    match what {
+        WorkCommand::Ls { all, closed, json } => {
+            let filter = match (all, closed) {
+                (true, _) => Filter::All,
+                (_, true) => Filter::Closed,
+                _ => Filter::Live,
+            };
+            let works = store.works(filter)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&works)?);
+            } else if works.is_empty() {
+                println!("no works — `jod main \"work on @repo, do X\"` opens one");
+            } else {
+                render::works(&works, now);
+            }
+        }
+        WorkCommand::Show { id, json } => {
+            let id = resolve_work(store, &id)?;
+            let work = store.work(&id)?.expect("resolve_work found it a moment ago");
+            let sessions = store.work_sessions(&id)?;
+            let tasks = store.work_tasks(&id)?;
+            let leases = store.work_leases(&id)?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "work": work,
+                        "sessions": sessions,
+                        "tasks": tasks,
+                        "leases": leases,
+                    }))?
+                );
+            } else {
+                // Cards per session, because "where are the questions" is the
+                // reason to open a work at all and the tree is where they hide.
+                let mut cards = Vec::new();
+                for session in &sessions {
+                    cards.push(store.count_open_cards(&session.conversation_id, false)?);
+                }
+                render::work(&work, &sessions, &cards, &tasks, &leases, now);
+            }
+        }
+        WorkCommand::Close { id } => {
+            let id = resolve_work(store, &id)?;
+            let closing = store.close_work(&id)?;
+            print!("{}", closing.summary());
+            if let Some(card) = closing.card_id {
+                println!("raised as card #{card}");
+            }
+        }
+        WorkCommand::Delete { id } => {
+            let id = resolve_work(store, &id)?;
+            // INTEGRATION POINT (lane-a-works): `works::Confirmation` has
+            // private fields, no serde, and is only ever minted inside
+            // `delete_work`, so this second process has nothing to present and
+            // a work holding a worktree cannot be deleted from here. D8's
+            // "repeating the identical command completes it" needs the
+            // confirmation to live in the database rather than in a caller's
+            // memory. Until it does, this prints the refusal in full and stops
+            // — which is the safe half of the behaviour, not a substitute for
+            // it. A work with no leases deletes on the first command today.
+            match store.delete_work(&id, None)? {
+                Deletion::Refused { doomed, .. } => {
+                    print!("{}", doomed.report());
+                    bail!(
+                        "refused: this work holds a worktree. Repeating the command is not yet \
+                         wired up from the command line — delete it from `jod tui`, or release \
+                         its leases first with `jod work leases {}`",
+                        short_id(&id)
+                    );
+                }
+                Deletion::Done {
+                    doomed,
+                    worktrees_left,
+                } => {
+                    println!(
+                        "deleted {} — {} session(s), {} transcript(s), {} unanswered card(s)",
+                        doomed.title, doomed.sessions, doomed.transcripts, doomed.unanswered_cards
+                    );
+                    // Printed so nothing is orphaned silently: Jod's records
+                    // are cheap to recreate and a branch with uncommitted work
+                    // on it is not.
+                    for path in &worktrees_left {
+                        println!("  left on disk: {}", path.display());
+                    }
+                    if !worktrees_left.is_empty() {
+                        println!("`jod work leases --orphaned` finds them again");
+                    }
+                }
+            }
+        }
+        WorkCommand::Leases { id, orphaned, json } => {
+            let leases = match (&id, orphaned) {
+                (_, true) => store.orphaned_leases()?,
+                (Some(id), _) => store.work_leases(&resolve_work(store, id)?)?,
+                (None, _) => {
+                    let mut all = Vec::new();
+                    for work in store.works(Filter::All)? {
+                        all.extend(store.work_leases(&work.id)?);
+                    }
+                    all.extend(store.orphaned_leases()?);
+                    all
+                }
+            };
+            if json {
+                println!("{}", serde_json::to_string_pretty(&leases)?);
+                return Ok(());
+            }
+            if leases.is_empty() {
+                println!("no worktrees claimed");
+                return Ok(());
+            }
+            // Read from git now rather than from the row: a worktree that was
+            // clean an hour ago says nothing about whether removing it today
+            // would lose somebody's afternoon.
+            let mut conditions = Vec::new();
+            for lease in &leases {
+                conditions.push(store.lease_condition(lease)?);
+            }
+            render::leases(&leases, &conditions, now);
+        }
+    }
+    Ok(())
+}
+
+/// Resolve a typed work-id prefix, refusing an ambiguous one.
+///
+/// The same rule [`resolve_conversation`] follows, for a sharper reason:
+/// `jod work delete` on the wrong work takes every transcript in it.
+fn resolve_work(store: &Store, typed: &str) -> Result<String> {
+    use jod_core::works::Filter;
+    let all = store.works(Filter::All)?;
+    if all.iter().any(|w| w.id == typed) {
+        return Ok(typed.to_string());
+    }
+    let hits: Vec<_> = all.iter().filter(|w| w.id.starts_with(typed)).collect();
+    match hits.as_slice() {
+        [only] => Ok(only.id.clone()),
+        [] => bail!("no work starts with {typed} — `jod work ls` lists them"),
+        many => bail!("{typed} matches {} works — type more of it", many.len()),
+    }
 }
 
 /// Resolve a typed id prefix against the conversations that exist.
@@ -2943,6 +3709,166 @@ mod tests {
     fn the_cli_definition_is_valid() {
         use clap::CommandFactory;
         Cli::command().debug_assert();
+    }
+
+    // ---- the rail, the roots, the secrets and the works ----
+
+    fn arg_names(path: &[&str]) -> Vec<String> {
+        use clap::CommandFactory;
+        let mut command = Cli::command();
+        for name in path {
+            command = command
+                .find_subcommand(name)
+                .unwrap_or_else(|| panic!("no `{name}` subcommand"))
+                .clone();
+        }
+        command
+            .get_arguments()
+            .map(|a| a.get_id().to_string())
+            .collect()
+    }
+
+    /// **The property `jod secret set` exists to have.** Anything on a command
+    /// line is world-readable through `/proc` for the life of the process and
+    /// in the shell's history for ever afterwards, so there must be no argument
+    /// a value could be typed into — asserted, because adding one back would be
+    /// a one-line convenience with no visible symptom.
+    #[test]
+    fn setting_a_secret_takes_no_argument_a_value_could_arrive_in() {
+        let args = arg_names(&["secret", "set"]);
+        for forbidden in ["value", "secret", "token", "key"] {
+            assert!(
+                !args.iter().any(|a| a == forbidden),
+                "`jod secret set` grew a `{forbidden}` argument: {args:?}"
+            );
+        }
+        assert!(args.iter().any(|a| a == "name"));
+    }
+
+    /// The scope is the blast radius if a value leaks, so it is typed rather
+    /// than defaulted — `--global` hands a key to every session on the box.
+    #[test]
+    fn storing_a_secret_without_saying_who_it_is_for_is_refused() {
+        use clap::CommandFactory;
+        let refused = Cli::command()
+            .try_get_matches_from(["jod", "secret", "set", "STRIPE_API_KEY"])
+            .is_err();
+        assert!(refused, "a secret was stored without a scope being chosen");
+        for scope in [
+            ["jod", "secret", "set", "K", "--global"],
+            ["jod", "secret", "set", "K", "--work=w1"],
+            ["jod", "secret", "set", "K", "--conversation=c1"],
+        ] {
+            assert!(
+                Cli::command().try_get_matches_from(scope).is_ok(),
+                "{scope:?} was refused"
+            );
+        }
+        // And never two at once: a value cannot be global *and* one work's.
+        assert!(Cli::command()
+            .try_get_matches_from(["jod", "secret", "set", "K", "--global", "--work=w1"])
+            .is_err());
+    }
+
+    #[test]
+    fn a_scope_flag_resolves_to_the_scope_it_names() {
+        use jod_core::secrets::Scope;
+        let global = ScopeArgs {
+            global: true,
+            work: None,
+            conversation: None,
+        };
+        assert_eq!(global.resolve(), (Scope::Global, String::new()));
+        let work = ScopeArgs {
+            global: false,
+            work: Some("w1".into()),
+            conversation: None,
+        };
+        assert_eq!(work.resolve(), (Scope::Work, "w1".to_string()));
+        let conversation = ScopeArgs {
+            global: false,
+            work: None,
+            conversation: Some("c1".into()),
+        };
+        assert_eq!(conversation.resolve(), (Scope::Conversation, "c1".to_string()));
+    }
+
+    #[test]
+    fn every_card_filter_maps_to_the_one_the_store_takes() {
+        use jod_core::cards::{CardKind, Sort, Status};
+        assert_eq!(CardKind::from(KindArg::Decision), CardKind::Decision);
+        assert_eq!(CardKind::from(KindArg::Question), CardKind::Question);
+        assert_eq!(CardKind::from(KindArg::Secret), CardKind::Secret);
+        assert_eq!(Status::from(StatusArg::Open), Status::Open);
+        assert_eq!(Status::from(StatusArg::Answered), Status::Answered);
+        assert_eq!(Status::from(StatusArg::Dismissed), Status::Dismissed);
+        // Every order the rail cycles through is one the command line can name,
+        // or the two surfaces sort the same cards differently.
+        let named: Vec<Sort> = [SortArg::Pressing, SortArg::Importance, SortArg::Created, SortArg::Updated]
+            .into_iter()
+            .map(Sort::from)
+            .collect();
+        assert_eq!(named, Sort::ALL.to_vec());
+    }
+
+    /// Deleting the wrong work takes every transcript in it, so an ambiguous
+    /// prefix is refused rather than guessed.
+    #[test]
+    fn a_work_prefix_that_matches_two_works_is_refused() {
+        let store = Store::in_memory().unwrap();
+        let first = store.create_work("port the parser").unwrap();
+        let second = store.create_work("and the tests").unwrap();
+
+        assert_eq!(resolve_work(&store, &first.id).unwrap(), first.id);
+        assert_eq!(
+            resolve_work(&store, &first.id[..8]).unwrap(),
+            first.id,
+            "a prefix long enough to be unique should resolve"
+        );
+        assert!(resolve_work(&store, "nothing-like-this").is_err());
+        // Both uuids start with a hex digit, so *some* one-character prefix is
+        // shared: whichever it is must be refused rather than picked.
+        let shared: String = first.id.chars().take(1).collect();
+        if second.id.starts_with(&shared) {
+            assert!(resolve_work(&store, &shared).is_err());
+        }
+    }
+
+    #[test]
+    fn a_root_command_with_no_conversation_and_no_main_chat_says_so() {
+        let store = Store::in_memory().unwrap();
+        let refused = which_conversation(&store, None).unwrap_err().to_string();
+        assert!(refused.contains("--conversation"), "{refused}");
+    }
+
+    /// A secret card whose scope has nothing to attach to must not quietly
+    /// become a second global bucket — a key meant for one work handed to every
+    /// session on the box is the failure the default scope exists to prevent.
+    #[test]
+    fn answering_a_work_scoped_secret_card_with_no_work_is_refused_before_anything_is_read() {
+        use jod_core::cards::{CardKind, NewCard};
+        let store = Store::in_memory().unwrap();
+        let conversation = store
+            .new_conversation(HarnessKind::ClaudeCode, "/tmp/repo", None)
+            .unwrap()
+            .id;
+        let card = store
+            .raise_card(NewCard {
+                conversation_id: conversation,
+                kind: Some(CardKind::Secret),
+                title: "STRIPE_API_KEY needed".into(),
+                secret_name: Some("STRIPE_API_KEY".into()),
+                secret_scope: Some("work".into()),
+                ..NewCard::default()
+            })
+            .unwrap();
+
+        let refused = answer_secret_card(&store, &card).unwrap_err().to_string();
+        assert!(refused.contains("--global"), "{refused}");
+        assert!(
+            store.secret_names(jod_core::secrets::Scope::Global, "").unwrap().is_empty(),
+            "a refusal still stored something"
+        );
     }
 
     fn extraction() -> Consolidation {

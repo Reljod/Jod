@@ -14,6 +14,11 @@
 //! pressed enter.
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+
+use crate::error::Result;
+use crate::store::Store;
+use crate::works::{Filter, State};
 
 /// What a row in the tree is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -73,5 +78,481 @@ impl Node {
     /// Whether this row should draw an expansion marker at all.
     pub fn is_expandable(&self) -> bool {
         self.has_children
+    }
+}
+
+/// Draw a flattened forest as indented text.
+///
+/// Deliberately plain — no box-drawing characters, no colour, no width. What
+/// makes a tree *readable* in a terminal is the renderer's job; what makes it
+/// *right* is the order and the depth, and those are checkable without one.
+pub fn render(nodes: &[Node]) -> String {
+    let mut out = String::new();
+    for node in nodes {
+        for _ in 0..node.depth {
+            out.push_str("  ");
+        }
+        out.push_str(&node.label);
+        if node.running {
+            out.push_str(" [running]");
+        }
+        if node.blocked > 0 {
+            out.push_str(&format!(" [{} blocked]", node.blocked));
+        } else if node.cards > 0 {
+            out.push_str(&format!(" [{} cards]", node.cards));
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// One conversation, as the flatten reads it before it becomes a [`Node`].
+struct RawSession {
+    id: String,
+    parent: Option<String>,
+    title: String,
+    summary: String,
+    running: bool,
+    /// Open cards raised by this conversation alone.
+    cards: usize,
+    blocked: usize,
+}
+
+/// One run under a session.
+struct RawRun {
+    id: String,
+    conversation_id: String,
+    label: String,
+    summary: String,
+    running: bool,
+}
+
+impl Store {
+    /// Every work, its sessions and their runs, flattened for rendering.
+    ///
+    /// The fleet tree is a **self-join over what already exists** — a work is a
+    /// group, not a new kind of session — so this is four queries and one walk
+    /// rather than a query per node. That matters: the alternative is a read
+    /// per row on a screen that repaints on a tick, and the tree is the screen
+    /// most likely to be open while forty runs are going.
+    ///
+    /// Every node comes back expanded. What is *visible* is the caller's state
+    /// to hold, because it survives across rebuilds and this does not.
+    pub fn forest(&self) -> Result<Vec<Node>> {
+        self.forest_of(Filter::All)
+    }
+
+    pub fn forest_of(&self, filter: Filter) -> Result<Vec<Node>> {
+        let works = self.works(filter)?;
+        if works.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut cards: HashMap<String, (usize, usize)> = HashMap::new();
+        let mut sessions: HashMap<String, Vec<RawSession>> = HashMap::new();
+        let mut runs: HashMap<String, Vec<RawRun>> = HashMap::new();
+        {
+            let conn = self.conn.lock().expect("store lock poisoned");
+
+            let mut stmt = conn.prepare(
+                "SELECT conversation_id, COUNT(*), COALESCE(SUM(blocking), 0)
+                   FROM cards WHERE status = 'open' GROUP BY conversation_id",
+            )?;
+            let rows = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    (r.get::<_, i64>(1)? as usize, r.get::<_, i64>(2)? as usize),
+                ))
+            })?;
+            for row in rows {
+                let (id, counts) = row?;
+                cards.insert(id, counts);
+            }
+
+            // The newest thing each session said, which is its summary. Read
+            // from the transcript rather than asked of a model: a tree that
+            // costs a model call per row is a tree nobody can afford to leave
+            // open.
+            let mut latest: HashMap<String, String> = HashMap::new();
+            let mut stmt = conn.prepare(
+                "SELECT m.conversation_id, m.text, m.tool_name FROM messages m
+                   JOIN (SELECT conversation_id, MAX(id) AS id FROM messages
+                          GROUP BY conversation_id) last ON last.id = m.id",
+            )?;
+            let rows = stmt.query_map([], |r| {
+                let text: String = r.get(1)?;
+                let tool: Option<String> = r.get(2)?;
+                Ok((r.get::<_, String>(0)?, summarise(&text, tool.as_deref())))
+            })?;
+            for row in rows {
+                let (id, summary) = row?;
+                latest.insert(id, summary);
+            }
+
+            let mut stmt = conn.prepare(
+                "SELECT c.work_id, c.id, c.parent_conversation_id, c.title,
+                        EXISTS (SELECT 1 FROM messages msg JOIN runs r ON r.id = msg.run_id
+                                 WHERE msg.conversation_id = c.id AND r.status = 'running')
+                   FROM conversations c
+                  WHERE c.work_id IS NOT NULL
+                  ORDER BY c.created_at_ms, c.id",
+            )?;
+            let rows = stmt.query_map([], |r| {
+                let work_id: String = r.get(0)?;
+                let id: String = r.get(1)?;
+                let (open, blocked) = cards.get(&id).copied().unwrap_or((0, 0));
+                Ok((
+                    work_id,
+                    RawSession {
+                        parent: r.get(2)?,
+                        title: r.get(3)?,
+                        running: r.get::<_, i64>(4)? != 0,
+                        summary: latest.get(&id).cloned().unwrap_or_default(),
+                        cards: open,
+                        blocked,
+                        id,
+                    },
+                ))
+            })?;
+            for row in rows {
+                let (work_id, session) = row?;
+                sessions.entry(work_id).or_default().push(session);
+            }
+
+            // A run belongs to the conversation it wrote into. There is no
+            // column saying so — `messages.run_id` is the join, and it is the
+            // same one `conversation_for_run` uses.
+            let mut stmt = conn.prepare(
+                "SELECT m.conversation_id, r.id, r.name, r.status, r.summary
+                   FROM runs r
+                   JOIN (SELECT DISTINCT conversation_id, run_id FROM messages
+                          WHERE run_id IS NOT NULL) m ON m.run_id = r.id
+                  ORDER BY r.created_at_ms, r.id",
+            )?;
+            let rows = stmt.query_map([], |r| {
+                let status: String = r.get(3)?;
+                Ok(RawRun {
+                    conversation_id: r.get(0)?,
+                    id: r.get(1)?,
+                    label: r.get(2)?,
+                    summary: r.get(4)?,
+                    running: status == "running",
+                })
+            })?;
+            for row in rows {
+                let run = row?;
+                runs.entry(run.conversation_id.clone()).or_default().push(run);
+            }
+        }
+
+        let mut out = Vec::new();
+        for work in works {
+            let own = sessions.remove(&work.id).unwrap_or_default();
+            // A session whose parent is outside this work — the main chat is
+            // the usual one — hangs from the work itself. Otherwise the whole
+            // subtree would be dropped for pointing at a row that is not here.
+            let ids: std::collections::HashSet<&str> =
+                own.iter().map(|s| s.id.as_str()).collect();
+            let mut children: HashMap<Option<String>, Vec<&RawSession>> = HashMap::new();
+            for session in &own {
+                let key = session
+                    .parent
+                    .as_deref()
+                    .filter(|p| ids.contains(p))
+                    .map(str::to_string);
+                children.entry(key).or_default().push(session);
+            }
+
+            let work_node = out.len();
+            out.push(Node {
+                id: NodeId::work(&work.id),
+                parent: None,
+                kind: NodeKind::Work,
+                depth: 0,
+                label: if work.title.is_empty() {
+                    work.instruction.clone()
+                } else {
+                    work.title.clone()
+                },
+                summary: work.summary.clone(),
+                running: false,
+                cards: 0,
+                blocked: 0,
+                colour: work.colour.clone(),
+                expanded: true,
+                has_children: !own.is_empty(),
+            });
+
+            // Depth-first, oldest first, so a session always appears directly
+            // below the session that spawned it — pushed in reverse because
+            // this is a stack and the tree is read top-down.
+            let mut stack: Vec<(&RawSession, usize, Option<String>)> = children
+                .get(&None)
+                .map(|top| {
+                    top.iter()
+                        .rev()
+                        .map(|s| (*s, 1usize, None))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+
+            let mut work_cards = 0usize;
+            let mut work_blocked = 0usize;
+            let mut work_running = false;
+            while let Some((session, depth, parent)) = stack.pop() {
+                if let Some(kids) = children.get(&Some(session.id.clone())) {
+                    for kid in kids.iter().rev() {
+                        stack.push((kid, depth + 1, Some(session.id.clone())));
+                    }
+                }
+                let session_runs = runs.remove(&session.id).unwrap_or_default();
+                let has_children = !session_runs.is_empty()
+                    || children.get(&Some(session.id.clone())).is_some_and(|c| !c.is_empty());
+                work_cards += session.cards;
+                work_blocked += session.blocked;
+                work_running |= session.running;
+                out.push(Node {
+                    id: NodeId::session(&session.id),
+                    parent: Some(match parent {
+                        Some(p) => NodeId::session(p),
+                        None => NodeId::work(&work.id),
+                    }),
+                    kind: NodeKind::Session,
+                    depth,
+                    label: if session.title.is_empty() {
+                        session.id.chars().take(8).collect()
+                    } else {
+                        session.title.clone()
+                    },
+                    summary: session.summary.clone(),
+                    running: session.running,
+                    cards: session.cards,
+                    blocked: session.blocked,
+                    colour: work.colour.clone(),
+                    expanded: true,
+                    has_children,
+                });
+                for run in session_runs {
+                    out.push(Node {
+                        id: NodeId::run(&run.id),
+                        parent: Some(NodeId::session(&session.id)),
+                        kind: NodeKind::Run,
+                        depth: depth + 1,
+                        label: run.label,
+                        summary: run.summary,
+                        running: run.running,
+                        cards: 0,
+                        blocked: 0,
+                        colour: work.colour.clone(),
+                        expanded: true,
+                        has_children: false,
+                    });
+                }
+            }
+            // Cards cascade upward only, so the work's counts are its sessions'
+            // — which is what makes the tree say where the questions are
+            // without being expanded.
+            out[work_node].cards = work_cards;
+            out[work_node].blocked = work_blocked;
+            out[work_node].running = work_running && work.state != State::Closed;
+        }
+        Ok(out)
+    }
+}
+
+/// The one line a node shows: what was last said, or which tool was last
+/// called.
+fn summarise(text: &str, tool: Option<&str>) -> String {
+    if let Some(tool) = tool {
+        if !tool.is_empty() {
+            return format!("{tool}…");
+        }
+    }
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    flat.chars().take(80).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cards::NewCard;
+    use crate::conversation::{NewMessage, Role};
+    use crate::harness::HarnessKind;
+    use crate::store::StoredRun;
+    use crate::works::Origin;
+
+    fn store() -> Store {
+        Store::in_memory().expect("in-memory store")
+    }
+
+    fn session(s: &Store, work: &str, parent: Option<&str>, title: &str) -> String {
+        let c = s
+            .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
+            .unwrap();
+        s.set_conversation_title(&c.id, title).unwrap();
+        s.attach_conversation(&c.id, work, parent, Origin::Agent)
+            .unwrap();
+        c.id
+    }
+
+    fn run_for(s: &Store, conversation: &str, id: &str, status: &str) {
+        s.save_run(&StoredRun {
+            id: id.into(),
+            name: format!("run {id}"),
+            harness: "claude-code".into(),
+            status: status.into(),
+            cwd: "/tmp".into(),
+            session_id: None,
+            pid: None,
+            pgid: None,
+            created_at_ms: 1,
+            summary: serde_json::json!({}),
+        })
+        .unwrap();
+        s.append_message(
+            conversation,
+            NewMessage::new(Role::Assistant, "on it").from_run(id),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn an_empty_forest_has_no_rows() {
+        assert!(store().forest().unwrap().is_empty());
+    }
+
+    /// The shape the fleet screen renders: a work, the sessions under it, and
+    /// the runs under those — each one directly below the row that owns it.
+    #[test]
+    fn a_work_its_sessions_and_their_runs_flatten_in_document_order() {
+        let s = store();
+        let work = s.create_work("port the parser").unwrap();
+        s.set_work_title(&work.id, "the parser").unwrap();
+        let lead = session(&s, &work.id, None, "lead");
+        let child = session(&s, &work.id, Some(&lead), "worker");
+        run_for(&s, &lead, "run-1", "running");
+
+        let nodes = s.forest().unwrap();
+        let shape: Vec<(&str, usize, &str)> = nodes
+            .iter()
+            .map(|n| (n.id.kind_tag, n.depth, n.label.as_str()))
+            .collect();
+        assert_eq!(
+            shape,
+            [
+                ("work", 0, "the parser"),
+                ("session", 1, "lead"),
+                ("run", 2, "run run-1"),
+                ("session", 2, "worker"),
+            ]
+        );
+        assert_eq!(nodes[1].parent, Some(NodeId::work(&work.id)));
+        assert_eq!(nodes[3].parent, Some(NodeId::session(&lead)));
+        assert_eq!(nodes[1].colour, nodes[0].colour, "the work tints its rows");
+        assert!(nodes[0].running, "a work with a run in flight is running");
+        assert!(nodes[0].has_children);
+        assert!(!nodes[3].has_children);
+        let _ = child;
+    }
+
+    /// Cascade is upward only: a work's row says where the questions are
+    /// without being expanded, and a child never shows its parent's.
+    #[test]
+    fn a_sessions_cards_are_counted_on_its_work() {
+        let s = store();
+        let work = s.create_work("a job").unwrap();
+        let lead = session(&s, &work.id, None, "lead");
+        let child = session(&s, &work.id, Some(&lead), "worker");
+        for (conversation, blocking) in [(&lead, false), (&child, true), (&child, false)] {
+            s.raise_card(NewCard {
+                conversation_id: conversation.clone(),
+                work_id: Some(work.id.clone()),
+                blocking,
+                title: format!("card for {conversation} {blocking}"),
+                ..NewCard::default()
+            })
+            .unwrap();
+        }
+
+        let nodes = s.forest().unwrap();
+        assert_eq!((nodes[0].cards, nodes[0].blocked), (3, 1));
+        assert_eq!((nodes[1].cards, nodes[1].blocked), (1, 0), "the lead's own");
+        assert_eq!((nodes[2].cards, nodes[2].blocked), (2, 1));
+    }
+
+    /// The first session of a work is usually spawned by the main chat, which
+    /// is in no work at all. Dropping subtrees whose parent is not in the tree
+    /// would lose the whole work.
+    #[test]
+    fn a_session_whose_parent_is_outside_the_work_hangs_from_the_work() {
+        let s = store();
+        let work = s.create_work("a job").unwrap();
+        let main = s
+            .main_conversation(HarnessKind::ClaudeCode, "/tmp")
+            .unwrap();
+        let c = s
+            .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
+            .unwrap();
+        s.set_conversation_title(&c.id, "worker").unwrap();
+        s.attach_conversation(&c.id, &work.id, Some(&main), Origin::Orchestrator)
+            .unwrap();
+
+        let nodes = s.forest().unwrap();
+        assert_eq!(nodes.len(), 2);
+        assert_eq!(nodes[1].depth, 1);
+        assert_eq!(nodes[1].parent, Some(NodeId::work(&work.id)));
+    }
+
+    #[test]
+    fn a_closed_work_still_lists_and_stops_claiming_to_be_running() {
+        let s = store();
+        let work = s.create_work("a job").unwrap();
+        let c = session(&s, &work.id, None, "worker");
+        run_for(&s, &c, "run-1", "running");
+        let task = s.work_tasks(&work.id).unwrap().remove(0);
+        s.complete_work_task(&task.id).unwrap();
+        // Finishing, then closed once the run stops.
+        s.set_run_status("run-1", "completed").unwrap();
+        s.refresh_work_state(&work.id).unwrap();
+
+        let nodes = s.forest_of(crate::works::Filter::Closed).unwrap();
+        assert_eq!(nodes[0].kind, NodeKind::Work);
+        assert!(!nodes[0].running);
+        assert!(s.forest_of(crate::works::Filter::Live).unwrap().is_empty());
+    }
+
+    #[test]
+    fn rendering_indents_by_depth_and_marks_what_needs_attention() {
+        let nodes = vec![
+            Node {
+                id: NodeId::work("w"),
+                parent: None,
+                kind: NodeKind::Work,
+                depth: 0,
+                label: "the parser".into(),
+                summary: String::new(),
+                running: false,
+                cards: 2,
+                blocked: 1,
+                colour: "cyan".into(),
+                expanded: true,
+                has_children: true,
+            },
+            Node {
+                id: NodeId::session("c"),
+                parent: Some(NodeId::work("w")),
+                kind: NodeKind::Session,
+                depth: 1,
+                label: "lead".into(),
+                summary: String::new(),
+                running: true,
+                cards: 0,
+                blocked: 0,
+                colour: "cyan".into(),
+                expanded: true,
+                has_children: false,
+            },
+        ];
+        assert_eq!(render(&nodes), "the parser [1 blocked]\n  lead [running]\n");
     }
 }

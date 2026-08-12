@@ -33,8 +33,12 @@ use std::sync::Arc;
 use serde::Serialize;
 use serde_json::{json, Value};
 
+use crate::cards::{Card, CardKind, Importance, NewCard, Source, Status};
+use crate::delivery;
+use crate::event::AgentEvent;
 use crate::harness::ToolAccess;
 use crate::schedule::{Goal, GoalState, Schedule, ScheduleState};
+use crate::secrets;
 use crate::service::{default_cwd, AgentStatus, RunConversation};
 use crate::store::{NewFact, Origin, Store, DEFAULT_SCOPE};
 use crate::team::{Caller, Kind, Post, Sent};
@@ -72,6 +76,28 @@ pub const MAX_ASK_DEADLINE_SECS: i64 = 600;
 /// SQLite file — so this is about how quickly a reply is noticed, not about
 /// load.
 const ASK_POLL: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// How long a **blocking** [`Tool::ask_question`] holds its run waiting for a
+/// person, when the caller does not say.
+///
+/// Five minutes rather than `ask`'s two, because the two waits are on different
+/// things: `ask` waits for a peer that Jod itself will wake within a tick, and
+/// this waits for Reljod to look at the rail. Long enough to cover somebody
+/// finishing a sentence and turning to the screen; short enough that a question
+/// asked while nobody is at the desk costs one wait rather than a night of a
+/// model context and a tmux session held open.
+///
+/// **There is deliberately no way to wait without a deadline.** The same rule
+/// A5 states for the bus holds here for the same reason: an agent that can wait
+/// for ever is an agent that hangs when the thing it waits for never comes, and
+/// a human who has gone to bed is exactly that. When the deadline passes the
+/// card stays open — giving up waiting is not withdrawing the question — and
+/// the answer reaches the run later, through the ordinary delivery path.
+pub const CARD_ANSWER_DEADLINE_SECS: i64 = 300;
+
+/// The longest wait a caller may ask for. A cap rather than a default, because
+/// the argument is the model's and the bound is not.
+pub const MAX_CARD_WAIT_SECS: i64 = 1_800;
 
 // JSON-RPC 2.0 error codes. Spelled out because a wrong one here reads to the
 // client as a different failure than the one that happened.
@@ -117,7 +143,12 @@ fn one_of(description: &str, values: &[&str]) -> Value {
     json!({ "type": "string", "description": description, "enum": values })
 }
 
+fn strings(description: &str) -> Value {
+    json!({ "type": "array", "items": { "type": "string" }, "description": description })
+}
+
 const HARNESS_IDS: [&str; 3] = ["claude_code", "open_code", "agy"];
+const IMPORTANCE_IDS: [&str; 3] = ["low", "normal", "high"];
 const PERMISSION_IDS: [&str; 3] = ["ask", "accept_edits", "bypass"];
 const ACCESS_IDS: [&str; 3] = ["read_only", "delegate", "orchestrate"];
 
@@ -312,6 +343,99 @@ pub fn catalogue() -> Vec<Tool> {
                     "scope": text("Which domain to walk. Default `default`.")
                 }),
                 &["subject"],
+            ),
+        },
+        // ---- the rail -----------------------------------------------------
+        //
+        // The three tools D2 names, and the reason the rail is the same on all
+        // three harnesses instead of a Claude Code feature reimplemented twice.
+        //
+        // All three sit at `read_only`, which looks wrong for something that
+        // writes and is not. A card spends no money, starts no process and
+        // costs no peer a turn — it is a sentence addressed to Reljod, and the
+        // most confined agent on the box is precisely the one whose choices
+        // most need to be visible enough to overrule. Gating emission behind
+        // `delegate` would leave the rail empty for it.
+        //
+        // Note again what appears in no schema below: a conversation. A card
+        // belongs to whoever raised it, and that comes from the run — see
+        // [`Server::raiser`].
+        Tool {
+            name: "record_decision",
+            description:
+                "Say what you decided and what you decided against, so Reljod can overrule it \
+                 with one keystroke instead of a conversation. Use it the moment you pick \
+                 between real alternatives — a library, a schema, an approach — rather than \
+                 saving it for a summary nobody reads until afterwards. Returns at once; \
+                 nobody has to be looking.",
+            needs: ToolAccess::ReadOnly,
+            schema: obj(
+                json!({
+                    "title": text("The choice, in a few words: `chat DB`, `auth for the webhook`."),
+                    "chosen": text("What you went with."),
+                    "options": strings(
+                        "The alternatives you chose between, as you would offer them. Reljod \
+                         switches to one of these by pressing its number, so they are the whole \
+                         value of this tool — a decision with no alternatives is a note."
+                    ),
+                    "why": text("The reasoning, in a sentence or two."),
+                    "importance": one_of(
+                        "How much this matters if it is wrong. Default normal.",
+                        &IMPORTANCE_IDS,
+                    )
+                }),
+                &["title", "chosen"],
+            ),
+        },
+        Tool {
+            name: "ask_question",
+            description:
+                "Put a question to Reljod on the rail and carry on. Returns a card id \
+                 immediately: the answer arrives in a later turn, so ask, then do whatever does \
+                 not depend on it. Set `blocking` only when you genuinely cannot proceed — that \
+                 waits, and even then it gives up after a while rather than hanging the run.",
+            needs: ToolAccess::ReadOnly,
+            schema: obj(
+                json!({
+                    "question": text("What you need to know, as one line."),
+                    "context": text("What you already know, and what turns on the answer."),
+                    "options": strings("Answers you would accept, if the question has a shortlist. Answerable by number."),
+                    "importance": one_of("How much it matters. Default normal.", &IMPORTANCE_IDS),
+                    "blocking": {
+                        "type": "boolean",
+                        "description":
+                            "You cannot proceed past this. Marks the card `blocked` and waits for \
+                             an answer. Default false."
+                    },
+                    "wait_seconds": int(
+                        "How long a blocking question waits. Default 300, capped at 1800. \
+                         Ignored when `blocking` is false."
+                    )
+                }),
+                &["question"],
+            ),
+        },
+        Tool {
+            name: "request_secret",
+            description:
+                "Ask for a credential by NAME. You are told a variable exists; you are never \
+                 told a value, and this tool cannot carry one — do not paste a key into any \
+                 argument. Reljod stores it outside every repository and Jod injects it into \
+                 the environment of the *next* run, so it will not reach this one: if you need \
+                 it now, you are blocked, and saying so is the correct ending.",
+            needs: ToolAccess::ReadOnly,
+            schema: obj(
+                json!({
+                    "name": text("The environment variable's name, e.g. `STRIPE_API_KEY`. A name, never a value."),
+                    "hint": text("What it is for and where to get one, in Reljod's terms."),
+                    "blocking": {
+                        "type": "boolean",
+                        "description":
+                            "This run cannot finish without it. Default true, because a run that \
+                             asks for a credential usually cannot."
+                    }
+                }),
+                &["name", "hint"],
             ),
         },
         // ---- the bus ------------------------------------------------------
@@ -639,6 +763,9 @@ impl Server {
             "related" => self.related(args),
             "conversations" => self.conversations(args),
             "conversation_search" => self.conversation_search(args),
+            "record_decision" => self.record_decision(args),
+            "ask_question" => self.ask_question(args).await,
+            "request_secret" => self.request_secret(args),
             "roster" => self.roster(),
             "read_messages" => self.read_messages(),
             "send_message" => self.send_message(args),
@@ -1060,6 +1187,302 @@ impl Server {
         as_json(&hits)
     }
 
+    // ---- the rail ---------------------------------------------------------
+
+    /// The run this server speaks as, or why it cannot say.
+    ///
+    /// Factored out of [`Server::caller`] because the rail asks the same
+    /// question the bus does and must not answer it a second way. `doing` is
+    /// the verb the refusal names — "sending", "raising a card" — so a model
+    /// reading it is told what it was refused rather than which function
+    /// refused it.
+    fn identified_run(&self, doing: &str) -> Result<&str, ToolError> {
+        match &self.identity {
+            Identity::Run(id) => Ok(id.as_str()),
+            Identity::Unknown => Err(ToolError::Refused(format!(
+                "this session has no run behind it, so Jod cannot say who would be {doing}. \
+                 That works from agents Jod started; a hand-started session can read but not \
+                 write."
+            ))),
+            // Neither answer is preferred, on purpose. Two sources disagreeing
+            // about who this is means something is wrong upstream, and picking
+            // one would make a wrong sender permanent and silent.
+            Identity::Disputed { group, claimed } => Err(ToolError::Refused(format!(
+                "this server cannot say who it is: its process group belongs to {}, but its \
+                 environment claims run `{claimed}`. Nothing will be written until they agree — \
+                 a card or a message from the wrong sender is worse than none.",
+                match group {
+                    Some(id) => format!("run `{id}`"),
+                    None => "no run at all".to_string(),
+                }
+            ))),
+        }
+    }
+
+    /// Whose rail a card lands on, resolved from the run and from nothing else.
+    ///
+    /// **This is why no card tool takes a conversation.** A card is a sentence
+    /// addressed to a person about *this* agent's work; an argument naming the
+    /// conversation would let one run put words on another run's rail, and an
+    /// answer would then be delivered to an agent that never asked anything.
+    ///
+    /// Deliberately laxer than [`Server::caller`] in exactly one respect, and
+    /// no more: it does not require membership of a team or a work. The bus
+    /// needs one because a message needs somebody to be addressed to; a card is
+    /// addressed to Reljod, who is always there. A plain `jod run` that could
+    /// not record a decision would leave the rail empty for the ordinary case.
+    pub fn raiser(&self) -> Result<Raiser, ToolError> {
+        let run_id = self.identified_run("raising a card")?;
+        let store = self.store()?;
+        let conversation_id = store
+            .conversation_for_run(run_id)
+            .map_err(|e| ToolError::Refused(format!("could not resolve who is calling: {e}")))?
+            .ok_or_else(|| {
+                ToolError::Refused(format!(
+                    "run `{run_id}` has not written into a conversation, so there is no rail to \
+                     raise this on. A run Jod started has one from its first turn; this one was \
+                     started some other way."
+                ))
+            })?;
+        Ok(Raiser {
+            work_id: work_of(store, &conversation_id),
+            conversation_id,
+            run_id: run_id.to_string(),
+        })
+    }
+
+    /// [`CardKind::Decision`] — the agent chose, and is saying so.
+    ///
+    /// Never blocking: the choice has already been made and the run has already
+    /// carried on. What the card buys is the *undo*, and that is why `options`
+    /// carries weight the prose does not — a decision offered with its
+    /// alternatives is switched by pressing a number, and one without them is a
+    /// note that provokes a conversation.
+    fn record_decision(&self, args: &Value) -> Result<String, ToolError> {
+        let raiser = self.raiser()?;
+        let title = required_str(args, "title")?;
+        let chosen = required_str(args, "chosen")?;
+        let mut options = string_list(args, "options")?;
+        // The chosen option belongs in the list even when the model left it
+        // out, or the rail offers Reljod every alternative except the one that
+        // is in force, and answering with a digit cannot restate it.
+        if !options.iter().any(|o| o.trim() == chosen.trim()) {
+            options.insert(0, chosen.clone());
+        }
+        let card = self
+            .store()?
+            .raise_card(NewCard {
+                conversation_id: raiser.conversation_id,
+                work_id: raiser.work_id,
+                run_id: Some(raiser.run_id),
+                kind: Some(CardKind::Decision),
+                importance: importance(args)?,
+                blocking: false,
+                title: title.clone(),
+                body: opt_str(args, "why").unwrap_or_default(),
+                options,
+                chosen: Some(chosen),
+                source: Some(Source::Mcp),
+                dedupe_key: Some(dedupe_key(CardKind::Decision, &title)),
+                ..NewCard::default()
+            })
+            .map_err(|e| ToolError::Refused(format!("could not raise that: {e}")))?;
+        as_json(&json!({
+            "card_id": card.id,
+            "note": "on the rail. Carry on — if Reljod switches it you will be told in a \
+                     later turn.",
+        }))
+    }
+
+    /// [`CardKind::Question`] — and the one tool here that may wait.
+    ///
+    /// Returns the card id at once unless the caller says it is blocked, per
+    /// D2: emission never blocks the agent. A blocking question waits, bounded
+    /// by [`CARD_ANSWER_DEADLINE_SECS`], and a wait that times out leaves the
+    /// card open rather than withdrawing it.
+    async fn ask_question(&self, args: &Value) -> Result<String, ToolError> {
+        let raiser = self.raiser()?;
+        let question = required_str(args, "question")?;
+        let blocking = opt_bool(args, "blocking").unwrap_or(false);
+        let seconds = opt_i64(args, "wait_seconds")?
+            .unwrap_or(CARD_ANSWER_DEADLINE_SECS)
+            .clamp(1, MAX_CARD_WAIT_SECS);
+        let store = self.store()?;
+
+        let card = store
+            .raise_card(NewCard {
+                conversation_id: raiser.conversation_id.clone(),
+                work_id: raiser.work_id,
+                run_id: Some(raiser.run_id.clone()),
+                kind: Some(CardKind::Question),
+                importance: importance(args)?,
+                blocking,
+                title: question.clone(),
+                body: opt_str(args, "context").unwrap_or_default(),
+                options: string_list(args, "options")?,
+                source: Some(Source::Mcp),
+                // The key both emission paths compute, so a harness that asks
+                // Jod *and* prints its own question produces one card.
+                dedupe_key: Some(dedupe_key(CardKind::Question, &question)),
+                ..NewCard::default()
+            })
+            .map_err(|e| ToolError::Refused(format!("could not raise that: {e}")))?;
+
+        if !blocking {
+            return as_json(&json!({
+                "card_id": card.id,
+                "status": "open",
+                "note": "asked. Jod is not waiting and neither should you — do whatever does \
+                         not depend on the answer, and it will reach you in a later turn.",
+            }));
+        }
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(seconds as u64);
+        loop {
+            let now = store
+                .card(card.id)
+                .map_err(|e| ToolError::Refused(format!("could not watch for an answer: {e}")))?
+                .ok_or_else(|| {
+                    // Only reachable if the card's conversation was deleted
+                    // under the run — worth saying plainly rather than looping
+                    // until the deadline on a card that will never be answered.
+                    ToolError::Refused(format!("card #{} is gone", card.id))
+                })?;
+            match now.status {
+                Status::Open if std::time::Instant::now() >= deadline => {
+                    return as_json(&json!({
+                        "card_id": card.id,
+                        "status": "open",
+                        "waited_seconds": seconds,
+                        "note": format!(
+                            "nobody answered within {seconds}s. The question is still on the \
+                             rail and the answer will reach you in a later turn — decide for \
+                             yourself now, or stop and say you are blocked on it. Do not ask \
+                             again; that is a second card about one question."
+                        ),
+                    }));
+                }
+                Status::Open => tokio::time::sleep(ASK_POLL).await,
+                Status::Dismissed => {
+                    return as_json(&json!({
+                        "card_id": card.id,
+                        "status": "dismissed",
+                        "note": "read, and deliberately not answered. Decide for yourself.",
+                    }));
+                }
+                Status::Answered => {
+                    // Taken off the delivery queue here, for the same reason
+                    // `ask` settles a reply it received: answering a card
+                    // enqueues a synthetic turn, and a run that has just been
+                    // handed the answer as a tool result would be told the same
+                    // thing again later — which reads as a second instruction
+                    // and gets the work done twice.
+                    self.settle_card_delivery(&raiser.conversation_id, card.id, &raiser.run_id);
+                    return as_json(&json!({
+                        "card_id": card.id,
+                        "status": "answered",
+                        "chosen": now.chosen,
+                        "answer": now.answer,
+                    }));
+                }
+            }
+        }
+    }
+
+    /// Mark a card's queued answer as already delivered, best effort.
+    ///
+    /// Best effort on purpose: the answer *is* in the caller's hands by the
+    /// time this runs, and failing the tool call over the bookkeeping would
+    /// turn a duplicate into a lost answer. The worst case is the milder bug —
+    /// the agent hears it twice — and it is visible in the transcript.
+    fn settle_card_delivery(&self, conversation_id: &str, card_id: i64, run_id: &str) {
+        let Ok(store) = self.store() else { return };
+        let Ok(queued) = store.pending_for(conversation_id) else {
+            return;
+        };
+        let ids: Vec<i64> = queued
+            .iter()
+            .filter(|p| p.kind == delivery::Kind::CardAnswer && p.ref_id == card_id.to_string())
+            .map(|p| p.id)
+            .collect();
+        if !ids.is_empty() {
+            let _ = store.mark_deliveries_delivered(&ids, Some(run_id));
+        }
+    }
+
+    /// [`CardKind::Secret`] — a name and a hint, and it cannot carry a value.
+    ///
+    /// Two properties hold here and both are load-bearing:
+    ///
+    /// 1. **There is no argument a value could arrive in**, and one that turns
+    ///    up under an obvious name is refused rather than ignored. A credential
+    ///    that reached this function would already be in the model's context
+    ///    and in the transcript — D3 is about it never getting there, so the
+    ///    only useful place to refuse is before it is stored, not after.
+    /// 2. **It returns at once and never waits.** Waiting would be a lie:
+    ///    injection happens at *spawn*, so the value cannot reach the run that
+    ///    asked for it however long it sits there. Saying so is what turns a
+    ///    missing credential into a blocked ending rather than an invented one.
+    fn request_secret(&self, args: &Value) -> Result<String, ToolError> {
+        for smuggled in ["value", "secret", "secret_value", "token"] {
+            if args.get(smuggled).is_some() {
+                return Err(ToolError::BadParams(format!(
+                    "`{smuggled}` is not an argument of request_secret, and no argument of it \
+                     carries a value. Ask for the credential by name; Reljod types the value \
+                     into Jod, where you cannot read it."
+                )));
+            }
+        }
+        let raiser = self.raiser()?;
+        let name = required_str(args, "name")?;
+        if !secrets::is_valid_name(&name) {
+            return Err(ToolError::BadParams(format!(
+                "`{name}` is not a legal environment variable name: a letter or underscore, \
+                 then letters, digits and underscores. A name a shell would drop makes a \
+                 credential that is present behave exactly like one that is missing."
+            )));
+        }
+        let hint = required_str(args, "hint")?;
+        // The scope is not the agent's to choose. How widely a credential is
+        // shared is the blast radius if it leaks, and it is decided by the
+        // person typing the value; what the card records is where it *would*
+        // go — the work when there is one, so a key given for one project is
+        // not handed to every session on the box.
+        let scope = match &raiser.work_id {
+            Some(_) => secrets::Scope::Work,
+            None => secrets::Scope::Conversation,
+        };
+        let card = self
+            .store()?
+            .raise_card(NewCard {
+                conversation_id: raiser.conversation_id,
+                work_id: raiser.work_id.clone(),
+                run_id: Some(raiser.run_id),
+                kind: Some(CardKind::Secret),
+                importance: Some(Importance::High),
+                blocking: opt_bool(args, "blocking").unwrap_or(true),
+                title: format!("{name} needed"),
+                body: hint,
+                secret_name: Some(name.clone()),
+                secret_scope: Some(scope.as_str().to_string()),
+                source: Some(Source::Mcp),
+                dedupe_key: Some(dedupe_key(CardKind::Secret, &name)),
+                ..NewCard::default()
+            })
+            .map_err(|e| ToolError::Refused(format!("could not raise that: {e}")))?;
+        as_json(&json!({
+            "card_id": card.id,
+            "secret": name,
+            "scope": scope.as_str(),
+            "note": format!(
+                "asked for. `{name}` is injected into the environment of the next run, not \
+                 this one, and you will never be shown its value. If you need it to finish, \
+                 you are blocked: say so and stop. Do not invent a value, and do not work \
+                 around it."
+            ),
+        }))
+    }
+
     // ---- the bus ----------------------------------------------------------
 
     /// Which member is calling, resolved from the run and from nothing else.
@@ -1070,31 +1493,7 @@ impl Server {
     /// caller say who it is. A run that belongs to no scope has nobody to talk
     /// to, which is a fact about the fleet rather than about this call.
     pub fn caller(&self) -> Result<Caller, ToolError> {
-        let run_id = match &self.identity {
-            Identity::Run(id) => id.as_str(),
-            Identity::Unknown => {
-                return Err(ToolError::Refused(
-                    "this session has no run behind it, so Jod cannot say who would be sending. \
-                     Messaging works from agents Jod started; a hand-started session can read but \
-                     not send."
-                        .into(),
-                ))
-            }
-            // Neither answer is preferred, on purpose. Two sources disagreeing
-            // about who this is means something is wrong upstream, and picking
-            // one would make a wrong sender permanent and silent.
-            Identity::Disputed { group, claimed } => {
-                return Err(ToolError::Refused(format!(
-                    "this server cannot say who it is: its process group belongs to {}, but its \
-                     environment claims run `{claimed}`. Nothing will be sent until they agree — \
-                     a message from the wrong sender is worse than no message.",
-                    match group {
-                        Some(id) => format!("run `{id}`"),
-                        None => "no run at all".to_string(),
-                    }
-                )))
-            }
-        };
+        let run_id = self.identified_run("sending")?;
         self.store()?
             .caller_for_run(run_id)
             .map_err(|e| ToolError::Refused(format!("could not resolve who is calling: {e}")))?
@@ -1416,6 +1815,252 @@ pub fn identify(store: &Store, claimed: Option<&str>) -> Identity {
     }
 }
 
+// ---- the rail's own types and its second emission path --------------------
+
+/// Whose rail a card lands on. See [`Server::raiser`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Raiser {
+    pub run_id: String,
+    pub conversation_id: String,
+    /// Denormalised onto every card raised, so a card keeps its work's colour
+    /// after the session that raised it is gone.
+    pub work_id: Option<String>,
+}
+
+/// The work a conversation belongs to, or none.
+///
+/// A one-column read rather than a store method, because the alternative is
+/// waiting for one: works land in a lane this file does not own. Collapse it
+/// into that lane's `work_for_conversation` when it exists — this is the only
+/// caller.
+fn work_of(store: &Store, conversation_id: &str) -> Option<String> {
+    let conn = store.conn.lock().expect("store lock poisoned");
+    conn.query_row(
+        "SELECT work_id FROM conversations WHERE id = ?1",
+        rusqlite::params![conversation_id],
+        |r| r.get::<_, Option<String>>(0),
+    )
+    .ok()
+    .flatten()
+}
+
+/// The key the two emission paths must agree on, computed from what they both
+/// have: the kind, and the words of the question.
+///
+/// A harness can emit one question twice — once by calling Jod's tool and once
+/// by printing its own — and two rail cards for one question is worse than
+/// none, because answering one leaves the other open for ever. Neither path can
+/// see the other, so the only thing they can agree on is the text, and it has
+/// to survive the differences between them: capitalisation, a trailing question
+/// mark, the whitespace a JSON payload keeps and a prompt does not.
+///
+/// Capped, because an [`AgentEvent::ToolCall`] payload can be a whole plan and
+/// a key that long would never match a second emission that reworded one line
+/// near its end.
+pub fn dedupe_key(kind: CardKind, subject: &str) -> String {
+    let mut words = String::with_capacity(subject.len());
+    for c in subject.chars() {
+        if c.is_alphanumeric() {
+            words.extend(c.to_lowercase());
+        } else if !words.ends_with(' ') {
+            words.push(' ');
+        }
+    }
+    let words: String = words.trim().chars().take(120).collect();
+    format!("{}:{words}", kind.as_str())
+}
+
+/// A card recognised in a harness's own output, before it has a conversation.
+///
+/// The passive half of D2. Jod's MCP server is the supported path and behaves
+/// identically everywhere; this is what a run launched *without* it still
+/// produces, so the rail is never simply empty because somebody started a
+/// session by hand. It reports what the harness already said out loud — it
+/// never invents a question that was not asked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Lifted {
+    pub kind: CardKind,
+    pub title: String,
+    pub body: String,
+    pub options: Vec<String>,
+    pub blocking: bool,
+    pub dedupe_key: String,
+}
+
+impl Lifted {
+    /// The card this becomes once it knows whose it is.
+    pub fn into_card(self, raiser: &Raiser) -> NewCard {
+        NewCard {
+            conversation_id: raiser.conversation_id.clone(),
+            work_id: raiser.work_id.clone(),
+            run_id: Some(raiser.run_id.clone()),
+            kind: Some(self.kind),
+            importance: Some(Importance::Normal),
+            blocking: self.blocking,
+            title: self.title,
+            body: self.body,
+            options: self.options,
+            source: Some(Source::Lifted),
+            dedupe_key: Some(self.dedupe_key),
+            ..NewCard::default()
+        }
+    }
+}
+
+/// The harness tool calls that are really questions to a person.
+///
+/// Two, both Claude Code's, because those are the two that have been *measured*
+/// — see `docs/harness-support.md` for the standard this repository holds
+/// harness behaviour to. Adding a name here on the strength of a changelog
+/// would produce cards for a payload nobody has seen, which is worse than the
+/// gap: a wrong card is answered, and an absent one is noticed.
+const ASK_USER_QUESTION: &str = "AskUserQuestion";
+const EXIT_PLAN_MODE: &str = "ExitPlanMode";
+
+/// Turn one event into the cards it is really asking for.
+///
+/// A list rather than an option because `AskUserQuestion` carries an array:
+/// one call can ask three things, and three questions collapsed into one card
+/// is a card that cannot be answered.
+pub fn lift(event: &AgentEvent) -> Vec<Lifted> {
+    let AgentEvent::ToolCall { name, input } = event else {
+        return vec![];
+    };
+    let input = input.as_ref().unwrap_or(&Value::Null);
+    match name.as_str() {
+        ASK_USER_QUESTION => lift_questions(input),
+        EXIT_PLAN_MODE => lift_plan(input),
+        _ => vec![],
+    }
+}
+
+/// Claude Code's `AskUserQuestion`, in either shape it has been seen in.
+///
+/// Deliberately tolerant. The payload is another program's private interface,
+/// so the choice is between reading it loosely and dropping the card the moment
+/// a field is renamed — and a dropped card is a question Reljod never sees. A
+/// call with nothing question-shaped in it lifts nothing rather than raising a
+/// card titled with a fragment of JSON.
+fn lift_questions(input: &Value) -> Vec<Lifted> {
+    let asked: Vec<&Value> = match input.get("questions").and_then(Value::as_array) {
+        Some(list) => list.iter().collect(),
+        None => vec![input],
+    };
+    asked
+        .into_iter()
+        .filter_map(|q| {
+            let title = q
+                .get("question")
+                .or_else(|| q.get("header"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())?;
+            Some(Lifted {
+                kind: CardKind::Question,
+                title: title.to_string(),
+                body: q
+                    .get("header")
+                    .and_then(Value::as_str)
+                    .filter(|h| *h != title)
+                    .unwrap_or_default()
+                    .to_string(),
+                options: labels(q.get("options")),
+                // The run is not stopped by this. In print mode — the only mode
+                // Jod spawns a harness in — the harness answers its own
+                // question and carries on, so marking it `blocked` would put a
+                // coloured border and the auto-open on a run that is still
+                // working perfectly well.
+                blocking: false,
+                dedupe_key: dedupe_key(CardKind::Question, title),
+            })
+        })
+        .collect()
+}
+
+/// Claude Code's `ExitPlanMode`: the agent asking to start.
+///
+/// Blocking, and this one really is. Plan mode refuses every mutation, so a run
+/// that has reached here does nothing further until somebody says go — which is
+/// exactly the case E7.S2 hands to the rail, because print mode has no
+/// interactive callback a permission prompt could hang on.
+///
+/// The options are answerable by digit and are delivered as the agent's *next*
+/// turn rather than as this tool call's return: Jod cannot answer a call the
+/// harness has already answered itself. That is why they read as instructions —
+/// "go ahead" is a sentence the next turn can act on, whereas a bare "yes"
+/// arriving with no anchor is an answer to nothing.
+fn lift_plan(input: &Value) -> Vec<Lifted> {
+    let plan = input
+        .get("plan")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    if plan.is_empty() {
+        return vec![];
+    }
+    vec![Lifted {
+        kind: CardKind::Question,
+        title: "start on this plan?".into(),
+        body: plan.to_string(),
+        options: vec!["go ahead".into(), "stop, I want to change it".into()],
+        blocking: true,
+        dedupe_key: dedupe_key(CardKind::Question, plan),
+    }]
+}
+
+/// Option labels out of either an array of strings or an array of objects.
+fn labels(value: Option<&Value>) -> Vec<String> {
+    value
+        .and_then(Value::as_array)
+        .map(|list| {
+            list.iter()
+                .filter_map(|o| match o {
+                    Value::String(s) => Some(s.clone()),
+                    other => other
+                        .get("label")
+                        .or_else(|| other.get("name"))
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                })
+                .filter(|s| !s.trim().is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Lift one event onto the rail of whichever conversation the run belongs to.
+///
+/// The whole of what a caller watching an event stream has to do. It is
+/// idempotent through `dedupe_key`, so replaying a run's events — which
+/// `rehydrate` does on every fresh process — cannot produce a second copy of a
+/// question, and neither can a harness that both calls Jod's tool and prints
+/// its own.
+///
+/// A run with no conversation lifts nothing. That is not a failure: it is a run
+/// nobody is watching a rail for.
+pub fn lift_into_cards(
+    store: &Store,
+    run_id: &str,
+    event: &AgentEvent,
+) -> crate::Result<Vec<Card>> {
+    let lifted = lift(event);
+    if lifted.is_empty() {
+        return Ok(vec![]);
+    }
+    let Some(conversation_id) = store.conversation_for_run(run_id)? else {
+        return Ok(vec![]);
+    };
+    let raiser = Raiser {
+        work_id: work_of(store, &conversation_id),
+        conversation_id,
+        run_id: run_id.to_string(),
+    };
+    lifted
+        .into_iter()
+        .map(|l| store.raise_card(l.into_card(&raiser)))
+        .collect()
+}
+
 /// The words inside a refusal, for a caller that has to quote one.
 fn refusal_text(e: &ToolError) -> String {
     match e {
@@ -1520,6 +2165,53 @@ fn opt_f64(args: &Value, key: &str) -> Result<Option<f64>, ToolError> {
 
 fn opt_usize(args: &Value, key: &str) -> Result<Option<usize>, ToolError> {
     Ok(opt_i64(args, key)?.map(|n| n.max(0) as usize))
+}
+
+/// An array of strings, refusing anything that is not one.
+///
+/// A model that passes a single string where a list was asked for has offered
+/// one option, and reading it as one costs nothing; anything else is refused
+/// rather than coerced, because the alternative is a rail row labelled with a
+/// fragment of JSON that nobody can answer.
+fn string_list(args: &Value, key: &str) -> Result<Vec<String>, ToolError> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(vec![]),
+        Some(Value::String(s)) => Ok(vec![s.clone()]),
+        Some(Value::Array(items)) => items
+            .iter()
+            .map(|item| match item {
+                Value::String(s) => Ok(s.trim().to_string()),
+                other => Err(ToolError::BadParams(format!(
+                    "`{key}` must be a list of strings, and one of them is {other}"
+                ))),
+            })
+            .filter(|s| !matches!(s, Ok(s) if s.is_empty()))
+            .collect(),
+        Some(other) => Err(ToolError::BadParams(format!(
+            "`{key}` must be a list of strings, not {other}"
+        ))),
+    }
+}
+
+/// How much the agent says a card matters, refusing a word nobody defined.
+///
+/// [`Importance::parse`] takes anything and answers `normal`, which is right
+/// for a row read back from a database written by a newer build and wrong for
+/// an argument: a model that writes `urgent` and is silently given `normal` has
+/// been told nothing, and will write it again.
+fn importance(args: &Value) -> Result<Option<Importance>, ToolError> {
+    let Some(word) = opt_str(args, "importance") else {
+        return Ok(None);
+    };
+    match word.trim().to_ascii_lowercase().as_str() {
+        "low" => Ok(Some(Importance::Low)),
+        "normal" => Ok(Some(Importance::Normal)),
+        "high" => Ok(Some(Importance::High)),
+        other => Err(ToolError::BadParams(format!(
+            "`{other}` is not an importance — {}",
+            IMPORTANCE_IDS.join(", ")
+        ))),
+    }
 }
 
 // ---- the JSON-RPC surface -------------------------------------------------
@@ -1849,7 +2541,7 @@ mod tests {
     /// agree with any mistake made there, and the whole question is whether the
     /// line falls where the design says it does — reading is free and visible,
     /// delegating spends money now, scheduling spends it at 2am for ever.
-    const READ_ONLY_TOOLS: [&str; 9] = [
+    const READ_ONLY_TOOLS: [&str; 12] = [
         "list_agents",
         "schedule_list",
         "goal_list",
@@ -1861,6 +2553,13 @@ mod tests {
         // hides nothing.
         "roster",
         "read_messages",
+        // Raising a card writes, and still belongs here. It spends no money,
+        // starts no process and costs no peer a turn — it is a sentence
+        // addressed to Reljod — and the most confined agent is the one whose
+        // choices most need to be visible enough to overrule.
+        "record_decision",
+        "ask_question",
+        "request_secret",
     ];
     // Writing to a peer spends a turn of theirs, which is money now — the same
     // line `delegate` sits on. What stops it running away is not the access
@@ -2335,6 +3034,609 @@ mod tests {
         assert!(!answers[1]["result"]["tools"].as_array().unwrap().is_empty());
     }
 
+    // ---- the rail --------------------------------------------------------
+
+    use crate::cards::{Delivery, Query};
+
+    /// A run with a conversation behind it, which is what a card is raised
+    /// against. Deliberately *not* a team member: the ordinary run that raises
+    /// a card is nobody's teammate, and that is the case this fixture holds.
+    fn working(access: ToolAccess) -> (Arc<Store>, Server, String) {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let conversation = store
+            .new_conversation(HarnessKind::ClaudeCode, "/tmp/repo", None)
+            .unwrap()
+            .id;
+        // The spawn path records the instruction as the conversation's first
+        // user turn, keyed to the run — which is the join `raiser` reads.
+        store
+            .append_prompt(&conversation, "run-1", "port the parser")
+            .unwrap();
+        let server = Server::new(Jod::with_store(store.clone()))
+            .with_access(access)
+            .for_run("run-1");
+        (store, server, conversation)
+    }
+
+    fn only_card(store: &Store, conversation: &str) -> crate::cards::Card {
+        let mut all = store
+            .cards(&Query {
+                conversation_id: Some(conversation.to_string()),
+                ..Query::default()
+            })
+            .unwrap();
+        assert_eq!(all.len(), 1, "expected exactly one card, got {all:?}");
+        all.remove(0)
+    }
+
+    #[tokio::test]
+    async fn a_decision_arrives_with_the_alternatives_it_was_chosen_over() {
+        let (store, server, conversation) = working(ToolAccess::ReadOnly);
+        let answer = call(
+            &server,
+            "record_decision",
+            json!({
+                "title": "chat DB",
+                "chosen": "sqlite",
+                "options": ["sqlite", "postgres"],
+                "why": "no server to run",
+                "importance": "high"
+            }),
+        )
+        .await;
+        assert!(!is_error_result(&answer), "{answer}");
+
+        let card = only_card(&store, &conversation);
+        assert_eq!(card.kind, CardKind::Decision);
+        assert_eq!(card.title, "chat DB");
+        assert_eq!(card.chosen.as_deref(), Some("sqlite"));
+        assert_eq!(card.options, vec!["sqlite", "postgres"]);
+        assert_eq!(card.importance, Importance::High);
+        assert_eq!(card.source, Source::Mcp);
+        assert_eq!(card.run_id.as_deref(), Some("run-1"));
+        assert!(
+            !card.blocking,
+            "a decision has already been taken, so nothing is waiting on it"
+        );
+    }
+
+    /// A decision offered without the option that is in force cannot be
+    /// restated by pressing a digit, which is the whole point of the row.
+    #[tokio::test]
+    async fn a_decision_whose_choice_is_missing_from_its_options_still_offers_it() {
+        let (store, server, conversation) = working(ToolAccess::ReadOnly);
+        call(
+            &server,
+            "record_decision",
+            json!({ "title": "chat DB", "chosen": "sqlite", "options": ["postgres"] }),
+        )
+        .await;
+        assert_eq!(
+            only_card(&store, &conversation).options,
+            vec!["sqlite", "postgres"]
+        );
+    }
+
+    /// D2: emission never blocks the agent.
+    #[tokio::test]
+    async fn an_ordinary_question_returns_a_card_id_without_waiting_for_anybody() {
+        let (store, server, conversation) = working(ToolAccess::ReadOnly);
+        let started = std::time::Instant::now();
+        let said: Value = serde_json::from_str(&said(
+            &call(
+                &server,
+                "ask_question",
+                json!({ "question": "which port?", "context": "the webhook receiver" }),
+            )
+            .await,
+        ))
+        .unwrap();
+
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "an unblocking question waited for an answer"
+        );
+        assert_eq!(said["status"], "open");
+        let card = only_card(&store, &conversation);
+        assert_eq!(said["card_id"], card.id);
+        assert_eq!(card.kind, CardKind::Question);
+        assert!(!card.blocking);
+    }
+
+    #[tokio::test]
+    async fn a_blocking_question_comes_back_with_the_answer_when_one_is_given() {
+        let (store, server, conversation) = working(ToolAccess::ReadOnly);
+        // Reljod, answering while the run waits.
+        let answering = store.clone();
+        let of = conversation.clone();
+        tokio::spawn(async move {
+            loop {
+                let open = answering
+                    .cards(&Query {
+                        conversation_id: Some(of.clone()),
+                        ..Query::default()
+                    })
+                    .unwrap();
+                if let Some(card) = open.first() {
+                    answering
+                        .answer_card(card.id, Some("8443"), Some("same everywhere"))
+                        .unwrap();
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        });
+
+        let said: Value = serde_json::from_str(&said(
+            &call(
+                &server,
+                "ask_question",
+                json!({ "question": "which port?", "blocking": true, "wait_seconds": 10 }),
+            )
+            .await,
+        ))
+        .unwrap();
+        assert_eq!(said["status"], "answered", "{said}");
+        assert_eq!(said["chosen"], "8443");
+        assert_eq!(said["answer"], "same everywhere");
+        assert!(store.card(said["card_id"].as_i64().unwrap()).unwrap().is_some());
+    }
+
+    /// An answer handed back as a tool result and *also* delivered later reads
+    /// to the agent as a second instruction, and the work gets done twice.
+    #[tokio::test]
+    async fn an_answer_taken_by_a_waiting_run_is_not_delivered_to_it_again() {
+        let (store, server, conversation) = working(ToolAccess::ReadOnly);
+        let answering = store.clone();
+        let of = conversation.clone();
+        tokio::spawn(async move {
+            loop {
+                let open = answering
+                    .cards(&Query {
+                        conversation_id: Some(of.clone()),
+                        ..Query::default()
+                    })
+                    .unwrap();
+                if let Some(card) = open.first() {
+                    answering.answer_card(card.id, None, Some("8443")).unwrap();
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        });
+        call(
+            &server,
+            "ask_question",
+            json!({ "question": "which port?", "blocking": true, "wait_seconds": 10 }),
+        )
+        .await;
+
+        assert!(
+            store.pending_for(&conversation).unwrap().is_empty(),
+            "the answer is queued for a turn as well as returned, so it arrives twice"
+        );
+        let card = only_card_of_status(&store, &conversation, Status::Answered);
+        assert_eq!(card.delivery, Delivery::Delivered);
+    }
+
+    fn only_card_of_status(
+        store: &Store,
+        conversation: &str,
+        status: Status,
+    ) -> crate::cards::Card {
+        let mut all = store
+            .cards(&Query {
+                conversation_id: Some(conversation.to_string()),
+                status: Some(status),
+                ..Query::default()
+            })
+            .unwrap();
+        assert_eq!(all.len(), 1, "expected one card, got {all:?}");
+        all.remove(0)
+    }
+
+    /// The property the deadline exists for: nobody is at the desk, and the run
+    /// carries on rather than holding a session open all night.
+    #[tokio::test]
+    async fn a_blocking_question_gives_up_at_its_deadline_and_leaves_the_card_open() {
+        let (store, server, conversation) = working(ToolAccess::ReadOnly);
+        let started = std::time::Instant::now();
+        let said: Value = serde_json::from_str(&said(
+            &call(
+                &server,
+                "ask_question",
+                json!({ "question": "which port?", "blocking": true, "wait_seconds": 1 }),
+            )
+            .await,
+        ))
+        .unwrap();
+        assert_eq!(said["status"], "open", "{said}");
+        assert!(said["note"].as_str().unwrap().contains("blocked"));
+        assert!(started.elapsed() < std::time::Duration::from_secs(30));
+        // Giving up waiting is not withdrawing the question.
+        assert!(only_card(&store, &conversation).is_open());
+    }
+
+    #[tokio::test]
+    async fn a_wait_can_never_be_asked_to_last_longer_than_the_card_cap() {
+        // Asserted on the constants rather than by waiting half an hour.
+        const { assert!(CARD_ANSWER_DEADLINE_SECS <= MAX_CARD_WAIT_SECS) };
+        assert_eq!(
+            (MAX_CARD_WAIT_SECS + 10_000).clamp(1, MAX_CARD_WAIT_SECS),
+            MAX_CARD_WAIT_SECS
+        );
+    }
+
+    #[tokio::test]
+    async fn a_dismissed_question_tells_the_agent_to_decide_for_itself() {
+        let (store, server, conversation) = working(ToolAccess::ReadOnly);
+        let dismissing = store.clone();
+        let of = conversation.clone();
+        tokio::spawn(async move {
+            loop {
+                let open = dismissing
+                    .cards(&Query {
+                        conversation_id: Some(of.clone()),
+                        ..Query::default()
+                    })
+                    .unwrap();
+                if let Some(card) = open.first() {
+                    dismissing.dismiss_card(card.id).unwrap();
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        });
+        let said: Value = serde_json::from_str(&said(
+            &call(
+                &server,
+                "ask_question",
+                json!({ "question": "which port?", "blocking": true, "wait_seconds": 10 }),
+            )
+            .await,
+        ))
+        .unwrap();
+        assert_eq!(said["status"], "dismissed", "{said}");
+        assert!(store.pending_for(&conversation).unwrap().is_empty());
+    }
+
+    // ---- secrets ---------------------------------------------------------
+
+    /// D3, at the one place a value could enter the model's world through a
+    /// tool: there is no argument for one, and an obvious attempt is refused
+    /// out loud rather than quietly dropped.
+    #[tokio::test]
+    async fn requesting_a_secret_refuses_every_argument_a_value_could_arrive_in() {
+        let (store, server, conversation) = working(ToolAccess::ReadOnly);
+        for smuggled in ["value", "secret", "secret_value", "token"] {
+            let answer = call(
+                &server,
+                "request_secret",
+                json!({ "name": "STRIPE_API_KEY", "hint": "the live key", smuggled: "sk-live-1234567890" }),
+            )
+            .await;
+            assert_eq!(error_code(&answer), INVALID_PARAMS, "{smuggled}: {answer}");
+        }
+        assert!(
+            store
+                .cards(&Query {
+                    conversation_id: Some(conversation),
+                    ..Query::default()
+                })
+                .unwrap()
+                .is_empty(),
+            "a call carrying a value raised a card, so the value is now in the database"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_secret_card_carries_a_name_and_a_scope_and_no_value() {
+        let (store, server, conversation) = working(ToolAccess::ReadOnly);
+        let said: Value = serde_json::from_str(&said(
+            &call(
+                &server,
+                "request_secret",
+                json!({ "name": "STRIPE_API_KEY", "hint": "the live key, from the dashboard" }),
+            )
+            .await,
+        ))
+        .unwrap();
+        assert_eq!(said["secret"], "STRIPE_API_KEY");
+        // Said to the model in as many words, because "a missing key is a
+        // blocked ending" is the whole of E3.S5 and it has to arrive at the
+        // moment the agent notices the key is missing.
+        assert!(said["note"].as_str().unwrap().contains("blocked"), "{said}");
+
+        let card = only_card(&store, &conversation);
+        assert_eq!(card.kind, CardKind::Secret);
+        assert_eq!(card.secret_name.as_deref(), Some("STRIPE_API_KEY"));
+        assert_eq!(card.secret_scope.as_deref(), Some("conversation"));
+        assert!(card.blocking);
+        assert_eq!(card.importance, Importance::High);
+    }
+
+    /// A name a shell would drop makes a credential that is present behave
+    /// exactly like one that is missing, so it is refused at the call.
+    #[tokio::test]
+    async fn a_secret_name_that_is_not_a_legal_variable_is_refused() {
+        let (_, server, _) = working(ToolAccess::ReadOnly);
+        let answer = call(
+            &server,
+            "request_secret",
+            json!({ "name": "stripe-api-key", "hint": "the live key" }),
+        )
+        .await;
+        assert_eq!(error_code(&answer), INVALID_PARAMS);
+        assert!(answer["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("environment variable"));
+    }
+
+    // ---- who a card belongs to -------------------------------------------
+
+    /// The rail's version of the property sender identity exists for: a card
+    /// lands on the rail of the run that raised it, whatever the arguments say.
+    #[tokio::test]
+    async fn a_card_is_raised_against_the_calling_run_whatever_the_arguments_say() {
+        let (store, server, conversation) = working(ToolAccess::ReadOnly);
+        let elsewhere = store
+            .new_conversation(HarnessKind::ClaudeCode, "/tmp/other", None)
+            .unwrap()
+            .id;
+        call(
+            &server,
+            "record_decision",
+            json!({
+                "title": "chat DB",
+                "chosen": "sqlite",
+                // Every spelling an agent might try. None is read, and this is
+                // the reason no card tool has an argument for it.
+                "conversation_id": elsewhere,
+                "conversation": elsewhere,
+                "run_id": "run-somebody-else"
+            }),
+        )
+        .await;
+
+        assert_eq!(only_card(&store, &conversation).run_id.as_deref(), Some("run-1"));
+        assert!(
+            store
+                .cards(&Query {
+                    conversation_id: Some(elsewhere),
+                    ..Query::default()
+                })
+                .unwrap()
+                .is_empty(),
+            "an agent named another conversation and Jod put a card on it"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_session_with_no_run_behind_it_raises_nothing() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let server = Server::new(Jod::with_store(store)).with_access(ToolAccess::Orchestrate);
+        let answer = call(
+            &server,
+            "record_decision",
+            json!({ "title": "chat DB", "chosen": "sqlite" }),
+        )
+        .await;
+        assert!(is_error_result(&answer), "{answer}");
+        assert!(said(&answer).contains("no run behind it"), "{}", said(&answer));
+    }
+
+    /// A run that is nobody's teammate is the ordinary case for a card, and the
+    /// refusal `caller` gives the bus must not reach the rail.
+    #[tokio::test]
+    async fn a_run_on_no_team_can_still_say_what_it_decided() {
+        let (store, server, conversation) = working(ToolAccess::ReadOnly);
+        assert!(
+            server.caller().is_err(),
+            "this fixture is only meaningful while the run is nobody's teammate"
+        );
+        let answer = call(
+            &server,
+            "record_decision",
+            json!({ "title": "chat DB", "chosen": "sqlite" }),
+        )
+        .await;
+        assert!(!is_error_result(&answer), "{answer}");
+        assert_eq!(only_card(&store, &conversation).title, "chat DB");
+    }
+
+    // ---- the passive lifter ----------------------------------------------
+
+    fn tool_call(name: &str, input: Value) -> AgentEvent {
+        AgentEvent::ToolCall {
+            name: name.into(),
+            input: Some(input),
+        }
+    }
+
+    #[test]
+    fn a_harnesss_own_question_becomes_a_question_card() {
+        let lifted = lift(&tool_call(
+            ASK_USER_QUESTION,
+            json!({
+                "questions": [{
+                    "question": "Which database for the chat store?",
+                    "header": "chat DB",
+                    "options": [{ "label": "sqlite" }, { "label": "postgres" }]
+                }]
+            }),
+        ));
+        assert_eq!(lifted.len(), 1);
+        assert_eq!(lifted[0].kind, CardKind::Question);
+        assert_eq!(lifted[0].title, "Which database for the chat store?");
+        assert_eq!(lifted[0].body, "chat DB");
+        assert_eq!(lifted[0].options, vec!["sqlite", "postgres"]);
+    }
+
+    /// One call can ask three things, and three questions collapsed into one
+    /// card is a card nobody can answer.
+    #[test]
+    fn every_question_in_one_call_becomes_its_own_card() {
+        let lifted = lift(&tool_call(
+            ASK_USER_QUESTION,
+            json!({
+                "questions": [
+                    { "question": "which database?" },
+                    { "question": "which port?" }
+                ]
+            }),
+        ));
+        assert_eq!(lifted.len(), 2);
+        assert_eq!(lifted[1].title, "which port?");
+    }
+
+    /// The payload is another program's private interface, so the flat shape is
+    /// read as well as the nested one, and string options as well as objects.
+    #[test]
+    fn a_flatter_question_payload_is_still_lifted() {
+        let lifted = lift(&tool_call(
+            ASK_USER_QUESTION,
+            json!({ "question": "which port?", "options": ["8443", "443"] }),
+        ));
+        assert_eq!(lifted.len(), 1);
+        assert_eq!(lifted[0].options, vec!["8443", "443"]);
+    }
+
+    #[test]
+    fn a_call_with_nothing_question_shaped_in_it_lifts_nothing() {
+        assert!(lift(&tool_call(ASK_USER_QUESTION, json!({ "questions": [] }))).is_empty());
+        assert!(lift(&tool_call(ASK_USER_QUESTION, json!({ "note": "hello" }))).is_empty());
+        assert!(lift(&tool_call(EXIT_PLAN_MODE, json!({ "plan": "   " }))).is_empty());
+        assert!(lift(&tool_call("Bash", json!({ "command": "ls" }))).is_empty());
+        assert!(lift(&AgentEvent::Message { text: "hello".into() }).is_empty());
+    }
+
+    /// Plan mode refuses every mutation, so a run that has reached here really
+    /// is stopped until somebody says go — the one lifted case that blocks.
+    #[test]
+    fn a_plan_waiting_for_approval_is_lifted_as_a_blocker() {
+        let lifted = lift(&tool_call(
+            EXIT_PLAN_MODE,
+            json!({ "plan": "1. port the lexer\n2. port the parser" }),
+        ));
+        assert_eq!(lifted.len(), 1);
+        assert!(lifted[0].blocking);
+        assert!(lifted[0].body.contains("port the lexer"));
+        assert!(!lifted[0].options.is_empty(), "a plan is approved by a keystroke");
+    }
+
+    #[tokio::test]
+    async fn a_lifted_card_is_marked_as_lifted_and_lands_on_the_runs_rail() {
+        let (store, _, conversation) = working(ToolAccess::ReadOnly);
+        let raised = lift_into_cards(
+            &store,
+            "run-1",
+            &tool_call(ASK_USER_QUESTION, json!({ "question": "which port?" })),
+        )
+        .unwrap();
+        assert_eq!(raised.len(), 1);
+        assert_eq!(raised[0].source, Source::Lifted);
+        assert_eq!(raised[0].conversation_id, conversation);
+        assert_eq!(raised[0].run_id.as_deref(), Some("run-1"));
+    }
+
+    /// **The reason `dedupe_key` exists.** A harness wired to Jod's MCP server
+    /// asks the question twice — once by calling `ask_question` and once by
+    /// printing its own tool call — and two rail rows for one question is worse
+    /// than none, because answering one leaves the other open for ever.
+    #[tokio::test]
+    async fn a_question_asked_over_mcp_and_printed_by_the_harness_is_one_card() {
+        let (store, server, conversation) = working(ToolAccess::ReadOnly);
+        call(
+            &server,
+            "ask_question",
+            json!({ "question": "Which database for the chat store?" }),
+        )
+        .await;
+        // The same question as the harness spells it: different punctuation,
+        // different case, extra whitespace — the differences the key survives.
+        let lifted = lift_into_cards(
+            &store,
+            "run-1",
+            &tool_call(
+                ASK_USER_QUESTION,
+                json!({ "questions": [{ "question": "  which database for the chat store  " }] }),
+            ),
+        )
+        .unwrap();
+
+        let card = only_card(&store, &conversation);
+        assert_eq!(lifted.len(), 1);
+        assert_eq!(lifted[0].id, card.id, "the second emission minted a card");
+        assert_eq!(
+            card.source,
+            Source::Mcp,
+            "the first card stands; the lift must not rewrite it"
+        );
+        assert_eq!(card.title, "Which database for the chat store?");
+    }
+
+    /// Replaying a run's events — which every fresh process does on rehydrate —
+    /// must not produce a second copy of a question.
+    #[tokio::test]
+    async fn lifting_the_same_event_twice_produces_one_card() {
+        let (store, _, conversation) = working(ToolAccess::ReadOnly);
+        let event = tool_call(ASK_USER_QUESTION, json!({ "question": "which port?" }));
+        let first = lift_into_cards(&store, "run-1", &event).unwrap();
+        let again = lift_into_cards(&store, "run-1", &event).unwrap();
+        assert_eq!(first[0].id, again[0].id);
+        only_card(&store, &conversation);
+    }
+
+    /// De-duplication is per conversation, so two sessions asking the same
+    /// question are two questions — answered by different agents.
+    #[tokio::test]
+    async fn two_runs_asking_one_question_get_a_card_each() {
+        let (store, _, _) = working(ToolAccess::ReadOnly);
+        let other = store
+            .new_conversation(HarnessKind::ClaudeCode, "/tmp/other", None)
+            .unwrap()
+            .id;
+        store.append_prompt(&other, "run-2", "and the tests").unwrap();
+        let event = tool_call(ASK_USER_QUESTION, json!({ "question": "which port?" }));
+
+        let first = lift_into_cards(&store, "run-1", &event).unwrap();
+        let second = lift_into_cards(&store, "run-2", &event).unwrap();
+        assert_ne!(first[0].id, second[0].id);
+    }
+
+    #[tokio::test]
+    async fn a_run_nobody_is_watching_a_rail_for_lifts_nothing() {
+        let (store, _, _) = working(ToolAccess::ReadOnly);
+        let raised = lift_into_cards(
+            &store,
+            "run-nobody-has-heard-of",
+            &tool_call(ASK_USER_QUESTION, json!({ "question": "which port?" })),
+        )
+        .unwrap();
+        assert!(raised.is_empty());
+    }
+
+    #[test]
+    fn the_dedupe_key_ignores_case_punctuation_and_spacing_but_not_the_kind() {
+        assert_eq!(
+            dedupe_key(CardKind::Question, "Which DB?"),
+            dedupe_key(CardKind::Question, "  which   db  ")
+        );
+        assert_ne!(
+            dedupe_key(CardKind::Question, "which db"),
+            dedupe_key(CardKind::Decision, "which db"),
+            "a question and the decision that answers it are two different rows"
+        );
+        assert_ne!(
+            dedupe_key(CardKind::Question, "which db"),
+            dedupe_key(CardKind::Question, "which port")
+        );
+        // Capped, or a key computed from a whole plan would never match a
+        // second emission that reworded one line near its end.
+        assert!(dedupe_key(CardKind::Question, &"word ".repeat(200)).len() < 200);
+    }
+
     // ---- the bus ---------------------------------------------------------
 
     use crate::team::{MailState, Scope};
@@ -2645,8 +3947,10 @@ mod tests {
     #[tokio::test]
     async fn a_wait_can_never_be_asked_to_last_longer_than_the_cap() {
         // The argument is the model's; the bound is not. Asserted on the
-        // constants rather than by waiting ten minutes for it.
-        assert!(ASK_DEADLINE_SECS <= MAX_ASK_DEADLINE_SECS);
+        // constants rather than by waiting ten minutes for it — and the first
+        // one at compile time, since a default above its own cap should never
+        // reach a test run.
+        const { assert!(ASK_DEADLINE_SECS <= MAX_ASK_DEADLINE_SECS) };
         assert_eq!(
             (MAX_ASK_DEADLINE_SECS + 10_000).clamp(1, MAX_ASK_DEADLINE_SECS),
             MAX_ASK_DEADLINE_SECS
