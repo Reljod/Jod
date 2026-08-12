@@ -1774,3 +1774,81 @@ never loaded `browser.env`, so it answered "direct" while the very next fetch
 went through the proxy. Harmless in the one-shot CLI, where `browser_options()`
 always ran first — and a lie in `browser_status`, whose entire job is to say
 whether traffic is proxied.
+
+## The cheapest disk to reclaim is the disk never written
+
+The box hit 100% — 45G, zero free — with six agents building in parallel. What
+that looks like from inside a session is not a full disk. It is a build failing
+for a reason unrelated to the diff, or a file that will not write, so the agent
+reports its symptom and the cause lands on somebody else's task looking like
+theirs. This repo already carried a commit named *"record why an idle agent is
+usually a full disk"* before anything was done about it.
+
+The arithmetic is unforgiving. A cargo `target/` is per-worktree, six parallel
+worktrees is six of them, and every default inside each is paid for six times.
+Measured on one worktree's 8.7 GB `target/debug`: **3.9 GB of it — 44% — was
+incremental-compile state**, and summing ELF sections in the largest object file,
+**69% of it was `.debug_*`**. Both are correct defaults for a human in an
+edit-rebuild loop. Neither describes an agent that builds twice and is then
+deleted, which writes the incremental cache, pays for it, and never reads it
+back.
+
+So the fix is not cleanup. `[profile.dev]` sets `incremental = false` and
+`debug = "line-tables-only"`, which keeps the file and line in a panic backtrace
+— the part a failing test actually needs — and drops the type and variable DWARF
+that dominates the size. `profile.test` inherits it, so it reaches the check that
+runs. `dev-debug` inherits and puts the DWARF back for anyone who does want a
+debugger.
+
+**The obvious answer was the wrong one.** A shared `CARGO_TARGET_DIR` across the
+worktrees reclaims more — one dependency set instead of six, ~22.7 GB down to
+~5 GB — and it was rejected. Cargo takes an exclusive lock on the build
+directory, so six agents pointed at one target dir build one at a time; the
+fleet's whole purpose is that they do not. The worktrees also build different
+feature sets, which would churn each other's fingerprints and force rebuilds. It
+trades the thing being optimised for against the thing that matters, and it is
+the option a reader would reach for first, which is why it is written down.
+
+What remains is a sweep, because worktrees outlive their tasks — and the sweep is
+**shell, not judgement**. Whether a build directory is still wanted has a
+determinate answer: a compiler is writing to it, or wrote to it recently, or
+neither. A model asked hourly would sometimes answer differently, and the failure
+direction is deleting the `target/` a teammate is three minutes into, which
+surfaces as an unexplained build failure in *their* session. So
+`sweep_targets.sh` decides, and it runs through
+`jod monitor set --no-agent` — "the script is the whole job: its stdout is the
+result and no model is ever woken. Empty stdout means stay quiet." A quiet hour
+costs a `df` and a `find`, wakes nothing, and writes no ledger entry.
+
+Three of its properties are load-bearing and none is the deletion.
+
+**It only acts under pressure.** Above `--min-free-gb` (default 8) it exits 0 and
+silently. A build cache is only waste when the space it holds is needed, and a
+sweep that runs when there is room is pure loss — it converts free disk into
+somebody's next rebuild.
+
+**It stops as soon as there is room.** Oldest directory first, re-checking free
+space between each, so a sweep deletes as little as it can rather than as much as
+it may.
+
+**It distinguishes an idle agent from an idle build.** Only compiler processes
+count toward "busy", and a compiler is identified by its name appearing as the
+executable *or* as any token on the command line — `/proc/pid/exe` resolves to
+the real inode, so a build driven through a shim or `bash -c 'cargo test …'` has
+an `exe` of bash and would otherwise be invisible. A session's cwd deliberately
+does *not* count: an agent's cwd sits in its worktree for the session's whole
+life, so honouring that would mean a worktree with an idle agent in it is never
+swept, which is the exact case being reclaimed.
+
+The guard before the only `rm -rf` re-checks the basename and refuses any
+directory containing a `.git` entry, and says so rather than skipping quietly.
+The candidate list is already built from `find -name`, so it cannot fire today.
+It is there because the asymmetry is total: a wrongly deleted `target/` costs
+compile time, and a wrongly deleted checkout costs unpushed work with no way
+back. Those two must never be one bug apart. A peer session asked precisely this
+question while the sweep was being written — worktrees had vanished, and it
+wanted to know whether the sweep had done it. It had not; they were removed
+through git by session-exit cleanup, which is why they were absent from
+`git worktree list` as well as from disk, where an `rm -rf` would have left the
+administrative entry behind. The guard and its test exist because the question
+was worth being able to answer with a test instead of an assurance.

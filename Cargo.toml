@@ -39,3 +39,31 @@ croner = "3"
 # The IANA database. A schedule stores a zone *name*, never a captured offset —
 # an offset is only correct until the next transition.
 chrono-tz = "0.10"
+
+# A fleet of agents builds this workspace in parallel, one git worktree each, and
+# a `target/` is per-worktree — so every default cargo pays for is paid for six
+# times over. Measured on one worktree's 8.7 GB `target/debug`:
+#
+#   incremental   3.9 GB  (44% of the directory)
+#   deps          4.2 GB  (69% of the largest object file was `.debug_*`)
+#
+# Both defaults are tuned for a human in an edit-rebuild loop, which is not what
+# runs here. `cargo test` inherits this profile, so both settings reach the check
+# that actually runs.
+[profile.dev]
+# Incremental state is a cache for the *next* build of the same tree. An agent
+# builds a handful of times and the worktree is then deleted, so the cache is
+# written, paid for, and thrown away without ever being read back.
+incremental = false
+# `line-tables-only` keeps the file and line in a panic backtrace — the part a
+# failing test needs — and drops the type and variable DWARF that dominates the
+# size. Full `debug = 2` is what a debugger needs to inspect variables; nothing
+# unattended does that, and `cargo build --profile dev-debug` gets it back.
+debug = "line-tables-only"
+
+# The escape hatch, for when a human does want to step through the TUI in a
+# debugger. Inherits everything above and puts the DWARF back.
+[profile.dev-debug]
+inherits = "dev"
+debug = 2
+incremental = true
