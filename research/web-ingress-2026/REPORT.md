@@ -336,11 +336,13 @@ using Tailscale for the private one.
 
 ---
 
-## If the app you mean is the Jod HUD — three facts in the current code
+## If the app you mean is the Jod HUD — what the current code constrains
 
 Prompted by the `apps/ios` session asking how a phone reaches `jod-api`. These
-are read from the source, not observed at runtime, and they constrain the
-ingress design more than the tunnel choice does.
+are read from the source and from vendor documentation, not observed at
+runtime, and they constrain the ingress design more than the tunnel choice
+does. The `apps/ios` session independently verified the first two against the
+code and confirmed both.
 
 **TLS is a correctness requirement, not just hardening.** `api/src/session.rs`
 sets the browser session cookie `HttpOnly; Secure; SameSite=Strict`. A `Secure`
@@ -359,6 +361,39 @@ the same way independently: a cross-site request would not carry the session
 cookie even if CORS were added. **Serve the front-end and the API from one
 origin** — `tailscale serve` can front both — and both problems disappear
 without touching the auth design.
+
+**One origin is achievable, but not the obvious way.** `tailscale serve`
+supports several mount points on one host:443 via `--set-path`, so a single
+origin needs no second port and no second hostname. The obvious split — bundle
+at `/`, API at `/v1` — nevertheless fails twice over. **The mount point is
+stripped before proxying**, so a proxy mounted at `/v1` hands the backend
+`/health` when the client asked for `/v1/health`, and every route in
+`api/src/lib.rs:117-153` is registered with a literal `/v1/` prefix; the result
+is a 404 on every call. Independently, **a mount at `/` overrides all other
+paths**, so the precedence goes the wrong way too. Tailscale's own docs name
+this class of breakage and suggest a real reverse proxy for it.
+
+Two arrangements do work. **Have `jod-api` serve the bundle itself** — one mount
+at `/`, no stripping anywhere, `/v1/*` untouched and a `ServeDir` fallback
+underneath. That needs tower-http's `fs` feature (`api/Cargo.toml` currently has
+`["limit", "cors", "trace"]`, and no `ServeDir` exists in `api/src/` today), and
+it makes same-origin a property of the binary rather than of whoever last ran
+`tailscale serve`. Or **put Caddy on loopback** as the multiplexer behind
+`tailscale serve`, routing `/v1/*` to the daemon and everything else to the
+static directory — no code change. Caddy in that role opens no port and carries
+none of the objections that rule it out as a *public* ingress on :443.
+
+**Same-origin fixes a browser, not a packaged app.** Assets served from
+`tauri://localhost` are cross-origin to `https://<host>.ts.net` whatever the
+daemon mounts, so a packaged shell cannot be same-origin unless it loads its
+content remotely. Since `SameSite=Strict` blocks the cookie cross-site even if a
+`CorsLayer` were added, the cookie path cannot be rescued for a packaged client
+and bearer auth is the only clean route. That has a cost worth pricing in:
+`EventSource` cannot set an `Authorization` header — the reason the cookie
+exists at all — so a bearer-only packaged client must hand-roll SSE over
+`fetch`, giving back the automatic reconnect and `Last-Event-ID` resume that SSE
+was chosen for. It is a real argument for making a same-origin browser client
+the primary path.
 
 **Bearer auth is the native path; the cookie is a workaround.** The module doc
 is explicit that the cookie exists only because `EventSource` cannot set an
@@ -417,10 +452,17 @@ Stated plainly so none of it reads as checked:
   classify it; I did not review its source for XSS, dependency CVEs, or how it
   would store an API token in a browser. For a Class B app that review is
   necessary before any exposure, private or not.
-- **The three code facts above are read, not run.** The `Secure`-cookie and
+- **The HUD section is read, not run.** The `Secure`-cookie and
   missing-`CorsLayer` conclusions come from the source and the relevant specs;
   I did not stand up the daemon and watch a browser drop a cookie or fail a
-  preflight. Both are cheap to confirm empirically once something is running.
+  preflight. Both are cheap to confirm empirically once something is running,
+  and the `apps/ios` session has since re-derived both from the code
+  independently.
+- **`tailscale serve`'s mount-point stripping and `/` precedence are from
+  Tailscale's documentation, not demonstrated.** Tailscale is not installed on
+  this box, so I could not mount a path and watch a request arrive. Both are
+  ten-minute checks once it is, and worth doing *before* anyone commits install
+  steps that depend on them.
 - **`vite preview` is a dev server**, not a production one. Serving a built
   Vite app in production means static files behind a real server; nothing here
   covers that build-and-serve pipeline.
