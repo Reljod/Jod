@@ -52,6 +52,20 @@ pub fn launched(agent: &AgentSummary) {
     println!("  watch   {}", paint(CYAN, &agent.watch_command));
 }
 
+/// Say that a run is being watched, and name what would stop it.
+///
+/// On stderr, so it does not land in the middle of `--json` output — and it
+/// names the daemon because a heartbeat with nothing sweeping it is a promise
+/// that silently does not hold.
+pub fn watching(run_id: &str, stall_ms: i64) {
+    eprintln!(
+        "{} watching {} — stopped if silent for {} minutes (needs `jod daemon`)",
+        paint(DIM, "♥"),
+        paint(BOLD, run_id),
+        stall_ms / 60_000,
+    );
+}
+
 pub fn launched_waiting(agent: &AgentSummary) {
     eprintln!(
         "{} {} {} {}",

@@ -3258,6 +3258,17 @@ mod tests {
         let _ = rendered(&a, 24, 5);
     }
 
+    /// A terminal tall enough to show the whole command list at once.
+    ///
+    /// Derived rather than written down, because the two tests below assert
+    /// things about rows that must all be *visible*, and a literal height is a
+    /// fixture that silently expires the next time a command is added — which
+    /// is exactly how it expired last time. The slack is the popup's borders,
+    /// the input box and the frame around them.
+    fn popup_height() -> u16 {
+        crate::tui::command::HELP.len() as u16 + 12
+    }
+
     /// With thirty-odd commands the list outgrows the space above the input, so
     /// it has to scroll — otherwise ↓ past the fold moves a cursor nobody can
     /// see.
@@ -3273,12 +3284,13 @@ mod tests {
 
     /// Eighteen ragged rows read as noise; the eye needs an edge to run down.
     /// Rendered tall, because the command list has since grown past what a
-    /// short terminal's popup can hold.
+    /// short terminal's popup can hold — and taller again each time a command
+    /// is added, so the height is derived from the list rather than guessed.
     #[test]
     fn the_completion_hints_line_up_in_a_column() {
         let mut a = app();
         a.input = "/".into();
-        let screen = rendered(&a, 100, 40);
+        let screen = rendered(&a, 100, popup_height());
         // Counted in characters, not bytes: the selection marker is three bytes
         // wide and one column wide, and a byte index would call the two rows
         // misaligned when they are not.
@@ -3499,7 +3511,7 @@ mod tests {
     fn the_splash_yields_to_the_completion_popup_rather_than_clipping_it() {
         let mut a = app();
         a.input = "/".into();
-        let screen = rendered(&a, 100, 40);
+        let screen = rendered(&a, 100, popup_height());
         assert!(screen.contains("this list"), "/help:\n{screen}");
         assert!(
             screen.contains("the team panel"),

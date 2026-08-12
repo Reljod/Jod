@@ -47,7 +47,7 @@ process.
 | 4 | **Agents + A2A** | Harness-run agents that talk to each other | **Built (single-agent)** |
 | 5 | **Memory** | What Jod knows, and what it did | **Built** |
 | 6 | **Conversations** | A transcript Jod owns: list, fork, revert, compact | **Built** |
-| 7 | **Time** | Schedules that fire, and goals that persist | **Built** |
+| 7 | **Time** | Schedules that fire, goals that persist, heartbeats that reap what wedges | **Built** |
 | 8 | **Inbound** | GitHub events, and Telegram messages that are turns in the main chat | **Built** |
 
 Pillar 2 arrived early and by a different route than planned. It is a graph over

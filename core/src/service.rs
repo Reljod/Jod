@@ -863,6 +863,59 @@ impl Jod {
         Ok(())
     }
 
+    /// Stop a run a watchdog has judged dead, and make its status say so.
+    ///
+    /// Distinct from [`Jod::kill_agent`] in two ways that matter.
+    ///
+    /// **It ends `Failed`, not `Killed`.** `Killed` means a person decided to
+    /// stop this; `Failed` means it stopped working and something noticed.
+    /// Collapsing them would make "I stopped it" and "it wedged and was reaped"
+    /// the same row, which is the distinction anybody looking at the history is
+    /// there to make.
+    ///
+    /// **It works from the store, not only from memory.** `kill_agent` reads
+    /// the pgid out of the in-memory map and fails with `UnknownAgent` if the
+    /// run is not there. A heartbeat sweep is exactly the caller that cannot
+    /// rely on that: it runs in a daemon that rehydrates a bounded number of
+    /// runs, so a long-running run started before the last few hundred others
+    /// is watched by a row it can still read and absent from the map. Falling
+    /// back to the stored pgid is what keeps "long-running" and "reapable" from
+    /// being mutually exclusive.
+    ///
+    /// `terminate` is false for a run whose process group is already gone —
+    /// signalling a recycled pgid would reach whatever now holds that number.
+    pub async fn fail_agent(&self, id: &str, terminate: bool) -> Result<()> {
+        let in_memory = self.state.read().await.agents.get(id).map(|r| r.summary.pgid);
+        let pgid = match in_memory {
+            Some(pgid) => pgid,
+            None => match &self.store {
+                Some(store) => store.run(id)?.and_then(|r| r.pgid),
+                None => None,
+            },
+        };
+
+        if terminate {
+            if let Some(pgid) = pgid {
+                // A failure to signal is not a reason to leave the status
+                // lying. The group may have exited between the probe and here,
+                // which is the ordinary case, not an error.
+                let _ = proc::terminate_group(pgid, KILL_GRACE).await;
+            }
+        }
+
+        if let Some(store) = &self.store {
+            store.set_run_status(id, AgentStatus::Failed.as_str())?;
+        }
+        let mut guard = self.state.write().await;
+        if let Some(record) = guard.agents.get_mut(id) {
+            record.summary.process_alive = false;
+            if record.summary.status == AgentStatus::Running {
+                record.summary.status = AgentStatus::Failed;
+            }
+        }
+        Ok(())
+    }
+
     /// A short digest of everything in flight — what Jod reports back to Reljod.
     pub async fn report(&self) -> Report {
         let agents = self.agents().await;

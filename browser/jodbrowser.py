@@ -42,7 +42,18 @@ def load_env(path: Path = ENV_FILE) -> None:
 
 
 def proxy_config() -> dict | None:
-    """The proxy Camoufox should egress through, or None to browse direct."""
+    """The proxy Camoufox should egress through, or None to browse direct.
+
+    Loads the env file itself rather than trusting a caller to have done it.
+    It used to depend on `browser_options()` having run first, which made the
+    answer depend on call order: `describe()` before the first fetch reported
+    "direct" while the very next fetch went through the proxy. Harmless in the
+    one-shot CLI, where `browser_options()` always ran first — and a lie in the
+    MCP server's `browser_status`, whose entire job is to say whether traffic is
+    proxied. `load_env` uses `setdefault`, so this is idempotent and a real
+    environment variable still wins.
+    """
+    load_env()
     server = os.environ.get("JOD_PROXY_SERVER", "").strip()
     if not server:
         return None

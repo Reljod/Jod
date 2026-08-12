@@ -109,6 +109,8 @@ pub enum Action {
     Stop(String),
     /// Put an agent's output on screen and follow it.
     Watch(String),
+    /// Arm or disarm a run's heartbeat — see [`command::Slash::Heartbeat`].
+    Heartbeat { id: String, on: bool },
     /// Say how to attach to an agent's tmux session.
     Attach(String),
     /// Put a task on the watched team's board.
@@ -965,6 +967,39 @@ async fn perform(
                 app.push(Entry::Notice(format!("stopped {}", short(&id))));
             }
             Err(e) => app.push(Entry::Notice(format!("could not stop {}: {e}", short(&id)))),
+        },
+        // Arming this is the opposite gesture to `Action::Watch`: it is what
+        // you do to a run you are about to stop looking at. So it says out loud
+        // that the sweep lives in the daemon — a heartbeat with nothing
+        // sweeping it is a promise that quietly does not hold, and the TUI is
+        // exactly where somebody would arm one without a daemon running.
+        Action::Heartbeat { id, on } => match jod.store() {
+            None => app.push(Entry::Notice("no store — nothing can be watched".into())),
+            Some(store) => {
+                let said = if on {
+                    let hb = jod_core::heartbeat::Heartbeat::starting(
+                        &id,
+                        jod_core::heartbeat::Watching::Run,
+                        app.now_ms,
+                    );
+                    store.watch_run(&hb).map(|()| {
+                        format!(
+                            "heartbeat on {} — reaped if silent for {} min (needs `jod daemon`)",
+                            short(&id),
+                            hb.stall_ms / 60_000
+                        )
+                    })
+                } else {
+                    store.unwatch_run(&id).map(|had| match had {
+                        true => format!("heartbeat off {}", short(&id)),
+                        false => format!("{} was not being watched", short(&id)),
+                    })
+                };
+                app.push(Entry::Notice(match said {
+                    Ok(text) => text,
+                    Err(e) => format!("could not change the heartbeat on {}: {e}", short(&id)),
+                }));
+            }
         },
         // The binding follows the eye, like the session cursor does: watching
         // another agent means the next turn continues *that* conversation, and
@@ -3322,6 +3357,9 @@ fn apply_slash(app: &mut App, slash: command::Slash) -> Option<Action> {
         Slash::EnterMain => return Some(Action::EnterMain),
         Slash::Stop(which) => return resolve_agent(app, &which).map(Action::Stop),
         Slash::Watch(which) => return resolve_agent(app, &which).map(Action::Watch),
+        Slash::Heartbeat { which, on } => {
+            return resolve_agent(app, &which).map(|id| Action::Heartbeat { id, on })
+        }
         Slash::Attach(which) => return resolve_agent(app, &which).map(Action::Attach),
         Slash::Todo(title) => return Some(Action::AddTask(title)),
         Slash::Done(id) => return Some(Action::FinishTask(id)),

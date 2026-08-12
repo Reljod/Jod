@@ -77,6 +77,13 @@ pub enum Slash {
     Stop(String),
     /// Put an agent's output on screen.
     Watch(String),
+    /// Keep a heartbeat on an agent, so a run that wedges is reaped.
+    ///
+    /// Deliberately *not* spelled `/watch`, which already means "put this on
+    /// screen". The two are opposites in the way that matters: `/watch` is for
+    /// a run you are looking at, and this is for one you are going to walk away
+    /// from for a few hours.
+    Heartbeat { which: String, on: bool },
     /// Say how to attach to an agent's tmux session.
     Attach(String),
     /// Put a task on the watched team's board.
@@ -284,6 +291,32 @@ pub fn parse(line: &str) -> Option<Slash> {
                 Slash::Watch(arg.to_string())
             }
         }
+        // `/heartbeat <id>` arms it, `/heartbeat <id> off` disarms it. A
+        // trailing word rather than a flag, because the TUI's commands take
+        // prose arguments and `--off` would be the only flag in the set.
+        "heartbeat" | "hb" => {
+            let (which, tail) = match arg.split_once(char::is_whitespace) {
+                Some((head, rest)) => (head, rest.trim()),
+                None => (arg, ""),
+            };
+            if which.is_empty() {
+                Slash::NeedsArgument("/heartbeat <id> [off]")
+            } else {
+                match tail {
+                    "" | "on" => Slash::Heartbeat {
+                        which: which.to_string(),
+                        on: true,
+                    },
+                    "off" | "stop" | "no" => Slash::Heartbeat {
+                        which: which.to_string(),
+                        on: false,
+                    },
+                    other => Slash::Refused(format!(
+                        "{other} is not on or off — /heartbeat <id> [off]"
+                    )),
+                }
+            }
+        }
         "attach" => {
             if arg.is_empty() {
                 Slash::NeedsArgument("/attach <id>")
@@ -416,6 +449,10 @@ pub const HELP: &[(&str, &str)] = &[
     ),
     ("/agents", "the fleet (Alt-A, Alt-K f)"),
     ("/watch <id>", "put an agent's output on screen"),
+    (
+        "/heartbeat <id> [off]",
+        "reap it if it goes silent — for runs you leave alone for hours",
+    ),
     ("/stop <id>", "stop an agent and close its session"),
     ("/attach <id>", "how to attach to its tmux session"),
     ("/memory [query]", "what Jod remembers (Alt-K m)"),
@@ -529,9 +566,14 @@ pub fn completions(input: &str, app: &crate::tui::App) -> Vec<Completion> {
         // Whichever agents are still worth naming. `/stop` only offers the ones
         // that could actually be stopped, so the list answers "what can I do"
         // rather than merely "what exists".
-        "stop" | "kill" | "watch" | "focus" | "attach" => agents
+        // `/heartbeat` completes over running agents only, for the same reason
+        // `/stop` does: watching a finished run is a row that retires on the
+        // next sweep having done nothing.
+        "stop" | "kill" | "watch" | "focus" | "attach" | "heartbeat" | "hb" => agents
             .iter()
-            .filter(|a| !matches!(name.as_str(), "stop" | "kill") || a.is_running())
+            .filter(|a| {
+                !matches!(name.as_str(), "stop" | "kill" | "heartbeat" | "hb") || a.is_running()
+            })
             .filter(|a| a.id.starts_with(&typed))
             .map(|a| {
                 let id: String = a.id.chars().take(8).collect();
@@ -1118,6 +1160,20 @@ mod tests {
         assert_eq!(parse("/watch abc123"), Some(Slash::Watch("abc123".into())));
         assert_eq!(parse("/focus abc123"), Some(Slash::Watch("abc123".into())));
         assert_eq!(
+            parse("/heartbeat abc123"),
+            Some(Slash::Heartbeat {
+                which: "abc123".into(),
+                on: true
+            })
+        );
+        assert_eq!(
+            parse("/hb abc123 off"),
+            Some(Slash::Heartbeat {
+                which: "abc123".into(),
+                on: false
+            })
+        );
+        assert_eq!(
             parse("/attach abc123"),
             Some(Slash::Attach("abc123".into()))
         );
@@ -1151,6 +1207,41 @@ mod tests {
         assert_eq!(parse("/jod"), Some(Slash::EnterMain));
     }
 
+    /// `/watch` puts a run on screen; `/heartbeat` is what you arm on the run
+    /// you are about to stop looking at. Two commands with adjacent names and
+    /// opposite purposes, so the parse must never collapse one into the other.
+    #[test]
+    fn watching_a_run_and_keeping_a_heartbeat_on_it_are_different_commands() {
+        assert_eq!(parse("/watch abc"), Some(Slash::Watch("abc".into())));
+        assert_eq!(
+            parse("/heartbeat abc"),
+            Some(Slash::Heartbeat {
+                which: "abc".into(),
+                on: true
+            })
+        );
+    }
+
+    /// Anything other than on/off is refused rather than guessed at. Reading a
+    /// stray word as "on" would arm a heartbeat somebody was trying to disarm.
+    #[test]
+    fn a_heartbeat_argument_that_is_neither_on_nor_off_is_refused() {
+        assert!(matches!(
+            parse("/heartbeat abc maybe"),
+            Some(Slash::Refused(_))
+        ));
+        for text in ["/heartbeat abc off", "/heartbeat abc stop", "/heartbeat abc no"] {
+            assert_eq!(
+                parse(text),
+                Some(Slash::Heartbeat {
+                    which: "abc".into(),
+                    on: false
+                }),
+                "{text}"
+            );
+        }
+    }
+
     /// Each of these does something irreversible or unguessable without its
     /// argument, so a bare one must ask rather than act.
     #[test]
@@ -1159,6 +1250,7 @@ mod tests {
             ("/delegate", "/delegate <prompt>"),
             ("/stop", "/stop <id>"),
             ("/watch", "/watch <id>"),
+            ("/heartbeat", "/heartbeat <id> [off]"),
             ("/attach", "/attach <id>"),
             ("/todo", "/todo <title>"),
             ("/done", "/done <task-id>"),

@@ -1677,3 +1677,100 @@ Nothing deletes a conversation — there is no such verb in the store, and the
 fleet is not an editable list, so `x` is not offered on it. The main chat's
 permanence rests on that plus get-or-create: if it were ever gone, the next
 thing to ask for it would make it again.
+
+## Alive is not working, and only one of them was ever checked
+
+`proc::group_alive` asks the kernel whether a process group exists. It never
+lies and it is not enough: a harness blocked on a socket that will never answer,
+a tool waiting on input that cannot arrive, a model call retrying for ever — all
+of them pass it, indefinitely.
+
+That gap had a specific consequence rather than a theoretical one. `tick_goals`
+settles the previous iteration before starting the next, and it settles it by
+reading the run's status. A wedged run's status is `running` and *stays*
+`running`, because the only process that ever writes a terminal status is the
+supervisor watching a harness that is never going to exit. So the goal waits.
+Not for an iteration, not for a day: for ever, still listed as `running`, with
+nothing anywhere recording that anything was wrong.
+
+So a heartbeat asks the second question too — has this run's high-water event
+`seq` moved since the last sweep — and a run has to pass both. The window is
+twenty minutes and deliberately generous, because the two errors are not
+symmetric: killing a merely-slow run destroys work somebody waited for, while
+noticing a wedged one twenty minutes late costs twenty minutes of an idle
+process.
+
+**The sweep runs before schedules and goals, and moving it is a bug.** Reaping
+first is what lets the same tick that discovers a stall also let the goal move
+on. Reaping afterwards costs an extra tick in the ordinary case and, in the case
+this exists for, never resolves at all.
+
+**A ceiling beats progress, which looks backwards until you name the failure.**
+A run stuck in a retry loop is *busy* — it emits events for ever. A ceiling that
+yielded to progress would therefore never fire, against exactly the run it
+exists to stop. So `Expired` is checked before `Beating`.
+
+**No claim and no lease, unlike schedules and goals.** Those guard a *spawn*:
+two processes acting on one schedule start two harnesses and cost real money. A
+sweep starts nothing, and its worst case under two daemons is signalling the
+same group twice, which is idempotent. A contended write per tick to prevent
+that would buy nothing.
+
+**Retiring deletes the row.** Cleanup was the requirement and a table of
+tombstones is not cleanup. Deletion also makes the crash path self-healing: if a
+sweep dies between stopping a run and tidying up, the row is still live, and the
+next sweep re-decides from scratch — the group is gone, so it reads as
+`Vanished`, the status is corrected, and the row goes. A state column would have
+had to be crash-correct instead, and would only ever be read by the code that
+wrote it. Deletion on *run* deletion is the foreign key's job, not code's, so
+parts of the system that have never heard of heartbeats cannot leak one.
+
+The reason a heartbeat retired goes to the memory layer, **not** to the run's
+event stream. `events` is `UNIQUE(run_id, seq)` and a duplicate is silently
+ignored, while the supervisor allocates `seq` from a counter held in its own
+memory — so a watchdog writing `last_seq + 1` would race the one process that
+owns that sequence, and losing costs either the explanation or the supervisor's
+`Finished`, invisibly. For a stalled run those writes are near-simultaneous by
+construction. A fact has no such contention, and for a goal it lands in the
+scope the *next iteration's prompt is built from*, so a stall is not merely
+recorded — it is told to whatever runs next.
+
+## Reading a web page is not one of Jod's verbs
+
+`ToolAccess` bounds what an agent may do *to Jod*: delegate, schedule, spend
+money, write memory. Browsing touches none of that, so the browser MCP is
+offered at every level — including to a run granted nothing at all, which used
+to mean no MCP config was written whatsoever.
+
+The alternative was worse in a way that only shows up in practice: `jod run`
+passes `tools: None` on purpose, so gating the browser behind an access level
+would have meant ordinary delegation never got it, and reaching the web would
+have required granting the ability to spawn other agents. That is a strange
+thing to have to hand somebody so they can read a page.
+
+**The routing is a prompt, not a permission, because no harness offers the
+switch it would need.** There is no "deny WebFetch but allow this server" flag;
+Claude Code's built-ins are granted or denied by name alongside everything else.
+So the instruction is the mechanism, and it is stated in terms of what an agent
+*gets* — reaching pages that would otherwise refuse it — rather than as a rule,
+because an agent that understands why a tool is better uses it when it matters.
+It is applied once in `runner::launch` rather than at the twenty-odd sites that
+build a `SpawnRequest`: an instruction that has to be remembered is one that
+will be missing from whichever call site is added next.
+
+**A server, not the script next door.** `jodbrowser.py` fetches one URL and
+exits, so every page pays a full Firefox launch and nothing can be clicked — the
+browser that rendered the page is gone by the time an agent reads it. Resident
+means one launch, many pages, and cookies that persist across tool calls, which
+is what a login-walled page needs. It starts Firefox lazily, because an MCP
+server is launched when the harness starts and most runs never browse at all.
+
+**Everything camoufox does sits behind a four-method seam**, so the protocol,
+dispatch, argument validation and truncation are all tested from values with no
+browser installed — the same split `monitor::Probes` makes on the Rust side.
+What that cannot cover is whether traffic really leaves through the proxy, and
+that check found a real bug immediately: `describe()` read the environment but
+never loaded `browser.env`, so it answered "direct" while the very next fetch
+went through the proxy. Harmless in the one-shot CLI, where `browser_options()`
+always ran first — and a lie in `browser_status`, whose entire job is to say
+whether traffic is proxied.

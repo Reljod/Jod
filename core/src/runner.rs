@@ -96,6 +96,22 @@ pub async fn launch(
     // framing, so it goes in front of the prompt for those. Done here rather
     // than in each adapter because the prompt reaches argv as a placeholder —
     // an adapter cannot rewrite what it never holds.
+    //
+    // The framing also carries how this run reaches the web, when Jod has a
+    // browser to offer. Done here, once, rather than at each of the twenty-odd
+    // places that build a `SpawnRequest`: an instruction that has to be
+    // remembered is one that will be missing from whichever call site is added
+    // next, and "the agent browsed straight out of the VPS's own IP" is a
+    // failure nobody sees until a site starts refusing.
+    //
+    // Rebound onto the request rather than used locally, because the harness
+    // that *does* take a system prompt reads it off `req` to build the flag. A
+    // local would have framed only the harnesses that cannot take one, which is
+    // exactly backwards.
+    let req = &SpawnRequest {
+        system: crate::mcp_config::framing(req.system.as_deref()),
+        ..req.clone()
+    };
     let prompt = match (&req.system, harness.takes_system_prompt()) {
         (Some(system), false) => format!("{system}\n\n---\n\n{}", req.prompt),
         _ => req.prompt.clone(),
