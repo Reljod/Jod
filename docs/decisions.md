@@ -1912,6 +1912,39 @@ transcript, and not in the launch record. A missing key blocks one test rather
 than a session — which is the point, and why the agent is told to treat an
 absent credential as a *blocked* ending rather than a reason to invent one.
 
+### What the machinery does not do, measured
+
+An earlier version of this entry implied the model never sees the value. It is
+not true, and an agent found it rather than a test — asked to print a secret
+through a shell command, it reported back:
+
+> the value came back to me **unredacted** in the tool result. So whatever
+> scrubbing Jod does, it isn't happening on the tool-output path into the
+> model's context — it can only be happening later, at storage time.
+
+It is right, and the reason is structural. The supervisor sits between the
+harness and Jod's store, **not** between the harness and the model. A harness
+runs its own tool loop: it executes the command, hands the output back to the
+model, and only then prints a line that Jod reads and scrubs. By the time
+redaction happens the model has already seen it.
+
+So the guarantee to state is **the value never reaches the record** — not the
+database, not the transcript, not the launch plan, not a backup. Whether the
+*model* sees it is decided by the preamble telling it not to go looking, and by
+nothing else. That sentence in the preamble is therefore load-bearing rather
+than decorative, and anyone trimming the brief for length should know it is
+the whole of that control.
+
+Two smaller limits follow from the same shape. The scrubber replaces exact
+occurrences, so an agent that retypes a fragment, or breaks the value across a
+line, defeats it — which is a reason to keep values long and opaque rather than
+a reason to build a cleverer matcher. And redaction cannot see an outbound
+request at all: the exfiltration path that actually matters is the agent
+calling something with the key, which no scrubber is positioned to observe.
+
+None of this makes the design worse than the alternative — a credential in the
+prompt is seen by the model *and* stored. It makes the claim smaller and true.
+
 ## A worktree outlives the work that cut it
 
 Deleting a work removes its sessions, their transcripts, their unanswered cards

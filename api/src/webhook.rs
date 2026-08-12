@@ -383,6 +383,20 @@ impl SpawnTask {
             return Err("the daemon's permission ceiling forbids its own default".into());
         }
 
+        // No roots and no secrets, deliberately — this is not an omission to
+        // be tidied up later.
+        //
+        // The prompt below is built from a payload a stranger wrote, which is
+        // why `spawn_from_untrusted` caps this run's tool access on the way in.
+        // A credential is strictly worse than a tool grant here: a tool call is
+        // visible in the transcript, an environment variable is ambient, and
+        // the run holding the key is the one being steered by attacker-
+        // influenced text.
+        //
+        // Redaction does not help. It keeps a value out of *Jod's* record; the
+        // path that matters is the agent making an outbound request with the
+        // key, which no scrubber is positioned to see. See `docs/decisions.md`,
+        // "What the machinery does not do, measured".
         let req = SpawnRequest {
             name: format!("{} ({})", rule.name, self.event),
             harness,
@@ -390,6 +404,8 @@ impl SpawnTask {
             system: None,
             cwd,
             model: rule.model.clone(),
+            roots: Vec::new(),
+            secrets: Vec::new(),
             permission,
             // Always a fresh context. Resuming would carry one stranger's
             // payload into the next stranger's run.

@@ -285,6 +285,17 @@ if [ "${#HARNESSES[@]}" -eq 0 ]; then
 fi
 echo
 echo "harnesses under test: ${HARNESSES[*]}"
+echo
+echo "-- what this suite deliberately does not cover --"
+echo "  \`jod run\` is given no Jod tools (\`tools: None\`, cli/src/main.rs), and"
+echo "  that is a decision rather than an oversight: a one-liner should not be"
+echo "  able to arm schedules that spend money nightly. The consequence for"
+echo "  parity is that a bare \`jod run\` cannot record a decision, ask a"
+echo "  question or request a secret at all — so the card half below is driven"
+echo "  through a work opened from the main chat, which is the path that grants"
+echo "  tools. A run started with no tools is meant to produce its cards through"
+echo "  the passive lifter instead, from what it prints; that path is not"
+echo "  exercised here and wants a suite of its own."
 
 # ---------------------------------------------------------------------------
 # One harness, one run, six things.

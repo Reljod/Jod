@@ -137,13 +137,29 @@ UI must not pretend otherwise.** An answered card shows as *answered, queued*
 until the handler delivers it, then as *delivered*. Reljod can answer ten cards
 while a run is mid-turn and none of them touch it until it comes up for air.
 
-**D3 — a secret's value is never in the model's context.** Stored outside every
-repo at owner-only permissions, injected as an environment variable at spawn,
-and scrubbed from the harness's output before anything is parsed or stored. This
-is the model GitHub Actions, Doppler, Infisical and `op run` converged on: inject
+**D3 — a secret's value never reaches the record.** Stored outside every repo at
+owner-only permissions, injected as an environment variable at spawn, and
+scrubbed from the harness's output before anything is parsed or stored. This is
+the model GitHub Actions, Doppler, Infisical and `op run` converged on: inject
 at exec, mask on output, reference by name. Redaction is the belt to injection's
 braces — an agent that echoes the variable still cannot get the value into the
 transcript.
+
+**This originally said "never in the model's context", and that was wrong.**
+Measured: an agent asked to print a secret through a shell command reported the
+value came back to it *unredacted* in the tool result. The reason is structural
+— the supervisor sits between the harness and Jod's store, not between the
+harness and the model. A harness runs its own tool loop, hands the output to the
+model, and only then prints the line Jod reads and scrubs. Redaction is
+downstream of the model by construction.
+
+So the guarantee is the record: not the database, not the transcript, not the
+launch plan. Whether the model sees a value is decided by the preamble telling
+it not to go looking, which makes that sentence load-bearing rather than
+decorative. Two limits follow: the scrubber matches exact occurrences, so a
+retyped fragment defeats it — an argument for long opaque values, not a cleverer
+matcher — and no scrubber can see an outbound request, which is the
+exfiltration path that actually matters.
 
 **D4 — a work is a group, not a new kind of session.** Nothing in Jod learns a
 second session type, and the fleet tree becomes a self-join over what already
