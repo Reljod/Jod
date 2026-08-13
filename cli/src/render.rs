@@ -163,21 +163,19 @@ fn print_event(event: &AgentEvent, show_thinking: bool) {
     match event {
         AgentEvent::Started { model, .. } => {
             if let Some(m) = model {
-                eprintln!("{}", paint(DIM, &format!("  model {m}")));
+                emit(&paint(DIM, &format!("  model {m}")));
             }
         }
         AgentEvent::Thinking { text } => {
             if show_thinking {
-                eprintln!("{}", paint(DIM, &indent(text, "  ")));
+                emit(&paint(DIM, &indent(text, "  ")));
             }
         }
         AgentEvent::Message { text } => println!("{text}"),
-        AgentEvent::ToolCall { name, .. } => {
-            eprintln!("{} {}", paint(CYAN, "⚙"), paint(DIM, name));
-        }
+        AgentEvent::ToolCall { name, input } => emit(&tool_line(name, input.as_ref())),
         AgentEvent::ToolResult { name, is_error, .. } => {
             if *is_error {
-                eprintln!("{} {}", paint(RED, "✗"), paint(DIM, name));
+                emit(&format!("{} {}", paint(RED, "✗"), paint(DIM, name)));
             }
         }
         AgentEvent::Finished {
@@ -196,15 +194,125 @@ fn print_event(event: &AgentEvent, show_thinking: bool) {
                 format!(" · {}", parts.join(" · "))
             };
             if *is_error {
-                eprintln!("{}{}", paint(RED, "✗ failed"), paint(DIM, &tail));
+                emit(&format!("{}{}", paint(RED, "✗ failed"), paint(DIM, &tail)));
             } else {
-                eprintln!("{}{}", paint(GREEN, "✓ done"), paint(DIM, &tail));
+                emit(&format!("{}{}", paint(GREEN, "✓ done"), paint(DIM, &tail)));
             }
         }
         // An unrecognised harness line is shown, never dropped.
-        AgentEvent::Raw { line } => eprintln!("{}", paint(DIM, line)),
-        AgentEvent::Error { message } => eprintln!("{} {message}", paint(RED, "error")),
+        AgentEvent::Raw { line } => emit(&paint(DIM, line)),
+        AgentEvent::Error { message } => emit(&format!("{} {message}", paint(RED, "error"))),
     }
+}
+
+/// One line of the readable stream, always on **stderr**.
+///
+/// stdout belongs to the machine-readable half — `--json` envelopes, `jod ls
+/// --json` — so chatter must never land there. Routed through one function
+/// rather than a dozen `eprintln!`s because libtest offers no way to read back
+/// what `eprintln!` wrote, and a renderer whose output cannot be asserted on is
+/// how `⚙ Read` with no path survived.
+fn emit(line: &str) {
+    #[cfg(test)]
+    if tests::recorded(line) {
+        return;
+    }
+    eprintln!("{line}");
+}
+
+/// `⚙ Read · /abs/path` — the tool, and the one argument that says what it did.
+///
+/// The name alone is what `jod watch` used to print, which made a 25-second
+/// window of a live run read as `⚙ Read`, `⚙ Bash` and nothing else. The TUI
+/// has always shown the argument; this is the same convention on the same
+/// events.
+fn tool_line(name: &str, input: Option<&serde_json::Value>) -> String {
+    let head = format!("{} {}", paint(CYAN, "⚙"), paint(DIM, name));
+    match input.and_then(salient).map(|v| summarized(&v)) {
+        Some(detail) if !detail.is_empty() => {
+            format!("{head} {}", paint(DIM, &format!("· {detail}")))
+        }
+        _ => head,
+    }
+}
+
+/// The one argument of a tool call worth a line: which file, which command.
+///
+/// Keys are compared with case and underscores ignored, because the harnesses
+/// genuinely disagree — Claude Code says `file_path` where AGY says
+/// `TargetFile` — and the order is "which thing?" best-first, so `Bash` shows
+/// its command and `Read`/`Write`/`Edit` show their path. Anything whose keys
+/// are all unknown falls back to the arguments themselves, since an unfamiliar
+/// tool's payload is still more than its name; `None` only when there is
+/// nothing at all to show.
+fn salient(input: &serde_json::Value) -> Option<serde_json::Value> {
+    const KEYS: [&str; 12] = [
+        "command",
+        "cmd",
+        "filepath",
+        "path",
+        "targetfile",
+        "directorypath",
+        "pattern",
+        "query",
+        "url",
+        "description",
+        "prompt",
+        "searchterm",
+    ];
+    fn normalise(key: &str) -> String {
+        key.chars()
+            .filter(|c| *c != '_')
+            .flat_map(char::to_lowercase)
+            .collect()
+    }
+    if let Some(map) = input.as_object() {
+        for key in KEYS {
+            for (found, value) in map {
+                if normalise(found) != key {
+                    continue;
+                }
+                if let Some(v) = value.as_str().map(flatten) {
+                    if !v.is_empty() {
+                        return Some(serde_json::Value::String(v));
+                    }
+                }
+            }
+        }
+        if map.is_empty() {
+            return None;
+        }
+    }
+    match input {
+        serde_json::Value::Null => None,
+        serde_json::Value::String(s) => Some(flatten(s))
+            .filter(|s| !s.is_empty())
+            .map(serde_json::Value::String),
+        other => Some(other.clone()),
+    }
+}
+
+/// Cut a payload down with the helper that exists for exactly this.
+///
+/// `jod_core::event::summarize` is `pub(crate)`, so the only way to reach it
+/// from this crate is the projection that already applies it:
+/// `NewMessage::from_event` renders a `ToolCall`'s input into the readable
+/// `text` it stores. Borrowing that keeps `jod watch` and the stored transcript
+/// cut by one rule instead of two — and keeps a `Write`'s whole file body out
+/// of the stream, which is the failure mode a bounded helper exists to prevent.
+fn summarized(input: &serde_json::Value) -> String {
+    jod_core::conversation::NewMessage::from_event(&AgentEvent::ToolCall {
+        name: String::new(),
+        input: Some(input.clone()),
+    })
+    .map(|m| m.text)
+    .unwrap_or_default()
+}
+
+/// One line, so a multi-line command cannot own the stream. Not a truncation —
+/// the cutting is [`summarized`]'s job and stays in one place.
+fn flatten(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn indent(text: &str, prefix: &str) -> String {
@@ -681,6 +789,148 @@ pub fn report(r: &Report) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    thread_local! {
+        /// Where [`emit`] writes while a test is recording. `None` — every
+        /// other thread, and every non-test build — means stderr as usual.
+        static LINES: std::cell::RefCell<Option<Vec<String>>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    /// Divert one line into this thread's recording. `false` when nothing is
+    /// recording, which is [`emit`]'s cue to print it for real.
+    pub(super) fn recorded(line: &str) -> bool {
+        LINES.with(|l| match l.borrow_mut().as_mut() {
+            Some(buf) => {
+                buf.push(line.to_string());
+                true
+            }
+            None => false,
+        })
+    }
+
+    /// Run a renderer and hand back everything it put on stderr.
+    ///
+    /// `#[tokio::test]` polls on the calling thread, so the thread-local the
+    /// future writes to is the one this reads back.
+    async fn stderr_of(f: impl std::future::Future<Output = i32>) -> (i32, String) {
+        LINES.with(|l| *l.borrow_mut() = Some(Vec::new()));
+        let code = f.await;
+        let lines = LINES.with(|l| l.borrow_mut().take().unwrap_or_default());
+        (code, lines.join("\n"))
+    }
+
+    fn envelope(seq: u64, event: AgentEvent) -> AgentEnvelope {
+        AgentEnvelope {
+            agent_id: "run-1".into(),
+            at_ms: 0,
+            seq,
+            event,
+        }
+    }
+
+    fn done() -> AgentEvent {
+        AgentEvent::Finished {
+            text: None,
+            exit_code: Some(0),
+            is_error: false,
+            usage: jod_core::Usage::default(),
+        }
+    }
+
+    /// Feed one tool call through the real `stream` and read stderr back.
+    async fn watched(name: &str, input: serde_json::Value) -> String {
+        let (tx, rx) = broadcast::channel(8);
+        tx.send(envelope(
+            1,
+            AgentEvent::ToolCall {
+                name: name.into(),
+                input: Some(input),
+            },
+        ))
+        .unwrap();
+        tx.send(envelope(2, done())).unwrap();
+        stderr_of(stream(rx, "run-1", false, false)).await.1
+    }
+
+    /// Regression: `jod watch` printed `⚙ Read` and `⚙ Bash` with no arguments,
+    /// so 25 seconds of a live run said nothing about what it was doing.
+    #[tokio::test]
+    async fn a_tool_call_shows_its_argument_not_just_the_tool_name() {
+        let out = watched("Read", serde_json::json!({ "file_path": "/abs/path/main.rs" })).await;
+        assert!(out.contains("⚙ Read"), "{out}");
+        assert!(out.contains("· /abs/path/main.rs"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn a_bash_call_shows_the_command_it_ran() {
+        let out = watched("Bash", serde_json::json!({ "command": "cargo test -p jod-cli" })).await;
+        assert!(out.contains("⚙ Bash · cargo test -p jod-cli"), "{out}");
+    }
+
+    /// A `Write`'s input is a whole file. Printing it raw would turn `jod watch`
+    /// into `cat`, so the argument is cut by `summarize` before it is shown.
+    #[tokio::test]
+    async fn a_huge_input_is_truncated_rather_than_dumped_whole() {
+        let body = "x".repeat(5_000);
+        let out = watched("Write", serde_json::json!({ "content": body.clone() })).await;
+        assert!(!out.contains(&body), "the whole payload was printed");
+        assert!(out.contains("(+"), "no truncation marker: {out}");
+        assert!(
+            out.chars().count() < 400,
+            "one tool line ran to {} chars",
+            out.chars().count()
+        );
+    }
+
+    /// The path, not the file body: a `Write` says which file it wrote even
+    /// though the content is the larger field.
+    #[tokio::test]
+    async fn a_write_shows_its_path_and_never_its_body() {
+        let body = "y".repeat(5_000);
+        let out = watched(
+            "Write",
+            serde_json::json!({ "file_path": "/tmp/out.rs", "content": body }),
+        )
+        .await;
+        assert!(out.contains("⚙ Write · /tmp/out.rs"), "{out}");
+        assert!(!out.contains("yyyy"), "the file body leaked into the stream");
+    }
+
+    /// A tool nobody has heard of still says more than its name.
+    #[tokio::test]
+    async fn an_unknown_tools_arguments_are_shown_as_they_came() {
+        let out = watched("mcp__jod__remember", serde_json::json!({ "fact": "sky" })).await;
+        assert!(out.contains(r#"{"fact":"sky"}"#), "{out}");
+    }
+
+    #[tokio::test]
+    async fn a_tool_call_with_no_arguments_still_prints_its_name() {
+        let (tx, rx) = broadcast::channel(8);
+        tx.send(envelope(
+            1,
+            AgentEvent::ToolCall {
+                name: "TodoWrite".into(),
+                input: None,
+            },
+        ))
+        .unwrap();
+        tx.send(envelope(2, done())).unwrap();
+        let (_, out) = stderr_of(stream(rx, "run-1", false, false)).await;
+        assert!(out.contains("⚙ TodoWrite"), "{out}");
+    }
+
+    /// A command spanning lines is one line here: the stream is a log, and a
+    /// heredoc pasted into it buries everything around it.
+    #[test]
+    fn a_multi_line_argument_is_flattened_to_one_line() {
+        let line = tool_line(
+            "Bash",
+            Some(&serde_json::json!({ "command": "set -e\n  cargo build" })),
+        );
+        assert!(line.contains("· set -e cargo build"), "{line}");
+        assert!(!line.contains('\n'), "{line}");
+    }
 
     #[test]
     fn indenting_prefixes_every_line_not_just_the_first() {
