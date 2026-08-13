@@ -1786,7 +1786,7 @@ async fn main() -> Result<()> {
                 tui::Options {
                     harness: harness.map(Into::into),
                     team,
-                    cwd: cwd.unwrap_or_else(jod_core::service::default_cwd),
+                    cwd: console_cwd(cwd),
                     model,
                     permission,
                     resume: if continue_last {
@@ -3984,6 +3984,31 @@ fn grants_for_run(
     Ok((roots, secrets))
 }
 
+/// Where the console works when `--cwd` said nothing: the directory it was
+/// launched in.
+///
+/// Not [`jod_core::service::default_cwd`], which answers `$HOME`, and the
+/// difference is not cosmetic. A console is opened *inside* something — you
+/// `cd` to a repository and type `jod tui` — so the home directory is almost
+/// never the answer, and it was the wrong one in three places at once: every
+/// turn's harness process started in `$HOME`, the band now printing the
+/// directory would have printed `~`, and [`crate::tui::ensure_launch_root`]
+/// would have handed the conversation the whole home directory to search.
+///
+/// `$HOME` remains the fallback for the case that has no launched-in
+/// directory at all — a working directory that has been deleted out from under
+/// the process, which is where `current_dir` fails.
+///
+/// This is the console only. `jod run` is a one-shot that may be fired from
+/// anywhere by anything, and a batch job silently inheriting whatever directory
+/// its caller happened to be in is the opposite of what a resumed run wants —
+/// see [`session_cwd`], which looks the answer up rather than assuming it.
+fn console_cwd(given: Option<PathBuf>) -> PathBuf {
+    given
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(jod_core::service::default_cwd)
+}
+
 /// The directory a resumed session belongs to, when Jod knows it.
 ///
 /// `None` for a fresh run, and for a session id Jod has never seen — somebody
@@ -4374,6 +4399,21 @@ mod tests {
             }
             std::fs::remove_dir_all(&self.dir).ok();
         }
+    }
+
+    /// A console is opened *inside* something. `jod tui` typed in a repository
+    /// used to open a session whose every turn ran in `$HOME` — so the harness
+    /// started somewhere the user was not, and the picker, which has always
+    /// used the launched-in directory, disagreed with it.
+    #[test]
+    fn a_console_opens_where_it_was_launched_rather_than_at_home() {
+        let here = std::env::current_dir().expect("a working directory");
+        assert_eq!(console_cwd(None), here);
+        // ...and somebody who names a directory means it.
+        assert_eq!(
+            console_cwd(Some(PathBuf::from("/tmp/elsewhere"))),
+            PathBuf::from("/tmp/elsewhere")
+        );
     }
 
     /// The bug this pins: `jod root add` and `jod secret set` both wrote rows
