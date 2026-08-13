@@ -2112,7 +2112,6 @@ fn draw_which_key(f: &mut Frame, app: &App) {
 /// quietly. Help that lies about being complete is worse than no help, because
 /// you stop looking.
 fn draw_keymap(f: &mut Frame, app: &App) {
-    let mut lines: Vec<Line> = Vec::new();
     // Whichever layer actually has the keyboard, for the reason the overlay is
     // screen-first at all: help that omits what is in force sends you to the
     // source, and help that lists what is *not* in force teaches a key that
@@ -2122,18 +2121,23 @@ fn draw_keymap(f: &mut Frame, app: &App) {
     } else {
         keys::keymap(app.workspace)
     };
-    for (heading, bindings) in sections {
-        if !lines.is_empty() {
-            lines.push(Line::from(""));
+    let compose = |spaced: bool| {
+        let mut lines: Vec<Line> = Vec::new();
+        for (heading, bindings) in sections.clone() {
+            if spaced && !lines.is_empty() {
+                lines.push(Line::from(""));
+            }
+            lines.push(Line::from(Span::styled(heading, bold(USER))));
+            for binding in bindings {
+                lines.push(Line::from(vec![
+                    Span::styled(format!("  {:<12}", binding.key), fg(WARN)),
+                    Span::styled(binding.what.to_string(), fg(AGENT)),
+                ]));
+            }
         }
-        lines.push(Line::from(Span::styled(heading, bold(USER))));
-        for binding in bindings {
-            lines.push(Line::from(vec![
-                Span::styled(format!("  {:<12}", binding.key), fg(WARN)),
-                Span::styled(binding.what.to_string(), fg(AGENT)),
-            ]));
-        }
-    }
+        lines
+    };
+    let mut lines = compose(true);
     let width_of = |line: &Line| {
         line.spans
             .iter()
@@ -2147,8 +2151,16 @@ fn draw_keymap(f: &mut Frame, app: &App) {
     // a column and the next.
     let rows = screen.height.saturating_sub(2).max(1) as usize;
     let column = widest + 2;
-    let wanted = lines.len().div_ceil(rows);
     let affordable = ((screen.width.saturating_sub(2)) as usize / column.max(1)).max(1);
+    // The blank line between sections is the cheapest thing on this panel — a
+    // heading already separates them, and a separator teaches no key — so a map
+    // that does not fit drops the separators before it drops a binding. Same
+    // budget rule the keybar spends by, and for the same reason: what is
+    // dropped should be the thing you can learn nowhere else, last.
+    if lines.len() > affordable * rows {
+        lines = compose(false);
+    }
+    let wanted = lines.len().div_ceil(rows);
     let columns = wanted.min(affordable);
     let shown = (columns * rows).min(lines.len());
     let hidden = lines.len() - shown;

@@ -153,8 +153,24 @@ pub const GLOBAL: &[Key] = &[
     k("Alt-O", "show or hide tool output"),
     k("Alt-L", "clear the transcript"),
     k("Alt-↑↓", "scroll the transcript"),
-    k("Ctrl-A/Home", "start of the line"),
-    k("Ctrl-E/End", "end of the line"),
+    // One row for the pair, for the same reason `uU` above is one row.
+    //
+    // The `?` overlay promises to be complete at 100×30, and this branch and
+    // `main` each added chords to it — the rail's two, the picker, search,
+    // yank, and background shells — which together cost it one line more than
+    // it had. Something had to give, and a verb with its inverse gives up a
+    // row without giving up a verb: both keys still fire and both are still
+    // advertised.
+    //
+    // This pair rather than another because start-of-line and end-of-line are
+    // read as one idea by anyone who already knows them from a shell, and
+    // guessed as a pair by anyone who does not.
+    // All four spellings, because all four are dispatched. `press_of` splits on
+    // `/` and carries the modifier along, so this one row still advertises
+    // Ctrl-A, Ctrl-E, Ctrl-Home and Ctrl-End — and the drift net, which replays
+    // every printed label as a real keypress, is what caught the version of
+    // this that quietly dropped Home and End while still answering them.
+    k("Ctrl-A/E/Home/End", "start / end of the line"),
     k("Ctrl-U", "clear the input line"),
     k("Ctrl-W", "delete the previous word"),
     k("Ctrl-C/D", "quit — twice while agents run"),
