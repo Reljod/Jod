@@ -541,12 +541,31 @@ fn is_upper(c: u32) -> bool {
 /// usually gets there first anyway.
 const CACHE_TTL: Duration = Duration::from_secs(5);
 
-/// Directories the fallback walker never descends into.
+/// Directory names that are never worth offering — the one definition of
+/// noise in this program.
 ///
-/// ripgrep gets this right for free by reading `.gitignore`. The walker cannot,
-/// so it hard-codes the three that would otherwise dominate every list and
-/// bury the file you were looking for under a build tree.
-const SKIP: [&str; 3] = [".git", "node_modules", "target"];
+/// It used to be three copies: this list, the fallback walker's, and the
+/// `/add-dir` picker's. They disagreed, and the disagreement was visible —
+/// `/add-dir ~/tetris` offered `src`, while `@` in the same tree offered
+/// `dist` and `node_modules`. One list, three consumers: the ripgrep call
+/// below turns it into `--glob` exclusions, [`walk`] refuses to descend into
+/// it, and the picker imports it.
+///
+/// `.venv` is here as well as `venv` because the mention path passes
+/// `--hidden`; without it, `--hidden` is exactly what drags a Python
+/// environment into the list.
+///
+/// Not a security measure. A root can still *point* at any of these — this is
+/// only about what gets offered before you have typed anything.
+pub const NOISE: [&str; 7] = [
+    ".git",
+    "node_modules",
+    "target",
+    "dist",
+    "build",
+    "venv",
+    ".venv",
+];
 
 struct Cached {
     at: Instant,
@@ -618,15 +637,34 @@ fn enumerate(root: &Path) -> Result<Vec<String>> {
 /// Ask ripgrep for the files. `None` means it is not installed or could not
 /// run, and the caller should walk the tree itself.
 ///
-/// `--hidden` because a dotfile is a file people mention, and `!.git` because
-/// the object store is thousands of paths nobody has ever wanted to `@`.
-/// Everything else ripgrep leaves out — `target`, `node_modules` — it leaves
-/// out by reading `.gitignore`, which is the whole reason it is preferred over
-/// the walker below.
+/// `--hidden` because a dotfile is a file people mention. That flag is also
+/// what made [`NOISE`] mandatory here rather than merely nice.
+///
+/// The original reasoning was that ripgrep leaves `target` and `node_modules`
+/// out by reading `.gitignore`. True — **inside a git repository**. A plain
+/// directory has no `.gitignore`, so nothing filters at all, and what had been
+/// quietly holding the line was that pnpm keeps the real files in the *hidden*
+/// `node_modules/.pnpm/` and exposes packages as symlinks: ripgrep skips
+/// hidden directories and does not follow links. `--hidden` switches off
+/// exactly that accident. In a freshly scaffolded, not-yet-`git init`-ed
+/// project — the normal state of the thing you most want to `@` — the list
+/// came back 95% dependencies.
+///
+/// So the exclusions are stated rather than inherited: the guarantee no longer
+/// depends on the directory happening to be a repository. `.gitignore` is
+/// still read where there is one, which is still why ripgrep beats the walker.
 fn ripgrep_files(root: &Path) -> Option<Vec<String>> {
     let rg = crate::discovery::find_binary("JOD_RIPGREP_BIN", &["rg"], &[])?;
+    let mut args: Vec<String> = vec!["--files".into(), "--hidden".into()];
+    for name in NOISE {
+        // A glob with no `/` matches the basename at any depth, and one that
+        // matches a directory excludes everything under it — gitignore
+        // semantics, which is what the list already meant.
+        args.push("--glob".into());
+        args.push(format!("!{name}"));
+    }
     let out = std::process::Command::new(rg)
-        .args(["--files", "--hidden", "--glob", "!.git"])
+        .args(&args)
         .current_dir(root)
         .output()
         .ok()?;
@@ -670,7 +708,7 @@ fn with_ancestors(files: Vec<String>) -> Vec<String> {
 
 /// Walk the tree ourselves, for a machine with no ripgrep.
 ///
-/// Deliberately simple: it cannot read `.gitignore`, so it skips [`SKIP`] and
+/// Deliberately simple: it cannot read `.gitignore`, so it skips [`NOISE`] and
 /// nothing else, and a repository with a large ignored directory outside that
 /// list will list more than ripgrep would. That is a worse candidate list, not
 /// a broken one, and the alternative — reimplementing gitignore semantics — is
@@ -706,7 +744,7 @@ fn walk(root: &Path) -> Result<Vec<String>> {
             // is listed as an entry and never descended into. That is the
             // whole cycle protection, and it is enough.
             if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                if SKIP.contains(&name.as_str()) {
+                if NOISE.contains(&name.as_str()) {
                     continue;
                 }
                 stack.push((entry.path(), rel.clone()));
@@ -1025,6 +1063,82 @@ mod tests {
                 "{noise} should not be in the list: {found:?}"
             );
         }
+    }
+
+    /// A build directory is noise wherever it is found, and the walker used to
+    /// know about three of the seven names the picker knew about.
+    #[test]
+    fn the_walker_skips_every_name_the_shared_list_holds() {
+        let dir = scratch("walk-noise");
+        for name in NOISE {
+            write(&dir.join(name).join("buried.txt"), "");
+        }
+        write(&dir.join("src/main.rs"), "");
+
+        let found = walk(&dir).unwrap();
+        assert!(found.contains(&"src/main.rs".to_string()), "{found:?}");
+        for name in NOISE {
+            assert!(
+                !found.iter().any(|f| f.starts_with(name)),
+                "{name} survived the walk: {found:?}"
+            );
+        }
+    }
+
+    /// BUG-15, at the level the user meets it: a project scaffolded and
+    /// `npm install`-ed but not yet `git init`-ed.
+    ///
+    /// No `.git` and no `.gitignore`, so nothing filters by inheritance — the
+    /// state the old comment assumed away. The fixture mirrors what pnpm
+    /// actually lays down, real files under the *hidden* `node_modules/.pnpm/`,
+    /// because that hidden directory is what `--hidden` un-hid.
+    #[test]
+    fn a_project_that_is_not_a_git_repo_offers_its_source_not_its_dependencies() {
+        let dir = scratch("non-git");
+        assert!(!dir.join(".git").exists(), "the fixture must not be a repo");
+        write(&dir.join("src/engine.js"), "export const board = [];");
+        write(&dir.join("index.html"), "<html>");
+        write(&dir.join("package.json"), "{}");
+        write(&dir.join("dist/assets/index-CGus7geV.js"), "");
+        for n in 0..40 {
+            write(
+                &dir.join(format!(
+                    "node_modules/.pnpm/pkg{n}@1.0.0/node_modules/pkg{n}/index.js"
+                )),
+                "",
+            );
+        }
+
+        let found = candidates(&dir).unwrap();
+        assert!(
+            found.contains(&"src/engine.js".to_string()),
+            "the source is not offered at all: {found:?}"
+        );
+        for noise in ["node_modules", "dist"] {
+            assert!(
+                !found.iter().any(|f| f.starts_with(noise)),
+                "{noise} floods the list: {} of {} paths",
+                found.iter().filter(|f| f.starts_with(noise)).count(),
+                found.len()
+            );
+        }
+    }
+
+    /// What `--hidden` was added for, and what removing it would have cost.
+    #[test]
+    fn a_dotfile_is_still_offered_in_a_directory_that_is_not_a_repo() {
+        let dir = scratch("non-git-dotfiles");
+        write(&dir.join(".env"), "KEY=1");
+        write(&dir.join(".github/workflows/ci.yml"), "on: push");
+        write(&dir.join("node_modules/.pnpm/left-pad@1/index.js"), "");
+
+        let found = candidates(&dir).unwrap();
+        assert!(found.contains(&".env".to_string()), "{found:?}");
+        assert!(
+            found.contains(&".github/workflows/ci.yml".to_string()),
+            "{found:?}"
+        );
+        assert!(!found.iter().any(|f| f.starts_with("node_modules")));
     }
 
     #[test]

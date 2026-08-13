@@ -57,13 +57,6 @@ pub const MAX_DIRS: usize = 20_000;
 /// per-directory judgement call.
 pub const MAX_DEPTH: usize = 6;
 
-/// Directory names never worth offering as a root.
-///
-/// Not a security measure — [`skip`] is about noise. A picker whose first
-/// twenty matches for `src` are all inside `target/debug/build` is a picker
-/// that makes you type the whole path anyway.
-const NOISE: [&str; 6] = ["node_modules", "target", ".git", "dist", "build", "venv"];
-
 /// The full-screen picker, while it is up.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Picker {
@@ -254,11 +247,17 @@ pub fn directories(base: &Path) -> (Vec<String>, bool) {
 
 /// Whether a directory is noise rather than somewhere to point a root.
 ///
-/// Hidden directories go too. `.git` is the obvious one, but `.cache`,
-/// `.venv` and the rest are the same argument: a root is a place you work,
-/// and none of these are.
+/// The list is [`rank::NOISE`], shared with the `@` path so the two pickers
+/// cannot disagree about what noise is — they did, and it showed:
+/// `/add-dir ~/tetris` offered `src` while `@` in the same tree offered
+/// `node_modules`.
+///
+/// The *hidden* rule stays local, because it is this picker's own judgement
+/// rather than a fact about noise: a root is a place you work, and `.cache` is
+/// not one. `@` deliberately takes the opposite view — a dotfile is a file
+/// people mention.
 fn skip(name: &str) -> bool {
-    name.starts_with('.') || NOISE.contains(&name)
+    name.starts_with('.') || rank::NOISE.contains(&name)
 }
 
 #[cfg(test)]

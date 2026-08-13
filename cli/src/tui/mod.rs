@@ -35,6 +35,7 @@ mod picker;
 mod rail;
 mod secret;
 mod sessions;
+mod text;
 mod todo;
 /// Public for `examples/screens.rs`, which compiles this module in by path and
 /// renders the traffic log off a real database — the same reason [`data`] and

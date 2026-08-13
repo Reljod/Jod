@@ -35,6 +35,7 @@ use super::mention;
 use super::picker;
 use super::rail;
 use super::secret;
+use super::text;
 use super::traffic;
 use super::workspace::Workspace;
 use jod_core::cards::{Card, CardKind, Delivery, Importance, Sort, Status};
@@ -721,6 +722,12 @@ fn draw_mention(f: &mut Frame, app: &App, input: Rect) {
         return;
     }
 
+    let w = 56u16.min(input.width);
+    // The borders eat a column either side, and what is left is what a row has
+    // to fit into. Known before the rows are built, because each row is fitted
+    // to it rather than clipped by the widget afterwards.
+    let inner = w.saturating_sub(2) as usize;
+
     // Zero roots is a message, not an empty list: an empty list reads as "no
     // matches" and invites another keystroke, and there is no keystroke that
     // would help.
@@ -739,14 +746,13 @@ fn draw_mention(f: &mut Frame, app: &App, input: Rect) {
             .rows
             .iter()
             .enumerate()
-            .map(|(at, row)| ListItem::new(mention_line(row, at == popup.selected)))
+            .map(|(at, row)| ListItem::new(mention_line(row, at == popup.selected, inner)))
             .collect()
     };
 
     let h = ((rows.len() + 2) as u16)
         .min(input.y.saturating_sub(1))
         .max(3);
-    let w = 56u16.min(input.width);
     // Anchored on the `@` itself, then pulled back inside the box: a popup that
     // hangs off the right edge of the terminal is drawn over nothing.
     let col = app.input[..popup.at.min(app.input.len())].chars().count() as u16;
@@ -776,39 +782,66 @@ fn draw_mention(f: &mut Frame, app: &App, input: Rect) {
     );
 }
 
-/// One offered path, with the characters the query matched picked out.
+/// One offered path, with the characters the query matched picked out, fitted
+/// into `width` columns.
 ///
 /// The highlight is the whole reason [`jod_core::rank::Match`] carries
 /// positions rather than only a score: a fuzzy list you cannot read the match
 /// in is a list you stop trusting.
-fn mention_line(row: &mention::Row, here: bool) -> Line<'static> {
+///
+/// `width` is the whole row, marker and root label included. Left to the
+/// widget, the row was hard-clipped on the right — the end of a path is the
+/// filename, so six different files came out as six identical rows. So it is
+/// fitted here instead, by [`text::elide_left`], which drops the shared head
+/// and keeps the part that tells them apart.
+fn mention_line(row: &mention::Row, here: bool, width: usize) -> Line<'static> {
     let (mark, base) = if here {
         ("▸ ", fg(AGENT))
     } else {
         ("  ", fg(MUTED))
     };
     let mut spans = vec![Span::styled(mark.to_string(), bold(USER))];
+    let mut spent = mark.chars().count();
     if let Some(label) = &row.label {
-        spans.push(Span::styled(format!("{label}/"), fg(MUTED)));
+        let qualified = format!("{label}/");
+        spent += qualified.chars().count();
+        spans.push(Span::styled(qualified, fg(MUTED)));
     }
-    // Walked by byte offset, which is what `Match::positions` holds, and sliced
-    // directly. The offsets are ascending and always land on a character
-    // boundary — `rank` takes a byte fast path only for an ASCII query and a
-    // char path otherwise, precisely so this loop does not have to check. A
-    // guard here would be a second, weaker copy of a guarantee core already
-    // makes, and it would turn a bug in the matcher into a row that silently
-    // lost its highlight instead of a panic naming the offset.
+    // The label is not elided: it says which repository the row came from, and
+    // a row that cannot say that is worse than a short one. It is short by
+    // construction anyway — a root's own name.
+    let fitted = text::elide_left(&row.path, width.saturating_sub(spent));
+    if fitted.is_elided() {
+        spans.push(Span::styled(text::ELLIPSIS.to_string(), fg(MUTED)));
+    }
+    // Byte offsets from `Match::positions`, moved into the fitted string —
+    // dropping bytes off the front moved every one of them, and a position
+    // that did not survive is dropped rather than guessed at.
+    //
+    // The offsets are ascending and always land on a character boundary —
+    // `rank` takes a byte fast path only for an ASCII query and a char path
+    // otherwise, precisely so this loop does not have to check. A guard here
+    // would be a second, weaker copy of a guarantee core already makes, and it
+    // would turn a bug in the matcher into a row that silently lost its
+    // highlight instead of a panic naming the offset.
+    let shown = &fitted.text[text::ELLIPSIS.len() * usize::from(fitted.is_elided())..];
     let mut at = 0usize;
     for hit in row.positions.iter().copied() {
+        let Some(hit) = fitted
+            .shift(hit)
+            .map(|at| at - text::ELLIPSIS.len() * usize::from(fitted.is_elided()))
+        else {
+            continue;
+        };
         if hit > at {
-            spans.push(Span::styled(row.path[at..hit].to_string(), base));
+            spans.push(Span::styled(shown[at..hit].to_string(), base));
         }
-        let end = hit + row.path[hit..].chars().next().map_or(0, char::len_utf8);
-        spans.push(Span::styled(row.path[hit..end].to_string(), bold(USER)));
+        let end = hit + shown[hit..].chars().next().map_or(0, char::len_utf8);
+        spans.push(Span::styled(shown[hit..end].to_string(), bold(USER)));
         at = end;
     }
-    if at < row.path.len() {
-        spans.push(Span::styled(row.path[at..].to_string(), base));
+    if at < shown.len() {
+        spans.push(Span::styled(shown[at..].to_string(), base));
     }
     Line::from(spans)
 }
@@ -2320,7 +2353,11 @@ fn draw_picker(f: &mut Frame, p: &picker::Picker) {
         )));
     }
     for (at, row) in p.rows.iter().enumerate() {
-        lines.push(mention_line(row, at == p.selected));
+        lines.push(mention_line(
+            row,
+            at == p.selected,
+            width.saturating_sub(2) as usize,
+        ));
     }
     // A list that is quietly partial is one you trust and should not.
     if p.truncated {
@@ -9220,7 +9257,7 @@ mod tests {
             path: "core/src/rank.rs".into(),
             positions: vec![9, 10, 11, 12],
         };
-        let line = mention_line(&row, true);
+        let line = mention_line(&row, true, 56);
         let lit: String = line
             .spans
             .iter()
@@ -9243,7 +9280,7 @@ mod tests {
             path: "src/main.rs".into(),
             positions: vec![],
         };
-        let whole: String = mention_line(&row, false)
+        let whole: String = mention_line(&row, false, 56)
             .spans
             .iter()
             .map(|s| s.content.to_string())
@@ -9386,5 +9423,66 @@ mod tests {
             screen.contains("projects"),
             "the projects key drew nothing at all:\n{screen}"
         );
+    }
+
+    /// BUG-16: rows longer than the popup used to be clipped on the right,
+    /// which is the end that tells one path from another. Six different files
+    /// rendered as six identical lines, and choosing between them was
+    /// impossible.
+    #[test]
+    fn two_long_paths_that_differ_only_at_the_end_render_differently() {
+        let stem = "tetris/node_modules/.pnpm/tinyglobby@0.2.17/dist";
+        let mut a = app();
+        a.transcript.push(Entry::Notice("hello".into()));
+        a.roots = vec![jod_core::roots::Root {
+            id: 1,
+            conversation_id: "c".into(),
+            path: std::path::PathBuf::from("/home/reljod/tetris"),
+            writable: false,
+            position: 0,
+            origin: jod_core::roots::Origin::Human,
+            added_at_ms: 0,
+        }];
+        a.candidates = vec![std::sync::Arc::new(vec![
+            format!("{stem}/index.js"),
+            format!("{stem}/index.d.ts"),
+        ])];
+        a.input = "@index".into();
+        a.cursor = a.input.len();
+        a.open_mention(0);
+        a.sync_mention();
+        let frame = rendered(&a, 120, 30);
+
+        // Both filenames are on screen, which is the whole of the fix: the
+        // shared head is what gets dropped, not the part that distinguishes.
+        assert!(frame.contains("index.d.ts"), "{frame}");
+        assert!(frame.contains("index.js"), "{frame}");
+        // And the two rows are not the same line of text.
+        let rows: Vec<&str> = frame.lines().filter(|l| l.contains("tinyglobby")).collect();
+        assert_eq!(rows.len(), 2, "expected both rows on screen: {frame}");
+        assert_ne!(rows[0], rows[1], "two files, one rendering:\n{frame}");
+    }
+
+    /// The elision has to move the highlight with it, or a row says it matched
+    /// characters it no longer shows.
+    #[test]
+    fn a_clipped_row_still_bolds_the_characters_it_matched() {
+        let row = crate::tui::mention::Row {
+            label: None,
+            // `rank` at bytes 43..47 of a path far too long for the column.
+            path: "a/very/long/prefix/nobody/needs/to/read/at/rank.rs".into(),
+            positions: vec![43, 44, 45, 46],
+        };
+        let line = mention_line(&row, true, 24);
+        let lit: String = line
+            .spans
+            .iter()
+            .filter(|s| s.style.add_modifier.contains(Modifier::BOLD))
+            .filter(|s| s.content.trim() != "▸")
+            .map(|s| s.content.to_string())
+            .collect();
+        assert_eq!(lit, "rank", "{line:?}");
+        let whole: String = line.spans.iter().map(|s| s.content.to_string()).collect();
+        assert!(whole.ends_with("rank.rs"), "{whole}");
     }
 }

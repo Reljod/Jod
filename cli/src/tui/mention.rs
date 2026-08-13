@@ -303,6 +303,98 @@ mod tests {
         assert_eq!(popup.acceptable().map(|r| r.path.as_str()), Some("alpha.rs"));
     }
 
+    // ---- what the popup offers on a real tree -------------------------
+
+    /// A scratch directory that is emphatically **not** a git repository —
+    /// no `.git`, no `.gitignore`, nothing to inherit ignore rules from.
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("jod-mention-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        jod_core::roots::normalise(&dir)
+    }
+
+    fn write(path: &std::path::Path, text: &str) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+
+    fn rooted_at(dir: &std::path::Path) -> Root {
+        Root {
+            id: 0,
+            conversation_id: "c".into(),
+            path: dir.to_path_buf(),
+            writable: false,
+            position: 0,
+            origin: Origin::Human,
+            added_at_ms: 0,
+        }
+    }
+
+    /// BUG-15 as the user meets it: `/add-dir` a freshly scaffolded project —
+    /// dependencies installed, never `git init`-ed — then press `@` and read
+    /// the eight rows.
+    ///
+    /// The assertion is on those eight rows and nothing further down, because
+    /// eight rows is the whole popup: a source file ranked ninth is a source
+    /// file you cannot see.
+    #[test]
+    fn opening_the_popup_in_a_non_git_project_shows_source_not_dependencies() {
+        let dir = scratch("non-git-popup");
+        write(&dir.join("src/engine.js"), "export const board = [];");
+        write(&dir.join("src/render.js"), "");
+        write(&dir.join("index.html"), "<html>");
+        write(&dir.join("package.json"), "{}");
+        write(&dir.join("dist/assets/index-CGus7geV.js"), "");
+        write(&dir.join("dist/index.html"), "");
+        // pnpm keeps the real files in the hidden store and links the rest.
+        for n in 0..40 {
+            write(
+                &dir.join(format!(
+                    "node_modules/.pnpm/pkg{n}@1.0.0/node_modules/pkg{n}/index.js"
+                )),
+                "",
+            );
+        }
+
+        jod_core::rank::clear_candidate_cache();
+        let paths = Arc::new(jod_core::rank::candidates(&dir).unwrap());
+        let mut popup = Mention::new(0);
+        popup.refresh(&[rooted_at(&dir)], &[paths]);
+
+        let shown: Vec<&str> = popup.rows.iter().map(|r| r.path.as_str()).collect();
+        assert!(
+            shown.iter().any(|p| *p == "src/engine.js"),
+            "no source file in the eight rows: {shown:?}"
+        );
+        let noise = shown
+            .iter()
+            .filter(|p| p.starts_with("node_modules") || p.starts_with("dist"))
+            .count();
+        assert_eq!(noise, 0, "the popup is showing build output: {shown:?}");
+    }
+
+    /// And the flag that caused BUG-15 keeps what it was added for.
+    #[test]
+    fn a_dotfile_is_still_mentionable() {
+        let dir = scratch("dotfiles-popup");
+        write(&dir.join(".env"), "KEY=1");
+        write(&dir.join("node_modules/.pnpm/left-pad@1/index.js"), "");
+
+        jod_core::rank::clear_candidate_cache();
+        let paths = Arc::new(jod_core::rank::candidates(&dir).unwrap());
+        let mut popup = Mention::new(0);
+        popup.query = "env".into();
+        popup.refresh(&[rooted_at(&dir)], &[paths]);
+
+        assert_eq!(
+            popup.acceptable().map(|r| r.path.as_str()),
+            Some(".env"),
+            "{:?}",
+            popup.rows
+        );
+    }
+
     /// Accepting replaces the `@` and everything typed after it — no more, so
     /// the words either side of the mention are untouched.
     #[test]
