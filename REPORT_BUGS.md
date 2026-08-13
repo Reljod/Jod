@@ -24,6 +24,16 @@ see BUG-13.
 > [BUG-14](#bug-14): a delegated run wrote its output into **`$HOME`**, outside
 > every declared root, and Jod recorded it as `✓ done`.
 
+> **Correction, 2026-08-13 — eleven line numbers in this file were wrong.**
+> Rebased onto `f3aaf45` and re-checked every `file:line` citation
+> mechanically. Eleven pointed a consistent ~18–22 lines too early, because I
+> had read them in the **main checkout** (still parked on the pre-#75 commit)
+> rather than in this worktree. The *findings* were unaffected — every one was
+> reproduced against the running binary, and the quoted code is verbatim — but
+> anyone opening `ui.rs:2489` would have landed on `Block::default()` and
+> wondered what I was talking about. All corrected; every citation in this file
+> now resolves in the rebased tree. The claims themselves are unchanged.
+
 ---
 
 ## Severity summary
@@ -430,7 +440,7 @@ format!("  in {}", p.base.display()),
 
 so ratatui clips it at the panel edge.
 
-**Why the test suite missed it.** `ui.rs:8964`
+**Why the test suite missed it.** `ui.rs:8979`
 `the_full_screen_picker_names_the_tree_it_is_walking` asserts the header is
 present — using the path `/home/reljod/notes` (18 chars) at width 120. Any
 realistic path (worktrees, monorepos, nested projects) overflows. The test
@@ -583,7 +593,7 @@ but the projects catalog only renders inside the side panel, which is gated on
 `app.panel` — opened by `Shift-Tab` (BUG-7), and `false` at startup. So the key
 flips a flag that draws nothing, and says nothing about why.
 
-**Why the test suite missed it.** `cli/src/tui/mod.rs:6396`
+**Why the test suite missed it.** `cli/src/tui/mod.rs:6393`
 `the_catalog_is_collapsed_without_closing_the_panel` opens with:
 
 ```rust
@@ -658,15 +668,17 @@ still present.
 `End` and `start` are glued together. Every other row is aligned; this one
 reads as a typo in the program.
 
-**Root cause.** `cli/src/tui/ui.rs:2409` pads to a *minimum* of 12 and never
+**Root cause (in the pre-#75 tree; both sites are gone now).** `ui.rs` padded
+to a *minimum* of 12 and never
 truncates:
 
 ```rust
 Span::styled(format!("  {:<12}", binding.key), fg(WARN)),
 ```
 
-The label at `cli/src/tui/keys.rs:179` is `"Ctrl-A/E/Home/End"` — 17 chars, so
-it overruns the column and eats the gap. `keys.rs:678` states the design
+The label — still present, now at `cli/src/tui/keys.rs:224` — is
+`"Ctrl-A/E/Home/End"`, 17 chars, so
+it overruns the column and eats the gap. `keys.rs:723` states the design
 constraint explicitly ("the overlay has twelve columns for a key"); this label
 is the one that breaks it.
 
@@ -828,7 +840,7 @@ database gets it right — `sqlite3 ~/.jod/jod.db` records the run as `killed` �
 so this is purely the transcript rendering both the interrupt entry and a
 generic failure entry when the harness process ends.
 
-The comment at `cli/src/tui/mod.rs:4134` states the intent exactly, and it is
+The comment at `cli/src/tui/mod.rs:4156` states the intent exactly, and it is
 the right intent — *"A partial turn silently dropped would leave the transcript
 claiming the agent simply stopped talking, and the next reader cannot tell an
 interruption from a crash."* The interrupt entry does that job. The trailing
@@ -918,7 +930,7 @@ Hard-clipped mid-path, no ellipsis. **Both** informative parts are gone: the
 filename (`NOTES.md` — the whole point of a path header) and the `+6 -0` counts
 that were supposed to follow it.
 
-**Root cause.** `cli/src/tui/ui.rs:4619`:
+**Root cause.** `cli/src/tui/ui.rs:4637`:
 
 ```rust
 let room = (width as usize).saturating_sub(6);
@@ -971,7 +983,7 @@ The warning reads **"this cannot be undo"**. The instructions read
 **"y confirms · anythi"** — the user is not told what cancels, and is left
 looking at a half-word on a dialog that destroys data.
 
-**Root cause.** `cli/src/tui/ui.rs:2489` sizes the panel from the question
+**Root cause.** `cli/src/tui/ui.rs:2507` sizes the panel from the question
 alone, ignoring its own border titles:
 
 ```rust
@@ -993,7 +1005,7 @@ There is plenty of room — this is a 200-column terminal. Nothing is competing
 for the space.
 
 **Why the test suite missed it — the fourth instance of this pattern, and the
-subtlest.** `ui.rs:6938`:
+subtlest.** `ui.rs:6953`:
 
 ```rust
 a.overlay = Overlay::Confirm { verb: "delete".into(), what: "pr-opened".into() };
@@ -1050,7 +1062,7 @@ killed|5          <-- and zero rows with status 'failed'
 The menu's dashboard line inherits the error: `15 runs · 0 running · 2 failed`,
 counting two failures that do not exist in the record.
 
-**Root cause.** `cli/src/tui/app.rs:1655` counts on the *live* agent list:
+**Root cause.** `cli/src/tui/app.rs:1656` counts on the *live* agent list:
 
 ```rust
 let failed = self.agents.iter().filter(|a| a.status == "failed").count();
@@ -1222,7 +1234,7 @@ text made it repaint correctly.
 
 I tried to pin it on resize handling — and there is a real smell there: there
 is **no `Event::Resize` arm anywhere in the TUI** (`grep -rn "Event::Resize"
-cli/src/tui/` → zero hits), only a catch-all at `cli/src/tui/mod.rs:616`
+cli/src/tui/` → zero hits), only a catch-all at `cli/src/tui/mod.rs:617`
 commented *"A resize just needs a redraw, which the next loop does."*
 
 But I could not reproduce it: resize alone repaints fine (11 non-blank lines
@@ -1265,7 +1277,7 @@ Worth recording, since the point of a hand-drive is to separate the two:
 - `jod tui` starts clean and fast; the splash renders correctly at 200×50.
 - `?` and `Ctrl-G` overlays open, render and dismiss correctly.
 - `/` completion filters live and anchors the input to the bottom so the
-  ~43-row list is not cut in half — a deliberate touch (`ui.rs:1192`) that
+  ~43-row list is not cut in half — a deliberate touch (`ui.rs:1196`) that
   works.
 - `/add-dir <path>` **correctly honours its argument** and stores the root
   (verified against `jod root ls`), despite BUG-3 making it look otherwise.
