@@ -47,7 +47,7 @@ by me. **PR open** = CI-green draft awaiting merge. **open** = nobody on it.
 | [BUG-1](#bug-1) | **Critical** | **merged** #82 | rendering | A fresh session hid *all* notice-only output — most slash commands rendered nothing |
 | [BUG-2](#bug-2) | **High** | **merged** #82 | delegation | `Ctrl-B` delegated with almost no confirmation; it looked like nothing happened |
 | [BUG-3](#bug-3) | **High** | PR open #86 | directory clarity | The directory picker's header is truncated, so you cannot tell which tree you are in |
-| [BUG-4](#bug-4) | **High** | PR open #78 | directory clarity | The working directory appears nowhere in the chat UI |
+| [BUG-4](#bug-4) | **High** | **merged** #78 | directory clarity | The working directory appeared nowhere in the chat UI |
 | [BUG-5](#bug-5) | **High** | PR open #85 | projects | A project cannot be created or cited from the TUI at all |
 | [BUG-6](#bug-6) | **High** | **merged** #81 | discoverability | The projects key was a silent no-op unless an undiscoverable panel was already open |
 | [BUG-7](#bug-7) | Medium | **merged** #81 | discoverability | `Shift-Tab` — the only way to reach projects/sessions/context — was undocumented |
@@ -62,8 +62,8 @@ by me. **PR open** = CI-green draft awaiting merge. **open** = nobody on it.
 | [BUG-19](#bug-19) | Medium | with an agent | fleet | An interrupted run reads `✗ failed` in the TUI but `killed` in `jod ls` and the database |
 | [BUG-20](#bug-20) | **High** | PR open #86 | destructive UI | The "cannot be undone" dialog clips its own warning and hides what cancels |
 | [BUG-21](#bug-21) | Medium | PR open #86 | diffs | The diff header's untruncated path pushes the promised `+N -M` counts off screen |
-| [BUG-15](#bug-15) | **High** | PR open #83 | mentions | `@` in a non-git directory is ~95% `node_modules` noise; source is invisible |
-| [BUG-16](#bug-16) | Medium | PR open #83 | mentions | `@` clips paths from the right, so six different files render identically |
+| [BUG-15](#bug-15) | **High** | #83 rebased, **needs a human** | mentions | `@` in a non-git directory is ~95% `node_modules` noise; source is invisible |
+| [BUG-16](#bug-16) | Medium | #83 rebased, **needs a human** | mentions | `@` clips paths from the right, so six different files render identically |
 
 **Nothing is unclaimed except [BUG-10](#bug-10) and [BUG-12](#bug-12).** Check
 this column before starting; five findings have merged since the body text
@@ -201,13 +201,52 @@ non-fresh session: the message was always good, it was only ever invisible.
 
 | PR | Findings | Note |
 |---|---|---|
-| #78 | [BUG-4](#bug-4) | status-bar cwd |
-| #83 | [BUG-15](#bug-15), [BUG-16](#bug-16) | `@` noise and right-clipping |
+| #83 | [BUG-15](#bug-15), [BUG-16](#bug-16) | **conflict resolved, rebased, CI green — blocked on human review (size)** |
 | #84 | [BUG-14](#bug-14) *(backend half)* | the card for a run that wrote outside every root |
 | #85 | [BUG-5](#bug-5) | `/project ls\|add` |
 | #86 | [BUG-3](#bug-3), [BUG-11](#bug-11), [BUG-20](#bug-20), [BUG-21](#bug-21) | Pattern B — four sites, one shared helper |
 
 **#86 is stacked on #83's branch, so #83 must merge first.**
+
+#### #83 — conflict fixed; do not retry the merge, it needs a person
+
+The conflict is **resolved and pushed**. It was in `cli/src/tui/ui.rs`, where #81
+and #83 had each appended tests to the end of the same test module. Both sides
+were kept — they are independent — and all four tests pass:
+
+```
+test tui::ui::tests::a_clipped_row_still_bolds_the_characters_it_matched ... ok
+test tui::ui::tests::two_long_paths_that_differ_only_at_the_end_render_differently ... ok
+test tui::ui::tests::the_projects_key_shows_the_catalog_from_a_cold_start ... ok
+test tui::ui::tests::the_keymap_names_the_key_that_opens_the_panel ... ok
+```
+
+Full suite after the final rebase: **973 passed, 0 failed.** Both CI checks
+(`test`, `triage`) pass.
+
+**It still will not merge, and that is correct.** `merge_pr.sh 83 --ready`
+refuses:
+
+```
+REFUSED to merge PR #83:
+ - triage says human-review — run pr_triage.sh for the reasons
+```
+
+and the reason is **size**, not a false positive:
+
+> **size** — 590 code lines changed, over the 400-line limit
+> *A human must read this before it merges … an agent must not merge it, and
+> clearing them is a review, not a re-run.*
+
+So this is a `human-review` verdict on an honest measurement — six code files,
+590 lines. Per the charter this is a successful ending, not a failure: nothing
+here is bypassable by an agent, and re-running the gate will not change it.
+**Do not rebase-and-retry in the hope it clears.** It needs Reljod, or a split
+into smaller PRs.
+
+One caveat for whoever picks this up: `main` moved three times during this work
+(#78, then two more), so the branch goes stale quickly. Rebase immediately
+before the human merges rather than in advance.
 
 #86 is the shape this report was arguing for: four width bugs taken as one
 sweep through one helper, not four agents in one 9,000-line file. See
