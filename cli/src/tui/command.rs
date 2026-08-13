@@ -608,14 +608,41 @@ const KINDS: [&str; 5] = ["schedule", "goal", "hook", "memory", "task"];
 pub struct Completion {
     /// The whole line to put in the input if this is chosen.
     pub line: String,
+    /// How the row reads in the palette.
+    ///
+    /// Separate from [`Completion::line`] because the two are not the same
+    /// question. What gets inserted is only what can be typed for you; what
+    /// gets *shown* has to say what the command does. Collapsing them listed
+    /// `/main` twice — "go into the main chat" and "send it one instruction" —
+    /// with nothing on either row to say that the second one takes an
+    /// argument and the first one does not.
+    pub label: String,
     /// What is shown next to it.
     pub hint: String,
 }
 
 impl Completion {
+    /// A row that reads as the text it inserts. The trailing space an argument
+    /// leaves behind is not part of the reading.
     fn new(line: impl Into<String>, hint: impl Into<String>) -> Completion {
+        let line = line.into();
+        Completion {
+            label: line.trim_end().to_string(),
+            line,
+            hint: hint.into(),
+        }
+    }
+
+    /// A row that reads as its whole usage — `/main <instruction>` — while
+    /// inserting only the part that can be typed for you.
+    fn usage(
+        line: impl Into<String>,
+        label: impl Into<String>,
+        hint: impl Into<String>,
+    ) -> Completion {
         Completion {
             line: line.into(),
+            label: label.into(),
             hint: hint.into(),
         }
     }
@@ -723,7 +750,12 @@ pub fn completions(input: &str, app: &crate::tui::App) -> Vec<Completion> {
                 } else {
                     name.to_string()
                 };
-                Completion::new(line, *hint)
+                // Shown as the help table writes it, argument and all. Two
+                // commands can share a name and differ only in what follows
+                // it — `/main` and `/main <instruction>` do the opposite
+                // things — and a palette that prints the name alone makes
+                // them one row typed twice.
+                Completion::usage(line, *usage, *hint)
             })
             .collect();
         offered.extend(repo_commands(&typed, app));

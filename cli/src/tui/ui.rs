@@ -111,7 +111,7 @@ pub fn draw(f: &mut Frame, app: &App) -> usize {
     let height = if app.workspace == Workspace::Chat {
         let column = measure(body);
         if fresh(app) {
-            let (height, box_) = draw_splash(f, app, column);
+            let (height, box_) = draw_splash(f, app, column, body);
             input = box_;
             height
         } else {
@@ -124,9 +124,9 @@ pub fn draw(f: &mut Frame, app: &App) -> usize {
                 .direction(Direction::Vertical)
                 .constraints([Constraint::Min(3), Constraint::Length(3)])
                 .split(column);
-            input = parts[1];
+            input = composer(parts[1], body);
             let height = draw_transcript(f, app, parts[0]);
-            draw_input(f, app, parts[1]);
+            draw_input(f, app, input);
             height
         }
     } else {
@@ -182,6 +182,26 @@ fn measure(area: Rect) -> Rect {
         x: area.x + (area.width - MEASURE) / 2,
         width: MEASURE,
         ..area
+    }
+}
+
+/// The composer's rect: the chat column's rows, at the body's full width.
+///
+/// `MEASURE` is a cap on *reading*, and the reason it exists — the eye loses
+/// its place coming back to the left edge — is a fact about prose you read
+/// back, not about the one line you are composing. Applied to the input box it
+/// does the opposite of helping: the field scrolls horizontally, so every
+/// column withheld is a column of your own prompt you cannot see. On a
+/// 260-column terminal the box was 72 wide and a 200-character delegation
+/// prompt showed about 68 characters of itself.
+///
+/// It stays concentric with the transcript — both are centred in `body` — so a
+/// wide composer under a centred column still reads as one screen.
+fn composer(rows: Rect, body: Rect) -> Rect {
+    Rect {
+        x: body.x,
+        width: body.width,
+        ..rows
     }
 }
 
@@ -1241,12 +1261,13 @@ fn fresh(app: &App) -> bool {
 
 /// The new-session screen: the wordmark, large and centred, with the input box
 /// under it. Returns the viewport height and where the input box ended up.
-fn draw_splash(f: &mut Frame, app: &App, area: Rect) -> (usize, Rect) {
+fn draw_splash(f: &mut Frame, app: &App, area: Rect, body: Rect) -> (usize, Rect) {
     // Too short for a wordmark and a box both: the input wins, because a screen
     // with no way to type into it is not a screen.
     if area.height < 6 {
-        draw_input(f, app, area);
-        return (1, area);
+        let box_ = composer(area, body);
+        draw_input(f, app, box_);
+        return (1, box_);
     }
 
     // The completion popup grows *upwards* out of the input box and the command
@@ -1339,9 +1360,12 @@ fn draw_splash(f: &mut Frame, app: &App, area: Rect) -> (usize, Rect) {
     };
     f.render_widget(Paragraph::new(head).alignment(Alignment::Center), top);
 
-    // A full-width input box under a centred wordmark reads as two unrelated
-    // screens, so the box is centred on the same axis.
-    let box_ = narrow(box_, 72);
+    // Centred on the wordmark's axis, so the two read as one screen — but at
+    // the body's width rather than a fixed 72 columns. This is the screen a
+    // fresh session starts on and therefore the one the first delegation
+    // prompt is typed into, and 72 columns is where the report found a
+    // 200-character prompt showing 68 characters of itself.
+    let box_ = composer(box_, body);
     draw_input(f, app, box_);
     (top.height.max(1) as usize, box_)
 }
@@ -1514,16 +1538,6 @@ fn fit_path(path: &str, room: usize) -> String {
         return "…".repeat(room);
     }
     format!("…{}", path.chars().skip(len - (room - 1)).collect::<String>())
-}
-
-/// At most `width` columns, centred in `area`.
-fn narrow(area: Rect, width: u16) -> Rect {
-    let width = width.min(area.width);
-    Rect {
-        x: area.x + (area.width - width) / 2,
-        width,
-        ..area
-    }
 }
 
 // ---- the right-hand panel ----------------------------------------------
@@ -2121,7 +2135,7 @@ fn draw_completions(f: &mut Frame, app: &App, input: Rect) {
     // the widest of each part rather than the widest whole row.
     let widest_name = suggestions
         .iter()
-        .map(|c| c.line.trim_end().chars().count())
+        .map(|c| c.label.chars().count())
         .max()
         .unwrap_or(0);
     let widest_hint = suggestions
@@ -2171,7 +2185,10 @@ fn draw_completions(f: &mut Frame, app: &App, input: Rect) {
             } else {
                 ("  ", Style::default())
             };
-            let name = c.line.trim_end();
+            // The label, not the line: the row has to read as the command it
+            // stands for, which for `/main <instruction>` is not what
+            // accepting it types.
+            let name = &c.label;
             let pad = " ".repeat(widest_name.saturating_sub(name.chars().count()) + 2);
             ListItem::new(Line::from(vec![
                 Span::styled(mark, style),
@@ -5506,6 +5523,43 @@ mod tests {
         assert!(screen.contains(&longest), "{longest:?} whole:\n{screen}");
     }
 
+    /// BUG-10: `/main` was listed twice, with opposite behaviours — go into the
+    /// main chat, and send it one instruction from here — and nothing on either
+    /// row said which was which. The difference is the argument, so the row has
+    /// to show the argument.
+    ///
+    /// Pinned to the two rows rather than to the screen: `/main` is also in the
+    /// input box being typed, and a screen-wide `contains` would pass on a
+    /// palette that still shows the same token twice.
+    #[test]
+    fn the_two_main_rows_say_which_one_takes_an_instruction() {
+        let mut a = app();
+        a.input = "/main".into();
+        let screen = rendered(&a, 120, popup_height());
+        let row = |hint: &str| {
+            screen
+                .lines()
+                .find(|line| line.contains(hint))
+                .unwrap_or_else(|| panic!("expected a row hinting {hint:?}:\n{screen}"))
+        };
+        // The label is what is left of a row once its hint and the chrome come
+        // off — the part a user reads to choose between the two.
+        let label = |hint: &str| {
+            let line = row(hint);
+            line[..line.find(hint).unwrap()]
+                .trim_matches(|c: char| c.is_whitespace() || c == '│' || c == '▸')
+                .to_string()
+        };
+        let go = label("go into the main chat");
+        let send = label("send it one instruction");
+        assert_ne!(
+            go, send,
+            "the two /main rows must not read alike:\n{screen}"
+        );
+        assert_eq!(go, "/main", "{screen}");
+        assert_eq!(send, "/main <instruction>", "{screen}");
+    }
+
     #[test]
     fn the_highlighted_suggestion_is_marked() {
         let mut a = app();
@@ -5628,6 +5682,49 @@ mod tests {
         assert!(
             !screen.contains("tell Jod what to do"),
             "the hint must not sit under the typing:\n{screen}"
+        );
+    }
+
+    /// BUG-12: on a 260-column terminal the composer was 72 columns wide, so a
+    /// 200-character delegation prompt was about 68 characters visible and the
+    /// rest scrolled off. Ctrl-B spends money and runs unattended; not being
+    /// able to read your own prompt before sending it is a poor trade.
+    ///
+    /// Measured off the composer's own borders rather than by looking for text
+    /// on the screen: the `you` title also appears in the keybar, and a
+    /// screen-wide `contains` would pass on a box that is still 72 wide.
+    #[test]
+    fn the_composer_uses_the_width_the_terminal_actually_has() {
+        let screen = rendered(&app(), 260, 30);
+        let top = screen
+            .lines()
+            .find(|line| line.contains("┌ you "))
+            .unwrap_or_else(|| panic!("expected the composer's top border:\n{screen}"));
+        let columns: Vec<char> = top.chars().collect();
+        let left = columns.iter().position(|c| *c == '┌').unwrap();
+        let right = columns.iter().position(|c| *c == '┐').unwrap();
+        let width = right - left + 1;
+        assert!(
+            width >= 200,
+            "the composer is {width} columns of a 260-column terminal:\n{screen}"
+        );
+    }
+
+    /// And the point of the width: the whole of what you are about to send is
+    /// on screen before you send it.
+    #[test]
+    fn a_long_delegation_prompt_is_readable_before_it_is_sent() {
+        let mut a = app();
+        a.input = "sweep every open PR, group them by which file they touch, \
+                   and tell me which two would conflict if they both landed \
+                   today — do not merge anything, just report what you find"
+            .into();
+        a.cursor = a.input.len();
+        assert!(a.input.chars().count() >= 160, "a realistic prompt");
+        let screen = rendered(&a, 260, 30);
+        assert!(
+            screen.contains(&a.input),
+            "the whole prompt must be readable:\n{screen}"
         );
     }
 
