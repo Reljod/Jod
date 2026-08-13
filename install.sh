@@ -141,15 +141,26 @@ installed_ref() {
   fi
 }
 
+filter_cargo_tags() {
+  local tag
+  while IFS= read -r tag; do
+    [ -n "$tag" ] || continue
+    if git -C "$SRC" cat-file -e "$tag:Cargo.toml" 2>/dev/null; then
+      printf '%s\n' "$tag"
+    fi
+  done
+}
+
 # The highest patch tag within one MAJOR.MINOR — the only move `jod update`
 # is allowed to make on its own.
 highest_patch_of() {
   local ver="${1#v}" major rest minor
   major="${ver%%.*}"; rest="${ver#*.}"; minor="${rest%%.*}"
-  git -C "$SRC" tag --list "v$major.$minor.*" | highest_semver_tag
+  git -C "$SRC" tag --list "v$major.$minor.*" | filter_cargo_tags | highest_semver_tag
 }
 
-newest_tag() { git -C "$SRC" tag --list 'v*.*.*' | highest_semver_tag; }
+newest_tag() { git -C "$SRC" tag --list 'v*.*.*' | filter_cargo_tags | highest_semver_tag; }
+
 
 resolve_version() {
   case "$1" in
@@ -247,6 +258,9 @@ if [ -z "$FORCE" ] && up_to_date "$HEAD_COMMIT"; then
 fi
 
 # --- build -------------------------------------------------------------------
+[ -f "$SRC/Cargo.toml" ] \
+  || err "no Cargo.toml found in $SRC at $TARGET_REF — $TARGET_REF cannot be built as a Rust package"
+
 command -v cargo >/dev/null 2>&1 \
   || err "cargo is required to build Jod — install Rust from https://rustup.rs, then re-run this"
 

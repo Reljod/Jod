@@ -9,398 +9,180 @@
  ╚════╝  ╚═════╝ ╚═════╝
 ```
 
-**Reljod, duplicated.**
+**Autonomous multi-agent orchestration and terminal agent workspace.**
 
-*An autonomous agent built to think, decide, and act the way he does —
-whether or not he's at the keyboard.*
+*Supervise, orchestrate, and delegate tasks across agent harnesses in one unified interface.*
 
 </div>
 
 ---
 
-## What this is
+## Overview
 
-Jod is not a product. It's infrastructure for one person — a standing
-agent that mirrors how Reljod runs his own life and work, so the loop
-keeps turning between the moments he's paying direct attention.
+**Jod** is a standing multi-agent orchestrator built in Rust. It lives on your machine or VPS, supervising agent runs across supported harnesses (**Claude Code**, **OpenCode**, and **AGY**) and persisting every event, run, and memory into a single SQLite store.
 
-Most of the runtime lives in the Claude ecosystem — Claude Code for
-building, the Claude Agent SDK for autonomy, Claude in Slack for reach —
-wired into the tools where the real work already happens.
+Jod does not generate code itself - it delegates tasks to isolated agent harnesses running under process supervision (`jod-run`), normalizes their output into a unified event stream, and lets you manage, watch, and interact with all agents concurrently.
 
 ```mermaid
 flowchart LR
-    R((Reljod))
-    J["Jod\n(this repo)"]
+    User(["User / TUI / CLI"])
+    JodCore["Jod Core\n(Process supervision & SQLite store)"]
 
-    R -. delegates .-> J
+    User --> JodCore
 
-    J --> L[Linear\ntasks & kanban]
-    J --> N[Notion\nsecond brain]
-    J --> C[Claude Code\nbuilding & shipping]
-    J --> F[Finance\nplanned]
+    JodCore --> H1["Claude Code"]
+    JodCore --> H2["OpenCode"]
+    JodCore --> H3["AGY"]
 
-    style J fill:#6b46c1,stroke:#4c1d95,color:#fff
-    style R fill:#1a1a1a,stroke:#000,color:#fff
+    H1 --> Events["Unified Event Stream\n(SQLite)"]
+    H2 --> Events
+    H3 --> Events
+
+    style JodCore fill:#4f46e5,stroke:#3730a3,color:#fff
+    style Events fill:#059669,stroke:#047857,color:#fff
 ```
 
-## Domains
+---
 
-| | Domain | System of record |
-|---|---|---|
-| 🗂️ | **Tasks** — what's in flight, what's next | [Linear](./domains/tasks) |
-| 🧠 | **Second brain** — notes, reference, memory | [Notion](./domains/second-brain) |
-| 💰 | **Finance** — money in, money out | *planned* ([notes](./domains/finance)) |
+## Jod TUI (`jod tui`)
 
-Each domain folder holds operating notes, not the data itself — Linear
-stays the kanban, Notion stays the brain. This repo is the charter and the
-glue.
-
-## The application
-
-Jod is also a program you run. It lives on a VPS and stays up. It delegates work
-to agent harnesses — it never answers a prompt itself — and gives you one place
-to watch every agent at once.
-
-| | | |
-|---|---|---|
-| 🦀 | [`core/`](./core) | the service: harness seam, process supervision, event stream, memory |
-| ⌨️ | [`cli/`](./cli) | the `jod` command — delegate, watch, remember, chat |
-| 📱 | HTTP API, mobile | *planned — same core behind an API* |
-
-Each delegated task runs as its own detached process group under **Claude
-Code**, **OpenCode** or **AGY**, supervised by `jod-run`, so you can watch any
-agent, kill it, or log out without stopping the work. Output from all three is
-normalised into one event vocabulary and written straight into one SQLite file —
-which is what lets `jod watch`, the HTTP API and the phone all follow the same
-run without one of them owning it.
+The centerpiece of Jod is `jod tui`: a rich, full-screen terminal interface designed for multi-agent delegation and monitoring.
 
 ```sh
-cargo build --release
-./target/release/jod tui                  # the full-screen interface
-./target/release/jod harnesses            # what's installed
-./target/release/jod run "summarise my inbox"
-./target/release/jod chat                 # a conversation on a plain terminal
-./target/release/jod recall "what do I prefer for tasks"
+jod tui
 ```
 
-`jod tui` is the one to start with: a scrolling conversation, an input box, and
-`Ctrl-A` for a panel listing every agent Jod has running — which is the part
-that makes it an orchestrator's interface rather than a chat window. `Ctrl-B`
-delegates the typed line to an agent that runs in the background and reports
-back when it ends; the panel is where those runs are watched, stopped, resumed
-or attached to.
+### Key Features of Jod TUI
 
-**Its top row is the main chat.** The panel's first row is not a run — it is the
-one conversation Jod keeps for itself, pinned above the agents, outside the sort
-and outside the filter, and there whether or not anything has been said to it.
-`⏎` on it goes *into* the chat: the transcript is replayed and what you type
-next is an instruction to the orchestrator rather than a turn to an agent.
-`/main` with no argument does the same from the keyboard, and `/new` leaves
-again. Every other conversation in the TUI works exactly as it did.
+- **Pinned Orchestrator Chat (`jod main`)**: The top row of the fleet view is permanently reserved for `jod main`. It is Jod's own orchestrator conversation that remains available across sessions. Pressing `Enter` on the top row enters the orchestrator chat, where you can issue meta-level instructions (delegation, scheduling, goal setting, agent inspection).
+- **Fleet View (`Ctrl-A`)**: Toggle the fleet management panel listing every active and historical agent process group.
+- **Background Delegation (`Ctrl-B`)**: Instantly delegate a prompt to a detached background agent process that runs independently and reports back upon completion.
+- **Agent Interactivity**: Select any running or finished agent run from the panel to attach, view live transcripts, pause, resume, or terminate execution.
+- **In-TUI Live Updates (`/update`)**: Trigger background binary updates from within the console. Build progress streams into the transcript, allowing you to re-exec into updated binaries without dropping your terminal session.
 
-### `jod main` — the pinned chat
+### Pinned Orchestrator Chat (`jod main`)
 
-One conversation is pinned and never ends. It is where you say what you want,
-and it is the only part of Jod you have to remember how to use.
+`jod main` is the single persistent orchestrator conversation. Rather than answering prompts directly, it uses Model Context Protocol (MCP) tools to act on your workspace:
+
+| You say | Jod Main executes | Result |
+|---|---|---|
+| *"Every weekday at 8am, sweep open PRs"* | `schedule_create` | Armed recurring cron schedule |
+| *"Keep refactoring until tests pass"* | `goal_create` | Persistent goal loop with automated checks |
+| *"Build feature X"* | `delegate` | Spawns a new supervised agent run |
+| *"Continue on that error"* | `continue_agent` | Resumes existing agent with full context |
+
+---
+
+## Core Features & Architecture
+
+Jod is structured into decoupled Rust components:
+
+| Component | Path | Function |
+|---|---|---|
+| **Core Engine** | [`core/`](./core) | Harness abstractions, SQLite event logging, memory management, and MCP tools |
+| **Supervisor** | [`supervisor/`](./supervisor) | `jod-run`: Process group supervisor managing agent execution and stdout/stderr normalization |
+| **CLI & TUI** | [`cli/`](./cli) | `jod` binary offering terminal commands and full-screen TUI interface |
+| **HTTP Daemon** | [`api/`](./api) | `jod-api`: Optional REST daemon providing remote access to the SQLite event store |
+
+### Unified Event Stream & Process Supervision
+
+Every delegated run is executed in its own detached process group managed by `jod-run`. If the TUI exits or your terminal disconnects, background agent tasks continue uninterrupted. Every tool call, prompt turn, stdout line, and exit state is recorded in `$HOME/.jod/jod.sqlite`.
+
+---
+
+## CLI Usage
 
 ```sh
-jod main "every weekday at 8am, sweep the open PRs and tell me what needs me"
-jod main "keep working until the README explains what jod main does, then stop"
-jod main "count the Rust files in the repo and tell me"
-jod main                                  # read the chat back
+# Start the full-screen terminal interface
+jod tui
+
+# Talk directly to the pinned orchestrator conversation
+jod main "check status of current background runs"
+
+# Delegate a single prompt directly to an agent harness
+jod run "summarize git changes in this directory"
+
+# Start a simple terminal chat
+jod chat
+
+# Query Jod memory and past run context
+jod recall "what were the test results for the last PR?"
+
+# Check available agent harnesses on your system
+jod harnesses
+
+# Update Jod binaries to the latest patch release
+jod update
 ```
 
-There is exactly one of it, it cannot be deleted, and every route reaches the
-same conversation: `jod main "…"` from a shell, `/main …` from the TUI, and
-sitting in it after `⏎` on the fleet's top row all write the same thread.
+---
 
-**It does not do the work.** It is a harness run holding Jod's own tools over
-MCP, so it delegates by *calling* rather than by describing, and it returns
-immediately — the command above comes back in the same second it was typed,
-while the work carries on without it.
+## Installation
 
-What it does with an instruction depends on what the instruction is:
-
-| you say | it calls | you get |
-|---|---|---|
-| *when* — "every weekday at 8am" | `schedule_create` | an armed schedule |
-| *keep* / *until* — "until the README explains…" | `goal_create` | a goal that runs until its done-check passes |
-| a task | `delegate` | a new agent |
-| a follow-up | `continue_agent` | the **same** agent, resumed with its context |
-
-The last row is the one that matters most, and the reason it calls `list_agents`
-before deciding anything: reusing a run that is already holding the context
-beats starting one that has to rebuild it. It says which it chose and why.
-
-Its window is managed for you. `jod main` checks the live transcript before
-sending — against both size and how long since you last said something — and
-tells you when it is due for compaction.
-
-The full design — including the planned knowledge graph (Open Knowledge Format
-notes indexed by GraphQLite) and agent-to-agent messaging — is in
-[`docs/jod-system.md`](./docs/jod-system.md).
-
-## The toolkit
-
-The reusable, project-agnostic layer — a set of Claude Code
-skills under [`.agents/`](./.agents) that never reach into a personal domain.
-Copy `.agents/` into any repo and the skills come with it.
-[`AGENTS.md`](./AGENTS.md) holds the guidelines as bullets; the reasoning behind
-them lives in [`docs/decisions.md`](./docs/decisions.md).
-
-### Install as a Claude Code plugin
-
-This repo is also a Claude Code plugin — the same skills and subagents, with no
-clone and nothing copied into your project. The repo *is* the plugin and the
-catalog that serves it: `.claude-plugin/plugin.json` and
-`.claude-plugin/marketplace.json` sit at the root because Claude Code looks for
-them at exactly that path, and only those two files go in that folder.
-
-**Someone installing it on their machine** — two steps, because adding a
-catalog and installing from it are separate acts:
-
-```
-/plugin marketplace add Reljod/Jod     # register the catalog (installs nothing)
-/plugin install jod@reljod             # install the plugin from it
-/reload-plugins                        # activate without restarting
-```
-
-`jod@reljod` reads as *plugin `jod`, from marketplace `reljod`*.
-
-**A repo that wants everyone who opens it to get the plugin** — commit the
-marketplace into that repo's `.claude/settings.json`, then install once at
-**project scope**, which writes the enable-entry alongside it:
-
-```json
-{
-  "extraKnownMarketplaces": {
-    "reljod": {
-      "source": { "source": "github", "repo": "Reljod/Jod" }
-    }
-  }
-}
-```
-
-Collaborators get prompted to install it when they trust the repo folder. Run
-`/plugin install jod@reljod` and pick **Project scope** rather than hand-writing
-the enable-entry — Claude Code writes the correct shape into
-`.claude/settings.json` itself.
-
-**Installing from a branch or tag** — the `owner/repo` shorthand always reads
-the repo's *default branch*. To pin a ref, use the full git URL with `#`:
-
-```
-/plugin marketplace add https://github.com/Reljod/Jod.git#v1.2.0
-```
-
-Plugin components are namespaced, so the skills arrive as `/jod:write-spec`,
-`/jod:tdd-loop`, `/jod:test-scenarios`, `/jod:create-pr`, `/jod:setup-git-hooks`
-and `/jod:setup-project`, and Claude invokes them on its own when a task matches
-their description. It also brings the subagents (`reviewer`, `investigator`,
-`merge-checker`, `skill-author`, `toolkit-engineer`) and the `TaskCompleted`
-gate, which refuses to close a task while a test suite is red unless a
-`BLOCKED.md` documents why — the anti-workaround rule from
-[`AGENTS.md`](./AGENTS.md), enforced rather than requested.
-
-Two things worth knowing:
-
-- **The gate is a no-op in repos it finds no suites in.** It looks for
-  `*.test.sh` and `*/tests/test.sh`; a project with neither is never blocked.
-- **The plugin puts nothing on your `PATH`.** It carries skills, subagents and
-  the hook, and no binary — so the `jod` you run is always the one
-  [`install.sh`](#install-jod-on-a-machine) built, never a shim shipped
-  alongside a plugin that would shadow it.
-
-Not included: the `SessionStart` hook that pins git identity. That one is
-project-local on purpose ([why](./docs/decisions.md)).
-
-To hack on the plugin without installing it, point Claude Code at a checkout —
-`claude --plugin-dir /path/to/Jod` — and `/reload-plugins` after each edit. That
-needs no marketplace and no install, so it's also the fastest way to try the
-plugin before committing to it. `tests/plugin.test.sh` validates the manifest,
-the catalog, and that every skill, agent, hook and bundled script the plugin
-declares actually resolves.
-
-If `/plugin marketplace add` reports that it can't find the catalog, the usual
-cause is the ref: the marketplace files have to exist **on the branch being
-fetched**, and the shorthand fetches the default branch.
-
-### Install Jod on a machine
-
-One line, on any Linux or macOS box with `git` and
-[Rust](https://rustup.rs):
+Install Jod with a single command on Linux or macOS (requires Git and [Rust](https://rustup.rs)):
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/Reljod/Jod/main/install.sh | bash
 ```
 
-That clones the source to `~/.jod/src`, builds the workspace, and puts two
-binaries on your `PATH` (`~/.local/bin` by default, `$JOD_BIN_DIR` to change
-it):
+The installer:
+1. Clones the source into `$HOME/.jod/src` (or `$JOD_SRC`).
+2. Validates buildable releases and compiles Rust binaries (`jod` and `jod-run`).
+3. Installs binaries into `$HOME/.local/bin` (or `$JOD_BIN_DIR`).
 
-| | |
-|---|---|
-| `jod` | the CLI and the full-screen console (`jod tui`) |
-| `jod-run` | the supervisor every run is launched through — `jod` without it can read and list, but cannot start anything |
+### Optional HTTP Daemon (`jod-api`)
 
-`jod-api` — the HTTP daemon — is **not** installed unless you ask for it with
-`JOD_WITH_API=1`. It is an endpoint that spawns agent harnesses, so standing
-one up is a deliberate act rather than a side effect of installing a CLI.
-→ [`deploy/README.md`](./deploy/README.md)
-
-It builds from source rather than downloading a binary: releases here carry no
-prebuilt assets, and the box that runs an agent supervisor is one you want able
-to rebuild it. Re-running is free — it fetches into the existing checkout, and
-skips the build entirely when the installed binaries already match the target
-commit.
-
-Updating later is one command, and it works while the console is running:
+To build and install the optional HTTP daemon alongside the CLI and supervisor:
 
 ```sh
-jod update            # newest patch within the installed MAJOR.MINOR
-jod update --check    # what it would do, without doing it
-jod update --version v1.3.0   # a deliberate minor/major move
+curl -fsSL https://raw.githubusercontent.com/Reljod/Jod/main/install.sh | JOD_WITH_API=1 bash
 ```
 
-The new binary is *renamed* over the old one rather than written in place, so
-the running `jod tui` never blocks its own update — it keeps the build it
-started with until you restart it, which the installer reminds you to do
-(along with any `jod-daemon`/`jod-api` unit it finds running).
+See [`deploy/README.md`](./deploy/README.md) for deployment and daemon setup options.
 
-**From inside the console**, `/update` runs the same thing as a background
-job: the build streams into the transcript, the console stays usable while it
-runs, and `Alt-J` (or `/jobs`) lists the background shells — what is running,
-what it last printed, and how the finished ones ended. When an update lands,
-the console offers to restart into it; `y` re-execs in place, keeping the same
-terminal and tmux pane. `/reload` does that at any time, and `/update check`
-just reports.
+---
 
-#### Scaffolding another repo
+## Portable Skills Toolkit & Plugin
 
-The project scaffolder is a skill, not a subcommand. With the plugin enabled,
-ask for `/jod:setup-project` in that repo; from a checkout, run the script:
+Jod includes a reusable, project-agnostic toolkit under [`.agents/skills/`](./.agents/skills) for workflow automation (PR creation, spec writing, TDD loops, scenario testing, and git hooks).
+
+### Installing as a Claude Code Plugin
+
+Register the catalog and install the plugin:
 
 ```sh
-cd ~/code/some-other-repo
-~/.jod/src/.agents/skills/setup-project/scripts/setup-project.sh
+/plugin marketplace add Reljod/Jod
+/plugin install jod@reljod
+/reload-plugins
 ```
 
-That walks you through the setup in the terminal — **↑/↓** to move through
-the behavior presets, **space** to toggle each skill on or off, **enter** to
-confirm:
+This brings slash commands directly into your Claude Code workflow:
+- `/jod:write-spec` - Interactive spec generator prior to implementation
+- `/jod:create-pr` - Rich PR description generator with visual deltas
+- `/jod:tdd-loop` - Red-green-refactor TDD watch loop
+- `/jod:test-scenarios` - Exhaustive edge-case test coverage auditing
+- `/jod:setup-git-hooks` - Deterministic pre-commit/pre-push git hooks installer
+- `/jod:setup-project` - Interactive repository charter & skills bootstrapper
+
+---
+
+## Repository Layout
 
 ```
-Behavior preset  ↑/↓ move · enter select · q cancel
-  ❯ jod         the full Jod charter — layered quality gates, draft-PR habits
-    minimal     lean identity + a few principles; grow it as needs get real
-    tdd-strict  test-first enforced, coverage as a required CI gate
-    team        Conventional Commits, PR/review norms — OSS & multi-contributor
-
-Skills to copy in  ↑/↓ move · space toggle · a all · n none · enter confirm
-  ❯ [x] create-pr        Build a visual-first PR description for the current change.
-    [x] setup-git-hooks  Install deterministic local git hooks for a repo.
-    [ ] tdd-loop         Build a feature or fix a bug test-first.
-    [x] test-scenarios   Exhaustively test a unit — every scenario, every edge case.
-    [x] write-spec       Interview, then write a SPEC.md a fresh session can execute.
+AGENTS.md          Charter, coding conventions, and agent rules
+CLAUDE.md          Symlink to AGENTS.md for Claude integration
+install.sh         Bootstrap installer script for Jod
+core/              Rust core: process supervision, SQLite store, events, MCP tools
+supervisor/        jod-run supervisor daemon
+cli/               jod CLI and full-screen TUI implementation
+api/               jod-api HTTP server
+.agents/skills/    Portable agent skills and slash commands
+apps/              Desktop, mobile, web, and voice client applications
+docs/              Architecture specs and decision documentation
 ```
-
-Every choice is also a flag, so the same scaffold is scriptable — and with
-no terminal attached (CI, a pipe) it prints the available presets/skills
-instead of hanging on a prompt:
-
-```sh
-setup-project.sh --list
-setup-project.sh --preset jod --skills create-pr,setup-git-hooks,tdd-loop
-```
-
-It scaffolds `AGENTS.md`/`CLAUDE.md` plus the chosen skills straight into the
-current repo — no need to clone Jod itself into every project.
-→ [`.agents/skills/setup-project/`](./.agents/skills/setup-project/)
-
-#### Versioning and updates
-
-Releases are tagged [Semantic Versioning](https://semver.org)
-`vMAJOR.MINOR.PATCH`. Cutting one is two steps, and only the second is visible
-to anyone else.
-
-**1. Push a branch — this part is automatic.**
-
-```sh
-git switch -c release/v1.2.0 && git push -u origin release/v1.2.0
-```
-
-The **Release** workflow runs the test suites, resolves the version, stamps it
-into `.claude-plugin/plugin.json`, `Cargo.toml` and `Cargo.lock`, and opens a
-draft release PR. The branch name decides the version — with one exception: if
-it names the version that is *already* the latest tag, the patch is bumped
-(`release/v1.2.0` with `v1.2.0` tagged → `v1.2.1`) rather than failing at
-`git tag` after the suite has run. A branch naming a version *below* the latest
-tag is refused: that tag would install on nobody's machine.
-→ [`.github/scripts/release_version.sh`](./.github/scripts/release_version.sh),
-[`tests/release-version.test.sh`](./tests/release-version.test.sh)
-
-Opening that PR needs **Settings → Actions → General → "Allow GitHub Actions to
-create and approve pull requests"** switched on (it is off by default). Without
-it the branch is still resolved, stamped and pushed — the job prints the
-`gh pr create` line to run by hand instead of failing.
-
-**2. Publish — this part is manual, always.**
-
-```sh
-gh workflow run release.yml --ref main -f version=v1.2.0
-```
-
-Or Actions tab → Release → Run workflow. It repeats the suites plus the e2e
-scaffold-fitness check (`tests/e2e/`, too expensive for every push), tags, and
-publishes a GitHub Release. It runs in the `release` environment, so adding a
-required reviewer in repo settings adds an approval gate with no code change.
-Dispatching with no `version` and no release branch falls back to bumping the
-latest tag by the `bump` input — the old behaviour, still there.
-
-- **Install** always pins to the newest release by default. Ask for another
-  version with `JOD_VERSION`:
-  ```sh
-  curl -fsSL .../install.sh | bash                      # latest release
-  curl -fsSL .../install.sh | JOD_VERSION=v1.2.0 bash    # a specific release
-  curl -fsSL .../install.sh | JOD_VERSION=main bash      # bleeding edge
-  ```
-- **`jod update`** only ever takes newer *patch* releases within the
-  installed `MAJOR.MINOR` — it never jumps the console and the daemon to a new
-  minor/major on its own. Say `jod update --version v1.3.0` (or re-run
-  `install.sh` with `JOD_VERSION`) to make that move deliberately. Either way
-  a newer release is *named* on every run, so it is never a surprise.
-- **`jod --version`** prints the version the running binary was built from,
-  and `jod update --check` prints what is installed, what is available, and
-  what an update would do.
-
-## Structure
-
-```
-AGENTS.md          the charter — identity, principles, conventions
-CLAUDE.md          symlink -> AGENTS.md, so every runtime reads the same source
-REVIEW.md          brief for the automated PR review — what to flag, what to ignore
-docs/              the WHYs behind the charter's guidelines
-install.sh         curlable bootstrap: clones this repo, builds it, installs the binaries
-bin/lib/semver.sh  tag comparison shared by install.sh and the release workflow
-.claude-plugin/    plugin manifest + marketplace catalog (installs this repo as a plugin)
-hooks/hooks.json   the TaskCompleted gate, as the plugin ships it
-agents/            the subagents, where a plugin reads them from
-.claude/agents/    the same files, so they work here without the plugin
-.agents/skills/    the portable toolkit — reusable Claude Code skills
-domains/           personal operating notes, one per area of Reljod's life
-core/              the orchestrator service — harnesses, supervision, events, memory
-supervisor/        jod-run — supervises one agent process, writes its events
-cli/               the `jod` command, the way you talk to it
-api/               the HTTP API over the same store, for remote clients
-apps/              desktop, iOS, web and voice clients over that API
-research/          the measured groundwork the design rests on
-```
-
-Start with [`AGENTS.md`](./AGENTS.md) — it's the whole point.
 
 ---
 
 <div align="center">
-<sub>Built one delegated task at a time.</sub>
+<sub>Built for autonomous multi-agent orchestration.</sub>
 </div>
