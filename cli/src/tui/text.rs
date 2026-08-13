@@ -111,9 +111,62 @@ pub fn elide_left(s: &str, width: usize) -> Elided {
     }
 }
 
+/// A path fitted into what is left of a `line` once `chrome` columns of fixed
+/// furniture have been reserved — a `± ` marker, a `+6 -0` count, a border, an
+/// `  in ` label.
+///
+/// The reservation is the whole point. Laying the path out first and hoping
+/// the rest fits is what pushed a diff header's line counts off the right edge
+/// and clipped the filename with them: both informative parts gone, and no
+/// marker to say so. Reserve, then fit.
+pub fn path_beside(path: &str, line: usize, chrome: usize) -> String {
+    elide_left(path, line.saturating_sub(chrome)).text
+}
+
+/// The width a bordered panel needs so that none of `parts` is clipped.
+///
+/// A ratatui `Block` draws its titles *into* the border row, so a panel sized
+/// from its body alone clips its own chrome — and the chrome is where the
+/// warning and the way out live. Two columns are the corners the titles cannot
+/// have.
+pub fn panel_width<'a>(parts: impl IntoIterator<Item = &'a str>) -> usize {
+    parts
+        .into_iter()
+        .map(|part| part.chars().count() + 2)
+        .max()
+        .unwrap_or(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_panel_is_as_wide_as_its_widest_part_plus_its_corners() {
+        // The confirm dialog: a short question, a long footer. Sizing from the
+        // question alone is what cut "anything else cancels" off the border.
+        let width = panel_width([
+            "  forget x?  ",
+            " this cannot be undone ",
+            " y confirms · anything else cancels ",
+        ]);
+        assert_eq!(
+            width,
+            " y confirms · anything else cancels ".chars().count() + 2
+        );
+        let nothing: [&str; 0] = [];
+        assert_eq!(panel_width(nothing), 0);
+    }
+
+    #[test]
+    fn a_path_is_fitted_around_the_chrome_that_shares_its_line() {
+        // 40 columns, six of them spoken for by "  ± " and "  +6 -0".
+        let fitted = path_beside("/home/reljod/repo/jod/cli/src/tui/ui.rs", 40, 12);
+        assert_eq!(fitted.chars().count(), 28);
+        assert!(fitted.starts_with('…') && fitted.ends_with("ui.rs"), "{fitted}");
+        // Chrome wider than the line leaves nothing, and says nothing.
+        assert_eq!(path_beside("/a/b/c", 4, 9), "");
+    }
 
     #[test]
     fn a_string_that_fits_is_returned_untouched() {

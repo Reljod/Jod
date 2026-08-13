@@ -2111,6 +2111,7 @@ fn draw_completions(f: &mut Frame, app: &App, input: Rect) {
     if app.workspace != Workspace::Chat {
         return;
     }
+    const TAB_COMPLETES: &str = " Tab completes · ↑↓ choose ";
     let suggestions = crate::tui::command::completions(&app.input, app);
     if suggestions.is_empty() {
         return;
@@ -2128,9 +2129,20 @@ fn draw_completions(f: &mut Frame, app: &App, input: Rect) {
         .map(|c| c.hint.chars().count())
         .max()
         .unwrap_or(0);
-    let w = ((widest_name + widest_hint + 8) as u16)
-        .clamp(24, 72)
-        .min(input.width);
+    // Sized to the rows *and* to the title that sits in the border, and bounded
+    // by the room actually to the right of the input box rather than by a fixed
+    // 72 columns — that cap is what stopped `no argument restores` one letter
+    // short on a 200-column terminal.
+    let want = text::panel_width([TAB_COMPLETES]).max(widest_name + widest_hint + 8);
+    // The popup is anchored to the input box's left edge, so the room is what
+    // lies to the right of it — never more, or it would be drawn off the
+    // buffer.
+    let room = f.area().width.saturating_sub(input.x).max(1);
+    let w = (want as u16).min(room).max(24.min(room));
+    // Whatever is left for the hint once the mark, the name column and the
+    // borders have been paid for. Below that it is cut *with* a marker, so a
+    // sentence that stops never reads as a sentence that ended.
+    let hint_room = (w as usize).saturating_sub(widest_name + 6);
     // Only as tall as it needs to be, and never taller than the space above.
     let h = ((suggestions.len() + 2) as u16)
         .min(input.y.saturating_sub(1))
@@ -2164,7 +2176,7 @@ fn draw_completions(f: &mut Frame, app: &App, input: Rect) {
             ListItem::new(Line::from(vec![
                 Span::styled(mark, style),
                 Span::styled(name.to_string(), style),
-                Span::styled(format!("{pad}{}", c.hint), fg(MUTED)),
+                Span::styled(format!("{pad}{}", cut(&c.hint, hint_room)), fg(MUTED)),
             ]))
         })
         .collect();
@@ -2175,7 +2187,7 @@ fn draw_completions(f: &mut Frame, app: &App, input: Rect) {
             Block::default()
                 .borders(Borders::ALL)
                 .border_style(fg(MUTED))
-                .title(" Tab completes · ↑↓ choose "),
+                .title(cut(TAB_COMPLETES, (w as usize).saturating_sub(2))),
         ),
         panel,
     );
@@ -2329,14 +2341,31 @@ fn draw_search(f: &mut Frame, query: &str, selected: usize, hits: &[crate::tui::
 /// shared call is what makes "one picker at two sizes" true in the rendering
 /// as well as in the matcher.
 fn draw_picker(f: &mut Frame, p: &picker::Picker) {
+    const TITLE: &str = " a directory to work in ";
+    const FOOTER: &str = " ⏎ adds it read-only · ↑↓ choose · Esc cancels ";
+    const LABEL: &str = "  in ";
     let screen = f.area();
-    let width = (screen.width.saturating_sub(8)).min(96).max(40);
+    let base = p.base.display().to_string();
+    // Wide enough for the header and both border titles, and otherwise the
+    // shape it always had. The old fixed `.min(96)` cap held on a 260-column
+    // terminal too, so `…/tui-dogfood-tetris/tetris` came out as
+    // `…/tui-dogfood-tetr` — a different directory, with nothing to say text
+    // was missing.
+    let want =
+        text::panel_width([format!("{LABEL}{base}").as_str(), TITLE, FOOTER]).max(96) as u16;
+    let width = want.clamp(40, screen.width.saturating_sub(8).max(40));
     let height = (picker::ROWS as u16 + 6).min(screen.height.saturating_sub(2));
     let panel = centred(screen, width, height);
+    let inner = panel.width.saturating_sub(2) as usize;
 
     let mut lines: Vec<Line> = vec![
+        // Elided from the left when it still does not fit: the tail of a path
+        // is the end that tells one directory from another.
         Line::from(Span::styled(
-            format!("  in {}", p.base.display()),
+            format!(
+                "{LABEL}{}",
+                text::path_beside(&base, inner, LABEL.chars().count())
+            ),
             fg(MUTED),
         )),
         Line::from(vec![
@@ -2353,11 +2382,7 @@ fn draw_picker(f: &mut Frame, p: &picker::Picker) {
         )));
     }
     for (at, row) in p.rows.iter().enumerate() {
-        lines.push(mention_line(
-            row,
-            at == p.selected,
-            width.saturating_sub(2) as usize,
-        ));
+        lines.push(mention_line(row, at == p.selected, inner));
     }
     // A list that is quietly partial is one you trust and should not.
     if p.truncated {
@@ -2376,8 +2401,8 @@ fn draw_picker(f: &mut Frame, p: &picker::Picker) {
             Block::default()
                 .borders(Borders::ALL)
                 .border_style(fg(USER))
-                .title(" a directory to work in ")
-                .title_bottom(" ⏎ adds it read-only · ↑↓ choose · Esc cancels "),
+                .title(cut(TITLE, inner))
+                .title_bottom(cut(FOOTER, inner)),
         ),
         panel,
     );
@@ -2661,20 +2686,38 @@ fn draw_keymap(f: &mut Frame, app: &App) {
 /// A destructive verb on a bare letter is one fat-fingered `Ctrl-G h x` away
 /// from losing a secret, so the confirmation **names the thing**.
 fn draw_confirm(f: &mut Frame, verb: &str, what: &str) {
-    let question = format!("{verb} {what}?");
-    let panel = centred(f.area(), (question.chars().count() + 8) as u16, 5);
+    const WARNING: &str = " this cannot be undone ";
+    const WAYS_OUT: &str = " y confirms · anything else cancels ";
+    let question = format!("  {verb} {what}?  ");
+    // Sized to the widest of the question and the two border titles. Sizing it
+    // from the question alone gave `forget x` a seventeen-column box, which
+    // clipped the warning to "this canno" and never said what cancels — on the
+    // one dialog in the program that destroys something.
+    let panel = centred(
+        f.area(),
+        text::panel_width([question.as_str(), WARNING, WAYS_OUT]) as u16,
+        5,
+    );
+    // `centred` clamps to the terminal, so a window narrower than the footer is
+    // still possible. Fit the chrome to what there is rather than let the
+    // border cut it: a sentence that stops mid-word reads as the whole
+    // sentence.
+    let inner = panel.width.saturating_sub(2) as usize;
     f.render_widget(Clear, panel);
     f.render_widget(
         Paragraph::new(vec![
             Line::from(""),
-            Line::from(Span::styled(format!("  {question}"), bold(BAD))),
+            Line::from(Span::styled(
+                cut(&format!("  {verb} {what}?"), inner),
+                bold(BAD),
+            )),
         ])
         .block(
             Block::default()
                 .borders(Borders::ALL)
                 .border_style(fg(BAD))
-                .title(" this cannot be undone ")
-                .title_bottom(" y confirms · anything else cancels "),
+                .title(cut(WARNING, inner))
+                .title_bottom(cut(WAYS_OUT, inner)),
         ),
         panel,
     );
@@ -4847,13 +4890,23 @@ fn render_delegated(id: &str, prompt: &str, dir: &str, width: u16) -> Vec<Line<'
 /// throughout by construction.
 fn render_diff(edit: &diff::Edit, width: u16) -> Vec<Line<'static>> {
     let room = (width as usize).saturating_sub(6);
+    // The counts are reserved before the path is laid out, not appended after
+    // it and hoped for: `room` used to be computed and then applied only to the
+    // body, so an absolute path — every path, in a worktree — ran to the right
+    // edge and pushed both the filename and the `+6 -0` off the screen.
+    let marker = "  ± ";
+    let counts = format!("  +{} -{}", edit.added(), edit.removed());
     let mut lines = vec![Line::from(vec![
-        Span::styled("  ± ".to_string(), fg(WARN)),
-        Span::styled(edit.path.clone(), bold(AGENT)),
+        Span::styled(marker.to_string(), fg(WARN)),
         Span::styled(
-            format!("  +{} -{}", edit.added(), edit.removed()),
-            fg(MUTED),
+            text::path_beside(
+                &edit.path,
+                room,
+                marker.chars().count() + counts.chars().count(),
+            ),
+            bold(AGENT),
         ),
+        Span::styled(counts, fg(MUTED)),
     ])];
     for line in &edit.lines {
         let colour = match line {
@@ -5411,6 +5464,46 @@ mod tests {
             "the hint is shown"
         );
         assert!(!screen.contains("/help"));
+    }
+
+    /// BUG-11: descriptions simply stopped — `no argument restore`, one letter
+    /// short of `restores` — because the popup was capped at 72 columns and the
+    /// row was clipped by the border. With no `…` a cut sentence reads as one
+    /// the author forgot to finish.
+    #[test]
+    fn every_command_description_is_whole_or_marked_as_cut() {
+        let mut a = app();
+        a.input = "/".into();
+        let screen = rendered(&a, 100, popup_height());
+        for c in crate::tui::command::completions(&a.input, &a) {
+            if screen.contains(&c.hint) {
+                continue;
+            }
+            let marked = (1..c.hint.chars().count()).any(|n| {
+                let head: String = c.hint.chars().take(n).collect();
+                screen.contains(&format!("{head}…"))
+            });
+            assert!(
+                marked,
+                "{:?} is neither whole nor marked as cut:\n{screen}",
+                c.hint
+            );
+        }
+    }
+
+    /// And on a terminal with room to spare there is nothing to cut: the cap
+    /// was fixed at 72 columns whatever the terminal was.
+    #[test]
+    fn a_wide_terminal_shows_the_longest_description_whole() {
+        let mut a = app();
+        a.input = "/".into();
+        let screen = rendered(&a, 200, popup_height());
+        let longest = crate::tui::command::completions(&a.input, &a)
+            .into_iter()
+            .max_by_key(|c| c.hint.chars().count())
+            .expect("the list is not empty")
+            .hint;
+        assert!(screen.contains(&longest), "{longest:?} whole:\n{screen}");
     }
 
     #[test]
@@ -7272,8 +7365,58 @@ mod tests {
         };
         let screen = rendered(&a, 100, 24);
         assert!(screen.contains("delete pr-opened?"), "{screen}");
-        assert!(screen.contains("cannot be undone"));
-        assert!(screen.contains("y confirms"));
+        // The whole warning and the whole footer, on the dialog's own border
+        // rows. "cannot be undone" and "y confirms" both fitted the broken
+        // 25-column box, which is why this test passed while the dialog on
+        // screen read "this cannot be undo" / "y confirms · anythi" — and the
+        // footer alone is no good either, because the keybar prints the same
+        // sentence at the bottom of the screen whatever the dialog does.
+        assert!(screen.contains("┌ this cannot be undone "), "{screen}");
+        assert!(
+            screen.contains("└ y confirms · anything else cancels "),
+            "{screen}"
+        );
+    }
+
+    /// BUG-20: the panel was sized from the question alone — `question + 8` —
+    /// while its own border titles are 23 and 36 characters wide. The severity
+    /// scales *inversely* with the name being destroyed, so the worst case is
+    /// the shortest one: `forget x` gave a 17-column box and a warning reading
+    /// "this canno".
+    #[test]
+    fn the_shortest_destructive_name_still_gets_the_whole_warning() {
+        let mut a = app();
+        a.overlay = Overlay::Confirm {
+            verb: "forget".into(),
+            what: "x".into(),
+        };
+        let screen = rendered(&a, 200, 24);
+        assert!(screen.contains("forget x?"), "{screen}");
+        assert!(screen.contains("┌ this cannot be undone "), "{screen}");
+        assert!(
+            screen.contains("└ y confirms · anything else cancels "),
+            "the dialog itself says what cancels:\n{screen}"
+        );
+    }
+
+    /// The same dialog on a terminal too narrow to seat the footer whole. It
+    /// still may not stop mid-word: something has to say text was dropped.
+    #[test]
+    fn a_narrow_confirmation_marks_what_it_could_not_fit() {
+        let mut a = app();
+        a.overlay = Overlay::Confirm {
+            verb: "forget".into(),
+            what: "x".into(),
+        };
+        let screen = rendered(&a, 30, 12);
+        let footer = screen
+            .lines()
+            .find(|line| line.contains("y confirms"))
+            .expect("the dialog draws its footer");
+        assert!(
+            footer.contains('…'),
+            "the drop is marked on the border row:\n{screen}"
+        );
     }
 
     #[test]
@@ -8682,6 +8825,39 @@ mod tests {
         );
     }
 
+    /// BUG-21: `docs/try-it.md` promises "the path as a header **and counts**".
+    /// The header laid an absolute path out at full length and appended the
+    /// counts after it, so both informative parts — the filename and the
+    /// `+N -M` — ran off the right edge, and the path was cut mid-word with no
+    /// marker. In a worktree that is every path.
+    #[test]
+    fn a_deep_absolute_path_keeps_its_filename_and_its_counts() {
+        let deep = "/Users/reljodoreta/Developer/Repositories/Projects/Jod\
+                    /.claude/worktrees/tui-dogfood-tetris/tetris/NOTES.md";
+        let mut a = app();
+        a.apply(&jod_core::AgentEvent::ToolCall {
+            name: "Write".into(),
+            input: Some(serde_json::json!({
+                "file_path": deep,
+                "content": "# Tetris\n",
+            })),
+        });
+        let frame = rendered(&a, 100, 30);
+        let header = frame
+            .lines()
+            .find(|line| line.contains("±"))
+            .expect("the diff draws a header");
+        assert!(
+            header.contains("NOTES.md"),
+            "the filename is the point of a path header:\n{frame}"
+        );
+        assert!(
+            header.contains("+1 -0"),
+            "and the counts the docs promise:\n{frame}"
+        );
+        assert!(header.contains('…'), "the head is marked dropped:\n{frame}");
+    }
+
     /// Everything that is not an edit keeps its one-line summary, so the
     /// transcript does not turn into a wall of diffs.
     #[test]
@@ -9324,6 +9500,49 @@ mod tests {
         assert!(frame.contains("/home/reljod/notes"), "{frame}");
         assert!(frame.contains("daily"), "{frame}");
         assert!(frame.contains("⏎ adds it read-only"), "{frame}");
+    }
+
+    /// BUG-3: the header was drawn into a panel capped at 96 columns however
+    /// wide the terminal was, and clipped by the border with no marker. An
+    /// eighteen-character fixture path proved the function, not the feature:
+    /// a worktree path came out as `…/tui-dogfood-tetr`, which names a
+    /// *different directory* from the real one.
+    ///
+    /// The tail is the informative end of a path, so it is the end that has to
+    /// survive.
+    #[test]
+    fn the_picker_header_stays_readable_for_a_real_worktree_path() {
+        let deep = "/Users/reljodoreta/Developer/Repositories/Projects/Jod\
+                    /.claude/worktrees/tui-dogfood-tetris/tetris";
+        let mut a = app();
+        a.overlay = Overlay::Picker(picker::Picker::new(
+            std::path::PathBuf::from(deep),
+            vec![".".into()],
+            false,
+        ));
+
+        // Wide enough for the whole thing: show the whole thing. At 120 too —
+        // the old fixed 96-column cap clipped it on both of these.
+        for width in [200, 120] {
+            let wide = rendered(&a, width, 30);
+            assert!(wide.contains(deep), "at {width} columns:\n{wide}");
+        }
+
+        // Genuinely too narrow for it: keep the end that tells directories
+        // apart, and say that the head was dropped.
+        let narrow = rendered(&a, 80, 30);
+        assert!(
+            narrow.contains("tui-dogfood-tetris/tetris"),
+            "the distinguishing tail survives:\n{narrow}"
+        );
+        // The marker is `elide_left`'s, so it lands on the column rather than
+        // on a separator — `…itories/Projects/…`. What matters is that it is
+        // there: nothing else on the line says text was dropped.
+        assert!(narrow.contains("  in …"), "the drop is marked:\n{narrow}");
+        assert!(
+            !narrow.contains("tui-dogfood-tetr\n") && !narrow.contains("tui-dogfood-tetr "),
+            "never cut mid-word without a marker:\n{narrow}"
+        );
     }
 
     /// With a root set, the popup ranks live under the cursor.
