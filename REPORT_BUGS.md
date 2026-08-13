@@ -36,15 +36,42 @@ see BUG-13.
 
 ---
 
-## Where this stands — 19 of 21 findings are closed in `main`
+## Where this stands — 19 of 22 findings are closed in `main`
 
-As of `3e39c2c`, **only two PRs remain open**, and between them they carry the
-last five findings:
+As of `905f969`, **#86 has merged** and **one PR remains open**, plus one
+unclaimed finding:
 
-| PR | Findings | State |
+| Item | Findings | State |
 |---|---|---|
-| [#86](https://github.com/Reljod/Jod/pull/86) | [BUG-3](#bug-3), [BUG-11](#bug-11), [BUG-20](#bug-20), [BUG-21](#bug-21) | draft, **CI green** (`test` pass, `triage` pass) — the whole of **Pattern B** in one sweep, adopting #83's `elide_left` helper |
+| **#86** — merged `905f969` | [BUG-3](#bug-3), [BUG-11](#bug-11), [BUG-20](#bug-20), [BUG-21](#bug-21) | ✅ **merged, and all four re-driven by hand — see below** |
 | [#89](https://github.com/Reljod/Jod/pull/89) | [BUG-10](#bug-10), [BUG-12](#bug-12) | draft, no checks reported yet |
+| [BUG-22](#bug-22) | — | **open**, claimed by an agent as of this writing |
+
+### ✅ #86 re-driven by hand at `905f969`
+
+All four fixed, verified in a real terminal rather than from the diff:
+
+| Finding | Before | Now |
+|---|---|---|
+| [BUG-20](#bug-20) | `┌ this cannot be undo┐` / `└ y confirms · anythi┘` | `┌ this cannot be undone ┐` / `└ y confirms · anything else cancels ┘` — **both complete** |
+| [BUG-3](#bug-3) | `in /…/worktrees/tui-dogfood-tetr` | full path: `in /Users/…/tui-dogfood-tetris/tetris-final` |
+| [BUG-11](#bug-11) | `/model … no argument restore` | `/model … no argument restores the default` — and `/add-dir`, `/heartbeat`, `/update` all read as whole sentences again |
+| [BUG-21](#bug-21) | counts pushed off screen | `render_diff` now reserves the counts **before** laying out the path, via #83's shared `text::path_beside` |
+
+BUG-20 was the last **High** in the original set, and it was the worst-placed
+truncation in the program — a dialog that destroys data while clipping the
+words "undone" and "else cancels".
+
+`render_diff`'s new comment states the failure exactly as reported: *"`room`
+used to be computed and then applied only to the body, so an absolute path —
+every path, in a worktree — ran to the right edge and pushed both the filename
+and the `+6 -0` off the screen."*
+
+**Pattern B is retired.** All four sites now go through the one `text` helper
+#83 introduced, rather than each clipping by hand.
+
+Still open and confirmed live: [BUG-10](#bug-10) — `/main` is still listed
+twice in the `/` popup, awaiting #89.
 
 **#86 is the one worth landing next.** It is green, it carries the only
 remaining **High** finding ([BUG-20](#bug-20) — the destructive-action dialog
