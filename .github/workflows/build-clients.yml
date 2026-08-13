@@ -1,0 +1,441 @@
+name: Build clients
+
+# The button that turns a tag into something a person can actually install.
+#
+# `release.yml` decides versions and creates tags — that is the irreversible,
+# externally-visible act, and it stays in exactly one place. This workflow never
+# invents or moves a tag. It builds the three clients and, when asked, attaches
+# the results to a release that a tag already exists for:
+#
+#   Jod TUI      jod, jod-run, jod-api — one tarball per platform, plus a
+#                SHA256 next to it. What `install.sh` compiles from source; this
+#                is the same thing prebuilt, for a box with no Rust toolchain.
+#   Jod Desktop  the Tauri shell. A universal .dmg for macOS (Apple Silicon and
+#                Intel in one file), .deb and .AppImage for Linux.
+#   Jod iOS      simulator only, and unsigned — a device build needs an Apple
+#                developer certificate this repo does not hold, and inventing
+#                one is not on the table. The build itself is `ios.yml`, called
+#                rather than copied.
+#
+# Two modes, and the default is the safe one:
+#
+#   version blank      Build only. Everything lands on the run as artifacts and
+#                      nothing outside the repo changes. This is the default,
+#                      for the same reason release.yml's publish is manual.
+#   version vX.Y.Z     Also upload the assets to that tag's GitHub release.
+#                      The tag must already exist; if it does not, this refuses
+#                      and points at release.yml rather than tagging behind its
+#                      back.
+#
+# Everything is built from the *tag*, not from whatever `main` happens to be
+# when you press the button — otherwise `jod --version` would lie.
+#
+# Nothing here is code-signed or notarised. That is stated plainly in the README
+# next to the install steps, with the one command each OS needs to accept an
+# unsigned build, rather than papered over.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Existing release tag to attach the builds to, e.g. v0.2.0. Blank: build only, nothing is published."
+        required: false
+        type: string
+      tui:
+        description: "Build Jod TUI (jod, jod-run, jod-api)"
+        required: false
+        type: boolean
+        default: true
+      desktop:
+        description: "Build Jod Desktop (.dmg, .deb, .AppImage)"
+        required: false
+        type: boolean
+        default: true
+      ios:
+        description: "Build Jod iOS (unsigned, simulator only)"
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+concurrency:
+  # Keyed by what is being built, not by who asked. Two runs uploading assets to
+  # the same tag would race on `gh release upload`; two runs building different
+  # tags are unrelated and may overlap.
+  group: build-clients-${{ inputs.version || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # ---------------------------------------------------------------- resolve --
+  resolve:
+    name: Resolve what to build
+    runs-on: ubuntu-latest
+    outputs:
+      # The commit-ish every build job checks out.
+      ref: ${{ steps.plan.outputs.ref }}
+      # 'true' only when a real tag was named. Guards the whole publish job.
+      publish: ${{ steps.plan.outputs.publish }}
+      tag: ${{ steps.plan.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Tags are the input to this decision, and a shallow clone has none.
+          fetch-depth: 0
+
+      - name: Resolve the ref to build
+        id: plan
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          DISPATCH_REF: ${{ github.ref_name }}
+          BASE: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          source .github/scripts/build_target.sh
+
+          # Assigned from a command substitution rather than read out of a
+          # process substitution: a `read < <(…)` reports success even when the
+          # resolver refused, and the refusal is the whole reason this step
+          # exists. → tests/build-clients.test.sh
+          resolved="$(git tag --list 'v*' \
+            | resolve_build_target "${INPUT_VERSION:-}" "$DISPATCH_REF" "$BASE")" || {
+            echo "::error::cannot build '${INPUT_VERSION:-HEAD}' from '$DISPATCH_REF' — see the refusal above"
+            exit 1
+          }
+          read -r publish tag <<<"$resolved"
+
+          if [ "$publish" = "true" ]; then
+            # Build the tag, not the branch. Otherwise `jod --version` would
+            # report the released version while the code came from wherever
+            # main had moved on to.
+            {
+              echo "publish=true"
+              echo "tag=$tag"
+              echo "ref=$tag"
+            } >> "$GITHUB_OUTPUT"
+            echo "::notice::building $tag and attaching the assets to its release"
+          else
+            {
+              echo "publish=false"
+              echo "tag="
+              echo "ref=$GITHUB_SHA"
+            } >> "$GITHUB_OUTPUT"
+            echo "::notice::no version given — building $(git rev-parse --short "$GITHUB_SHA"), publishing nothing"
+          fi
+
+  # The same gate every PR passes. A build-only run pays for it too: a button
+  # that ships a broken binary because nobody re-read the suite is worse than a
+  # button that takes a minute longer.
+  test:
+    uses: ./.github/workflows/tests.yml
+
+  # ------------------------------------------------------------------- TUI --
+  tui:
+    name: TUI ${{ matrix.target }}
+    if: inputs.tui
+    needs: [resolve, test]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # One platform failing should not hide whether the others are fine.
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          # Cross-compiled from the same Apple Silicon runner rather than taken
+          # to a macos-13 Intel image: those images are on a deprecation path,
+          # and nothing in these crates needs a native host to build for x86_64.
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          # Free for public repositories, which this is. Covers an ARM VPS.
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.ref }}
+
+      - name: Add the target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Show the toolchain actually in use
+        run: rustc -V && cargo -V
+
+      # `--locked` deliberately: the lockfile is committed and stamped by
+      # release.yml, so a release binary is built from the dependency set that
+      # was reviewed, not from whatever resolved on the day.
+      #
+      # No dependency cache. A release build runs a handful of times a month,
+      # and a cache action is one more third-party thing in the path between a
+      # tag and a binary people download.
+      - name: Build the binaries
+        run: |
+          cargo build --release --locked --target ${{ matrix.target }} \
+            -p jod-cli -p jod-supervisor -p jod-api
+
+      - name: Package
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          # No version in the filename, deliberately. It is what makes
+          # `/releases/latest/download/jod-<target>.tar.gz` a URL the README can
+          # print once and never revise. The binary answers `--version` itself,
+          # so nothing is lost.
+          name="jod-$TARGET"
+          out="$RUNNER_TEMP/dist"
+          mkdir -p "$out"
+
+          bin="target/$TARGET/release"
+          for b in jod jod-run jod-api; do
+            test -x "$bin/$b" || { echo "::error::$bin/$b missing or not executable"; exit 1; }
+          done
+
+          # -C so the tarball holds three bare binaries, not target/…/release/…
+          tar -czf "$out/$name.tar.gz" -C "$bin" jod jod-run jod-api
+
+          # Run the binary before archiving it, while the path is still simple —
+          # and let it fail loudly only where it *should* run. A row whose
+          # target is not this host's is cross-built and cannot be executed
+          # here; that is expected, not a defect.
+          echo "version-check:"
+          "$bin/jod" --version || echo "(cross-built for $TARGET — not runnable on this host)"
+
+          cd "$out"
+          # sha256sum on Linux, shasum on macOS — neither host has both. The
+          # checksum names the file relative to itself, so `sha256sum -c` works
+          # in whatever directory the user downloaded it to.
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
+          else
+            shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
+          fi
+          cat "$name.tar.gz.sha256"
+
+      # `release-` prefix on purpose: the publish job downloads by that pattern,
+      # so a diagnostic artifact can never be mistaken for a release asset.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-tui-${{ matrix.target }}
+          path: ${{ runner.temp }}/dist/*
+          if-no-files-found: error
+
+  # --------------------------------------------------------------- Desktop --
+  desktop:
+    name: Desktop ${{ matrix.name }}
+    if: inputs.desktop
+    needs: [resolve, test]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # One .dmg that runs on both Apple architectures, rather than two the
+          # user has to choose between.
+          - name: macos-universal
+            os: macos-latest
+            target: universal-apple-darwin
+            bundles: app,dmg
+          - name: linux-x86_64
+            os: ubuntu-latest
+            target: ""
+            bundles: deb,appimage
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.ref }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # Tauri v2's Linux dependency set: webkit2gtk-4.1 (not 4.0, which is v1),
+      # and libayatana rather than libappindicator3 — the two conflict.
+      - name: Install the Linux webview dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libxdo-dev \
+            libssl-dev \
+            patchelf \
+            build-essential \
+            file \
+            wget
+
+      # A universal binary is two real builds stitched together; cargo needs
+      # both targets present or `tauri build` fails partway through the second.
+      - name: Add the macOS targets
+        if: runner.os == 'macOS'
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - name: Install dependencies
+        working-directory: apps/desktop
+        run: npm ci --no-audit --no-fund
+
+      - name: Build the bundles
+        working-directory: apps/desktop
+        env:
+          TARGET: ${{ matrix.target }}
+          BUNDLES: ${{ matrix.bundles }}
+        run: |
+          set -euo pipefail
+          # `tauri build` runs `npm run build` itself via beforeBuildCommand —
+          # the frontend is not built separately here.
+          args=(--bundles "$BUNDLES")
+          # Empty on the Linux row, which builds for the host. Spelled as an
+          # `if` rather than `[ -n "$TARGET" ] && args+=(…)` so it stays correct
+          # if it ever ends up last in a script under `set -e`, where an
+          # AND-list that fails its test does set a non-zero exit status.
+          if [ -n "$TARGET" ]; then
+            args+=(--target "$TARGET")
+          fi
+          npx tauri build "${args[@]}"
+
+      - name: Collect the bundles
+        env:
+          NAME: ${{ matrix.name }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/dist"
+          mkdir -p "$out"
+
+          # src-tauri is its own cargo workspace, so its target/ is local to the
+          # app. Cargo inserts the triple as a path segment only when one was
+          # asked for — hence the two shapes. Pinned rather than searched: a
+          # tree that has been built twice holds a bundle per target, and a
+          # search would happily label the wrong one.
+          root="apps/desktop/src-tauri/target"
+          if [ -n "$TARGET" ]; then
+            bundle="$root/$TARGET/release/bundle"
+          else
+            bundle="$root/release/bundle"
+          fi
+          test -d "$bundle" || {
+            echo "::error::no bundle directory at $bundle"
+            find "$root" -maxdepth 3 -type d -name bundle -print
+            exit 1
+          }
+
+          found=0
+          while IFS= read -r -d '' f; do
+            found=1
+            base="$(basename "$f")"
+            ext="${base##*.}"
+            cp "$f" "$out/jod-desktop-$NAME.$ext"
+            echo "collected: $base -> jod-desktop-$NAME.$ext"
+          done < <(find "$bundle" -type f \
+            \( -name '*.dmg' -o -name '*.deb' -o -name '*.AppImage' \) -print0)
+
+          if [ "$found" -eq 0 ]; then
+            echo "::error::tauri produced no installable bundle under $bundle"
+            find "$bundle" -maxdepth 2 | head -50
+            exit 1
+          fi
+
+          cd "$out"
+          for f in *; do
+            if command -v sha256sum >/dev/null 2>&1; then
+              sha256sum "$f" > "$f.sha256"
+            else
+              shasum -a 256 "$f" > "$f.sha256"
+            fi
+          done
+          ls -la
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-desktop-${{ matrix.name }}
+          path: ${{ runner.temp }}/dist/*
+          if-no-files-found: error
+
+  # ------------------------------------------------------------------- iOS --
+  # Called, not copied. `ios.yml` already owns compiling the shell for iOS,
+  # bundling it and proving it launches in a simulator; duplicating that here
+  # would give this repo two versions of a long, fiddly macOS build to keep in
+  # step. Given `package: true` it also zips the .app with `ditto` and uploads
+  # it as `release-ios`, which is what the publish job below collects.
+  ios:
+    name: iOS
+    if: inputs.ios
+    needs: [resolve, test]
+    uses: ./.github/workflows/ios.yml
+    with:
+      ref: ${{ needs.resolve.outputs.ref }}
+      package: true
+
+  # ---------------------------------------------------------------- publish --
+  publish:
+    name: Attach the assets to the release
+    needs: [resolve, tui, desktop, ios]
+    # `needs` on a job that was switched off leaves it 'skipped', which would
+    # skip this one too under the default rule. So: run unless something the
+    # user actually asked for failed, and upload whatever did get built.
+    if: >-
+      !cancelled()
+      && needs.resolve.result == 'success'
+      && needs.resolve.outputs.publish == 'true'
+      && needs.tui.result != 'failure'
+      && needs.desktop.result != 'failure'
+      && needs.ios.result != 'failure'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download the release assets
+        uses: actions/download-artifact@v4
+        with:
+          path: incoming
+          # Only the release-shaped artifacts. Without this it would also pull
+          # `ios-simulator` — a screenshot and an unpacked .app tree, hundreds of
+          # files that would each become a release asset.
+          pattern: release-*
+
+      - name: Flatten
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          # Artifacts arrive one directory per job; the release wants a flat
+          # list of files. Names are unique by construction (target or platform
+          # is in each one), so -n never has to arbitrate.
+          find incoming -type f -exec cp -n {} dist/ \;
+          ls -la dist
+          test -n "$(ls -A dist)"
+
+      - name: Upload to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          # The tag was verified to exist in `resolve`. A release page for it
+          # may not have been created yet — materialising one is not a version
+          # decision, so it is safe to do here. Creating the *tag* is not, and
+          # never happens in this workflow.
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            echo "::notice::no release for $TAG yet — creating one"
+            gh release create "$TAG" --title "$TAG" --generate-notes
+          fi
+
+          gh release upload "$TAG" dist/* --clobber
+
+          {
+            echo "## Assets attached to \`$TAG\`"
+            echo
+            echo '| File | Size |'
+            echo '|---|---|'
+            for f in dist/*; do
+              [ -f "$f" ] || continue
+              printf '| `%s` | %s |\n' "$(basename "$f")" "$(du -h "$f" | cut -f1)"
+            done
+            echo
+            gh release view "$TAG" --json url --jq .url
+          } >> "$GITHUB_STEP_SUMMARY"
