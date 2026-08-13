@@ -626,7 +626,21 @@ async fn event_loop(
                                 stop_listening(&mut app, &mut session, &voice_tx, true);
                             }
                             Some(Action::Reload) => reload(terminal, &mut app),
-                            Some(action) => perform(&jod, &mut app, &opts, &mut thread, action).await,
+                            Some(action) => {
+                                // The keypress is acknowledged *before* the
+                                // work it asked for. The frame at the top of
+                                // this loop was drawn before the key was read,
+                                // and `perform` talks to the service — so
+                                // without this the screen keeps showing the
+                                // state the key just changed, spinner and
+                                // elapsed counter frozen, for as long as the
+                                // action takes. Stopping a run takes seconds,
+                                // and a frozen clock is how a program looks
+                                // when it has hung rather than when it is
+                                // doing what it was told.
+                                terminal.draw(|f| viewport = ui::draw(f, &app))?;
+                                perform(&jod, &mut app, &opts, &mut thread, action).await
+                            }
                             None => {}
                         }
                         if app.rail.query(app.conversation.clone()) != asked {
@@ -1005,9 +1019,7 @@ async fn orchestrate(
             // Watched, so the reply lands in the transcript: the whole point of
             // routing through the orchestrator is *which* route it picks, and
             // that arrives as its answer.
-            app.watching = Some(handed.agent.id);
-            app.busy = true;
-            app.turn_started_ms = Some(app.now_ms);
+            app.begin_turn(handed.agent.id, app.now_ms);
             app.scroll_to_bottom();
         }
         Err(e) => app.push(Entry::Notice(format!("could not reach the main chat: {e}"))),
@@ -1133,10 +1145,18 @@ async fn perform(
         }
         Action::Interrupt(id) => {
             if let Err(e) = jod.kill_agent(&id).await {
+                // Only a stop that genuinely failed reaches here now: a group
+                // that had already ended is reported as stopped, because it is.
+                // The wording carries the error as it comes — `JodError::Kill`
+                // already says "could not stop the agent", and the sentence
+                // this used to wrap it in said so a second time, around a
+                // message that claimed the agent would not *start*.
                 app.push(Entry::Notice(format!(
-                    "the run would not stop ({e}) — it may still be writing; \
-                     Ctrl-X kills it outright"
+                    "{e} — it may still be writing; Ctrl-X kills it outright"
                 )));
+                // Nothing more is coming, so the status bar must stop saying a
+                // stop is under way.
+                app.interrupting = None;
             }
         }
         Action::Stop(id) => match jod.kill_agent(&id).await {
@@ -1147,7 +1167,13 @@ async fn perform(
                 }
                 app.push(Entry::Notice(format!("stopped {}", short(&id))));
             }
-            Err(e) => app.push(Entry::Notice(format!("could not stop {}: {e}", short(&id)))),
+            Err(e) => {
+                app.push(Entry::Notice(format!("could not stop {}: {e}", short(&id))));
+                // Nothing more is coming for this one, so the status bar must
+                // stop saying a stop is under way. Only for the run that
+                // failed: another may still be being stopped.
+                app.claims_interrupt(&id);
+            }
         },
         // Arming this is the opposite gesture to `Action::Watch`: it is what
         // you do to a run you are about to stop looking at. So it says out loud
@@ -2563,7 +2589,14 @@ fn on_chord(app: &mut App, key: KeyEvent) -> Option<Option<Action>> {
         // Stop what is being watched. Ctrl-C is quit, so interrupting a run
         // needs a key of its own or the only way out is to leave.
         KeyCode::Char('x') if either => handled(match app.watching.clone() {
-            Some(id) if app.busy => Some(Action::Stop(id)),
+            Some(id) if app.busy => {
+                // Harsher than `Esc` and asked for the same way, so it is
+                // written down the same way: the run's ending is one this
+                // reader asked for, and reporting it as a failure would
+                // contradict the "stopped" notice a line above it.
+                app.interrupting = Some(id.clone());
+                Some(Action::Stop(id))
+            }
             _ => {
                 app.push(Entry::Notice("nothing running to stop here".into()));
                 None
@@ -4210,6 +4243,12 @@ fn on_chat_key(app: &mut App, key: KeyEvent, viewport: usize) -> Option<Action> 
             ));
             app.busy = false;
             app.turn_started_ms = None;
+            // Named as being stopped, not merely stopped. The kill itself takes
+            // a moment — the signal goes out and the harness winds down — and
+            // for that moment the status bar has something true to say instead
+            // of `working` over a clock that has stopped. It is also what tells
+            // the run's own ending, when it arrives, that it was asked for.
+            app.interrupting = Some(id.clone());
             // The line being typed is left alone: the correction is usually
             // already half-written by the time you reach for Escape.
             return Some(Action::Interrupt(id));
@@ -4999,9 +5038,7 @@ async fn send_turn(
                     // first moment anything chosen before it can be written
                     // down.
                     flush_pending(jod, app, thread, &id);
-                    app.watching = Some(id);
-                    app.busy = true;
-                    app.turn_started_ms = Some(app.now_ms);
+                    app.begin_turn(id, app.now_ms);
                     app.push(Entry::You(prompt));
                     app.scroll_to_bottom();
                 }
@@ -10530,15 +10567,33 @@ mod tests {
 
     // ---- interrupting a turn without killing the session ----
 
+    /// Mid-turn, reached the way a turn is reached.
+    ///
+    /// `begin_turn` is the call both `orchestrate` and `send_turn` make, so
+    /// this fixture cannot claim a state the real entry points do not produce.
+    /// It used to set `watching`, `busy` and `turn_started_ms` by hand, which
+    /// is the same three fields — but only by coincidence, and a fixture that
+    /// agrees with the code by coincidence is how a feature broken in its
+    /// default state stays green.
     fn mid_turn() -> App {
         let mut app = app_on(HarnessKind::ClaudeCode);
         app.agents = vec![running("run-1", "port the parser")];
-        app.watching = Some("run-1".into());
-        app.busy = true;
-        app.turn_started_ms = Some(0);
+        app.begin_turn("run-1", 0);
         app.session = Some("sess-abc".into());
         app.resume = Resume::Session("sess-abc".into());
         app
+    }
+
+    /// What the harness reports when a run it was told to stop stops: an
+    /// ending, and an error, because a process killed by a signal is an error
+    /// to anything reading an exit status.
+    fn killed_ending() -> AgentEvent {
+        AgentEvent::Finished {
+            text: None,
+            exit_code: None,
+            is_error: true,
+            usage: jod_core::Usage::default(),
+        }
     }
 
     /// **E7.S1's stated check**: the session id is unchanged across the
@@ -10609,6 +10664,102 @@ mod tests {
         app.scroll_up(3, 10);
         assert_eq!(press(&mut app, KeyCode::Esc), None, "nothing left to stop");
         assert!(app.following(), "it follows the tail again");
+    }
+
+    /// **BUG-17.1.** Stopping is not instant: the signal goes out, the harness
+    /// winds down, and its ending arrives seconds later. For those seconds the
+    /// status bar said `working` with the elapsed counter stopped — a frozen
+    /// clock, which is what a hung program looks like, so the reader presses
+    /// the key again or reaches for Ctrl-C. The keypress has to be
+    /// acknowledged by the keypress.
+    #[test]
+    fn the_status_bar_says_a_stop_is_under_way_from_the_keypress() {
+        let mut app = mid_turn();
+        app.now_ms = 10_000;
+        assert!(app.activity().contains("working"), "{}", app.activity());
+
+        press(&mut app, KeyCode::Esc);
+
+        let said = app.activity();
+        assert!(
+            said.contains("interrupting"),
+            "the keypress must be acknowledged at once, not when the kill \
+             lands: {said}"
+        );
+        assert!(!said.contains("working"), "the turn is not still working: {said}");
+    }
+
+    /// **BUG-17.2.** The run's own ending arrives after the interrupt and reads
+    /// as an error, because being killed is one. Written out as it comes, it
+    /// put a red `✗ failed` under the green `✓ done · interrupted` for the same
+    /// turn — two verdicts that disagree, at the moment the reader is checking
+    /// whether their stop worked.
+    #[test]
+    fn an_interrupted_turn_is_not_also_reported_as_a_failure() {
+        let mut app = mid_turn();
+        app.now_ms = 10_000;
+        press(&mut app, KeyCode::Esc);
+
+        // What the loop feeds in when the run it just stopped ends.
+        app.apply(&killed_ending());
+
+        let said = format!("{:?}", app.transcript);
+        assert!(said.contains("interrupted"), "the stop is still recorded: {said}");
+        assert!(
+            !said.contains("failed: true"),
+            "a deliberate stop is not a failure: {said}"
+        );
+        assert!(!app.busy, "and the turn is over either way");
+        assert_eq!(
+            app.activity(),
+            "ready",
+            "the stop has landed, so the status bar stops saying it is under way"
+        );
+    }
+
+    /// The other half of the same rule: a turn that failed on its own must
+    /// still say so. Suppressing the ending whenever one had ever been asked
+    /// for would hide real failures behind a key pressed minutes earlier.
+    #[test]
+    fn a_turn_that_failed_on_its_own_is_still_reported_failed() {
+        let mut app = mid_turn();
+        app.apply(&killed_ending());
+        let said = format!("{:?}", app.transcript);
+        assert!(
+            said.contains("failed: true"),
+            "nothing was interrupted, so this is a failure: {said}"
+        );
+    }
+
+    /// `Ctrl-X` stops the same turn by the other key, so it must be written
+    /// down the same way: its "stopped" notice and a red `✗ failed` under it
+    /// are the same contradiction.
+    #[test]
+    fn a_turn_killed_outright_is_not_reported_as_a_failure_either() {
+        let mut app = mid_turn();
+        assert_eq!(
+            ctrl(&mut app, KeyCode::Char('x')),
+            Some(Action::Stop("run-1".into()))
+        );
+        app.apply(&killed_ending());
+        let said = format!("{:?}", app.transcript);
+        assert!(
+            !said.contains("failed: true"),
+            "a deliberate stop is not a failure: {said}"
+        );
+    }
+
+    /// A stop that was never heard back about must not outlive the turn it was
+    /// aimed at — the next turn is working, not interrupting.
+    #[test]
+    fn a_new_turn_clears_a_stop_that_was_never_answered() {
+        let mut app = mid_turn();
+        press(&mut app, KeyCode::Esc);
+        assert!(app.interrupting.is_some());
+
+        app.begin_turn("run-2", 0);
+        app.now_ms = 3_000;
+        assert!(app.activity().contains("working"), "{}", app.activity());
     }
 
     /// Escape with nothing in flight never becomes an interrupt, or every way
