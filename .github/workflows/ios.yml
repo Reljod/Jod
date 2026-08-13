@@ -20,6 +20,16 @@ name: iOS build
 on:
   workflow_dispatch:
   workflow_call:
+    inputs:
+      ref:
+        description: "Commit-ish to build. Blank: whatever ref the caller's run is on."
+        required: false
+        type: string
+      package:
+        description: "Zip the built .app and upload it as the `release-ios` artifact, for a caller that is going to release it."
+        required: false
+        default: false
+        type: boolean
   pull_request:
     paths:
       - "apps/ios/**"
@@ -41,6 +51,12 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Empty on `pull_request` and on a bare dispatch, which is exactly
+          # what checkout already defaults to. Set when `build-clients.yml`
+          # calls this to build a specific tag, so a released .app is the tag's
+          # code and not whatever main had moved on to.
+          ref: ${{ inputs.ref }}
 
       - uses: actions/setup-node@v4
         with:
@@ -109,6 +125,9 @@ jobs:
           app=$(find src-tauri/gen/apple -name '*.app' -maxdepth 6 | head -1)
           test -n "$app"
           echo "built: $app"
+          # Handed to the packaging step below rather than found twice, so the
+          # bundle that gets released is provably the one that just launched.
+          echo "app=$app" >> "$GITHUB_ENV"
           bundle_id=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Info.plist")
           echo "bundle id: $bundle_id"
 
@@ -169,6 +188,38 @@ jobs:
             xcrun simctl diagnose -b -X --no-archive --output=. < /dev/null || true
             exit 1
           fi
+
+      # Only when a caller asked for a release-shaped asset. A PR run has no
+      # version to name it after and no use for it.
+      - name: Package the .app for release
+        if: inputs.package
+        run: |
+          set -euxo pipefail
+          out="$RUNNER_TEMP/dist"
+          mkdir -p "$out"
+          # Unversioned, so `/releases/latest/download/` resolves it.
+          zip="jod-ios-simulator.zip"
+
+          # `ditto`, not `zip` and not upload-artifact's own zipping: a .app is
+          # a tree carrying an executable bit and internal symlinks, and an
+          # archive that loses either produces a bundle the simulator refuses
+          # to install.
+          ditto -c -k --sequesterRsrc --keepParent "$app" "$out/$zip"
+
+          cd "$out"
+          shasum -a 256 "$zip" > "$zip.sha256"
+          cat "$zip.sha256"
+
+      - name: Upload the packaged app
+        if: inputs.package
+        uses: actions/upload-artifact@v4
+        with:
+          # `release-` prefix: build-clients.yml collects release assets by that
+          # pattern, which is what keeps the screenshot and the raw .app tree
+          # uploaded below out of the GitHub release.
+          name: release-ios
+          path: ${{ runner.temp }}/dist/*
+          if-no-files-found: error
 
       - name: Upload the simulator screenshot and the app bundle
         if: always()
