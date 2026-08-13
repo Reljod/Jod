@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["core", "cli", "api", "supervisor"]
+members = ["core", "cli", "api", "supervisor", "voice"]
 
 [workspace.package]
 version = "0.1.0"
@@ -9,6 +9,10 @@ license = "MIT"
 
 [workspace.dependencies]
 jod-core = { path = "core" }
+# Dictation. A separate crate rather than a module in the CLI so that the
+# console keeps building on a headless VPS — nothing here links an audio
+# backend. → `voice/src/record.rs`
+jod-voice-core = { path = "voice" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"

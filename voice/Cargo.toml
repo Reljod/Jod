@@ -1,0 +1,23 @@
+[package]
+name = "jod-voice-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Dictation for the jod console — record, gate, transcribe."
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+libc.workspace = true
+# Reading back the WAV a recorder wrote. Pure Rust and no system library, which
+# is the whole point: see the note in `record.rs` about why nothing here links
+# an audio backend.
+hound = "3.5"
+base64 = "0.22"
+# Same client, same rationale and same TLS stack as `jod-core` — one binary
+# onto a VPS, so rustls rather than the system OpenSSL.
+reqwest = { version = "0.13", default-features = false, features = [
+  "json",
+  "rustls",
+] }
