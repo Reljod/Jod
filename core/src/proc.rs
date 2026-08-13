@@ -50,7 +50,51 @@ pub fn spawn_detached(program: &Path, args: &[String], cwd: &Path, log: &Path) -
         });
     }
 
-    Ok(cmd.spawn()?.id())
+    let child = cmd.spawn()?;
+    let pid = child.id();
+    reap(child);
+    Ok(pid)
+}
+
+/// Collect a detached child's exit status, so a run that ends leaves nothing
+/// behind.
+///
+/// Detaching a process does not stop it being this process's child: `setsid`
+/// changes its session, not its parentage. So the kernel still holds its exit
+/// status until somebody asks for it, and until then the pid stays in the
+/// table as a zombie. `jod tui` starts one supervisor per agent and, on the VPS,
+/// stays up for weeks — so every finished run used to add a corpse that lived
+/// as long as the console did.
+///
+/// A thread per live run rather than a `SIGCHLD` handler, because the
+/// disposition of that signal belongs to the whole process: `jod` also runs
+/// `git`, `gh` and `$EDITOR` through `Command::status`, and anything global
+/// enough to reap these would take their exit statuses too. Waiting on one
+/// known `Child` is the same thing the supervisor does with its harness, and it
+/// touches nothing else.
+///
+/// The thread blocks until the run ends, which is exactly as long as the corpse
+/// would otherwise have to wait, and it costs the run nothing: the child is in
+/// its own session and never learns that anyone is waiting. If the console exits
+/// first the run keeps going, orphaned to init — which reaps it instead.
+fn reap(mut child: std::process::Child) {
+    let pid = child.id();
+    let spawned = std::thread::Builder::new()
+        .name(format!("jod-reap-{pid}"))
+        .spawn(move || {
+            // The status itself is nobody's business here. How a run ended is
+            // the supervisor's to record, into the database, where a process
+            // that never started it can still read it. This wants only the
+            // side effect of asking.
+            let _ = child.wait();
+        });
+    if let Err(e) = spawned {
+        // The child is already running and healthy; refusing to report it
+        // because a thread could not start would turn a live run into a failed
+        // spawn. It goes unreaped instead — the behaviour of every run before
+        // this existed — and says so.
+        eprintln!("[jod] could not start a reaper for pid {pid}: {e}");
+    }
 }
 
 /// Send `signal` to every process in the group led by `pgid`.
@@ -87,16 +131,22 @@ pub fn signal_group(pgid: u32, signal: i32) -> io::Result<()> {
 ///
 /// **A zombie does not count.** The question every caller is asking is "is this
 /// still running", and a leader that has exited but not been reaped is not: it
-/// is an exit status waiting for a `wait` that, for a run started by
-/// [`spawn_detached`], never comes — nothing here holds the `Child`. `kill(pid,
-/// 0)` cannot tell the two apart, so this used to report a finished run as a
-/// live one for as long as the corpse held the pid, which is what had
-/// [`terminate_group`] watch it for the whole grace and then signal it.
+/// is an exit status nobody has collected yet. `kill(pid, 0)` cannot tell the
+/// two apart, so this used to report a finished run as a live one for as long
+/// as the corpse held the pid, which is what had [`terminate_group`] watch it
+/// for the whole grace and then signal it.
+///
+/// [`spawn_detached`] now waits on its own children, so a run this process
+/// started is a zombie only for as long as its reaper takes to notice. This
+/// check still has to be here for every other case: a run is addressed by a pgid
+/// read out of SQLite, so the asker is very often not the process that started
+/// it and cannot wait on it at all.
 ///
 /// Pids are recycled, so this can in principle be fooled by a new process that
-/// inherited the number. Callers consult the run's recorded status first and
-/// only probe when it still says running, which keeps the window to the life of
-/// one run rather than the life of the database.
+/// inherited the number — and reaping releases a pid for reuse sooner than a
+/// corpse left in the table would. Callers consult the run's recorded status
+/// first and only probe when it still says running, which keeps the window to
+/// the life of one run rather than the life of the database.
 pub fn group_alive(pgid: u32) -> bool {
     if pgid <= 1 {
         return false;
@@ -301,12 +351,12 @@ mod tests {
         assert!(!group_alive(4_000_000));
     }
 
-    /// Nothing here waits on the child — `spawn_detached` drops the `Child`, so
-    /// a run that ends leaves a corpse holding its pid for as long as the
-    /// process that started it lives. That is the state a `jod` session is in
-    /// every time an agent finishes, and the pid probe alone cannot see it.
+    /// A run that ends is a corpse until its reaper collects it, and the pid
+    /// probe alone cannot see the difference. That window is short now and used
+    /// to last the whole session, but "exited" has to read as not-alive in
+    /// either case — so this asserts the answer, not the timing.
     #[test]
-    fn a_leader_that_exited_and_was_never_reaped_is_not_alive() {
+    fn a_leader_that_exited_is_never_reported_alive() {
         let dir = tempdir("zombie");
         let prog = script(&dir, "exit 0");
         let pid = spawn_detached(&prog, &[], &dir, &dir.join("log")).unwrap();
@@ -321,6 +371,56 @@ mod tests {
         }
         assert!(gone, "a corpse holding pid {pid} was reported as running");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The leak a resident console reaches: a finished child must leave the
+    /// process table by itself.
+    ///
+    /// `jod tui` starts one detached `jod-run` per agent and then stays up for
+    /// weeks — that is how Jod is deployed. Every run that ended used to leave a
+    /// corpse behind for the rest of the session, because the `Child` was
+    /// dropped and nothing ever waited on it. Twenty short-lived children are
+    /// enough to see it, and the count in the failure message is the leak.
+    #[test]
+    fn a_finished_child_is_reaped_rather_than_left_in_the_table() {
+        let dir = tempdir("reaped");
+        let prog = script(&dir, "exit 0");
+        let log = dir.join("log");
+        let pids: Vec<u32> = (0..20)
+            .map(|_| spawn_detached(&prog, &[], &dir, &log).unwrap())
+            .collect();
+
+        // First that they all really ended, so the reaping question is asked of
+        // corpses and not of children still on their way to `exit`.
+        let running = poll_until(|| pids.iter().copied().filter(|&p| group_alive(p)).collect());
+        assert!(running.is_empty(), "children never finished: {running:?}");
+
+        // Then that none of them is still an unreaped exit status. `zombie` is
+        // the exact question — a pid that was reaped and immediately reused by
+        // some unrelated process on this box would answer a liveness probe, but
+        // it would not answer this one.
+        let corpses = poll_until(|| pids.iter().copied().filter(|&p| zombie(p)).collect());
+        assert!(
+            corpses.is_empty(),
+            "{} of {} finished children were never reaped: {corpses:?}",
+            corpses.len(),
+            pids.len()
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Re-run `probe` until it comes back empty, and hand back whatever it said
+    /// last. Ten seconds is far longer than a `bash -c 'exit 0'` needs; a probe
+    /// still returning pids by then is reporting a state that will not change.
+    fn poll_until(probe: impl Fn() -> Vec<u32>) -> Vec<u32> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let left = probe();
+            if left.is_empty() || std::time::Instant::now() >= deadline {
+                return left;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
     }
 
     /// The whole of BUG-18: stopping a run that has already ended must be a
