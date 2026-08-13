@@ -27,6 +27,16 @@ use jod_core::{
 };
 use std::path::PathBuf;
 
+/// How many runs `jod ls` reads back out of the database before deciding what
+/// to print. Deliberately larger than the row cap: the read-back is what makes
+/// a run *visible at all*, so it has to reach past the rows a screenful shows.
+const LS_READ_BACK: usize = 200;
+
+/// "No limit", for the paths that take one anyway. SQLite receives a limit as a
+/// signed integer, so `usize::MAX` would arrive as `-1`; this is the largest
+/// value that survives the trip meaning what it says.
+const ALL_ROWS: usize = i64::MAX as usize;
+
 #[derive(Parser)]
 #[command(
     name = "jod",
@@ -89,8 +99,15 @@ enum Command {
         #[arg(long)]
         thinking: bool,
     },
-    /// List the agents this process knows about.
+    /// List the agents this process knows about, newest first.
     Ls {
+        /// How many rows to print. The newest ones, because a run still going
+        /// is at that end and it is the row worth reading.
+        #[arg(short, long, default_value_t = 20)]
+        limit: usize,
+        /// Every run on the box, however many that is.
+        #[arg(long)]
+        all: bool,
         #[arg(long)]
         json: bool,
     },
@@ -1614,14 +1631,22 @@ async fn main() -> Result<()> {
             std::process::exit(code);
         }
 
-        Command::Ls { json } => {
+        Command::Ls { limit, all, json } => {
             // A fresh process knows nothing until it reads the database back.
-            jod.rehydrate(200).await?;
-            let agents = jod.agents().await;
+            // Read back more than will be printed: a run started days ago and
+            // still going sits far down the list, and dropping it is the whole
+            // failure this cap exists to avoid.
+            let read_back = if all { ALL_ROWS } else { LS_READ_BACK.max(limit) };
+            jod.rehydrate(read_back).await?;
+            let cap = if all { ALL_ROWS } else { limit };
+            let (agents, known) = jod.recent_agents(cap).await;
             if json {
                 println!("{}", serde_json::to_string_pretty(&agents)?);
             } else {
-                render::agents(&agents);
+                // The database knows about runs this process never read back,
+                // so it gives the truthful "how many were hidden"; `known` is
+                // the floor for a process running without one.
+                render::agents(&agents, jod.run_count()?.max(known));
             }
         }
 

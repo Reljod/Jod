@@ -338,7 +338,9 @@ fn indent(text: &str, prefix: &str) -> String {
         .join("\n")
 }
 
-pub fn agents(list: &[AgentSummary]) {
+/// The agent listing: `list` is already the page to print, newest first, and
+/// `total` is how many the process knows about.
+pub fn agents(list: &[AgentSummary], total: usize) {
     if list.is_empty() {
         println!("{}", paint(DIM, "no agents"));
         return;
@@ -358,6 +360,19 @@ pub fn agents(list: &[AgentSummary]) {
             a.name
         );
     }
+    // Truncating in silence is the same bug in miniature: the reader has no way
+    // to tell a box with 20 runs from one with 88.
+    if let Some(hidden) = hidden_rows(list.len(), total) {
+        println!(
+            "{}",
+            paint(DIM, &format!("{hidden} older hidden — jod ls --all"))
+        );
+    }
+}
+
+/// How many rows the cap left out, or `None` when nothing was hidden.
+fn hidden_rows(shown: usize, total: usize) -> Option<usize> {
+    total.checked_sub(shown).filter(|n| *n > 0)
 }
 
 /// A team: who is on it, then what is on its board.
@@ -970,6 +985,21 @@ mod tests {
     fn a_clean_run_exits_zero() {
         assert_eq!(exit_status(false, Some(0)), 0);
         assert_eq!(exit_status(false, None), 0);
+    }
+
+    /// A capped listing has to say so. 20 of 88 rows printed in silence reads
+    /// exactly like a box with 20 runs on it.
+    #[test]
+    fn a_capped_listing_reports_how_many_rows_it_left_out() {
+        assert_eq!(hidden_rows(20, 88), Some(68));
+    }
+
+    #[test]
+    fn a_listing_that_hid_nothing_says_nothing() {
+        assert_eq!(hidden_rows(88, 88), None);
+        assert_eq!(hidden_rows(1, 1), None);
+        // A total that lags the page cannot underflow into a huge count.
+        assert_eq!(hidden_rows(20, 3), None);
     }
 
     #[test]
