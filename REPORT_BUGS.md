@@ -48,6 +48,7 @@ see BUG-13.
 | [BUG-18](#bug-18) | Medium | interrupt | Every interrupt falsely warns the run "may still be writing", worded as a *start* failure |
 | [BUG-19](#bug-19) | Medium | fleet | An interrupted run reads `✗ failed` in the TUI but `killed` in `jod ls` and the database |
 | [BUG-20](#bug-20) | **High** | destructive UI | The "cannot be undone" dialog clips its own warning and hides what cancels |
+| [BUG-21](#bug-21) | Medium | diffs | The diff header's untruncated path pushes the promised `+N -M` counts off screen |
 | [BUG-15](#bug-15) | **High** | mentions | `@` in a non-git directory is ~95% `node_modules` noise; source is invisible |
 | [BUG-16](#bug-16) | Medium | mentions | `@` clips paths from the right, so six different files render identically |
 
@@ -90,6 +91,7 @@ a longer thing into it, and let the terminal clip mid-word with no ellipsis.
 | [BUG-11](#bug-11) | popup width | half the command descriptions |
 | [BUG-16](#bug-16) | popup width | the filename — the only distinguishing part |
 | [BUG-20](#bug-20) | `question.len() + 8` | the words "undone" and "else cancels" |
+| [BUG-21](#bug-21) | `room` computed, then unused | the filename *and* the `+N -M` counts |
 
 Notably the code **already knows how to do this correctly** — the transcript
 wraps notices properly, and the search overlay elides with a real `…`. The
@@ -894,6 +896,56 @@ variant (or make it `Invalid`) so a stop failure stops claiming to be a spawn
 failure. Only warn about "may still be writing" when processes genuinely
 survive the grace period, which is a condition worth checking rather than
 assuming.
+
+---
+
+<a name="bug-21"></a>
+## BUG-21 — The diff header pushes its own line counts off the screen · Medium · OPEN
+
+`docs/try-it.md:252` promises: *"File edits render as diffs with the path as a
+header **and counts**."* The counts are not there.
+
+**Repro:** ask the agent to create a file. The diff header renders as:
+
+```
+  ± /Users/reljodoreta/Developer/Repositories/Projects/Jod/.claude/worktrees/tui-dogfood-tetri
+    +# Tetris
+    +
+    +- Released in 1984 by Alexey Pajitnov, written on an Electronika 60 at the Soviet Acade…
+```
+
+Hard-clipped mid-path, no ellipsis. **Both** informative parts are gone: the
+filename (`NOTES.md` — the whole point of a path header) and the `+6 -0` counts
+that were supposed to follow it.
+
+**Root cause.** `cli/src/tui/ui.rs:4619`:
+
+```rust
+let room = (width as usize).saturating_sub(6);
+let mut lines = vec![Line::from(vec![
+    Span::styled("  ± ".to_string(), fg(WARN)),
+    Span::styled(edit.path.clone(), bold(AGENT)),          // full absolute path, never trimmed
+    Span::styled(format!("  +{} -{}", edit.added(), edit.removed()), fg(MUTED)),
+])];
+```
+
+`room` is computed and then **not applied to the header** — only to the body
+lines below. So the path span runs to whatever length it happens to be, and
+anything after it, including the counts, is pushed past the right edge and
+clipped. Any absolute path longer than the panel loses the counts, which in a
+worktree or monorepo is all of them.
+
+The tell is one line above it on screen: the tool's own output line *does*
+elide properly with `…`. The helper exists; this header does not use it.
+
+The doc comment directly above explains why the path is a header rather than a
+per-line prefix — *"repeated down forty rows it would cost the width the code
+needs"* — which is exactly right, and exactly the reasoning that should also
+have bounded the header itself.
+
+**Suggested fix.** Elide the path from the **left** to `room`, keeping the
+filename, and reserve the width the counts need before laying the path out —
+`± …/tui-dogfood-tetris/NOTES.md  +6 -0`. Fifth instance of Pattern B.
 
 ---
 
