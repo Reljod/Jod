@@ -93,6 +93,62 @@ and have been removed rather than left to mislead.
 | #81 | `2c0963f` | [BUG-7](#bug-7), [BUG-6](#bug-6) | `Shift-Tab` advertised; the projects key opens the panel from a cold start | ✗ reported |
 | #82 | `27a7072` | [BUG-1](#bug-1), [BUG-2](#bug-2), [BUG-14](#bug-14) *(display half)* | notice-only output no longer swallowed; the delegation confirmation names id, full prompt **and cwd**; fleet detail shows the run's cwd | ✗ reported |
 
+### ✅ Now re-driven by hand, against `main` at `a15c016`
+
+The `✗ reported` column above is **closed**. I rebuilt from a clean tree at
+`a15c016` (no local patches — I discarded two in-flight fixes of my own once I
+found they duplicated #78) and drove the real TUI in a terminal. Results:
+
+| Finding | PR | Hand-driven result |
+|---|---|---|
+| [BUG-13](#bug-13) | #80 | ✅ **fixed** — `jod --version` → `jod 0.1.0 (a15c016 2026-08-14)`. Commit **and** date, exactly the fix suggested. |
+| [BUG-7](#bug-7) | #81 | ✅ **fixed** — the `?` overlay now lists `Shift-Tab  show or hide the side panel`. |
+| [BUG-6](#bug-6) | #81 | ✅ **fixed** — `Ctrl-G d` from a **cold start** now shows the projects panel. This was the one with the misleading green test; it is genuinely fixed in the default state. |
+| [BUG-1](#bug-1) | #82 | ✅ **fixed** — `/root` typed as the *first* action now prints its answer immediately. Verified the constraint too: the splash still appears on a fresh session. |
+| [BUG-2](#bug-2) | #82 | ✅ **fixed** — and better than I asked for (see below). |
+| [BUG-4](#bug-4) | #78 | ❌ **still open** — status bar reads `● auto · Claude Code · ready`. No directory. |
+| [BUG-14](#bug-14) | #78 | ❌ **STILL BITES** — see below. This is the last blocker. |
+
+**#82's delegate confirmation is the best fix in this report.** It reads:
+
+```
+⇢ delegated b2dd9d66 · in the background, Ctrl-F to watch
+    in /Users/reljodoreta
+    reply with the word here
+```
+
+id, **working directory**, and prompt. (I nearly filed a correction claiming it
+omitted the cwd — my `grep` had caught only the first line. It does not omit
+it; the maintainer's description was right and mine was wrong.)
+
+### ⚠ BUG-14 is not fixed on `main`, and it is the one thing left
+
+`main` still has, at `cli/src/main.rs:1789`:
+
+```rust
+cwd: cwd.unwrap_or_else(jod_core::service::default_cwd),
+```
+
+Driven just now: launched `jod tui` **from `tetris-oneshot`**, with no `--cwd`,
+delegated one prompt. The run recorded:
+
+```
+b2dd9d66|/Users/reljodoreta|reply with the word
+```
+
+`$HOME`. So on today's `main`, a one-shot Tetris **still lands in the home
+directory**. [PR #78](https://github.com/Reljod/Jod/pull/78) is the fix and is
+still a draft — **merging it is the highest-value action available.**
+
+The consolation is that #82 turned a silent failure into a loud one: the
+confirmation now prints `in /Users/reljodoreta` right under the delegation, so
+the mistake is visible the moment it happens instead of after a paid run has
+written a project into the wrong tree. That is the difference between a
+critical bug and an annoying one — but the annoying one still misplaces the
+work.
+
+---
+
 That closes the two findings I most wanted closed. [BUG-1](#bug-1) was the one
 hiding every other message in the program, and #82 taking [BUG-2](#bug-2) with
 it matches what I predicted after testing the delegate confirmation in a
