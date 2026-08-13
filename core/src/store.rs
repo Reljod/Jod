@@ -1727,6 +1727,14 @@ impl Store {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
+    /// How many runs are on record. What a capped listing needs to say how
+    /// many rows it left out, without reading them back to count them.
+    pub fn run_count(&self) -> Result<usize> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        let n: i64 = conn.query_row("SELECT COUNT(*) FROM runs", [], |r| r.get(0))?;
+        Ok(n.max(0) as usize)
+    }
+
     /// The harness session id of the most recent run, so `--continue` can be
     /// resolved to a specific conversation rather than "whatever was last".
     pub fn last_session_for(&self, harness: &str) -> Result<Option<String>> {

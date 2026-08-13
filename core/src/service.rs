@@ -551,6 +551,19 @@ impl Jod {
         }
     }
 
+    /// How many runs are on record, whichever process launched them. Zero
+    /// without a store, where nothing outlives this process anyway.
+    ///
+    /// The database is the authority here, not [`agents`](Self::agents): this
+    /// process only ever reads back the newest few hundred runs, so counting
+    /// what it holds would understate a box that has been busy.
+    pub fn run_count(&self) -> Result<usize> {
+        match &self.store {
+            Some(store) => store.run_count(),
+            None => Ok(0),
+        }
+    }
+
     /// Load prior runs from the database back into memory. Returns how many.
     ///
     /// A daemon that restarts has no idea what it launched before; without this
@@ -934,6 +947,39 @@ impl Jod {
             .filter_map(|id| guard.agents.get(id))
             .map(|r| r.summary.clone())
             .collect()
+    }
+
+    /// The newest `limit` agents, and how many this process holds in total.
+    ///
+    /// [`agents`] hands back launch order — oldest first — which is what a
+    /// board that renders every row wants, and every other caller depends on.
+    /// A terminal listing wants the opposite, for the same reason
+    /// [`history`](Self::history) is newest first: on a box that has
+    /// accumulated runs, the one still running is at the *new* end, and
+    /// oldest-first pushed the only row worth reading off the bottom of the
+    /// screen. The count comes back with the page so the caller can say how
+    /// many rows it hid rather than silently truncating.
+    ///
+    /// `limit` is a row cap, not a fetch cap: what this process knows about is
+    /// decided by [`rehydrate`](Self::rehydrate).
+    pub async fn recent_agents(&self, limit: usize) -> (Vec<AgentSummary>, usize) {
+        let guard = self.state.read().await;
+        // `order` can name a run whose record is gone, so the total has to be
+        // counted from what actually resolves rather than from `order.len()`.
+        let known: Vec<&String> = guard
+            .order
+            .iter()
+            .filter(|id| guard.agents.contains_key(*id))
+            .collect();
+        let total = known.len();
+        let page = known
+            .into_iter()
+            .rev()
+            .take(limit)
+            .filter_map(|id| guard.agents.get(id))
+            .map(|r| r.summary.clone())
+            .collect();
+        (page, total)
     }
 
     pub async fn agent(&self, id: &str) -> Result<AgentSummary> {
@@ -1328,6 +1374,102 @@ mod tests {
         let report = jod.report().await;
         assert_eq!(report.running, 0);
         assert_eq!(report.total_cost_usd, 0.0);
+    }
+
+    /// A box that has accumulated runs: `count` finished ones, oldest first,
+    /// and then one still running as the newest — the shape `jod ls` was
+    /// reported on, where the single running agent was the very last line.
+    fn store_with_a_backlog(count: usize) -> std::sync::Arc<Store> {
+        let store = std::sync::Arc::new(Store::in_memory().unwrap());
+        for i in 0..count {
+            let mut summary = record().summary;
+            summary.id = format!("old-{i:03}");
+            summary.name = format!("run {i}");
+            summary.status = AgentStatus::Completed;
+            summary.created_at_ms = i as i64;
+            summary.pid = Some(4_000_000);
+            summary.pgid = Some(4_000_000);
+            store.save_run(&stored_run(&summary)).unwrap();
+        }
+        let mut live = record().summary;
+        live.id = "the-live-one".into();
+        live.name = "the run worth reading".into();
+        live.status = AgentStatus::Running;
+        live.created_at_ms = count as i64;
+        // This test process, so the liveness probe in `rehydrate` finds a real
+        // group and leaves the run marked running instead of failing it.
+        live.pid = Some(std::process::id());
+        live.pgid = Some(std::process::id());
+        store.save_run(&stored_run(&live)).unwrap();
+        store
+    }
+
+    /// The reported bug: 88 rows came out oldest first, so the one running
+    /// agent was the last line and scrolled off the screen.
+    #[tokio::test]
+    async fn listing_agents_puts_the_newest_run_first() {
+        let jod = Jod::with_store(store_with_a_backlog(87));
+        jod.rehydrate(1000).await.unwrap();
+
+        let (page, total) = jod.recent_agents(88).await;
+        assert_eq!(total, 88);
+        assert_eq!(page.len(), 88);
+        assert_eq!(page[0].id, "the-live-one", "the running run must lead");
+        assert_eq!(page[0].status, AgentStatus::Running);
+        assert_eq!(page.last().unwrap().id, "old-000", "oldest run goes last");
+
+        let times: Vec<i64> = page.iter().map(|a| a.created_at_ms).collect();
+        let mut descending = times.clone();
+        descending.sort_unstable_by(|a, b| b.cmp(a));
+        assert_eq!(times, descending, "every row must be newest first");
+    }
+
+    /// The cap keeps the listing to a screenful, and takes it off the *old*
+    /// end — capping the new end would hide exactly the row the cap exists to
+    /// surface.
+    #[tokio::test]
+    async fn the_listing_cap_keeps_the_newest_rows_and_reports_the_total() {
+        let jod = Jod::with_store(store_with_a_backlog(87));
+        jod.rehydrate(1000).await.unwrap();
+
+        let (page, total) = jod.recent_agents(20).await;
+        assert_eq!(page.len(), 20, "the cap is applied");
+        assert_eq!(total, 88, "the total is still reported, so 68 hidden");
+        assert_eq!(
+            jod.run_count().unwrap(),
+            88,
+            "and the database agrees, so the hidden count is not a guess"
+        );
+        assert_eq!(page[0].id, "the-live-one");
+        assert_eq!(page.last().unwrap().id, "old-068");
+        assert!(
+            !page.iter().any(|a| a.id == "old-000"),
+            "the oldest rows are the ones dropped"
+        );
+    }
+
+    /// The escape hatch: `jod ls --all` passes a limit past the row count and
+    /// must come back with every run, still newest first.
+    #[tokio::test]
+    async fn asking_for_everything_returns_every_run() {
+        let jod = Jod::with_store(store_with_a_backlog(87));
+        jod.rehydrate(1000).await.unwrap();
+
+        let (page, total) = jod.recent_agents(i64::MAX as usize).await;
+        assert_eq!(page.len(), 88);
+        assert_eq!(page.len(), total);
+        assert_eq!(page[0].id, "the-live-one");
+        assert_eq!(page.last().unwrap().id, "old-000");
+    }
+
+    /// A cap larger than the listing is not an error and hides nothing.
+    #[tokio::test]
+    async fn a_cap_wider_than_the_listing_hides_nothing() {
+        let jod = Jod::with_store(store_with_one_finished_run());
+        jod.rehydrate(100).await.unwrap();
+        let (page, total) = jod.recent_agents(20).await;
+        assert_eq!(page.len(), 1);
+        assert_eq!(total, 1);
     }
 
     /// Build a store holding one finished run, as a previous process would
