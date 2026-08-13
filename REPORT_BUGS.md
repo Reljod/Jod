@@ -842,7 +842,7 @@ argument being broken. It was not — the `tetris` dir is simply empty, and the
 behaviour was correct. **The truncated header made correct behaviour
 indistinguishable from a bug.**
 
-**Root cause.** `cli/src/tui/ui.rs:2179`:
+**Root cause.** `cli/src/tui/ui.rs:2300`:
 
 ```rust
 let width = (screen.width.saturating_sub(8)).min(96).max(40);
@@ -1287,7 +1287,26 @@ every interrupt.
 ---
 
 <a name="bug-18"></a>
-## BUG-18 — Every interrupt prints a false "would not stop" warning, worded as a start failure · Medium · OPEN
+## BUG-18 — Every interrupt prints a false "would not stop" warning, worded as a start failure · ~~Medium~~ · **FIXED by #87** (`8ffcdd5`)
+
+> **Verified fixed in the merged tree**, and fixed exactly as suggested — both
+> halves:
+>
+> - **The self-contradicting wording is gone.** `core/src/error.rs:23` now has
+>   a dedicated `Kill(String)` variant, so a failure to *stop* no longer
+>   reports itself as a failure to *start*. `core/src/service.rs:885` raises
+>   `JodError::Kill(format!("process group {pgid}: {e}"))`.
+> - **The false alarm is gone.** `core/src/proc.rs:75` now treats `ESRCH` — the
+>   group having already exited — as success, with a test named
+>   `signalling_a_group_that_is_already_gone_is_success` (`proc.rs:285`) and
+>   another at `proc.rs:330` whose comment reads *"The whole of BUG-18:
+>   stopping a run that has already ended must be a success"*.
+>
+> The `it may still be writing` sentence still exists at
+> `cli/src/tui/mod.rs:1184`, which is correct — it is now reachable only when a
+> stop genuinely fails, rather than on every interrupt.
+>
+> The repro below is kept as the regression reference.
 
 **Repro:** interrupt any running turn (`Esc` or `Ctrl-X`). Observed on **2 of
 2** interrupts, with different pgids — this is systematic, not a one-off.
@@ -1361,7 +1380,7 @@ Hard-clipped mid-path, no ellipsis. **Both** informative parts are gone: the
 filename (`NOTES.md` — the whole point of a path header) and the `+6 -0` counts
 that were supposed to follow it.
 
-**Root cause.** `cli/src/tui/ui.rs:4637`:
+**Root cause.** `cli/src/tui/ui.rs:4815`:
 
 ```rust
 let room = (width as usize).saturating_sub(6);
@@ -1432,7 +1451,7 @@ The warning reads **"this cannot be undo"**. The instructions read
 **"y confirms · anythi"** — the user is not told what cancels, and is left
 looking at a half-word on a dialog that destroys data.
 
-**Root cause.** `cli/src/tui/ui.rs:2507` sizes the panel from the question
+**Root cause.** `cli/src/tui/ui.rs:2628` sizes the panel from the question
 alone, ignoring its own border titles:
 
 ```rust
@@ -1511,7 +1530,7 @@ killed|5          <-- and zero rows with status 'failed'
 The menu's dashboard line inherits the error: `15 runs · 0 running · 2 failed`,
 counting two failures that do not exist in the record.
 
-**Root cause.** `cli/src/tui/app.rs:1656` counts on the *live* agent list:
+**Root cause.** `cli/src/tui/app.rs:1754` counts on the *live* agent list:
 
 ```rust
 let failed = self.agents.iter().filter(|a| a.status == "failed").count();
