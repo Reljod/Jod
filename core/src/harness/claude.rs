@@ -223,7 +223,43 @@ impl Harness for ClaudeCode {
                     session_id: str_at(&v, "session_id"),
                     model: str_at(&v, "model"),
                 }],
-                // hook_started / hook_response / thinking_tokens are bookkeeping.
+                // The only thing a long think puts on the wire.
+                //
+                // This arm used to read "hook_started / hook_response /
+                // thinking_tokens are bookkeeping" and drop all three. Two of
+                // those are bookkeeping. This one is the liveness signal: a
+                // turn that reasons for minutes emits no assistant block, no
+                // tool call and no result, and `system/thinking_tokens` arrives
+                // steadily throughout. Jod received every one of them and threw
+                // every one away, which is why a nine-minute think rendered as
+                // a frozen transcript behind a bare spinner.
+                //
+                // The shape is read off claude 2.1.231 itself rather than
+                // guessed — it emits
+                // `{subtype:"thinking_tokens", estimated_tokens, estimated_tokens_delta, uuid, session_id}`.
+                // Only the running total is carried up: a consumer wanting the
+                // delta has the previous tick.
+                Some("thinking_tokens") => vec![AgentEvent::Progress {
+                    thinking_tokens: u64_at(&v, "estimated_tokens"),
+                }],
+                // `hook_started` / `hook_response` stay dropped, and that is a
+                // decision rather than the status quo surviving by default.
+                // They cannot fill the silence this fix is about: a hook fires
+                // around something Jod already renders — `PreToolUse` and
+                // `PostToolUse` bracket a `ToolCall`/`ToolResult`, `Stop`
+                // brackets the end — so they are a second copy of an event the
+                // stream already carries, and none of them fires during a think
+                // with no tool in it. They are also conditional on the user
+                // having configured hooks at all, which a liveness signal
+                // cannot be. And `hook_response` carries the `stdout`/`stderr`
+                // of an arbitrary user shell command, so surfacing it would put
+                // unreviewed command output into the transcript and the
+                // persisted event log — a redaction question, not a liveness
+                // win.
+                //
+                // Dropped here rather than left to fall through, because the
+                // catch-all below turns anything it reaches into
+                // `AgentEvent::Raw` and dumps the JSON into the transcript.
                 _ => vec![],
             },
             Some("assistant") => self.parse_assistant(&v),
@@ -799,15 +835,66 @@ mod tests {
         );
     }
 
+    /// The regression this whole change exists for.
+    ///
+    /// A `system`/`thinking_tokens` line has to reach the stream as a typed
+    /// event. It used to be dropped, which is what made a nine-minute think
+    /// render as a frozen transcript behind a bare spinner — and the trap on
+    /// the other side is just as bad: falling through to the catch-all would
+    /// make it `Raw` and dump the JSON into the transcript. Both failures are
+    /// asserted against.
+    ///
+    /// The line is claude 2.1.231's own — subtype, `estimated_tokens` and
+    /// `estimated_tokens_delta` read off the shipped binary rather than
+    /// invented.
+    #[test]
+    fn a_thinking_tick_reaches_the_stream_as_a_typed_event() {
+        let mut h = ClaudeCode::default();
+        let out = h.parse_line(
+            r#"{"type":"system","subtype":"thinking_tokens","estimated_tokens":1408,
+                "estimated_tokens_delta":64,"uuid":"u1","session_id":"s1"}"#,
+        );
+        assert_eq!(
+            out,
+            vec![AgentEvent::Progress {
+                thinking_tokens: Some(1408)
+            }],
+            "the only liveness signal a long think emits was dropped again"
+        );
+        assert!(
+            !out.iter().any(|e| matches!(e, AgentEvent::Raw { .. })),
+            "a tick that lands in Raw dumps harness JSON into the transcript"
+        );
+    }
+
+    /// The count is a courtesy; the tick is the point. A build that renames
+    /// `estimated_tokens` must still say "still working" rather than fall
+    /// silent — the failure mode this change removes.
+    #[test]
+    fn a_thinking_tick_survives_losing_its_counter() {
+        let mut h = ClaudeCode::default();
+        let out = h.parse_line(r#"{"type":"system","subtype":"thinking_tokens"}"#);
+        assert_eq!(
+            out,
+            vec![AgentEvent::Progress {
+                thinking_tokens: None
+            }]
+        );
+    }
+
+    /// Hooks and rate-limit notices stay silent — and silent means *dropped*,
+    /// not `Raw`. `hook_response` in particular carries the stdout of an
+    /// arbitrary user shell command, which has no business in the transcript.
     #[test]
     fn bookkeeping_system_lines_produce_nothing() {
         let mut h = ClaudeCode::default();
-        assert!(h
-            .parse_line(r#"{"type":"system","subtype":"thinking_tokens","estimated_tokens":5}"#)
-            .is_empty());
-        assert!(h
-            .parse_line(r#"{"type":"rate_limit_event","rate_limit_info":{}}"#)
-            .is_empty());
+        for line in [
+            r#"{"type":"system","subtype":"hook_started","hook_id":"h1","hook_name":"fmt","hook_event":"PostToolUse"}"#,
+            r#"{"type":"system","subtype":"hook_response","hook_id":"h1","hook_name":"fmt","hook_event":"PostToolUse","stdout":"AWS_SECRET=…","exit_code":0,"outcome":"success"}"#,
+            r#"{"type":"rate_limit_event","rate_limit_info":{}}"#,
+        ] {
+            assert!(h.parse_line(line).is_empty(), "{line} was not dropped");
+        }
     }
 
     #[test]

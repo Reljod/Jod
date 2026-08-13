@@ -196,6 +196,9 @@ impl NewMessage {
     ///
     /// Four kinds deliberately produce nothing:
     ///
+    /// - `Progress` is a liveness tick with no content — the thing a long
+    ///   silent think emits so a UI can show it is still working. It belongs in
+    ///   a status line, never in a transcript replayed into another harness.
     /// - `Started` is metadata. It carries the session id and model, which
     ///   belong on the conversation row — see [`Store::set_conversation_session`].
     /// - `Finished.text` is always a repeat: every harness adapter fills it
@@ -238,9 +241,13 @@ impl NewMessage {
             // A run that died mid-way must say so in the transcript, or the
             // thread reads as though the agent simply stopped talking.
             AgentEvent::Error { message } => Some(NewMessage::new(Role::System, message.clone())),
-            AgentEvent::Started { .. } | AgentEvent::Finished { .. } | AgentEvent::Raw { .. } => {
-                None
-            }
+            // `Progress` joins them: it is a liveness tick with no content, so
+            // a transcript replayed into another harness must not carry a
+            // record of how long the first one thought.
+            AgentEvent::Started { .. }
+            | AgentEvent::Finished { .. }
+            | AgentEvent::Raw { .. }
+            | AgentEvent::Progress { .. } => None,
         }
     }
 }

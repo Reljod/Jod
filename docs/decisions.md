@@ -2281,3 +2281,51 @@ would cost exactly the case it exists for.
 `Bash` is the acknowledged gap: `pnpm install` created the `node_modules` tree in
 `$HOME` in the original run and no argument inspection would have caught it.
 What catches that is the working directory being right to begin with.
+
+## The line dismissed as bookkeeping was the only one on the wire
+
+A build submitted through `jod tui` froze for about nine minutes. The last
+rendered line was a `Bash` result from second seven; the status bar showed a
+bare spinner and `working 4m49s`. Nothing was wrong — the model was thinking —
+but a five-minute blind spinner and a crashed process look exactly alike, and
+the only honest thing a person can do with either is kill it.
+
+The harness was not silent. `claude` emits `system` / `thinking_tokens`
+throughout a long think, steadily, carrying a running estimate. Jod's adapter
+handled `system` only when `subtype == "init"` and dropped the rest under a
+comment calling them bookkeeping. They arrived, they were counted by nobody, and
+they were thrown away — during the one window in a run where nothing else is
+produced at all. A turn that reasons emits no assistant block, no tool call and
+no result until it is finished reasoning.
+
+So `AgentEvent::Progress` exists, and three things about it were deliberate.
+
+**A tick, not content.** It carries a token count and no text. Put in the
+transcript it would be nine minutes of scrollback saying "still working"; its
+place is a status line. `NewMessage::from_event` drops it for the same reason a
+`Raw` line is dropped — a thread replayed into another harness must not replay
+the first harness's heartbeat.
+
+**Typed, not `Raw`.** The catch-all arm below would have taken it and rendered
+the JSON verbatim into the transcript. "Not dropped" and "surfaced" are
+different fixes, and only one of them is this one.
+
+**The count is optional; the tick is not.** If a later build renames
+`estimated_tokens`, Jod still says *alive* rather than falling silent again. The
+failure being repaired is silence, so nothing in the path may be conditional on
+a field parsing.
+
+`hook_started` and `hook_response` stay dropped, and that is now a decision
+rather than the previous line surviving by inertia. A hook fires around
+something Jod already renders — `PreToolUse`/`PostToolUse` bracket a tool call
+and its result — so it is a second copy of an event the stream already carries,
+and none of them fires inside a think with no tool in it. They also exist only
+if the user configured hooks, and a liveness signal cannot be contingent on
+that. `hook_response` additionally carries the `stdout` and `stderr` of an
+arbitrary user shell command, so surfacing it is a redaction question rather
+than a liveness win.
+
+One consequence beyond the UI: [heartbeats](#alive-is-not-working-and-only-one-of-them-was-ever-checked)
+ask whether a run is *producing events*, and a long think used to produce none.
+Ticks now advance the run's high-water `seq`, so thinking reads as working —
+which is what it is.

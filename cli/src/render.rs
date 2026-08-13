@@ -171,6 +171,22 @@ fn print_event(event: &AgentEvent, show_thinking: bool) {
                 emit(&paint(DIM, &indent(text, "  ")));
             }
         }
+        // The same information as `Thinking`, counted rather than quoted, so it
+        // rides the same flag: `--thinking` turns the silent stretch of a long
+        // reasoning turn into a running count instead of nothing at all.
+        //
+        // A tick without a count still prints — "it is alive" is the whole
+        // message, and swallowing the tick because its counter is missing would
+        // reproduce the bug one layer up.
+        AgentEvent::Progress { thinking_tokens } => {
+            if show_thinking {
+                let count = match thinking_tokens {
+                    Some(t) => format!("  thinking… {t} tokens"),
+                    None => "  thinking…".to_string(),
+                };
+                eprintln!("{}", paint(DIM, &count));
+            }
+        }
         AgentEvent::Message { text } => println!("{text}"),
         AgentEvent::ToolCall { name, input } => emit(&tool_line(name, input.as_ref())),
         AgentEvent::ToolResult { name, is_error, .. } => {
