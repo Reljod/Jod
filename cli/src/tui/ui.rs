@@ -8571,6 +8571,10 @@ mod tests {
 
     /// The spec's own words: with zero roots it says so. An empty list would
     /// read as "no matches" and invite another keystroke that cannot help.
+    ///
+    /// And it says so with the command that fixes it *from here*. The popup is
+    /// open and the cursor is in the chat box; a message naming a shell
+    /// command is a message you cannot act on without leaving.
     #[test]
     fn the_picker_with_no_roots_says_so_rather_than_showing_an_empty_list() {
         let mut a = app();
@@ -8579,7 +8583,28 @@ mod tests {
         a.cursor = a.input.len();
         a.open_mention(8);
         let frame = rendered(&a, 120, 30);
-        assert!(frame.contains("no roots set"), "{frame}");
+        assert!(frame.contains("no folder to search"), "{frame}");
+        assert!(frame.contains("/add-dir"), "{frame}");
+    }
+
+    /// The full-screen picker says which tree it is walking.
+    ///
+    /// It mattered less when the base was always the directory `jod` was
+    /// launched in — you knew where you were. `/add-dir <path>` makes the base
+    /// somewhere you named a moment ago, and a list of bare relative paths
+    /// with no header is a list you cannot tell apart from the last one.
+    #[test]
+    fn the_full_screen_picker_names_the_tree_it_is_walking() {
+        let mut a = app();
+        a.overlay = Overlay::Picker(picker::Picker::new(
+            std::path::PathBuf::from("/home/reljod/notes"),
+            vec![".".into(), "daily".into(), "reference".into()],
+            false,
+        ));
+        let frame = rendered(&a, 120, 30);
+        assert!(frame.contains("/home/reljod/notes"), "{frame}");
+        assert!(frame.contains("daily"), "{frame}");
+        assert!(frame.contains("⏎ adds it read-only"), "{frame}");
     }
 
     /// With a root set, the popup ranks live under the cursor.

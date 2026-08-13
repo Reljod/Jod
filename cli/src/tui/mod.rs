@@ -1231,7 +1231,7 @@ async fn perform(
                     let roots = store.roots(&conversation).unwrap_or_default();
                     if roots.is_empty() {
                         vec![
-                            "no roots — Alt-P picks a directory, and `@` says so until there is one"
+                            "no roots — /add-dir picks one (Alt-P), and `@` says so until there is"
                                 .to_string(),
                         ]
                     } else {
@@ -2464,9 +2464,7 @@ fn on_chord(app: &mut App, key: KeyEvent) -> Option<Option<Action>> {
         // the filesystem to keep a picker warm that is opened twice a day is a
         // cost nobody asked for. Every *keystroke* after this ranks in memory.
         KeyCode::Char('p') if alt => {
-            let base = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-            let (entries, truncated) = picker::directories(&base);
-            app.overlay = Overlay::Picker(picker::Picker::new(base, entries, truncated));
+            open_picker(app, launch_dir());
             handled(None)
         }
         // Delegate: the typed line becomes an agent that runs without taking
@@ -4214,12 +4212,24 @@ fn apply_slash(app: &mut App, slash: command::Slash) -> Option<Action> {
                 // opens — one picker, reached two ways, rather than a second
                 // one that would drift.
                 command::RootCmd::Add(None) => {
-                    let base = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-                    let (entries, truncated) = picker::directories(&base);
-                    app.overlay = Overlay::Picker(picker::Picker::new(base, entries, truncated));
+                    open_picker(app, launch_dir());
                     None
                 }
                 command::RootCmd::Add(Some(path)) => Some(Action::AddRoot(PathBuf::from(path))),
+                // `/add-dir <where>` — the same picker, started somewhere you
+                // name. Refused rather than opened empty when the name is not
+                // a directory: a picker with no rows would read as "nothing
+                // here" when the truth is "that is not a place".
+                command::RootCmd::AddFrom(named) => {
+                    match picker::base_named(&named) {
+                        Some(base) => open_picker(app, base),
+                        None => app.push(Entry::Notice(format!(
+                            "{named} is not a directory — /add-dir takes somewhere that exists, \
+                             or nothing at all to pick from here"
+                        ))),
+                    }
+                    None
+                }
                 command::RootCmd::Remove(path) => Some(Action::RemoveRoot(PathBuf::from(path))),
             }
         }
@@ -4389,6 +4399,28 @@ fn go_home(app: &mut App) {
     app.scroll_to_bottom();
     // Takes the overlay and the back stack with it, which is the rest of home.
     app.go(Workspace::Chat);
+}
+
+/// Put the directory picker on screen, walking from `base`.
+///
+/// One function because there are now three ways in — `Alt-P`, `/root add` and
+/// `/add-dir` — and they must open the *same* picker. Three copies of "walk,
+/// construct, assign" is three places for the bound, the noise list or the
+/// starting row to drift apart, which is exactly the drift `picker.rs` was
+/// written to prevent between its own two sizes.
+///
+/// The walk is the one piece of I/O the key path does, and it stays here for
+/// the reason spelled out at `Alt-P`: bounded, on an explicit keystroke, never
+/// on the tick.
+fn open_picker(app: &mut App, base: PathBuf) {
+    let (entries, truncated) = picker::directories(&base);
+    app.overlay = Overlay::Picker(picker::Picker::new(base, entries, truncated));
+}
+
+/// Where a picker opened with no argument starts: the directory `jod` was
+/// launched in.
+fn launch_dir() -> PathBuf {
+    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 
 /// Record the model this conversation is to run on from now on.
@@ -10064,6 +10096,69 @@ mod tests {
         assert!(
             p.rows.iter().any(|r| r.path == "."),
             "the directory you are in is the first offer"
+        );
+    }
+
+    /// `/add-dir` is the folder-first name for the same picker, so it must
+    /// land in exactly the state the chord does — one picker, three doors.
+    #[test]
+    fn add_dir_opens_the_same_picker_the_chord_does() {
+        let mut typed = app_on(HarnessKind::ClaudeCode);
+        apply_slash(&mut typed, command::parse("/add-dir").expect("parses"));
+        let mut chorded = app_on(HarnessKind::ClaudeCode);
+        alt(&mut chorded, KeyCode::Char('p'));
+        assert_eq!(typed.overlay, chorded.overlay);
+    }
+
+    /// The argument is a *base*, and this is the capability that did not exist
+    /// before: a console launched inside one repository can be pointed at a
+    /// tree that has nothing to do with it.
+    #[test]
+    fn add_dir_with_a_path_walks_that_tree_rather_than_the_launch_directory() {
+        let base = std::env::temp_dir().join(format!("jod-add-dir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("notes")).expect("a fixture tree");
+
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        let line = format!("/add-dir {}", base.display());
+        apply_slash(&mut app, command::parse(&line).expect("parses"));
+
+        let Overlay::Picker(p) = &app.overlay else {
+            panic!("/add-dir <path> opens the picker, got {:?}", app.overlay);
+        };
+        assert_eq!(p.base, std::fs::canonicalize(&base).expect("a real path"));
+        assert_ne!(
+            p.base,
+            std::env::current_dir().expect("a working directory"),
+            "the point of the argument is to leave where you are"
+        );
+        assert!(
+            p.entries.contains(&"notes".to_string()),
+            "and to walk the named tree: {:?}",
+            p.entries
+        );
+        // `.` is still the first row, so "this exact folder" costs one `⏎`.
+        assert_eq!(p.rows[0].path, ".");
+        assert_eq!(p.chosen().as_deref(), Some(p.base.as_path()));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A name that is not a directory is said out loud. An empty picker would
+    /// read as "there is nothing here" when the truth is "that is not a
+    /// place", and the next keystroke would look like it might help.
+    #[test]
+    fn add_dir_somewhere_that_does_not_exist_says_so_and_opens_nothing() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        apply_slash(
+            &mut app,
+            command::parse("/add-dir /no/such/folder/anywhere").expect("parses"),
+        );
+        assert_eq!(app.overlay, Overlay::None);
+        assert!(
+            last_notice(&app).contains("not a directory"),
+            "got {:?}",
+            last_notice(&app)
         );
     }
 
