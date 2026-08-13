@@ -363,6 +363,22 @@ pub struct App {
     /// True while the conversation on screen is mid-turn. Other agents may be
     /// working at the same time; this is only about the one being watched.
     pub busy: bool,
+    /// The run a stop has been asked for and not yet heard back about.
+    ///
+    /// Stopping is not instant — the signal goes out, the harness winds down,
+    /// and its own ending arrives afterwards — so there is a gap between the
+    /// keypress and the end of the turn. Without a word for that gap the status
+    /// bar had only `working` and `ready` to choose from, and it said `working`
+    /// with the elapsed counter stopped: a frozen clock, which reads as a hung
+    /// program rather than as a stop in progress.
+    ///
+    /// It also decides how the turn is written down. The ending of a run that
+    /// was killed arrives as an error, because to anything reading an exit
+    /// status that is what a signal is; rendered as-is it printed a red
+    /// `✗ failed` directly beneath the `✓ done · interrupted` this file had
+    /// just written, two verdicts on one turn that disagreed. A deliberate stop
+    /// is not a failure.
+    pub interrupting: Option<String>,
     pub agents: Vec<AgentLine>,
     /// Prompts typed while the watched conversation was still working. They are
     /// sent in order as the turn ends, so thinking ahead is not punished by
@@ -892,6 +908,7 @@ impl App {
             overlay: Overlay::None,
             graph: GraphView::new(String::new()),
             busy: false,
+            interrupting: None,
             agents: Vec::new(),
             queued: Vec::new(),
             history: Vec::new(),
@@ -1102,6 +1119,36 @@ impl App {
             ""
         };
         format!("mode: {}{when}", self.mode.label())
+    }
+
+    /// A turn has started on `run`: watch it, and say the conversation is busy.
+    ///
+    /// One function because there are two ways in — a line typed into the main
+    /// chat, which goes to the orchestrator, and a line typed into any other
+    /// conversation, which goes straight to a harness — and they must leave the
+    /// app in the same state. Nothing enforced that before, so a fixture could
+    /// assemble a "mid-turn" app by hand and be believed while the state a real
+    /// turn produces drifted away from it.
+    pub fn begin_turn(&mut self, run: impl Into<String>, at_ms: i64) {
+        self.watching = Some(run.into());
+        self.busy = true;
+        self.turn_started_ms = Some(at_ms);
+        // Whatever was being stopped, this is not it. A stop that was never
+        // heard back about would otherwise leave the status bar saying
+        // `interrupting…` over a turn that has already started again.
+        self.interrupting = None;
+    }
+
+    /// Whether `id` is the run a stop is waiting on, taking the wait with it.
+    ///
+    /// Called with a run's ending, so the answer is "this ending is the one the
+    /// stop asked for" — which is what makes it a stop rather than a failure.
+    pub fn claims_interrupt(&mut self, id: &str) -> bool {
+        if self.interrupting.as_deref() == Some(id) {
+            self.interrupting = None;
+            return true;
+        }
+        false
     }
 
     /// How full the context window is, as a fraction — capped at 1.0 so a bar
@@ -2095,10 +2142,26 @@ impl App {
                 if let Some(t) = self.elapsed() {
                     bits.push(t);
                 }
-                self.push(Entry::Done {
-                    text: bits.join(" · "),
-                    failed: *is_error,
-                });
+                // A run stopped on purpose ends here too, and its ending is an
+                // error to anything reading an exit status — a signal is how it
+                // was stopped. But the interrupt already wrote what happened,
+                // so printing this one put a red `✗ failed` under the green
+                // `✓ done · interrupted` for the same turn, the transcript
+                // contradicting itself at the exact moment the reader is
+                // checking whether their stop worked.
+                //
+                // `apply` is only ever fed the events of the run being watched,
+                // so a stop outstanding on that run is a stop on this ending.
+                let stopped_on_purpose = match self.watching.clone() {
+                    Some(id) => self.claims_interrupt(&id),
+                    None => false,
+                };
+                if !stopped_on_purpose {
+                    self.push(Entry::Done {
+                        text: bits.join(" · "),
+                        failed: *is_error,
+                    });
+                }
                 self.busy = false;
                 self.turn_started_ms = None;
             }
@@ -2178,7 +2241,13 @@ impl App {
     /// What he is doing about it: this turn, the runs behind it, and the
     /// prompts waiting their turn.
     pub fn activity(&self) -> String {
-        let mut parts = vec![if self.busy {
+        let mut parts = vec![if self.interrupting.is_some() {
+            // Said the moment the key is pressed, because the stop is not
+            // instant and the alternative was a status that still read
+            // `working` over a clock that had stopped ticking. Four seconds of
+            // that and the reader presses the key again, or reaches for Ctrl-C.
+            format!("{} interrupting…", self.spinner())
+        } else if self.busy {
             // The spinner and the elapsed time are the difference between "this
             // is working" and "this has hung", which a static word cannot tell
             // you during a run that legitimately takes ten minutes.

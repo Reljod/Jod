@@ -871,21 +871,42 @@ impl Jod {
     /// Works from any process, including one that never launched this run: the
     /// process-group id is a column, not a handle.
     pub async fn kill_agent(&self, id: &str) -> Result<()> {
-        let pgid = match self.state.read().await.agents.get(id) {
-            Some(record) => record.summary.pgid,
+        let (pgid, was_running) = match self.state.read().await.agents.get(id) {
+            Some(record) => (
+                record.summary.pgid,
+                record.summary.status == AgentStatus::Running,
+            ),
             None => return Err(JodError::UnknownAgent(id.to_string())),
         };
 
         if let Some(pgid) = pgid {
-            proc::terminate_group(pgid, KILL_GRACE).await.map_err(|e| {
-                JodError::Spawn(format!("could not stop process group {pgid}: {e}"))
-            })?;
+            proc::terminate_group(pgid, KILL_GRACE)
+                .await
+                .map_err(|e| JodError::Kill(format!("process group {pgid}: {e}")))?;
         }
 
         let mut guard = self.state.write().await;
         if let Some(record) = guard.agents.get_mut(id) {
             record.summary.process_alive = false;
-            if record.summary.status == AgentStatus::Running {
+            // `Failed` counts, and this is the whole of it: the harness dies
+            // *because* of the signal above, and its own ending arrives — as a
+            // `Finished { is_error: true }`, folded in by `apply` — while
+            // `terminate_group` is still waiting out the grace. So by the time
+            // this lock is taken the status may already say the run failed,
+            // written by the exit this call caused. The supervisor knows better
+            // and stores `killed`; without this the memory the TUI reads
+            // disagreed with the row `jod ls` reads, and a run the user stopped
+            // on purpose showed as a red failure until the next restart.
+            //
+            // `was_running` is what keeps that from relabelling somebody else's
+            // failure: only a run that was still going when this was asked can
+            // have been ended by it.
+            let ended_here = was_running
+                && matches!(
+                    record.summary.status,
+                    AgentStatus::Running | AgentStatus::Failed
+                );
+            if ended_here {
                 record.summary.status = AgentStatus::Killed;
                 if let Some(store) = &self.store {
                     let _ = store.set_run_status(id, AgentStatus::Killed.as_str());
@@ -1401,6 +1422,144 @@ mod tests {
             AgentStatus::Killed,
             "the supervisor's word must beat the replay"
         );
+    }
+
+    /// A failure to *stop* must not be worded as a failure to *start*. The one
+    /// message a worried reader studies hardest is the one about an agent that
+    /// may still be writing to their files, and it used to contain three
+    /// contradictory claims.
+    #[test]
+    fn a_stop_failure_does_not_claim_the_agent_would_not_start() {
+        let said = JodError::Kill("process group 37237: Operation not permitted".into()).to_string();
+        assert!(said.contains("could not stop the agent"), "{said}");
+        assert!(!said.contains("start"), "{said}");
+    }
+
+    /// The guard on the repair above: a run that had already failed on its own
+    /// before anybody asked it to stop keeps its failure. Relabelling that as a
+    /// kill would hide the one status a reader needs to see.
+    #[tokio::test]
+    async fn stopping_a_run_that_had_already_failed_leaves_it_failed() {
+        let store = std::sync::Arc::new(Store::in_memory().unwrap());
+        let mut summary = record().summary;
+        summary.id = "already-failed".into();
+        summary.status = AgentStatus::Running;
+        // A pgid nothing is behind, so the stop is a no-op and the status is
+        // the only thing under test.
+        summary.pid = Some(4_000_000);
+        summary.pgid = Some(4_000_000);
+        store.save_run(&stored_run(&summary)).unwrap();
+
+        let jod = Jod::with_store(store.clone());
+        jod.rehydrate(100).await.unwrap();
+        assert_eq!(
+            jod.agent("already-failed").await.unwrap().status,
+            AgentStatus::Failed,
+            "a running row with a dead group is a failure, and this is before the kill"
+        );
+
+        jod.kill_agent("already-failed").await.unwrap();
+        assert_eq!(
+            jod.agent("already-failed").await.unwrap().status,
+            AgentStatus::Failed
+        );
+    }
+
+    /// A run stopped on purpose must read `killed` *without* a restart.
+    ///
+    /// The race this pins is the ordinary case, not a corner: `kill_agent`
+    /// signals the group and then waits out the grace, and the harness dies
+    /// during that wait. Its ending arrives as `Finished { is_error: true }` —
+    /// a process killed by a signal is an error to everything that only sees
+    /// the exit — and folds into the record while the kill is still waiting.
+    /// The supervisor, which saw the signal, stores `killed`. So the row said
+    /// `killed`, memory said `failed`, and the TUI reading memory showed a red
+    /// ✗ for a run the reader stopped themselves, until the next restart
+    /// silently changed its mind.
+    #[tokio::test]
+    async fn a_run_stopped_on_purpose_reads_killed_before_any_restart() {
+        let dir = std::env::temp_dir().join(format!("jod-kill-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let prog = dir.join("run.sh");
+        // Deaf to `SIGTERM`, so the group is still there while the event lands —
+        // in production the grace is what holds this window open. The `ready`
+        // file is waited for below: a signal that arrives before the script has
+        // exec'd hits a child with no trap installed yet and kills it outright,
+        // which closes the window this test needs open.
+        std::fs::write(
+            &prog,
+            "#!/usr/bin/env bash\ntrap '' TERM\n: > ready\nfor _ in $(seq 1 30); do sleep 0.05; done\n",
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&prog, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let pgid = crate::proc::spawn_detached(&prog, &[], &dir, &dir.join("log")).unwrap();
+        for _ in 0..200 {
+            if dir.join("ready").exists() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(
+            crate::proc::group_alive(pgid),
+            "the fixture run must actually be running"
+        );
+
+        let store = std::sync::Arc::new(Store::in_memory().unwrap());
+        let mut summary = record().summary;
+        summary.id = "raced-kill".into();
+        summary.status = AgentStatus::Running;
+        summary.pid = Some(pgid);
+        summary.pgid = Some(pgid);
+        store.save_run(&stored_run(&summary)).unwrap();
+
+        let jod = Jod::with_store(store.clone());
+        jod.rehydrate(100).await.unwrap();
+        let mut watching = jod.subscribe();
+
+        let stopping = tokio::spawn({
+            let jod = jod.clone();
+            async move { jod.kill_agent("raced-kill").await }
+        });
+
+        // The harness's own ending, arriving mid-kill through the real event
+        // loop — the same envelope the supervisor emits for a signalled run.
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        assert!(
+            !stopping.is_finished(),
+            "the ending has to land while the stop is still waiting, or this \
+             test proves nothing"
+        );
+        jod.events_tx
+            .send(AgentEnvelope {
+                agent_id: "raced-kill".into(),
+                at_ms: 1,
+                seq: 0,
+                event: AgentEvent::Finished {
+                    text: None,
+                    exit_code: None,
+                    is_error: true,
+                    usage: Usage::default(),
+                },
+            })
+            .unwrap();
+        watching.recv().await.expect("the loop handled the ending");
+
+        stopping.await.unwrap().expect("the run stops");
+
+        assert_eq!(
+            jod.agent("raced-kill").await.unwrap().status,
+            AgentStatus::Killed,
+            "a deliberate stop is not a failure"
+        );
+        assert_eq!(
+            store.run("raced-kill").unwrap().unwrap().status,
+            "killed",
+            "and the live view agrees with the row `jod ls` reads"
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// The converse, and the reason the row is not trusted blindly: a row left

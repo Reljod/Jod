@@ -14,6 +14,14 @@ pub enum JodError {
     #[error("could not start the agent: {0}")]
     Spawn(String),
 
+    /// Stopping a run that would not stop. Separate from [`JodError::Spawn`]
+    /// because a failure to *stop* rendered as "could not start the agent" is a
+    /// contradiction printed in the one message a worried reader studies
+    /// hardest — the one about an agent that may still be writing to their
+    /// files.
+    #[error("could not stop the agent: {0}")]
+    Kill(String),
+
     /// A run is supervised by a detached process that reports through the
     /// database, so there is nowhere for its output to go without one. Failing
     /// here is better than launching an agent nobody will ever hear from.
