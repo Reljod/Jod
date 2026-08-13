@@ -2937,9 +2937,27 @@ fn on_which_key(app: &mut App, key: KeyEvent) -> Option<Action> {
         //
         // Here rather than on a chord because `Ctrl-D` is quit, and the last
         // free letter went to dictation in the same change that added this.
+        //
+        // The catalog is drawn *inside* the side panel, so while the panel is
+        // shut this key used to flip a flag nothing rendered: from a cold start
+        // — the state every user begins in — the menu offered `projects · show
+        // or hide the catalog` and pressing it changed nothing on screen and
+        // said nothing about why. So a shut panel is opened rather than
+        // toggled: the key's promise is *show me the projects*, and that is the
+        // one reading which is true from either state.
+        //
+        // Guarded from a default `App`, with the panel left shut, by
+        // `ui::tests::the_projects_key_shows_the_catalog_from_a_cold_start` —
+        // the precondition `the_catalog_is_collapsed_without_closing_the_panel`
+        // sets away, which is how this survived a keymap refactor.
         'd' => {
             app.overlay = Overlay::None;
-            app.projects_open = !app.projects_open;
+            if app.panel {
+                app.projects_open = !app.projects_open;
+            } else {
+                app.panel = true;
+                app.projects_open = true;
+            }
             None
         }
         // Search every transcript. `/` is the command palette in chat and the
