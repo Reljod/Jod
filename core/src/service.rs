@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
-use tokio::sync::{broadcast, mpsc, RwLock};
+use tokio::sync::{broadcast, mpsc, RwLock, Semaphore};
 
 use crate::cards::{CardKind, Importance, NewCard, Source};
 use crate::conversation::{Conversation, NewMessage};
@@ -415,6 +415,35 @@ fn record_in_conversation(store: &Store, conversation_id: &str, envelope: &Agent
 /// leaves the run marked running with no explanation.
 const KILL_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// How often the concurrency watcher checks whether a launched run's process
+/// group is still alive. Same order of magnitude as [`runner::follow`]'s own
+/// poll, which this deliberately does not share — this one exists even when
+/// nobody is watching the run's output, and coupling the two would mean a
+/// change to one silently retunes the other.
+const CAPACITY_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(150);
+
+/// The cap on agents running at once, before an eighth agent takes a four-core
+/// box to a load of 60. `available_parallelism` unless `JOD_MAX_CONCURRENT_AGENTS`
+/// says otherwise — the same override shape [`crate::discovery::find_binary`]
+/// uses, so one environment variable can pin this on a box that wants a
+/// different number than its own core count.
+///
+/// A box that cannot even ask how many cores it has gets 1, not 0 — a cap of
+/// zero would refuse every spawn forever, which is a worse failure than
+/// running one agent at a time on hardware nobody could size.
+pub fn default_max_concurrent_agents() -> usize {
+    if let Ok(v) = std::env::var("JOD_MAX_CONCURRENT_AGENTS") {
+        if let Ok(n) = v.parse::<usize>() {
+            if n > 0 {
+                return n;
+            }
+        }
+    }
+    std::thread::available_parallelism()
+        .map(std::num::NonZeroUsize::get)
+        .unwrap_or(1)
+}
+
 struct AgentRecord {
     summary: AgentSummary,
     events: Vec<AgentEnvelope>,
@@ -435,6 +464,13 @@ pub struct Jod {
     events_tx: mpsc::UnboundedSender<AgentEnvelope>,
     broadcast_tx: broadcast::Sender<AgentEnvelope>,
     store: Option<Arc<Store>>,
+    /// Bounds how many launched processes may be running at once. Every
+    /// caller funnels through [`Jod::spawn_agent_in`], which acquires a
+    /// permit before [`runner::launch`] and hands it to a watcher that holds
+    /// it for the launched process's whole life — so the (N+1)th concurrent
+    /// spawn queues on `acquire_owned` rather than piling another process
+    /// onto a box that is already at capacity. → `default_max_concurrent_agents`
+    concurrency: Arc<Semaphore>,
 }
 
 impl Jod {
@@ -464,6 +500,7 @@ impl Jod {
             events_tx,
             broadcast_tx: broadcast_tx.clone(),
             store: store.clone(),
+            concurrency: Arc::new(Semaphore::new(default_max_concurrent_agents())),
         });
 
         let state = jod.state.clone();
@@ -887,6 +924,22 @@ impl Jod {
             eprintln!("[jod] could not persist run: {e}");
         }
 
+        // Wait for a slot before starting a process, not before accepting the
+        // request — the request is already recorded above. This is the one
+        // seam every caller funnels through (the TUI calls this directly; the
+        // API's own pre-check at `max_concurrent_agents` runs before it ever
+        // gets here), so queueing here is what keeps an eighth agent on a
+        // four-core box from becoming an eighth process. `acquire_owned` is a
+        // fair FIFO wait, not a rejection: a queued caller's `spawn_agent_in`
+        // simply takes longer to return, which is the whole of "queue, don't
+        // reject."
+        let permit = self
+            .concurrency
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("the concurrency semaphore is never closed");
+
         let launch = runner::launch(
             &id,
             &req,
@@ -900,6 +953,8 @@ impl Jod {
         let launched = match launch {
             Ok(l) => l,
             Err(e) => {
+                // `permit` drops here, freeing the slot immediately: nothing
+                // was ever running, so nothing should be waited on.
                 let mut guard = self.state.write().await;
                 if let Some(record) = guard.agents.get_mut(&id) {
                     record.summary.status = AgentStatus::Failed;
@@ -908,6 +963,23 @@ impl Jod {
                 return Err(e);
             }
         };
+
+        // Hand the permit to a watcher that holds it for the process's whole
+        // life and releases it the moment the process group is gone —
+        // however the run ends: it finishes, it is killed, or its supervisor
+        // dies without ever writing a `Finished` event. Tied to the process
+        // group rather than to the event stream on purpose: a slot the event
+        // stream forgot to free is a concurrency cap that silently stops
+        // admitting anyone, which is worse than the bug this fixes.
+        {
+            let pgid = launched.pgid;
+            tokio::spawn(async move {
+                let _permit = permit;
+                while proc::group_alive(pgid) {
+                    tokio::time::sleep(CAPACITY_POLL_INTERVAL).await;
+                }
+            });
+        }
 
         let summary = {
             let mut guard = self.state.write().await;
