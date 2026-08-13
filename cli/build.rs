@@ -27,6 +27,15 @@ fn main() {
     println!("cargo:rustc-env=JOD_BUILD_ID={id}");
     println!("cargo:rustc-env=JOD_BUILD_DATE={date}");
 
+    // The platform triple this build is for, which is what `jod upgrade` needs
+    // to know which `jod-<target>.tar.gz` the release holds for it. Cargo sets
+    // TARGET for every build script; asking the host with `uname` instead
+    // would answer for the kernel rather than for this binary, and send a
+    // cross-built or Rosetta'd copy to a tarball it cannot run.
+    let target = std::env::var("TARGET").unwrap_or_else(|_| "unknown".to_string());
+    println!("cargo:rustc-env=JOD_BUILD_TARGET={target}");
+    println!("cargo:rerun-if-env-changed=TARGET");
+
     // Emitting any `rerun-if-changed` replaces cargo's default of "rerun when
     // any file in the package changed", so `src` is re-stated here — it is
     // what `-dirty` is mostly about, and a source edit already recompiles this

@@ -128,7 +128,12 @@ fn execute(
 /// other: the installer writes progress to one and `cargo` writes to the
 /// other, and draining them in sequence would deadlock the moment the pipe
 /// nobody is reading fills up.
-fn stream(mut cmd: Command, tx: UnboundedSender<String>) -> Result<std::process::ExitStatus> {
+///
+/// Shared with [`crate::upgrade`], which runs a different script the same way.
+pub(crate) fn stream(
+    mut cmd: Command,
+    tx: UnboundedSender<String>,
+) -> Result<std::process::ExitStatus> {
     use std::io::{BufRead, BufReader};
 
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -191,7 +196,7 @@ pub fn running_binary() -> Result<PathBuf> {
 /// Which file is at this path, as the filesystem knows it. `None` when it
 /// cannot be read, which compares unequal to nothing — an unreadable binary is
 /// never reported as replaced.
-fn file_identity(path: &Path) -> Option<(u64, u64)> {
+pub(crate) fn file_identity(path: &Path) -> Option<(u64, u64)> {
     use std::os::unix::fs::MetadataExt;
     let meta = std::fs::metadata(path).ok()?;
     Some((meta.dev(), meta.ino()))

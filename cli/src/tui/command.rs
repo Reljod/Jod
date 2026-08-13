@@ -117,6 +117,18 @@ pub enum Slash {
     Update {
         check: bool,
     },
+    /// Install the newest *release* of the binaries this console runs from,
+    /// downloaded prebuilt rather than rebuilt from a checkout.
+    ///
+    /// A separate variant rather than an alias of [`Slash::Update`], because
+    /// at a shell the two words already name two different acts — `jod update`
+    /// rebuilds within the installed MAJOR.MINOR, `jod upgrade` downloads the
+    /// newest release whatever its major and minor. A console where `/upgrade`
+    /// quietly did the first would make the same word mean two things
+    /// depending on where it was typed.
+    Upgrade {
+        check: bool,
+    },
     Exit,
     /// A `/word` nobody knows. Reported rather than sent to the agent.
     Unknown(String),
@@ -443,15 +455,26 @@ pub fn parse(line: &str) -> Option<Slash> {
         // "start one" on one line and "list them" on the next is a trap.
         "jobs" | "shells" => Slash::Jobs,
         "reload" | "restart" => Slash::Reload,
-        // Deliberately not `/upgrade <version>`: a minor or major move changes
-        // what the console and the daemon *are*, and the console mid-session is
-        // the wrong place to decide that. `jod update --version` at a shell is.
-        "update" | "upgrade" => match arg.trim_start_matches("--") {
+        "update" => match arg.trim_start_matches("--") {
             "" => Slash::Update { check: false },
             "check" | "dry-run" | "n" => Slash::Update { check: true },
             other => Slash::Refused(format!(
                 "“{other}” is not something /update takes — /update installs the \
                  newest patch, /update check says what it would install"
+            )),
+        },
+        // Still deliberately not `/upgrade <version>`. Naming a version is how
+        // you land on a release nobody is on by accident, and the console
+        // mid-session is the wrong place to decide that — `jod upgrade
+        // --version` at a shell is. Taking the newest published release is a
+        // different act, and it is the one this offers.
+        "upgrade" => match arg.trim_start_matches("--") {
+            "" => Slash::Upgrade { check: false },
+            "check" | "dry-run" | "n" => Slash::Upgrade { check: true },
+            other => Slash::Refused(format!(
+                "“{other}” is not something /upgrade takes — /upgrade installs the \
+                 newest release, /upgrade check says what it would install. To land \
+                 on a specific one, run `jod upgrade --version {other}` at a shell"
             )),
         },
         "exit" | "quit" | "q" => Slash::Exit,
@@ -595,7 +618,11 @@ pub const HELP: &[(&str, &str)] = &[
     ),
     (
         "/update",
-        "build and install the newest patch of Jod; 'check' just says what it would do",
+        "rebuild and install the newest patch of Jod; 'check' just says what it would do",
+    ),
+    (
+        "/upgrade",
+        "download and install the newest release of Jod; 'check' just says what it would do",
     ),
     ("/exit", "leave; running agents keep going"),
 ];

@@ -47,6 +47,18 @@ jod --version && jod tui
 
 Make sure `~/.local/bin` is on your `PATH`.
 
+Once installed, `jod upgrade` does all of the above for you next time — it
+resolves the newest release, downloads the tarball for your platform, checks it
+against the published `.sha256`, and replaces the binaries in place. It needs no
+checkout and no Rust toolchain, which is what makes it the counterpart to this
+install path rather than to the one below.
+
+```sh
+jod upgrade --check              # say what it would install, change nothing
+jod upgrade                      # take the newest release
+jod upgrade --version v1.2.0     # land on a specific one
+```
+
 ### Jod TUI — from source
 
 The original path, and still the one `jod update` drives. Requires Git and [Rust](https://rustup.rs):
@@ -61,7 +73,18 @@ The installer clones into `$HOME/.jod/src` (or `$JOD_SRC`), compiles `jod` and `
 curl -fsSL https://raw.githubusercontent.com/Reljod/Jod/main/install.sh | JOD_WITH_API=1 bash
 ```
 
-See [`deploy/README.md`](./deploy/README.md) for daemon and VPS deployment. Once installed, `jod update` takes newer patch releases within your installed `MAJOR.MINOR`.
+See [`deploy/README.md`](./deploy/README.md) for daemon and VPS deployment. Once installed, `jod update` rebuilds newer patch releases within your installed `MAJOR.MINOR` — it never crosses a minor on its own, so the daemon and the console cannot change out from under a running box.
+
+`jod update` and `jod upgrade` are two commands because they are two acts:
+
+| | `jod update` | `jod upgrade` |
+|---|---|---|
+| Gets the bits by | `cargo build` in your checkout | downloading the release tarball |
+| Needs | Git, Rust, a checkout | curl, tar |
+| Moves to | newest patch of your `MAJOR.MINOR` | newest release, any `MAJOR.MINOR` |
+| Takes | minutes | seconds |
+
+Either works from inside the console as `/update` and `/upgrade`, running as a background job so the TUI stays usable while it goes. → [why](./docs/decisions.md#update-and-upgrade-are-two-commands-because-they-are-two-acts)
 
 ### Jod Desktop
 
@@ -253,7 +276,8 @@ This brings slash commands directly into your Claude Code workflow:
 ```
 AGENTS.md          Charter, coding conventions, and agent rules
 CLAUDE.md          Symlink to AGENTS.md for Claude integration
-install.sh         Bootstrap installer script for Jod
+install.sh         Bootstrap installer for Jod — clones and builds from source
+bin/               jod-upgrade.sh, what `jod upgrade` runs to install a release
 core/              Rust core: process supervision, SQLite store, events, MCP tools
 supervisor/        jod-run supervisor daemon
 cli/               jod CLI and full-screen TUI implementation
