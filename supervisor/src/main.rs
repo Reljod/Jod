@@ -28,12 +28,14 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
 
+use jod_core::cards::{CardKind, Importance, NewCard, Source};
 use jod_core::event::{AgentEnvelope, AgentEvent};
 use jod_core::redact::Scrubber;
 use jod_core::runner::SpawnPlan;
 use jod_core::secrets::read_secret_value;
 use jod_core::service::AgentStatus;
 use jod_core::store::Store;
+use jod_core::workdir;
 
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
@@ -143,6 +145,10 @@ async fn run(plan_path: &PathBuf) -> Result<(), String> {
 
     let mut terminating = false;
     let mut outcome: Option<Exit> = None;
+    // Every file this run put bytes into, as it goes. Accumulated here rather
+    // than read back out of the events afterwards because this process already
+    // has them in hand, and it is the one process that cannot miss any.
+    let mut wrote: Vec<PathBuf> = Vec::new();
 
     let mut sigterm = signal_stream(tokio::signal::unix::SignalKind::terminate())?;
     let mut sigint = signal_stream(tokio::signal::unix::SignalKind::interrupt())?;
@@ -168,6 +174,18 @@ async fn run(plan_path: &PathBuf) -> Result<(), String> {
                     for event in harness.parse_line(&line) {
                         if let AgentEvent::Started { session_id: Some(id), .. } = &event {
                             writer.set_session(id);
+                        }
+                        if let AgentEvent::ToolCall { name, input } = &event {
+                            if let Some(path) = workdir::written_path(name, input.as_ref()) {
+                                // Relative to the harness, which is running in
+                                // `plan.cwd` — not to this process, which is
+                                // deliberately somewhere else entirely.
+                                wrote.push(if path.is_absolute() {
+                                    path
+                                } else {
+                                    plan.cwd.join(path)
+                                });
+                            }
                         }
                         writer.emit(event);
                     }
@@ -203,14 +221,121 @@ async fn run(plan_path: &PathBuf) -> Result<(), String> {
     let errored = matches!(finished, AgentEvent::Finished { is_error: true, .. });
     writer.emit(finished);
 
-    writer.set_status(match (terminating || outcome.signalled, errored) {
+    let status = match (terminating || outcome.signalled, errored) {
         (true, _) => AgentStatus::Killed,
         (false, true) => AgentStatus::Failed,
         (false, false) => AgentStatus::Completed,
-    });
+    };
+    writer.set_status(status);
+
+    // Only for a run that says it succeeded. A failure already has something to
+    // say for itself, and the state this is about is the one that says nothing:
+    // `✓ done`, real money spent, and the directory you pointed at untouched.
+    if status == AgentStatus::Completed {
+        note_writes_outside_the_workspace(&store, &plan, &wrote);
+    }
 
     Ok(())
 }
+
+/// Say so when a run finished having written nothing where it was pointed.
+///
+/// The failure this exists for is silent in both directions: the agent believed
+/// it had succeeded, the run's row agreed, the fleet showed a green check — and
+/// every file it produced was in the user's home directory, while the directory
+/// they had added stayed empty. Nothing anywhere would ever have told them.
+///
+/// The workspace is the run's own working directory *plus* whatever its
+/// conversation declares now, read at the end rather than taken from the plan
+/// so that a worktree the agent claimed mid-run counts as somewhere it was
+/// meant to write.
+///
+/// A card rather than a status change, and the distinction is the honest one:
+/// the run really did complete. What it did not do is land anywhere anybody
+/// asked for, and that is a thing to tell a person, not a way to relabel an
+/// exit code.
+///
+/// Every failure here is a line on stderr. A run whose work is already durably
+/// recorded must not be reported as broken because a warning about it could not
+/// be filed.
+fn note_writes_outside_the_workspace(store: &Store, plan: &SpawnPlan, wrote: &[PathBuf]) {
+    let conversation = match store.conversation_for_run(&plan.run_id) {
+        Ok(Some(id)) => id,
+        // A run with no conversation — a probe, a summariser — has nowhere to
+        // put a card and nobody reading for one.
+        Ok(None) => return,
+        Err(e) => {
+            eprintln!("jod-run: could not find the run's conversation: {e}");
+            return;
+        }
+    };
+
+    let mut workspace = vec![plan.cwd.clone()];
+    match store.roots(&conversation) {
+        Ok(roots) => workspace.extend(roots.into_iter().map(|r| r.path)),
+        Err(e) => eprintln!("jod-run: could not read the conversation's roots: {e}"),
+    }
+
+    let Some(strays) = workdir::strayed(wrote, &workspace) else {
+        return;
+    };
+
+    let listed = |paths: &[PathBuf]| -> String {
+        paths
+            .iter()
+            .take(SHOWN_PATHS)
+            .map(|p| format!("  {}\n", p.display()))
+            .collect::<String>()
+    };
+    let more = strays.len().saturating_sub(SHOWN_PATHS);
+    let body = format!(
+        "This run reported success, and every file it wrote landed outside the \
+         directories it was given.\n\n\
+         It was working in:\n{}\n\
+         It wrote to:\n{}{}\n\
+         Nothing it produced is in a directory this session declared. If you \
+         meant it to work in one of them, the work is not there — it is at the \
+         paths above.",
+        listed(&workspace),
+        listed(&strays),
+        if more > 0 {
+            format!("  …and {more} more\n")
+        } else {
+            String::new()
+        },
+    );
+
+    let card = NewCard {
+        conversation_id: conversation,
+        run_id: Some(plan.run_id.clone()),
+        // It chose, and it is being reported so the choice can be overruled.
+        // Nothing is waiting on an answer — the run is over — so this is not
+        // blocking however much it matters.
+        kind: Some(CardKind::Decision),
+        importance: Some(Importance::High),
+        blocking: false,
+        title: "this run wrote outside every directory it was given".into(),
+        body,
+        options: workspace
+            .iter()
+            .map(|p| p.to_string_lossy().to_string())
+            .collect(),
+        chosen: strays
+            .first()
+            .and_then(|p| p.parent())
+            .map(|p| p.to_string_lossy().to_string()),
+        source: Some(Source::Jod),
+        dedupe_key: Some(format!("stray-writes:{}", plan.run_id)),
+        ..NewCard::default()
+    };
+    if let Err(e) = store.raise_card(card) {
+        eprintln!("jod-run: could not raise the stray-writes card: {e}");
+    }
+}
+
+/// How many paths a card names before it summarises. A card is a thing you read
+/// in a rail, and a run that wrote sixty files would otherwise paste all sixty.
+const SHOWN_PATHS: usize = 8;
 
 /// Turn the plan's secret *names* into environment pairs.
 ///

@@ -183,6 +183,14 @@ pub enum Source {
     /// fallback for a run launched without Jod's MCP server, de-duplicated
     /// against the tool path so a harness that does both produces one card.
     Lifted,
+    /// Jod itself raised it, about the run rather than for it.
+    ///
+    /// Distinct from both of the above because the agent did not participate:
+    /// it neither called a tool nor said anything Jod lifted. It is Jod
+    /// noticing something the run could not — that every file it wrote landed
+    /// outside the directories it was given, say — and the reader deserves to
+    /// know the observation is Jod's rather than the agent's.
+    Jod,
 }
 
 impl Source {
@@ -190,12 +198,14 @@ impl Source {
         match self {
             Source::Mcp => "mcp",
             Source::Lifted => "lifted",
+            Source::Jod => "jod",
         }
     }
 
     pub fn parse(s: &str) -> Source {
         match s {
             "lifted" => Source::Lifted,
+            "jod" => Source::Jod,
             _ => Source::Mcp,
         }
     }
