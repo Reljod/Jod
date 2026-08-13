@@ -30,7 +30,7 @@ see BUG-13.
 
 | ID | Severity | Area | One line |
 |---|---|---|---|
-| [BUG-14](#bug-14) | **Critical** | delegation | A delegated agent wrote into `$HOME`, outside every root, and the run was recorded `✓ done` |
+| [BUG-14](#bug-14) | **Critical** | delegation | **The TUI runs every agent in `$HOME`** — work lands outside every root and the run is recorded `✓ done` |
 | [BUG-1](#bug-1) | **Critical** | rendering | A fresh session hides *all* notice-only output — most slash commands render nothing |
 | [BUG-2](#bug-2) | **High** | delegation | `Ctrl-B` delegates with almost no confirmation; it looks like nothing happened |
 | [BUG-3](#bug-3) | **High** | directory clarity | The directory picker's header is truncated, so you cannot tell which tree you are in |
@@ -97,20 +97,70 @@ directory was touched."* Same instruction shape, same outcome, different
 session — the agent resolves a bare directory name against `$HOME` rather than
 against the root or the launch directory.
 
-**Why it happens.** Two documented facts combine badly:
+**Root cause — found, and it is a one-line inconsistency between two entry
+points.** The agent did not "guess" `$HOME`. **Jod launched it there.** Every
+run started from the TUI records `$HOME` as its working directory:
 
-- *"Roots are a convention, not a sandbox — passing one grants; withholding one
-  does not deny"* (`docs/try-it.md:203`). Nothing **stops** a write outside a
-  root.
-- Roots are added **read-only**, and write access is supposed to come from the
-  agent calling `claim_worktree`. `tetris/` was an empty non-git directory, so
-  there was no worktree to claim.
+```
+$ sqlite3 ~/.jod/jod.db "select substr(id,1,8), cwd, substr(name,1,26) from runs order by created_at_ms desc"
+7de30036|/Users/reljodoreta|say hi in one word
+87e84b92|/Users/reljodoreta|Build a working Tetris gam     <-- the Tetris run
+715fb69c|/Users/reljodoreta|continue
+```
 
-So the agent had a read-only root it could not write to, an ambiguous phrase
-("the tetris directory"), and no visible statement of its own working
-directory — and resolved the ambiguity against `$HOME`. Compounding it,
-**BUG-4** means the human could not have noticed the mismatch either: the TUI
-never shows the cwd a delegated agent is given.
+— even though `jod tui` was itself launched from the worktree, and a root had
+been added. The chain:
+
+`cli/src/main.rs:1786` builds the TUI options with
+
+```rust
+cwd: cwd.unwrap_or_else(jod_core::service::default_cwd),
+```
+
+and `core/src/service.rs:1038` is:
+
+```rust
+pub fn default_cwd() -> PathBuf {
+    std::env::var("HOME").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("."))
+}
+```
+
+**The TUI defaults an agent's working directory to `$HOME`.** `jod run` does
+not — `cli/src/main.rs:3343`, `:3754` and `:3862` all use
+`cwd.unwrap_or(std::env::current_dir()?)`. Two entry points into the same
+system, opposite defaults, and only the CLI one matches where the user is
+standing.
+
+Given cwd `$HOME`, the agent behaved **correctly**: "the tetris directory"
+resolved to `~/tetris`. The instruction was fine; the working directory it was
+interpreted against was wrong before the agent ever read it.
+
+Three things then combine to make it invisible:
+
+- **BUG-4** — the TUI never displays the cwd, so the mismatch cannot be seen.
+- *"Roots are a convention, not a sandbox"* (`docs/try-it.md:203`) — nothing
+  **stops** a write outside a root, by design.
+- Roots are read-only until `claim_worktree`, and `tetris/` was an empty
+  non-git directory, so there was no worktree to claim even if it had tried.
+
+**A second, quieter casualty.** Because the workspace is `$HOME`, Claude Code
+refuses to trust it, and says so mid-transcript:
+
+> `Ignoring 3 permissions.allow entries from .claude/settings.json: this
+> workspace has not been trusted. … set projects["/Users/reljodoreta"].hasTrustDialogAccepted`
+
+So the project's own permission settings are **silently discarded** on every
+TUI run — and the `projects["/Users/reljodoreta"]` in that message is the
+same bug showing through from the harness's side.
+
+**Workaround available today** (verified): launch with an explicit directory —
+
+```
+jod tui --cwd "$PWD"
+```
+
+I confirmed this records correctly:
+`9ad3d21f|/…/worktrees/tui-dogfood-tetris/tetris|reply with the word ok`.
 
 **Why this is Critical rather than High.** The failure is silent in both
 directions. The agent believes it succeeded, Jod's records agree (`✓ done`,
@@ -121,17 +171,21 @@ unrelated tree in `$HOME` that silently did.
 
 **Suggested fixes**, in order of value:
 
-1. **Pass and display the delegated cwd.** The delegate confirmation should
-   name the working directory the run was launched with, and the run detail
-   pane should show it. Today neither does.
-2. **Resolve bare directory names against the roots** before falling back to
-   anything else, and if a name matches no root, raise a blocking card instead
-   of guessing. Guessing `$HOME` is the worst available default.
-3. **Warn when a run's file writes all land outside every declared root.** The
-   supervisor already sees the events; a run that declares "done" having
-   touched nothing inside any root is worth a card, not a green check.
-4. Consider whether a root that cannot be written to, with no worktree to
-   claim, should be accepted silently at all.
+1. **Make the TUI default to `std::env::current_dir()`, as `jod run` already
+   does.** This is the actual fix and it is one line at `cli/src/main.rs:1786`.
+   `$HOME` is a defensible default for a resident service with no launch
+   context (the phone bridge, the daemon) — but `jod tui` is typed into a
+   terminal that is standing in a directory, and that directory is the answer.
+   If `default_cwd` must stay for the service paths, the TUI should stop
+   calling it.
+2. **Display the cwd** — in the status bar (BUG-4) and in the delegate
+   confirmation (BUG-2). Either one would have exposed this in seconds.
+3. **Warn when a run's writes all land outside every declared root.** The
+   supervisor sees the events; a run that reports `done` having touched nothing
+   inside any root deserves a card, not a green check.
+4. **Add a test that the TUI's default cwd is the launch directory.** There is
+   no coverage of this today, which is why an entry point could default to
+   `$HOME` without anything going red.
 
 ---
 
@@ -181,6 +235,22 @@ for line in lines {
 So the notice is pushed, `fresh()` is still true, the splash still owns the
 screen, and the output is never seen. The command is correct; the renderer
 hides it.
+
+**Proof, caught live.** After sending one real prompt — which puts a
+non-`Notice` entry in the transcript and makes `fresh()` false — every notice
+that had been suppressed appeared *retroactively*, including the `/add-dir`
+confirmation from many minutes earlier:
+
+```
+• Ctrl-G opens every screen · / for commands · Enter send · Ctrl-B delegate…
+• added /Users/reljodoreta/tetris — read-only, as every root is until something claims it
+› say hi in one word
+```
+
+That second line is the confirmation I was told did not exist. It was in the
+transcript the whole time, behind the splash. Nothing was lost — only hidden,
+and only during the exact window where a new user is forming their first
+impression of whether the program works.
 
 **Blast radius.** Every command whose entire output is notices is invisible
 until something non-notice enters the transcript. Confirmed dead on arrival at
@@ -313,8 +383,14 @@ is unobtainable from inside the TUI.
 For a program whose core action is delegating file-modifying agents, "which
 directory am I about to change?" should never require a command.
 
-**Suggested fix.** Put the root (elided from the left) in the status bar, or in
-the input box's border title.
+**This is not cosmetic — it is what let BUG-14 through.** The answer the TUI
+declines to show was `$HOME`, and it was wrong. A single line of status bar
+would have made a critical bug self-evident on the first run instead of after
+a $1.18 agent had written a project into the wrong tree.
+
+**Suggested fix.** Put the working directory (elided from the left) in the
+status bar beside the harness and mode, where `● auto · Claude Code · ready`
+already sits.
 
 ---
 
