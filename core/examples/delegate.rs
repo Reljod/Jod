@@ -127,6 +127,9 @@ fn print_event(event: &AgentEvent) {
             );
         }
         AgentEvent::Thinking { text } => println!("[thinking] {}", first_line(text)),
+        AgentEvent::Progress { thinking_tokens } => {
+            println!("[working]  {} thinking tokens", thinking_tokens.unwrap_or(0))
+        }
         AgentEvent::Message { text } => println!("[message]  {text}"),
         AgentEvent::ToolCall { name, .. } => println!("[tool →]   {name}"),
         AgentEvent::ToolResult { name, is_error, .. } => {

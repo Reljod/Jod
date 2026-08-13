@@ -2188,6 +2188,14 @@ impl App {
                 self.busy = false;
                 self.turn_started_ms = None;
             }
+            // Nothing in the transcript, on purpose. A tick every few seconds
+            // for nine minutes would be nine minutes of scrollback saying
+            // "still working" — the status bar is where it belongs, and drawing
+            // it there is `cli/src/tui/ui.rs`, which the queued `stream-render`
+            // task owns. This arm exists so the event is *accounted for* here
+            // rather than swept up by a catch-all that would hide it from
+            // whoever writes that half.
+            AgentEvent::Progress { .. } => {}
             AgentEvent::Error { message } => self.push(Entry::Notice(message.clone())),
             AgentEvent::Raw { line } => {
                 if !line.trim().is_empty() {

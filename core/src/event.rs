@@ -39,6 +39,28 @@ pub enum AgentEvent {
     },
     /// Reasoning/thinking text, when the harness surfaces it.
     Thinking { text: String },
+    /// The harness is mid-turn and has nothing renderable yet.
+    ///
+    /// Not decoration. A turn that reasons for nine minutes before its next
+    /// tool call emits *nothing else* — no text, no thinking block, no tool —
+    /// and a UI with nothing to draw is indistinguishable from a UI watching a
+    /// process that died. Observed exactly that way: a `jod tui` transcript
+    /// froze on a tool result from second 7 while the status bar counted to
+    /// `working 4m49s` on a bare spinner. This is the only thing on the wire in
+    /// that window, so it is the only thing that can say "still working".
+    ///
+    /// Deliberately carries no text. It is a tick, not content: it belongs in a
+    /// status line rather than the transcript, and
+    /// [`crate::conversation::NewMessage::from_event`] drops it so replaying a
+    /// thread into another harness does not replay a heartbeat.
+    Progress {
+        /// Reasoning tokens produced so far this turn, when the harness counts
+        /// them. Optional so a harness that can only say "still here" — or a
+        /// future build that renames its counter — still produces the tick
+        /// rather than falling silent again.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thinking_tokens: Option<u64>,
+    },
     /// Assistant prose addressed to the caller.
     Message { text: String },
     /// The agent invoked a tool.
@@ -118,6 +140,29 @@ mod tests {
     fn summarize_renders_non_strings_as_json() {
         let v = serde_json::json!({"a": 1});
         assert_eq!(summarize(&v, 100), "{\"a\":1}");
+    }
+
+    /// The tick has to survive the wire, because the clients that most need it
+    /// are the ones on the far side of it — `api/src/sse.rs` serialises these
+    /// straight to the desktop, iOS and web apps, and a liveness signal that
+    /// does not serialise is a spinner again.
+    #[test]
+    fn a_progress_tick_survives_the_wire() {
+        let e = AgentEvent::Progress {
+            thinking_tokens: Some(1408),
+        };
+        let s = serde_json::to_string(&e).unwrap();
+        assert_eq!(s, r#"{"kind":"progress","thinking_tokens":1408}"#);
+        assert_eq!(serde_json::from_str::<AgentEvent>(&s).unwrap(), e);
+
+        // And without a count, which is what a harness that only says "still
+        // here" sends. The field disappears rather than becoming a null.
+        let bare = AgentEvent::Progress {
+            thinking_tokens: None,
+        };
+        let s = serde_json::to_string(&bare).unwrap();
+        assert_eq!(s, r#"{"kind":"progress"}"#);
+        assert_eq!(serde_json::from_str::<AgentEvent>(&s).unwrap(), bare);
     }
 
     #[test]
