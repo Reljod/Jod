@@ -179,6 +179,18 @@ program and a clean one-shot, it is verified working by hand rather than by
 assertion, and it is a strictly smaller behaviour change than the two PRs
 already merged.
 
+> **Update — #78 is now merged** as `a625bec`, along with **#85** (`8160282`,
+> the `/project` command — [BUG-5](#bug-5)) and **#87** (`8ffcdd5`, stopped
+> runs no longer reported as failures — [BUG-17](#bug-17), [BUG-19](#bug-19)).
+> Verified present in the merged tree: `cli/src/tui/command.rs:267` now matches
+> `"project" | "projects" | "repo" | "repos"`, and `cli/src/tui/app.rs:372`
+> reasons explicitly about *"the elapsed counter stopped: a frozen clock, which
+> reads as a hung"* — the exact failure this report described.
+>
+> **That is six of the findings closed in `main`:** BUG-1, BUG-2, BUG-5,
+> BUG-6, BUG-7, BUG-13, BUG-14 and BUG-4, plus BUG-17/BUG-19 addressed and
+> BUG-8/BUG-9 fixed earlier by #75.
+
 ---
 
 The consolation is that #82 turned a silent failure into a loud one: the
