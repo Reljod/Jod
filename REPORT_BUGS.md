@@ -843,6 +843,34 @@ way.
 
 ---
 
+## NOT bugs — checked, and ruled out
+
+Recorded so nobody spends time on them.
+
+- **`Ctrl-Y` "copies" but the clipboard does not change.** Reported success
+  (`• copied the last reply — 40 lines`) while a sentinel on the macOS
+  clipboard survived untouched, twice. **This is my harness, not Jod.**
+  `cli/src/tui/yank.rs:10` deliberately uses **OSC 52** — an escape sequence to
+  the *terminal's* clipboard, chosen because Jod runs over SSH where a
+  clipboard crate would target the wrong machine. My tmux session is
+  **detached**, so the sequence has no attached terminal to reach; setting
+  `set -g set-clipboard on` changed nothing for the same reason. Untestable
+  headlessly. Note OSC 52 has no acknowledgement, so the unconditional
+  "copied" notice is the only thing Jod *can* say — the module documents this.
+- **`/add-dir tetris` showing only `.`** — correct. The directory was empty.
+  Only BUG-3's truncated header made it look wrong.
+- **`Esc` not interrupting my first attempt** — that run had genuinely
+  finished (all 40 numbers, 7s) before the key landed. The real defect is
+  BUG-17, found on a retest with a 90-second run.
+- **The `/add-dir` picker hiding `dist` and `node_modules`** — deliberate, via
+  `picker.rs:65`'s `NOISE` list, and correct. It is the `@` path that is wrong
+  (BUG-15), not this one.
+- **The stale-looking `jod --help`** with 27 subcommands — that was my own
+  pre-rebuild binary, not a defect. It is what led to BUG-13, which is the real
+  issue underneath.
+
+---
+
 ## NEEDS-REPRO — observed once, could not reproduce
 
 Recorded for honesty; **do not act on these without reproducing first.**
