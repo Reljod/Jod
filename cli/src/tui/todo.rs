@@ -57,13 +57,22 @@ pub struct Item {
     pub state: State,
 }
 
+/// Whether a tool's *name* says it revises the plan.
+///
+/// Named separately from `from_tool` because a tool's *result* carries no
+/// arguments to recognise it by, and the transcript still has to know that the
+/// plan block is that result's announcement.
+pub fn names_a_plan(name: &str) -> bool {
+    name.to_ascii_lowercase().contains("todo")
+}
+
 /// The plan a todo tool call carries, or `None` for every other tool.
 ///
 /// Reads the *call's arguments* rather than its result, for the reason
 /// `diff::from_tool` does: the arguments are what the agent decided, and they
 /// are present whether or not the tool answered.
 pub fn from_tool(name: &str, input: &Value) -> Option<Vec<Item>> {
-    if !name.to_ascii_lowercase().contains("todo") {
+    if !names_a_plan(name) {
         return None;
     }
     let list = input

@@ -1255,6 +1255,32 @@ impl App {
         }
     }
 
+    /// Whether this tool's call already has a line in the transcript, so its
+    /// result does not need to add one.
+    ///
+    /// Not `transcript.last()`, which is where this started: a call does not
+    /// always leave its line at the tail. An edit pushes its diff *underneath*
+    /// its line, and a plan call is folded into the plan block and pushes no
+    /// line at all — so the tail check answered "nobody announced this" for
+    /// both, and the result arm obligingly announced them a second time. A
+    /// detail-less `⚙ Edit` appeared under every diff and a `⚙ TodoWrite` under
+    /// every plan revision, and neither is distinguishable from a fresh
+    /// anonymous call: a burst of writes read as a stack of them.
+    fn announced(&self, name: &str) -> bool {
+        // The plan block is revised in place rather than re-pushed, so a todo
+        // call leaves nothing near the tail to find. It is announced all the
+        // same — by the block itself.
+        if todo::names_a_plan(name) && self.transcript.iter().any(|e| matches!(e, Entry::Plan(_))) {
+            return true;
+        }
+        self.transcript
+            .iter()
+            .rev()
+            // Step over what the call pushed *below* its own line.
+            .find(|e| !matches!(e, Entry::Diff(_)))
+            .is_some_and(|e| matches!(e, Entry::Tool { name: n, .. } if n == name))
+    }
+
     pub fn push(&mut self, entry: Entry) {
         self.transcript.push(entry);
         // New output pulls the view back to the bottom only if it was already
@@ -2097,10 +2123,7 @@ impl App {
                 // `completed`, so no ToolCall ever arrives and the output was
                 // rendered as a bare `└ Wrote file successfully.` — an answer
                 // with its question missing.
-                let announced = matches!(
-                    self.transcript.last(),
-                    Some(Entry::Tool { name: n, .. }) if n == name
-                );
+                let announced = self.announced(name);
                 if *is_error || !announced {
                     self.push(Entry::Tool {
                         name: name.clone(),
@@ -2587,6 +2610,63 @@ mod tests {
                 },
             ]
         );
+    }
+
+    /// An edit pushes a diff between its call line and its result, so "was this
+    /// announced?" cannot be answered by looking only one entry back. It was,
+    /// and the result pushed a second, detail-less `⚙ Edit` under the diff —
+    /// which reads as a *new* anonymous call rather than as the old one
+    /// finishing. A burst of writes became a stack of them.
+    #[test]
+    fn an_edit_result_adds_no_second_line_under_its_diff() {
+        let mut a = app();
+        a.apply(&AgentEvent::ToolCall {
+            name: "Edit".into(),
+            input: Some(serde_json::json!({
+                "file_path": "/src/game.ts",
+                "old_string": "a\nb\nc",
+                "new_string": "a\nz\nc",
+            })),
+        });
+        a.apply(&AgentEvent::ToolResult {
+            name: "Edit".into(),
+            summary: None,
+            is_error: false,
+        });
+        assert_eq!(
+            a.transcript.len(),
+            2,
+            "the call line and its diff, and nothing else: {:#?}",
+            a.transcript
+        );
+        assert!(matches!(a.transcript[0], Entry::Tool { .. }));
+        assert!(matches!(a.transcript[1], Entry::Diff(_)));
+    }
+
+    /// The same blindness, one step further back: a plan call is folded into the
+    /// plan block and pushes no `Tool` line at all, so its result announced
+    /// itself as a bare `⚙ TodoWrite` beneath the plan it just revised.
+    #[test]
+    fn a_plan_result_adds_no_line_under_its_plan() {
+        let mut a = app();
+        a.apply(&AgentEvent::ToolCall {
+            name: "TodoWrite".into(),
+            input: Some(serde_json::json!({
+                "todos": [{"content": "ship it", "status": "pending"}],
+            })),
+        });
+        a.apply(&AgentEvent::ToolResult {
+            name: "TodoWrite".into(),
+            summary: None,
+            is_error: false,
+        });
+        assert_eq!(
+            a.transcript.len(),
+            1,
+            "the plan block, and nothing else: {:#?}",
+            a.transcript
+        );
+        assert!(matches!(a.transcript[0], Entry::Plan(_)));
     }
 
     /// The harnesses disagree on how a parameter is spelled. AGY's PascalCase
