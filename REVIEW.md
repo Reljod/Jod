@@ -1,9 +1,13 @@
 # REVIEW.md
 
-Instructions for the automated PR review that runs on every pull request
-(`.github/workflows/claude-code-review.yml`). It is the **first pass**, not
-the gate: required checks in CI are still the authority, and a human still
-reads anything on the high-tier list below.
+Instructions for the read-only `reviewer` agents that `/shepherd-prs` spawns on
+every PR that reaches `ready`, and for a human doing the same pass by hand. It
+is the **judgement** layer, not the gate: `merge_pr.sh` is still the authority
+on what may merge, required checks in CI are still the authority on whether it
+works, and a human still reads anything on the high-tier list below.
+
+A review here may only subtract. Anything short of a clean read sends the PR to
+a human; nothing written in this file can bring one back.
 
 Read `AGENTS.md` for this repo's conventions before reviewing.
 

@@ -5,11 +5,16 @@
 # The workflow that publishes a tag cannot be tested by running it: dispatching
 # it *is* the release. So every decision it makes lives in
 # .github/scripts/release_version.sh and is asserted here instead, offline —
-# no git, no gh, no network.
+# no git, no gh, no network. The half that is structure rather than logic —
+# which job may tag, which may only upload, what a build-only run is allowed to
+# reach — is asserted against release.yml itself, job by job.
 #
 # What it must never get wrong, in order of how expensive the mistake is:
+#   - creating or moving a tag anywhere but the publish job (unrecoverable)
 #   - cutting a version that already exists (the push fails after the tests ran)
 #   - cutting a version *below* the newest tag (succeeds, and installs nothing)
+#   - attaching assets to, or building from, a tag this run did not create
+#   - publishing anything at all on a run that asked for a build and no more
 #   - reading the version out of the branch name at all
 #
 # Run: tests/release-version.test.sh
@@ -152,14 +157,89 @@ assert_grep ".github/scripts/stamp_version.sh" "$WF" "…and stamps through the 
 assert_ok bash -n .github/scripts/release_version.sh
 assert_ok bash -n .github/scripts/stamp_version.sh
 
+# job_block <name> — writes one job's lines to a file and echoes the path.
+# Job-scoped on purpose: an assertion about `publish` must not be satisfiable by
+# an identical line under `e2e` or `attach`. The merged workflow's whole shape
+# is that these jobs differ in what they are allowed to do, and a whole-file
+# grep cannot tell them apart.
+JOBS_TMP="$(mktemp -d)"
+trap 'rm -rf "$JOBS_TMP"' EXIT
+job_block() {
+  awk -v want="  $1:" '
+    $0 == want          { inside = 1; next }
+    inside && /^  [a-z]/ { inside = 0 }
+    inside              { print }
+  ' "$WF" > "$JOBS_TMP/$1.yml"
+  # A renamed or deleted job would otherwise yield an empty file, and every
+  # assert_no_grep against it would pass for the wrong reason — the loudest
+  # possible failure is the only safe answer here.
+  if [ ! -s "$JOBS_TMP/$1.yml" ]; then
+    fail "no job named '$1' in $WF — the assertions below would be vacuous"
+    printf '/dev/null\n'
+    return
+  fi
+  printf '%s\n' "$JOBS_TMP/$1.yml"
+}
+
+section "publishing stays manual, and exactly one job can mint a tag"
+
 # The publish job is the irreversible one. It must stay manual: no push, no
 # schedule can reach it — only a human dispatch, through an environment that
 # can carry a required approval.
 assert_grep "workflow_dispatch:" "$WF" "publishing is dispatch-triggered"
-assert_grep "environment: release" "$WF" "…inside an environment that can gate it"
-assert_grep "if: github.event_name == 'workflow_dispatch'" "$WF" \
-  "…and the publish job runs on nothing else"
 assert_no_grep "on: push" "$WF" "no push trigger anywhere near a tag"
+
+PUB="$(job_block publish)"
+assert_grep "environment: release" "$PUB" "publish runs inside an environment that can gate it"
+assert_grep "if: github.event_name == 'workflow_dispatch'" "$PUB" \
+  "…on a human dispatch and nothing else"
+assert_grep "!inputs.build_only" "$PUB" "…never on a run that was told to publish nothing"
+assert_grep "refusing to tag from" "$PUB" "…and never from an arbitrary branch"
+assert_grep "git tag -a" "$PUB" "publish is where the tag is minted"
+
+# A second opinion about what v0.2.0 means is unrecoverable, so there is exactly
+# one of each. This is what folding the client builds in here bought: before,
+# a separate workflow re-resolved the same version against the same tag list.
+assert_eq "$(grep -c 'git tag -a' "$WF")" "1" "exactly one job in the workflow tags"
+assert_eq "$(grep -c 'gh release create' "$WF")" "1" "…and exactly one creates the release"
+assert_missing ".github/workflows/build-clients.yml" \
+  "the clients are built by this workflow, not a second one that could disagree"
+assert_missing ".github/scripts/build_target.sh" \
+  "…so there is no second ref resolver to keep in step"
+
+section "the clients are built from the published tag"
+
+for j in tui desktop; do
+  B="$(job_block "$j")"
+  assert_grep 'ref: ${{ needs.publish.outputs.tag || github.sha }}' "$B" \
+    "$j checks out the tag, not whatever main moved on to"
+  assert_grep "needs.publish.result != 'failure'" "$B" \
+    "…and does not build on a failed publish"
+done
+
+IOS="$(job_block ios)"
+assert_grep "uses: ./.github/workflows/ios.yml" "$IOS" "iOS is called, not copied"
+assert_grep 'ref: ${{ needs.publish.outputs.tag || github.sha }}' "$IOS" \
+  "…and told which ref to build"
+
+section "assets are attached only to a tag that this run created"
+
+ATT="$(job_block attach)"
+assert_grep "needs.publish.result == 'success'" "$ATT" \
+  "attaching requires a publish that actually succeeded"
+assert_grep "gh release upload" "$ATT" "…and uploads to that release"
+assert_no_grep "gh release create" "$ATT" "…never materialising a release of its own"
+assert_no_grep "git tag" "$ATT" "…and never a tag of its own"
+
+section "a build-only run builds everything and publishes nothing"
+
+assert_grep "build_only:" "$WF" "there is a build-only mode"
+assert_grep "!inputs.build_only" "$(job_block e2e)" \
+  "it skips the expensive scaffold-fitness check, which only a release needs"
+for j in tui desktop ios; do
+  assert_no_grep "!inputs.build_only" "$(job_block "$j")" \
+    "$j still builds on a build-only run — that is the entire point of the mode"
+done
 
 assert_summary
 exit
