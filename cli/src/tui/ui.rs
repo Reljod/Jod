@@ -1538,6 +1538,15 @@ fn projects_height(app: &App, available: u16) -> u16 {
     wanted.min(ceiling)
 }
 
+/// The way out of an empty catalog, in the thirty-odd columns the panel has.
+///
+/// It used to say “ask Jod to add one”, which is not a remedy: it names no
+/// command, and the console had none to name — the catalog could only be
+/// filled from a second terminal. Now that `/project add` exists, the empty
+/// state is the natural place to learn it, because an empty box is exactly
+/// when you are looking for the way to fill it.
+pub(super) const CATALOG_REMEDY: &str = "/project add";
+
 /// The catalog, with the project this conversation is about marked.
 ///
 /// The mark is the point of the box. Everything else here is a list of
@@ -1571,7 +1580,10 @@ fn draw_projects(f: &mut Frame, app: &App, area: Rect) {
                 Span::styled(" ▸ ", fg(MUTED)),
                 Span::styled(cut(name, inner.saturating_sub(3)), bold(GOOD)),
             ]),
-            None => Line::from(Span::styled(" ▸ nothing set", fg(MUTED))),
+            None => Line::from(Span::styled(
+                format!(" ▸ nothing set — {CATALOG_REMEDY}"),
+                fg(MUTED),
+            )),
         };
         f.render_widget(Paragraph::new(line).block(block), area);
         return;
@@ -1580,7 +1592,7 @@ fn draw_projects(f: &mut Frame, app: &App, area: Rect) {
     if app.projects.is_empty() {
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
-                " no projects yet — ask Jod to add one",
+                format!(" none yet — {CATALOG_REMEDY} <path>"),
                 fg(MUTED),
             )))
             .block(block),
@@ -6221,10 +6233,21 @@ mod tests {
         );
     }
 
+    /// It used to say "no projects yet — ask Jod to add one", which named no
+    /// command, because until `/project` existed the console had none to name.
+    /// The assertion is now on the remedy rather than on the complaint: an
+    /// empty box whose text does not say how to fill it is the bug.
     #[test]
     fn an_empty_catalog_says_how_to_fill_it() {
         let a = with_catalog(&[], None);
-        assert!(rendered(&a, 140, 30).contains("no projects yet"));
+        let screen = rendered(&a, 140, 30);
+        assert!(screen.contains(CATALOG_REMEDY), "{screen}");
+        // And the same is true with the box collapsed, which is one keypress
+        // away and used to read only "nothing set".
+        let mut shut = with_catalog(&[], None);
+        shut.projects_open = false;
+        let screen = rendered(&shut, 140, 30);
+        assert!(screen.contains(CATALOG_REMEDY), "{screen}");
     }
 
     /// The sessions list is how a running fleet is watched. A long catalog must
