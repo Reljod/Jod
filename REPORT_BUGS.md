@@ -1280,6 +1280,23 @@ BUG-17 — worth fixing in one place.
 the two views cannot disagree, and count only genuine failures in
 `count_for`.
 
+**Confirmed a second way — the same run changes verdict when you restart.**
+In the session that killed them, the dashboard read:
+
+```
+15 runs · 0 running · 2 failed
+```
+
+A freshly started TUI, reading the same runs back from the store, reads:
+
+```
+20 runs · 1 running · 0 failed
+```
+
+Same two runs, no longer failures. Nothing about them changed except which
+source the count came from — which is the bug stated as plainly as it can be:
+**the failure count is a property of your session, not of the runs.**
+
 ---
 
 <a name="bug-15"></a>
