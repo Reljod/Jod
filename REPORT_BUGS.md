@@ -1859,6 +1859,38 @@ Worth recording, since the point of a hand-drive is to separate the two:
 
 ---
 
+## A supervised run outlives its console — verified by accident
+
+Worth recording as a **positive** result, because it was proven the hard way.
+
+Another agent reading the harness notes below reused the same tmux socket name
+(`jodtest`) and started its own TUI on it, which replaced mine mid-run — my
+console vanished, and a poller watching the *screen* concluded the run had
+ended.
+
+It had not. The run record showed:
+
+```
+44461917|running|/…/tui-dogfood-tetris/tetris-final|Build a complete, working
+```
+
+The work carried on to completion with no console attached at all. That is
+exactly what `docs/jod-system.md` claims — runs are supervised detached
+process groups reporting through the database, not children of the UI — and it
+is the behaviour that makes `Ctrl-C`'s "press again to leave them running"
+promise true.
+
+**Two lessons for anyone driving this program:**
+
+1. **Give each agent its own tmux socket** (`tmux -L <something-unique>`).
+   A shared socket name is a shared session, and the second agent silently
+   evicts the first.
+2. **Poll the run record, not the screen.** `sqlite3 ~/.jod/jod.db "select
+   status from runs where id like '<id>%'"` is the truth. The console is a
+   view, and a view can be replaced by somebody else.
+
+---
+
 ## How this was driven
 
 For anyone reproducing: the TUI was driven through an isolated tmux server
