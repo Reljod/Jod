@@ -715,6 +715,11 @@ impl Store {
                 params![id, title, instruction, colour_for(&taken), at],
             )?;
             insert_task(tx, &id, &uuid::Uuid::new_v4().to_string(), &instruction, at)?;
+            // The person is on the roster from the moment the work exists,
+            // before any session is attached to it. An agent that answers a
+            // question it was asked must not be told the asker does not exist,
+            // and the first session may well be the one asking.
+            crate::team::insert_human_member_in(tx, Scope::Work, &id, at)?;
             tx.query_row(
                 &format!("SELECT {WORK_COLUMNS} FROM works WHERE id = ?1"),
                 params![id],

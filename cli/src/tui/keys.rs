@@ -203,9 +203,24 @@ const FLEET: &[Key] = &[
     // eighty columns, but matching the board is the reason.
     k("d", "delegate"),
     k("c", "conversations"),
+    // The work's bus. High in the table because it is the only verb here that
+    // answers "what are these agents saying to each other", and a work whose
+    // traffic cannot be read is a work you can only watch spend money — see
+    // `tui::traffic`. Capital because `t` already retries a run on this screen.
+    k("T", "traffic"),
     k("b", "branches"),
-    k("u", "undo"),
-    k("U", "redo"),
+    // One row for the pair, the way `→←` below is one row for two arrows.
+    //
+    // Both keys still fire and both are still advertised; what changed is that
+    // they cost the `?` overlay one line instead of two. The overlay is two
+    // columns of twenty-eight rows at the design size, and the fleet's own
+    // section plus the spine plus the global chords came to exactly one line
+    // more than that when `T traffic` arrived — so a screen that had promised
+    // to be complete at 100×30 started saying `1 more — widen the window`.
+    // Undo and redo are a verb and its inverse and read as one thing anyway,
+    // which is why this pair is the one that gives way rather than a verb that
+    // would have had to be dropped.
+    k("uU", "undo / redo"),
     k("g", "go to #"),
     k("f", "fork"),
     k("t", "retry"),
@@ -219,6 +234,25 @@ const FLEET: &[Key] = &[
     k("C", "collapse all"),
     k("z", "closed works"),
     k("/", "filter"),
+];
+
+/// The traffic log, opened from the tree with `T`.
+///
+/// `T` is capital because lower-case `t` is already *retry* on the fleet, and a
+/// letter that retried a run on one press and opened a screen on the next would
+/// be the worst kind of collision — one of the two is destructive. `E`, `C`,
+/// `U` and `S` set that pattern on this screen already: when the letter is
+/// spoken for, the verb goes to the capital rather than to an unrelated key
+/// nobody can guess.
+///
+/// `f` is the state cycle, spelled and ordered exactly as the rail's `f` is,
+/// because G5.S5 asks for one way to narrow a list in this program rather than
+/// a second idiom for the same job. `/` and `S` are the spine's and go last.
+const TRAFFIC: &[Key] = &[
+    k("⏎", "the message in full"),
+    k("f", "every / failed / waiting / delivered"),
+    k("/", "filter"),
+    k("S", "cycle sort"),
 ];
 
 const MEMORY: &[Key] = &[
@@ -364,6 +398,7 @@ pub fn local(ws: Workspace) -> &'static [Key] {
         Workspace::Tasks => TASKS,
         Workspace::Activity => ACTIVITY,
         Workspace::Team => TEAM,
+        Workspace::Traffic => TRAFFIC,
     }
 }
 

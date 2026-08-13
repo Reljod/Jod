@@ -22,13 +22,17 @@ pub enum Workspace {
     Tasks,
     Activity,
     Team,
+    /// The fleet's second level: one work's agent-to-agent traffic, threaded.
+    /// Reached from the tree with `T` and never from a digit, because it means
+    /// nothing without a work whose bus to read.
+    Traffic,
 }
 
 use Workspace::*;
 
 impl Workspace {
     /// Every workspace, including the ones with no digit of their own.
-    pub const ALL: [Workspace; 10] = [
+    pub const ALL: [Workspace; 11] = [
         Chat,
         Fleet,
         Memory,
@@ -39,6 +43,7 @@ impl Workspace {
         Tasks,
         Activity,
         Team,
+        Traffic,
     ];
 
     /// The which-key menu, in the order it is drawn. This is also the order the
@@ -62,7 +67,7 @@ impl Workspace {
             Tasks => 't',
             Activity => 'a',
             Team => 'w',
-            MemoryGraph => return None,
+            MemoryGraph | Traffic => return None,
         })
     }
 
@@ -97,6 +102,7 @@ impl Workspace {
             Tasks => "tasks",
             Activity => "activity",
             Team => "team",
+            Traffic => "fleet · traffic",
         }
     }
 
@@ -113,6 +119,7 @@ impl Workspace {
             Tasks => "tasks",
             Activity => "activity",
             Team => "team",
+            Traffic => "traffic",
         }
     }
 
@@ -138,6 +145,10 @@ impl Workspace {
             Tasks => &["state", "name", "age"],
             Activity => &["newest", "unread first", "source"],
             Team => &["name", "status"],
+            // Named once, in `traffic::SORTS`, because the key that applies
+            // them indexes into the same list — two copies are two things that
+            // can disagree about which number means "sender".
+            Traffic => &super::traffic::SORTS,
             Chat | MemoryGraph => &["—"],
         }
     }
@@ -274,12 +285,15 @@ mod tests {
         }
     }
 
-    /// The graph is memory's second level, so it has no digit — a digit would
-    /// promise you could land there without a node to look at.
+    /// The graph is memory's second level and the traffic log is the fleet's,
+    /// so neither has a digit — a digit would promise you could land there
+    /// without a node, or a work, to look at.
     #[test]
-    fn the_local_graph_is_not_directly_addressable() {
-        assert_eq!(Workspace::MemoryGraph.letter(), None);
-        assert_eq!(Workspace::MemoryGraph.digit(), None);
+    fn a_second_level_screen_is_not_directly_addressable() {
+        for ws in [Workspace::MemoryGraph, Workspace::Traffic] {
+            assert_eq!(ws.letter(), None, "{ws:?}");
+            assert_eq!(ws.digit(), None, "{ws:?}");
+        }
     }
 
     #[test]

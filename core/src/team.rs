@@ -22,7 +22,7 @@
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
-use crate::error::Result;
+use crate::error::{JodError, Result};
 use crate::harness::HarnessKind;
 use crate::store::Store;
 use crate::works::{DEFAULT_MAX_DEPTH, DEFAULT_MESSAGE_BUDGET};
@@ -156,6 +156,19 @@ pub struct WakeOrder {
     pub messages: usize,
 }
 
+/// What a woken agent needs in order to answer what it has just been handed.
+///
+/// Kept beside [`wake_order`] rather than in a preamble because a preamble is
+/// delivered once and this has to be true on every turn that carries mail. The
+/// message id is already in each message's own line; this says what to do with
+/// it.
+pub const REPLY_PROTOCOL: &str = "To answer any of the messages above, call \
+    `reply` with the message number shown in its brackets — that is what keeps \
+    a reply in the same thread as the question, and a thread is what the depth \
+    bound counts. Use `send_message` only to start something new. Replying in \
+    prose reaches nobody: these came from another agent, not from a person \
+    reading your output.";
+
 /// Decide whether a member should be woken, and with what.
 ///
 /// Separated from the spawning on purpose: *when to wake* is the part with all
@@ -173,19 +186,6 @@ pub struct WakeOrder {
 ///   without a session id would silently start a *fresh* context, so the member
 ///   would answer having forgotten everything. Staying asleep and visibly
 ///   holding unread mail is better than answering with amnesia.
-/// What a woken agent needs in order to answer what it has just been handed.
-///
-/// Kept beside [`wake_order`] rather than in a preamble because a preamble is
-/// delivered once and this has to be true on every turn that carries mail. The
-/// message id is already in each message's own line; this says what to do with
-/// it.
-pub const REPLY_PROTOCOL: &str = "To answer any of the messages above, call \
-    `reply` with the message number shown in its brackets — that is what keeps \
-    a reply in the same thread as the question, and a thread is what the depth \
-    bound counts. Use `send_message` only to start something new. Replying in \
-    prose reaches nobody: these came from another agent, not from a person \
-    reading your output.";
-
 pub fn wake_order(member: &Member, pending: &[Message]) -> Option<WakeOrder> {
     if pending.is_empty() || member.status != MemberStatus::Ready {
         return None;
@@ -423,6 +423,37 @@ impl ThreadState {
     }
 }
 
+/// One thread, as a screen shows it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Thread {
+    pub thread_id: String,
+    /// Oldest first, so the newest thing said is last.
+    pub messages: Vec<Envelope>,
+    pub state: ThreadState,
+    /// Hops on the deepest message that counts. `-1` for a thread of refusals.
+    pub deepest: i64,
+    pub last_at_ms: i64,
+    /// Messages nobody has read. For a person's mail this is *unread*; for an
+    /// agent's it is *not yet injected*.
+    pub unread: usize,
+}
+
+/// Whether a thread may carry another hop.
+///
+/// Pure, and shared by [`Store::thread_state`] and [`Store::threads`] so the
+/// screen and the send path cannot disagree about whether a conversation is
+/// paused. The budget is checked first because it pauses every thread in the
+/// scope, not just this one.
+pub fn thread_state_from(bounds: Bounds, used: i64, deepest: i64) -> ThreadState {
+    if used >= bounds.message_budget {
+        ThreadState::PausedBudget
+    } else if deepest >= bounds.max_depth {
+        ThreadState::PausedDepth
+    } else {
+        ThreadState::Open
+    }
+}
+
 /// A message on its way onto the bus.
 ///
 /// Note what is *not* here: nothing that names the sender's authority. `from`
@@ -514,6 +545,14 @@ pub struct Addressee {
     pub can_be_woken: bool,
     /// How much mail is already waiting for this member.
     pub waiting: usize,
+    /// This is the person, not an agent.
+    ///
+    /// On the roster because an agent choosing a recipient needs to know the
+    /// difference: writing here reaches somebody who will read it on a screen
+    /// when they look, and nothing starts a turn. `can_be_woken` is false for
+    /// a human and for an agent with no session, and those are not the same
+    /// situation at all — one is waiting to be read, the other is stuck.
+    pub human: bool,
 }
 
 /// A member with mail nobody has read yet.
@@ -597,6 +636,42 @@ fn now_ms() -> i64 {
 /// coherence one, because an agent reading its mail in one batch answers
 /// better than one woken per line.
 pub const WAKE_INTERVAL_MS: i64 = 60_000;
+
+/// What the person is called on the bus.
+///
+/// A **reserved name**, not a convention. Two things turn on it and both are
+/// about identity: an agent must be able to address the human without guessing
+/// what to call them, and a message that says it came from the human must
+/// actually have. An agent's sender is derived from its run and cannot be
+/// argued with ([`Store::caller_for_run`]), so the only way to forge one is to
+/// *be called* `reljod` — which is why nothing else may take this name.
+///
+/// Hard-coded rather than configured, in the same spirit as
+/// [`crate::delivery::Kind::Human`]'s "[message from Reljod]" and
+/// [`crate::store::Origin::Owner`]: this program has one owner, and a settings
+/// key for who he is would be a knob with one position and a way to get it
+/// wrong.
+pub const HUMAN: &str = "reljod";
+
+/// Whether this name is the person's.
+///
+/// Case-insensitive, because a name typed on a command line is typed by a
+/// person: `--to Reljod` must reach the same inbox as `--to reljod`, and an
+/// agent that capitalises a sentence must not thereby address nobody.
+pub fn is_human(name: &str) -> bool {
+    name.eq_ignore_ascii_case(HUMAN)
+}
+
+/// What the roster calls the person, so an agent knows who it is talking to.
+const HUMAN_ROLE: &str = "the person this work is for";
+
+/// Stored in the `harness` column of the person's member row.
+///
+/// Deliberately not a [`HarnessKind`]: there is no process to launch and
+/// nothing will ever try. Anything reading it back gets `None` from
+/// `HarnessKind::from_id` and falls back, which is why every path that matters
+/// asks [`is_human`] rather than looking at the harness.
+const HUMAN_HARNESS: &str = "human";
 
 /// The longest a generated member name may be.
 ///
@@ -770,13 +845,65 @@ impl Store {
         )?)
     }
 
+    /// Every thread on this scope's bus, with its messages and its state.
+    ///
+    /// **The screen's query, and it exists because the obvious way to build
+    /// that screen is quadratic.** Rendering a work's traffic means the
+    /// threads, each with its messages and whether it is paused — and asking
+    /// [`Store::thread_state`] per thread costs three queries *per thread* on
+    /// every repaint, because each one re-reads the bounds and recounts the
+    /// scope's whole traffic. This reads the traffic once, groups it in
+    /// memory, and asks for the bounds once.
+    ///
+    /// Ordered the way it is read: threads by when they were last spoken in,
+    /// messages within a thread oldest first, so the newest thing is last in
+    /// both directions.
+    pub fn threads(&self, scope: Scope, team: &str) -> Result<Vec<Thread>> {
+        let bounds = self.bounds_for(scope, team)?;
+        let used = self.messages_used(scope, team)?;
+
+        let mut order: Vec<String> = Vec::new();
+        let mut grouped: std::collections::HashMap<String, Vec<Envelope>> =
+            std::collections::HashMap::new();
+        for envelope in self.traffic(scope, team)? {
+            let thread_id = envelope.thread_id.clone();
+            if !grouped.contains_key(&thread_id) {
+                order.push(thread_id.clone());
+            }
+            grouped.entry(thread_id).or_default().push(envelope);
+        }
+
+        let mut out: Vec<Thread> = order
+            .into_iter()
+            .filter_map(|thread_id| {
+                let messages = grouped.remove(&thread_id)?;
+                let deepest = messages
+                    .iter()
+                    .filter(|e| e.state.counts_against_budget())
+                    .map(|e| e.depth)
+                    .max()
+                    .unwrap_or(-1);
+                Some(Thread {
+                    state: thread_state_from(bounds, used, deepest),
+                    unread: messages
+                        .iter()
+                        .filter(|e| e.state == MailState::Queued)
+                        .count(),
+                    last_at_ms: messages.iter().map(|e| e.message.at_ms).max().unwrap_or(0),
+                    deepest,
+                    thread_id,
+                    messages,
+                })
+            })
+            .collect();
+        out.sort_by_key(|t| t.last_at_ms);
+        Ok(out)
+    }
+
     /// Whether a thread may carry another hop, and if not, which bound says so.
     pub fn thread_state(&self, scope: Scope, team: &str, thread_id: &str) -> Result<ThreadState> {
         let bounds = self.bounds_for(scope, team)?;
         let used = self.messages_used(scope, team)?;
-        if used >= bounds.message_budget {
-            return Ok(ThreadState::PausedBudget);
-        }
         let conn = self.conn.lock().expect("store lock poisoned");
         let deepest: i64 = conn.query_row(
             &format!(
@@ -787,11 +914,7 @@ impl Store {
             params![thread_id],
             |r| r.get(0),
         )?;
-        Ok(if deepest >= bounds.max_depth {
-            ThreadState::PausedDepth
-        } else {
-            ThreadState::Open
-        })
+        Ok(thread_state_from(bounds, used, deepest))
     }
 
     // ---- writing to the bus ----------------------------------------------
@@ -850,6 +973,13 @@ impl Store {
             };
             let recipients: Vec<String> = match post.to {
                 Some(one) => {
+                    // The person's name is the one address a *human* types, so
+                    // it is matched however they capitalised it and stored in
+                    // the spelling the roster uses. Everyone else's name is
+                    // read off the roster verbatim and matched exactly: two
+                    // agents whose names differ only in case are two agents,
+                    // and guessing between them would deliver to the wrong one.
+                    let one = if is_human(one) { HUMAN } else { one };
                     if !members.iter().any(|m| m == one) {
                         let id = record(
                             tx,
@@ -995,6 +1125,16 @@ impl Store {
         role: &str,
         conversation_id: Option<&str>,
     ) -> Result<()> {
+        // The person's name is not available to anything that launches a
+        // process. An agent joined under it would send messages that no reader
+        // could tell from the human's own — and the whole of sender identity
+        // here is that it is derived from the run rather than claimed.
+        // [`Store::ensure_human_member`] is the only way that row is written.
+        if is_human(name) {
+            return Err(JodError::Invalid(format!(
+                "`{name}` is the person's name on the bus and cannot be joined as an agent"
+            )));
+        }
         self.write(|tx| {
             tx.execute(
                 "INSERT INTO team_members
@@ -1017,6 +1157,59 @@ impl Store {
             )?;
             Ok(())
         })
+    }
+
+    /// Put the person on this scope's roster.
+    ///
+    /// The human is the one participant who is definitely present, and until
+    /// this existed an agent that answered a question it had been asked was
+    /// told `\`reljod\` is not a member of this team` and its reply was
+    /// recorded undeliverable. Observed in a real run: mail went *to* the
+    /// agents and could not come back.
+    ///
+    /// A real row rather than a special case in the send path, and the choice
+    /// matters. `post` already refuses a recipient who is not a member, and
+    /// [`Store::roster`] already lists members — so a row makes the person
+    /// addressable and visible through the code that is already there, with no
+    /// second notion of who is here. The alternative would have been a branch
+    /// in both, and a third in anything that asks the same question later.
+    ///
+    /// What the row deliberately is not: something that can be woken. It holds
+    /// no session and no run, and every delivery path asks [`is_human`] before
+    /// it considers waking anybody.
+    ///
+    /// Idempotent, and it never overwrites a session or a run onto the person.
+    pub fn ensure_human_member(&self, scope: Scope, team: &str) -> Result<()> {
+        let at = now_ms();
+        self.write(|tx| insert_human_member_in(tx, scope, team, at))
+    }
+
+    /// Everything said to the person on this scope's bus, oldest first.
+    ///
+    /// The screen's query. Mail to a human is never *delivered* — there is no
+    /// session to resume and no prompt to inject — so it stays queued until
+    /// somebody reads it, and [`MailState::Queued`] on one of these means
+    /// "unread" rather than "stuck". That is why the wake path skips the human
+    /// entirely instead of reporting them as a member holding mail nobody can
+    /// give them.
+    pub fn human_inbox(&self, scope: Scope, team: &str) -> Result<Vec<Envelope>> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {ENVELOPE_COLUMNS} FROM team_messages
+              WHERE scope = ?1 AND team = ?2 AND recipient = ?3 ORDER BY id"
+        ))?;
+        let rows = stmt.query_map(params![scope.as_str(), team, HUMAN], envelope_from_row)?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// Mark what the person has now seen.
+    ///
+    /// Read on a screen rather than injected into a turn, so "delivered" here
+    /// means a pair of eyes rather than a prompt. The same column either way,
+    /// because a traffic view showing one message as read and another as
+    /// waiting should not have to know which kind of participant received it.
+    pub fn mark_human_read(&self, ids: &[i64]) -> Result<()> {
+        self.mark_mail_delivered(ids)
     }
 
     /// Make a session a member of its work, with no join step.
@@ -1051,9 +1244,16 @@ impl Store {
         // Uniqueness within the scope is not a nicety: an ambiguous name is a
         // message delivered to whichever agent the database happened to return
         // first, and the sender is told it was delivered.
+        //
+        // The person's name is taken from the start, whether or not their row
+        // exists yet. A session titled "Reljod" would otherwise slug to
+        // `reljod` and every message it sent would be indistinguishable from
+        // one the human sent — sender identity is derived from the run
+        // precisely so that it cannot be claimed, and a *name* that can be
+        // claimed would give it all back.
         let mut name = base.clone();
         let mut n = 2;
-        while taken.contains(&name) {
+        while taken.contains(&name) || is_human(&name) {
             name = format!("{base}-{n}");
             n += 1;
         }
@@ -1123,14 +1323,20 @@ impl Store {
         let mut out = Vec::with_capacity(members.len());
         for m in members.into_iter().filter(|m| m.name != asking) {
             let waiting = self.team_unread(team, &m.name)?.len();
+            let human = is_human(&m.name);
             out.push(Addressee {
                 idle: m.status == MemberStatus::Ready,
-                can_be_woken: m.session_id.is_some(),
+                // A person is never "woken". False here says the same word to
+                // an agent as it does about a stuck teammate, which is why
+                // `human` sits beside it: one of them is waiting to be read,
+                // the other cannot be reached at all.
+                can_be_woken: !human && m.session_id.is_some(),
                 name: m.name,
                 role: m.role,
                 harness: m.harness,
                 status: m.status,
                 waiting,
+                human,
             });
         }
         Ok(out)
@@ -1265,6 +1471,16 @@ impl Store {
         let mut out = Vec::new();
         for (scope, team, name) in addresses {
             let scope = Scope::parse(&scope);
+            // The person's mail never appears here, in either list. There is
+            // nothing to wake and nothing to report as stuck: it is sitting on
+            // a screen waiting to be looked at, which is neither of the two
+            // things this function distinguishes. `wake_order` is therefore
+            // never asked to reason about a human, and the tick never
+            // annotates their mail with why nobody read it — [`Store::
+            // human_inbox`] is where it is read from instead.
+            if is_human(&name) {
+                continue;
+            }
             // Mail addressed to a name that is no longer a member is left
             // alone here rather than deleted. It is visible in the traffic log,
             // and deciding what to do about it is a person's call.
@@ -1408,6 +1624,31 @@ impl Store {
             Ok(())
         })
     }
+}
+
+/// Write the person's member row.
+///
+/// Takes a transaction because [`crate::works::Store::create_work`] enrols the
+/// human inside the transaction that opens the work: a work that existed for
+/// even an instant with no addressable human is a work an agent could be told
+/// to report into and then find nobody to report to.
+///
+/// Never touches `session_id` or `agent_id`. There is no process behind this
+/// row and nothing may ever put one there.
+pub(crate) fn insert_human_member_in(
+    tx: &rusqlite::Transaction,
+    scope: Scope,
+    team: &str,
+    at_ms: i64,
+) -> Result<()> {
+    tx.execute(
+        "INSERT INTO team_members
+           (team, name, harness, role, status, joined_at_ms, scope, conversation_id)
+         VALUES (?1, ?2, ?3, ?4, 'ready', ?5, ?6, NULL)
+         ON CONFLICT(team, name) DO UPDATE SET role = ?4, scope = ?6",
+        params![team, HUMAN, HUMAN_HARNESS, HUMAN_ROLE, at_ms, scope.as_str()],
+    )?;
+    Ok(())
 }
 
 /// Insert one message row. Every ending of [`Store::post`] goes through here,
@@ -2321,8 +2562,15 @@ mod tests {
         let (work, _lead, _worker) = work_of_two(&s);
 
         let roster = s.roster(Scope::Work, &work, "the-lead").unwrap();
-        assert_eq!(roster.len(), 1);
-        assert_eq!(roster[0].name, "the-worker");
+        let sibling = roster
+            .iter()
+            .find(|a| a.name == "the-worker")
+            .expect("the sibling is addressable with no join step");
+        assert!(!sibling.human);
+        assert!(
+            roster.iter().any(|a| a.human && a.name == HUMAN),
+            "and so is the person, who is the one participant definitely present: {roster:?}"
+        );
 
         let sent = s
             .post(&Post::new(Scope::Work, &work, "the-lead", "take the lexer").to("the-worker"))
@@ -2373,7 +2621,15 @@ mod tests {
             .attach_conversation(&c.id, &work.id, None, crate::works::Origin::Agent)
             .unwrap();
         assert_eq!(again.name, "first-name");
-        assert_eq!(s.members_in(Scope::Work, &work.id).unwrap().len(), 1);
+        assert_eq!(
+            s.members_in(Scope::Work, &work.id)
+                .unwrap()
+                .iter()
+                .filter(|m| !is_human(&m.name))
+                .count(),
+            1,
+            "re-attaching a session must not enrol it a second time"
+        );
     }
 
     /// G3.S6. Waking a session that has just been allowed to stop is the one
@@ -2526,5 +2782,268 @@ mod tests {
         assert!(s.members_in(Scope::Work, &work).unwrap().is_empty());
         assert!(s.mail_waiting().unwrap().is_empty());
         assert!(s.mail_held().unwrap().is_empty());
+    }
+
+    // ---- the person on the bus (G5.S3) -----------------------------------
+
+    /// The bug, in the shape a real run produced it: an agent answered the
+    /// person who had written to it and was told the asker did not exist.
+    ///
+    /// ```text
+    /// 6 | answerer | reljod | 1 | undeliverable | `reljod` is not a member of this team
+    /// ```
+    #[test]
+    fn an_agent_can_answer_the_person_who_wrote_to_it() {
+        let s = Store::in_memory().unwrap();
+        let (work, _lead, _worker) = work_of_two(&s);
+        // The direction that already worked.
+        s.post(&Post::new(Scope::Work, &work, HUMAN, "where does the parser live?").to("the-lead"))
+            .unwrap();
+
+        let answered = s
+            .post(&Post::new(Scope::Work, &work, "the-lead", "in core/src/harness").to(HUMAN))
+            .unwrap();
+
+        let Sent::Queued { recipients, .. } = &answered else {
+            panic!("a reply to the person must reach them, got {answered:?}");
+        };
+        assert_eq!(recipients, &[HUMAN.to_string()]);
+        assert_eq!(
+            s.human_inbox(Scope::Work, &work).unwrap().len(),
+            1,
+            "and it is waiting where a person would read it"
+        );
+    }
+
+    /// An agent choosing who to ask has to be able to see there is a person to
+    /// ask, and to tell them apart from a teammate that cannot be reached.
+    #[test]
+    fn the_person_is_on_the_roster_and_is_marked_as_a_person() {
+        let s = Store::in_memory().unwrap();
+        let (work, _lead, _worker) = work_of_two(&s);
+
+        let roster = s.roster(Scope::Work, &work, "the-lead").unwrap();
+        let human = roster
+            .iter()
+            .find(|a| a.human)
+            .expect("the person is addressable from inside a work");
+
+        assert_eq!(human.name, HUMAN);
+        assert!(!human.can_be_woken, "nothing starts a turn on a person");
+        assert!(human.role.contains("person"), "{}", human.role);
+    }
+
+    /// Mail to a person is not a wake. There is no session to resume and no
+    /// prompt to inject; it is something somebody reads when they look.
+    #[test]
+    fn mail_to_the_person_never_becomes_a_turn_and_is_never_reported_stuck() {
+        let s = Store::in_memory().unwrap();
+        let (work, _lead, _worker) = work_of_two(&s);
+        s.post(&Post::new(Scope::Work, &work, "the-lead", "which database?").to(HUMAN))
+            .unwrap();
+
+        assert!(
+            s.mail_waiting().unwrap().iter().all(|w| w.member.name != HUMAN),
+            "the wake path must never consider a person"
+        );
+        assert!(
+            s.mail_held().unwrap().iter().all(|w| w.member.name != HUMAN),
+            "and must not report them as holding mail nobody can deliver"
+        );
+
+        let inbox = s.human_inbox(Scope::Work, &work).unwrap();
+        assert_eq!(inbox.len(), 1);
+        assert_eq!(
+            inbox[0].state,
+            MailState::Queued,
+            "unread, which for a person is not the same as stuck"
+        );
+
+        s.mark_human_read(&[inbox[0].message.id]).unwrap();
+        assert_eq!(
+            s.human_inbox(Scope::Work, &work).unwrap()[0].state,
+            MailState::Delivered
+        );
+    }
+
+    /// Sender identity is derived from the run precisely so that it cannot be
+    /// claimed. A *name* that could be claimed would give all of that back:
+    /// every message from the impostor would read as the human's.
+    #[test]
+    fn nothing_else_may_be_called_by_the_persons_name() {
+        let s = Store::in_memory().unwrap();
+        let err = s
+            .join_scope(
+                Scope::Team,
+                "crew",
+                HUMAN,
+                HarnessKind::ClaudeCode,
+                "impostor",
+                None,
+            )
+            .unwrap_err();
+        assert!(matches!(err, JodError::Invalid(_)), "got {err:?}");
+
+        // And not by the back door either: a session *titled* "Reljod" slugs to
+        // the reserved name.
+        let work = s.create_work("a job").unwrap();
+        let c = s
+            .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
+            .unwrap();
+        s.set_conversation_title(&c.id, "Reljod").unwrap();
+        let session = s
+            .attach_conversation(&c.id, &work.id, None, crate::works::Origin::Agent)
+            .unwrap();
+        assert_ne!(session.name, HUMAN);
+        assert_eq!(session.name, "reljod-2");
+    }
+
+    /// Case is a person's business, not an address's: `--to Reljod` typed on a
+    /// command line must reach the same inbox as `--to reljod`.
+    #[test]
+    fn the_persons_name_is_recognised_however_it_is_capitalised() {
+        assert!(is_human("reljod"));
+        assert!(is_human("Reljod"));
+        assert!(is_human("RELJOD"));
+        assert!(!is_human("reljodd"));
+        assert!(!is_human("the-lead"));
+
+        let s = Store::in_memory().unwrap();
+        let (work, _lead, _worker) = work_of_two(&s);
+        let sent = s
+            .post(&Post::new(Scope::Work, &work, "the-lead", "a sentence starts capitalised").to("Reljod"))
+            .unwrap();
+
+        let Sent::Queued { recipients, .. } = &sent else {
+            panic!("a capitalised name must reach the same person, got {sent:?}");
+        };
+        assert_eq!(
+            recipients,
+            &[HUMAN.to_string()],
+            "and is stored in the spelling the roster uses"
+        );
+        assert_eq!(s.human_inbox(Scope::Work, &work).unwrap().len(), 1);
+    }
+
+    /// The guard: the person is enrolled when the *work* is created, not when
+    /// a session joins it. Remove that line from `create_work` and this fails —
+    /// which is what an agent asking the first question would hit.
+    #[test]
+    fn a_work_has_a_person_on_it_before_any_session_is_attached() {
+        let s = Store::in_memory().unwrap();
+        let work = s.create_work("port the parser").unwrap();
+
+        let members = s.members_in(Scope::Work, &work.id).unwrap();
+        assert_eq!(
+            members.iter().filter(|m| is_human(&m.name)).count(),
+            1,
+            "a work with nobody to report to is a work an agent gets stuck in: {members:?}"
+        );
+        assert!(
+            members.iter().all(|m| m.session_id.is_none() && m.agent_id.is_none()),
+            "nothing may put a process behind the person's row"
+        );
+    }
+
+    /// The screen's query: a work's traffic, threaded, newest last, with what
+    /// is unread and what is paused already worked out.
+    #[test]
+    fn a_works_traffic_comes_back_threaded_and_in_reading_order() {
+        let s = Store::in_memory().unwrap();
+        let (work, _lead, _worker) = work_of_two(&s);
+        let asked = s
+            .post(&Post::new(Scope::Work, &work, "the-lead", "where is the parser?").to("the-worker"))
+            .unwrap();
+        let (ids, first_thread, _) = queued(&asked);
+        s.post(
+            &Post::new(Scope::Work, &work, "the-worker", "core/src/harness")
+                .to("the-lead")
+                .replying_to(ids[0]),
+        )
+        .unwrap();
+        // A separate question, so there are two threads to keep apart.
+        s.post(&Post::new(Scope::Work, &work, "the-lead", "and the tests?").to("the-worker"))
+            .unwrap();
+
+        let threads = s.threads(Scope::Work, &work).unwrap();
+
+        assert_eq!(threads.len(), 2, "grouped by thread, not flattened");
+        assert_eq!(threads[0].thread_id, first_thread);
+        assert_eq!(threads[0].messages.len(), 2);
+        assert_eq!(
+            threads[0].messages[1].message.text,
+            "core/src/harness",
+            "within a thread the newest is last"
+        );
+        assert_eq!(threads[0].deepest, 1, "a reply is one hop deeper");
+        assert_eq!(threads[0].state, ThreadState::Open);
+        assert_eq!(threads[0].unread, 2, "nobody has read either yet");
+        assert!(
+            threads[1].last_at_ms >= threads[0].last_at_ms,
+            "threads are ordered by when they were last spoken in"
+        );
+    }
+
+    /// The rule the screen shows and the rule the send path enforces are one
+    /// function, so a thread cannot render as open and then refuse the next
+    /// message.
+    #[test]
+    fn a_paused_thread_reads_as_paused_on_the_screen_too() {
+        let s = Store::in_memory().unwrap();
+        let work = s.create_work("a job").unwrap();
+        // Written straight onto the row: nothing in Jod sets a work's own
+        // bounds yet, so this is fixture data rather than a call.
+        s.write(|tx| {
+            tx.execute(
+                "UPDATE works SET max_depth = 1 WHERE id = ?1",
+                params![work.id],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        for title in ["the lead", "the worker"] {
+            let c = s
+                .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
+                .unwrap();
+            s.set_conversation_title(&c.id, title).unwrap();
+            s.attach_conversation(&c.id, &work.id, None, crate::works::Origin::Agent)
+                .unwrap();
+        }
+        let first = s
+            .post(&Post::new(Scope::Work, &work.id, "the-lead", "one").to("the-worker"))
+            .unwrap();
+        let (ids, _, _) = queued(&first);
+        s.post(
+            &Post::new(Scope::Work, &work.id, "the-worker", "two")
+                .to("the-lead")
+                .replying_to(ids[0]),
+        )
+        .unwrap();
+
+        let threads = s.threads(Scope::Work, &work.id).unwrap();
+        let thread_id = threads[0].thread_id.clone();
+
+        assert_eq!(threads[0].state, ThreadState::PausedDepth);
+        assert_eq!(
+            threads[0].state,
+            s.thread_state(Scope::Work, &work.id, &thread_id).unwrap(),
+            "the screen and the send path must not disagree about a bound"
+        );
+    }
+
+    #[test]
+    fn the_bound_rule_is_one_function_whoever_asks() {
+        let bounds = Bounds {
+            max_depth: 3,
+            message_budget: 10,
+        };
+        assert_eq!(thread_state_from(bounds, 0, -1), ThreadState::Open);
+        assert_eq!(thread_state_from(bounds, 9, 2), ThreadState::Open);
+        assert_eq!(thread_state_from(bounds, 9, 3), ThreadState::PausedDepth);
+        assert_eq!(
+            thread_state_from(bounds, 10, 0),
+            ThreadState::PausedBudget,
+            "the budget pauses every thread in the scope, so it is asked first"
+        );
     }
 }

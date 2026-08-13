@@ -36,6 +36,7 @@ mod rail;
 mod secret;
 mod sessions;
 mod todo;
+mod traffic;
 mod yank;
 pub mod ui;
 mod workspace;
@@ -2974,7 +2975,57 @@ fn on_workspace_key(app: &mut App, key: KeyEvent, viewport: usize) -> Option<Act
         Workspace::Tasks => on_task_key(app, key),
         Workspace::Activity => on_activity_key(app, key),
         Workspace::Team => on_team_key(app, key),
+        Workspace::Traffic => on_traffic_key(app, key),
         Workspace::Chat | Workspace::MemoryGraph => None,
+    }
+}
+
+/// The traffic log's own verbs.
+///
+/// Two of them, because `/` and `S` are the spine's and are already handled
+/// above — which is the point of G5.S5: narrowing this list works exactly as
+/// narrowing every other one does.
+///
+/// No I/O, like every key handler here. `f` and `⏎` change what the *next*
+/// render draws out of state the tick already loaded; nothing reaches the
+/// store, so both are testable without a runtime.
+fn on_traffic_key(app: &mut App, key: KeyEvent) -> Option<Action> {
+    match key.code {
+        // The message in full, in the transcript rather than in an overlay: a
+        // message is prose of unknown length, and the transcript is the one
+        // pane in this program that scrolls.
+        KeyCode::Enter => {
+            let held = app.selected_is_held();
+            let envelope = app.selected_message()?.clone();
+            let mut said = format!(
+                "{} → {} · {} · depth {}\n{}",
+                envelope.message.from,
+                envelope.message.to,
+                traffic::state_word(&envelope, held),
+                envelope.depth,
+                envelope.message.text
+            );
+            // The reason last, so it is the thing left on screen. A refusal
+            // that printed its state and buried its cause would be the silence
+            // A8 exists to prevent, one layer along.
+            if let Some(trouble) = traffic::trouble(&envelope, held) {
+                said.push_str(&format!("\n{trouble}"));
+            }
+            app.push(Entry::Notice(said));
+            None
+        }
+        // The state cycle, spelled as the rail's `f` is. Said out loud, because
+        // a filter nobody can see is a screen that looks empty for no reason.
+        KeyCode::Char('f') => {
+            app.traffic_shown = app.traffic_shown.next();
+            app.reconcile();
+            app.push(Entry::Notice(format!(
+                "showing {}",
+                app.traffic_shown.label()
+            )));
+            None
+        }
+        _ => None,
     }
 }
 
@@ -3037,6 +3088,35 @@ fn on_tree_key(app: &mut App, key: KeyEvent) -> Option<Option<Action>> {
             ));
             handled(None)
         }
+        // `T` — what these agents are saying to each other.
+        //
+        // From a session or a run as well as from a work, and it opens the
+        // *work's* bus in each case: G5.S1 is a message log per work, and a
+        // session's own half of a conversation is not a conversation. Walking
+        // up is what makes the key work from wherever the cursor happens to be,
+        // which is the difference between a screen people find and one they are
+        // told about.
+        //
+        // Capital because `t` retries a run on this screen, and a letter that
+        // retried on one press and navigated on the next would be a collision
+        // where one of the two is destructive.
+        KeyCode::Char('T') => {
+            let Some(work) = work_above(app) else {
+                app.push(Entry::Notice(
+                    "that row belongs to no work, so there is no bus to read — \
+                     traffic is a work's, and a session's half of it is not a conversation"
+                        .into(),
+                ));
+                return handled(None);
+            };
+            app.traffic_of = Some(traffic::Watching::work(work));
+            // Emptied rather than left holding the last work's messages: the
+            // tick fills it within a frame, and a screen that opens showing
+            // another work's conversation is worse than one that opens empty.
+            app.traffic = traffic::Log::default();
+            app.drill(Workspace::Traffic);
+            handled(None)
+        }
         // `⏎` opens whatever the row stands for. A run is something to watch; a
         // session is a conversation to go into; a work is a heading, so it
         // toggles rather than pretending to open something.
@@ -3060,6 +3140,22 @@ fn on_tree_key(app: &mut App, key: KeyEvent) -> Option<Option<Action>> {
             }
         }
         _ => None,
+    }
+}
+
+/// The work the cursor is inside, whichever level of the tree it is on.
+///
+/// Climbs by parent id rather than by scanning back for a shallower row: two
+/// works' sessions sit at the same depth, and the nearest shallower row is not
+/// always the ancestor — the same trap `fleet::matching` walks around.
+fn work_above(app: &App) -> Option<String> {
+    let mut node = app.selected_node()?;
+    loop {
+        if node.kind == jod_core::tree::NodeKind::Work {
+            return Some(node.id.id.clone());
+        }
+        let parent = node.parent.clone()?;
+        node = app.forest.iter().find(|n| n.id == parent)?;
     }
 }
 
@@ -3101,6 +3197,9 @@ fn selected_label(app: &App, ws: Workspace) -> Option<String> {
         Workspace::Tasks => app.selected_board_task().map(|t| t.id),
         Workspace::Activity => app.selected_activity().map(|a| a.id.clone()),
         Workspace::Team => app.selected_task().map(|t| t.id.clone()),
+        Workspace::Traffic => app
+            .selected_message()
+            .map(|e| format!("message #{}", e.message.id)),
         Workspace::Chat | Workspace::MemoryGraph => None,
     }
 }
@@ -4760,6 +4859,13 @@ fn refresh_workspaces(jod: &Arc<Jod>, app: &mut App) {
     app.closed_works = closed;
     let rows = app.tree_rows();
     app.tree.reconcile(&rows);
+    // The bus a work's agents are talking on. Loaded here rather than when `T`
+    // is pressed, for the reason every list on this tick is: agents write to it
+    // from other processes, so a copy read once at open would be stale by the
+    // second message. Cheap when nothing has been opened — `data::traffic`
+    // returns an empty log without touching the store.
+    app.traffic = data::traffic(jod, app.traffic_of.as_ref());
+    app.reconcile();
     refresh_rail(jod, app);
 }
 
