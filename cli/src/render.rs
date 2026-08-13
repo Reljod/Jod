@@ -187,6 +187,14 @@ fn print_event(event: &AgentEvent, show_thinking: bool) {
                 eprintln!("{}", paint(DIM, &count));
             }
         }
+        // A fragment of a block that prints in full, once, as `Message` or
+        // `ToolCall` below when it finishes. This stream is plain and
+        // non-interactive — no status line to update the way `jod tui`'s
+        // `Liveness` does — so printing every fragment here would either
+        // duplicate that later, complete print or, for a tool call's
+        // streaming arguments, put raw unparseable JSON straight in the
+        // terminal. Dropped, not printed.
+        AgentEvent::Delta { .. } => {}
         AgentEvent::Message { text } => println!("{text}"),
         AgentEvent::ToolCall { name, input } => emit(&tool_line(name, input.as_ref())),
         AgentEvent::ToolResult { name, is_error, .. } => {

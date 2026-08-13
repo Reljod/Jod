@@ -130,6 +130,7 @@ fn print_event(event: &AgentEvent) {
         AgentEvent::Progress { thinking_tokens } => {
             println!("[working]  {} thinking tokens", thinking_tokens.unwrap_or(0))
         }
+        AgentEvent::Delta { text } => println!("[delta]    {}", first_line(text)),
         AgentEvent::Message { text } => println!("[message]  {text}"),
         AgentEvent::ToolCall { name, .. } => println!("[tool →]   {name}"),
         AgentEvent::ToolResult { name, is_error, .. } => {
