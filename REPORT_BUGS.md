@@ -13,8 +13,16 @@ Every finding below was produced by driving the real binary in a real terminal
 (tmux, isolated socket `jodtest`, 200×50 and 260×50), not by reading code. Root
 causes were then confirmed in source and are cited `file:line`.
 
-**Binary under test:** freshly built `target/release/jod` at the tip of `main`
-(`79f9fdf`). The build matters — see BUG-13.
+**Binary under test:** rebased onto `origin/main` mid-run and rebuilt, so
+everything below reflects `f43e7a7` / `abc3e8f` — **including PR #75, which
+moved every global chord from `Alt` to `Ctrl`.** Findings were re-verified
+against the new binary after the rebase; two are now fixed and are marked so
+rather than deleted, since the fix is the useful record. The build matters —
+see BUG-13.
+
+> **Read this first.** The single most serious finding is
+> [BUG-14](#bug-14): a delegated run wrote its output into **`$HOME`**, outside
+> every declared root, and Jod recorded it as `✓ done`.
 
 ---
 
@@ -22,19 +30,106 @@ causes were then confirmed in source and are cited `file:line`.
 
 | ID | Severity | Area | One line |
 |---|---|---|---|
+| [BUG-14](#bug-14) | **Critical** | delegation | A delegated agent wrote into `$HOME`, outside every root, and the run was recorded `✓ done` |
 | [BUG-1](#bug-1) | **Critical** | rendering | A fresh session hides *all* notice-only output — most slash commands render nothing |
-| [BUG-2](#bug-2) | **High** | delegation | `Alt-B` delegates with almost no confirmation; it looks like nothing happened |
+| [BUG-2](#bug-2) | **High** | delegation | `Ctrl-B` delegates with almost no confirmation; it looks like nothing happened |
 | [BUG-3](#bug-3) | **High** | directory clarity | The directory picker's header is truncated, so you cannot tell which tree you are in |
 | [BUG-4](#bug-4) | **High** | directory clarity | The working directory appears nowhere in the chat UI |
 | [BUG-5](#bug-5) | **High** | projects | A project cannot be created or cited from the TUI at all |
-| [BUG-6](#bug-6) | Medium | discoverability | `Alt-D` is a silent no-op unless a panel you cannot discover is already open |
+| [BUG-6](#bug-6) | **High** | discoverability | `Ctrl-G d` (projects) is a silent no-op unless an undiscoverable panel is already open — **survived #75 and got worse** |
 | [BUG-7](#bug-7) | Medium | discoverability | `Shift-Tab` — the only way to reach projects/sessions/context — is undocumented |
-| [BUG-8](#bug-8) | Medium | rendering | Keymap overlay: key label collides with its description |
-| [BUG-9](#bug-9) | Medium | honesty | The splash claims "Alt-K opens every screen". It does not. |
+| [BUG-8](#bug-8) | ~~Medium~~ | rendering | ~~Keymap overlay: key label collides with its description~~ — **FIXED by #75** |
+| [BUG-9](#bug-9) | ~~Medium~~ | honesty | ~~The splash claims "Alt-K opens every screen"~~ — **largely FIXED by #75** |
 | [BUG-10](#bug-10) | Low | commands | `/main` is listed twice, with two different meanings |
 | [BUG-11](#bug-11) | Low | commands | Command descriptions are cut mid-word with no ellipsis |
 | [BUG-12](#bug-12) | Low | input | The input box is fixed at ~70 columns and single-line |
 | [BUG-13](#bug-13) | Medium | tooling | `jod --version` cannot distinguish two different builds |
+
+---
+
+<a name="bug-14"></a>
+## BUG-14 — A delegated run wrote into `$HOME`, outside every root, and reported success · **Critical** · OPEN
+
+This is the finding that matters most, and it is the one the whole exercise was
+for. It is also **not** a one-off: your own run history shows the same failure.
+
+**What I did**, entirely through the TUI:
+
+1. `/add-dir tetris` → `⏎`, adding
+   `…/worktrees/tui-dogfood-tetris/tetris` as a root. Verified stored:
+   `jod root ls` → `read-only human /…/tui-dogfood-tetris/tetris`.
+2. Typed: *"Build a working Tetris game **in the tetris directory** using
+   Node.js, Vite and HTML…"*
+3. `Ctrl-B` to delegate.
+
+**What happened.** The run completed and Jod recorded it as success:
+
+```
+$ jod ls
+87e84b92   done   Claude Code  Build a working Tetris game
+```
+
+The fleet shows `✓ done · $1.1813 · 17425 out`. But the root I added is
+**empty**:
+
+```
+$ ls -la …/tui-dogfood-tetris/tetris/
+total 0          # nothing. not one file.
+```
+
+The game was written **to the home directory instead**:
+
+```
+$ ls /Users/reljodoreta/tetris/
+dist  index.html  node_modules  package.json  pnpm-lock.yaml
+pnpm-workspace.yaml  src/
+```
+
+The agent's own closing report confirms it plainly: *"`pnpm install && pnpm dev`
+in `/Users/reljodoreta/tetris` starts it."* It also ran `pnpm install` there,
+so a `node_modules/` tree landed in `$HOME` as well.
+
+**This recurs.** The `tetris-rust` run already in your history ends with:
+*"Everything is at `/Users/reljodoreta/tetris-rs`; nothing else under your home
+directory was touched."* Same instruction shape, same outcome, different
+session — the agent resolves a bare directory name against `$HOME` rather than
+against the root or the launch directory.
+
+**Why it happens.** Two documented facts combine badly:
+
+- *"Roots are a convention, not a sandbox — passing one grants; withholding one
+  does not deny"* (`docs/try-it.md:203`). Nothing **stops** a write outside a
+  root.
+- Roots are added **read-only**, and write access is supposed to come from the
+  agent calling `claim_worktree`. `tetris/` was an empty non-git directory, so
+  there was no worktree to claim.
+
+So the agent had a read-only root it could not write to, an ambiguous phrase
+("the tetris directory"), and no visible statement of its own working
+directory — and resolved the ambiguity against `$HOME`. Compounding it,
+**BUG-4** means the human could not have noticed the mismatch either: the TUI
+never shows the cwd a delegated agent is given.
+
+**Why this is Critical rather than High.** The failure is silent in both
+directions. The agent believes it succeeded, Jod's records agree (`✓ done`,
+$1.18 spent), the fleet shows a green check — and the directory the user
+actually pointed at is untouched. Nothing in the TUI would ever tell you. A
+user who trusts the green check has a repo that never received the work and an
+unrelated tree in `$HOME` that silently did.
+
+**Suggested fixes**, in order of value:
+
+1. **Pass and display the delegated cwd.** The delegate confirmation should
+   name the working directory the run was launched with, and the run detail
+   pane should show it. Today neither does.
+2. **Resolve bare directory names against the roots** before falling back to
+   anything else, and if a name matches no root, raise a blocking card instead
+   of guessing. Guessing `$HOME` is the worst available default.
+3. **Warn when a run's file writes all land outside every declared root.** The
+   supervisor already sees the events; a run that declares "done" having
+   touched nothing inside any root is worth a card, not a green check.
+4. Consider whether a root that cannot be written to, with no worktree to
+   claim, should be accepted silently at all.
 
 ---
 
@@ -104,12 +199,14 @@ simply drop the splash on any notice, or the startup hint alone would kill it.
 ---
 
 <a name="bug-2"></a>
-## BUG-2 — `Alt-B` delegate gives almost no confirmation · **High** · OPEN
+## BUG-2 — delegate gives almost no confirmation · **High** · OPEN
 
 You suspected "delegate task does not spawn". **It does spawn.** The bug is
-that the UI barely admits it, which is indistinguishable from failure.
+that the UI barely admits it, which is indistinguishable from failure — and
+when the run then writes to the wrong place (BUG-14), the silence is what stops
+you noticing.
 
-**Repro:** type a prompt, press `Alt-B`.
+**Repro:** type a prompt, press `Ctrl-B` (`Alt-B` before #75).
 
 **Actual:** the input clears, the splash stays up, the transcript stays empty,
 and the *only* feedback anywhere on screen is a suffix appended to the status
@@ -131,7 +228,7 @@ $ jod ls
 87e84b92   running   Claude Code  Build a working Tetris game
 ```
 
-and `Alt-A` (fleet) shows `● 87e84b92 running 20s cc Build a working Tetris game`.
+and the fleet shows `● 87e84b92 running 20s cc Build a working Tetris game`.
 
 **Root cause:** the delegation confirmation is an `Entry::Notice`, hidden by
 BUG-1. Fixing BUG-1 likely fixes most of this. It is filed separately because
@@ -139,7 +236,9 @@ delegation deserves a *loud* confirmation regardless — it is the single most
 consequential key in the program, it spends money, and it is fire-and-forget.
 
 **Suggested fix.** On delegate, push a non-notice transcript entry naming the
-agent id, the prompt, **and the working directory** it was given (see BUG-4).
+agent id, the prompt, **and the working directory** it was given (see BUG-4 and
+BUG-14). That last field is not cosmetic: it is the one piece of information
+that would have exposed BUG-14 the moment it happened.
 
 ---
 
@@ -233,8 +332,11 @@ This is "project cannot be cited", and it is real.
 There is **no way to populate it from the TUI**:
 
 - No `/project` command. `grep -n "project" cli/src/tui/command.rs` → **zero
-  matches**; it is absent from the `/` list entirely.
-- It is not in the `Alt-K` menu.
+  matches**; it is absent from the `/` list entirely. Re-checked after #75:
+  still zero.
+- The `Ctrl-G` menu has a `projects` entry, but it only *toggles visibility* of
+  the catalog — it cannot add to it, and from a cold start it does nothing at
+  all (BUG-6).
 - The panel's own empty state, `nothing set`, names no remedy.
 
 The capability exists everywhere *except* the TUI: `core/src/projects.rs:436`
@@ -262,27 +364,39 @@ fix itself.
 ---
 
 <a name="bug-6"></a>
-## BUG-6 — `Alt-D` is a silent no-op unless an undiscoverable panel is open · Medium · OPEN
+## BUG-6 — projects toggle is a silent no-op unless an undiscoverable panel is open · **High** · OPEN
 
-**Repro:** from a cold `jod tui`, press `Alt-D`. The `?` overlay advertises it
-as **"show or hide the projects"**.
+> **Re-verified after #75 — still broken, and now worse.** The binding moved
+> from `Alt-D` to `Ctrl-G d` and was *promoted* into the workspace menu, where
+> it is now a described, first-class entry: `d  projects  show or hide the
+> catalog`. It still does nothing. Severity raised from Medium: a chord nobody
+> can find failing quietly is bad; a menu item the program advertises to every
+> new user failing quietly is worse.
 
-**Actual:** nothing. No panel, no message, no change of any kind.
+**Repro:** from a cold `jod tui`, press `Ctrl-G`, then `d`.
 
-**Root cause.** `cli/src/tui/mod.rs:2492` toggles `app.projects_open`:
+**Actual:** nothing. No panel, no message, no change of any kind. (Pre-#75 the
+same was true of `Alt-D`.)
+
+**Root cause.** `cli/src/tui/mod.rs:2940` toggles `app.projects_open`:
 
 ```rust
-KeyCode::Char('d') if alt => {
+'d' => {
+    app.overlay = Overlay::None;
     app.projects_open = !app.projects_open;
-    handled(None)
+    None
 }
 ```
+
+The handler's own comment gives the mistaken assumption away — *"Collapse the
+catalog **without closing the whole panel**"* — it is written for the case
+where the panel is already open.
 
 but the projects catalog only renders inside the side panel, which is gated on
 `app.panel` — opened by `Shift-Tab` (BUG-7), and `false` at startup. So the key
 flips a flag that draws nothing, and says nothing about why.
 
-**Why the test suite missed it.** `cli/src/tui/mod.rs:6371`
+**Why the test suite missed it.** `cli/src/tui/mod.rs:6396`
 `the_catalog_is_collapsed_without_closing_the_panel` opens with:
 
 ```rust
@@ -296,9 +410,14 @@ It sets the panel open *first*, so it only ever exercises the state where
 never tested. This is precisely the failure mode `docs/try-it.md:16` warns
 about.
 
-**Suggested fix.** Either have `Alt-D` open the panel when it is closed, or
-have it push a notice explaining that `Shift-Tab` opens the panel. (The notice
-route requires BUG-1 to be fixed first, or it will be invisible.)
+**Suggested fix.** Have the projects key **open the panel when it is closed**
+(`app.panel = true` alongside `projects_open = true`). The notice route —
+"press Shift-Tab first" — is worse, and would be invisible anyway until BUG-1
+is fixed.
+
+**Regression guard worth adding:** assert the key does something observable
+starting from `App::default()`, i.e. without pre-setting `app.panel`. That one
+missing precondition is what hid this through an entire refactor.
 
 ---
 
@@ -308,9 +427,11 @@ route requires BUG-1 to be fixed first, or it will be invisible.)
 `Shift-Tab` opens the side panel holding **projects, sessions, mode, harness,
 spend and context usage** — a large fraction of the program's state.
 
-It appears in **neither** the `?` keymap (which claims to be the whole keymap —
-23 bindings, no `Shift-Tab`) **nor** the `Alt-K` menu. The only place it is
-written down is the bottom border of the panel itself:
+**Re-verified after #75: unchanged.** It appears in **neither** the `?` keymap
+(which the `Ctrl-G` menu bills as "the whole keymap" — no `Shift-Tab` in it)
+**nor** the `Ctrl-G` menu, even though that menu gained six other entries in
+the same PR. The only place it is written down is the bottom border of the
+panel itself:
 
 ```
 └ Shift-Tab closes ──────────────┘
@@ -319,17 +440,24 @@ written down is the bottom border of the panel itself:
 — which you can only read *after* you have already discovered the key. I found
 it by reading source, not by using the program.
 
-**Suggested fix.** Add `Shift-Tab` to `GLOBAL` in `cli/src/tui/keys.rs`. Note
-the overlay is described as budget-tight at 100×30 (`keys.rs:164`), so this may
-need a row freed — but a key that opens six panels earns its row more than most
-of the ones present.
+**Suggested fix.** Add `Shift-Tab` to `GLOBAL` in `cli/src/tui/keys.rs`, and to
+the `Ctrl-G` menu. #75 freed several rows from the overlay by moving verbs into
+the menu, so the row-budget objection that used to apply has largely gone
+away — and a key that opens six panels earns its row more than most of the ones
+still present.
 
 ---
 
 <a name="bug-8"></a>
-## BUG-8 — Keymap overlay: the key label collides with its description · Medium · OPEN
+## BUG-8 — Keymap overlay: the key label collides with its description · ~~Medium~~ · **FIXED by #75**
 
-**Repro:** press `?`. Read the fifth row from the bottom:
+> **Re-verified after the rebase: fixed.** The overlay now renders
+> `Ctrl-A/E/Home/End start / end of the line` with a proper gap, and the
+> hardcoded `{:<12}` pad is gone from `ui.rs`. Kept here because the *class* of
+> bug (a fixed-width column that pads but never truncates) still applies to
+> BUG-3 and BUG-11, which remain open.
+
+**Original repro (pre-#75):** press `?`. Read the fifth row from the bottom:
 
 ```
   Ctrl-A/E/Home/Endstart / end of the line
@@ -359,23 +487,24 @@ advertising `Ctrl-Home`/`Ctrl-End`. Widen the column; do not trim the label.
 ---
 
 <a name="bug-9"></a>
-## BUG-9 — The splash claims "Alt-K opens every screen"; it does not · Medium · OPEN
+## BUG-9 — The splash claims the menu "opens every screen" · ~~Medium~~ · **largely FIXED by #75**
 
-The splash caption reads:
+> **Re-verified after the rebase: mostly fixed.** The caption is now `Ctrl-G
+> opens every screen`, and `Ctrl-G` genuinely gained the entries it was missing
+> — **editor, jobs, unread, clear, projects and search** are all in the menu
+> now. This was a real improvement.
 
-```
-jod · an orchestrator, not a chat window · Alt-K opens every screen
-```
+**Original finding (pre-#75).** The caption read `Alt-K opens every screen`,
+but projects, the rail, background shells, transcript search, delegate and the
+side panel were all reachable only by chord and absent from that menu.
 
-`Alt-K` lists: chat, fleet, memory, schedules, goals, hooks, tasks, activity,
-team, new…, editor, keys.
+**What remains.** Two gaps survive:
 
-Reachable **only** by chord, and absent from that menu: **projects** (`Alt-D`),
-**the rail** (`Alt-R`), **background shells** (`Alt-J`), **transcript search**
-(`Alt-S`), **delegate** (`Alt-B`), and the **side panel** (`Shift-Tab`).
-
-A user who believes the caption will never find them. Either soften the caption
-or add the missing entries.
+- **`Shift-Tab` is still absent** from the menu and the keymap — see BUG-7.
+  It is the single biggest one left, because it opens six panels.
+- **`projects` is in the menu but does not work** from a cold start — BUG-6.
+  Being listed and being reachable are not the same thing, and this entry is
+  currently listed without being reachable.
 
 ---
 
@@ -483,21 +612,67 @@ as a bug. If someone sees a blank TUI in the wild, start here.
 
 ---
 
+## The Tetris itself — delivered, and independently verified
+
+The task did produce a real, working game. It is at **`/Users/reljodoreta/tetris`**
+— which is the wrong place (BUG-14), but the code is good.
+
+I did not take the agent's word for it. `pnpm build` succeeds (8 modules, 825 ms),
+and I wrote an independent probe against the engine — **14 assertions, 14 pass**:
+board is 10×20, the 7-bag yields seven distinct pieces before repeating, left and
+right walls stop the piece, stacking hard drops reaches game over in a plausible
+number of drops, pause blocks the drop and unpausing resumes, a bottom row fills,
+and the score advances as pieces land.
+
+Structure: a headless engine (`src/engine.js`, no DOM), a canvas renderer, and a
+keyboard controller, so the rules stay testable independently of the browser.
+Ghost piece, next-piece preview, wall kicks, per-level gravity, standard
+100/300/500/800 × level scoring.
+
+One caveat the agent reported honestly rather than papering over: it could not
+drive a real browser (`browser` MCP failed — `ModuleNotFoundError: No module
+named 'camoufox'`), so live key handling and visual output are unverified. That
+is a fair "blocked" and worth knowing — the browser MCP is broken on this box.
+
+To run it: `cd ~/tetris && pnpm install && pnpm dev`.
+
+---
+
 ## Verified working
 
 Worth recording, since the point of a hand-drive is to separate the two:
 
 - `jod tui` starts clean and fast; the splash renders correctly at 200×50.
-- `?` and `Alt-K` overlays open, render and dismiss correctly.
+- `?` and `Ctrl-G` overlays open, render and dismiss correctly.
 - `/` completion filters live and anchors the input to the bottom so the
   ~43-row list is not cut in half — a deliberate touch (`ui.rs:1192`) that
   works.
 - `/add-dir <path>` **correctly honours its argument** and stores the root
   (verified against `jod root ls`), despite BUG-3 making it look otherwise.
-- `Alt-A` fleet is genuinely good: live status, age, harness, per-run detail,
-  spend, and the last message body in a side pane.
-- **Delegation works.** `Alt-B` spawned a real Claude Code run against the
-  right prompt; `jod ls` and the fleet both showed it running.
+- The fleet (`Ctrl-F`) is genuinely good: live status, age, harness, per-run
+  detail, spend, and the last message body in a side pane. It was the only
+  screen that told me what was actually going on.
+- **Delegation spawns correctly.** `Ctrl-B` started a real Claude Code run with
+  the right prompt; `jod ls` and the fleet both showed it running, then done,
+  with accurate cost accounting ($1.18 / 17,425 output tokens).
 - Roots are read-only by design (`jod root add` → "Add a directory,
   read-only"); write access comes from the agent's own `claim_worktree`. Not a
-  bug — behaves as `docs/try-it.md:199` documents.
+  bug in itself — it behaves as `docs/try-it.md:199` documents — but see
+  BUG-14 for what happens when there is no worktree to claim.
+- **#75 is a real improvement.** Moving the chords off `Alt` fixed BUG-8
+  outright, largely fixed BUG-9, and the `Ctrl-G` menu is now a much better
+  map of the program. `docs/try-it.md` was updated in step, so the docs did
+  **not** drift — I checked specifically.
+
+---
+
+## How this was driven
+
+For anyone reproducing: the TUI was driven through an isolated tmux server
+(`tmux -L jodtest`, socket deliberately not the default, so the user's own
+session and iTerm are untouchable), at 200×50 and 260×50, sending real
+keypresses and capturing the rendered pane. `send-keys` + `capture-pane` is
+enough to hand-drive this program end to end, and is worth wiring into CI as a
+smoke test — **every single finding above is invisible to the unit suite**, and
+several are actively *masked* by it (BUG-3 and BUG-6 each have a green test
+sitting on top of the broken behaviour).
