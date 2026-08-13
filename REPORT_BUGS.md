@@ -82,6 +82,40 @@ trust:
 | BUG-6 — `Ctrl-G d` on a cold session | still renders **nothing** |
 | BUG-13 — `jod --version` | still bare `jod 0.1.0` |
 | BUG-21 — diff header | re-verified with a second file; path still clipped, counts still absent |
+| BUG-14 — TUI cwd | **fix verified working** — see below. Not in `main` yet. |
+
+### BUG-14's fix works — verified, though it is not merged
+
+While I was re-verifying, an **uncommitted** change appeared in this worktree's
+`cli/src/main.rs` (not mine — another agent is working in this checkout, see
+the collision note below):
+
+```rust
+-  cwd: cwd.unwrap_or_else(jod_core::service::default_cwd),
++  cwd: tui_cwd(cwd)?,
+```
+
+with `tui_cwd` at `cli/src/main.rs:4002` falling back to
+`std::env::current_dir()`. That is exactly fix #1 as recommended below, so I
+built it and drove it rather than assume.
+
+**It works.** Launched from the worktree with **no `--cwd` flag at all** — the
+condition that originally sent Tetris into `$HOME`:
+
+```
+ab8a6b9d|/…/worktrees/tui-dogfood-tetris|reply with the single word verified
+```
+
+against the original failure for comparison:
+
+```
+87e84b92|/Users/reljodoreta|Build a working Tetris game
+```
+
+The run now lands where the console was launched. Whoever owns that PR can
+treat this as an independent confirmation. **Caveat:** this was an uncommitted
+working-tree change built locally, not `main` — BUG-14 stays `OPEN` here until
+it merges.
 
 So every `OPEN` item below is open against `f3aaf45` as of this writing. When
 those PRs merge, the items to re-check first are BUG-1 (which should also close
@@ -89,6 +123,36 @@ BUG-2) and BUG-14 — and BUG-14 has two halves in two PRs (#82 display, #84
 backend), so it is worth confirming that a run writing outside its roots
 *both* raises the card and shows its cwd, rather than one landing without the
 other.
+
+---
+
+## ⚠ Collision notice — someone is editing inside this worktree
+
+At the time of writing, `git status` in
+`.claude/worktrees/tui-dogfood-tetris` shows:
+
+```
+ M cli/src/main.rs          <-- not mine; a BUG-14 fix in progress
+?? tetris-oneshot/          <-- not mine; another agent's test project
+```
+
+I have **not** committed or reverted either — someone else's uncommitted work
+is not mine to touch, and reverting it would destroy it. But two consequences
+matter for anyone working here:
+
+1. **This worktree is not a clean room any more.** A `cargo build` here now
+   compiles somebody's in-flight fix, not `f3aaf45`. My earlier findings were
+   all taken against the clean tree; the one exception is the BUG-14 fix
+   verification above, which is labelled as such.
+2. **The shared `target/` is contended.** My build printed
+   `Blocking waiting for file lock on build directory` — two source trees are
+   compiling into one `CARGO_TARGET_DIR`, so `target/release/jod` may be built
+   from *either* tree at any moment. If you are testing behaviour, do not trust
+   that binary without checking what it actually does; I confirmed the fix
+   behaviourally (recorded `cwd`) rather than by trusting the build.
+
+This is the "one owner per path" rule in `docs/teamwork.md` being crossed in
+practice. Worth a fresh worktree per agent.
 
 ---
 
