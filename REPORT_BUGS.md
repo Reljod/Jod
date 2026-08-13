@@ -44,6 +44,7 @@ see BUG-13.
 | [BUG-11](#bug-11) | Low | commands | Command descriptions are cut mid-word with no ellipsis |
 | [BUG-12](#bug-12) | Low | input | The input box is fixed at ~70 columns and single-line |
 | [BUG-13](#bug-13) | Medium | tooling | `jod --version` cannot distinguish two different builds |
+| [BUG-17](#bug-17) | **High** | interrupt | `Esc` does not stop a running turn in the main chat, though the docs say it does |
 | [BUG-15](#bug-15) | **High** | mentions | `@` in a non-git directory is ~95% `node_modules` noise; source is invisible |
 | [BUG-16](#bug-16) | Medium | mentions | `@` clips paths from the right, so six different files render identically |
 
@@ -666,6 +667,70 @@ suspect, and nothing in the program's own output reveals it.
 **Suggested fix.** Put the git SHA and build timestamp in `--version`
 (`git describe --always --dirty` at build time via `build.rs`). Cheap, and it
 retires a whole category of phantom bug reports.
+
+---
+
+<a name="bug-17"></a>
+## BUG-17 — `Esc` does not interrupt a turn in the main chat · **High** · OPEN
+
+`docs/try-it.md:245` documents `Esc` as the way out of a running turn:
+
+> | `Esc` | interrupt the turn, keep the session — the conversation survives |
+
+**Repro:** in the main chat, type `run the shell command: sleep 90; then say
+done`, press `⏎`, wait for `⠸ working`, then press `Esc`.
+
+**Actual:** nothing. Four seconds later the status bar still reads
+`⠹ working 15s`. The turn runs on. `Ctrl-X` **does** stop it (status returns to
+`ready`), so the capability exists — it is `Esc` that is dead.
+
+**Root cause.** `cli/src/tui/mod.rs:4132` guards the interrupt on *watching*:
+
+```rust
+KeyCode::Esc if app.busy && app.watching.is_some() => { … interrupt … }
+```
+
+In the ordinary flow — type into the main chat, press `⏎` — `app.busy` is true
+but `app.watching` is `None`, so the arm never matches and `Esc` falls through
+to `app.back()`. The interrupt only fires while you are explicitly *watching* a
+run, which is the rarer case.
+
+The code's own comment two lines above still describes the old behaviour:
+
+> *"The line being typed is left alone: the correction is usually already
+> half-written by the time you reach for **Escape**."*
+
+**Why the test suite missed it — for the third time.** The test
+`escape_interrupts_the_turn_without_losing_the_session` (`mod.rs:10293`) builds
+its state from `mid_turn()` (`mod.rs:10277`):
+
+```rust
+fn mid_turn() -> App {
+    let mut app = app_on(HarnessKind::ClaudeCode);
+    app.agents = vec![running("run-1", "port the parser")];
+    app.watching = Some("run-1".into());   // <-- satisfies the guard
+    app.busy = true;
+    …
+}
+```
+
+The fixture presets `watching`, so the guard is always satisfied and the test
+is always green — while the path a user actually takes is not covered at all.
+This is the **same failure shape** as BUG-6 (`app.panel = true`) and BUG-3
+(a short path). Three separate features are broken in their default state and
+green in their tests, each because a fixture supplies a precondition the real
+entry point does not.
+
+**Why High.** This is the stop button. A user watching an agent do something
+they did not intend reaches for `Esc` first — it is what the documentation
+tells them to press — and nothing happens. `Ctrl-X` is discoverable from the
+footer, but only if you look down while worrying about what the agent is
+doing.
+
+**Suggested fix.** Drop `&& app.watching.is_some()` and interrupt whatever the
+current turn is, or bind `Esc` to the same action as `Ctrl-X` in the chat
+workspace. Then fix the fixture: assert the interrupt from a state produced by
+*sending a prompt*, not one hand-assembled with `watching` already set.
 
 ---
 
