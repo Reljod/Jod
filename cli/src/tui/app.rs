@@ -300,6 +300,46 @@ impl Dictation {
 /// thing a static "working…" cannot do.
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
+/// Evidence that a turn is still working, gathered from whichever harness
+/// event proves it — a long turn can sit silent for more than one reason, and
+/// the spinner alone cannot tell the reader which.
+///
+/// Reasoning is the only kind wired up so far: `AgentEvent::Progress` ticks
+/// while the model thinks with nothing else on the wire yet. A second kind
+/// belongs here for the silence a long assistant message sits in while it
+/// *generates* — a message with several `tool_use` blocks can take minutes to
+/// produce with no `Thinking` or `Progress` event in between, because the
+/// model is not reasoning in that window, it is emitting. That event does not
+/// exist yet — `task-stream-flag` is the one adding it, over in
+/// `core/src/event.rs`, which this file does not own — but when it lands, its
+/// arm in `App::apply` sets a new variant here, and `describe` below grows one
+/// more match arm. Nothing about this type needs renaming to receive it: the
+/// field is "the latest evidence", not "the token count".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Liveness {
+    /// A running reasoning-token count. Set, never incremented — the event
+    /// carries the total so far, not a delta.
+    Thinking(u64),
+}
+
+impl Liveness {
+    /// How this reads on the status line, or nothing if the reader has asked
+    /// not to see it.
+    ///
+    /// `show_thinking` is passed in rather than read off `App` so each
+    /// variant can answer independently once there is more than one — a
+    /// generation signal is the model producing the answer it was asked for,
+    /// not the reasoning behind it, and hiding reasoning should not also hide
+    /// that.
+    fn describe(self, show_thinking: bool) -> Option<String> {
+        match self {
+            Liveness::Thinking(tokens) => {
+                show_thinking.then(|| format!("{tokens} thinking tokens"))
+            }
+        }
+    }
+}
+
 /// A duration as the shortest thing that still reads as a duration.
 ///
 /// Watching agents means reading a column of these, so they are padded to a
@@ -402,6 +442,15 @@ pub struct App {
     pub now_ms: i64,
     /// When the turn on screen started, for the elapsed counter.
     pub turn_started_ms: Option<i64>,
+    /// The latest [`Liveness`] evidence for the turn on screen, or `None`
+    /// before any has arrived.
+    ///
+    /// Only ever overwritten by newer evidence, never incremented or
+    /// animated: if the harness stops producing it, this stops changing, and
+    /// a status line built on it freezes exactly the way a genuinely wedged
+    /// run should. Cleared at the start and end of every turn so evidence
+    /// from a previous think can never bleed into the next one.
+    pub liveness: Option<Liveness>,
     /// Ticks since start, which is all the spinner needs.
     pub tick: u64,
     /// Which entry of the slash-command popup is highlighted. Meaningless when
@@ -919,6 +968,7 @@ impl App {
             unread_only: false,
             now_ms: 0,
             turn_started_ms: None,
+            liveness: None,
             tick: 0,
             suggestion: 0,
             team: None,
@@ -1137,6 +1187,10 @@ impl App {
         self.watching = Some(run.into());
         self.busy = true;
         self.turn_started_ms = Some(at_ms);
+        // Evidence left over from the turn before would read as this turn
+        // already having done that much work before it asked its first
+        // question.
+        self.liveness = None;
         // Whatever was being stopped, this is not it. A stop that was never
         // heard back about would otherwise leave the status bar saying
         // `interrupting…` over a turn that has already started again.
@@ -2191,15 +2245,29 @@ impl App {
                 }
                 self.busy = false;
                 self.turn_started_ms = None;
+                self.liveness = None;
             }
-            // Nothing in the transcript, on purpose. A tick every few seconds
+            // Nothing in the transcript, on purpose — a tick every few seconds
             // for nine minutes would be nine minutes of scrollback saying
-            // "still working" — the status bar is where it belongs, and drawing
-            // it there is `cli/src/tui/ui.rs`, which the queued `stream-render`
-            // task owns. This arm exists so the event is *accounted for* here
-            // rather than swept up by a catch-all that would hide it from
-            // whoever writes that half.
-            AgentEvent::Progress { .. } => {}
+            // "still working", and PR #92 just finished scrubbing spurious
+            // entries out of exactly this transcript.
+            //
+            // The evidence is *stored*, not drawn, here: `activity()` below
+            // reads `self.liveness` back for the status bar, which
+            // `cli/src/tui/ui.rs` renders. Only ever overwritten by a later
+            // tick with a count of its own — a bare tick (no count) still
+            // proves the harness is alive without erasing the last number we
+            // had — so a run that stops ticking leaves this frozen rather than
+            // this code inventing motion for it.
+            //
+            // This is reasoning silence specifically — see [`Liveness`] for
+            // where generation silence (a long assistant message with no
+            // ticks) plugs in once that event exists.
+            AgentEvent::Progress { thinking_tokens } => {
+                if let Some(t) = thinking_tokens {
+                    self.liveness = Some(Liveness::Thinking(*t));
+                }
+            }
             AgentEvent::Error { message } => self.push(Entry::Notice(message.clone())),
             AgentEvent::Raw { line } => {
                 if !line.trim().is_empty() {
@@ -2293,6 +2361,19 @@ impl App {
         } else {
             "ready".into()
         }];
+        // The one thing on the wire during a long, silent turn — see
+        // [`Liveness`]. Shown only while genuinely mid-turn (not while a stop
+        // is already winding one down) and only once some evidence has
+        // actually arrived, so a harness that never sends any leaves this
+        // exactly as quiet as before. Each variant decides for itself whether
+        // `show_thinking` hides it — today's only variant is reasoning, which
+        // is "the same information as `Thinking`, counted rather than quoted"
+        // (see `cli/src/render.rs`) and so follows the same flag.
+        if self.busy && self.interrupting.is_none() {
+            if let Some(note) = self.liveness.and_then(|l| l.describe(self.show_thinking)) {
+                parts.push(note);
+            }
+        }
         // Background work is the reason this is an orchestrator, so it is stated
         // even when the conversation on screen is idle. Only the agents *other*
         // than the watched one are counted: the watched one already said so.
@@ -3240,6 +3321,116 @@ mod tests {
         let first = a.spinner();
         a.advance(65_250);
         assert_ne!(first, a.spinner(), "the spinner must actually turn");
+    }
+
+    /// A nine-minute think emits nothing else — no text, no tool call — so the
+    /// `Progress` tick is the only thing on the wire that can prove the turn is
+    /// still moving. Before this the status bar only had the spinner and the
+    /// clock, neither of which changes because a real answer is coming versus
+    /// because the process died.
+    #[test]
+    fn a_progress_tick_shows_up_in_the_working_status() {
+        let mut a = app();
+        a.begin_turn("run-1", 0);
+        assert!(
+            !a.status().contains("thinking"),
+            "nothing to show before the first tick: {}",
+            a.status()
+        );
+
+        a.apply(&AgentEvent::Progress {
+            thinking_tokens: Some(1408),
+        });
+        let status = a.status();
+        assert!(
+            status.contains("1408 thinking"),
+            "the running total must show: {status}"
+        );
+    }
+
+    /// Ticks carry a running total, not a delta — a later, smaller-looking tick
+    /// still replaces the one before it because it is the more current count.
+    /// And a run that stops sending ticks must leave the count exactly where it
+    /// was, not decay or reset it — a stall has to look like a stall.
+    #[test]
+    fn a_stalled_run_keeps_showing_its_last_known_count() {
+        let mut a = app();
+        a.begin_turn("run-1", 0);
+        a.apply(&AgentEvent::Progress {
+            thinking_tokens: Some(500),
+        });
+        a.apply(&AgentEvent::Progress {
+            thinking_tokens: Some(900),
+        });
+        assert!(a.status().contains("900 thinking"), "{}", a.status());
+
+        // No more ticks arrive — the wire went quiet, same as a real wedge.
+        a.advance(1000);
+        assert!(
+            a.status().contains("900 thinking"),
+            "the count must not move on its own: {}",
+            a.status()
+        );
+    }
+
+    /// A tick without a count still proves the harness is alive, but there is
+    /// nothing new to report — so the last known count survives it rather than
+    /// being blanked out.
+    #[test]
+    fn a_bare_tick_does_not_erase_the_last_count() {
+        let mut a = app();
+        a.begin_turn("run-1", 0);
+        a.apply(&AgentEvent::Progress {
+            thinking_tokens: Some(500),
+        });
+        a.apply(&AgentEvent::Progress {
+            thinking_tokens: None,
+        });
+        assert!(a.status().contains("500 thinking"), "{}", a.status());
+    }
+
+    /// The status bar is not the transcript: watching a harness think is a
+    /// choice (`show_thinking`), and turning it off should hide the token
+    /// count exactly as it hides `Entry::Thinking` blocks.
+    #[test]
+    fn turning_off_thinking_hides_the_token_count_too() {
+        let mut a = app();
+        a.show_thinking = false;
+        a.begin_turn("run-1", 0);
+        a.apply(&AgentEvent::Progress {
+            thinking_tokens: Some(1408),
+        });
+        assert!(
+            !a.status().contains("thinking"),
+            "hidden by the same flag as the transcript: {}",
+            a.status()
+        );
+    }
+
+    /// A fresh turn must not carry the previous turn's count — otherwise the
+    /// status bar would say a new question had already been thought about
+    /// before the harness said a word.
+    #[test]
+    fn a_new_turn_starts_the_count_over() {
+        let mut a = app();
+        a.begin_turn("run-1", 0);
+        a.apply(&AgentEvent::Progress {
+            thinking_tokens: Some(1408),
+        });
+        a.apply(&AgentEvent::Finished {
+            text: None,
+            exit_code: Some(0),
+            is_error: false,
+            usage: Usage::default(),
+        });
+        assert_eq!(a.liveness, None, "cleared when the turn ends");
+
+        a.begin_turn("run-2", 0);
+        assert!(
+            !a.status().contains("thinking"),
+            "the new turn starts silent: {}",
+            a.status()
+        );
     }
 
     #[test]
