@@ -33,7 +33,7 @@ pub const ROWS: usize = 8;
 /// Named as the command you can run from where you are standing. The popup is
 /// open, the cursor is in the chat box, and `jod root add` in another terminal
 /// is not a next step anybody takes from here.
-pub const NO_ROOTS: &str = "no folder to search — /add-dir picks one (Alt-P)";
+pub const NO_ROOTS: &str = "no folder to search — /add-dir picks one (Ctrl-P)";
 
 /// One offered path.
 #[derive(Debug, Clone, PartialEq, Eq)]

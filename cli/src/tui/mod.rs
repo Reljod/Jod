@@ -1,13 +1,13 @@
 //! `jod tui` — the full-screen interface.
 //!
 //! Layout, top to bottom: a scrolling transcript, an input box, a status bar.
-//! `Alt-A` reveals a panel listing every delegation this process knows about,
+//! `Ctrl-F` reveals a panel listing every delegation this process knows about,
 //! which is the part that makes this an orchestrator's UI rather than a chat
 //! window — Jod's job is watching several agents, not talking to one.
 //!
 //! That panel is where unattended work is actually managed: it is a cursor over
 //! the live fleet, and from it a run can be watched, stopped, resumed or
-//! attached to. Sending a prompt with `Alt-B` (or `/delegate`) starts an agent
+//! attached to. Sending a prompt with `Ctrl-B` (or `/delegate`) starts an agent
 //! that never takes over the screen, so a long job can be left running while the
 //! conversation carries on — and its ending arrives as a notice rather than
 //! being missed.
@@ -519,7 +519,7 @@ async fn event_loop(
     // the harness would leave a stale claim on screen the moment `/harness`
     // switches. The status bar is the one place that tracks it.
     app.push(Entry::Notice(
-        "Alt-K opens every screen · / for commands · Enter send · Alt-B delegate in the background · ? for keys · Ctrl-C quit"
+        "Ctrl-G opens every screen · / for commands · Enter send · Ctrl-B delegate in the background · ? for keys · Ctrl-C quit"
             .to_string(),
     ));
 
@@ -812,7 +812,7 @@ fn announce(app: &mut App, id: &str) {
     };
     let took = app::short_duration(app.now_ms.saturating_sub(agent.created_at_ms));
     app.push(Entry::Notice(format!(
-        "{mark} {} {} after {took} — Alt-A to open it",
+        "{mark} {} {} after {took} — Ctrl-F to open it",
         agent.name, agent.status
     )));
 }
@@ -1043,7 +1043,7 @@ async fn perform(
             {
                 Ok(id) => {
                     app.push(Entry::Notice(format!(
-                        "delegated {} — {} · runs in the background, Alt-A to watch",
+                        "delegated {} — {} · runs in the background, Ctrl-F to watch",
                         short(&id),
                         crate::default_name(&prompt)
                     )));
@@ -1111,7 +1111,7 @@ async fn perform(
             if let Err(e) = jod.kill_agent(&id).await {
                 app.push(Entry::Notice(format!(
                     "the run would not stop ({e}) — it may still be writing; \
-                     Alt-X kills it outright"
+                     Ctrl-X kills it outright"
                 )));
             }
         }
@@ -1292,7 +1292,7 @@ async fn perform(
                     let roots = store.roots(&conversation).unwrap_or_default();
                     if roots.is_empty() {
                         vec![
-                            "no roots — /add-dir picks one (Alt-P), and `@` says so until there is"
+                            "no roots — /add-dir picks one (Ctrl-P), and `@` says so until there is"
                                 .to_string(),
                         ]
                     } else {
@@ -1367,7 +1367,7 @@ async fn perform(
         // Suspending and restoring the terminal is the loop's job, so this is
         // handled there rather than here. Reaching it means the loop did not.
         Action::Editor => app.push(Entry::Notice(
-            "no $EDITOR handoff from here — set $EDITOR and try Alt-F in chat".into(),
+            "no $EDITOR handoff from here — set $EDITOR and try Ctrl-G e in chat".into(),
         )),
         // Both need something only the loop holds — the job table for one, the
         // terminal for the other. Reached only from a caller that has neither,
@@ -1381,7 +1381,7 @@ async fn perform(
         // The recorder is a child process the loop owns across turns, so it is
         // handled there for the same reason `Action::Editor` is.
         Action::Dictate | Action::CancelDictation => app.push(Entry::Notice(
-            "dictation runs from the console's own loop — press Alt-V in chat".into(),
+            "dictation runs from the console's own loop — press Ctrl-V in chat".into(),
         )),
         // Named rather than silently ignored: a key that appears to do nothing
         // is worse than one that says what it is waiting for.
@@ -2180,7 +2180,7 @@ fn on_key(app: &mut App, key: KeyEvent, viewport: usize) -> Option<Action> {
         _ => {}
     }
     // The rail sits above both of the layers below it, because it is drawn
-    // beside both and `Alt-C` may have been pressed on either. It only owns the
+    // beside both and `Ctrl-N` may have been pressed on either. It only owns the
     // keyboard once it has been given it, which is what keeps a rail that is
     // merely *visible* from stealing the letters you are typing.
     if app.rail.focused && app.rail.shown {
@@ -2195,7 +2195,7 @@ fn on_key(app: &mut App, key: KeyEvent, viewport: usize) -> Option<Action> {
 /// Keys while the decision rail has the keyboard.
 ///
 /// Every one of these is a bare letter, which is only safe because the focus is
-/// explicit and printed: `Alt-C` gives the rail the keyboard, the keybar
+/// explicit and printed: `Ctrl-N` gives the rail the keyboard, the keybar
 /// changes to the rail's verbs while it holds it, and `Esc` gives it back with
 /// the typed line untouched. See [`keys::RAIL`].
 fn on_rail_key(app: &mut App, key: KeyEvent) -> Option<Action> {
@@ -2394,45 +2394,51 @@ fn on_quit(app: &mut App) -> Option<Action> {
 
 /// The chords that work in every layer. `Some` means the chord was handled.
 ///
-/// **Alt for Jod's verbs, Ctrl for line editing.** A multiplexer takes Ctrl
-/// chords before this process sees them — tmux's own prefix is `Ctrl-B`, which
-/// was the delegate key, so it never arrived at all. Alt is uncontended.
+/// **Ctrl throughout, minus the letters something else already holds.** Alt was
+/// tried and is unpressable: a stock macOS terminal types `å` rather than
+/// sending Option as Meta, so the chords could not be reached at all. Ctrl can
+/// be, everywhere except the six letters tmux is prefixed and paned on —
+/// `a s h j k l` — which is why several verbs here are two keys rather than
+/// one. `keys.rs`'s module header carries the whole argument.
 ///
-/// Three groups, and which one a chord is in is a decision, not a pattern:
+/// Two groups, and which one a chord is in is a decision, not a pattern:
 ///
-/// - **`either`** — no readline verb sits on the Ctrl spelling, so both work.
-///   Alt is what the keybar prints; Ctrl keeps firing so the move is not a
-///   re-learning tax. `Ctrl-K`, `Ctrl-N`, `Ctrl-T` and friends have readline
-///   meanings on paper (kill-to-end, next-history, transpose) that Jod has
+/// - **`either`** — Jod's own verbs. Ctrl is what the keybar prints, because it
+///   is the spelling that can be typed; Alt keeps firing for anyone who learned
+///   the last release and for the terminals that do send it. `Ctrl-N`,
+///   `Ctrl-P`, `Ctrl-R`, `Ctrl-T` and `Ctrl-Y` have readline meanings on paper
+///   (next- and previous-history, reverse-search, transpose, yank) that Jod has
 ///   never implemented and does not intend to — the whole input is one prompt
 ///   that `Ctrl-U` clears, and history is on the bare arrows.
-/// - **`alt` only** — the Ctrl spelling means something to readline, so
-///   claiming it would be re-making the mistake this change undoes. Only the
-///   fleet is here, and it is the reason `Ctrl-A` was ambiguous before.
-/// - **`ctrl` only** — readline's own keys, which no multiplexer steals
-///   because every shell needs them. `Ctrl-A`/`Ctrl-E` to the ends of the
-///   line, `Ctrl-U` to clear it, `Ctrl-W` to eat a word. `Ctrl-C`/`Ctrl-D`
-///   quit, ahead of all of this in `on_key`.
+/// - **`ctrl` only** — readline's own keys, which no multiplexer steals because
+///   every shell needs them. `Ctrl-A`/`Ctrl-E` to the ends of the line,
+///   `Ctrl-U` to clear it, `Ctrl-W` to eat a word. `Ctrl-C`/`Ctrl-D` quit,
+///   ahead of all of this in `on_key`. An Alt spelling would be a second way to
+///   press a key nobody is having trouble pressing.
 ///
-/// Note that `Alt-B` and `Alt-F` are readline's word motions. Jod binds no
+/// Note that `Ctrl-B` and `Ctrl-F` are readline's word motions. Jod binds no
 /// word motion at all, so the chords are free — but if one is ever wanted it
-/// has to find another key, because delegate and `$EDITOR` are printed here.
+/// has to find another key, because delegate and the fleet are printed here.
 fn on_chord(app: &mut App, key: KeyEvent) -> Option<Option<Action>> {
     let handled = |a: Option<Action>| Some(a);
     let alt = key.modifiers.contains(KeyModifiers::ALT);
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let either = alt || ctrl;
     match key.code {
-        // The leader. One free chord reaches nine screens, which is the whole
-        // reason this is a menu rather than five more chords.
-        KeyCode::Char('k') if either => {
+        // The leader, and now the *only* way to most of the screens: eleven
+        // free letters did not stretch to sixteen verbs, so destinations went
+        // behind this one and the chords went to the verbs you need without
+        // stopping the sentence you are typing. `g` for go.
+        KeyCode::Char('g') if either => {
             app.overlay = Overlay::WhichKey;
             handled(None)
         }
-        // Alt only. `Ctrl-A` is readline's start-of-line and goes back to
-        // meaning that below — Jod taking it for the fleet was the one Ctrl
-        // collision Jod inflicted on itself rather than inherited.
-        KeyCode::Char('a') if alt => {
+        // The one destination that kept a chord, because the fleet is where a
+        // delegated run goes: `Ctrl-B` then `Ctrl-F` is a single thought. It
+        // used to be `Ctrl-A`, which is tmux's prefix here and readline's
+        // start-of-line everywhere — the one Ctrl collision Jod inflicted on
+        // itself rather than inherited, and it is not coming back.
+        KeyCode::Char('f') if either => {
             app.go(if app.workspace == Workspace::Fleet {
                 Workspace::Chat
             } else {
@@ -2440,32 +2446,6 @@ fn on_chord(app: &mut App, key: KeyEvent) -> Option<Option<Action>> {
             });
             handled(None)
         }
-        KeyCode::Char('g') if either => {
-            app.go(if app.workspace == Workspace::Team {
-                Workspace::Chat
-            } else {
-                Workspace::Team
-            });
-            handled(None)
-        }
-        // Only meaningful once cron, goals and webhooks report endings while
-        // nobody is at the terminal.
-        KeyCode::Char('n') if either => {
-            jump_to_oldest_unread(app);
-            handled(None)
-        }
-        // The background shells this console started — an update building
-        // while you carry on working, and whatever joins it later. Alt only:
-        // Ctrl-J is a line feed, which most terminals send for Enter, so
-        // taking `either` here would make Enter open a panel.
-        KeyCode::Char('j') if alt => {
-            app.overlay = Overlay::Jobs;
-            handled(None)
-        }
-        // `$EDITOR` on the input. Claude Code spells this `Ctrl+G`, which is
-        // Jod's team panel and is documented — so `Alt-F`, with `Alt-K e` as
-        // the discoverable alias.
-        KeyCode::Char('f') if either => handled(Some(Action::Editor)),
         KeyCode::Char('t') if either => {
             app.show_thinking = !app.show_thinking;
             app.push(Entry::Notice(format!(
@@ -2485,23 +2465,25 @@ fn on_chord(app: &mut App, key: KeyEvent) -> Option<Option<Action>> {
         // Dictation. A toggle rather than a hold, because a terminal cannot
         // see a key being released — see [`Dictation`]. `Esc` while listening
         // throws the utterance away, which is handled with the other escapes.
-        KeyCode::Char('v') if alt => handled(Some(Action::Dictate)),
-        // Collapse the catalog without closing the whole panel. Separate keys
-        // because they answer different questions: Shift-Tab is "I want the
-        // screen back", this is "I know which project I am in".
-        KeyCode::Char('d') if alt => {
-            app.projects_open = !app.projects_open;
-            handled(None)
-        }
-        // The rail, on Alt only. `Ctrl-R` is readline's reverse search and
-        // `Ctrl-C` is quit, so claiming either spelling would be re-making the
-        // collision the move to Alt undid.
         //
-        // A visibility toggle, deliberately separate from `Alt-C`: hiding the
+        // `v` was the one letter left unspent, and dictation is the verb with
+        // the strongest claim to a chord in the program: it is *only* useful
+        // while your hands are not on the keyboard.
+        //
+        // The projects toggle arrived in the same change and did not get one —
+        // `Ctrl-D` is quit, and there was nothing left to give it. It is
+        // `Ctrl-G d` now; Shift-Tab still closes the whole panel, which is the
+        // other half of the pair it was designed against.
+        KeyCode::Char('v') if either => handled(Some(Action::Dictate)),
+        // The rail. `Ctrl-R` is readline's reverse-search on paper, which Jod
+        // has never implemented — the input is one prompt, not a history buffer
+        // to walk — so the letter is free and `r` is the one that means rail.
+        //
+        // A visibility toggle, deliberately separate from `Ctrl-N`: hiding the
         // rail must not depend on where the cursor is, and showing it must not
         // cost you the keyboard. Hiding it also hands the keyboard back, or the
         // bare keys would still be the rail's with no rail on screen.
-        KeyCode::Char('r') if alt => {
+        KeyCode::Char('r') if either => {
             app.rail.shown = !app.rail.shown;
             if !app.rail.shown {
                 app.rail.focused = false;
@@ -2509,17 +2491,21 @@ fn on_chord(app: &mut App, key: KeyEvent) -> Option<Option<Action>> {
             }
             handled(None)
         }
-        // Focus the rail, and step through the cards. Safe in the middle of a
-        // sentence — this is the property E2.S3 asks for by name — because a
-        // chord never reaches `App::insert`.
-        KeyCode::Char('c') if alt => {
+        // Focus the rail, and step through the cards — `n` for the next one.
+        // Safe in the middle of a sentence — this is the property E2.S3 asks
+        // for by name — because a chord never reaches `App::insert`.
+        //
+        // It was `Ctrl-C`, which is quit and always will be. This letter is the
+        // one the oldest-unread jump used to have; that is a destination and
+        // went behind the leader, where a card you have to answer is not.
+        KeyCode::Char('n') if either => {
             let ids = app.card_ids();
             app.rail.cycle(&ids);
             handled(None)
         }
         // Copy the last reply. The terminal's own selection stops working the
         // moment a pane has scrollback and wrapping, which is always.
-        KeyCode::Char('y') if alt => handled(match yank::from_transcript(&app.transcript) {
+        KeyCode::Char('y') if either => handled(match yank::from_transcript(&app.transcript) {
             Some(found) => {
                 let sequence = yank::osc52(&found.text);
                 app.push(Entry::Notice(yank::note(&found)));
@@ -2530,35 +2516,25 @@ fn on_chord(app: &mut App, key: KeyEvent) -> Option<Option<Action>> {
                 None
             }
         }),
-        // Search every transcript. `/` is the command palette in chat and the
-        // list filter everywhere else, so the one thing it could never be is
-        // this — hence a chord. Alt only: `Ctrl-S` is XON and the terminal eats
-        // it before this process sees it.
-        KeyCode::Char('s') if alt => {
-            app.overlay = Overlay::Search {
-                query: String::new(),
-                selected: 0,
-                hits: Vec::new(),
-            };
-            handled(None)
-        }
-        // The full-screen picker. Alt only, and `p` because it is the picker —
-        // `Ctrl-P` is a history motion in every shell that has one.
+        // The full-screen picker. `p` because it is the picker; `Ctrl-P` is a
+        // history motion in every shell that has one, and Jod's history is on
+        // the bare arrows.
         //
         // Enumerating from the key handler is the one place this file does
         // I/O, and it is deliberate: the walk is bounded and happens once, on
         // an explicit keystroke, rather than on the tick — a background walk of
         // the filesystem to keep a picker warm that is opened twice a day is a
         // cost nobody asked for. Every *keystroke* after this ranks in memory.
-        KeyCode::Char('p') if alt => {
+        KeyCode::Char('p') if either => {
             open_picker(app, launch_dir());
             handled(None)
         }
         // Delegate: the typed line becomes an agent that runs without taking
         // the screen. This is the key that makes several jobs at once possible
-        // without leaving the UI — and the one the move to Alt was really for,
-        // because `Ctrl-B` is tmux's default prefix and never reached us under
-        // a multiplexer at all.
+        // without leaving the UI. `Ctrl-B` is tmux's *default* prefix and was
+        // the reason the keymap fled to Alt — but this tmux is prefixed on
+        // `Ctrl-A`, so the letter is free here, and a chord nobody can type is
+        // a worse answer than one a default nobody runs would have eaten.
         KeyCode::Char('b') if either => handled(app.take_input().map(Action::Delegate)),
         // Stop what is being watched. Ctrl-C is quit, so interrupting a run
         // needs a key of its own or the only way out is to leave.
@@ -2569,13 +2545,6 @@ fn on_chord(app: &mut App, key: KeyEvent) -> Option<Option<Action>> {
                 None
             }
         }),
-        // Clearing the transcript is what `Ctrl-L` clears the screen for in
-        // every shell, so the Ctrl spelling stays as well as the Alt one.
-        KeyCode::Char('l') if either => {
-            app.transcript.clear();
-            app.scroll_to_bottom();
-            handled(None)
-        }
         // Ctrl only, both of them: these *are* readline's verbs, not Jod verbs
         // that happen to sit on readline's keys. An Alt spelling would be a
         // second way to press a key nobody is having trouble pressing.
@@ -2599,10 +2568,14 @@ fn on_chord(app: &mut App, key: KeyEvent) -> Option<Option<Action>> {
             handled(None)
         }
         // Start and end of the line. `Ctrl-A` means this again now that the
-        // fleet has moved to `Alt-A`; `Ctrl-Home`/`Ctrl-End` stay because on a
+        // fleet has moved to `Ctrl-F`; `Ctrl-Home`/`Ctrl-End` stay because on a
         // list screen the bare Home and End are the first and last *row*, so
         // without them there is no way to reach the ends of the typed line
         // from there at all.
+        //
+        // Under a prefix-on-`Ctrl-A` tmux this one wants pressing twice. That
+        // is the price of readline's convention and it is not Jod's to move —
+        // and `Home` is right there, which is why the label prints both.
         KeyCode::Char('a') if ctrl => {
             app.home();
             handled(None)
@@ -2911,6 +2884,18 @@ fn confirmed(app: &mut App, verb: &str, what: &str) -> Option<Action> {
 
 /// The which-key menu's second keystroke. Anything it does not know cancels
 /// silently rather than doing something surprising.
+///
+/// Six of these are verbs rather than screens, and they are here because there
+/// was nowhere else: eleven free Ctrl letters did not stretch to sixteen verbs
+/// once tmux's six were taken out, so what a chord is *for* decided who kept
+/// one. A chord buys reachability mid-sentence; none of these six need it.
+/// `$EDITOR` takes the line away from you anyway, the transcript is not being
+/// cleared halfway through a thought, and searching, the jobs panel and the
+/// oldest unread are all somewhere to *go*. See `keys.rs`'s module header.
+///
+/// The letters are free of the nine workspaces by construction — `Workspace`
+/// claims `c f m s g h t a w`, and `a_which_key_verb_does_not_shadow_a_screen`
+/// is what keeps a new screen from quietly taking one back.
 fn on_which_key(app: &mut App, key: KeyEvent) -> Option<Action> {
     let KeyCode::Char(c) = key.code else {
         app.overlay = Overlay::None;
@@ -2925,11 +2910,48 @@ fn on_which_key(app: &mut App, key: KeyEvent) -> Option<Action> {
             app.overlay = Overlay::None;
             Some(Action::Editor)
         }
-        // No workspace claims `j`, so the menu can carry the jobs panel as
-        // well — the discoverable spelling of Alt-J, exactly as `e` is of
-        // Alt-F.
+        // The background shells this console started — an update building while
+        // you carry on working, and whatever joins it later.
         'j' => {
             app.overlay = Overlay::Jobs;
+            None
+        }
+        // Only meaningful once cron, goals and webhooks report endings while
+        // nobody is at the terminal.
+        'u' => {
+            app.overlay = Overlay::None;
+            jump_to_oldest_unread(app);
+            None
+        }
+        // `l` is what clears the screen in every shell, so the letter survives
+        // the chord it can no longer have — `Ctrl-L` is a tmux pane here.
+        'l' => {
+            app.overlay = Overlay::None;
+            app.transcript.clear();
+            app.scroll_to_bottom();
+            None
+        }
+        // Collapse the catalog without closing the whole panel. Separate keys
+        // because they answer different questions: Shift-Tab is "I want the
+        // screen back", this is "I know which project I am in".
+        //
+        // Here rather than on a chord because `Ctrl-D` is quit, and the last
+        // free letter went to dictation in the same change that added this.
+        'd' => {
+            app.overlay = Overlay::None;
+            app.projects_open = !app.projects_open;
+            None
+        }
+        // Search every transcript. `/` is the command palette in chat and the
+        // list filter everywhere else, so this is the one place in the program
+        // where it can mean the third thing without ambiguity: the menu is up,
+        // it is drawn, and it owns the keyboard while it is.
+        '/' => {
+            app.overlay = Overlay::Search {
+                query: String::new(),
+                selected: 0,
+                hits: Vec::new(),
+            };
             None
         }
         '?' => {
@@ -4116,7 +4138,7 @@ fn on_chat_key(app: &mut App, key: KeyEvent, viewport: usize) -> Option<Action> 
         // **Stop, but stay.** The most-used key in a coding harness: you see a
         // turn going the wrong way in the first two seconds and you correct it.
         //
-        // Everything that makes this "interrupt" rather than `Alt-X`'s "kill"
+        // Everything that makes this "interrupt" rather than `Ctrl-X`'s "kill"
         // happens *here*, in a pure handler, and none of it touches
         // `App::session` or `App::resume`. Those two are the harness's
         // conversation id and how the next turn continues it — the run is one
@@ -4295,7 +4317,7 @@ fn apply_slash(app: &mut App, slash: command::Slash) -> Option<Action> {
         Slash::Root(what) => {
             return match what {
                 command::RootCmd::List => Some(Action::ListRoots),
-                // No path means the picker, which is the same screen `Alt-P`
+                // No path means the picker, which is the same screen `Ctrl-P`
                 // opens — one picker, reached two ways, rather than a second
                 // one that would drift.
                 command::RootCmd::Add(None) => {
@@ -4490,14 +4512,14 @@ fn go_home(app: &mut App) {
 
 /// Put the directory picker on screen, walking from `base`.
 ///
-/// One function because there are now three ways in — `Alt-P`, `/root add` and
+/// One function because there are now three ways in — `Ctrl-P`, `/root add` and
 /// `/add-dir` — and they must open the *same* picker. Three copies of "walk,
 /// construct, assign" is three places for the bound, the noise list or the
 /// starting row to drift apart, which is exactly the drift `picker.rs` was
 /// written to prevent between its own two sizes.
 ///
 /// The walk is the one piece of I/O the key path does, and it stays here for
-/// the reason spelled out at `Alt-P`: bounded, on an explicit keystroke, never
+/// the reason spelled out at `Ctrl-P`: bounded, on an explicit keystroke, never
 /// on the tick.
 fn open_picker(app: &mut App, base: PathBuf) {
     let (entries, truncated) = picker::directories(&base);
@@ -4761,7 +4783,7 @@ fn resolve_agent(app: &mut App, typed: &str) -> Option<String> {
         [only] => Some(only.id.clone()),
         [] => {
             app.push(Entry::Notice(format!(
-                "no agent starts with {typed} — Alt-A lists them"
+                "no agent starts with {typed} — Ctrl-F lists them"
             )));
             None
         }
@@ -5022,7 +5044,7 @@ fn refresh_rail(jod: &Arc<Jod>, app: &mut App) {
     // appears on its own without explanation reads as a rendering fault.
     if app.rail.auto_open(&app.cards) {
         app.push(Entry::Notice(
-            "a run is blocked — the rail is open; Alt-C answers, Alt-R hides it".into(),
+            "a run is blocked — the rail is open; Ctrl-N answers, Ctrl-R hides it".into(),
         ));
     }
 }
@@ -5342,7 +5364,7 @@ fn edit_in_editor(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &m
         .filter(|e| !e.trim().is_empty())
     else {
         app.push(Entry::Notice(
-            "no $EDITOR set — export one and press Alt-F again".into(),
+            "no $EDITOR set — export one and press Ctrl-G e again".into(),
         ));
         return;
     };
@@ -5424,14 +5446,14 @@ fn start_update(app: &mut App, tx: &tokio::sync::mpsc::UnboundedSender<UpdateMsg
         .any(|j| j.is_running() && j.label.starts_with("update"))
     {
         app.push(Entry::Notice(
-            "an update is already running — Alt-J shows it".into(),
+            "an update is already running — Ctrl-G j shows it".into(),
         ));
         return;
     }
     let label = if check { "update --check" } else { "update" };
     let job = app.job_start(label, app.now_ms);
     app.push(Entry::Notice(format!(
-        "{label} running in the background · Alt-J lists background shells"
+        "{label} running in the background · Ctrl-G j lists background shells"
     )));
 
     let tx = tx.clone();
@@ -6372,10 +6394,12 @@ mod tests {
         let mut app = app_on(HarnessKind::ClaudeCode);
         app.panel = true;
         assert!(app.projects_open);
-        alt(&mut app, KeyCode::Char('d'));
+        ctrl(&mut app, KeyCode::Char('g'));
+        press(&mut app, KeyCode::Char('d'));
         assert!(!app.projects_open);
         assert!(app.panel, "collapsing the catalog closed the whole panel");
-        alt(&mut app, KeyCode::Char('d'));
+        ctrl(&mut app, KeyCode::Char('g'));
+        press(&mut app, KeyCode::Char('d'));
         assert!(app.projects_open, "the same key opens it");
     }
 
@@ -7145,9 +7169,9 @@ mod tests {
     /// The discoverability spine. One free chord, a menu of every screen, and
     /// recognition instead of recall.
     #[test]
-    fn ctrl_k_opens_the_which_key_menu() {
+    fn ctrl_g_opens_the_which_key_menu() {
         let mut app = app_on(HarnessKind::ClaudeCode);
-        ctrl(&mut app, KeyCode::Char('k'));
+        ctrl(&mut app, KeyCode::Char('g'));
         assert_eq!(app.overlay, Overlay::WhichKey);
     }
 
@@ -7165,7 +7189,7 @@ mod tests {
             ('c', Workspace::Chat),
         ] {
             let mut app = app_on(HarnessKind::ClaudeCode);
-            ctrl(&mut app, KeyCode::Char('k'));
+            ctrl(&mut app, KeyCode::Char('g'));
             press(&mut app, KeyCode::Char(letter));
             assert_eq!(app.workspace, expected, "Ctrl-K {letter}");
             assert_eq!(app.overlay, Overlay::None, "and the menu closed");
@@ -7177,7 +7201,7 @@ mod tests {
     #[test]
     fn an_unknown_which_key_letter_cancels_without_going_anywhere() {
         let mut app = app_on(HarnessKind::ClaudeCode);
-        ctrl(&mut app, KeyCode::Char('k'));
+        ctrl(&mut app, KeyCode::Char('g'));
         press(&mut app, KeyCode::Char('z'));
         assert_eq!(app.overlay, Overlay::None);
         assert_eq!(app.workspace, Workspace::Chat);
@@ -7187,7 +7211,7 @@ mod tests {
     #[test]
     fn esc_cancels_the_which_key_menu() {
         let mut app = app_on(HarnessKind::ClaudeCode);
-        ctrl(&mut app, KeyCode::Char('k'));
+        ctrl(&mut app, KeyCode::Char('g'));
         press(&mut app, KeyCode::Esc);
         assert_eq!(app.overlay, Overlay::None);
         assert_eq!(app.workspace, Workspace::Chat);
@@ -7197,7 +7221,7 @@ mod tests {
     #[test]
     fn the_new_submenu_lands_on_the_screen_and_opens_its_prompt() {
         let mut app = app_on(HarnessKind::ClaudeCode);
-        ctrl(&mut app, KeyCode::Char('k'));
+        ctrl(&mut app, KeyCode::Char('g'));
         press(&mut app, KeyCode::Char('n'));
         assert_eq!(app.overlay, Overlay::WhichKeyNew);
         press(&mut app, KeyCode::Char('s'));
@@ -7210,46 +7234,80 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_k_question_mark_opens_the_keymap() {
+    fn ctrl_g_question_mark_opens_the_keymap() {
         let mut app = app_on(HarnessKind::ClaudeCode);
-        ctrl(&mut app, KeyCode::Char('k'));
+        ctrl(&mut app, KeyCode::Char('g'));
         press(&mut app, KeyCode::Char('?'));
         assert_eq!(app.overlay, Overlay::Keymap);
     }
 
-    /// `Alt-A` and `Alt-G` toggle their screens, and pressing them again comes
-    /// home.
+    /// Clearing the transcript kept its letter and lost its chord: `Ctrl-L` is
+    /// a tmux pane here, and `l` is still what clears a screen everywhere else.
     #[test]
-    fn the_screen_chords_toggle_their_screens() {
+    fn the_menus_l_empties_the_transcript() {
         let mut app = app_on(HarnessKind::ClaudeCode);
-        alt(&mut app, KeyCode::Char('a'));
+        app.push(Entry::Notice("something to clear".into()));
+        assert!(!app.transcript.is_empty());
+
+        ctrl(&mut app, KeyCode::Char('g'));
+        press(&mut app, KeyCode::Char('l'));
+        assert!(app.transcript.is_empty(), "{:?}", app.transcript);
+        assert_eq!(app.overlay, Overlay::None, "and the menu closed");
+    }
+
+    /// Six of the menu's letters are verbs rather than screens, and they only
+    /// stay reachable while no workspace claims the letter — `from_letter` is
+    /// checked *after* them in `on_which_key`, so a new screen taking `u` would
+    /// not collide loudly, it would silently shadow the verb.
+    ///
+    /// The real cost is asymmetric, which is why this is a test and not a
+    /// comment: the screen would still be reachable by its digit and by `/`,
+    /// while the verb would have nowhere left to go at all.
+    #[test]
+    fn a_which_key_verb_does_not_shadow_a_screen() {
+        for verb in ['n', 'e', 'j', 'u', 'l', 'd'] {
+            assert!(
+                Workspace::from_letter(verb).is_none(),
+                "the menu spends `{verb}` on a verb, but a workspace now claims it — one of \
+                 the two is unreachable and the workspace still has its digit"
+            );
+        }
+    }
+
+    /// `Ctrl-F` is the one screen with a chord of its own, and pressing it
+    /// again comes home. Every other screen is one letter past the leader —
+    /// the team included, which used to have `Alt-G` and gave the letter up
+    /// when `g` became the leader.
+    #[test]
+    fn the_fleet_toggles_on_its_chord_and_every_other_screen_is_behind_the_leader() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        ctrl(&mut app, KeyCode::Char('f'));
         assert_eq!(app.workspace, Workspace::Fleet);
-        alt(&mut app, KeyCode::Char('a'));
+        ctrl(&mut app, KeyCode::Char('f'));
         assert_eq!(app.workspace, Workspace::Chat);
 
-        alt(&mut app, KeyCode::Char('g'));
+        ctrl(&mut app, KeyCode::Char('g'));
+        press(&mut app, KeyCode::Char('w'));
         assert_eq!(app.workspace, Workspace::Team);
-        alt(&mut app, KeyCode::Char('g'));
-        assert_eq!(app.workspace, Workspace::Chat);
     }
 
-    /// The move to Alt is only worth anything if the old finger memory still
-    /// lands somewhere sensible. Where Ctrl meant nothing to readline it keeps
-    /// meaning what it meant; where it meant something to readline, readline
-    /// gets it back.
+    /// Alt is unpressable on a stock macOS terminal, which is why nothing
+    /// prints it — but the terminals that *are* configured to send it, and the
+    /// fingers that learned the release it was the only spelling in, both still
+    /// land. The alias is on the letter the verb has now, not the one it had.
     #[test]
-    fn a_ctrl_chord_with_no_readline_meaning_still_fires() {
+    fn the_alt_spelling_of_a_verb_still_fires_unadvertised() {
         let mut app = app_on(HarnessKind::ClaudeCode);
-        ctrl(&mut app, KeyCode::Char('k'));
-        assert_eq!(
-            app.overlay,
-            Overlay::WhichKey,
-            "Ctrl-K is unadvertised, not removed"
-        );
+        alt(&mut app, KeyCode::Char('g'));
+        assert_eq!(app.overlay, Overlay::WhichKey, "Alt-G is the leader too");
+
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        alt(&mut app, KeyCode::Char('f'));
+        assert_eq!(app.workspace, Workspace::Fleet, "and Alt-F is the fleet");
     }
 
-    /// The one binding that had to be taken away rather than doubled up:
-    /// `Ctrl-A` was the fleet, which is the collision Jod inflicted on itself.
+    /// `Ctrl-A` is readline's, and is also this tmux's prefix. Either reason
+    /// alone would be enough to keep a verb off it; it once opened the fleet.
     #[test]
     fn ctrl_a_is_the_start_of_the_line_again_and_not_the_fleet() {
         let mut app = app_on(HarnessKind::ClaudeCode);
@@ -7268,8 +7326,10 @@ mod tests {
     /// would have typed a `z` into a line the user was about to send, which is
     /// worse than the key doing nothing.
     ///
-    /// Was `Alt-D` until the project catalog claimed it — the assertion is
-    /// about an *unclaimed* chord, so it has to move whenever one is taken.
+    /// Was `Alt-D` until the project catalog claimed it, and `d` is in fact
+    /// free again now that the catalog sits behind the leader — but the
+    /// assertion is about an *unclaimed* chord, and `z` is the one letter no
+    /// keymap here can ever want: the terminal owns `Ctrl-Z` outright.
     #[test]
     fn an_alt_chord_nothing_claims_does_not_become_typed_text() {
         let mut app = app_on(HarnessKind::ClaudeCode);
@@ -7352,11 +7412,18 @@ mod tests {
     /// Backwards: a chord that works but no screen ever names is a feature
     /// only its author can find.
     ///
-    /// The deliberate exception is the *spelling*, not the binding — `Ctrl-T`
-    /// still toggles reasoning while only `Alt-T` is printed, because
-    /// advertising the Ctrl form would advertise the chord tmux eats. So the
-    /// requirement is that the same key is named in one spelling or the other,
-    /// which still fails the moment a binding exists in neither.
+    /// The deliberate exception is the *spelling*, not the binding — `Alt-T`
+    /// still toggles reasoning while only `Ctrl-T` is printed, because
+    /// advertising the Alt form would advertise a chord a stock macOS terminal
+    /// cannot send. So the requirement is that the same key is named in one
+    /// spelling or the other, which still fails the moment a binding exists in
+    /// neither.
+    ///
+    /// It cannot see a verb that has no chord at all: `$EDITOR`, search, the
+    /// jobs panel, the oldest unread and clearing the transcript are bare
+    /// letters behind the leader now, and bare letters are not chords. What
+    /// keeps *those* honest is `draw_which_key`, which prints every one of
+    /// them, and `a_which_key_verb_does_not_shadow_a_screen`.
     #[test]
     fn every_chord_the_dispatch_answers_is_one_some_screen_names() {
         let named: std::collections::HashSet<(KeyCode, KeyModifiers)> =
@@ -7388,7 +7455,7 @@ mod tests {
     #[test]
     fn an_alt_chord_reaches_the_dispatch_through_the_router() {
         let mut app = app_on(HarnessKind::ClaudeCode);
-        alt(&mut app, KeyCode::Char('k'));
+        alt(&mut app, KeyCode::Char('g'));
         assert_eq!(app.overlay, Overlay::WhichKey);
     }
 
@@ -7874,14 +7941,15 @@ mod tests {
     /// `Ctrl-N` exists because an ending that arrived while you were away has
     /// to be reachable without hunting for it.
     #[test]
-    fn ctrl_n_lands_on_the_oldest_thing_you_have_not_read() {
+    fn the_menus_u_lands_on_the_oldest_thing_you_have_not_read() {
         let mut app = app_on(HarnessKind::ClaudeCode);
         app.activity = vec![
             activity_item("newest", 100, true, None),
             activity_item("oldest", 1, true, None),
         ];
         app.reconcile();
-        ctrl(&mut app, KeyCode::Char('n'));
+        ctrl(&mut app, KeyCode::Char('g'));
+        press(&mut app, KeyCode::Char('u'));
         assert_eq!(app.workspace, Workspace::Activity);
         assert_eq!(
             app.list(Workspace::Activity).selected.as_deref(),
@@ -7890,9 +7958,10 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_n_with_nothing_unread_says_so_rather_than_pretending() {
+    fn the_menus_u_with_nothing_unread_says_so_rather_than_pretending() {
         let mut app = app_on(HarnessKind::ClaudeCode);
-        ctrl(&mut app, KeyCode::Char('n'));
+        ctrl(&mut app, KeyCode::Char('g'));
+        press(&mut app, KeyCode::Char('u'));
         assert!(format!("{:?}", app.transcript.last().unwrap()).contains("nothing unread"));
     }
 
@@ -8073,15 +8142,16 @@ mod tests {
     /// The editor handoff is a decision the key handler makes and the loop
     /// carries out, so the decision is testable without a terminal.
     #[test]
-    fn ctrl_f_asks_for_the_editor() {
+    fn the_menus_e_asks_for_the_editor() {
         let mut app = app_on(HarnessKind::ClaudeCode);
-        assert_eq!(ctrl(&mut app, KeyCode::Char('f')), Some(Action::Editor));
+        ctrl(&mut app, KeyCode::Char('g'));
+        assert_eq!(press(&mut app, KeyCode::Char('e')), Some(Action::Editor));
     }
 
     #[test]
-    fn ctrl_k_e_is_the_discoverable_alias_for_the_editor() {
+    fn ctrl_g_e_is_the_menus_route_to_the_editor() {
         let mut app = app_on(HarnessKind::ClaudeCode);
-        ctrl(&mut app, KeyCode::Char('k'));
+        ctrl(&mut app, KeyCode::Char('g'));
         assert_eq!(press(&mut app, KeyCode::Char('e')), Some(Action::Editor));
     }
 
@@ -8090,7 +8160,7 @@ mod tests {
     #[test]
     fn ctrl_c_still_leaves_from_inside_an_overlay() {
         let mut app = app_on(HarnessKind::ClaudeCode);
-        ctrl(&mut app, KeyCode::Char('k'));
+        ctrl(&mut app, KeyCode::Char('g'));
         ctrl(&mut app, KeyCode::Char('c'));
         assert!(app.should_quit);
     }
@@ -9903,15 +9973,16 @@ mod tests {
     /// Backgrounding something and giving no way to look at it is asking to be
     /// trusted about work that is never shown.
     #[test]
-    fn background_shells_are_reachable_by_command_and_by_chord() {
+    fn background_shells_are_reachable_by_command_and_from_the_menu() {
         assert_eq!(command::parse("/jobs"), Some(command::Slash::Jobs));
         let mut app = app_on(HarnessKind::ClaudeCode);
         apply_slash(&mut app, command::Slash::Jobs);
         assert_eq!(app.overlay, Overlay::Jobs, "/jobs opens the panel");
 
         let mut app = app_on(HarnessKind::ClaudeCode);
-        alt(&mut app, KeyCode::Char('j'));
-        assert_eq!(app.overlay, Overlay::Jobs, "Alt-J opens the panel");
+        ctrl(&mut app, KeyCode::Char('g'));
+        press(&mut app, KeyCode::Char('j'));
+        assert_eq!(app.overlay, Overlay::Jobs, "Ctrl-G j opens the panel");
         // Read-only, like the keymap: any key closes it.
         press(&mut app, KeyCode::Char('q'));
         assert_eq!(app.overlay, Overlay::None);
@@ -10012,12 +10083,12 @@ mod tests {
         let mut app = with_cards();
         type_line(&mut app, "ship the parser");
 
-        alt(&mut app, KeyCode::Char('c'));
+        ctrl(&mut app, KeyCode::Char('n'));
         assert!(app.rail.shown && app.rail.focused);
         assert_eq!(app.rail.selected, Some(1), "on the most pressing card");
         assert_eq!(app.input, "ship the parser", "the sentence is untouched");
 
-        alt(&mut app, KeyCode::Char('c'));
+        ctrl(&mut app, KeyCode::Char('n'));
         assert_eq!(app.rail.selected, Some(2), "and again steps on");
         assert_eq!(app.input, "ship the parser");
     }
@@ -10027,10 +10098,10 @@ mod tests {
     #[test]
     fn alt_r_shows_and_hides_the_rail_and_takes_the_focus_with_it() {
         let mut app = with_cards();
-        alt(&mut app, KeyCode::Char('c'));
+        ctrl(&mut app, KeyCode::Char('n'));
         assert!(app.rail.focused);
 
-        alt(&mut app, KeyCode::Char('r'));
+        ctrl(&mut app, KeyCode::Char('r'));
         assert!(!app.rail.shown);
         assert!(!app.rail.focused, "no rail, no rail keys");
 
@@ -10043,7 +10114,7 @@ mod tests {
     #[test]
     fn letters_typed_at_a_focused_rail_do_not_reach_the_input_box() {
         let mut app = with_cards();
-        alt(&mut app, KeyCode::Char('c'));
+        ctrl(&mut app, KeyCode::Char('n'));
         type_line(&mut app, "jk");
         assert_eq!(app.input, "");
     }
@@ -10054,7 +10125,7 @@ mod tests {
     fn esc_gives_the_keyboard_back_with_the_line_intact() {
         let mut app = with_cards();
         type_line(&mut app, "half a sentence");
-        alt(&mut app, KeyCode::Char('c'));
+        ctrl(&mut app, KeyCode::Char('n'));
         press(&mut app, KeyCode::Enter);
         assert!(app.rail.expanded);
 
@@ -10071,7 +10142,7 @@ mod tests {
     #[test]
     fn a_digit_in_the_rail_answers_the_option_it_names() {
         let mut app = with_cards();
-        alt(&mut app, KeyCode::Char('c'));
+        ctrl(&mut app, KeyCode::Char('n'));
         assert_eq!(
             press(&mut app, KeyCode::Char('2')),
             Some(Action::AnswerCard {
@@ -10087,7 +10158,7 @@ mod tests {
     #[test]
     fn a_digit_that_names_no_option_says_so_rather_than_doing_nothing() {
         let mut app = with_cards();
-        alt(&mut app, KeyCode::Char('c'));
+        ctrl(&mut app, KeyCode::Char('n'));
         assert_eq!(press(&mut app, KeyCode::Char('7')), None);
         let said = last_notice(&app);
         assert!(said.contains("press 1–2"), "{said}");
@@ -10105,7 +10176,7 @@ mod tests {
     #[test]
     fn x_in_the_rail_dismisses_without_a_confirmation() {
         let mut app = with_cards();
-        alt(&mut app, KeyCode::Char('c'));
+        ctrl(&mut app, KeyCode::Char('n'));
         assert_eq!(
             press(&mut app, KeyCode::Char('x')),
             Some(Action::DismissCard(1))
@@ -10120,7 +10191,7 @@ mod tests {
     #[test]
     fn a_prose_answer_lands_on_the_card_the_prompt_was_opened_on() {
         let mut app = with_cards();
-        alt(&mut app, KeyCode::Char('c'));
+        ctrl(&mut app, KeyCode::Char('n'));
         press(&mut app, KeyCode::Char('a'));
         let Overlay::Prompt { intent, .. } = app.overlay.clone() else {
             panic!("`a` opens a prompt, got {:?}", app.overlay);
@@ -10148,7 +10219,7 @@ mod tests {
     #[test]
     fn the_rails_filter_and_sort_survive_leaving_it_and_coming_back() {
         let mut app = with_cards();
-        alt(&mut app, KeyCode::Char('c'));
+        ctrl(&mut app, KeyCode::Char('n'));
         press(&mut app, KeyCode::Char('S'));
         press(&mut app, KeyCode::Char('t'));
         press(&mut app, KeyCode::Char('f'));
@@ -10160,10 +10231,10 @@ mod tests {
         // Away to another screen, and back. Deliberately not by `Esc`, which
         // clears the filter on purpose — it is the key that undoes one level,
         // and undoing the filter is exactly what it should do there.
-        alt(&mut app, KeyCode::Char('a'));
+        ctrl(&mut app, KeyCode::Char('f'));
         assert_eq!(app.workspace, Workspace::Fleet);
         app.go(Workspace::Chat);
-        alt(&mut app, KeyCode::Char('c'));
+        ctrl(&mut app, KeyCode::Char('n'));
 
         assert_eq!(app.rail.query(Some("conv".into())), asked);
         assert_eq!(asked.text.as_deref(), Some("port"));
@@ -10177,7 +10248,7 @@ mod tests {
     #[test]
     fn the_rails_filter_line_owns_the_letters_while_it_is_being_typed() {
         let mut app = with_cards();
-        alt(&mut app, KeyCode::Char('c'));
+        ctrl(&mut app, KeyCode::Char('n'));
         press(&mut app, KeyCode::Char('/'));
         type_line(&mut app, "sqlite");
         assert_eq!(app.rail.filter.as_deref(), Some("sqlite"));
@@ -10286,7 +10357,7 @@ mod tests {
     }
 
     /// **E7.S1's stated check**: the session id is unchanged across the
-    /// interruption. That is the whole difference between this and `Alt-X` —
+    /// interruption. That is the whole difference between this and `Ctrl-X` —
     /// the run is one process of many in a conversation, so ending it ends the
     /// turn and leaves the conversation exactly where it was.
     #[test]
@@ -10512,7 +10583,8 @@ mod tests {
 
     fn searching(hits: &[(&str, &str, &str)]) -> App {
         let mut app = app_on(HarnessKind::ClaudeCode);
-        alt(&mut app, KeyCode::Char('s'));
+        ctrl(&mut app, KeyCode::Char('g'));
+        press(&mut app, KeyCode::Char('/'));
         if let Overlay::Search { hits: into, .. } = &mut app.overlay {
             *into = hits
                 .iter()
@@ -10528,9 +10600,10 @@ mod tests {
     }
 
     #[test]
-    fn alt_s_opens_the_search() {
+    fn the_menus_slash_opens_the_search() {
         let mut app = app_on(HarnessKind::ClaudeCode);
-        alt(&mut app, KeyCode::Char('s'));
+        ctrl(&mut app, KeyCode::Char('g'));
+        press(&mut app, KeyCode::Char('/'));
         assert!(matches!(app.overlay, Overlay::Search { .. }));
     }
 
@@ -10614,9 +10687,9 @@ mod tests {
     #[test]
     fn alt_p_opens_the_picker_at_the_current_directory() {
         let mut app = app_on(HarnessKind::ClaudeCode);
-        alt(&mut app, KeyCode::Char('p'));
+        ctrl(&mut app, KeyCode::Char('p'));
         let Overlay::Picker(p) = &app.overlay else {
-            panic!("Alt-P opens the picker, got {:?}", app.overlay);
+            panic!("Ctrl-P opens the picker, got {:?}", app.overlay);
         };
         assert_eq!(
             p.base,
@@ -10635,7 +10708,7 @@ mod tests {
         let mut typed = app_on(HarnessKind::ClaudeCode);
         apply_slash(&mut typed, command::parse("/add-dir").expect("parses"));
         let mut chorded = app_on(HarnessKind::ClaudeCode);
-        alt(&mut chorded, KeyCode::Char('p'));
+        ctrl(&mut chorded, KeyCode::Char('p'));
         assert_eq!(typed.overlay, chorded.overlay);
     }
 
@@ -10767,7 +10840,7 @@ mod tests {
         let mut app = app_on(HarnessKind::ClaudeCode);
         app.cards = vec![secret_card(9, "GITHUB_TOKEN")];
         app.reconcile_rail();
-        alt(&mut app, KeyCode::Char('c'));
+        ctrl(&mut app, KeyCode::Char('n'));
         press(&mut app, KeyCode::Char('a'));
         app
     }

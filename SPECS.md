@@ -425,7 +425,7 @@ cross-harness handoff, and a task board. These are the gaps that make a working
 day painful, and nothing here is speculative — each one was measured absent.
 
 - **E7.S1 Interrupt a turn without killing the session.** Today the only stop is
-  `Alt-X`, which kills the process group outright; there is no way to say "stop,
+  `Ctrl-X`, which kills the process group outright; there is no way to say "stop,
   but stay". That is the single most-used key in a coding harness — you see it
   going the wrong way in the first two seconds and you correct it. Escape
   interrupts the run, keeps the conversation and its session id, records the

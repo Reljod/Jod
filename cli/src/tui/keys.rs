@@ -65,31 +65,67 @@
 //! importance rather than settling it. What survives is the part that is both
 //! true and checkable; the rest is judgement, and is written down as judgement.
 //!
-//! ## Why the verbs are on Alt and the editing keys are not
+//! ## Why the verbs are on Ctrl, and why six letters are missing from them
 //!
-//! Every global chord used to be Ctrl, which put Jod in a fight it cannot win:
-//! a multiplexer sits between the terminal and this process and takes Ctrl
-//! chords first — tmux's own prefix is `Ctrl-B`, which was Jod's delegate key,
-//! so the binding simply never arrived. Alt is not contended that way, so the
-//! *screen and verb* chords live there now.
+//! The verbs were briefly on Alt, to get out of the way of a multiplexer that
+//! takes Ctrl chords before this process ever sees them — tmux's default prefix
+//! is `Ctrl-B`, which was Jod's delegate key, so the binding never arrived.
+//!
+//! That fixed the wrong half of the problem. On macOS, Option does not send Alt
+//! at all unless the terminal is specially told to — iTerm2's "Esc+" for the
+//! left Option key, Terminal.app's "Use Option as Meta key" — and without it
+//! the terminal eats the keypress to type `å`. So the chords did not merely
+//! collide, they could not be typed. A binding nobody can press is worse than
+//! one a multiplexer eats, because the second at least has a workaround.
+//!
+//! The verbs are therefore Ctrl again, minus the letters something else is
+//! already holding. tmux here is prefixed on `Ctrl-A`, with `Ctrl-H/J/K/L` for
+//! panes and `Ctrl-S` for sessions; the terminal has always owned `Ctrl-Q` and
+//! `Ctrl-Z`, and `Ctrl-I`/`Ctrl-M` are Tab and Enter. Take those away, then
+//! readline's `Ctrl-C/D/E/U/W`, and eleven letters are left:
+//! **B F G N O P R T V X Y**.
+//!
+//! ## Eighteen verbs, eleven letters
+//!
+//! They do not fit, so which verb keeps a chord is decided by what a chord is
+//! *for*. The chat box turns every bare key into text, so a chord buys exactly
+//! one thing: a verb you can reach **without stopping the sentence you are
+//! typing, or looking away from the run you are watching**. Delegate the line,
+//! stop the run, copy the reply, show the reasoning, answer the rail, start
+//! dictating. Those get the letters.
+//!
+//! Everything else is a *destination*, and destinations go behind the leader:
+//! `Ctrl-G` opens the menu, one more letter lands you anywhere. That is not a
+//! consolation prize for the verbs that lost the draw — it is the job the menu
+//! was built for, and it now covers all nine screens rather than the seven that
+//! happened to have no chord. `Ctrl-F` is the one destination that kept one,
+//! because the fleet is where a delegated run goes and `Ctrl-B` `Ctrl-F` is a
+//! single thought.
+//!
+//! **The eleven are now spent.** `Ctrl-V` was held back so the next verb would
+//! have somewhere to land that is not someone else's key, and dictation took it
+//! within the week — which is the argument for having kept it, not against.
+//! The projects panel arrived in the same batch and went to `Ctrl-G d`, because
+//! `Ctrl-D` is quit.
+//!
+//! So the next verb after this one has no letter at all, and that is the
+//! decision to make deliberately rather than by taking `Ctrl-L` back off tmux:
+//! either it is a destination and goes behind the leader, or something already
+//! holding a letter is demoted to make room. The menu is the pressure valve and
+//! it has nine free letters left.
 //!
 //! What did **not** move is the handful of Ctrl chords the terminal itself has
 //! taught everyone: `Ctrl-C`/`Ctrl-D` quit, `Ctrl-U` clears the line, `Ctrl-W`
 //! deletes a word, `Ctrl-A`/`Ctrl-E` go to the ends of it. Moving those would
 //! break muscle memory that predates Jod by forty years to solve a problem
 //! nobody has — no multiplexer steals them, because every shell needs them.
-//! `Ctrl-A` in fact comes *back* to readline here: it used to open the fleet,
-//! which was the one Ctrl collision Jod inflicted on itself.
+//! `Ctrl-A` is the one that costs anything under a prefix-on-`Ctrl-A` tmux, and
+//! what it costs is a second press rather than the binding.
 //!
-//! Where Ctrl had no readline meaning, the old spelling still works but is no
-//! longer printed — `Ctrl-T` still toggles reasoning. Keeping the alias costs
-//! nothing and stops the move being a re-learning tax; printing it would
-//! advertise the chord tmux eats. Where Ctrl *does* have a readline meaning the
-//! Alt spelling is the only one, so that `Ctrl-A` can never again be ambiguous.
-//!
-//! On macOS, Option only reaches this process as Alt when the terminal is told
-//! to send it: iTerm2's "Esc+" for the left Option key, Terminal.app's "Use
-//! Option as Meta key". Without that the terminal eats it to type `å`.
+//! `no_verb_sits_on_a_chord_a_multiplexer_takes` is what keeps the six letters
+//! clear, and it exempts those readline rows by name rather than by pattern —
+//! they are the terminal's convention, printed here because Jod answers them,
+//! not verbs Jod chose to put there.
 
 // Only the drift net turns a printed label back into a keypress, and that is
 // test-only — the running program prints these strings and never reads them.
@@ -127,38 +163,47 @@ pub const SPINE: &[Key] = &[
 
 /// The chords that work everywhere, including in the middle of typing.
 ///
-/// Alt for Jod's own verbs, Ctrl for the line editing every terminal already
-/// does — see the module header for why the split falls exactly there. Only one
-/// spelling per binding is printed: the Ctrl aliases still fire, but a keybar
-/// that advertised them would be advertising the chords tmux intercepts.
+/// Ctrl throughout, because Alt is unpressable on a stock macOS terminal — see
+/// the module header, which also says why six Ctrl letters are missing and
+/// where the verbs that wanted them went. The Alt spelling of each of these
+/// still fires and is deliberately not printed: it costs nothing to keep for
+/// anyone who learned it, and printing it would advertise a chord that does not
+/// exist on the keyboard this is aimed at.
+///
+/// The last four rows are readline's rather than Jod's, and are the exemption
+/// `no_verb_sits_on_a_chord_a_multiplexer_takes` names.
 pub const GLOBAL: &[Key] = &[
-    k("Alt-K", "the workspace menu"),
-    k("Alt-A", "fleet"),
-    k("Alt-G", "team"),
-    k("Alt-N", "the oldest thing unread"),
-    k("Alt-J", "background shells"),
+    // The label is load-bearing on its *length*: `draw_keymap` sizes a column
+    // from the widest row, and at 100×30 a `what` longer than 33 characters
+    // costs the `?` overlay its second column and hides twenty rows. Say the
+    // menu takes another key, in under that.
+    k("Ctrl-G", "the workspace menu — then a key"),
+    // The one destination that kept a chord. See the module header.
+    k("Ctrl-F", "fleet"),
     // The rail's two chords. Both are chords rather than letters for one
     // reason, and it is the reason E2.S3 gives: the chat box owns every bare
     // key, so a rail verb on `c` would type a `c` into the sentence being
     // written. See [`RAIL`].
-    k("Alt-R", "show or hide the rail"),
-    k("Alt-C", "the rail's next card"),
-    k("Alt-P", "add a directory to work in"),
+    k("Ctrl-R", "show or hide the rail"),
+    k("Ctrl-N", "the rail's next card"),
+    k("Ctrl-P", "add a directory to work in"),
     // A switch, not a button: it stays on, and everything said streams into
     // the box until it is switched off. Saying "go ahead" sends, "stop
     // listening" switches off — the keyboard is optional once it is on, which
     // is the point.
-    k("Alt-V", "listen, and keep listening"),
-    k("Alt-D", "show or hide the projects"),
-    k("Alt-S", "search every transcript"),
-    k("Alt-Y", "copy the last reply"),
-    k("Alt-B", "delegate the typed line"),
-    k("Alt-X", "stop the run being watched"),
-    k("Alt-F", "the typed line in $EDITOR"),
-    k("Alt-T", "show or hide reasoning"),
-    k("Alt-O", "show or hide tool output"),
-    k("Alt-L", "clear the transcript"),
-    k("Alt-↑↓", "scroll the transcript"),
+    //
+    // This is what the spare letter was being kept for, and `v` is the one it
+    // would have asked for anyway. It is also the clearest case yet of the rule
+    // above: dictation is *only* useful without stopping what you are doing.
+    // The projects panel that arrived beside it is a destination and went to
+    // `Ctrl-G d` — `Ctrl-D` is quit and there was no letter left to give it.
+    k("Ctrl-V", "listen, and keep listening"),
+    k("Ctrl-Y", "copy the last reply"),
+    k("Ctrl-B", "delegate the typed line"),
+    k("Ctrl-X", "stop the run being watched"),
+    k("Ctrl-T", "show or hide reasoning"),
+    k("Ctrl-O", "show or hide tool output"),
+    k("Ctrl-↑↓", "scroll the transcript"),
     // One row for the pair, for the same reason `uU` above is one row.
     //
     // The `?` overlay promises to be complete at 100×30, and this branch and
@@ -183,9 +228,9 @@ pub const GLOBAL: &[Key] = &[
 ];
 
 const CHAT: &[Key] = &[
-    k("Alt-B", "delegate"),
-    k("Alt-A", "fleet"),
-    k("Alt-K", "menu"),
+    k("Ctrl-B", "delegate"),
+    k("Ctrl-F", "fleet"),
+    k("Ctrl-G", "menu"),
     k("/", "commands"),
     k("?", "keys"),
 ];
@@ -359,15 +404,15 @@ const ACTIVITY: &[Key] = &[
 const TEAM: &[Key] = &[k("⏎", "mark done"), k("↑↓", "pick"), k("/", "filter")];
 
 /// The decision rail's own verbs, in force only while the rail has the
-/// keyboard — which `Alt-C` is what gives it, and `Esc` is what takes away.
+/// keyboard — which `Ctrl-N` is what gives it, and `Esc` is what takes away.
 ///
 /// **Why a focus rather than a chord per verb.** The chat input turns every
 /// bare key into text, so the rail could either have a chord for each of its
-/// eight verbs — eight more chords to find free, on a keymap that has already
-/// had to move off Ctrl once — or one chord that hands it the keyboard. It has
-/// the second. Getting *in* is free and safe mid-sentence (`Alt-C` never
-/// touches `App::input`); once in, the keys are ordinary letters, and `Esc`
-/// gives the keyboard back with the typed line exactly as it was.
+/// eight verbs — eight more free letters, on a keymap with exactly one to spare
+/// — or one chord that hands it the keyboard. It has the second. Getting *in*
+/// is free and safe mid-sentence (`Ctrl-N` never touches `App::input`); once
+/// in, the keys are ordinary letters, and `Esc` gives the keyboard back with
+/// the typed line exactly as it was.
 ///
 /// `1–9` answers the numbered option under the cursor rather than jumping to a
 /// workspace. That collision is safe precisely *because* focus is explicit: the
@@ -512,7 +557,7 @@ const MORE: &str = "? more";
 /// The keybar's right half: the way out, which never changes.
 pub fn keybar_exit(ws: Workspace) -> &'static str {
     match ws {
-        Workspace::Chat => "Alt-X stop · Ctrl-C quit",
+        Workspace::Chat => "Ctrl-X stop · Ctrl-C quit",
         _ => "Esc back · ? keys",
     }
 }
@@ -577,15 +622,15 @@ pub fn rail_keymap() -> Vec<(String, &'static [Key])> {
 /// two-key route rather than the leader alone.
 ///
 /// This lives here rather than in `ui.rs` for one reason: `ui.rs` is prose the
-/// drift test cannot see. Spelled here, `Alt-K` is scanned and pressed like
+/// drift test cannot see. Spelled here, `Ctrl-G` is scanned and pressed like
 /// every other advertised chord, so it cannot go stale the next time the
 /// keymap moves. That is exactly how these four strings were left saying
 /// `Ctrl-K` after the keymap had already moved to Alt.
 pub fn which_key_hint(making: bool) -> String {
     if making {
-        "Alt-K n … s schedule · g goal · h hook · m memory · t task".to_string()
+        "Ctrl-G n … s schedule · g goal · h hook · m memory · t task".to_string()
     } else {
-        "Alt-K … waiting for a key".to_string()
+        "Ctrl-G … waiting for a key".to_string()
     }
 }
 
@@ -593,9 +638,9 @@ pub fn which_key_hint(making: bool) -> String {
 /// and the two must name the same chord — which is why they sit together.
 pub fn which_key_title(making: bool) -> &'static str {
     if making {
-        " Alt-K n · new… "
+        " Ctrl-G n · new… "
     } else {
-        " Alt-K "
+        " Ctrl-G "
     }
 }
 
@@ -620,7 +665,7 @@ pub fn is_chord(label: &str) -> bool {
 
 /// The chords named inside a line of on-screen prose.
 ///
-/// Exit hints are sentences (`"Alt-X stop · Ctrl-C quit"`), not table rows, so
+/// Exit hints are sentences (`"Ctrl-X stop · Ctrl-C quit"`), not table rows, so
 /// a chord can arrive there as a substring nobody registered anywhere.
 #[cfg(test)]
 pub fn chords_in(text: &str) -> Vec<String> {
@@ -678,7 +723,7 @@ pub fn all_documented_chords() -> Vec<String> {
 /// Two shorthands the labels use, because the overlay has twelve columns for a
 /// key and a row per binding is a row the reader has to scan:
 ///
-/// - `↑↓` means both arrows, so `Alt-↑↓` is two presses.
+/// - `↑↓` means both arrows, so `Ctrl-↑↓` is two presses.
 /// - a `/` continuation inherits the modifier to its left, so `Ctrl-A/Home` is
 ///   `Ctrl-A` and `Ctrl-Home` — not `Ctrl-A` and a bare `Home`.
 ///
@@ -947,7 +992,7 @@ mod tests {
     fn the_rails_overlay_still_names_the_way_out() {
         assert!(rail_keymap()
             .into_iter()
-            .any(|(_, bindings)| bindings.iter().any(|b| b.key == "Alt-R")));
+            .any(|(_, bindings)| bindings.iter().any(|b| b.key == "Ctrl-R")));
         assert!(RAIL_EXIT.contains("Esc"));
     }
 
@@ -956,8 +1001,8 @@ mod tests {
     #[test]
     fn the_rails_chords_are_taught_alongside_the_other_global_ones() {
         let printed: Vec<&str> = GLOBAL.iter().map(|b| b.key).collect();
-        assert!(printed.contains(&"Alt-R"), "{printed:?}");
-        assert!(printed.contains(&"Alt-C"), "{printed:?}");
+        assert!(printed.contains(&"Ctrl-R"), "{printed:?}");
+        assert!(printed.contains(&"Ctrl-N"), "{printed:?}");
     }
 
     #[test]
@@ -1065,7 +1110,7 @@ mod tests {
     /// Exit hints are sentences, so a chord can hide in them as a substring.
     #[test]
     fn a_chord_named_only_inside_an_exit_hint_is_still_found() {
-        assert!(all_documented_chords().iter().any(|c| c == "Alt-X"));
+        assert!(all_documented_chords().iter().any(|c| c == "Ctrl-X"));
         assert!(all_documented_chords().iter().any(|c| c == "Ctrl-C/D"));
     }
 
@@ -1076,65 +1121,90 @@ mod tests {
     fn the_which_key_overlay_names_the_leader_that_opened_it() {
         for making in [false, true] {
             assert!(
-                which_key_hint(making).contains("Alt-K"),
+                which_key_hint(making).contains("Ctrl-G"),
                 "hint, making={making}"
             );
             assert!(
-                which_key_title(making).contains("Alt-K"),
+                which_key_title(making).contains("Ctrl-G"),
                 "title, making={making}"
             );
         }
     }
 
-    /// The forward drift test presses what is printed — but `Ctrl-K` still
-    /// fires, so a screen that quietly went back to printing it would pass.
-    /// Nothing else would catch that, and it is exactly the state the four
-    /// which-key strings were found in after the keymap had already moved.
+    /// The letters a multiplexer holds. tmux here is prefixed on `Ctrl-A`, with
+    /// `Ctrl-H/J/K/L` for panes and `Ctrl-S` for sessions — a chord on any of
+    /// them is taken before this process is even asked, which is the failure
+    /// the whole keymap is arranged around.
+    const MULTIPLEXER: [char; 6] = ['a', 's', 'h', 'j', 'k', 'l'];
+
+    /// The rows that are readline's convention rather than Jod's choice, named
+    /// one by one rather than matched by a pattern — the point of an exemption
+    /// list is that adding to it has to be a decision.
     ///
-    /// `GLOBAL` is the one table allowed to name Ctrl, because it is where the
-    /// readline keys are taught. Every other screen names Jod's verbs, and
-    /// those are Alt — plus `Ctrl-C`, which any screen may print because
-    /// leaving must never depend on finding the right table.
+    /// `Ctrl-A` is here and nowhere else. Under a prefix-on-`Ctrl-A` tmux it
+    /// needs pressing twice, and that is the price of it also meaning
+    /// start-of-line in every shell ever written. A *verb* may not pay that
+    /// price, because a verb has somewhere else to go.
+    const READLINE: [&str; 4] = ["Ctrl-A/E/Home/End", "Ctrl-U", "Ctrl-W", "Ctrl-C/D"];
+
+    /// The reason this keymap has the shape it has. A verb printed on a letter
+    /// tmux is holding is a verb that never arrives — silently, with the keybar
+    /// still promising it, which is the exact failure mode the drift net exists
+    /// to make loud.
+    ///
+    /// Checked against the *parsed* press rather than the label, so a letter
+    /// smuggled in as the tail of a `/` continuation is caught too.
     #[test]
-    fn no_screen_outside_the_global_table_teaches_a_ctrl_verb() {
-        let mut printed: Vec<String> = Vec::new();
-        for ws in Workspace::ALL {
-            printed.extend(
-                local(ws)
-                    .iter()
-                    .filter(|b| is_chord(b.key))
-                    .map(|b| b.key.to_string()),
-            );
-            printed.extend(chords_in(keybar_exit(ws)));
+    fn no_verb_sits_on_a_chord_a_multiplexer_takes() {
+        let mut checked = 0;
+        for label in all_documented_chords() {
+            if READLINE.contains(&label.as_str()) {
+                continue;
+            }
+            for (code, modifier) in press_of(&label) {
+                if modifier != KeyModifiers::CONTROL {
+                    continue;
+                }
+                checked += 1;
+                if let KeyCode::Char(c) = code {
+                    assert!(
+                        !MULTIPLEXER.contains(&c),
+                        "Ctrl-{c} in {label} is tmux's — it never reaches this process, so a \
+                         keybar printing it promises a key that does nothing"
+                    );
+                }
+            }
         }
-        for making in [false, true] {
-            printed.extend(chords_in(&which_key_hint(making)));
-            printed.extend(chords_in(which_key_title(making)));
-        }
+        assert!(checked > 0, "the scan found no Ctrl verbs to check");
+    }
+
+    /// Alt is unpressable on a stock macOS terminal, so a keybar that teaches
+    /// it teaches a key the reader does not have. The aliases still fire — see
+    /// `on_chord` — but nothing may advertise them.
+    #[test]
+    fn no_screen_teaches_an_alt_chord() {
+        let printed = all_documented_chords();
         assert!(!printed.is_empty(), "the scan found nothing to check");
         for label in printed {
             assert!(
-                label.starts_with("Alt-") || label == "Ctrl-C",
-                "{label} is printed on a screen — Jod's verbs live on Alt, and only GLOBAL teaches Ctrl"
+                !label.starts_with("Alt-"),
+                "{label} is printed, but Option does not send Alt unless the terminal is \
+                 configured to — the Ctrl spelling is the one that can be typed"
             );
         }
     }
 
-    /// The move off Ctrl exists to stop a multiplexer eating Jod's verbs, and
-    /// it is only half done if the keybar still teaches the old spelling.
+    /// The verbs that must stay one keypress away, and the readline keys that
+    /// were never Jod's to move. Everything else is a destination and lives
+    /// behind the leader — see the module header for why the line falls there.
     #[test]
-    fn the_verbs_are_advertised_on_alt_and_the_editing_keys_on_ctrl() {
+    fn the_verbs_that_work_mid_sentence_are_the_ones_with_a_chord() {
         let printed: Vec<&str> = GLOBAL.iter().map(|b| b.key).collect();
-        for verb in ["Alt-K", "Alt-A", "Alt-G", "Alt-B", "Alt-X", "Alt-L"] {
-            assert!(printed.contains(&verb), "{verb} is not on the global list");
-        }
-        for stale in [
-            "Ctrl-K", "Ctrl-G", "Ctrl-B", "Ctrl-X", "Ctrl-T", "Ctrl-O", "Ctrl-L",
+        for verb in [
+            "Ctrl-G", "Ctrl-F", "Ctrl-B", "Ctrl-X", "Ctrl-R", "Ctrl-N", "Ctrl-Y", "Ctrl-T",
+            "Ctrl-O", "Ctrl-P", "Ctrl-V",
         ] {
-            assert!(
-                !printed.contains(&stale),
-                "{stale} still works, but printing it advertises the chord tmux takes"
-            );
+            assert!(verb_of(verb).is_some(), "{verb} is not on the global list");
         }
         // Readline's, not ours to move.
         for kept in ["Ctrl-U", "Ctrl-W"] {
@@ -1143,5 +1213,37 @@ mod tests {
                 "{kept} must stay where every shell puts it"
             );
         }
+    }
+
+    /// All eleven free letters are now spent — `Ctrl-V` was the last, and
+    /// dictation took it. This is not a failure state, but it *is* the fact
+    /// that decides what happens to the next verb, so it is asserted rather
+    /// than left to be rediscovered by whoever adds one.
+    ///
+    /// When this test fails, the keymap is full and the choice is deliberate:
+    /// the new verb is a destination and goes behind the leader, or something
+    /// already holding a letter is demoted to make room. It is **not** a
+    /// licence to take a letter back off the multiplexer —
+    /// `no_verb_sits_on_a_chord_a_multiplexer_takes` still refuses that.
+    #[test]
+    fn every_free_letter_is_spent_so_the_next_verb_is_a_decision() {
+        let free = ['b', 'f', 'g', 'n', 'o', 'p', 'r', 't', 'v', 'x', 'y'];
+        for letter in free {
+            let chord = format!("Ctrl-{}", letter.to_ascii_uppercase());
+            assert!(
+                verb_of(&chord).is_some(),
+                "{chord} is free again — that is room for a verb, not a gap to leave. \
+                 See the module header before spending it."
+            );
+        }
+        assert_eq!(
+            GLOBAL.iter().filter(|b| is_chord(b.key)).count(),
+            free.len() + 5,
+            "the global table is the eleven letters plus the arrows and readline's four"
+        );
+    }
+
+    fn verb_of(chord: &str) -> Option<&'static Key> {
+        GLOBAL.iter().find(|b| b.key == chord)
     }
 }

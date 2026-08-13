@@ -215,7 +215,7 @@ the mechanism replaced — the precedent set by there being no `Ctrl-W` here:
 
 | TUI | Here |
 |---|---|
-| digits, `Alt-K` which-key | a tab bar, in MENU order |
+| digits, `Ctrl-G` which-key | a tab bar, in MENU order |
 | `↑↓` then `⏎` | tap the row |
 | `/` filter line | a search field |
 | `S` sort cycle | a control naming the current order |

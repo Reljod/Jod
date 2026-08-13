@@ -212,7 +212,7 @@ enum Command {
         /// Pick up the last conversation instead of starting a new one.
         #[arg(short = 'C', long = "continue")]
         continue_last: bool,
-        /// Watch a team: Alt-G shows its members and its task board.
+        /// Watch a team: Ctrl-G w shows its members and its task board.
         #[arg(long)]
         team: Option<String>,
     },
@@ -765,7 +765,7 @@ enum CommandsCommand {
 enum VoiceCommand {
     /// Is dictation ready, and what would it use?
     ///
-    /// Answers the question `Alt-V` would otherwise answer by failing: whether
+    /// Answers the question `Ctrl-V` would otherwise answer by failing: whether
     /// there is a recorder, an engine and a model on this machine.
     Check,
     /// The models that can transcribe you, and which are downloaded.
@@ -2695,7 +2695,7 @@ async fn voice_command(jod: &Jod, what: VoiceCommand) -> Result<()> {
                 );
             }
             if s.recorder.is_some() && s.engine.is_ok() {
-                println!("\nready — press Alt-V in the console and talk.");
+                println!("\nready — press Ctrl-V in the console and talk.");
             }
         }
         VoiceCommand::Models => {

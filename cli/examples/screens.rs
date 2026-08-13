@@ -37,7 +37,7 @@ mod tui;
 mod update;
 // And again for dictation: the TUI resolves which engine would transcribe
 // before it starts recording, so `crate::voice` has to exist here even though
-// nothing this example renders will ever press Alt-V.
+// nothing this example renders will ever press Ctrl-V.
 #[path = "../src/voice.rs"]
 mod voice;
 

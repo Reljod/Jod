@@ -1150,7 +1150,7 @@ fn banner() -> Vec<String> {
 /// remember you launched.
 fn caption(width: usize) -> &'static str {
     const LINES: [&str; 3] = [
-        "jod · an orchestrator, not a chat window · Alt-K opens every screen",
+        "jod · an orchestrator, not a chat window · Ctrl-G opens every screen",
         "jod · an orchestrator, not a chat window",
         "jod",
     ];
@@ -1555,7 +1555,7 @@ fn draw_sessions(f: &mut Frame, app: &App, area: Rect) {
     ];
 
     if app.agents.is_empty() {
-        for chunk in wrap("no runs yet — Alt-B delegates one", inner, 1) {
+        for chunk in wrap("no runs yet — Ctrl-B delegates one", inner, 1) {
             items.push(ListItem::new(Span::styled(format!(" {chunk}"), fg(MUTED))));
         }
     }
@@ -1863,7 +1863,7 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         if !badge.is_empty() {
             badge.push_str(" · ");
         }
-        badge.push_str(&format!("⚙ {} running (Alt-J)", app.running_jobs()));
+        badge.push_str(&format!("⚙ {} running (Ctrl-G j)", app.running_jobs()));
     }
     let style = if app.busy && ws == Workspace::Chat {
         fg(WARN)
@@ -1880,7 +1880,7 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     ];
     // The status grows — a spinner, a clock, a background count, a queue — so
     // the badge has to yield rather than collide with it. Running them together
-    // produced `1 queuedAlt-X stop`, which reads as neither.
+    // produced `1 queuedCtrl-X stop`, which reads as neither.
     let used = mode_width + 3 + left.chars().count() + 2;
     let room = (area.width as usize).saturating_sub(used);
     if !badge.is_empty() && room >= badge.chars().count() + 2 {
@@ -1925,7 +1925,7 @@ fn two_ends(left: &str, right: &str, width: u16, colour: Color) -> Line<'static>
     let right_len = right.chars().count();
 
     // One space of margin at each end; at least one more between the halves, so
-    // they can never run together — `1 queuedAlt-X stop` reads as neither.
+    // they can never run together — `1 queuedCtrl-X stop` reads as neither.
     let show_right = right_len + 2 <= width;
     let room_for_left = if show_right {
         width.saturating_sub(right_len + 3)
@@ -2338,6 +2338,15 @@ fn draw_which_key(f: &mut Frame, app: &App) {
             "new…        n s sched · n g goal · n h hook · n t task".into(),
         ));
         rows.push(("e".into(), "editor      the input in $EDITOR".into()));
+        // The verbs that lost their chord to tmux. They are drawn rather than
+        // left to the keymap overlay because this menu is the only place they
+        // are now reachable at all — a route nothing prints is a route nobody
+        // takes. See `on_which_key`.
+        rows.push(("j".into(), "jobs        background shells".into()));
+        rows.push(("u".into(), "unread      the oldest thing unread".into()));
+        rows.push(("l".into(), "clear       empty the transcript".into()));
+        rows.push(("d".into(), "projects    show or hide the catalog".into()));
+        rows.push(("/".into(), "search      every transcript".into()));
         rows.push(("?".into(), "keys        the whole keymap".into()));
     }
 
@@ -2405,8 +2414,17 @@ fn draw_keymap(f: &mut Frame, app: &App) {
             }
             lines.push(Line::from(Span::styled(heading, bold(USER))));
             for binding in bindings {
+                // The trailing space is not padding, it is a separator. Twelve
+                // columns fits every key but one — `Ctrl-A/E/Home/End` is
+                // seventeen, and `{:<12}` pads rather than truncates, so that
+                // row rendered as `Ctrl-A/E/Home/Endstart / end of the line`.
+                //
+                // Widening the field to the longest key would cost the panel a
+                // whole column at 100 wide and hide twenty rows, which is a
+                // worse bug than the one being fixed. One space costs one
+                // column and only when the key overflows.
                 lines.push(Line::from(vec![
-                    Span::styled(format!("  {:<12}", binding.key), fg(WARN)),
+                    Span::styled(format!("  {:<12} ", binding.key), fg(WARN)),
                     Span::styled(binding.what.to_string(), fg(AGENT)),
                 ]));
             }
@@ -2482,7 +2500,7 @@ fn draw_keymap(f: &mut Frame, app: &App) {
     );
 }
 
-/// A destructive verb on a bare letter is one fat-fingered `Alt-K h x` away
+/// A destructive verb on a bare letter is one fat-fingered `Ctrl-G h x` away
 /// from losing a secret, so the confirmation **names the thing**.
 fn draw_confirm(f: &mut Frame, verb: &str, what: &str) {
     let question = format!("{verb} {what}?");
@@ -2921,7 +2939,7 @@ fn draw_fleet(f: &mut Frame, app: &App, area: Rect) {
     if rows.is_empty() {
         // Short enough to survive the master pane at the design width, which is
         // 44 cells inside its border — the longer form was clipped mid-word.
-        items.extend(empty("  nothing delegated yet — Alt-B starts one"));
+        items.extend(empty("  nothing delegated yet — Ctrl-B starts one"));
     }
     if let Some(line) = filter_line(app) {
         items.push(ListItem::new(Line::from("")));
@@ -4722,7 +4740,7 @@ const CARET: &str = "› ";
 /// nothing about what this program wants from them. It names the two ways in
 /// (prose, or `/`) and gets out of the way at the first keystroke. It stops
 /// there: the splash caption above it and the status bar below it already
-/// teach Alt-K, and a third copy is noise rather than help. Empty when even the
+/// teach Ctrl-G, and a third copy is noise rather than help. Empty when even the
 /// shortest form would be truncated, since half a sentence reads as a rendering
 /// bug rather than a hint.
 fn placeholder(width: usize) -> &'static str {
@@ -5437,7 +5455,7 @@ mod tests {
     #[test]
     fn the_wordmark_survives_a_notice_and_goes_when_the_conversation_starts() {
         let mut a = app();
-        a.push(Entry::Notice("Alt-K opens every screen".into()));
+        a.push(Entry::Notice("Ctrl-G opens every screen".into()));
         assert!(rendered(&a, 100, 24).contains("an orchestrator"));
 
         a.push(Entry::You("summarise my inbox".into()));
@@ -6301,8 +6319,8 @@ mod tests {
     fn the_two_halves_of_a_bar_never_run_together() {
         for width in [200u16, 150, 100, 80, 60, 40, 24, 12] {
             let line = two_ends(
-                "Alt-B delegate · Alt-K menu",
-                "Alt-X stop · Ctrl-C quit",
+                "Ctrl-B delegate · Ctrl-G menu",
+                "Ctrl-X stop · Ctrl-C quit",
                 width,
                 MUTED,
             );
@@ -6312,13 +6330,13 @@ mod tests {
                 "{width}: overflowed with {text:?}"
             );
             assert!(
-                !text.contains("menuAlt-X"),
+                !text.contains("menuCtrl-X"),
                 "{width}: they touched: {text:?}"
             );
             // The exit survives every width that can hold it at all.
-            if "Alt-X stop · Ctrl-C quit".len() + 2 <= width as usize {
+            if "Ctrl-X stop · Ctrl-C quit".len() + 2 <= width as usize {
                 assert!(
-                    text.contains("Alt-X stop · Ctrl-C quit"),
+                    text.contains("Ctrl-X stop · Ctrl-C quit"),
                     "{width}: the way out went: {text:?}"
                 );
             }
@@ -6661,31 +6679,28 @@ mod tests {
 
     /// The complement to `keys.rs`'s scan, which walks the tables and the two
     /// which-key accessors — it cannot see a chord named in *prose*, and prose
-    /// is exactly where `Ctrl-K` and `Ctrl-B` survived the move to Alt: in the
-    /// splash caption and in two empty-state sentences, which no table owns.
+    /// is exactly where the old spelling survives a move. `Ctrl-K` and
+    /// `Ctrl-B` outlived the move *to* Alt in the splash caption and two
+    /// empty-state sentences, which no table owns; `Alt-K` and `Alt-B` were
+    /// sitting in those same three strings after the move back.
     ///
     /// So this one reads the finished screen instead of the source. Anything a
-    /// pixel teaches is caught, whatever string it came from. `Ctrl-C` is the
-    /// one survivor by design: leaving must never depend on finding the right
-    /// table.
+    /// pixel teaches is caught, whatever string it came from — and what must
+    /// never be taught is Alt, because a stock macOS terminal cannot send it.
     ///
-    /// **`Overlay::Keymap` is excluded deliberately, and this is not a gap to
-    /// close.** That overlay *is* the global table on display, and the global
-    /// table is the one surface where Ctrl is legitimately taught — readline's
-    /// `Ctrl-U` and `Ctrl-W` are not ours to move. It is covered from the other
-    /// side by `keys::tests::the_verbs_are_advertised_on_alt_and_the_editing_
-    /// keys_on_ctrl`, which pins those two present and `Ctrl-K`/`Ctrl-G`/
-    /// `Ctrl-B`/`Ctrl-X`/`Ctrl-T`/`Ctrl-O`/`Ctrl-L` absent. Deleting the
-    /// exclusion here would delete that coverage and gain nothing.
+    /// Nothing is excluded now. The direction reversed with the keymap: the
+    /// global table is Ctrl throughout, so `Overlay::Keymap` has no more
+    /// licence to print an Alt chord than the splash does, and the exclusion
+    /// that used to protect it would now only hide a stale row.
     ///
     /// Everything renders wide, at 150×40, because clipping makes a
-    /// buffer-reading assertion lie in *both* directions: a `Ctrl-C quit` cut
-    /// mid-token leaves a bare `Ctrl-` and fails correct code, and a stale
-    /// `Ctrl-B` truncated off the right edge passes broken code. The count at
-    /// the end is what proves the width was actually enough — a scan that
-    /// found nothing has not passed, it has failed to look.
+    /// buffer-reading assertion lie in *both* directions: a token cut mid-word
+    /// fails correct code, and a stale `Alt-B` truncated off the right edge
+    /// passes broken code. The count at the end is what proves the width was
+    /// actually enough — a scan that found nothing has not passed, it has
+    /// failed to look.
     #[test]
-    fn no_screen_teaches_a_ctrl_chord_that_is_not_ctrl_c() {
+    fn no_screen_teaches_an_alt_chord() {
         let overlays = || {
             [
                 Overlay::None,
@@ -6716,14 +6731,14 @@ mod tests {
                         for (i, line) in screen.lines().enumerate() {
                             let mut rest = line;
                             while let Some(at) = rest.find("Ctrl-") {
-                                let tail = &rest[at + "Ctrl-".len()..];
-                                assert!(
-                                    tail.starts_with('C'),
-                                    "{ws:?} row {i} teaches a Ctrl verb: {line}"
-                                );
                                 kept += 1;
-                                rest = tail;
+                                rest = &rest[at + "Ctrl-".len()..];
                             }
+                            assert!(
+                                !line.contains("Alt-"),
+                                "{ws:?} row {i} teaches an Alt chord, which a stock macOS \
+                                 terminal cannot send: {line}"
+                            );
                         }
                     }
                 }
@@ -6736,7 +6751,7 @@ mod tests {
         // clipped away unseen.
         assert!(
             kept > 0,
-            "no Ctrl-C reached the buffer, so nothing was really scanned"
+            "no Ctrl chord reached the buffer, so nothing was really scanned"
         );
     }
 
@@ -6750,7 +6765,7 @@ mod tests {
             // Alt, not Ctrl: Jod's own verbs moved off the chords tmux
             // intercepts. The property here is unchanged — every screen prints
             // its own keys — only the chord it prints them under.
-            (Workspace::Chat, "Alt-K menu"),
+            (Workspace::Chat, "Ctrl-G menu"),
             (Workspace::Fleet, "s stop"),
             (Workspace::Memory, "g graph"),
             (Workspace::Schedules, "r run now"),
@@ -6789,7 +6804,7 @@ mod tests {
     }
 
     /// Regression: the status and the hints were run together on a narrow
-    /// terminal — `1 queuedAlt-X stop`, which reads as neither. The hints now
+    /// terminal — `1 queuedCtrl-X stop`, which reads as neither. The hints now
     /// live on their own row, so the rule is tested on both.
     #[test]
     fn the_bars_drop_their_right_hand_side_rather_than_colliding_with_it() {
@@ -6806,12 +6821,12 @@ mod tests {
             "they must not run together: {bar}"
         );
 
-        // With room for both, the keybar carries the exits again. `Alt-X`
-        // since the keymap moved off the chords tmux takes; `Ctrl-C` stayed
-        // where every terminal already puts it.
+        // With room for both, the keybar carries the exits again. `Ctrl-X`
+        // because Alt cannot be typed on a stock macOS terminal, and `x` is
+        // free of tmux; `Ctrl-C` stayed where every terminal already puts it.
         let wide = rendered(&a, 150, 12);
         let rows: Vec<&str> = wide.lines().collect();
-        assert!(rows[rows.len() - 2].contains("Alt-X stop"), "{wide}");
+        assert!(rows[rows.len() - 2].contains("Ctrl-X stop"), "{wide}");
     }
 
     /// Endings that arrive while you are away have to survive until you look.
@@ -6847,7 +6862,7 @@ mod tests {
                 "{ws:?} missing from the menu:\n{screen}"
             );
         }
-        assert!(screen.contains("Alt-K"));
+        assert!(screen.contains("Ctrl-G"));
         assert!(screen.contains("Esc cancels"));
     }
 
@@ -6932,7 +6947,7 @@ mod tests {
 
     // ---- confirmation and prompts ----
 
-    /// `x` deleting a webhook silently is one fat-fingered `Alt-K h x` away
+    /// `x` deleting a webhook silently is one fat-fingered `Ctrl-G h x` away
     /// from losing a secret, so the confirmation names the thing.
     #[test]
     fn a_destructive_confirmation_names_what_it_is_about_to_destroy() {
@@ -8112,7 +8127,7 @@ mod tests {
             "and that one of them stopped a run: {narrow}"
         );
         assert!(
-            narrow.contains("Alt-C"),
+            narrow.contains("Ctrl-N"),
             "and which key answers it: {narrow}"
         );
         assert!(
@@ -8141,7 +8156,7 @@ mod tests {
         );
     }
 
-    /// A hidden rail costs the chat nothing, which is what makes `Alt-R` worth
+    /// A hidden rail costs the chat nothing, which is what makes `Ctrl-R` worth
     /// pressing rather than something you turn off once and forget.
     #[test]
     fn a_hidden_rail_takes_no_columns_at_all() {
