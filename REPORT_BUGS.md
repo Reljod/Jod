@@ -53,6 +53,53 @@ see BUG-13.
 
 ---
 
+## Two patterns underneath most of this
+
+Twenty findings, but they are not twenty independent mistakes. Fixing the two
+shapes below would prevent most of them recurring.
+
+### Pattern A — a fixture supplies a precondition the real entry point never has
+
+Four features are **broken in their default state and green in their tests**,
+each because the test hands the code a starting state a user cannot produce:
+
+| Bug | The fixture's lie | What a user actually has |
+|---|---|---|
+| [BUG-6](#bug-6) | `app.panel = true` | panel closed at startup — the key does nothing |
+| [BUG-3](#bug-3) | path `/home/reljod/notes` (18 chars) | real paths overflow the 96-column cap |
+| [BUG-20](#bug-20) | asserts only `"y confirms"` (10 chars) | the other 26 chars are clipped away |
+| [BUG-1](#bug-1) | *no test at all* for a notice-only command at startup | every such command renders nothing |
+
+`docs/try-it.md:16` already warns that "a green suite is not evidence that a
+feature exists". These are that warning, four times, in the module the doc says
+was never hand-driven.
+
+**The cheap structural fix:** for any keybinding or overlay, assert *something
+observable* starting from the state a fresh `jod tui` actually produces —
+`App::default()`, no panel, no `watching`, empty transcript. Every bug above
+dies to that one rule.
+
+### Pattern B — a width computed from content, ignoring the chrome around it
+
+Four defects are the same arithmetic error: size a box from its text, then draw
+a longer thing into it, and let the terminal clip mid-word with no ellipsis.
+
+| Bug | Sized from | What gets clipped |
+|---|---|---|
+| [BUG-3](#bug-3) | fixed `.min(96)` | the directory you are browsing |
+| [BUG-11](#bug-11) | popup width | half the command descriptions |
+| [BUG-16](#bug-16) | popup width | the filename — the only distinguishing part |
+| [BUG-20](#bug-20) | `question.len() + 8` | the words "undone" and "else cancels" |
+
+Notably the code **already knows how to do this correctly** — the transcript
+wraps notices properly, and the search overlay elides with a real `…`. The
+helper exists; these four sites do not use it.
+
+**The fix:** size to `max(content, title, footer)`, and elide **from the left**
+for paths, where the tail carries the meaning.
+
+---
+
 <a name="bug-14"></a>
 ## BUG-14 — A delegated run wrote into `$HOME`, outside every root, and reported success · **Critical** · OPEN
 
