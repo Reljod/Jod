@@ -44,7 +44,7 @@ see BUG-13.
 | [BUG-11](#bug-11) | Low | commands | Command descriptions are cut mid-word with no ellipsis |
 | [BUG-12](#bug-12) | Low | input | The input box is fixed at ~70 columns and single-line |
 | [BUG-13](#bug-13) | Medium | tooling | `jod --version` cannot distinguish two different builds |
-| [BUG-17](#bug-17) | **High** | interrupt | `Esc` does not stop a running turn in the main chat, though the docs say it does |
+| [BUG-17](#bug-17) | Medium | interrupt | Interrupt is unacknowledged for 4–6s, then reported as both `✓ done` and `✗ failed` |
 | [BUG-15](#bug-15) | **High** | mentions | `@` in a non-git directory is ~95% `node_modules` noise; source is invisible |
 | [BUG-16](#bug-16) | Medium | mentions | `@` clips paths from the right, so six different files render identically |
 
@@ -671,66 +671,70 @@ retires a whole category of phantom bug reports.
 ---
 
 <a name="bug-17"></a>
-## BUG-17 — `Esc` does not interrupt a turn in the main chat · **High** · OPEN
+## BUG-17 — Interrupting a turn is unacknowledged for seconds, then reported twice, contradictorily · Medium · OPEN
 
-`docs/try-it.md:245` documents `Esc` as the way out of a running turn:
+> **Correction — I got this wrong first.** My initial write-up said "`Esc` does
+> not interrupt at all". That was **false**, and I am leaving the correction
+> visible because the file is being acted on. `Esc` *does* interrupt. I checked
+> four seconds after pressing it, saw `⠹ working`, and concluded it was dead.
+> A clean re-run — `Esc` only, never `Ctrl-X`, sampled every two seconds —
+> shows it landing between **t+4s and t+6s**. Do not "fix" a dead `Esc`; it
+> is not dead. What is below is what is actually wrong.
 
-> | `Esc` | interrupt the turn, keep the session — the conversation survives |
+**Repro:** in the main chat, run `run the shell command: sleep 120; then say
+finished`, wait for `⠧ working`, press `Esc` once, and sample the status bar.
 
-**Repro:** in the main chat, type `run the shell command: sleep 90; then say
-done`, press `⏎`, wait for `⠸ working`, then press `Esc`.
+**Actual:**
 
-**Actual:** nothing. Four seconds later the status bar still reads
-`⠹ working 15s`. The turn runs on. `Ctrl-X` **does** stop it (status returns to
-`ready`), so the capability exists — it is `Esc` that is dead.
-
-**Root cause.** `cli/src/tui/mod.rs:4132` guards the interrupt on *watching*:
-
-```rust
-KeyCode::Esc if app.busy && app.watching.is_some() => { … interrupt … }
+```
+before Esc:  … ⠧ working 10s
+t+2s      :  … ⠧ working 10s        <-- no acknowledgement
+t+4s      :  … ⠧ working 10s        <-- still nothing
+t+6s      :  … ready                <-- lands here
 ```
 
-In the ordinary flow — type into the main chat, press `⏎` — `app.busy` is true
-but `app.watching` is `None`, so the arm never matches and `Esc` falls through
-to `app.back()`. The interrupt only fires while you are explicitly *watching* a
-run, which is the rarer case.
+Two defects, both in the reporting rather than the mechanism:
 
-The code's own comment two lines above still describes the old behaviour:
+**1. No acknowledgement for 4–6 seconds.** The status bar keeps saying
+`working`, and the elapsed counter **freezes** at the value it had when `Esc`
+was pressed (`10s`, unchanging). So the one visual cue that something happened
+is a timer that has stopped — which reads as a hung UI, not as an interrupt in
+progress. There is no `interrupting…` state. A user who presses `Esc` and sees
+nothing for four seconds presses it again, or reaches for `Ctrl-C`.
 
-> *"The line being typed is left alone: the correction is usually already
-> half-written by the time you reach for **Escape**."*
+**2. The turn is then reported twice, and the two disagree:**
 
-**Why the test suite missed it — for the third time.** The test
-`escape_interrupts_the_turn_without_losing_the_session` (`mod.rs:10293`) builds
-its state from `mid_turn()` (`mod.rs:10277`):
-
-```rust
-fn mid_turn() -> App {
-    let mut app = app_on(HarnessKind::ClaudeCode);
-    app.agents = vec![running("run-1", "port the parser")];
-    app.watching = Some("run-1".into());   // <-- satisfies the guard
-    app.busy = true;
-    …
-}
+```
+✓ done · interrupted after 10s
+• stopped — the conversation is kept, so just say what to do instead
+✗ failed · 0 out · $0.0000
 ```
 
-The fixture presets `watching`, so the guard is always satisfied and the test
-is always green — while the path a user actually takes is not covered at all.
-This is the **same failure shape** as BUG-6 (`app.panel = true`) and BUG-3
-(a short path). Three separate features are broken in their default state and
-green in their tests, each because a fixture supplies a precondition the real
-entry point does not.
+A green `✓ done` and a red `✗ failed` for the same turn, adjacent. The
+database gets it right — `sqlite3 ~/.jod/jod.db` records the run as `killed` —
+so this is purely the transcript rendering both the interrupt entry and a
+generic failure entry when the harness process ends.
 
-**Why High.** This is the stop button. A user watching an agent do something
-they did not intend reaches for `Esc` first — it is what the documentation
-tells them to press — and nothing happens. `Ctrl-X` is discoverable from the
-footer, but only if you look down while worrying about what the agent is
-doing.
+The comment at `cli/src/tui/mod.rs:4134` states the intent exactly, and it is
+the right intent — *"A partial turn silently dropped would leave the transcript
+claiming the agent simply stopped talking, and the next reader cannot tell an
+interruption from a crash."* The interrupt entry does that job. The trailing
+`✗ failed` then undoes it.
 
-**Suggested fix.** Drop `&& app.watching.is_some()` and interrupt whatever the
-current turn is, or bind `Esc` to the same action as `Ctrl-X` in the chat
-workspace. Then fix the fixture: assert the interrupt from a state produced by
-*sending a prompt*, not one hand-assembled with `watching` already set.
+**Suggested fix.** Show an `interrupting…` state on the keypress so the input
+is acknowledged immediately, and suppress the generic terminal entry when the
+turn already has an interrupt entry — a deliberate stop is not a failure.
+
+**Related, seen once during the same test.** After an interrupt Jod printed:
+
+> `the run would not stop (could not stop process group 7003: Operation not
+> permitted (os error 1)) — it may still be writing; Ctrl-X kills it outright`
+
+`ps` showed pid 7003 as `<defunct>` and no `sleep` process survived, so the run
+**had** already stopped and nothing leaked. The warning is alarming, names a
+consequence that did not happen ("may still be writing"), and appears to be a
+race against an already-reaped process group. Worth a cheap guard: treat
+`ESRCH`/an already-dead group as success rather than as a failure to stop.
 
 ---
 
