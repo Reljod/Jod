@@ -202,6 +202,28 @@ all seven together**, not seven agents in parallel.
 5. The remaining width bugs (BUG-3, 11, 16, 21) — one sweep, one owner, since
    they are one root cause (see Pattern B).
 
+### Expect the TaskCompleted hook to block you — it is not your fix that broke
+
+Marking a task complete runs the suites, and on **macOS** `tests/reclaim-disk.test.sh`
+fails with **6 failures** regardless of what you changed:
+
+```
+touch: out of range or illegal time specification: YYYY-MM-DDThh:mm:SS[.frac][tz]
+…
+== 31 passed, 6 failed ==
+```
+
+That is BSD `touch` rejecting a GNU-style `-d` argument, so the fixture never
+gets the old mtimes its assertions depend on — every failure is an
+age/"is it stale" assertion. It is **host-dependent and pre-existing**; the
+suite passes in CI. It has nothing to do with the TUI.
+
+**Do not "fix" it by skipping tests, loosening assertions, or editing the
+suite to go green** — the charter forbids exactly that, and you would be
+deleting a real signal to unblock an unrelated task. Confirm against CI before
+chasing it. If it genuinely blocks you, write `BLOCKED.md` as the charter
+describes.
+
 ### Rules that apply to every fix here
 
 - **Add the regression test, and make sure it fails first.** Four of these bugs
