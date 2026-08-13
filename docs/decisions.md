@@ -2165,3 +2165,35 @@ in the program can detect that. What the repo can do is keep the map in one file
 and assert the constraint out loud, which is
 `no_verb_sits_on_a_chord_a_multiplexer_takes` — so the next person to move it
 finds the reasoning rather than the symptom.
+
+## A version that names only the release cannot answer what it is asked
+
+`jod --version` said `jod 0.1.0`, which is true of every binary this repository
+has ever produced. The question anyone actually asks it is narrower: *is the
+program I am running the code I am reading?* An installed copy on `$PATH` and a
+fresh build sat side by side answering identically while differing by seven
+subcommands — the user's first sign was `unrecognised subcommand` for a
+documented feature, and hand-driving the TUI against an unrebuilt tree produced
+bug reports nobody could trust.
+
+So the version carries the commit: `jod 0.1.0 (f4e4c72 2026-08-13)`, stamped by
+`cli/build.rs`, with `-dirty` for uncommitted work and `unknown` when there was
+no git to ask.
+
+**The date is the commit's, not the wall clock's.** A build script that stamped
+`now()` is only honest if it reruns on every `cargo build` — which recompiles
+the largest crate in the workspace, times however many worktrees the fleet has
+open. And if it does *not* rerun, cargo replays the previous value and the
+binary reports the time of an older build with total confidence: a lie in the
+one field whose entire job is telling builds apart. A commit date is stable, so
+rebuilding the same tree stays cache-hot and the stamp stays true. What the
+wall clock would have distinguished — two builds of the same commit — is
+already covered by `-dirty`.
+
+**The installer still copies rather than symlinks.** Symlinking `~/.local/bin/jod`
+into `target/release/` would track rebuilds automatically, and that is precisely
+the objection: installing would stop being an act. `cargo clean` — or the
+routine sweep of a full disk, which starts by deleting worktree `target/`
+directories — would leave a dangling binary on `$PATH`, and a long-running
+console's identity could change underneath it with nothing recorded. The copy
+was never the defect. Being unable to *tell which copy* was.

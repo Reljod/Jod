@@ -9,6 +9,7 @@ mod render;
 mod render_time;
 mod tui;
 mod update;
+mod version;
 mod voice;
 
 use anyhow::{bail, Context, Result};
@@ -30,7 +31,9 @@ use std::path::PathBuf;
 #[command(
     name = "jod",
     about = "Delegate to an agent harness and watch it work.",
-    version
+    // Not bare `version`: `jod 0.1.0` cannot tell a fresh build from a stale
+    // copy on `$PATH`. → `version::LONG_VERSION`
+    version = version::LONG_VERSION
 )]
 struct Cli {
     #[command(subcommand)]
