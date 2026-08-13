@@ -27,6 +27,7 @@ use std::collections::HashSet;
 use jod_core::cards::{Card, Query};
 use jod_core::commands::Discovered;
 use jod_core::HarnessKind;
+use jod_core::projects::{How, Project};
 use jod_core::rank;
 use jod_core::roots::Root;
 use jod_core::tree::{Node, NodeId, NodeKind};
@@ -1371,6 +1372,39 @@ pub fn discovered(jod: &Arc<Jod>, harness: HarnessKind) -> Vec<Discovered> {
         Some(store) => store.discovered(Some(harness)).unwrap_or_default(),
         None => Vec::new(),
     }
+}
+
+// ---- the project catalog -------------------------------------------------
+
+/// Reljod's repositories, most recently worked in first.
+///
+/// Archived entries are left out: the panel is a picture of what is in play,
+/// and a catalog that grows for ever is one that stops being glanceable.
+pub fn projects(jod: &Arc<Jod>) -> Vec<Project> {
+    match jod.store() {
+        Some(store) => store.projects(false).unwrap_or_default(),
+        None => Vec::new(),
+    }
+}
+
+/// Which project a conversation is about, and how that was settled.
+///
+/// The `how` comes from the resolution log rather than being inferred from the
+/// project itself, because the two answers differ in exactly the case that
+/// matters: the project is the same either way, and only the log knows whether
+/// he said it or whether it merely carried.
+pub fn current_project(jod: &Arc<Jod>, conversation: Option<&str>) -> Option<(String, How)> {
+    let store = jod.store()?;
+    let id = conversation?;
+    let project = store.current_project(id).ok().flatten()?;
+    let how = store
+        .project_resolutions(id, 1)
+        .ok()
+        .and_then(|r| r.first().map(|r| r.how))
+        // No log line means nobody has resolved anything on this conversation
+        // — it was set directly, which is a human act.
+        .unwrap_or(How::Human);
+    Some((project.name, how))
 }
 
 // ---- searching the transcript -------------------------------------------

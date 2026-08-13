@@ -27,6 +27,7 @@ use super::traffic;
 use super::workspace::{matches, ListState, Workspace};
 use jod_core::cards::Card;
 use jod_core::commands::Discovered;
+use jod_core::projects::{How, Project};
 use jod_core::roots::Root;
 use jod_core::secrets::Scope;
 use jod_core::tree::{Node, NodeId};
@@ -180,6 +181,44 @@ pub enum PromptIntent {
 impl Overlay {
     pub fn is_open(&self) -> bool {
         *self != Overlay::None
+    }
+}
+
+/// What the microphone is doing.
+///
+/// ## Why this is a toggle and not a push-to-talk
+///
+/// Holding a key is the better gesture and the terminal cannot see it. A
+/// terminal emulator reports key *presses*; releases arrive only under the
+/// kitty keyboard protocol, which most terminals — and every one reached over
+/// a plain SSH session — do not implement. A "hold to talk" that silently
+/// depended on the terminal would work on the developer's machine and record
+/// for ever on the VPS console.
+///
+/// So: press to start, press again to stop, `Esc` to throw it away.
+/// `apps/jod-voice` keeps push-to-talk, because a desktop app can register a
+/// real global hotkey and see both edges.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Dictation {
+    Off,
+    /// Recording, since `started_ms`, with the program that is doing it.
+    Listening { started_ms: i64, backend: String },
+    /// Uploaded and waiting on the model.
+    Transcribing { started_ms: i64 },
+}
+
+impl Dictation {
+    pub fn is_active(&self) -> bool {
+        !matches!(self, Dictation::Off)
+    }
+
+    /// Whether a *new* utterance may start.
+    ///
+    /// False while transcribing: the composer is about to receive text, and a
+    /// second recording started before the first has landed would race it into
+    /// the same buffer.
+    pub fn can_start(&self) -> bool {
+        matches!(self, Dictation::Off)
     }
 }
 
@@ -361,6 +400,32 @@ pub struct App {
     /// The slash commands and skills this repository offers, already filtered
     /// to the harness on screen. Refreshed on the tick, off the render path.
     pub discovered: Vec<Discovered>,
+
+    // ---- the project catalog --------------------------------------------
+    /// Reljod's repositories, most recently worked in first. Refreshed on the
+    /// tick like every other list, because another session touching a project
+    /// reorders it and a copy read once at open would be stale by the second
+    /// instruction.
+    pub projects: Vec<Project>,
+    /// Which project the conversation on screen is about, and how that was
+    /// decided.
+    ///
+    /// The `how` is carried rather than dropped because it is the whole point
+    /// of showing this: a project he *named* needs no attention, and one that
+    /// merely carried over is the one worth a glance before an agent starts
+    /// working in the wrong repository.
+    pub current_project: Option<(String, How)>,
+    /// Whether the catalog section of the panel is expanded.
+    ///
+    /// Open by default and collapsible, rather than hidden by default: the
+    /// point of putting it on screen is that he can see which repository a
+    /// dictated sentence will land in without asking. A twenty-project catalog
+    /// would eat the panel, though, which is what the collapse is for.
+    pub projects_open: bool,
+
+    // ---- dictation -------------------------------------------------------
+    /// What the microphone is doing, if anything.
+    pub dictation: Dictation,
 
     // ---- the fleet tree -------------------------------------------------
     /// Works, their sessions and their runs, flattened by core in one pass.
@@ -759,6 +824,13 @@ impl App {
             candidates: Vec::new(),
             mention: None,
             discovered: Vec::new(),
+            projects: Vec::new(),
+            current_project: None,
+            // Open, because the catalog is only useful if seeing it costs
+            // nothing — the point is to know where a dictated sentence lands
+            // without having to ask.
+            projects_open: true,
+            dictation: Dictation::Off,
             forest: Vec::new(),
             closed_works: HashSet::new(),
             tree: TreeState::default(),

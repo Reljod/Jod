@@ -144,6 +144,10 @@ pub const GLOBAL: &[Key] = &[
     k("Alt-R", "show or hide the rail"),
     k("Alt-C", "the rail's next card"),
     k("Alt-P", "add a directory to work in"),
+    // Press to start, press again to stop — a terminal cannot see a key being
+    // released, so this cannot be the push-to-talk the desktop app has.
+    k("Alt-V", "dictate into the box"),
+    k("Alt-D", "show or hide the projects"),
     k("Alt-S", "search every transcript"),
     k("Alt-Y", "copy the last reply"),
     k("Alt-B", "delegate the typed line"),

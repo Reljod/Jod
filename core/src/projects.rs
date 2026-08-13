@@ -299,7 +299,7 @@ pub fn resolve(utterance: &str, catalog: &[Project]) -> Match {
             forms.push((form.chars().count(), form, p));
         }
     }
-    forms.sort_by(|a, b| b.0.cmp(&a.0));
+    forms.sort_by_key(|f| std::cmp::Reverse(f.0));
 
     let mut hits: Vec<(String, String)> = Vec::new();
     let mut claimed: Vec<(usize, usize)> = Vec::new();

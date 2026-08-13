@@ -191,6 +191,19 @@ pub enum Action {
     /// Open the typed line in `$EDITOR`. The TUI has to be suspended and
     /// restored around it, which only the loop can do.
     Editor,
+    /// Start dictating, or stop and transcribe what was said.
+    ///
+    /// Belongs to the loop for the same reason [`Action::Editor`] does: it
+    /// owns a child process across turns of the event loop, which no key
+    /// handler can hold.
+    Dictate,
+    /// Throw away the utterance in progress.
+    ///
+    /// Distinct from [`Action::Dictate`] rather than being the same toggle:
+    /// stopping transcribes, and this is the verb for a sentence you started
+    /// and do not want. A single key that did both would make the expensive
+    /// one the default.
+    CancelDictation,
     /// Update the binaries this console is running from, or say what an update
     /// would take.
     ///
@@ -529,6 +542,14 @@ async fn event_loop(
     // installer's own output line by line so the transcript shows a build
     // happening rather than a console that has gone quiet.
     let (update_tx, mut update_rx) = tokio::sync::mpsc::unbounded_channel::<UpdateMsg>();
+    // Dictation. The recorder is a child process held across turns of this
+    // loop, so it lives here rather than on `App` — the same reason `$EDITOR`
+    // is an `Action` and not a key handler. The channel carries the finished
+    // transcript back from the upload, which must not block the keyboard: a
+    // console frozen for a second per sentence is worse than typing.
+    let (voice_tx, mut voice_rx) =
+        tokio::sync::mpsc::unbounded_channel::<Result<String, String>>();
+    let mut recorder: Option<jod_voice_core::Recorder> = None;
 
     loop {
         terminal.draw(|f| viewport = ui::draw(f, &app))?;
@@ -562,6 +583,27 @@ async fn event_loop(
                             // terminal, or the job slot the update occupies.
                             Some(Action::Update { check }) => {
                                 start_update(&mut app, &update_tx, check);
+                            }
+                            Some(Action::Dictate) => {
+                                toggle_dictation(&mut app, &mut recorder, &voice_tx);
+                            }
+                            Some(Action::CancelDictation) => {
+                                if let Some(rec) = recorder.take() {
+                                    rec.cancel();
+                                }
+                                // Also clears a `Transcribing`, which has no
+                                // recorder left to cancel: the upload is still
+                                // in flight and its result is dropped on
+                                // arrival, because he has said he does not want
+                                // it. Better than a transcript appearing in the
+                                // box seconds after Escape.
+                                let was = std::mem::replace(
+                                    &mut app.dictation,
+                                    app::Dictation::Off,
+                                );
+                                if was.is_active() {
+                                    app.push(Entry::Notice("dictation cancelled".into()));
+                                }
                             }
                             Some(Action::Reload) => reload(terminal, &mut app),
                             Some(action) => perform(&jod, &mut app, &opts, &mut thread, action).await,
@@ -664,6 +706,20 @@ async fn event_loop(
                         if replaced {
                             app.overlay = Overlay::ConfirmReload;
                         }
+                    }
+                }
+            }
+
+            Some(said) = voice_rx.recv() => {
+                // Only if this console is still waiting for it. Escape sets
+                // `dictation` to `Off` while the upload is in flight, and a
+                // transcript landing in the box seconds after it was cancelled
+                // is text he did not ask for and may not notice arriving.
+                if matches!(app.dictation, app::Dictation::Transcribing { .. }) {
+                    app.dictation = app::Dictation::Off;
+                    match said {
+                        Ok(text) => insert_dictation(&mut app, &text),
+                        Err(why) => app.push(Entry::Notice(why)),
                     }
                 }
             }
@@ -1316,6 +1372,11 @@ async fn perform(
         )),
         Action::Reload => app.push(Entry::Notice(
             "/reload restarts the console, which only the console can do".into(),
+        )),
+        // The recorder is a child process the loop owns across turns, so it is
+        // handled there for the same reason `Action::Editor` is.
+        Action::Dictate | Action::CancelDictation => app.push(Entry::Notice(
+            "dictation runs from the console's own loop — press Alt-V in chat".into(),
         )),
         // Named rather than silently ignored: a key that appears to do nothing
         // is worse than one that says what it is waiting for.
@@ -2067,6 +2128,16 @@ fn on_key(app: &mut App, key: KeyEvent, viewport: usize) -> Option<Action> {
     // Any key other than a second quit means the user changed their mind.
     app.confirm_quit = false;
 
+    // Ahead of the overlay and of every screen's own Esc, and only while the
+    // microphone is live. Escape means a dozen things here depending on where
+    // the cursor is; while a recorder is running it means exactly one, because
+    // that is the state whose cost is outside the program — a hot microphone
+    // and an upload about to be paid for. When nothing is recording this falls
+    // through and Escape means what it always did.
+    if key.code == KeyCode::Esc && app.dictation.is_active() {
+        return Some(Action::CancelDictation);
+    }
+
     if app.overlay.is_open() {
         return on_overlay_key(app, key);
     }
@@ -2404,6 +2475,17 @@ fn on_chord(app: &mut App, key: KeyEvent) -> Option<Option<Action>> {
                 "tool output {}",
                 if app.show_details { "shown" } else { "hidden" }
             )));
+            handled(None)
+        }
+        // Dictation. A toggle rather than a hold, because a terminal cannot
+        // see a key being released — see [`Dictation`]. `Esc` while listening
+        // throws the utterance away, which is handled with the other escapes.
+        KeyCode::Char('v') if alt => handled(Some(Action::Dictate)),
+        // Collapse the catalog without closing the whole panel. Separate keys
+        // because they answer different questions: Shift-Tab is "I want the
+        // screen back", this is "I know which project I am in".
+        KeyCode::Char('d') if alt => {
+            app.projects_open = !app.projects_open;
             handled(None)
         }
         // The rail, on Alt only. `Ctrl-R` is readline's reverse search and
@@ -4903,6 +4985,11 @@ fn refresh_workspaces(jod: &Arc<Jod>, app: &mut App) {
     // because `/harness` changes the answer and the palette must not go stale
     // mid-session.
     app.discovered = data::discovered(jod, app.harness);
+    // On the tick like every other list: another session touching a project
+    // reorders the catalog, and the current project changes underneath this
+    // console whenever the orchestrator resolves an instruction.
+    app.projects = data::projects(jod);
+    app.current_project = data::current_project(jod, app.conversation.as_deref());
     let (forest, closed) = data::forest(jod, app.tree.show_closed);
     app.forest = forest;
     app.closed_works = closed;
@@ -4995,6 +5082,123 @@ fn refresh_mention(jod: &Arc<Jod>, app: &mut App) {
     if let Some(popup) = &mut app.mention {
         popup.refresh(&roots, &candidates);
     }
+}
+
+// ---- dictation -----------------------------------------------------------
+
+/// Start recording, or stop and send the utterance off to be transcribed.
+///
+/// The recorder is a child process, so it is owned by the loop and passed in.
+/// Everything here is deliberately non-blocking except the stop, which waits
+/// only as long as it takes the recorder to finalise a WAV header — see
+/// [`jod_voice_core::record`] for why that wait cannot be skipped.
+fn toggle_dictation(
+    app: &mut App,
+    recorder: &mut Option<jod_voice_core::Recorder>,
+    tx: &tokio::sync::mpsc::UnboundedSender<Result<String, String>>,
+) {
+    // Stopping.
+    if let Some(rec) = recorder.take() {
+        let started = match &app.dictation {
+            app::Dictation::Listening { started_ms, .. } => *started_ms,
+            _ => app.now_ms,
+        };
+        match rec.finish() {
+            Ok(recording) => {
+                // Gated here, before the upload: a key-tap misfire or a muted
+                // microphone must not cost a network round trip, and "nothing
+                // was said" is a better answer than a hallucinated one. Whisper
+                // fed silence emits canned subtitle phrases.
+                let verdict = jod_voice_core::guard::assess(&recording.samples, recording.rate);
+                if verdict != jod_voice_core::Speech::Present {
+                    app.dictation = app::Dictation::Off;
+                    app.push(Entry::Notice(verdict.message().to_string()));
+                    return;
+                }
+                app.dictation = app::Dictation::Transcribing { started_ms: started };
+                let tx = tx.clone();
+                let wav = recording.wav;
+                tokio::spawn(async move {
+                    let said = jod_voice_core::transcribe::transcribe(
+                        &wav,
+                        jod_voice_core::DEFAULT_MODEL,
+                        None,
+                        None,
+                    )
+                    .await
+                    .map(|t| t.text);
+                    // The receiver is gone only when the console is exiting,
+                    // and a transcript nobody can receive is not an error worth
+                    // reporting to a screen that is being torn down.
+                    let _ = tx.send(said);
+                });
+            }
+            Err(why) => {
+                app.dictation = app::Dictation::Off;
+                app.push(Entry::Notice(why));
+            }
+        }
+        return;
+    }
+
+    // Starting.
+    if !app.dictation.can_start() {
+        app.push(Entry::Notice(
+            "still transcribing the last one — it will land in the box in a moment".into(),
+        ));
+        return;
+    }
+    // Checked before he speaks rather than after: a sentence dictated into a
+    // console that was never going to transcribe it is a sentence said twice.
+    if !jod_voice_core::transcribe::is_configured() {
+        app.push(Entry::Notice(
+            "dictation needs OPENROUTER_API_KEY, which is not set in this console's \
+             environment"
+                .into(),
+        ));
+        return;
+    }
+    match jod_voice_core::Recorder::start() {
+        Ok(rec) => {
+            app.dictation = app::Dictation::Listening {
+                started_ms: app.now_ms,
+                backend: rec.backend().program().to_string(),
+            };
+            *recorder = Some(rec);
+        }
+        Err(why) => app.push(Entry::Notice(why)),
+    }
+}
+
+/// Put a transcript into the composer, where it can be read before it is sent.
+///
+/// **Never sent automatically.** Dictation is good, not perfect, and an
+/// instruction that reaches the orchestrator is one that spawns agents in a
+/// repository — a mis-heard sentence should cost a keystroke to fix, not a
+/// run to undo. So it lands in the box at the cursor, exactly as if it had
+/// been typed, and `⏎` is still his.
+fn insert_dictation(app: &mut App, text: &str) {
+    let text = text.trim();
+    if text.is_empty() {
+        app.push(Entry::Notice("nothing was transcribed".into()));
+        return;
+    }
+    // A space between what was already there and what was just said, so
+    // dictating twice in a row does not run two sentences together — but not a
+    // leading space in an empty box.
+    let needs_space = app
+        .input
+        .get(..app.cursor)
+        .and_then(|s| s.chars().next_back())
+        .is_some_and(|c| !c.is_whitespace());
+    let addition = if needs_space {
+        format!(" {text}")
+    } else {
+        text.to_string()
+    };
+    let at = app.cursor.min(app.input.len());
+    app.input.insert_str(at, &addition);
+    app.cursor = at + addition.len();
 }
 
 /// Hand the typed line to `$EDITOR`, and take back whatever comes out.
@@ -5851,6 +6055,91 @@ mod tests {
         press(&mut app, KeyCode::Tab);
         assert_eq!(app.input, "/harness ", "the popup still owns Tab");
         assert_eq!(app.mode, before, "and the mode was left alone");
+    }
+
+    // ---- dictation ----
+
+    /// A transcript is text he might not have meant to say, and `⏎` from here
+    /// spawns agents in a repository. It lands in the box; sending stays his.
+    #[test]
+    fn a_transcript_lands_in_the_box_rather_than_being_sent() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        insert_dictation(&mut app, "i-refactor natin yung parser");
+        assert_eq!(app.input, "i-refactor natin yung parser");
+        assert_eq!(app.cursor, app.input.len(), "the cursor is not after it");
+    }
+
+    /// Dictating twice in a row is how a long instruction gets built, so the
+    /// second utterance must not weld itself onto the first.
+    #[test]
+    fn a_second_utterance_is_spaced_off_the_first() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        insert_dictation(&mut app, "fix the parser");
+        insert_dictation(&mut app, "and run the tests");
+        assert_eq!(app.input, "fix the parser and run the tests");
+    }
+
+    /// ...but an empty box must not start with a space.
+    #[test]
+    fn the_first_utterance_does_not_start_with_a_space() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        insert_dictation(&mut app, "fix the parser");
+        assert!(!app.input.starts_with(' '));
+    }
+
+    /// Transcription can legitimately return nothing; an empty insert would
+    /// leave the console looking like the key did not work.
+    #[test]
+    fn an_empty_transcript_says_so_rather_than_inserting_nothing() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        insert_dictation(&mut app, "   ");
+        assert!(app.input.is_empty());
+        assert!(matches!(app.transcript.last(), Some(Entry::Notice(_))));
+    }
+
+    #[test]
+    fn dictation_is_toggled_from_the_loop_because_it_owns_a_process() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        assert!(matches!(alt(&mut app, KeyCode::Char('v')), Some(Action::Dictate)));
+    }
+
+    /// Escape has a dozen meanings depending on the screen. While the
+    /// microphone is live it has exactly one, and it must not depend on where
+    /// the cursor happens to be.
+    #[test]
+    fn escape_drops_a_live_utterance_from_anywhere() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.dictation = app::Dictation::Listening {
+            started_ms: 0,
+            backend: "arecord".into(),
+        };
+        assert!(matches!(
+            press(&mut app, KeyCode::Esc),
+            Some(Action::CancelDictation)
+        ));
+    }
+
+    /// ...and no meaning at all when nothing is recording, or Escape would
+    /// stop closing overlays.
+    #[test]
+    fn escape_is_left_alone_when_the_microphone_is_off() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        assert!(!matches!(
+            press(&mut app, KeyCode::Esc),
+            Some(Action::CancelDictation)
+        ));
+    }
+
+    #[test]
+    fn the_catalog_is_collapsed_without_closing_the_panel() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.panel = true;
+        assert!(app.projects_open);
+        alt(&mut app, KeyCode::Char('d'));
+        assert!(!app.projects_open);
+        assert!(app.panel, "collapsing the catalog closed the whole panel");
+        alt(&mut app, KeyCode::Char('d'));
+        assert!(app.projects_open, "the same key opens it");
     }
 
     #[test]
@@ -6738,14 +7027,17 @@ mod tests {
         assert_eq!(app.cursor, 5, "and Ctrl-E is still the end of it");
     }
 
-    /// Alt-D is nobody's binding here. Falling through to the chat handler
-    /// would have typed a `d` into a line the user was about to send, which is
+    /// Alt-Z is nobody's binding here. Falling through to the chat handler
+    /// would have typed a `z` into a line the user was about to send, which is
     /// worse than the key doing nothing.
+    ///
+    /// Was `Alt-D` until the project catalog claimed it — the assertion is
+    /// about an *unclaimed* chord, so it has to move whenever one is taken.
     #[test]
     fn an_alt_chord_nothing_claims_does_not_become_typed_text() {
         let mut app = app_on(HarnessKind::ClaudeCode);
         type_line(&mut app, "ship it");
-        alt(&mut app, KeyCode::Char('d'));
+        alt(&mut app, KeyCode::Char('z'));
         assert_eq!(app.input, "ship it");
     }
 

@@ -21,7 +21,9 @@ use ratatui::Frame;
 use jod_core::team::MemberStatus;
 use jod_core::PermissionPolicy;
 
-use super::app::{absolute, short_duration, since, until, App, Entry, JobState, Overlay};
+use super::app::{
+    absolute, short_duration, since, until, App, Dictation, Entry, JobState, Overlay,
+};
 use super::data::{Outcome, Source};
 use super::diff;
 use super::todo;
@@ -35,6 +37,7 @@ use super::secret;
 use super::traffic;
 use super::workspace::Workspace;
 use jod_core::cards::{Card, CardKind, Delivery, Importance, Sort, Status};
+use jod_core::projects::How;
 
 const USER: Color = Color::Cyan;
 const AGENT: Color = Color::Reset;
@@ -1393,10 +1396,112 @@ const CONTEXT_HEIGHT: u16 = 7;
 fn draw_panel(f: &mut Frame, app: &App, area: Rect) {
     let parts = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(3), Constraint::Length(CONTEXT_HEIGHT)])
+        .constraints([
+            Constraint::Length(projects_height(app, area.height)),
+            Constraint::Min(3),
+            Constraint::Length(CONTEXT_HEIGHT),
+        ])
         .split(area);
-    draw_sessions(f, app, parts[0]);
-    draw_context(f, app, parts[1]);
+    draw_projects(f, app, parts[0]);
+    draw_sessions(f, app, parts[1]);
+    draw_context(f, app, parts[2]);
+}
+
+/// How many rows the catalog gets.
+///
+/// Collapsed it is one line plus its border, which still answers the question
+/// the panel is there for — *which project am I in* — while giving the rest of
+/// the height back to the sessions list. Expanded it grows with the catalog but
+/// never past a third of the panel: the sessions below it are what a running
+/// fleet is watched through, and a twenty-project catalog must not push them
+/// off the screen.
+fn projects_height(app: &App, available: u16) -> u16 {
+    if available < 12 {
+        // No honest room for a third box. The current project still reaches the
+        // status bar, which is where it matters most.
+        return 0;
+    }
+    if !app.projects_open {
+        return 3;
+    }
+    let ceiling = (available / 3).max(4);
+    let wanted = app.projects.len().clamp(1, 32) as u16 + 2;
+    wanted.min(ceiling)
+}
+
+/// The catalog, with the project this conversation is about marked.
+///
+/// The mark is the point of the box. Everything else here is a list of
+/// directories, which nobody needs on screen; *which one a dictated sentence
+/// will land in* is a fact worth a permanent corner of the panel, because the
+/// alternative is finding out when an agent starts editing the wrong
+/// repository.
+fn draw_projects(f: &mut Frame, app: &App, area: Rect) {
+    if area.height == 0 {
+        return;
+    }
+    let inner = area.width.saturating_sub(2) as usize;
+    let current = app.current_project.as_ref();
+
+    // Named, carried, or nothing — three states with three different claims on
+    // his attention, so they do not share a colour.
+    let (title, border) = match current.map(|(_, how)| how) {
+        Some(How::Sticky) => (" projects · carried ", WARN),
+        Some(_) => (" projects ", MUTED),
+        None => (" projects · none set ", MUTED),
+    };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(fg(border))
+        .title(title);
+
+    if !app.projects_open {
+        let line = match current {
+            Some((name, _)) => Line::from(vec![
+                Span::styled(" ▸ ", fg(MUTED)),
+                Span::styled(cut(name, inner.saturating_sub(3)), bold(GOOD)),
+            ]),
+            None => Line::from(Span::styled(" ▸ nothing set", fg(MUTED))),
+        };
+        f.render_widget(Paragraph::new(line).block(block), area);
+        return;
+    }
+
+    if app.projects.is_empty() {
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                " no projects yet — ask Jod to add one",
+                fg(MUTED),
+            )))
+            .block(block),
+            area,
+        );
+        return;
+    }
+
+    // The current project first regardless of recency, because the one fact
+    // this box exists to show must not be scrolled out of it by a catalog
+    // longer than the box is tall.
+    let mut rows: Vec<&jod_core::projects::Project> = app.projects.iter().collect();
+    rows.sort_by_key(|p| current.map(|(name, _)| &p.name != name).unwrap_or(true));
+
+    let lines: Vec<Line> = rows
+        .iter()
+        .map(|p| {
+            let is_current = current.is_some_and(|(name, _)| &p.name == name);
+            let marker = if is_current { " ▸ " } else { "   " };
+            Line::from(vec![
+                Span::styled(marker, fg(if is_current { GOOD } else { MUTED })),
+                Span::styled(
+                    cut(&p.name, inner.saturating_sub(3)),
+                    if is_current { bold(GOOD) } else { fg(AGENT) },
+                ),
+            ])
+        })
+        .collect();
+
+    f.render_widget(Paragraph::new(lines).block(block), area);
 }
 
 /// The panel when the terminal is too narrow to put it beside anything.
@@ -1664,6 +1769,23 @@ fn draw_keybar(f: &mut Frame, app: &App, area: Rect) {
 /// The permission mode leads it on every screen. What the next turn may do
 /// without asking changes while you are talking, and a setting you have to
 /// press a key to see is one you will be wrong about exactly when it matters.
+/// What the status row says about the microphone, if anything.
+///
+/// Carries the elapsed seconds while listening, for one reason: this is a
+/// toggle, so the failure mode it has and push-to-talk does not is a recorder
+/// left running because the second press never landed. A number climbing on
+/// screen is what makes that obvious rather than expensive.
+fn dictation_badge(app: &App) -> Option<String> {
+    match &app.dictation {
+        Dictation::Off => None,
+        Dictation::Listening { started_ms, .. } => Some(format!(
+            "● listening {} (Alt-V stop · Esc drop)",
+            short_duration(app.now_ms.saturating_sub(*started_ms))
+        )),
+        Dictation::Transcribing { .. } => Some("◌ transcribing".to_string()),
+    }
+}
+
 fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     if area.height == 0 {
         return;
@@ -1675,10 +1797,19 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         format!("{} · {}", ws.title(), app.count_for(ws))
     };
     let mut badge = String::new();
+    // First, and unconditionally. A live microphone is the one state on this
+    // row where not knowing has a cost outside the program, so it goes ahead
+    // of every other badge and never competes for the space.
+    if let Some(said) = dictation_badge(app) {
+        badge.push_str(&said);
+    }
     // The panel holds the context bar, but the panel is shut most of the time
     // and advice nobody can see is not advice — so the recommendation itself
     // rides the one row that is always on screen.
     if app.should_compact() {
+        if !badge.is_empty() {
+            badge.push_str(" · ");
+        }
         badge.push_str("⚠ compact");
     }
     // Endings that arrive while you are away have to survive until you look.
@@ -5702,6 +5833,146 @@ mod tests {
             "○",
             "the hollow glyph belongs to the one mode that cannot act"
         );
+    }
+
+    // ---- the project catalog ----
+
+    fn catalogued(name: &str) -> jod_core::projects::Project {
+        jod_core::projects::Project {
+            id: name.into(),
+            name: name.into(),
+            path: std::path::PathBuf::from(format!("/home/reljod/repo/{name}")),
+            remote: None,
+            aliases: Vec::new(),
+            state: jod_core::projects::State::Active,
+            colour: "cyan".into(),
+            notes: String::new(),
+            created_at_ms: 0,
+            last_touched_ms: 0,
+        }
+    }
+
+    fn with_catalog(names: &[&str], current: Option<(&str, How)>) -> App {
+        let mut a = app();
+        a.panel = true;
+        a.projects = names.iter().map(|n| catalogued(n)).collect();
+        a.current_project = current.map(|(n, how)| (n.to_string(), how));
+        a
+    }
+
+    #[test]
+    fn the_catalog_is_listed_in_the_panel() {
+        let a = with_catalog(&["tetris", "jod"], Some(("tetris", How::Inferred)));
+        let screen = rendered(&a, 140, 30);
+        assert!(screen.contains("projects"), "{screen}");
+        assert!(screen.contains("tetris"), "{screen}");
+        assert!(screen.contains("jod"), "{screen}");
+    }
+
+    /// The one fact the box exists for.
+    #[test]
+    fn the_current_project_is_marked() {
+        let a = with_catalog(&["tetris", "jod"], Some(("jod", How::Inferred)));
+        let screen = rendered(&a, 140, 30);
+        let marked = screen
+            .lines()
+            .find(|l| l.contains('▸') && l.contains("jod"))
+            .is_some();
+        assert!(marked, "the current project is not marked: {screen}");
+    }
+
+    /// A carried project is the one worth a glance before an agent starts, so
+    /// the box has to say it was carried rather than named.
+    #[test]
+    fn a_carried_project_says_so_on_the_box() {
+        let a = with_catalog(&["tetris"], Some(("tetris", How::Sticky)));
+        assert!(rendered(&a, 140, 30).contains("carried"));
+    }
+
+    #[test]
+    fn a_named_project_is_not_flagged_as_carried() {
+        let a = with_catalog(&["tetris"], Some(("tetris", How::Inferred)));
+        assert!(!rendered(&a, 140, 30).contains("carried"));
+    }
+
+    /// Collapsed still has to answer "which project am I in" — that is the
+    /// difference between collapsing the box and closing it.
+    /// Asserted against the catalog box rather than the whole screen: `jod` is
+    /// the program's own name and appears in the banner, so a screen-wide
+    /// search would be testing the wrong thing.
+    #[test]
+    fn a_collapsed_catalog_still_shows_the_current_project() {
+        let mut a = with_catalog(&["tetris", "zephyr"], Some(("tetris", How::Inferred)));
+        a.projects_open = false;
+        let screen = rendered(&a, 140, 30);
+        assert!(screen.contains("tetris"), "{screen}");
+        assert!(
+            !screen.contains("zephyr"),
+            "collapsed still listed the rest: {screen}"
+        );
+    }
+
+    #[test]
+    fn an_empty_catalog_says_how_to_fill_it() {
+        let a = with_catalog(&[], None);
+        assert!(rendered(&a, 140, 30).contains("no projects yet"));
+    }
+
+    /// The sessions list is how a running fleet is watched. A long catalog must
+    /// not push it off the panel.
+    #[test]
+    fn a_long_catalog_is_capped_at_a_third_of_the_panel() {
+        let mut a = app();
+        a.panel = true;
+        a.projects = (0..40)
+            .map(|i| catalogued(&format!("project-{i}")))
+            .collect();
+        let height = projects_height(&a, 30);
+        assert!(height <= 10, "the catalog took {height} of 30 rows");
+    }
+
+    /// Below a certain height there is no honest room for a third box, and
+    /// squeezing one in costs the sessions list its last row.
+    #[test]
+    fn a_short_panel_drops_the_catalog_rather_than_squeezing_it() {
+        let a = with_catalog(&["tetris"], None);
+        assert_eq!(projects_height(&a, 10), 0);
+    }
+
+    // ---- dictation ----
+
+    #[test]
+    fn a_live_microphone_is_on_the_always_visible_row() {
+        let mut a = app();
+        a.dictation = Dictation::Listening {
+            started_ms: 0,
+            backend: "arecord".into(),
+        };
+        a.now_ms = 3_000;
+        let screen = rendered(&a, 140, 24);
+        assert!(screen.contains("listening"), "{screen}");
+        assert!(screen.contains("Esc"), "no way out was offered: {screen}");
+    }
+
+    /// The failure a toggle has and push-to-talk does not: a recorder still
+    /// running because the second press never landed.
+    #[test]
+    fn the_listening_badge_counts_up_so_a_stuck_recorder_is_obvious() {
+        let mut a = app();
+        a.dictation = Dictation::Listening {
+            started_ms: 0,
+            backend: "arecord".into(),
+        };
+        a.now_ms = 75_000;
+        assert!(
+            dictation_badge(&a).is_some_and(|b| b.contains("1m15s")),
+            "the elapsed time is not shown"
+        );
+    }
+
+    #[test]
+    fn nothing_is_said_about_the_microphone_when_it_is_off() {
+        assert!(dictation_badge(&app()).is_none());
     }
 
     // ---- the right-hand panel ----

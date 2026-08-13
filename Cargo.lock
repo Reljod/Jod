@@ -1411,6 +1411,7 @@ dependencies = [
  "crossterm",
  "futures",
  "jod-core",
+ "jod-voice-core",
  "ratatui",
  "serde",
  "serde_json",
