@@ -44,11 +44,57 @@ use tokio::sync::mpsc;
 /// How long a harness gets to exit after being asked, before it is made to.
 const KILL_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// `0.1.0 (f4e4c72 2026-08-13)` — release, commit, commit date.
+///
+/// The same string, built the same way, that `jod --version` answers with:
+/// `CARGO_PKG_VERSION` from the workspace, then the two variables
+/// `build.rs` stamps on. The two binaries ship in one tarball and are looked
+/// up as siblings, so they have to name a build identically or the answer is
+/// worse than useless. → `cli/src/version.rs`
+const LONG_VERSION: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    " (",
+    env!("JOD_BUILD_ID"),
+    " ",
+    env!("JOD_BUILD_DATE"),
+    ")"
+);
+
+/// What `--help` prints.
+///
+/// Short on purpose. This is not a program anybody drives by hand — Jod writes
+/// the plan and starts the process — so the useful thing to say is what the one
+/// argument is and where it comes from, not a flag table.
+const USAGE: &str = "\
+jod-run — supervises one agent run and writes its events into SQLite.
+
+Usage:
+  jod-run <spawn.json>   supervise the run that plan describes
+  jod-run --version      print the version, with the commit it was built from
+  jod-run --help         print this
+
+Jod starts one of these per run, detached and in its own session, with the
+path to that run's `spawn.json`. The plan names the harness to launch, the
+database to write into, and the directory to work in. Nothing else is read
+from the command line, and there is no reason to start one by hand.
+";
+
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
-    let Some(plan_path) = std::env::args().nth(1).map(PathBuf::from) else {
-        eprintln!("usage: jod-run <spawn.json>");
-        return std::process::ExitCode::from(64);
+    let plan_path = match Invocation::of(std::env::args().nth(1)) {
+        Invocation::Version => {
+            println!("jod-run {LONG_VERSION}");
+            return std::process::ExitCode::SUCCESS;
+        }
+        Invocation::Help => {
+            print!("{USAGE}");
+            return std::process::ExitCode::SUCCESS;
+        }
+        Invocation::Usage => {
+            eprintln!("usage: jod-run <spawn.json>");
+            return std::process::ExitCode::from(64);
+        }
+        Invocation::Plan(path) => path,
     };
 
     match run(&plan_path).await {
@@ -58,6 +104,43 @@ async fn main() -> std::process::ExitCode {
             // exactly what that file is for.
             eprintln!("jod-run: {e}");
             std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+/// What the first argument means.
+///
+/// The bug this exists for: there was no such question. The first argument was
+/// turned straight into a `PathBuf` and handed to `std::fs::read`, so
+/// `jod-run --version` answered `reading "--version": No such file or
+/// directory` and exited 1 — the binary tried to *open* the flag.
+///
+/// Deliberately not a parser. `jod-run` is spawned by
+/// `core::runner::launch`, which hands it exactly one argument: an absolute
+/// path to the run's `spawn.json`. An absolute path cannot begin with `-`, so
+/// looking at the first argument and recognising four exact spellings changes
+/// nothing about any invocation that exists, while a real argument parser
+/// would have opinions about unknown flags, `--`, and repeated arguments that
+/// this program has never had. Everything that is not one of the four is still
+/// a path, including how it fails.
+///
+/// The four spellings are the ones `jod` accepts, because someone who learned
+/// them from the sibling binary will type them here.
+enum Invocation {
+    Plan(PathBuf),
+    Version,
+    Help,
+    /// Nothing to supervise.
+    Usage,
+}
+
+impl Invocation {
+    fn of(first: Option<String>) -> Invocation {
+        match first.as_deref() {
+            Some("--version" | "-V") => Invocation::Version,
+            Some("--help" | "-h") => Invocation::Help,
+            Some(path) => Invocation::Plan(PathBuf::from(path)),
+            None => Invocation::Usage,
         }
     }
 }
