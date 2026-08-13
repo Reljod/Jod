@@ -47,6 +47,7 @@ see BUG-13.
 | [BUG-17](#bug-17) | Medium | interrupt | Interrupt is unacknowledged for 4–6s, then reported as both `✓ done` and `✗ failed` |
 | [BUG-18](#bug-18) | Medium | interrupt | Every interrupt falsely warns the run "may still be writing", worded as a *start* failure |
 | [BUG-19](#bug-19) | Medium | fleet | An interrupted run reads `✗ failed` in the TUI but `killed` in `jod ls` and the database |
+| [BUG-20](#bug-20) | **High** | destructive UI | The "cannot be undone" dialog clips its own warning and hides what cancels |
 | [BUG-15](#bug-15) | **High** | mentions | `@` in a non-git directory is ~95% `node_modules` noise; source is invisible |
 | [BUG-16](#bug-16) | Medium | mentions | `@` clips paths from the right, so six different files render identically |
 
@@ -162,8 +163,17 @@ same bug showing through from the harness's side.
 jod tui --cwd "$PWD"
 ```
 
-I confirmed this records correctly:
-`9ad3d21f|/…/worktrees/tui-dogfood-tetris/tetris|reply with the word ok`.
+Verified for **both** paths — a main-chat turn (`⏎`) and a background
+delegation (`Ctrl-B`) both inherit it:
+
+```
+cbe879eb|/…/worktrees/tui-dogfood-tetris/tetris|echo hello from a delegate   <-- Ctrl-B
+9ad3d21f|/…/worktrees/tui-dogfood-tetris/tetris|reply with the word ok       <-- Enter
+```
+
+So `--cwd` is a complete workaround until the default is fixed. Worth telling
+users now: **launch `jod tui` with `--cwd "$PWD"`, or your agents are working
+in your home directory.**
 
 **Why this is Critical rather than High.** The failure is silent in both
 directions. The agent believes it succeeded, Jod's records agree (`✓ done`,
@@ -800,6 +810,74 @@ variant (or make it `Invalid`) so a stop failure stops claiming to be a spawn
 failure. Only warn about "may still be writing" when processes genuinely
 survive the grace period, which is a condition worth checking rather than
 assuming.
+
+---
+
+<a name="bug-20"></a>
+## BUG-20 — The irreversible-action dialog truncates its own warning and its own instructions · **High** · OPEN
+
+Of every place in this program to clip text, this is the worst one.
+
+**Repro:** `/forget tetris` (or any `Confirm` overlay — hooks, schedules, works
+all use it).
+
+**Actual, at 200 columns — the whole dialog:**
+
+```
+┌ this cannot be undo┐
+│                    │
+│  forget tetris?    │
+│                    │
+└ y confirms · anythi┘
+```
+
+The warning reads **"this cannot be undo"**. The instructions read
+**"y confirms · anythi"** — the user is not told what cancels, and is left
+looking at a half-word on a dialog that destroys data.
+
+**Root cause.** `cli/src/tui/ui.rs:2489` sizes the panel from the question
+alone, ignoring its own border titles:
+
+```rust
+let panel = centred(f.area(), (question.chars().count() + 8) as u16, 5);
+```
+
+For `forget tetris?` that is 14 + 8 = **22 columns**. The titles set six lines
+later are:
+
+- `" this cannot be undone "` — **23** chars
+- `" y confirms · anything else cancels "` — **36** chars
+
+Both exceed 22, so ratatui clips them at the border. **The severity scales
+inversely with the name being destroyed**: the shorter the thing you are
+deleting, the more of the warning disappears. `/forget x` gives a 17-column
+box, cutting the warning to `this canno`.
+
+There is plenty of room — this is a 200-column terminal. Nothing is competing
+for the space.
+
+**Why the test suite missed it — the fourth instance of this pattern, and the
+subtlest.** `ui.rs:6938`:
+
+```rust
+a.overlay = Overlay::Confirm { verb: "delete".into(), what: "pr-opened".into() };
+let screen = rendered(&a, 100, 24);
+assert!(screen.contains("cannot be undone"));
+assert!(screen.contains("y confirms"));
+```
+
+`"delete pr-opened?"` is 17 chars → a 25-column box, wide enough for the
+23-char title, so the first assertion passes. The second asserts only
+`"y confirms"` — **ten characters**, which survive the clip that eats the
+remaining twenty-six. The assertion is a prefix short enough to be true of the
+broken rendering. A longer fixture name, or asserting the *whole* footer, would
+have failed.
+
+**Suggested fix.** Size the panel to
+`max(question, title, footer) + padding`, and assert the **complete** footer
+string in the test. The same "content-derived width ignores the chrome" bug
+should be swept for elsewhere — this is the fourth width defect in the report
+(BUG-3, BUG-11, BUG-16, BUG-20).
 
 ---
 
