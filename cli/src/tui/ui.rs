@@ -199,6 +199,303 @@ const WORDMARK: [Glyph; 6] = [BIG_J, BIG_O, BIG_D, BIG_SPACE, BIG_A, BIG_I];
 /// How wide the assembled wordmark is: six blocks and five single-column gaps.
 const BANNER_WIDTH: u16 = 6 + 1 + 6 + 1 + 6 + 1 + 2 + 1 + 6 + 1 + 6;
 
+// ---- the mascot ---------------------------------------------------------
+
+/// The mascot's palette, and the one place in this file where colour is
+/// decoration rather than state.
+///
+/// Palette indices rather than the sixteen named colours, because orange is not
+/// one of the sixteen: `LightRed` is what a terminal calls a brighter red, and
+/// an orange head with red highlights needs two warms that are actually
+/// different hues. These are the xterm-256 slots, the one extension every
+/// terminal anybody runs a TUI in has had for twenty years.
+///
+/// The head is *filled* rather than outlined, which is what lets the eyes and
+/// teeth be white: they sit on a painted orange face rather than on the
+/// terminal's own background, so they read on a light theme as well as a dark
+/// one. The cost is paid under `NO_COLOR`, where the fill flattens to one
+/// silhouette — so every feature is cut with a half-block as well as coloured.
+/// The crown crenellates, the pupils, nose and fangs are notches out of an
+/// otherwise solid head, and the chin is a row of points: with the colour off
+/// the drawing is still a spiky head over a small body.
+const MANE: Color = Color::Indexed(208);
+const SPIKE: Color = Color::Indexed(196);
+const FACE: Color = Color::Indexed(215);
+const EYE: Color = Color::Indexed(231);
+const PUPIL: Color = Color::Indexed(233);
+const MAW: Color = Color::Indexed(88);
+const FUR: Color = Color::Indexed(41);
+
+/// Columns of air between the lion and the lettering it stands next to.
+const LOCKUP_GAP: u16 = 2;
+
+/// One pose of the mascot: a grid of glyphs, and a stencil that says what
+/// colour each of them is.
+///
+/// Two parallel grids rather than a colour attached to each glyph, because on a
+/// filled drawing almost every cell is `█` — the character cannot say whether
+/// it is mane, cheek, eye or nose, only its position can. The stencil letters
+/// are `f` for the mane, `r` for the red spike tips, `c` for the face, `n` for
+/// the nose, `w` for the white of an eye or a tooth, `y` for a pupil, `m` for
+/// the inside of an open mouth, `g` for the green body, and `.` for a cell that
+/// takes no colour at all.
+struct Pose {
+    art: &'static [&'static str],
+    ink: &'static [&'static str],
+}
+
+impl Pose {
+    /// Every row is this wide — a test holds it — so row zero can answer for
+    /// all of them.
+    fn width(&self) -> u16 {
+        self.art[0].chars().count() as u16
+    }
+
+    fn height(&self) -> u16 {
+        self.art.len() as u16
+    }
+}
+
+/// Jod's mascot: a small green lion, sitting, under a spiky mane several sizes
+/// too big for it.
+///
+/// Drawn in the same block characters as the wordmark so the two read as one
+/// lockup rather than as clip-art dropped beside a logo. Only block elements
+/// appear in the art — box-drawing and geometric-shape codepoints are East
+/// Asian Ambiguous, and a terminal that renders one of them double-width would
+/// tear a hole in a picture whose rows all have to be the same width.
+///
+/// **Four rows, against the wordmark's five.** The lion is the companion mark
+/// and the lettering is the name, so the lion is the smaller of the two: at any
+/// larger it stops standing *beside* the word and starts standing *over* it. A
+/// row of the terminal is worth two columns, so four rows is a drawing eight
+/// units tall — enough for a crown, a pair of eyes, a muzzle and a body, and
+/// nothing spare. Every feature below is therefore one row or half of one.
+///
+/// The mane alternates a tall red spike with a short orange one, because a
+/// single row of even points reads as a saw blade and it is the *ragged* edge
+/// that reads as fur. The eyes are three columns wide out of eleven — far too
+/// big for a real lion, which is the entire point — and the body is a green nub
+/// with a tail, because a body drawn to scale reads as a lion and a body drawn
+/// far too small reads as a cub, which is the one of the two that is cute.
+///
+/// The twelfth column is blank in every pose: it is where the scratching paw
+/// goes, and a grid that grew a column when the paw came out would shove the
+/// wordmark sideways four times a second.
+const SITTING: Pose = Pose {
+    art: &[
+        "█▄█▄█▄█▄█▄█ ",
+        "███▀███▀███ ",
+        "████▄▀▄████ ",
+        "█▀█▀▟█▙▗▄▖█ ",
+    ],
+    ink: &[
+        "rfrfrfrfrfr.",
+        "ffwywcwywff.",
+        "ffccwnwccff.",
+        "rfrfggggggr.",
+    ],
+};
+
+/// Eyes shut. At this size a closed eye has nowhere to put a lid, so the whites
+/// and the pupils simply go and the face closes over them — which is what a
+/// blink looks like once a head is four rows tall. Two ticks out of forty-eight
+/// is half a second: long enough to see, short enough not to look like the
+/// mascot has fallen asleep.
+const BLINKING: Pose = Pose {
+    art: &[
+        "█▄█▄█▄█▄█▄█ ",
+        "███████████ ",
+        "████▄▀▄████ ",
+        "█▀█▀▟█▙▗▄▖█ ",
+    ],
+    ink: &[
+        "rfrfrfrfrfr.",
+        "ffcccccccff.",
+        "ffccwnwccff.",
+        "rfrfggggggr.",
+    ],
+};
+
+/// Mid-roar: the mane puffs — every notch in the crown fills in, so the head
+/// gains half a row of height without gaining a row of grid — the eyes screw
+/// shut, and the muzzle opens onto a dark throat with a fang at each side.
+const ROARING: Pose = Pose {
+    art: &[
+        "███████████ ",
+        "███████████ ",
+        "███▄███▄███ ",
+        "█▀█▀▟█▙▗▄▖█ ",
+    ],
+    ink: &[
+        "rfrfrfrfrfr.",
+        "ffcccccccff.",
+        "ffcwmmmwcff.",
+        "rfrfggggggr.",
+    ],
+};
+
+/// Scratching an itch, paw down at the jaw, with the eye on that side screwed
+/// shut — the squint is what says the paw belongs to this lion rather than
+/// being a shape parked next to it.
+const SCRATCH_LOW: Pose = Pose {
+    art: &[
+        "█▄█▄█▄█▄█▄█ ",
+        "███▀███████ ",
+        "████▄▀▄████▟",
+        "█▀█▀▟█▙▗▄▖█ ",
+    ],
+    ink: &[
+        "rfrfrfrfrfr.",
+        "ffwywccccff.",
+        "ffccwnwccffg",
+        "rfrfggggggr.",
+    ],
+};
+
+/// The same scratch, paw up at the cheek. Alternating the two is the whole
+/// animation: one row of travel is all a scratch needs to read as motion.
+const SCRATCH_HIGH: Pose = Pose {
+    art: &[
+        "█▄█▄█▄█▄█▄█ ",
+        "███▀███████▟",
+        "████▄▀▄████ ",
+        "█▀█▀▟█▙▗▄▖█ ",
+    ],
+    ink: &[
+        "rfrfrfrfrfr.",
+        "ffwywccccffg",
+        "ffccwnwccff.",
+        "rfrfggggggr.",
+    ],
+};
+
+/// What one stencil letter means.
+fn ink(key: char) -> Style {
+    match key {
+        'f' => bold(MANE),
+        'r' => bold(SPIKE),
+        'c' => bold(FACE),
+        // The nose is the mane's orange against the face's lighter one, which is
+        // the only pair here that has to hold at one cell of separation.
+        'n' => bold(MANE),
+        'w' => bold(EYE),
+        'y' => fg(PUPIL),
+        'm' => fg(MAW),
+        'g' => bold(FUR),
+        _ => Style::default(),
+    }
+}
+
+/// Colour one row of art through its stencil, one span per run of a colour.
+///
+/// The spans borrow out of the `'static` art rather than building strings, so
+/// drawing a pose allocates one small vector per row and nothing else. Runs
+/// rather than a span per cell for the same reason: a span costs a style write,
+/// and thirteen of them per row times twelve rows times four frames a second is
+/// a lot of escape sequences for a picture that changes colour eight times.
+fn mascot_spans(art: &'static str, stencil: &str, into: &mut Vec<Span<'static>>) {
+    // The ink key this run is drawn in, and the byte it started at.
+    let mut run: Option<(char, usize)> = None;
+    for ((at, _), key) in art.char_indices().zip(stencil.chars()) {
+        match run {
+            Some((was, _)) if was == key => {}
+            _ => {
+                if let Some((was, from)) = run {
+                    into.push(Span::styled(&art[from..at], ink(was)));
+                }
+                run = Some((key, at));
+            }
+        }
+    }
+    if let Some((was, from)) = run {
+        into.push(Span::styled(&art[from..], ink(was)));
+    }
+}
+
+/// Which drawing of the mascot this tick gets.
+///
+/// The mascot is the only thing on a fresh screen that can say the fleet is
+/// working, so it earns its place twice: while anything is running it scratches
+/// at the itch, and otherwise it sits, blinks, and roars once every twelve
+/// seconds. Ticks are quarter-seconds, so every number below is one.
+///
+/// Deliberately a pure function of the tick rather than a stored pose index.
+/// The splash is not always on screen, and an index that advanced on render
+/// would freeze mid-scratch the moment you opened a workspace and pick up from
+/// there minutes later.
+///
+/// This costs nothing the TUI was not already paying: `event_loop` redraws on
+/// every tick regardless, for the spinner and the elapsed clock, and ratatui
+/// diffs the frame it built against the last one — so the ten seconds the
+/// mascot spends sitting perfectly still write no bytes to the terminal at all.
+fn mascot_pose(app: &App) -> &'static Pose {
+    if app.busy || app.running() > 0 {
+        return match app.tick % 8 {
+            2 | 3 => &SCRATCH_HIGH,
+            6 | 7 => &SITTING,
+            _ => &SCRATCH_LOW,
+        };
+    }
+    match app.tick % 48 {
+        42 | 43 => &BLINKING,
+        44..=47 => &ROARING,
+        _ => &SITTING,
+    }
+}
+
+/// The lion standing to the left of `letters`, or `None` if the two will not
+/// fit side by side in `width`.
+///
+/// Beside rather than above, because stacking them costs the height of both and
+/// this screen has an input box to seat underneath. Side by side the whole
+/// lockup is only as tall as the taller half, which is the lettering.
+///
+/// The two are aligned on a shared ground line rather than centred on each
+/// other: the lion has feet and the letters have a baseline, and a lion floated
+/// half a row off the bottom reads as a sticker rather than as something
+/// standing next to a word. The lettering takes the middle of whatever is left,
+/// which matters only in the narrow fallback where it is a single line.
+fn lockup(pose: &'static Pose, letters: &[String], width: u16) -> Option<Vec<Line<'static>>> {
+    let letters_wide = letters.iter().map(|l| l.chars().count()).max().unwrap_or(0) as u16;
+    if width < pose.width() + LOCKUP_GAP + letters_wide {
+        return None;
+    }
+    let rows = pose.height().max(letters.len() as u16);
+    let lion_top = rows - pose.height();
+    let letters_top = (rows - letters.len() as u16) / 2;
+    Some(
+        (0..rows)
+            .map(|row| {
+                let mut spans: Vec<Span<'static>> = Vec::with_capacity(10);
+                match row
+                    .checked_sub(lion_top)
+                    .and_then(|i| pose.art.get(i as usize).zip(pose.ink.get(i as usize)))
+                {
+                    Some((art, stencil)) => mascot_spans(art, stencil, &mut spans),
+                    // Above the crown of a lion shorter than the lettering.
+                    None => spans.push(Span::raw(" ".repeat(pose.width() as usize))),
+                }
+                spans.push(Span::raw(" ".repeat(LOCKUP_GAP as usize)));
+                // Padded out to the full width even where there is no letter,
+                // because the caller centres the block one line at a time: rows
+                // of different lengths would each be centred on their own and
+                // the lion would come out with its crown offset from its chin.
+                let text = row
+                    .checked_sub(letters_top)
+                    .and_then(|i| letters.get(i as usize))
+                    .map_or("", String::as_str);
+                spans.push(Span::styled(text.to_string(), bold(USER)));
+                match letters_wide as usize - text.chars().count() {
+                    0 => {}
+                    pad => spans.push(Span::raw(" ".repeat(pad))),
+                }
+                Line::from(spans)
+            })
+            .collect(),
+    )
+}
+
 fn banner() -> Vec<String> {
     (0..5)
         .map(|row| {
@@ -267,14 +564,30 @@ fn draw_splash(f: &mut Frame, app: &App, area: Rect) -> (usize, Rect) {
     // Big lettering is the first thing to go. Below its width it would be
     // truncated mid-glyph, which reads as a broken screen rather than a logo.
     let art = area.width >= BANNER_WIDTH && area.height >= 11;
-    let mut head: Vec<Line> = if art {
+
+    // The mark, in the largest form the screen can seat: the lion beside the
+    // block lettering, then the lettering on its own, then the lion beside a
+    // plain "Jod AI" on a terminal too narrow for block letters at all, then
+    // that name by itself. The mascot goes before the lettering does at every
+    // rung, because the lettering is what says which program you launched.
+    //
+    // The six rows a lockup has to leave behind are the blank and the caption
+    // under it, the row of air, and the three-row input box — a logo that has
+    // pushed the box off the bottom has cost more than a mascot is worth.
+    let pose = mascot_pose(app);
+    let seats = |rows: &Vec<Line>| area.height >= rows.len() as u16 + 6;
+    let lettering = || -> Vec<Line<'static>> {
         banner()
             .into_iter()
             .map(|row| Line::from(Span::styled(row, bold(USER))))
             .collect()
-    } else {
-        vec![Line::from(Span::styled("Jod AI", bold(USER)))]
     };
+    let mut head: Vec<Line> = lockup(pose, &banner(), area.width)
+        .filter(seats)
+        .or_else(|| art.then(lettering).filter(seats))
+        .or_else(|| lockup(pose, &["Jod AI".to_string()], area.width).filter(seats))
+        .unwrap_or_else(|| vec![Line::from(Span::styled("Jod AI", bold(USER)))]);
+
     if area.height >= head.len() as u16 + 5 {
         head.push(Line::from(""));
         head.push(Line::from(Span::styled(
@@ -282,6 +595,7 @@ fn draw_splash(f: &mut Frame, app: &App, area: Rect) -> (usize, Rect) {
             fg(MUTED),
         )));
     }
+
     let head_height = head.len() as u16;
 
     let (top, box_) = if anchored {
@@ -3502,6 +3816,184 @@ mod tests {
         let screen = rendered(&app(), 30, 14);
         assert!(screen.contains("Jod AI"), "{screen}");
         assert!(screen.lines().all(|l| l.chars().count() <= 30), "{screen}");
+    }
+
+    /// Every drawing the mascot has, so a test can hold all of them to the
+    /// same shape at once.
+    const POSES: [(&str, &Pose); 5] = [
+        ("sitting", &SITTING),
+        ("blinking", &BLINKING),
+        ("roaring", &ROARING),
+        ("scratch-low", &SCRATCH_LOW),
+        ("scratch-high", &SCRATCH_HIGH),
+    ];
+
+    /// The mascot is the brand, so it appears on the screen the brand is for —
+    /// standing beside the lettering, not stacked over it. Stacked, the lockup
+    /// costs the height of both and the input box pays for it.
+    #[test]
+    fn a_new_session_shows_the_mascot_beside_the_wordmark() {
+        let screen = rendered(&app(), 100, 24);
+        for row in SITTING.art {
+            assert!(
+                screen.contains(row.trim_end()),
+                "mascot row missing {row:?}:\n{screen}"
+            );
+        }
+        // Beside means one screen row holds both, in that order. The lion is
+        // the shorter of the two and sits on the baseline, so its crown lands
+        // on the wordmark's second row.
+        let crown = SITTING.art[0].trim_end();
+        let together = screen
+            .lines()
+            .find(|line| line.contains(crown))
+            .expect("the crown");
+        let lion = together.find(crown).expect("the mane");
+        let letters = together
+            .find(banner()[1].trim_end())
+            .expect("the wordmark on the same row");
+        assert!(
+            lion < letters,
+            "the lion stands to the left of the lettering:\n{together}"
+        );
+    }
+
+    /// The lion is shorter than the lettering, so the two share a ground line
+    /// rather than a centre: feet level with the baseline, and the blank row
+    /// the lion does not fill is above its crown, not under its paws. Centred
+    /// instead, it would float half a row off the bottom and read as a sticker
+    /// stuck beside a word.
+    #[test]
+    fn the_lion_stands_on_the_lettering_s_baseline() {
+        let rows = lockup(&SITTING, &banner(), 100).expect("a lockup at 100 columns");
+        assert_eq!(
+            rows.len(),
+            banner().len(),
+            "the lockup is as tall as the lettering and no taller"
+        );
+        let flat =
+            |line: &Line| -> String { line.spans.iter().map(|s| s.content.as_ref()).collect() };
+        assert!(
+            flat(&rows[0]).starts_with(&" ".repeat(SITTING.width() as usize)),
+            "the spare row is above the crown: {:?}",
+            flat(&rows[0])
+        );
+        assert!(
+            flat(rows.last().expect("a last row")).starts_with(SITTING.art[SITTING.art.len() - 1]),
+            "and the paws are on the bottom row: {:?}",
+            flat(rows.last().expect("a last row"))
+        );
+    }
+
+    /// Twenty-four rows is the smallest terminal anybody calls standard, and
+    /// eighty columns the narrowest. Both halves of the mark have to seat on
+    /// one, with the caption and the input box under them.
+    #[test]
+    fn the_mascot_fits_the_smallest_terminal_worth_calling_standard() {
+        let screen = rendered(&app(), 80, 24);
+        assert!(screen.contains(SITTING.art[2]), "the muzzle:\n{screen}");
+        assert!(screen.contains(&banner()[0]), "the wordmark:\n{screen}");
+        assert!(screen.contains("you"), "and somewhere to type:\n{screen}");
+    }
+
+    /// The lion costs twelve columns and two of air, and on the band of widths
+    /// that seats the block lettering but not both, the lettering is what
+    /// survives: it is the thing that says what you launched.
+    #[test]
+    fn the_mascot_is_the_first_thing_a_narrow_terminal_drops() {
+        let screen = rendered(&app(), 50, 20);
+        assert!(
+            !screen.contains(SITTING.art[2]),
+            "no room for a muzzle:\n{screen}"
+        );
+        assert!(
+            screen.contains(&banner()[0]),
+            "the wordmark stays:\n{screen}"
+        );
+        assert!(screen.contains("you"), "and somewhere to type:\n{screen}");
+    }
+
+    /// Twelve columns is a far cheaper logo than the thirty-seven the block
+    /// lettering needs, so a terminal too narrow for the wordmark still gets a
+    /// mascot beside "Jod AI" — as long as it is tall enough to seat one.
+    #[test]
+    fn the_mascot_survives_a_terminal_too_narrow_for_the_wordmark() {
+        let screen = rendered(&app(), 30, 20);
+        assert!(screen.contains("Jod AI"), "{screen}");
+        assert!(screen.contains(SITTING.art[2]), "the face:\n{screen}");
+        assert!(screen.lines().all(|l| l.chars().count() <= 30), "{screen}");
+    }
+
+    /// Every row of every frame the same width, and a stencil cell for every
+    /// glyph. Miss either and the mane stops lining up with the chin the moment
+    /// the thing is centred — or a row comes out in the wrong colour, which is
+    /// the failure that renders fine in a test that only reads text.
+    #[test]
+    fn every_mascot_pose_is_a_rectangle_with_a_stencil_to_match() {
+        let (_, first) = POSES[0];
+        for (name, frame) in POSES {
+            assert_eq!(
+                (frame.width(), frame.height()),
+                (first.width(), first.height()),
+                "{name} is a different size, so the lockup would jump four times a second"
+            );
+            assert_eq!(
+                frame.art.len(),
+                frame.ink.len(),
+                "{name} has a stencil of the wrong length"
+            );
+            for (art, stencil) in frame.art.iter().zip(frame.ink) {
+                assert_eq!(
+                    art.chars().count(),
+                    frame.width() as usize,
+                    "{name} row {art:?} is not {} columns",
+                    frame.width()
+                );
+                assert_eq!(
+                    stencil.chars().count(),
+                    art.chars().count(),
+                    "{name} stencil {stencil:?} does not cover {art:?}"
+                );
+            }
+        }
+    }
+
+    /// The mascot is the only thing on a fresh screen that can say the fleet is
+    /// busy, so a running agent has to change what it is doing. Two tells: a
+    /// paw appears in the column the idle lion leaves blank, and the eye on
+    /// that side screws shut.
+    #[test]
+    fn a_running_agent_sets_the_mascot_scratching() {
+        // The whole muzzle row, not the `▟` alone: that glyph is also a haunch
+        // of the body, so it is on screen in every pose.
+        let paw = SCRATCH_LOW.art[2].trim_end();
+        let both_eyes = SITTING.art[1].trim_end();
+        let mut a = app();
+        let idle = rendered(&a, 100, 24);
+        assert!(!idle.contains(paw), "an idle lion scratches nothing");
+        assert!(idle.contains(both_eyes), "and looks straight at you");
+
+        a.agents = vec![agent_line("aaa11111", "port the parser", "running")];
+        let screen = rendered(&a, 100, 24);
+        assert!(screen.contains(paw), "a paw up at the itch:\n{screen}");
+        assert!(
+            !screen.contains(both_eyes),
+            "and a squint on the side it scratches:\n{screen}"
+        );
+    }
+
+    /// Four ticks in every forty-eight, which is a roar every twelve seconds.
+    /// Driven by the tick rather than by a stored index, so the frame is a
+    /// function of the clock and a test can simply wind it forward.
+    #[test]
+    fn the_mascot_roars_on_a_schedule_of_its_own() {
+        let mut a = app();
+        a.tick = 45;
+        let screen = rendered(&a, 100, 24);
+        assert!(
+            screen.contains(ROARING.art[2].trim_end()),
+            "an open mouth and two fangs:\n{screen}"
+        );
     }
 
     /// The completion popup grows upwards out of the input box and the command

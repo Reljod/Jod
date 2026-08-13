@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import type { World } from "../state/world";
 import type { HarnessInfo } from "../types";
+import { Mascot } from "./Mascot";
 
 export type ViewMode = "tactical" | "timeline";
 
@@ -50,7 +51,7 @@ export function TopBar({
   return (
     <header className="topbar">
       <div className="brand">
-        <span className="mark">◈</span>
+        <Mascot size={16} busy={report.running > 0} />
         <span className="wordmark">JOD</span>
         <span className="sub">TACTICAL</span>
       </div>
