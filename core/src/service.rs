@@ -2208,6 +2208,128 @@ mod tests {
         );
     }
 
+    /// The regression this whole cap exists to fix: 8 agents took a 4-core box
+    /// to a load of 60, because nothing on the `spawn_agent_in` path — the one
+    /// seam the TUI and the API both funnel through — ever consulted a core
+    /// count. With the cap set to 2, a third concurrent spawn must not start a
+    /// third process; it must sit queued until one of the first two ends.
+    ///
+    /// Stands up fake `claude` and `jod-run` binaries under `JOD_CLAUDE_BIN`
+    /// and `JOD_SUPERVISOR_BIN` — the same override discovery.rs already
+    /// supports for pointing at a real install — so this exercises the actual
+    /// launch path (`runner::launch`, `proc::spawn_detached`, a real process
+    /// group) rather than asserting a config value is merely read.
+    #[tokio::test]
+    async fn a_spawn_past_the_cap_queues_instead_of_launching() {
+        let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let dir = scratch("cap");
+
+        // A `claude` that discovery can find and `runner::launch` can exec.
+        let claude_bin = dir.join("claude");
+        std::fs::write(&claude_bin, "#!/bin/sh\nexit 0\n").unwrap();
+        // A `jod-run` stand-in: it holds its process group open for two
+        // seconds, standing in for a harness actually doing work, so a slot
+        // it occupies stays occupied long enough for the assertions below to
+        // land inside that window rather than racing it.
+        let supervisor_bin = dir.join("jod-run");
+        std::fs::write(&supervisor_bin, "#!/bin/sh\nsleep 2\n").unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&claude_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+            std::fs::set_permissions(&supervisor_bin, std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+        }
+
+        let saved_home = std::env::var("JOD_HOME").ok();
+        let saved_claude = std::env::var("JOD_CLAUDE_BIN").ok();
+        let saved_supervisor = std::env::var("JOD_SUPERVISOR_BIN").ok();
+        let saved_cap = std::env::var("JOD_MAX_CONCURRENT_AGENTS").ok();
+        std::env::set_var("JOD_HOME", &dir);
+        std::env::set_var("JOD_CLAUDE_BIN", &claude_bin);
+        std::env::set_var("JOD_SUPERVISOR_BIN", &supervisor_bin);
+        std::env::set_var("JOD_MAX_CONCURRENT_AGENTS", "2");
+
+        // A file-backed store, not `Store::in_memory()`: `runner::launch`
+        // needs a `db_path` to hand the supervisor, and an in-memory store's
+        // `path()` is `None` — which would fail every launch before it ever
+        // reached a process, and this test would queue nothing because
+        // nothing would ever be occupying a slot.
+        let store = std::sync::Arc::new(Store::open(&dir.join("jod.db")).unwrap());
+        let jod = Jod::with_store(store.clone());
+
+        let first = jod.spawn_agent(request("first")).await;
+        let second = jod.spawn_agent(request("second")).await;
+
+        // Restore the environment before any assertion can fail this test —
+        // a panic must not leave the rest of the suite pointed at a scratch
+        // `JOD_HOME` or a fake harness.
+        macro_rules! restore_env {
+            () => {
+                match saved_home.clone() {
+                    Some(v) => std::env::set_var("JOD_HOME", v),
+                    None => std::env::remove_var("JOD_HOME"),
+                }
+                match saved_claude.clone() {
+                    Some(v) => std::env::set_var("JOD_CLAUDE_BIN", v),
+                    None => std::env::remove_var("JOD_CLAUDE_BIN"),
+                }
+                match saved_supervisor.clone() {
+                    Some(v) => std::env::set_var("JOD_SUPERVISOR_BIN", v),
+                    None => std::env::remove_var("JOD_SUPERVISOR_BIN"),
+                }
+                match saved_cap.clone() {
+                    Some(v) => std::env::set_var("JOD_MAX_CONCURRENT_AGENTS", v),
+                    None => std::env::remove_var("JOD_MAX_CONCURRENT_AGENTS"),
+                }
+            };
+        }
+
+        let first = match first {
+            Ok(a) => a,
+            Err(e) => {
+                restore_env!();
+                panic!("the first spawn, well under the cap, must launch: {e:?}");
+            }
+        };
+        let second = match second {
+            Ok(a) => a,
+            Err(e) => {
+                restore_env!();
+                panic!("the second spawn, exactly at the cap, must launch: {e:?}");
+            }
+        };
+        assert!(first.pid.is_some(), "a launched run has a pid");
+        assert!(second.pid.is_some(), "a launched run has a pid");
+
+        // The third spawn is past the cap. Race it against a timeout well
+        // inside the fake supervisor's 2-second lifetime: if the cap did
+        // nothing, `spawn_agent` returns almost immediately and this fails.
+        let jod_for_third = jod.clone();
+        let mut third_task =
+            tokio::spawn(async move { jod_for_third.spawn_agent(request("third")).await });
+        let raced =
+            tokio::time::timeout(std::time::Duration::from_millis(700), &mut third_task).await;
+        if raced.is_ok() {
+            restore_env!();
+            panic!(
+                "a third spawn on a cap of two must still be queued 700ms in, \
+                 while both slots are held by a process that sleeps for 2s; \
+                 instead it returned: {raced:?}"
+            );
+        }
+
+        // It must still get its turn once a slot frees — queued, not lost.
+        let third =
+            tokio::time::timeout(std::time::Duration::from_secs(5), third_task).await;
+        restore_env!();
+        let third = third
+            .expect("the queued spawn must eventually get a slot, not hang forever")
+            .expect("the spawning task must not panic")
+            .expect("the queued spawn must eventually succeed");
+        assert!(third.pid.is_some(), "the queued run must actually launch");
+    }
+
     // ---- runs populate conversations --------------------------------------
 
     fn request(prompt: &str) -> SpawnRequest {
