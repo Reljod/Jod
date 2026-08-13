@@ -75,12 +75,12 @@ by me. **PR open** = CI-green draft awaiting merge. **open** = nobody on it.
 
 | ID | Severity | Status | Area | One line |
 |---|---|---|---|---|
-| [BUG-14](#bug-14) | **Critical** | ½ **merged** #82 · #84 open | delegation | **The TUI ran every agent in `$HOME`** — work landed outside every root and the run was recorded `✓ done` |
+| [BUG-14](#bug-14) | **Critical** | **cwd fixed** #78 · card #84 open | delegation | **The TUI ran every agent in `$HOME`** — work landed outside every root and the run was recorded `✓ done` |
 | [BUG-1](#bug-1) | **Critical** | **merged** #82 | rendering | A fresh session hid *all* notice-only output — most slash commands rendered nothing |
 | [BUG-2](#bug-2) | **High** | **merged** #82 | delegation | `Ctrl-B` delegated with almost no confirmation; it looked like nothing happened |
 | [BUG-3](#bug-3) | **High** | PR open #86 | directory clarity | The directory picker's header is truncated, so you cannot tell which tree you are in |
 | [BUG-4](#bug-4) | **High** | **merged** #78 | directory clarity | The working directory appeared nowhere in the chat UI |
-| [BUG-5](#bug-5) | **High** | PR open #85 | projects | A project cannot be created or cited from the TUI at all |
+| [BUG-5](#bug-5) | **High** | **merged** #85 | projects | A project could not be created or cited from the TUI at all |
 | [BUG-6](#bug-6) | **High** | **merged** #81 | discoverability | The projects key was a silent no-op unless an undiscoverable panel was already open |
 | [BUG-7](#bug-7) | Medium | **merged** #81 | discoverability | `Shift-Tab` — the only way to reach projects/sessions/context — was undocumented |
 | [BUG-8](#bug-8) | ~~Medium~~ | **fixed** #75 | rendering | ~~Keymap overlay: key label collides with its description~~ |
@@ -94,8 +94,8 @@ by me. **PR open** = CI-green draft awaiting merge. **open** = nobody on it.
 | [BUG-19](#bug-19) | Medium | with an agent | fleet | An interrupted run reads `✗ failed` in the TUI but `killed` in `jod ls` and the database |
 | [BUG-20](#bug-20) | **High** | PR open #86 | destructive UI | The "cannot be undone" dialog clips its own warning and hides what cancels |
 | [BUG-21](#bug-21) | Medium | PR open #86 | diffs | The diff header's untruncated path pushes the promised `+N -M` counts off screen |
-| [BUG-15](#bug-15) | **High** | #83 rebased, **needs a human** | mentions | `@` in a non-git directory is ~95% `node_modules` noise; source is invisible |
-| [BUG-16](#bug-16) | Medium | #83 rebased, **needs a human** | mentions | `@` clips paths from the right, so six different files render identically |
+| [BUG-15](#bug-15) | **High** | **merged** #83 | mentions | `@` in a non-git directory was ~95% `node_modules` noise; source was invisible |
+| [BUG-16](#bug-16) | Medium | **merged** #83 | mentions | `@` clipped paths from the right, so six different files rendered identically |
 
 **Nothing is unclaimed except [BUG-10](#bug-10) and [BUG-12](#bug-12).** Check
 this column before starting; five findings have merged since the body text
@@ -1803,7 +1803,49 @@ as a bug. If someone sees a blank TUI in the wild, start here.
 
 ---
 
-## The one-shot, after the cwd fix — it works
+## The definitive one-shot, on merged `main`, with no workarounds
+
+This is the result the whole exercise was for, and it is now clean.
+
+**Setup:** `jod tui` launched inside an **empty directory**, with **no
+`--cwd`**, on `main` at `a6736ff` (i.e. with #78, #80, #81, #82, #83, #84, #85,
+#87 all merged). **One prompt. No follow-ups. No corrections.**
+
+**Result:** run `44461917`, `completed`, recorded against
+
+```
+/…/worktrees/tui-dogfood-tetris/tetris-final
+```
+
+— the directory I was standing in. On the tree this report opened against, the
+identical instruction produced `~/tetris` and a green check.
+
+**What it built**, verified independently rather than taken on trust:
+
+- `pnpm build` — clean, 5 modules, 75 ms.
+- `pnpm test` — **59 tests, 59 pass, 0 fail.** (My first run showed a failure;
+  that was *my* invocation — `node --test test/` treats `test` as a module.
+  The package's own `pnpm test` script is correct. Worth stating, because a
+  false failure reported here would have cost somebody an afternoon.)
+- Line-clear coverage is exhaustive: single/100, double/300, triple/500,
+  tetris/800-and-empties-the-well, scores multiplied by level, a lock that
+  completes no row scoring nothing, *a full row surrounded by gaps clearing
+  only itself*, and level rising every ten lines with scoring using the
+  **pre-clear** level.
+- **Played in Chrome:** move, rotate, hard drop, **hold** (swapped an O out and
+  a T in, both boxes updating), ghost piece, three-deep NEXT queue, score
+  advancing 0 → 108 → 140, pieces stacking correctly on an overhang rather
+  than falling through it. **Zero console errors.**
+
+**Run it:** `cd tetris-final && pnpm install && pnpm dev`.
+
+The friction that made the first attempt fail is gone: the splash names the
+directory you launched in, the delegate confirmation repeats it, and the work
+lands there.
+
+---
+
+## The earlier one-shot, before the fixes merged
 
 The point of the exercise: **can the TUI build a working classic Tetris in one
 shot?** With BUG-14's fix in the tree, yes.
