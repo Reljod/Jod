@@ -110,6 +110,11 @@ pub fn draw(f: &mut Frame, app: &App) -> usize {
             input = box_;
             height
         } else {
+            // The mascot goes on before the conversation is laid out, and takes
+            // its rows off the top: the transcript pages by what is left, so a
+            // band drawn over a viewport already measured would hide the last
+            // lines of the conversation underneath itself.
+            let column = draw_header(f, app, column);
             let parts = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([Constraint::Min(3), Constraint::Length(3)])
@@ -1261,6 +1266,109 @@ fn draw_splash(f: &mut Frame, app: &App, area: Rect) -> (usize, Rect) {
     let box_ = narrow(box_, 72);
     draw_input(f, app, box_);
     (top.height.max(1) as usize, box_)
+}
+
+// ---- the chat header ----------------------------------------------------
+
+/// Rows the header band costs: the mascot's four, and one of air under it so
+/// the transcript's top border does not land on the lion's paws.
+const HEADER: u16 = 5;
+
+/// The shortest chat column that seats the band and still leaves a
+/// conversation worth reading: the band, the three-row input box, and eight
+/// rows of transcript inside its own borders. Under that the conversation is
+/// what the screen is for and the lion goes — the same order of sacrifice the
+/// splash makes when it drops the mascot before the lettering.
+const HEADER_SEATS: u16 = HEADER + 3 + 8;
+
+/// ...and the narrowest. Fourteen of those columns are the lion and its gap,
+/// and the identity line is thirty-odd before it starts eliding: below this the
+/// band would cost four rows to print `Claude Code · …`.
+const HEADER_FITS: u16 = 48;
+
+/// The band over the conversation: the mascot, and three lines saying which
+/// build you launched, who is answering, and what he is doing about it.
+/// Returns what is left of `area` underneath it.
+///
+/// The mascot used to live on the splash alone, which put it on screen exactly
+/// while nothing was happening and took it away the moment work started — the
+/// one time a mascot has something to say. Over the transcript it stays for the
+/// whole session and scratches through every turn, so the work on screen reads
+/// as *his*: the lion is the one at the keyboard rather than a sticker on the
+/// welcome screen. The activity line sits directly under his chin for the same
+/// reason — a spinner belongs to a character, not to a chrome row.
+///
+/// The status bar states the same two facts on one row, and the overlap is
+/// deliberate rather than an oversight. The band is the first thing a short
+/// terminal drops; the bar is the row that is always there, on every workspace.
+/// Chrome that can vanish must never be the only place a fact is stated.
+fn draw_header(f: &mut Frame, app: &App, area: Rect) -> Rect {
+    if area.height < HEADER_SEATS || area.width < HEADER_FITS {
+        return area;
+    }
+    let parts = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(HEADER), Constraint::Min(3)])
+        .split(area);
+    f.render_widget(Paragraph::new(header_lines(app, area.width)), parts[0]);
+    parts[1]
+}
+
+/// The band's rows: the lion down the left, the text to the right of it.
+///
+/// The lion is one row taller than the text beside it, and the spare row goes
+/// *under* the last line rather than above the first — the opposite of the
+/// splash's lockup, and for the same reason. There the lion stood on the
+/// lettering's baseline; here it stands on the transcript's border, which is
+/// the ground line this block actually has.
+fn header_lines(app: &App, width: u16) -> Vec<Line<'static>> {
+    let pose = mascot_pose(app);
+    let room = width.saturating_sub(pose.width() + LOCKUP_GAP) as usize;
+    let text = [
+        header_name(room),
+        header_who(app, room),
+        header_doing(app, room),
+    ];
+    (0..pose.height() as usize)
+        .map(|row| {
+            let mut spans: Vec<Span<'static>> = Vec::with_capacity(10);
+            mascot_spans(pose.art[row], pose.ink[row], &mut spans);
+            spans.push(Span::raw(" ".repeat(LOCKUP_GAP as usize)));
+            if let Some(line) = text.get(row) {
+                spans.extend(line.iter().cloned());
+            }
+            Line::from(spans)
+        })
+        .collect()
+}
+
+/// Line one: the program, and the build of it that is running.
+///
+/// The version is here rather than anywhere else in the TUI because this is the
+/// only line that survives a thousand rows of scrollback, and "which build am I
+/// looking at" is the first question asked of a program that has just done
+/// something surprising. It is dropped whole rather than elided on a narrow
+/// band — half a version number is worse than none.
+fn header_name(room: usize) -> Vec<Span<'static>> {
+    const NAME: &str = "Jod AI";
+    let version = concat!(" v", env!("CARGO_PKG_VERSION"));
+    let mut spans = vec![Span::styled(cut(NAME, room), bold(USER))];
+    if room >= NAME.chars().count() + version.chars().count() {
+        spans.push(Span::styled(version, fg(MUTED)));
+    }
+    spans
+}
+
+/// Line two: who is answering — the harness and the model behind the replies.
+fn header_who(app: &App, room: usize) -> Vec<Span<'static>> {
+    vec![Span::styled(cut(&app.identity(), room), fg(MUTED))]
+}
+
+/// Line three: what he is doing about it, in the colour the status bar gives
+/// the same fact — amber while a turn is running, quiet once it is not.
+fn header_doing(app: &App, room: usize) -> Vec<Span<'static>> {
+    let colour = if app.busy { WARN } else { MUTED };
+    vec![Span::styled(cut(&app.activity(), room), fg(colour))]
 }
 
 /// At most `width` columns, centred in `area`.
@@ -5356,6 +5464,98 @@ mod tests {
         );
     }
 
+    /// A conversation with something in it, so the splash gives way to the
+    /// transcript and the header is what carries the mascot.
+    fn talking() -> App {
+        let mut a = app();
+        a.push(Entry::You("port the parser".into()));
+        a.push(Entry::Agent("on it".into()));
+        a
+    }
+
+    /// The mascot used to be on screen exactly while nothing was happening.
+    /// Over the conversation it stays for the whole session, which is the only
+    /// arrangement in which the work on screen can read as the lion's.
+    #[test]
+    fn the_mascot_stays_over_the_conversation_once_it_starts() {
+        let screen = rendered(&talking(), 100, 30);
+        for row in SITTING.art {
+            assert!(
+                screen.contains(row.trim_end()),
+                "mascot row missing {row:?}:\n{screen}"
+            );
+        }
+        assert!(screen.contains("port the parser"), "{screen}");
+        // Above it, not beside it: the crown comes before the first line of the
+        // conversation.
+        let crown = screen
+            .lines()
+            .position(|l| l.contains(SITTING.art[0].trim_end()))
+            .expect("the crown");
+        let said = screen
+            .lines()
+            .position(|l| l.contains("port the parser"))
+            .expect("the prompt");
+        assert!(crown < said, "the header sits over the transcript:\n{screen}");
+    }
+
+    /// Three lines beside him, each answering a different question: which build
+    /// is running, who is answering, and what he is doing about it.
+    #[test]
+    fn the_header_says_which_build_is_running_and_who_is_answering() {
+        let screen = rendered(&talking(), 100, 30);
+        let band = screen.lines().take(7).collect::<Vec<_>>().join("\n");
+        assert!(band.contains("Jod AI"), "{band}");
+        assert!(
+            band.contains(concat!("v", env!("CARGO_PKG_VERSION"))),
+            "the build that is running:\n{band}"
+        );
+        assert!(band.contains("Claude Code"), "who is answering:\n{band}");
+        assert!(band.contains("ready"), "and what he is doing:\n{band}");
+    }
+
+    /// The spinner belongs to a character rather than to a chrome row: while a
+    /// turn runs the lion scratches, and the line under his chin says so.
+    #[test]
+    fn the_lion_over_the_conversation_works_while_the_turn_does() {
+        let paw = SCRATCH_LOW.art[2].trim_end();
+        let mut a = talking();
+        assert!(
+            !rendered(&a, 100, 30).contains(paw),
+            "an idle lion scratches nothing"
+        );
+
+        a.busy = true;
+        let screen = rendered(&a, 100, 30);
+        assert!(screen.contains(paw), "a paw up at the itch:\n{screen}");
+        assert!(screen.contains("working"), "and a word for it:\n{screen}");
+    }
+
+    /// The band costs five rows, and a conversation squeezed into the few that
+    /// would be left is not a conversation. Below the threshold the lion goes
+    /// and the transcript keeps every row.
+    #[test]
+    fn a_short_terminal_drops_the_header_before_the_conversation() {
+        let screen = rendered(&talking(), 100, 14);
+        assert!(
+            !screen.contains(SITTING.art[2]),
+            "no room for a muzzle:\n{screen}"
+        );
+        assert!(screen.contains("port the parser"), "{screen}");
+    }
+
+    /// Fourteen columns of a narrow band are the lion, and what is left of the
+    /// line naming the model is an ellipsis. The conversation gets them back.
+    #[test]
+    fn a_narrow_column_drops_the_header_rather_than_eliding_it_to_nothing() {
+        let screen = rendered(&talking(), 44, 30);
+        assert!(
+            !screen.contains(SITTING.art[2]),
+            "no room for a muzzle:\n{screen}"
+        );
+        assert!(screen.contains("port the parser"), "{screen}");
+    }
+
     /// Four ticks in every forty-eight, which is a roar every twelve seconds.
     /// Driven by the tick rather than by a stored index, so the frame is a
     /// function of the clock and a test can simply wind it forward.
@@ -5401,12 +5601,22 @@ mod tests {
             "a row of air on top: {:?}",
             rows[0]
         );
-        assert!(
-            rows[1].starts_with("  ┌"),
-            "a gutter to the left: {:?}",
-            rows[1]
-        );
-        assert!(rows[1].ends_with("┐  "), "and to the right: {:?}", rows[1]);
+        // The box's own top row, found rather than assumed: the header band
+        // stands between the row of air and the transcript on any terminal tall
+        // enough to seat one.
+        let top = rows
+            .iter()
+            .find(|row| row.contains('┌'))
+            .expect("the transcript's top border");
+        assert!(top.starts_with("  ┌"), "a gutter to the left: {top:?}");
+        assert!(top.ends_with("┐  "), "and to the right: {top:?}");
+        // And the band above it keeps the same gutter, so the lion lines up
+        // with the box rather than standing a column out from it.
+        let crown = rows
+            .iter()
+            .find(|row| row.contains(SITTING.art[0].trim_end()))
+            .expect("the header band");
+        assert!(crown.starts_with("  █"), "the lion keeps it too: {crown:?}");
     }
 
     /// A chat column that runs edge to edge on a 200-column terminal is a

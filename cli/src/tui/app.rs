@@ -1969,7 +1969,19 @@ impl App {
     }
 
     /// The one-line summary shown in the status bar.
+    ///
+    /// Two halves, and they are separate functions because the chat header
+    /// prints them on two lines — who is answering above what he is doing about
+    /// it. Splitting this string back apart at a `·` would be a second place
+    /// that has to know the shape of the first, and the two would drift the
+    /// moment either half grew a field.
     pub fn status(&self) -> String {
+        format!("{} · {}", self.identity(), self.activity())
+    }
+
+    /// Who is answering: the harness, the model it actually ran, and what the
+    /// conversation has cost so far.
+    pub fn identity(&self) -> String {
         let mut parts = vec![self.harness.label().to_string()];
         // What the harness actually ran beats what was asked for; before the
         // first turn there is nothing to report, so the request stands in.
@@ -1979,7 +1991,13 @@ impl App {
         if self.cost_usd > 0.0 {
             parts.push(format!("${:.4}", self.cost_usd));
         }
-        parts.push(if self.busy {
+        parts.join(" · ")
+    }
+
+    /// What he is doing about it: this turn, the runs behind it, and the
+    /// prompts waiting their turn.
+    pub fn activity(&self) -> String {
+        let mut parts = vec![if self.busy {
             // The spinner and the elapsed time are the difference between "this
             // is working" and "this has hung", which a static word cannot tell
             // you during a run that legitimately takes ten minutes.
@@ -1989,7 +2007,7 @@ impl App {
             }
         } else {
             "ready".into()
-        });
+        }];
         // Background work is the reason this is an orchestrator, so it is stated
         // even when the conversation on screen is idle. Only the agents *other*
         // than the watched one are counted: the watched one already said so.
