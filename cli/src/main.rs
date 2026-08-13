@@ -1199,35 +1199,76 @@ enum GoalCommand {
 enum TeamCommand {
     /// Put a member on a team, or update the one already there.
     Join {
+        /// The team to join. A team exists once it has a member, so a name you
+        /// have not used before starts a new one.
         team: String,
+        /// What this teammate is called on the bus. Every other command spells
+        /// it the same way — `--to`, `inbox`, `claim` — and its runs are named
+        /// `<team>-<member>`.
         member: String,
+        /// Which agent harness runs this member's turns.
         #[arg(short = 'H', long, value_enum, default_value_t = HarnessArg::Claude)]
         harness: HarnessArg,
+        /// One line saying what this member is for. Free text, shown beside the
+        /// name by `jod team show`.
         #[arg(short, long, default_value = "")]
         role: String,
     },
     /// Put a task on the team's board.
     Task {
+        /// Whose board this goes on, as `jod team list` names it.
         team: String,
+        /// The short slug that names this task from here on.
+        ///
+        /// You invent it — nothing generates one, and it need only be unique
+        /// across the boards. It is what `jod team claim` and `jod team done`
+        /// take, what teammates call the task in messages, and
+        /// `jod team show <TEAM>` prints it back in full, which is the only
+        /// place to read one you have forgotten. Re-using an id already on a
+        /// board leaves that task exactly as it was.
         id: String,
+        /// What the task is, in plain words.
+        ///
+        /// Everything after the id is joined with spaces, so quoting is
+        /// optional. Left out, the id is used as the title.
         title: Vec<String>,
     },
     /// Take ownership of a task. Reports whether this member won the race.
-    Claim { id: String, member: String },
+    Claim {
+        /// The task to take, as `jod team show <TEAM>` lists it. An id that is
+        /// on no board is refused rather than created.
+        id: String,
+        /// Which teammate takes it, by the name it joined under. The first
+        /// caller wins; a later one is refused and exits non-zero, which is
+        /// how a script tells "mine" from "someone else got there".
+        member: String,
+    },
     /// Mark a task finished.
-    Done { id: String },
+    Done {
+        /// The task to close, as `jod team show <TEAM>` lists it. It does not
+        /// have to have been claimed first.
+        id: String,
+    },
     /// Send a message. Without --to it goes to every member but the sender.
     Msg {
+        /// Whose bus to put this on. Only that team's members can receive it.
         team: String,
+        /// Which member is sending, by the name it joined under. The recipient
+        /// is shown this name, and a broadcast skips it.
         #[arg(short, long)]
         from: String,
+        /// Deliver to this one member. Left out, every other member gets a copy.
         #[arg(short, long)]
         to: Option<String>,
+        /// What to say. Every word after the team is joined with spaces, so
+        /// quoting is optional.
         text: Vec<String>,
     },
     /// Read a member's waiting messages and mark them delivered.
     Inbox {
+        /// Whose bus to read from.
         team: String,
+        /// Whose mail to read, by the name it joined under.
         member: String,
         /// Look without consuming, so the next turn still sees them.
         #[arg(long)]
@@ -1238,9 +1279,13 @@ enum TeamCommand {
     /// Safe to run repeatedly — a member with nothing waiting, or one still
     /// working, is left alone.
     Wake {
+        /// Which team to sweep. Every idle member of it holding mail is resumed.
         team: String,
+        /// Where the resumed agents run. Defaults to your home directory.
         #[arg(short, long)]
         cwd: Option<PathBuf>,
+        /// How much the resumed agents may do unattended: plan, ask, edits or
+        /// auto.
         #[arg(short, long, value_parser = parse_permission_arg, default_value = "auto")]
         permission: PermissionPolicy,
         /// Say what would happen without spawning anything.
@@ -1255,11 +1300,18 @@ enum TeamCommand {
     /// A member has no session until it has run once; `wake` refuses to resume
     /// one it cannot identify, so this is how a teammate gets started.
     Start {
+        /// Which team the member is on.
         team: String,
+        /// Which member to start, by the name it joined under. It must already
+        /// be on the team — `jod team join` puts it there.
         member: String,
+        /// The first thing to say to it. Joined with spaces, so quoting is
+        /// optional.
         prompt: Vec<String>,
+        /// Where the agent runs. Defaults to your home directory.
         #[arg(short, long)]
         cwd: Option<PathBuf>,
+        /// How much the agent may do unattended: plan, ask, edits or auto.
         #[arg(short, long, value_parser = parse_permission_arg, default_value = "auto")]
         permission: PermissionPolicy,
         /// Return as soon as the agent is launched, instead of waiting for it.
@@ -1267,7 +1319,10 @@ enum TeamCommand {
         detach: bool,
     },
     /// Who is on the team, and what is on its board.
-    Show { team: String },
+    Show {
+        /// Which team to describe, as `jod team list` names it.
+        team: String,
+    },
     /// Every team that has a member.
     List,
 }
@@ -4807,5 +4862,70 @@ mod tests {
             "reasoning is speculation, and a fact extracted from it was never asserted"
         );
         assert_eq!(material, "user: where do tasks go?\nassistant: linear");
+    }
+
+    // ---- the team tree's own help ----
+
+    /// Every positional argument under `jod team` says what it is.
+    ///
+    /// `jod team task <TEAM> <ID> [TITLE]...` shipped with three blank
+    /// `Arguments:` rows, and this is the agent board's own entry point — so
+    /// the only way to learn what an `ID` was, or where one came from, was to
+    /// read `TeamCommand`. Asserted rather than fixed once, because a tenth
+    /// subcommand written the same way would reintroduce it silently: a bare
+    /// `field: String` compiles, runs, and documents nothing.
+    ///
+    /// The second half is the part that keeps the text honest. `/// Id` is
+    /// non-empty and answers nothing, so a description that only echoes the
+    /// argument's own name counts as no description at all.
+    #[test]
+    fn every_positional_under_team_says_what_it_is() {
+        use clap::CommandFactory;
+
+        fn walk(command: &clap::Command, path: &str, blank: &mut Vec<String>) {
+            for arg in command.get_arguments() {
+                if !arg.is_positional() || arg.is_hide_set() {
+                    continue;
+                }
+                let name = arg.get_id().to_string();
+                let help = arg
+                    .get_help()
+                    .or_else(|| arg.get_long_help())
+                    .map(|h| h.to_string())
+                    .unwrap_or_default();
+                let says_nothing = help.trim().is_empty()
+                    || help
+                        .trim()
+                        .trim_end_matches('.')
+                        .eq_ignore_ascii_case(&name.replace('_', " "));
+                if says_nothing {
+                    blank.push(format!("{path} <{}>", name.to_uppercase()));
+                }
+            }
+            for sub in command.get_subcommands() {
+                // clap writes `help` itself; its arguments are not ours to
+                // document.
+                if sub.get_name() == "help" {
+                    continue;
+                }
+                walk(sub, &format!("{path} {}", sub.get_name()), blank);
+            }
+        }
+
+        // Built first, so this reads the same tree `--help` prints from rather
+        // than the derive's raw one.
+        let mut cli = Cli::command();
+        cli.build();
+        let team = cli
+            .find_subcommand("team")
+            .expect("no `team` subcommand")
+            .clone();
+        let mut blank = Vec::new();
+        walk(&team, "jod team", &mut blank);
+        assert!(
+            blank.is_empty(),
+            "these positionals print an empty help row, so the only way to \
+             learn what to type is to read the source: {blank:?}"
+        );
     }
 }
