@@ -9015,4 +9015,76 @@ mod tests {
         assert!(frame.contains("core/src/rank.rs"), "{frame}");
         assert!(frame.contains("Esc keeps what you typed"), "{frame}");
     }
+
+    // ---- the side panel: advertised, and reachable ----
+
+    /// The panel holds the projects, the sessions, the mode, the harness, the
+    /// spend and the context left — a large fraction of the program's state —
+    /// and `Shift-Tab` is the only way in. Until it had a row here the only
+    /// place the key was written down was the panel's own bottom border, which
+    /// you can read only once you have already found it. An overlay that calls
+    /// itself the whole keymap and omits the key to a sixth of the program
+    /// sends the reader to the source, which is where this key was in fact
+    /// found.
+    #[test]
+    fn the_keymap_names_the_key_that_opens_the_panel() {
+        for ws in [Workspace::Chat, Workspace::Fleet] {
+            let mut a = populated();
+            a.go(ws);
+            a.overlay = Overlay::Keymap;
+            let screen = rendered(&a, 100, 30);
+            assert!(
+                screen.contains("Shift-Tab"),
+                "{ws:?}: the overlay claims to be the whole keymap:\n{screen}"
+            );
+        }
+    }
+
+    /// And the key it names is the key that works. A row printed in the overlay
+    /// is a promise; this is the half of it the drift net cannot check, because
+    /// `Shift-Tab` arrives as `BackTab` and carries no Ctrl or Alt for
+    /// `is_chord` to recognise.
+    #[test]
+    fn the_key_the_keymap_names_for_the_panel_is_the_one_that_opens_it() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut a = app();
+        assert!(!a.panel, "a cold start has the panel shut");
+        crate::tui::on_key(
+            &mut a,
+            KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE),
+            20,
+        );
+        let screen = rendered(&a, 120, 30);
+        assert!(
+            screen.contains("sessions"),
+            "the overlay's row for the panel opened nothing:\n{screen}"
+        );
+    }
+
+    /// Regression, from a **cold start** — the state every user is in and the
+    /// one precondition the older test set away. `Ctrl-G d` is advertised in
+    /// the workspace menu as `projects · show or hide the catalog`, and the
+    /// catalog draws inside the side panel, so while the panel was shut the key
+    /// flipped a flag that rendered nothing and said nothing about why.
+    #[test]
+    fn the_projects_key_shows_the_catalog_from_a_cold_start() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut a = app();
+        assert!(!a.panel, "a cold start has the panel shut");
+        crate::tui::on_key(
+            &mut a,
+            KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL),
+            20,
+        );
+        crate::tui::on_key(
+            &mut a,
+            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
+            20,
+        );
+        let screen = rendered(&a, 120, 30);
+        assert!(
+            screen.contains("projects"),
+            "the projects key drew nothing at all:\n{screen}"
+        );
+    }
 }

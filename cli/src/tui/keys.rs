@@ -172,6 +172,12 @@ pub const SPINE: &[Key] = &[
 ///
 /// The last four rows are readline's rather than Jod's, and are the exemption
 /// `no_verb_sits_on_a_chord_a_multiplexer_takes` names.
+///
+/// One row is not a chord at all — `Shift-Tab` — and it is here for the same
+/// reason everything else is: it works everywhere, including mid-sentence. It
+/// spends none of the eleven letters that
+/// `every_free_letter_is_spent_so_the_next_verb_is_a_decision` counts, because
+/// the terminal sends it as `BackTab` rather than as a letter.
 pub const GLOBAL: &[Key] = &[
     // The label is load-bearing on its *length*: `draw_keymap` sizes a column
     // from the widest row, and at 100×30 a `what` longer than 33 characters
@@ -186,6 +192,20 @@ pub const GLOBAL: &[Key] = &[
     // written. See [`RAIL`].
     k("Ctrl-R", "show or hide the rail"),
     k("Ctrl-N", "the rail's next card"),
+    // The side panel, which is where the projects, the sessions, the mode, the
+    // harness, the spend and the context left are drawn — a large fraction of
+    // what the program knows, behind one key.
+    //
+    // It is written down here because until now it was written down *only* on
+    // the panel's own bottom border (`Shift-Tab closes`), which you can read
+    // only once you have already found the key. An overlay that calls itself
+    // the whole keymap and omits the way into a sixth of the program sends the
+    // reader to the source, which is where this key was in fact found.
+    //
+    // Not caught by the drift net either, and that is why the row carries its
+    // own test in `ui`: `is_chord` recognises a Ctrl or Alt prefix, and this
+    // arrives as `BackTab` carrying neither, so nothing replays it.
+    k("Shift-Tab", "show or hide the side panel"),
     k("Ctrl-P", "add a directory to work in"),
     // A switch, not a button: it stays on, and everything said streams into
     // the box until it is switched off. Saying "go ahead" sends, "stop
