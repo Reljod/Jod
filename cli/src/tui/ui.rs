@@ -1161,6 +1161,26 @@ fn caption(width: usize) -> &'static str {
         .unwrap_or("jod")
 }
 
+/// The launch directory as the splash prints it, or `None` when there is none
+/// to print or no room to print it.
+///
+/// Shares [`under_home`] and [`fit_path`] with the header band, so the two
+/// screens cannot start disagreeing about how a path is written — the drift
+/// that would otherwise show up as `~/Developer/Jod` on one and
+/// `/Users/reljod/Developer/Jod` on the other.
+fn splash_where(app: &App, width: usize) -> Option<String> {
+    if app.cwd.as_os_str().is_empty() {
+        return None;
+    }
+    let shown = under_home(
+        &app.cwd,
+        std::env::var_os("HOME").map(PathBuf::from).as_deref(),
+    );
+    // Nothing worth centring under a wordmark. The caption above it makes the
+    // same call by having a shortest form and then giving up.
+    (width >= 12).then(|| format!("▪ {}", fit_path(&shown, width.saturating_sub(2))))
+}
+
 /// Whether this counts as a new session for rendering.
 ///
 /// It cannot be "the transcript is empty": `event_loop` pushes a hint at
@@ -1236,6 +1256,20 @@ fn draw_splash(f: &mut Frame, app: &App, area: Rect) -> (usize, Rect) {
             caption(area.width as usize),
             fg(MUTED),
         )));
+    }
+
+    // ...and where you are standing, under the caption.
+    //
+    // The header band says the same thing and is not on screen yet: the splash
+    // is *by definition* the state where nothing has been said, which is
+    // exactly when "which repository is this console pointed at" is worth
+    // knowing — the answer stops being changeable the moment you type the first
+    // instruction into it. Last, and dropped first on a short terminal, because
+    // the wordmark is what says which program you launched.
+    if area.height >= head.len() as u16 + 5 {
+        if let Some(here) = splash_where(app, area.width as usize) {
+            head.push(Line::from(Span::styled(here, fg(MUTED))));
+        }
     }
 
     let head_height = head.len() as u16;
@@ -5936,6 +5970,19 @@ mod tests {
             !screen.contains('▪'),
             "no folder mark with no folder:\n{screen}"
         );
+    }
+
+    /// The splash is the screen up while you decide what to type, so it is the
+    /// one that has to say which repository the first instruction will land in.
+    /// The band says it too and is not on screen yet — the splash *is* the
+    /// state where nothing has been said.
+    #[test]
+    fn the_new_session_screen_says_which_directory_you_opened_it_in() {
+        let mut a = app();
+        a.cwd = PathBuf::from("/somewhere/Developer/Jod");
+        let screen = rendered(&a, 100, 30);
+        assert!(screen.contains("an orchestrator"), "the splash:\n{screen}");
+        assert!(screen.contains("/somewhere/Developer/Jod"), "{screen}");
     }
 
     /// Home is written `~`, which is how it is typed and how every other
