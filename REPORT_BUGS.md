@@ -64,6 +64,103 @@ see BUG-13.
 
 ---
 
+## Verification status — rebased onto `f3aaf45`
+
+Re-checked after rebasing onto `f3aaf45` (#79). That PR touches only CI
+workflows, `README`, `REVIEW.md`, `docs/decisions.md` and shell tests —
+`git diff f43e7a7 f3aaf45 -- '*.rs'` is **empty** — so the binary under test is
+still exactly this tree's, and no finding needed re-running for that reason.
+
+Six draft PRs are open against these findings (#80, #81, #82, #83, #84, #78).
+**None are merged**, and I confirmed that by re-running the two cheapest
+reproductions from a cold session on the rebased tree rather than taking it on
+trust:
+
+| Check | Result on `f3aaf45` |
+|---|---|
+| BUG-1 — `/root` on a cold session | still renders **nothing**; splash still up |
+| BUG-6 — `Ctrl-G d` on a cold session | still renders **nothing** |
+| BUG-13 — `jod --version` | still bare `jod 0.1.0` |
+| BUG-21 — diff header | re-verified with a second file; path still clipped, counts still absent |
+
+So every `OPEN` item below is open against `f3aaf45` as of this writing. When
+those PRs merge, the items to re-check first are BUG-1 (which should also close
+BUG-2) and BUG-14 — and BUG-14 has two halves in two PRs (#82 display, #84
+backend), so it is worth confirming that a run writing outside its roots
+*both* raises the card and shows its cwd, rather than one landing without the
+other.
+
+---
+
+## For agents picking this up
+
+This file is the work queue. Read this section before editing code.
+
+### Claim protocol
+
+1. Pick a bug that is `OPEN`. Change its status to
+   `IN PROGRESS — <your name>` **in this file** and commit that one-line change
+   **before** you start editing code. That commit is your claim.
+2. When it is done and verified, set it to `FIXED — <your name>` and record the
+   commit, plus the verbatim output proving it.
+3. If you cannot finish, set it back to `OPEN` with a note. A silently
+   abandoned claim is worse than no claim.
+
+### One owner per path — this is where collisions will happen
+
+Most of these bugs live in **the same two files**. Do not take two bugs from
+the same row of this table in parallel with someone else:
+
+| File | Bugs living there |
+|---|---|
+| `cli/src/tui/ui.rs` | BUG-1, BUG-3, BUG-4, BUG-11, BUG-16, BUG-20, BUG-21 |
+| `cli/src/tui/mod.rs` | BUG-6, BUG-17 |
+| `cli/src/tui/app.rs` | BUG-19 |
+| `cli/src/main.rs` + `core/src/service.rs` | BUG-14 |
+| `cli/src/tui/command.rs` | BUG-5, BUG-10 |
+| `cli/src/tui/keys.rs` | BUG-7 |
+| `core/src/rank.rs` | BUG-15 |
+
+`ui.rs` holds seven of them. It is a 9,000-line file — **one agent should take
+all seven together**, not seven agents in parallel.
+
+### Suggested order
+
+1. **[BUG-14](#bug-14)** — agents are running in `$HOME`. Nothing else matters
+   until work lands where the user is standing. One line.
+2. **[BUG-1](#bug-1)** — unblocks BUG-2 for free, and makes every other fix
+   observable. Until this is fixed you cannot *see* most of the program's
+   output, including your own fixes.
+3. **[BUG-4](#bug-4)** — one status-bar field that would have caught BUG-14 in
+   seconds.
+4. **[BUG-20](#bug-20)**, **[BUG-6](#bug-6)** — small, self-contained, and both
+   currently mislead the user about destructive or missing behaviour.
+5. The remaining width bugs (BUG-3, 11, 16, 21) — one sweep, one owner, since
+   they are one root cause (see Pattern B).
+
+### Rules that apply to every fix here
+
+- **Add the regression test, and make sure it fails first.** Four of these bugs
+  were green in CI while broken (see Pattern A). A fix without a test that
+  would have caught the original is not a fix.
+- **Never weaken an existing test to go green.** If an existing test encodes
+  the broken behaviour, say so in your report rather than deleting it.
+- **Build with the shared target dir** — this worktree has no `target/` and the
+  disk is tight:
+  `CARGO_TARGET_DIR=/Users/reljodoreta/Developer/Repositories/Projects/Jod/target cargo build --release --bin jod`
+- **Re-verify by hand.** Every finding here came from driving the real TUI, not
+  from reading code. Drive it and confirm, using the harness described at the
+  bottom of this file.
+
+### In flight right now
+
+| Bug | Agent | State |
+|---|---|---|
+| [BUG-14](#bug-14) | `cwd-fix` | IN PROGRESS |
+| [BUG-1](#bug-1), [BUG-4](#bug-4) | `ui-fix` | IN PROGRESS |
+
+---
+
 ## Two patterns underneath most of this
 
 Twenty findings, but they are not twenty independent mistakes. Fixing the two
@@ -958,6 +1055,24 @@ have bounded the header itself.
 **Suggested fix.** Elide the path from the **left** to `room`, keeping the
 filename, and reserve the width the counts need before laying the path out —
 `± …/tui-dogfood-tetris/NOTES.md  +6 -0`. Fifth instance of Pattern B.
+
+**Re-verified after the rebase onto `f3aaf45`**, with a second file and a
+second run, at 200 columns:
+
+```
+⚙ Write ·
+  ± /Users/reljodoreta/Developer/Repositories/Projects/Jod/.claude/worktrees/tui-dogfood-tetri
+```
+
+`HELLO.md` is nowhere on screen, and neither is `+1 -0`. Still open.
+
+**One extra detail worth folding into the same fix:** the tool line above the
+header renders as `⚙ Write ·` — a trailing separator with nothing after it.
+A few lines later the same tool renders as plain `⚙ Write`, with no separator.
+So the dangling `·` is not a truncated value, it is a separator emitted for a
+field that is empty. Small, but it is on the same two lines a reader looks at
+to answer "which file did it just change?", and right now those two lines
+answer: a bullet, and a path with the filename cut off.
 
 ---
 
