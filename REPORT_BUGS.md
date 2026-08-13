@@ -88,6 +88,7 @@ by me. **PR open** = CI-green draft awaiting merge. **open** = nobody on it.
 | [BUG-10](#bug-10) | Low | **open — unclaimed** | commands | `/main` is listed twice, with two different meanings |
 | [BUG-11](#bug-11) | Low | PR open #86 | commands | Command descriptions are cut mid-word with no ellipsis |
 | [BUG-12](#bug-12) | Low | **open — unclaimed** | input | The input box is fixed at ~70 columns and single-line |
+| [BUG-22](#bug-22) | Medium | **NEW — needs confirmation** | interrupt | A stopped turn now leaves *no* mark in the transcript; it just stops mid-output |
 | [BUG-13](#bug-13) | Medium | **merged** #80 | tooling | `jod --version` could not distinguish two different builds |
 | [BUG-17](#bug-17) | Medium | with an agent | interrupt | Interrupt is unacknowledged for 4–6s, then reported as both `✓ done` and `✗ failed` |
 | [BUG-18](#bug-18) | Medium | with an agent | interrupt | Every interrupt falsely warns the run "may still be writing", worded as a *start* failure |
@@ -155,6 +156,56 @@ fix bought us) and drove the TUI from `~/tetris` — a non-git directory full of
 | [BUG-16](#bug-16) | #83 | ✅ **fixed** — at 60 columns paths elide as `agent-…/…/components/Completions.tsx`, keeping the filename. Rows that used to render identically now end in distinct names. |
 | [BUG-5](#bug-5) | #85 | ✅ **fixed**, and past what I asked — `/project` exists *and* the panel's empty state now reads `none yet — /project add <path>`. That empty state was my specific complaint: it was the only one in the program naming no way out. |
 | [BUG-19](#bug-19) | #87 | ✅ **fixed** — a **freshly** killed run renders `■ killed` in the live fleet, and the dashboard reads `27 runs · 1 running · 0 failed`. It previously claimed `2 failed` for runs the database called `killed`. I tested a fresh kill deliberately: an old run reads `killed` after any restart, so only a same-session kill proves the live-state fix. |
+
+<a name="bug-22"></a>
+### ⚠️ BUG-22 — a stopped turn now leaves **no** mark in the transcript · Medium · **NEW, needs confirmation**
+
+Found while verifying #87, and it looks like that fix overshooting. Flagging it
+rather than filing it as certain, because I could not pin the mechanism and I
+have been wrong about the interrupt path once already (see the BUG-17
+retraction).
+
+**Repro (twice, both times):** in the main chat ask for
+`write the numbers 1 to 600, one per line`, wait for `⠧ working`, press `Esc`
+(and separately, `Ctrl-X`). The status bar returns to `ready` and the database
+records the run as `killed` — so the stop *works*.
+
+**But the transcript simply stops.** The numbers end at `337` and the next thing
+on screen is the input box. No `interrupted after 8s`, no
+`stopped — the conversation is kept`, no terminal entry of any kind. I scrolled
+to the bottom with `Ctrl-↓` to be sure; `337` is the last line. Zero markers
+matched on the whole screen.
+
+Before #87 the same action produced:
+
+```
+✓ done · interrupted after 10s
+• stopped — the conversation is kept, so just say what to do instead
+✗ failed · 0 out · $0.0000          <-- this line is what #87 correctly removed
+```
+
+**This is precisely the failure the code's own comment warns about**, and that
+comment is still there, at `cli/src/tui/mod.rs:4321`:
+
+> *"A partial turn silently dropped would leave the transcript claiming the
+> agent simply stopped talking, and the next reader cannot tell an interruption
+> from a crash."*
+
+**Candidate cause, unconfirmed.** The entry is still pushed at `mod.rs:4324`,
+but the arm is guarded at `mod.rs:4319`:
+
+```rust
+KeyCode::Esc if app.busy && app.watching.is_some() => { … }
+```
+
+so it only fires while a run is *being watched*. That was my original BUG-17
+theory; I retracted it because I later saw the markers appear, which means
+`watching` was set in that session and may not be now. A background run was
+present this time (`· 1 in background`), which is the obvious variable.
+
+**Before fixing, confirm which it is** — a guard that never matches in the main
+chat, or #87 removing the entry along with the spurious `✗ failed`. Do not
+delete the `watching` guard on my say-so; reproduce it first.
 
 **#82's delegate confirmation is the best fix in this report.** It reads:
 
@@ -246,6 +297,49 @@ the mistake is visible the moment it happens instead of after a paid run has
 written a project into the wrong tree. That is the difference between a
 critical bug and an annoying one — but the annoying one still misplaces the
 work.
+
+---
+
+## The one-shot finally works — verified end to end
+
+The whole point of the exercise, and it now passes.
+
+A single prompt through the TUI, launched from `tetris-oneshot/` with **no
+`--cwd`**, produced a complete classic Tetris **in that directory** — not in
+`$HOME`. That is BUG-14 closed in the only way that counts.
+
+I did not take the agent's word for it. `pnpm build` succeeds (5 modules,
+107 ms), and an independent probe written against the engine passes
+**23 of 23**:
+
+```
+PASS board is 10 wide            PASS ghost is at or below the active piece
+PASS board is 20 tall            PASS hold stores a piece
+PASS seven tetrominoes           PASS hold swapped the active piece
+PASS every piece has a shape     PASS higher level drops faster
+PASS standard line scores        PASS level up every 10 lines
+PASS 7-bag: seven distinct       PASS a full row is cleared
+PASS left wall stops the piece   PASS clearLines reports one row cleared
+PASS right wall stops the piece  PASS a hard drop awards points
+PASS rotating against the wall   PASS pause stops gravity
+     leaves a legal piece        PASS stacking reaches game over
+PASS same seed → same piece      PASS game over in a plausible number of drops
+PASS getState exposes board/score/level/lines
+```
+
+Every item of the brief is present: 10×20 well, seven tetrominoes, wall kicks,
+7-bag randomiser, ghost piece, hold, soft/hard drop, pause, per-level gravity,
+100/300/500/800 × level scoring, level-up every ten lines, and game over. The
+engine is headless in `src/engine.js` with no DOM access, and seeded — so it is
+deterministic and testable, which is what made the probe possible.
+
+Run it: `cd tetris-oneshot && pnpm install && pnpm dev`.
+
+**Two probe failures were mine, not the game's**, and are worth recording since
+the same trap will catch the next person: `cellsOf()` returns `[x, y]` pairs
+rather than `{x, y}` objects, and `clearLines()` only clears — scoring lives in
+`lock()`. Both of my "failures" disappeared once I read the code instead of
+assuming the API matched the earlier Tetris.
 
 ---
 
