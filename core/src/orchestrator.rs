@@ -360,7 +360,15 @@ pub fn orchestrator_preamble() -> &'static str {
        holding the context beats starting one that has to rebuild it, and it is \
        the decision that matters most.\n\
      - `continue_agent` when the instruction carries on what a run is already \
-       doing. `delegate` when it does not.\n\
+       doing.\n\
+     - `open_work` when it does not and the instruction touches a repository, or \
+       will outlast a single session. This is the usual answer for anything \
+       about code. It opens the work, puts the first session on the checkout \
+       read-only, and gives Reljod a node in the fleet tree to watch it from.\n\
+     - `delegate` only for a one-shot that needs no repository and no board — a \
+       lookup, a question, a script. A delegated run belongs to no work, so it \
+       is **not** a node in the tree: reach for it when that is what you want, \
+       and reach for `open_work` when it is not.\n\
      - `schedule_create` when the instruction says *when*. `goal_create` when it \
        says *keep* or *until*.\n\
      - `recall` and `related` before asking Reljod something he has already told \
@@ -1298,6 +1306,40 @@ impl Store {
             .flatten())
     }
 
+    /// Hang one conversation under another, with no work involved.
+    ///
+    /// [`crate::works::Store::attach_conversation`] is the richer form and
+    /// needs a work to attach to. A `delegate`d run has none by design, and
+    /// declining to record its parent because there is no work to record it
+    /// *under* is how a delegation ended up leaving no trace anywhere: the run
+    /// existed, and nothing in the database said who had asked for it.
+    ///
+    /// This writes the one column the cascade and the tree both read, and
+    /// nothing else. It does **not** put the conversation in the fleet tree —
+    /// that is keyed on `work_id`, and a loose run is loose on purpose.
+    pub fn set_conversation_parent(&self, child: &str, parent: &str) -> Result<()> {
+        self.write(|tx| {
+            tx.execute(
+                "UPDATE conversations SET parent_conversation_id = ?2 WHERE id = ?1",
+                rusqlite::params![child, parent],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Who started this conversation, when anybody did.
+    pub fn parent_conversation(&self, conversation_id: &str) -> Result<Option<String>> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        Ok(conn
+            .query_row(
+                "SELECT parent_conversation_id FROM conversations WHERE id = ?1",
+                rusqlite::params![conversation_id],
+                |r| r.get(0),
+            )
+            .ok()
+            .flatten())
+    }
+
     /// Write down what was decided and what it turned into.
     pub fn record_delegation(&self, d: &Delegation) -> Result<i64> {
         self.write(|tx| {
@@ -1666,25 +1708,42 @@ mod tests {
                     peers: &peers,
                     tools,
                 });
-                // Anything in backticks that looks like a tool name: lower
-                // case, underscores, no path separators or spaces.
-                for span in said.split('`').skip(1).step_by(2) {
-                    let looks_like_a_tool = !span.is_empty()
-                        && span
-                            .chars()
-                            .all(|c| c.is_ascii_lowercase() || c == '_')
-                        && span.contains('_');
-                    if looks_like_a_tool {
-                        assert!(
-                            registered.contains(&span),
-                            "the brief tells a {} session to call `{span}`, which no tool is \
-                             registered under",
-                            harness.label()
-                        );
-                    }
+                for span in tools_named_in(said.as_str()) {
+                    assert!(
+                        registered.contains(&span),
+                        "the brief tells a {} session to call `{span}`, which no tool is \
+                         registered under",
+                        harness.label()
+                    );
                 }
             }
         }
+
+        // The orchestrator's preamble is the other one that names tools, and it
+        // was not covered here — which is how it came to define what a **work**
+        // is while naming no tool that opens one. A misspelling in it fails the
+        // same way a misspelling in a worker's brief does: silently, as a model
+        // reaching for something that is not there.
+        for span in tools_named_in(orchestrator_preamble()) {
+            assert!(
+                registered.contains(&span),
+                "the orchestrator is told to call `{span}`, which no tool is registered under"
+            );
+        }
+    }
+
+    /// Anything in backticks that looks like a tool name: lower case,
+    /// underscores, no path separators or spaces.
+    fn tools_named_in(said: &str) -> Vec<&str> {
+        said.split('`')
+            .skip(1)
+            .step_by(2)
+            .filter(|span| {
+                !span.is_empty()
+                    && span.chars().all(|c| c.is_ascii_lowercase() || c == '_')
+                    && span.contains('_')
+            })
+            .collect()
     }
 
     #[test]
@@ -1779,6 +1838,33 @@ mod tests {
         }
         assert!(said.contains("read-only"));
         assert!(said.contains("**You do not do the work.**"));
+    }
+
+    /// E4.S4's other half, and the one that went missing.
+    ///
+    /// The vocabulary above shipped and this did not: the preamble defined what
+    /// a **work** is and then never named the tool that opens one, so the
+    /// orchestrator knew the noun and had no verb for it and every instruction
+    /// about a repository went to `delegate`. A `delegate`d run has no
+    /// `work_id`, and `Store::forest_of` selects on `work_id IS NOT NULL` —
+    /// so the fleet tree showed nothing, correctly, because there was nothing.
+    ///
+    /// The test above passes on a preamble with no `open_work` in it at all,
+    /// which is exactly how the gap stayed green. This one does not.
+    #[test]
+    fn the_orchestrator_is_told_which_tool_opens_a_work() {
+        let said = orchestrator_preamble();
+        assert!(
+            said.contains("`open_work`"),
+            "the orchestrator is taught what a work is and not how to open one"
+        );
+        let opens = said.find("`open_work`").expect("checked above");
+        let delegates = said.find("`delegate` only").expect("delegate is still offered");
+        assert!(
+            opens < delegates,
+            "`delegate` is offered before `open_work`, so the cheaper and less \
+             visible of the two reads as the default"
+        );
     }
 
     // ---- what the orchestrator is told about projects ----
@@ -2189,5 +2275,45 @@ mod tests {
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].run_id.as_deref(), Some("r1"));
         assert!(all[0].reason.contains("parser context"));
+    }
+
+    /// A delegated run has no work, so `attach_conversation` cannot record who
+    /// asked for it. Without this the conversation is a root nothing points at,
+    /// and the delegation leaves no trace anywhere in the database.
+    #[test]
+    fn a_workless_conversation_can_still_say_who_started_it() {
+        let s = store();
+        let parent = s.main_conversation(crate::harness::HarnessKind::ClaudeCode, "/tmp").unwrap();
+        let child = s
+            .new_conversation(crate::harness::HarnessKind::ClaudeCode, "/tmp", None)
+            .unwrap()
+            .id;
+
+        s.set_conversation_parent(&child, &parent).unwrap();
+
+        assert_eq!(s.parent_conversation(&child).unwrap().as_deref(), Some(parent.as_str()));
+        assert!(
+            s.work_for_conversation(&child).unwrap().is_none(),
+            "linking a parent must not smuggle the child into a work — a \
+             delegated run is loose on purpose"
+        );
+    }
+
+    /// The tree is keyed on `work_id`, so a loose run stays out of it however
+    /// its parentage is recorded. Stated as a test because the obvious "fix"
+    /// for an invisible delegation is to relax that filter, and relaxing it
+    /// puts every throwaway lookup on Reljod's fleet screen.
+    #[test]
+    fn a_delegated_run_is_linked_but_still_not_in_the_fleet_tree() {
+        let s = store();
+        let parent = s.main_conversation(crate::harness::HarnessKind::ClaudeCode, "/tmp").unwrap();
+        let child = s
+            .new_conversation(crate::harness::HarnessKind::ClaudeCode, "/tmp", None)
+            .unwrap()
+            .id;
+        s.set_conversation_parent(&child, &parent).unwrap();
+
+        let ids: Vec<String> = s.forest().unwrap().into_iter().map(|n| n.id.id).collect();
+        assert!(!ids.contains(&child), "a workless conversation reached the fleet tree");
     }
 }
