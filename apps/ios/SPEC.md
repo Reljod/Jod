@@ -68,7 +68,7 @@ rather than the key — the precedent the README already set for `Ctrl-W`:
 
 | TUI | Phone |
 |---|---|
-| digits / which-key `Alt-K` | a tab bar for the 9, in MENU order |
+| digits / which-key `Ctrl-G` | a tab bar for the 9, in MENU order |
 | `↑↓` + `⏎` on a list | tap the row |
 | `/` filter line | a search field on the list |
 | `S` sort cycle | a sort control showing the current order's name |

@@ -82,10 +82,10 @@ pub enum Entry {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Overlay {
     None,
-    /// `Alt-K` — the which-key menu, waiting for one letter. Any key it does
+    /// `Ctrl-G` — the which-key menu, waiting for one letter. Any key it does
     /// not know cancels silently rather than doing something surprising.
     WhichKey,
-    /// `Alt-K n` — waiting for the kind of thing to make.
+    /// `Ctrl-G n` — waiting for the kind of thing to make.
     WhichKeyNew,
     /// `?` — the keymap, showing the current screen's verbs first.
     Keymap,
@@ -94,7 +94,7 @@ pub enum Overlay {
         verb: String,
         what: String,
     },
-    /// The background shells this console started — `/jobs`, or `Alt-J`.
+    /// The background shells this console started — `/jobs`, or `Ctrl-G j`.
     Jobs,
     /// Offered when an update has installed a new binary: restart into it now,
     /// or stay on the build this process started with.
@@ -188,7 +188,7 @@ impl Overlay {
 ///
 /// ## The microphone is a switch, not a button
 ///
-/// `Alt-V` turns listening on and it stays on. Everything said while it is on
+/// `Ctrl-V` turns listening on and it stays on. Everything said while it is on
 /// streams into the composer, sentence by sentence, and `⏎` is replaced by
 /// saying so — "go ahead", "sige". The point is coding with your hands
 /// somewhere else entirely.
@@ -314,7 +314,7 @@ pub struct App {
     pub cost_usd: f64,
     /// Whether reasoning is shown. On by default, for the same reason tool
     /// output is: watching a harness think is most of why you sit in front of
-    /// it. `/thinking` and `Alt-T` turn it off when the noise wins.
+    /// it. `/thinking` and `Ctrl-T` turn it off when the noise wins.
     pub show_thinking: bool,
     /// Whether tool output is shown. On by default: the reason to watch a
     /// harness work is to see what it is doing.
@@ -1266,7 +1266,7 @@ impl App {
         self.list_mut(ws)
     }
 
-    /// Go to a workspace from the top: `Alt-K`, a digit, or a slash command.
+    /// Go to a workspace from the top: `Ctrl-G`, a digit, or a slash command.
     ///
     /// Top-level travel forgets the way back on purpose. Jumping from the local
     /// graph to schedules and then pressing `Esc` twice to end up in a memory

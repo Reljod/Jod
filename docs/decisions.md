@@ -299,7 +299,7 @@ the shape of the thing being updated:
   were in the middle of using — freezing it for the duration contradicts the
   reason the console exists. Agents keep streaming while it builds.
 - **Visible.** A job you cannot see is a promise you cannot check, so the
-  status row carries a running count and `Alt-J` (`/jobs`) lists every
+  status row carries a running count and `Ctrl-G j` (`/jobs`) lists every
   background shell with its last line, how long it has run, and how it ended.
   Finished jobs stay listed: "did that update work" is asked afterwards.
 - **The restart is asked for, never taken.** Replacing the file does not
@@ -2078,3 +2078,60 @@ what makes it fixable.
 
 The general rule: **a fallback that hides a missing writer is not resilience,
 it is a second implementation of the writer with nobody watching it.**
+
+## Chords go to the verbs you press mid-sentence; screens go behind the leader
+
+The global chords were on Ctrl, then briefly on Alt, and are on Ctrl again. The
+move to Alt was sound about the problem and wrong about the fix: a multiplexer
+does take Ctrl chords before Jod sees them — tmux's default prefix is `Ctrl-B`,
+which was the delegate key, so it never arrived at all. But macOS composes
+Option into accented characters unless the terminal is specially configured, so
+on the machine this is actually used from, `Alt-K` typed `˚` into the prompt and
+*no* chord arrived. A binding nobody can press is worse than one something else
+eats, because the second at least has a workaround.
+
+So the rule is not "Ctrl" or "Alt". It is **take the letters nothing else is
+holding, and spend them on the verbs that need to be reachable without stopping
+what you are doing.**
+
+Here that leaves eleven: tmux has `a s h j k l`, the terminal has `q z i m`, and
+readline has `c d e u w`. Sixteen verbs do not fit in eleven letters, and the
+tempting move is to shave the list — drop a verb, or double one letter up under
+a modifier the terminal cannot distinguish anyway. Both are worse than the
+answer that was already in the program.
+
+A chord buys exactly one thing: reachability while the chat box is turning every
+bare key into text. Delegate the line, stop the run, copy the reply, answer the
+rail — those need it. A *destination* does not, because arriving somewhere is
+not something you do halfway through a sentence. Destinations went behind
+`Ctrl-G`, which is what the which-key menu was built for, and it now covers all
+nine screens instead of the seven that happened to have no chord left. Four
+verbs went with them, and the menu draws every one — a route nothing prints is a
+route nobody takes.
+
+Two things fell out of this that were not the point but are worth keeping. The
+letters spent on menu verbs have to stay clear of the workspace letters, or a
+new screen silently shadows a verb that then has nowhere to go — pinned by
+`a_which_key_verb_does_not_shadow_a_screen`. And one letter, `Ctrl-V`, was held
+back so the next verb would have somewhere to land that is not someone else's
+key.
+
+**The spare was spent within the week, which is the argument for having kept
+it.** Rebasing onto main brought two verbs that had been written against the Alt
+map: dictation and a projects panel. Dictation went straight to `Ctrl-V` — it is
+the strongest claim to a chord in the program, being *only* useful while your
+hands are off the keyboard, and `v` is the letter it would have asked for. The
+projects panel is a destination and went to `Ctrl-G d`, because `Ctrl-D` is quit.
+
+So the eleven are now spent, and `every_free_letter_is_spent_so_the_next_verb_is_a_decision`
+says so out loud. When it fails, the keymap is full and the choice is explicit:
+the new verb is a destination and goes behind the leader, or something already
+holding a letter is demoted. It is never a licence to take a letter back off the
+multiplexer. The menu is the pressure valve, and it has nine free letters left.
+
+**The part that does not generalise:** the six letters tmux holds are *this*
+tmux's. A differently-configured multiplexer wants a different six, and nothing
+in the program can detect that. What the repo can do is keep the map in one file
+and assert the constraint out loud, which is
+`no_verb_sits_on_a_chord_a_multiplexer_takes` — so the next person to move it
+finds the reasoning rather than the symptom.

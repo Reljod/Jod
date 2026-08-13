@@ -3,7 +3,7 @@
 //! Dictation has three moving parts on three different machines' worth of
 //! assumptions — a recorder program, a transcription engine, and a model — and
 //! any of them can be missing. This module is the one place that answers "can
-//! I press Alt-V", so the CLI's `jod voice check` and the console's own
+//! I press Ctrl-V", so the CLI's `jod voice check` and the console's own
 //! failure message cannot disagree about it.
 //!
 //! ## Local is the default once a model exists

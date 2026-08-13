@@ -22,10 +22,10 @@
 //! `j` into the sentence being written. Two ways out exist and the rail uses
 //! both, at different costs:
 //!
-//! - `Alt-R` shows or hides it, and `Alt-C` steps to the next card. Both are
+//! - `Ctrl-R` shows or hides it, and `Ctrl-N` steps to the next card. Both are
 //!   chords, so both are safe mid-sentence — that is the property E2.S3 asks
 //!   for by name.
-//! - `Alt-C` also *focuses* the rail, after which the bare keys are the rail's:
+//! - `Ctrl-N` also *focuses* the rail, after which the bare keys are the rail's:
 //!   `↑↓`/`jk` move, `⏎` expands, a digit answers, `x` dismisses, `Esc` hands
 //!   the keyboard back with the typed line exactly as it was.
 //!
@@ -109,7 +109,7 @@ impl Default for RailState {
     fn default() -> RailState {
         RailState {
             // Hidden until there is something to say. The first blocker opens
-            // it, and `Alt-R` opens it before that.
+            // it, and `Ctrl-R` opens it before that.
             shown: false,
             focused: false,
             expanded: false,
@@ -240,7 +240,7 @@ impl RailState {
         self.selected = Some(ids[landed]);
     }
 
-    /// `Alt-C`: focus the rail and move on to the next card.
+    /// `Ctrl-N`: focus the rail and move on to the next card.
     ///
     /// Wraps, unlike [`RailState::step`], because this is a *cycle* key rather
     /// than a cursor: pressing it repeatedly is how you walk the stack from the
@@ -273,7 +273,7 @@ impl RailState {
     ///
     /// One level at a time, like `Esc` everywhere else in this program: the
     /// expanded card first, then the filter, then the focus. The rail stays
-    /// *shown* — hiding it is `Alt-R`, and an `Esc` that also closed it would
+    /// *shown* — hiding it is `Ctrl-R`, and an `Esc` that also closed it would
     /// mean leaving a card you were reading costs you the sight of the rest.
     pub fn back(&mut self) -> bool {
         if self.editing_filter || self.filter.is_some() {
@@ -393,7 +393,7 @@ pub fn summary(cards: &[Card]) -> String {
     if queued > 0 {
         line.push_str(&format!(" · {queued} queued"));
     }
-    line.push_str(" · Alt-C to answer");
+    line.push_str(" · Ctrl-N to answer");
     line
 }
 
@@ -635,7 +635,7 @@ mod tests {
         assert_eq!(rail.selected, None);
     }
 
-    /// The first `Alt-C` must not skip the most pressing card, which is the
+    /// The first `Ctrl-N` must not skip the most pressing card, which is the
     /// one `Sort::Pressing` deliberately put at the top.
     #[test]
     fn the_first_cycle_lands_on_the_top_card_and_the_next_moves_on() {
@@ -719,7 +719,7 @@ mod tests {
         let line = summary(&[card(1, false), card(2, true), card(3, true)]);
         assert!(line.starts_with("3 cards"), "{line}");
         assert!(line.contains(&format!("2 {BLOCKED}")), "{line}");
-        assert!(line.contains("Alt-C"), "{line}");
+        assert!(line.contains("Ctrl-N"), "{line}");
     }
 
     #[test]

@@ -133,7 +133,7 @@ jod root ls
 ```
 
 In the TUI the same thing is `/add-dir`, which opens the fuzzy directory picker
-(`Alt-P` is the chord for it). The picker walks the directory `jod` was launched
+(`Ctrl-P` is the chord for it). The picker walks the directory `jod` was launched
 in — so to reach a tree outside it, name where to start:
 
 ```
@@ -244,10 +244,10 @@ rate-limited so ten messages become one turn carrying ten rather than ten turns.
 |---|---|
 | `Esc` | interrupt the turn, keep the session — the conversation survives |
 | `@` | mention a file across every root |
-| `Alt-P` | pick a directory to add as a root (`/add-dir`, or `/add-dir <where>` to browse elsewhere) |
-| `Alt-S` | search every transcript, including compacted turns |
-| `Alt-Y` | copy the last reply, or its code block without the fences |
-| `Alt-K` | which-key |
+| `Ctrl-P` | pick a directory to add as a root (`/add-dir`, or `/add-dir <where>` to browse elsewhere) |
+| `Ctrl-G /` | search every transcript, including compacted turns |
+| `Ctrl-Y` | copy the last reply, or its code block without the fences |
+| `Ctrl-G` | which-key |
 
 File edits render as diffs with the path as a header and counts. A todo list
 renders as one block revised in place rather than a new block per revision.

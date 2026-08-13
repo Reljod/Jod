@@ -136,26 +136,35 @@ here because the palette's wording could otherwise be read as a permission
 boundary. If you need a real boundary, it has to come from the machine: a
 container, a user account, filesystem permissions. Not from this list.
 
-## Terminal configuration: Option on macOS
+## Why the chords avoid six Ctrl letters
 
-Jod's global chords are on Alt — `Alt-K` for the workspace menu, `Alt-B` to
-delegate, `Alt-A` for the fleet. The move off Ctrl was to stop a multiplexer
-eating them; tmux's own prefix is `Ctrl-B`, which used to be the delegate key,
-so under tmux that binding never arrived at all.
+Jod's global chords are on Ctrl — `Ctrl-G` for the workspace menu, `Ctrl-B` to
+delegate, `Ctrl-F` for the fleet. They were briefly on Alt, to get out of the
+way of a multiplexer that takes Ctrl chords before Jod sees them, and that made
+things worse rather than better: macOS composes Option into accented characters
+unless the terminal is specially configured, so `Alt-K` typed `˚` into the prompt
+and no chord arrived at all. A binding nobody can press beats a binding
+something else eats, but not by enough to be worth it.
 
-On macOS this needs one setting, because the terminal composes Option into
-accented characters by default rather than sending it as a modifier. Until it
-is changed, `Alt-K` types `˚` into the prompt and no chord reaches Jod:
+So Ctrl came back, minus the letters that are genuinely spoken for:
 
-- **iTerm2** — Settings → Profiles → Keys → Left Option key → `Esc+`
-- **Terminal.app** — Settings → Profiles → Keyboard → "Use Option as Meta key"
-- **Ghostty** — `macos-option-as-alt = true`
-- **kitty** — `macos_option_as_alt yes`
-- **WezTerm** — `send_composed_key_when_left_alt_is_pressed = false`
-- **VS Code's terminal** — `"terminal.integrated.macOptionIsMeta": true`
+| letter | who has it |
+|---|---|
+| `Ctrl-A` `Ctrl-S` `Ctrl-H` `Ctrl-J` `Ctrl-K` `Ctrl-L` | tmux — prefix, sessions, panes |
+| `Ctrl-Q` `Ctrl-Z` `Ctrl-I` `Ctrl-M` | the terminal — flow control, job control, Tab, Enter |
+| `Ctrl-C` `Ctrl-D` `Ctrl-E` `Ctrl-U` `Ctrl-W` | readline — quit, end of line, kill line, kill word |
 
-Linux terminals send Alt as a modifier already and need nothing. The Ctrl
-spellings of the non-readline chords still fire and are deliberately not
-printed, so a Mac without the setting is degraded rather than stuck — but the
-keybar will be advertising chords that do not work, which is the failure this
-note exists to prevent.
+That leaves eleven letters for sixteen verbs, which is why five of them are a
+letter past the leader rather than a chord of their own: `Ctrl-G j` for
+background shells, `Ctrl-G u` for the oldest unread, `Ctrl-G l` to clear the
+transcript, `Ctrl-G /` to search every transcript, `Ctrl-G e` for `$EDITOR`.
+`Ctrl-G` on its own draws the whole menu, so none of them has to be memorised.
+
+**If your tmux is prefixed somewhere other than `Ctrl-A`,** the six above are
+the wrong six — check `tmux list-keys` and expect a collision. `cli/src/tui/keys.rs`
+is the one place the map lives, and `no_verb_sits_on_a_chord_a_multiplexer_takes`
+is the test that pins it.
+
+The Alt spelling of every verb still fires and is deliberately never printed, so
+a terminal configured with Option-as-Meta keeps working and one without it loses
+nothing.

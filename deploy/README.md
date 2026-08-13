@@ -64,7 +64,7 @@ works while the console is running — but a running process keeps the build it
 started with, so restart the units afterwards (the installer prints the exact
 commands for whatever it finds running). From inside the console, `/update`
 does the same thing as a background job and then offers to restart itself into
-the new build; `Alt-J` shows what is running.
+the new build; `Ctrl-G j` shows what is running.
 
 **Install both `jod` and `jod-run`.** `jod-run` supervises every agent — it holds the run's output
 and writes it to the store — so `jod-api` without it can serve requests but
