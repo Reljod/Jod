@@ -244,5 +244,25 @@ else
 fi
 assert_no_grep "No such file" "$PIPED_HELP" "piped --help reads no file it does not have"
 
+# --- 14. non-cargo / legacy tags without Cargo.toml are ignored --------------
+section "legacy tags without Cargo.toml are ignored during version resolution"
+EMPTY_BLOB="$(git -C "$SEED" hash-object -w /dev/null)"
+LEGACY_TREE="$(git -C "$SEED" mktree <<<"100644 blob $EMPTY_BLOB	README.md")"
+LEGACY_COMMIT="$(git -C "$SEED" commit-tree "$LEGACY_TREE" -m "legacy bash release v9.0.0")"
+git -C "$SEED" tag -f "v9.0.0" "$LEGACY_COMMIT"
+git -C "$SEED" tag -f "v9.1.0" "$LEGACY_COMMIT"
+git -C "$SEED" push --quiet --force origin "v9.0.0" "v9.1.0"
+
+export JOD_SRC="$WORK/legacy_src"
+export JOD_BIN_DIR="$WORK/legacy_bin"
+LEGACY_LOG="$WORK/legacy.log"
+assert_ok "$REPO_ROOT/install.sh" > "$LEGACY_LOG" 2>&1
+assert_file "$JOD_BIN_DIR/jod" "installs highest valid cargo tag (v1.1.0), ignoring higher non-cargo tags v9.x"
+assert_eq "$(cat "$JOD_SRC/.jod-version")" "v1.1.0" "latest resolves to newest tag containing Cargo.toml"
+
+assert_fails env JOD_VERSION=v9.1.0 JOD_SRC="$WORK/legacy_src" JOD_BIN_DIR="$WORK/legacy_bin" "$REPO_ROOT/install.sh"
+
 assert_summary
 exit
+
+
