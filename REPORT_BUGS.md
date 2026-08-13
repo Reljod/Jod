@@ -62,6 +62,11 @@ shot, in the directory you launched it in.** That was not true when this
 report was opened — the same instruction put the project in `$HOME` and
 reported `✓ done`.
 
+**One new finding since:** [BUG-22](#bug-22) — `jod main` and `jod chat` still
+default to `$HOME`. #78 fixed the TUI console and stopped there; the same
+default remains under the plain-terminal commands. Hand-verified, unclaimed,
+and a four-call-site fix using the helper #78 already added.
+
 The per-bug sections below still describe the **broken** behaviour on purpose:
 each one is the regression reference for the fix that closed it. Read the
 status line at the top of a section before assuming it is still true.
@@ -69,6 +74,11 @@ status line at the top of a section before assuming it is still true.
 ---
 
 ## Severity summary
+
+| ID | Severity | Status | Area | One line |
+|---|---|---|---|---|
+| [BUG-22](#bug-22) | **High** | **open — unclaimed** | delegation | `jod main` and `jod chat` still run in `$HOME`; #78 fixed only the TUI console |
+
 
 Status key: **merged** = in `main`, reported by the maintainer, *not* re-driven
 by me. **PR open** = CI-green draft awaiting merge. **open** = nobody on it.
@@ -652,6 +662,71 @@ for paths, where the tail carries the meaning.
 
 ---
 
+<a name="bug-22"></a>
+## BUG-22 — `jod main` and `jod chat` still run in `$HOME`; #78 fixed only the TUI · **High** · OPEN — unclaimed
+
+**New finding, hand-verified after #78 merged.** BUG-14 has siblings. The
+console fix landed for `jod tui` and stopped there, but the same default sits
+under the other commands a person types in a terminal.
+
+**Repro** — from any project directory, on `main` at `a6736ff`:
+
+```console
+$ cd /…/worktrees/tui-dogfood-tetris/tetris-final
+$ jod main "reply with the single word sibling"
+→ b4805588 · handed to the orchestrator
+```
+
+```
+b4805588|completed|/Users/reljodoreta|main      <-- $HOME, not the directory I was standing in
+```
+
+**The call sites still answering `$HOME`** (`cli/src/main.rs`):
+
+| Line | Command | Console? |
+|---|---|---|
+| 2092 | `main_chat`, backing **`jod main`** | **yes** — verified above |
+| 4085 | `chat`, backing **`jod chat`** | **yes** — its own help says *"Hold a conversation on a plain terminal"* |
+| 1912 | `jod team wake` | typed in a terminal, takes `--cwd` |
+| 1998 | `jod team start` | typed in a terminal, takes `--cwd` |
+| 1509–1510 | `jod run` fallbacks | **no — deliberately excluded**, see below |
+| 3476 | `jod telegram serve` | **no** — a resident bot with no launch directory |
+
+**#78's own reasoning is the argument for finishing the job.**
+`console_cwd` (`cli/src/main.rs:4006`) documents itself as:
+
+> *"A console is opened **inside** something — you `cd` to a repository and type
+> `jod tui` — so the home directory is almost never the answer… This is the
+> console only."*
+
+`jod chat` is a console by that exact definition — it is the same conversation
+without the full-screen UI — and `jod main` is the console for the pinned
+chat. Both are `cd`-ed into and typed. Neither calls `console_cwd`.
+
+The exclusions are **correct and should stay**: `jod run` is a one-shot that
+may be fired by anything from anywhere (the doc comment makes this case well),
+and `jod telegram serve` genuinely has no launch directory.
+
+**Why it still matters now that the TUI is fixed.** `jod main` is the command
+the charter points people at for the always-there conversation, and it is
+*also* what the TUI's `/main` command talks to. A user who fixes their habits
+around `jod tui` still gets `$HOME` the moment they use the plain-terminal
+route — and unlike the TUI, there is no splash naming the directory to warn
+them.
+
+**Workaround today:** both accept `--cwd`, e.g. `jod main --cwd "$PWD" "…"`.
+
+**Suggested fix.** Route `jod main`, `jod chat`, `jod team wake` and
+`jod team start` through the existing `console_cwd` helper. It already exists,
+is already documented, and already has the right semantics — this is four call
+sites, not new logic.
+
+*Credit: the sibling call sites were spotted by the `cwd-fix` agent while
+scoped to a narrow fix; it grepped every `default_cwd()` caller before
+touching one. The hand-verification above is mine.*
+
+---
+
 <a name="bug-14"></a>
 ## BUG-14 — A delegated run wrote into `$HOME`, outside every root, and reported success · **Critical** · **HALF MERGED**
 
@@ -1011,7 +1086,40 @@ terminal's real width.
 ---
 
 <a name="bug-4"></a>
-## BUG-4 — The working directory is shown nowhere in the chat UI · **High** · OPEN
+## BUG-4 — The working directory is shown nowhere in the chat UI · ~~High~~ · **FIXED by #78** (`a625bec`)
+
+> **Fixed, but not where this report suggested — and #78 chose better.** The
+> directory is named in the **header band and splash caption**
+> (`header_where` / `splash_where`), `~`-abbreviated:
+>
+> ```
+> ▪ ~/Developer/Repositories/Projects/Jod/.claude/worktrees/tui-dogfood-tetris/tetris-final
+> ```
+>
+> and repeated on every delegate confirmation. Hand-verified at 200 and 80
+> columns.
+>
+> **⚠ If anyone later moves it to the status row, read this first.** My
+> suggestion was "put it in the status bar beside mode and harness". An agent
+> implementing exactly that hit a real regression: in `draw_status()` the
+> right-hand badges — dictation, `⚠ compact`, `⚑ N unread`, `⚙ N running` — are
+> computed and space-reserved **after** the left side. Budgeting a path against
+> `mode + left` alone silently eats the room those badges need, and it broke
+> three existing tests including the one asserting the live-microphone badge
+> *"never competes for space"*. The failure needs a genuinely deep path to
+> surface, so a short fixture will not catch it. The fix is to reserve the
+> badge's minimum width **before** giving the path a budget. Recorded because
+> the status row still looks like the obvious home for this.
+>
+> **One residual, minor:** the splash is only on screen while the session is
+> fresh, so after the first turn the directory is no longer continuously
+> visible. The delegate confirmation covers the moment that matters.
+>
+> *Credit: the status-row budgeting hazard was found by the `ui-fix` agent,
+> which broke those three tests, caught it by running the full suite before
+> reporting, and diagnosed the ordering.*
+
+### The original finding, kept as the regression reference
 
 There is no indication anywhere on the main screen of which directory the
 session operates in. The status bar reads:
