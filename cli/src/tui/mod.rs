@@ -67,6 +67,7 @@ use jod_core::store::Store;
 use jod_core::{AgentEvent, HarnessKind, Jod, Model, PermissionPolicy, Resume, SpawnRequest};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 /// Something the loop has to do that state alone cannot: it needs the service,
@@ -534,6 +535,9 @@ async fn event_loop(
         load_preferences(&mut app, &store, &opts);
     }
     app.team = opts.team.clone();
+    // Where this console is standing. Read by the header band, and granted to
+    // the conversation on screen by `ensure_launch_root` below.
+    app.cwd = opts.cwd.clone();
     app.now_ms = now_ms();
     app.agents = list_agents(&jod).await;
     refresh_team(&jod, &mut app);
@@ -546,7 +550,13 @@ async fn event_loop(
     // refresh that ran first would ask for one conversation's cards and then be
     // told it was looking at another.
     let mut thread = Thread::default();
+    // Which conversations have already been handed the launch directory. Held
+    // by the loop rather than by `App` because it is a record of what this
+    // *process* has done, not of anything on screen — and because it is what
+    // makes a removed root stay removed: see `ensure_launch_root`.
+    let mut granted: HashSet<String> = HashSet::new();
     bind_rail(&jod, &mut app, &thread);
+    ensure_launch_root(&jod, &mut app, &mut granted);
     refresh_workspaces(&jod, &mut app);
     app.reconcile();
     app.push(startup_hint());
@@ -784,6 +794,11 @@ async fn event_loop(
                     // entering the main chat — and the rail would otherwise
                     // spend a second showing the previous conversation's cards.
                     bind_rail(&jod, &mut app, &thread);
+                    // ...and after it, because a rebind is exactly when a
+                    // conversation that has never been told where this console
+                    // is standing arrives on screen. Nothing happens on the
+                    // ticks in between — it is a lookup in a set.
+                    ensure_launch_root(&jod, &mut app, &mut granted);
                     refresh_workspaces(&jod, &mut app);
                     if matches!(app.workspace, Workspace::Team | Workspace::Tasks) {
                         refresh_team(&jod, &mut app);
@@ -5106,6 +5121,76 @@ fn bind_rail(jod: &Arc<Jod>, app: &mut App, thread: &Thread) {
         current_conversation(store, app, thread)
             .or_else(|| store.pinned_conversation().ok().flatten())
     });
+}
+
+/// Hand the directory `jod tui` was launched in to the conversation on screen,
+/// exactly as `/add-dir` would.
+///
+/// The gap this closes: a console opened inside a repository knew where it was
+/// — every turn's harness process starts there — and the one part of the
+/// program that asks "which directories may I search" did not. `@` in a fresh
+/// session said *no folder to search* about the repository you were standing
+/// in, and the fix was to type the path you had just `cd`-ed to.
+///
+/// Read-only, like every root Jod adds itself; a worktree is what makes one
+/// writable. It goes to the conversation [`bind_rail`] just resolved — the one
+/// the rail and the `@` popup are already reading — which before the first turn
+/// is the pinned main chat, because that is the conversation this console is
+/// looking at.
+///
+/// **Once per conversation, per process,** which is what the set is for.
+/// `Store::add_root` is idempotent, so re-adding would cost nothing and mean
+/// something: it would put the directory back every quarter-second after
+/// `/root remove` took it away, and a console that undoes your removals is
+/// worse than one that never offered the root. Removal therefore holds for the
+/// rest of the session, and the next launch grants it again — which is the same
+/// bargain `/add-dir` itself makes.
+fn ensure_launch_root(jod: &Arc<Jod>, app: &mut App, granted: &mut HashSet<String>) {
+    // Nowhere to put it, or nowhere to put it *in*. A fixture with no launch
+    // directory is not a session standing anywhere.
+    if app.cwd.as_os_str().is_empty() {
+        return;
+    }
+    let Some(store) = jod.store() else {
+        return;
+    };
+    // A console on a machine where nothing has run yet has no conversation at
+    // all: [`bind_rail`] falls back to the pinned main chat, and on a fresh
+    // install there is not one to fall back to. Opening it is what `enter_main`
+    // does and `main_conversation` is a singleton, so this mints one exactly
+    // once in the life of the machine and finds it every time after.
+    //
+    // Measured, not assumed: with this missing, a `jod tui` opened in a
+    // repository on a fresh `JOD_HOME` ran for minutes and left `conversations`
+    // and `conversation_roots` both empty — the whole feature waiting on a turn
+    // being typed before it could do anything.
+    let conversation = match app.conversation.clone() {
+        Some(conversation) => conversation,
+        None => match store.main_conversation(app.harness, &app.cwd.display().to_string()) {
+            Ok(id) => {
+                app.conversation = Some(id.clone());
+                id
+            }
+            // No conversation and none to be had. The `@` popup's own empty
+            // state covers this — it is the state it was written for.
+            Err(_) => return,
+        },
+    };
+    if !granted.insert(conversation.clone()) {
+        return;
+    }
+    let cwd = app.cwd.clone();
+    // Silent when it works: the header band names the directory, `/root` lists
+    // it, and a notice on every launch would be a line of chrome saying what
+    // the screen already says. A failure is worth one line — it is the
+    // difference between "`@` searches here" and "`@` says there is nothing to
+    // search", and the popup's own empty state cannot explain why.
+    if let Err(e) = store.add_root(&conversation, jod_core::roots::NewRoot::reading(&cwd)) {
+        app.push(Entry::Notice(format!(
+            "{} is where this console is, but it could not be added as a root: {e}",
+            cwd.display()
+        )));
+    }
 }
 
 /// Give the `@` popup something to search, and re-rank it against it.
@@ -11179,6 +11264,170 @@ mod tests {
             pending[0].body.contains("stored GITHUB_TOKEN"),
             "{}",
             pending[0].body
+        );
+    }
+
+    // ---- where the console is standing ----
+
+    /// A console opened inside a repository already knows where it is — every
+    /// turn's harness process starts there — and until this ran, the one part
+    /// of the program that asks *which directories may I search* did not. `@`
+    /// in a fresh session said "no folder to search" about the repository you
+    /// were standing in.
+    #[tokio::test]
+    async fn the_directory_the_console_was_opened_in_becomes_a_root() {
+        let store = store();
+        let conversation = store
+            .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
+            .expect("a conversation")
+            .id;
+        let jod = jod_with(store);
+
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.conversation = Some(conversation.clone());
+        app.cwd = std::env::current_dir().expect("a working directory");
+        let mut granted = HashSet::new();
+        ensure_launch_root(&jod, &mut app, &mut granted);
+
+        let store = jod.store().expect("the store");
+        let roots = store.roots(&conversation).expect("roots");
+        assert_eq!(roots.len(), 1, "{roots:?}");
+        // Against the normalised form, because `add_root` canonicalises and the
+        // path that comes back is the one every later match is made against.
+        assert_eq!(roots[0].path, jod_core::roots::normalise(&app.cwd));
+        assert!(!roots[0].writable, "read-only, like every root Jod adds");
+        assert!(
+            app.transcript.is_empty(),
+            "and silent about it: {:?}",
+            app.transcript
+        );
+    }
+
+    /// The case the unit tests above would have missed and a real launch found:
+    /// a machine where nothing has ever run has no conversation for the grant
+    /// to land on, so the console opens the one it already falls back to. Left
+    /// out, `jod tui` on a fresh install ran for minutes with an empty
+    /// `conversations` table and `@` still saying there was nothing to search.
+    #[tokio::test]
+    async fn a_console_on_a_fresh_machine_opens_the_main_chat_to_have_somewhere_to_put_it() {
+        let jod = jod_with(store());
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.cwd = std::env::current_dir().expect("a working directory");
+        // As `bind_rail` leaves it when there is no pinned chat to find.
+        app.conversation = None;
+        let mut granted = HashSet::new();
+        ensure_launch_root(&jod, &mut app, &mut granted);
+
+        let store = jod.store().expect("the store");
+        let conversation = app.conversation.clone().expect("a conversation to talk into");
+        assert_eq!(
+            store.pinned_conversation().expect("the pinned chat"),
+            Some(conversation.clone()),
+            "the main chat, not a loose one nothing else will find"
+        );
+        let roots = store.roots(&conversation).expect("roots");
+        assert_eq!(roots.len(), 1, "{roots:?}");
+        assert_eq!(roots[0].path, jod_core::roots::normalise(&app.cwd));
+    }
+
+    /// The half that makes it a grant rather than a policy. `add_root` is
+    /// idempotent, so re-adding on the next tick would cost nothing and undo
+    /// `/root remove` four times a second — a console that puts back what you
+    /// took away is worse than one that never offered the directory.
+    #[tokio::test]
+    async fn removing_the_launch_directory_makes_it_stay_removed() {
+        let store = store();
+        let conversation = store
+            .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
+            .expect("a conversation")
+            .id;
+        let jod = jod_with(store);
+
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.conversation = Some(conversation.clone());
+        app.cwd = std::env::current_dir().expect("a working directory");
+        let mut granted = HashSet::new();
+        ensure_launch_root(&jod, &mut app, &mut granted);
+
+        let store = jod.store().expect("the store");
+        assert!(
+            store
+                .remove_root(&conversation, &app.cwd)
+                .expect("removing what was just added"),
+            "it was there to remove"
+        );
+
+        // Every remaining tick of the session, as the loop would run them.
+        for _ in 0..8 {
+            ensure_launch_root(&jod, &mut app, &mut granted);
+        }
+        assert!(
+            store.roots(&conversation).expect("roots").is_empty(),
+            "the removal holds for the rest of the session"
+        );
+    }
+
+    /// The conversation on screen changes — `/new`, `/resume`, a harness
+    /// switch — and each one that arrives is a conversation that has never been
+    /// told where this console is.
+    #[tokio::test]
+    async fn a_conversation_bound_later_is_told_where_the_console_is_too() {
+        let store = store();
+        let first = store
+            .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
+            .expect("a conversation")
+            .id;
+        let second = store
+            .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
+            .expect("another conversation")
+            .id;
+        let jod = jod_with(store);
+
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.cwd = std::env::current_dir().expect("a working directory");
+        let mut granted = HashSet::new();
+
+        app.conversation = Some(first.clone());
+        ensure_launch_root(&jod, &mut app, &mut granted);
+        app.conversation = Some(second.clone());
+        ensure_launch_root(&jod, &mut app, &mut granted);
+
+        let store = jod.store().expect("the store");
+        for conversation in [&first, &second] {
+            assert_eq!(
+                store.roots(conversation).expect("roots").len(),
+                1,
+                "{conversation} was left without the directory it is being typed into"
+            );
+        }
+    }
+
+    /// A fixture with no launch directory is not a session standing anywhere,
+    /// and `""` as a root reads as `/` to anything that joins a path onto it —
+    /// the same trap `ensure_inherited_root` refuses.
+    #[tokio::test]
+    async fn a_session_with_no_launch_directory_grants_nothing() {
+        let store = store();
+        let conversation = store
+            .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
+            .expect("a conversation")
+            .id;
+        let jod = jod_with(store);
+
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.conversation = Some(conversation.clone());
+        let mut granted = HashSet::new();
+        ensure_launch_root(&jod, &mut app, &mut granted);
+
+        let roots = jod
+            .store()
+            .expect("the store")
+            .roots(&conversation)
+            .expect("roots");
+        assert!(roots.is_empty(), "{roots:?}");
+        assert!(
+            granted.is_empty(),
+            "and nothing was written down as granted"
         );
     }
 

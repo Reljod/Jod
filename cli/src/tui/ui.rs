@@ -10,6 +10,7 @@
 //! over SSH.
 
 use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
@@ -1296,8 +1297,8 @@ const HEADER_SEATS: u16 = HEADER + 3 + 8;
 /// band would cost four rows to print `Claude Code · …`.
 const HEADER_FITS: u16 = 48;
 
-/// The band over the conversation: the mascot, and three lines saying which
-/// build you launched, who is answering, and what he is doing about it.
+/// The band over the conversation: the mascot, and four lines saying which
+/// build you launched, who is answering, what he is doing about it, and where.
 /// Returns what is left of `area` underneath it.
 ///
 /// The mascot used to live on the splash alone, which put it on screen exactly
@@ -1326,19 +1327,30 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) -> Rect {
 
 /// The band's rows: the lion down the left, the text to the right of it.
 ///
-/// The lion is one row taller than the text beside it, and the spare row goes
-/// *under* the last line rather than above the first — the opposite of the
-/// splash's lockup, and for the same reason. There the lion stood on the
+/// Four rows of drawing, and up to four of text. A session that knows where it
+/// is standing fills the last one with the directory; one that does not leaves
+/// it blank, which is the shape this band had when it carried three lines — the
+/// spare row *under* the last line rather than above the first, the opposite of
+/// the splash's lockup and for the same reason. There the lion stood on the
 /// lettering's baseline; here it stands on the transcript's border, which is
-/// the ground line this block actually has.
+/// the ground line this block actually has, and it goes on standing there
+/// whether or not there is a fourth line beside it.
 fn header_lines(app: &App, width: u16) -> Vec<Line<'static>> {
     let pose = mascot_pose(app);
     let room = width.saturating_sub(pose.width() + LOCKUP_GAP) as usize;
-    let text = [
+    let mut text = vec![
         header_name(room),
         header_who(app, room),
         header_doing(app, room),
     ];
+    // The fourth row is the lion's body, and until now nothing was written
+    // beside it — the block was three lines against a four-row drawing. The
+    // directory goes there rather than anywhere shorter because it is the one
+    // fact on this band that a person cannot work out from the conversation:
+    // which repository the next turn will run in.
+    if let Some(where_) = header_where(app, room) {
+        text.push(where_);
+    }
     (0..pose.height() as usize)
         .map(|row| {
             let mut spans: Vec<Span<'static>> = Vec::with_capacity(10);
@@ -1379,6 +1391,62 @@ fn header_who(app: &App, room: usize) -> Vec<Span<'static>> {
 fn header_doing(app: &App, room: usize) -> Vec<Span<'static>> {
     let colour = if app.busy { WARN } else { MUTED };
     vec![Span::styled(cut(&app.activity(), room), fg(colour))]
+}
+
+/// Line four: where he is working — the directory `jod tui` was launched in,
+/// which is also the root `@` searches and where every turn's harness process
+/// starts. `None` in a fixture that was never given one, so the band stays
+/// three lines rather than printing a blank row beside the lion.
+///
+/// The glyph rather than a word: `in ~/Developer/Jod` spends three of the
+/// scarcest columns on the band saying what a folder mark says for one, and the
+/// three lines above it are already bare facts with no labels.
+fn header_where(app: &App, room: usize) -> Option<Vec<Span<'static>>> {
+    if app.cwd.as_os_str().is_empty() {
+        return None;
+    }
+    let shown = under_home(
+        &app.cwd,
+        std::env::var_os("HOME").map(PathBuf::from).as_deref(),
+    );
+    Some(vec![Span::styled(
+        format!("▪ {}", fit_path(&shown, room.saturating_sub(2))),
+        fg(MUTED),
+    )])
+}
+
+/// A path under the home directory, written with a `~`.
+///
+/// `home` is passed in rather than read here so the rule can be tested without
+/// the suite depending on whose machine it runs on — the same reason the picker
+/// takes `$HOME` at its own edge. `None` means there is no home to be under.
+fn under_home(path: &Path, home: Option<&Path>) -> String {
+    match home.and_then(|home| path.strip_prefix(home).ok()) {
+        // The home directory itself, rather than `~/`.
+        Some(rest) if rest.as_os_str().is_empty() => "~".to_string(),
+        Some(rest) => format!("~/{}", rest.display()),
+        None => path.display().to_string(),
+    }
+}
+
+/// A path in at most `room` columns, cut from the **left**.
+///
+/// The opposite end from [`cut`], and the difference is the whole reason this
+/// exists: what identifies a directory is its last two components, so a path
+/// truncated the ordinary way turns `~/Developer/Repositories/Projects/Jod`
+/// into `~/Developer/Repositor…` — every column spent on the part that is the
+/// same for every repository he owns.
+fn fit_path(path: &str, room: usize) -> String {
+    let len = path.chars().count();
+    if len <= room {
+        return path.to_string();
+    }
+    // Nothing legible fits. One glyph saying "there is a path here and it did
+    // not fit" beats a single stray character of it.
+    if room <= 1 {
+        return "…".repeat(room);
+    }
+    format!("…{}", path.chars().skip(len - (room - 1)).collect::<String>())
 }
 
 /// At most `width` columns, centred in `area`.
@@ -5840,6 +5908,77 @@ mod tests {
             screen.contains("the team panel"),
             "/team, thirty rows further down:\n{screen}"
         );
+    }
+
+    // ---- where this console is standing ----
+
+    /// The band has to name the directory, because it is the one fact on it a
+    /// person cannot recover from the conversation: which repository the next
+    /// turn runs in. A console that will edit `Jod` and a console that will
+    /// edit `Jod-Apps` look identical without it.
+    #[test]
+    fn the_band_says_which_directory_the_next_turn_runs_in() {
+        let mut a = app();
+        a.cwd = PathBuf::from("/somewhere/Developer/Jod");
+        a.push(Entry::Agent("here is the summary".into()));
+        let screen = rendered(&a, 100, 24);
+        assert!(screen.contains("/somewhere/Developer/Jod"), "{screen}");
+    }
+
+    /// ...and a fixture that was never given one stays three lines rather than
+    /// printing a bare mark against a blank row.
+    #[test]
+    fn a_session_standing_nowhere_prints_no_fourth_line() {
+        let mut a = app();
+        a.push(Entry::Agent("here is the summary".into()));
+        let screen = rendered(&a, 100, 24);
+        assert!(
+            !screen.contains('▪'),
+            "no folder mark with no folder:\n{screen}"
+        );
+    }
+
+    /// Home is written `~`, which is how it is typed and how every other
+    /// program on the machine prints it.
+    #[test]
+    fn a_path_under_home_is_written_with_a_tilde() {
+        let home = Path::new("/Users/reljod");
+        assert_eq!(
+            under_home(Path::new("/Users/reljod/Developer/Jod"), Some(home)),
+            "~/Developer/Jod"
+        );
+        assert_eq!(under_home(home, Some(home)), "~", "home itself is bare");
+        assert_eq!(
+            under_home(Path::new("/opt/jod"), Some(home)),
+            "/opt/jod",
+            "and a path that is not under it is left alone"
+        );
+        assert_eq!(
+            under_home(Path::new("/Users/reljodoreta/x"), Some(home)),
+            "/Users/reljodoreta/x",
+            "a longer name that merely starts with home's is not under it"
+        );
+        assert_eq!(
+            under_home(Path::new("/Users/reljod/x"), None),
+            "/Users/reljod/x",
+            "no home, nothing to shorten against"
+        );
+    }
+
+    /// A path is identified by its *last* components, so the elision has to eat
+    /// the front. Truncated the ordinary way, every repository he owns comes
+    /// out reading `~/Developer/Repositor…`.
+    #[test]
+    fn a_path_too_long_for_the_band_loses_its_front_not_its_name() {
+        assert_eq!(fit_path("~/Developer/Jod", 20), "~/Developer/Jod");
+        assert_eq!(fit_path("~/Developer/Jod", 8), "…per/Jod");
+        assert_eq!(
+            fit_path("~/Developer/Jod", 8).chars().count(),
+            8,
+            "and it fills the room it was given, exactly"
+        );
+        assert_eq!(fit_path("~/Developer/Jod", 1), "…", "no room for a name");
+        assert_eq!(fit_path("~/Developer/Jod", 0), "", "and none for anything");
     }
 
     // ---- padding and the readable measure ----

@@ -2197,3 +2197,37 @@ routine sweep of a full disk, which starts by deleting worktree `target/`
 directories — would leave a dangling binary on `$PATH`, and a long-running
 console's identity could change underneath it with nothing recorded. The copy
 was never the defect. Being unable to *tell which copy* was.
+
+## A console is opened inside something, so `$HOME` is the wrong default
+
+`jod tui` took its working directory from `service::default_cwd`, which answers
+`$HOME`. That default is right for the thing it was written for — `jod run` is
+a one-shot that a schedule, a webhook or a Telegram message can fire from
+anywhere, and inheriting whatever directory the caller happened to be in is not
+a decision anybody made. It is wrong for a console, which is *typed inside
+something*: you `cd` to a repository and open one there.
+
+The cost was not cosmetic, and it was paid in three places at once. Every
+turn's harness process started in `$HOME` rather than the repository on screen.
+Nothing on the screen named a directory, so there was no way to notice. And the
+picker had always used the launched-in directory — so `Ctrl-P` and the session
+itself quietly disagreed about where "here" was.
+
+The launch directory is now granted to the conversation on screen exactly as
+`/add-dir` would grant it, and the header band names it. Two rules keep that
+from becoming a policy:
+
+**Once per conversation, per process.** `add_root` is idempotent, so re-adding
+on every tick would cost nothing and mean something: it would put the directory
+back a quarter-second after `/root remove` took it away. A console that undoes
+your removals is worse than one that never offered the root. Removal holds for
+the session; the next launch grants it again, which is the same bargain
+`/add-dir` itself makes.
+
+**Somewhere to put it, or make one.** A machine where nothing has ever run has
+no conversation at all — the rail falls back to the pinned main chat and on a
+fresh install there is not one to fall back to. The console opens it, which is
+what entering the main chat already did. Found by launching the program against
+an empty `JOD_HOME` and reading the tables afterwards: `conversations` and
+`conversation_roots` were both still empty after minutes, with every unit test
+green. → [why that is the only check that finds this](#a-unit-test-proves-a-function-only-an-entry-point-test-proves-a-feature)

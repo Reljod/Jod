@@ -32,6 +32,7 @@ use jod_core::roots::Root;
 use jod_core::secrets::Scope;
 use jod_core::tree::{Node, NodeId};
 use std::collections::HashSet;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 /// One line in the transcript, tagged with what produced it so the renderer can
@@ -444,6 +445,16 @@ pub struct App {
     /// without offering a way to see it is asking to be trusted about work it
     /// never shows.
     pub jobs: Vec<Job>,
+    /// The directory `jod tui` was launched in.
+    ///
+    /// Where every turn's harness process starts, and — see
+    /// [`super::ensure_launch_root`] — the first root of the conversation on
+    /// screen, so `@` searches the repository you are standing in rather than
+    /// telling you to go and pick one.
+    ///
+    /// Empty in fixtures that do not care, which is what the header band reads
+    /// to decide whether it has a directory worth printing.
+    pub cwd: PathBuf,
 
     // ---- the decision rail, and the `@` picker --------------------------
     /// The conversation the rail and the `@` picker belong to.
@@ -910,6 +921,9 @@ impl App {
             panel: false,
             context_tokens: 0,
             jobs: Vec::new(),
+            // Set by the event loop from `Options::cwd`, like the mode and the
+            // team beside it: `new` builds an app, the launch flags fill it in.
+            cwd: PathBuf::new(),
             conversation: None,
             cards: Vec::new(),
             rail: RailState::default(),
