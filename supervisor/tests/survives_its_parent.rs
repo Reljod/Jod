@@ -406,6 +406,7 @@ fn kind_of(e: &jod_core::event::AgentEnvelope) -> &'static str {
         AgentEvent::Started { .. } => "started",
         AgentEvent::Thinking { .. } => "thinking",
         AgentEvent::Progress { .. } => "progress",
+        AgentEvent::Delta { .. } => "delta",
         AgentEvent::Message { .. } => "message",
         AgentEvent::ToolCall { .. } => "tool_call",
         AgentEvent::ToolResult { .. } => "tool_result",

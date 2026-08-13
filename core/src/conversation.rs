@@ -194,11 +194,16 @@ impl NewMessage {
     /// find out it was nothing. Giving this a store lookup would put that
     /// lookup on every event of every run.
     ///
-    /// Four kinds deliberately produce nothing:
+    /// Five kinds deliberately produce nothing:
     ///
     /// - `Progress` is a liveness tick with no content — the thing a long
     ///   silent think emits so a UI can show it is still working. It belongs in
     ///   a status line, never in a transcript replayed into another harness.
+    /// - `Delta` is a fragment of a block that reappears complete, moments
+    ///   later, as the `Message`/`ToolCall` this same function already turns
+    ///   into a row. Keeping both would duplicate every streamed turn — once
+    ///   as fragments, once whole — and a thread replayed into another harness
+    ///   must not replay the first harness's streaming pace along with it.
     /// - `Started` is metadata. It carries the session id and model, which
     ///   belong on the conversation row — see [`Store::set_conversation_session`].
     /// - `Finished.text` is always a repeat: every harness adapter fills it
@@ -241,13 +246,14 @@ impl NewMessage {
             // A run that died mid-way must say so in the transcript, or the
             // thread reads as though the agent simply stopped talking.
             AgentEvent::Error { message } => Some(NewMessage::new(Role::System, message.clone())),
-            // `Progress` joins them: it is a liveness tick with no content, so
-            // a transcript replayed into another harness must not carry a
-            // record of how long the first one thought.
+            // `Progress` and `Delta` join them: a liveness tick with no
+            // content, and a fragment whose complete form is handled above —
+            // neither belongs in a transcript replayed into another harness.
             AgentEvent::Started { .. }
             | AgentEvent::Finished { .. }
             | AgentEvent::Raw { .. }
-            | AgentEvent::Progress { .. } => None,
+            | AgentEvent::Progress { .. }
+            | AgentEvent::Delta { .. } => None,
         }
     }
 }

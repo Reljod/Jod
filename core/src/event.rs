@@ -61,6 +61,30 @@ pub enum AgentEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         thinking_tokens: Option<u64>,
     },
+    /// A fragment of a content block the harness has not finished emitting.
+    ///
+    /// `--include-partial-messages` is what puts this on the wire at all.
+    /// Without it, a block that takes a while to finish produces *nothing*
+    /// until it is complete — and "a while" is not always reasoning.
+    /// [`Progress`](AgentEvent::Progress) covers a long think; this covers a
+    /// long *write*. Observed live: a `jod tui` transcript froze for six
+    /// minutes, and what had actually happened in that window, recovered
+    /// afterwards, was one assistant turn carrying seven `Write` tool calls in
+    /// a row — each one's `content` argument a whole file, streamed as
+    /// `input_json_delta`. `thinking_tokens` cannot tick through that: the
+    /// model was not reasoning, it was emitting. This is the only thing on the
+    /// wire during that window.
+    ///
+    /// Carries the raw fragment — the incremental piece, not the running
+    /// total — whether it came from prose (`text_delta`) or a tool call's
+    /// arguments building up (`input_json_delta`). Both duplicate content that
+    /// reappears complete in the `Message`/`ToolCall` fired once the block
+    /// finishes, so this is deliberately not a substitute for either: a
+    /// consumer that only wants the finished form can ignore it, and
+    /// [`crate::conversation::NewMessage::from_event`] does exactly that — a
+    /// thread replayed into another harness must not replay every fragment a
+    /// second time.
+    Delta { text: String },
     /// Assistant prose addressed to the caller.
     Message { text: String },
     /// The agent invoked a tool.
@@ -163,6 +187,20 @@ mod tests {
         let s = serde_json::to_string(&bare).unwrap();
         assert_eq!(s, r#"{"kind":"progress"}"#);
         assert_eq!(serde_json::from_str::<AgentEvent>(&s).unwrap(), bare);
+    }
+
+    /// The same wire requirement as the progress tick, for the same reason:
+    /// `api/src/sse.rs` serialises this straight to every client, so a
+    /// streaming fragment that does not survive `serde_json` is silence again
+    /// by the time it would reach a UI.
+    #[test]
+    fn a_delta_fragment_survives_the_wire() {
+        let e = AgentEvent::Delta {
+            text: "Cr".into(),
+        };
+        let s = serde_json::to_string(&e).unwrap();
+        assert_eq!(s, r#"{"kind":"delta","text":"Cr"}"#);
+        assert_eq!(serde_json::from_str::<AgentEvent>(&s).unwrap(), e);
     }
 
     #[test]

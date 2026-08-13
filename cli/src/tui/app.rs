@@ -304,22 +304,24 @@ const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "�
 /// event proves it — a long turn can sit silent for more than one reason, and
 /// the spinner alone cannot tell the reader which.
 ///
-/// Reasoning is the only kind wired up so far: `AgentEvent::Progress` ticks
-/// while the model thinks with nothing else on the wire yet. A second kind
-/// belongs here for the silence a long assistant message sits in while it
-/// *generates* — a message with several `tool_use` blocks can take minutes to
-/// produce with no `Thinking` or `Progress` event in between, because the
-/// model is not reasoning in that window, it is emitting. That event does not
-/// exist yet — `task-stream-flag` is the one adding it, over in
-/// `core/src/event.rs`, which this file does not own — but when it lands, its
-/// arm in `App::apply` sets a new variant here, and `describe` below grows one
-/// more match arm. Nothing about this type needs renaming to receive it: the
-/// field is "the latest evidence", not "the token count".
+/// Two kinds, so far. Reasoning: `AgentEvent::Progress` ticks while the model
+/// thinks with nothing else on the wire yet. Generation: `AgentEvent::Delta`
+/// fragments while a long assistant message is being written — a message with
+/// several `tool_use` blocks can take minutes to produce with no `Thinking` or
+/// `Progress` event in between, because the model is not reasoning in that
+/// window, it is emitting. Nothing about this type needs renaming to add a
+/// third: the field is "the latest evidence", not "the token count".
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Liveness {
     /// A running reasoning-token count. Set, never incremented — the event
     /// carries the total so far, not a delta.
     Thinking(u64),
+    /// A `Delta` fragment arrived: the model is mid-generation. Carries no
+    /// count — `Delta` is an incremental fragment, not a running total, and
+    /// this file does not own the transcript-side accounting that would be
+    /// needed to turn a stream of fragments into a meaningful number. Proving
+    /// the wire is alive does not require one.
+    Generating,
 }
 
 impl Liveness {
@@ -327,15 +329,15 @@ impl Liveness {
     /// not to see it.
     ///
     /// `show_thinking` is passed in rather than read off `App` so each
-    /// variant can answer independently once there is more than one — a
-    /// generation signal is the model producing the answer it was asked for,
-    /// not the reasoning behind it, and hiding reasoning should not also hide
-    /// that.
+    /// variant can answer independently — a generation signal is the model
+    /// producing the answer it was asked for, not the reasoning behind it, so
+    /// hiding reasoning must not also hide that.
     fn describe(self, show_thinking: bool) -> Option<String> {
         match self {
             Liveness::Thinking(tokens) => {
                 show_thinking.then(|| format!("{tokens} thinking tokens"))
             }
+            Liveness::Generating => Some("writing…".into()),
         }
     }
 }
@@ -2261,12 +2263,22 @@ impl App {
             // this code inventing motion for it.
             //
             // This is reasoning silence specifically — see [`Liveness`] for
-            // where generation silence (a long assistant message with no
-            // ticks) plugs in once that event exists.
+            // generation silence, right below.
             AgentEvent::Progress { thinking_tokens } => {
                 if let Some(t) = thinking_tokens {
                     self.liveness = Some(Liveness::Thinking(*t));
                 }
+            }
+            // Generation silence: a long assistant message — often several
+            // `tool_use` blocks in a row, each one's arguments streamed as its
+            // own run of these — with no `Thinking`/`Progress` event in
+            // between, because the model is not reasoning in that window, it
+            // is emitting. Also kept out of the transcript, for the same
+            // reason as `Progress` above: one `Delta` per token-ish fragment
+            // would flood it, and the complete block still lands there once,
+            // as its own `Message`/`ToolCall`, when it finishes.
+            AgentEvent::Delta { .. } => {
+                self.liveness = Some(Liveness::Generating);
             }
             AgentEvent::Error { message } => self.push(Entry::Notice(message.clone())),
             AgentEvent::Raw { line } => {
@@ -3430,6 +3442,57 @@ mod tests {
             !a.status().contains("thinking"),
             "the new turn starts silent: {}",
             a.status()
+        );
+    }
+
+    /// The other half of the freeze `Liveness` exists for: a long assistant
+    /// message with several tool calls in it produces no `Thinking`/`Progress`
+    /// ticks at all — the model is emitting, not reasoning — so `Delta` has to
+    /// be enough on its own to keep the status bar honest.
+    #[test]
+    fn a_delta_fragment_shows_up_as_writing_in_the_status() {
+        let mut a = app();
+        a.begin_turn("run-1", 0);
+        assert!(!a.status().contains("writing"), "{}", a.status());
+
+        a.apply(&AgentEvent::Delta {
+            text: "{\"file_path\": \"package.json".into(),
+        });
+        assert!(
+            a.status().contains("writing"),
+            "a streamed fragment must prove the turn is still moving: {}",
+            a.status()
+        );
+    }
+
+    /// Unlike the reasoning count, showing that generation is happening at all
+    /// is not something a reader would want hidden with `show_thinking` — it
+    /// is not reasoning being shown, it is the answer itself arriving.
+    #[test]
+    fn writing_shows_even_with_thinking_hidden() {
+        let mut a = app();
+        a.show_thinking = false;
+        a.begin_turn("run-1", 0);
+        a.apply(&AgentEvent::Delta {
+            text: "frag".into(),
+        });
+        assert!(a.status().contains("writing"), "{}", a.status());
+    }
+
+    /// `Delta` must not land in the transcript — the complete block it is a
+    /// fragment of shows up there once, on its own, when it finishes.
+    #[test]
+    fn a_delta_fragment_never_reaches_the_transcript() {
+        let mut a = app();
+        a.begin_turn("run-1", 0);
+        let before = a.transcript.len();
+        a.apply(&AgentEvent::Delta {
+            text: "some text".into(),
+        });
+        assert_eq!(
+            a.transcript.len(),
+            before,
+            "a streaming fragment belongs on the status line, not the transcript"
         );
     }
 

@@ -44,6 +44,17 @@ impl Harness for ClaudeCode {
             ArgPart::lit("stream-json"),
             // stream-json in headless mode requires --verbose.
             ArgPart::lit("--verbose"),
+            // Without this, a block that takes a while to produce — a long
+            // prose answer, or a tool call whose argument is a whole file's
+            // contents — puts nothing on the wire until it is complete. That
+            // is silence indistinguishable from a dead process: a `jod tui`
+            // transcript froze for six minutes, and the window turned out to
+            // hold one assistant turn carrying seven `Write` calls in a row.
+            // This flag is what turns that window into `content_block_delta`
+            // frames, parsed below into `AgentEvent::Delta`. The two land in
+            // the same commit on purpose — see the comment on the `stream_event`
+            // arm in `parse_line`.
+            ArgPart::lit("--include-partial-messages"),
         ];
         // One `--add-dir` per root. Measured rather than assumed: repeating the
         // flag accumulates, and a run given two of them reported its cwd and
@@ -262,6 +273,22 @@ impl Harness for ClaudeCode {
                 // `AgentEvent::Raw` and dumps the JSON into the transcript.
                 _ => vec![],
             },
+            // What `--include-partial-messages` actually turns on.
+            //
+            // Read off claude 2.1.231 itself: each line is
+            // `{type:"stream_event", event:{type:"…", …}, session_id, uuid}`,
+            // wrapping the Anthropic Messages API's own streaming shape one
+            // level down. Only `content_block_delta` carries content; the
+            // rest of the wrapper is structural bookkeeping around blocks
+            // whose complete form Jod already renders once from `assistant`.
+            //
+            // This has to land in the same commit as the flag above. Without
+            // a parser arm, every one of these frames falls through to the
+            // catch-all at the bottom of this match, becomes `AgentEvent::Raw`,
+            // and dumps harness JSON straight into the transcript and the
+            // persisted event log — strictly worse than the silence this flag
+            // exists to fix.
+            Some("stream_event") => self.parse_stream_event(&v),
             Some("assistant") => self.parse_assistant(&v),
             Some("user") => self.parse_tool_results(&v),
             Some("result") => {
@@ -319,6 +346,60 @@ impl ClaudeCode {
             }
         }
         out
+    }
+
+    /// Unwrap one `stream_event` line into the fragment it carries, if any.
+    ///
+    /// The shape below the wrapper is claude 2.1.231's own, captured live
+    /// rather than guessed — a haiku prompt produced `text_delta`, a Bash
+    /// call produced `input_json_delta`, and a hard reasoning prompt produced
+    /// `thinking_delta` and `signature_delta` on a `"thinking"` block. Only
+    /// the first two become `AgentEvent::Delta`; the reasons for the other
+    /// four are inline below.
+    fn parse_stream_event(&mut self, v: &Value) -> Vec<AgentEvent> {
+        let Some(event) = v.get("event") else {
+            return vec![];
+        };
+        match event.get("type").and_then(Value::as_str) {
+            Some("content_block_delta") => {
+                let text = event.get("delta").and_then(|d| {
+                    match d.get("type").and_then(Value::as_str) {
+                        // Prose as it is written.
+                        Some("text_delta") => str_at(d, "text"),
+                        // A tool call's arguments as they are written — this is
+                        // the half of the six-minute freeze that mattered: each
+                        // `Write` call's `content` argument is a whole file,
+                        // streamed here token by token, and produced nothing at
+                        // all before this arm existed.
+                        Some("input_json_delta") => str_at(d, "partial_json"),
+                        // Reasoning already has its own liveness signal —
+                        // `AgentEvent::Progress`, from `system`/`thinking_tokens`
+                        // — which arrives independently of this flag and on
+                        // its own cadence. A second tick for the same window
+                        // would be noise, not new information.
+                        Some("thinking_delta") => None,
+                        // An opaque verification blob for the thinking block,
+                        // not content. Nothing to show.
+                        Some("signature_delta") => None,
+                        _ => None,
+                    }
+                });
+                match text {
+                    Some(t) if !t.is_empty() => vec![AgentEvent::Delta { text: t }],
+                    _ => vec![],
+                }
+            }
+            // `message_start` repeats what `system`/`init` already gave us
+            // (model, session). `content_block_start`/`content_block_stop`
+            // bracket a block whose content arrives via the deltas above —
+            // structural, not content. `message_delta` carries usage and
+            // `stop_reason` that the terminal `result` line already supplies
+            // authoritatively. `message_stop` carries nothing at all.
+            //
+            // Dropped here, not left to fall through — the catch-all at the
+            // bottom of `parse_line` turns anything it reaches into `Raw`.
+            _ => vec![],
+        }
     }
 
     fn parse_tool_results(&mut self, v: &Value) -> Vec<AgentEvent> {
@@ -706,6 +787,20 @@ mod tests {
         assert!(a.contains(&ArgPart::Prompt));
     }
 
+    /// The flag by itself is not the fix — `a_content_block_delta_reaches_the_stream_as_a_typed_event`
+    /// below is what actually matters, since the board complaint is about what
+    /// the user sees, not what the argv says. This just pins that the flag
+    /// making the frames possible in the first place is not lost.
+    #[test]
+    fn args_always_request_partial_messages() {
+        let a = ClaudeCode::default().args(&req(PermissionPolicy::Ask, None));
+        assert!(
+            a.contains(&ArgPart::lit("--include-partial-messages")),
+            "without this flag a long block puts nothing on the wire until \
+             it finishes: {a:?}"
+        );
+    }
+
     /// Each policy maps to its own flags, and no two share one.
     ///
     /// The property under test — distinct policies produce distinct argv — is
@@ -895,6 +990,141 @@ mod tests {
         ] {
             assert!(h.parse_line(line).is_empty(), "{line} was not dropped");
         }
+    }
+
+    /// The regression this whole change exists for, `stream_event`'s turn.
+    ///
+    /// Captured live off claude 2.1.231 with `--include-partial-messages` set:
+    /// a haiku prompt produced exactly this line — `type:"stream_event"`
+    /// wrapping `event:{type:"content_block_delta", delta:{type:"text_delta"}}`.
+    /// It has to reach the stream as a typed event, and — the trap the flag
+    /// alone would spring — it must not land in `Raw`, or this fix dumps
+    /// harness JSON into the transcript instead of fixing the silence.
+    #[test]
+    fn a_content_block_delta_reaches_the_stream_as_a_typed_event() {
+        let mut h = ClaudeCode::default();
+        let out = h.parse_line(
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,
+                "delta":{"type":"text_delta","text":"Crimson maples drift"}},
+                "session_id":"s1","parent_tool_use_id":null,"uuid":"u1"}"#,
+        );
+        assert_eq!(
+            out,
+            vec![AgentEvent::Delta {
+                text: "Crimson maples drift".into()
+            }],
+            "the only thing on the wire during a long write was dropped again"
+        );
+        assert!(
+            !out.iter().any(|e| matches!(e, AgentEvent::Raw { .. })),
+            "a delta that lands in Raw dumps harness JSON into the transcript"
+        );
+    }
+
+    /// The half of the six-minute freeze that actually mattered.
+    ///
+    /// The observed failure was not a long *prose* answer — it was one
+    /// assistant turn carrying seven `Write` calls back to back, each one's
+    /// `content` argument a whole file. That streams as `input_json_delta` on
+    /// a `tool_use` block, captured live from a real `Bash` call. If this arm
+    /// only handled `text_delta`, the fix would not cover the failure it was
+    /// written for.
+    #[test]
+    fn an_input_json_delta_reaches_the_stream_too() {
+        let mut h = ClaudeCode::default();
+        let out = h.parse_line(
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":1,
+                "delta":{"type":"input_json_delta","partial_json":"{\"command\": \"ls -la"}},
+                "session_id":"s1","parent_tool_use_id":null,"uuid":"u2"}"#,
+        );
+        assert_eq!(
+            out,
+            vec![AgentEvent::Delta {
+                text: "{\"command\": \"ls -la".into()
+            }]
+        );
+        assert!(!out.iter().any(|e| matches!(e, AgentEvent::Raw { .. })));
+    }
+
+    /// The acceptance scenario measured against a live re-run: one assistant
+    /// turn that streams several tool calls in a row must show progress
+    /// *throughout* that turn, not all at once when it finally completes. This
+    /// walks the actual sequence — `content_block_start` for a tool, several
+    /// `input_json_delta` fragments, `content_block_stop`, then the same
+    /// again for a second tool — and asserts a `Delta` lands for every
+    /// fragment along the way, before either tool's complete `ToolCall` would
+    /// ever arrive on the `assistant` line.
+    #[test]
+    fn a_turn_with_several_tool_calls_shows_progress_throughout_not_at_the_end() {
+        let mut h = ClaudeCode::default();
+        let lines = [
+            r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,
+                "content_block":{"type":"tool_use","id":"tu_1","name":"Write","input":{}}}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,
+                "delta":{"type":"input_json_delta","partial_json":"{\"file_path\": \"package.json"}}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,
+                "delta":{"type":"input_json_delta","partial_json":"\", \"content\": \"{...}\"}"}}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_stop","index":0}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_start","index":1,
+                "content_block":{"type":"tool_use","id":"tu_2","name":"Write","input":{}}}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":1,
+                "delta":{"type":"input_json_delta","partial_json":"{\"file_path\": \"tsconfig.json"}}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_stop","index":1}}"#,
+        ];
+        let deltas_before_the_end: usize = lines[..lines.len() - 1]
+            .iter()
+            .map(|l| {
+                h.parse_line(l)
+                    .iter()
+                    .filter(|e| matches!(e, AgentEvent::Delta { .. }))
+                    .count()
+            })
+            .sum();
+        assert_eq!(
+            deltas_before_the_end, 3,
+            "progress must land as each fragment streams in, not batched to the end"
+        );
+        // And nothing in the whole sequence became Raw, including the last line.
+        let last = h.parse_line(lines[lines.len() - 1]);
+        assert!(!last.iter().any(|e| matches!(e, AgentEvent::Raw { .. })));
+    }
+
+    /// Everything else `stream_event` carries is structural — bracketing a
+    /// block whose content already arrived via the deltas above, or repeating
+    /// what `system`/`init` and the terminal `result` line already say. Silent
+    /// is correct for all of it; `Raw` is not, because the catch-all is what
+    /// this whole change exists to keep these frames out of.
+    #[test]
+    fn stream_event_bookkeeping_is_dropped_not_raw() {
+        let mut h = ClaudeCode::default();
+        for line in [
+            r#"{"type":"stream_event","event":{"type":"message_start","message":{"model":"claude-opus-5"}}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,
+                "content_block":{"type":"text","text":""}}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,
+                "delta":{"type":"thinking_delta","thinking":"","estimated_tokens":50}}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,
+                "delta":{"type":"signature_delta","signature":"abc123"}}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_stop","index":0}}"#,
+            r#"{"type":"stream_event","event":{"type":"message_delta",
+                "delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":33}}}"#,
+            r#"{"type":"stream_event","event":{"type":"message_stop"}}"#,
+        ] {
+            assert!(h.parse_line(line).is_empty(), "{line} was not dropped");
+        }
+    }
+
+    /// An empty fragment — the very first `input_json_delta` on a fresh block
+    /// is captured live as `partial_json:""` — is not a signal worth an event
+    /// over, so it stays silent rather than becoming a no-op `Delta`.
+    #[test]
+    fn an_empty_delta_fragment_produces_nothing() {
+        let mut h = ClaudeCode::default();
+        let out = h.parse_line(
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":1,
+                "delta":{"type":"input_json_delta","partial_json":""}}}"#,
+        );
+        assert!(out.is_empty());
     }
 
     #[test]
