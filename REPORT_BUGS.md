@@ -156,8 +156,25 @@ all seven together**, not seven agents in parallel.
 
 | Bug | Agent | State |
 |---|---|---|
-| [BUG-14](#bug-14) | `cwd-fix` | IN PROGRESS |
-| [BUG-1](#bug-1), [BUG-4](#bug-4) | `ui-fix` | IN PROGRESS |
+| [BUG-14](#bug-14) | `cwd-fix` | IN PROGRESS — `cli/src/main.rs`, `core/src/service.rs` |
+| [BUG-1](#bug-1), [BUG-4](#bug-4) | `ui-fix` | IN PROGRESS — `cli/src/tui/ui.rs` |
+
+### Citations are verified — trust them, but re-check after a rebase
+
+Every `file:line` in this report has been machine-checked against the tree at
+the tip of this branch: all 24 resolve to the code they claim. If you rebase,
+re-run the check before trusting them — an earlier revision of this file cited
+eleven line numbers read from a **stale checkout of `main`**, which is an easy
+mistake to make in a repo with a worktree beside it. Verify with:
+
+```bash
+grep -oE '(cli/src/tui/[a-z_]+\.rs|core/src/[a-z_]+\.rs|cli/src/main\.rs)[:.]*[0-9]+' REPORT_BUGS.md \
+  | sed 's/[:.]*\([0-9]*\)$/ \1/' | sort -u \
+  | while read -r f l; do printf '%-26s %-6s %s\n' "$f" "$l" "$(sed -n "${l}p" "$f" | cut -c1-70)"; done
+```
+
+Line numbers are the fragile part of this document; the repros and root causes
+are not.
 
 ---
 
