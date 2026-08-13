@@ -497,14 +497,26 @@ has `add_project`, and the CLI has a full `jod project add|ls|archive|restore`
 (`cli/src/main.rs:313`). You must quit the TUI, or open a second terminal, and
 run `jod project add` to make the panel non-empty.
 
-Compare the roots empty state, which does this correctly
-(`cli/src/tui/mod.rs:1293`):
+**Every other empty state in the program names its own remedy.** I swept them
+all:
 
 ```
-no roots — /add-dir picks one (Alt-P), and `@` says so until there is
+roots        no roots — /add-dir picks one (Ctrl-P), and `@` says so until there is
+memory       nothing remembered yet — /remember writes one
+tasks        the board is empty — n adds a task, /todo does too
+schedules    nothing scheduled yet — n makes one, /new schedule too
+goals        no goals yet — n makes one, /new goal too
+webhooks     no webhooks yet — n makes one, /new hook too
+activity     nothing has happened yet — cron, hooks and goals write here
+team         no team — start one with `jod tui --team <name>`
+rail         nothing waiting — no agent has asked anything
+
+projects     nothing set                    <-- the only one that just stops
 ```
 
-That is exactly the affordance the projects panel lacks.
+The convention is established and followed nine times out of ten. Projects is
+the single outlier, and it is the one where the remedy is *not* guessable,
+because it lives outside the TUI entirely (`jod project add`, from a shell).
 
 The cost is stated in Jod's own CLI help (`cli/src/main.rs:309`): *"until a
 repository is listed, saying 'let's fix this' has nothing to resolve to and
