@@ -91,7 +91,7 @@ by me. **PR open** = CI-green draft awaiting merge. **open** = nobody on it.
 | [BUG-13](#bug-13) | Medium | **merged** #80 | tooling | `jod --version` could not distinguish two different builds |
 | [BUG-17](#bug-17) | Medium | with an agent | interrupt | Interrupt is unacknowledged for 4–6s, then reported as both `✓ done` and `✗ failed` |
 | [BUG-18](#bug-18) | Medium | with an agent | interrupt | Every interrupt falsely warns the run "may still be writing", worded as a *start* failure |
-| [BUG-19](#bug-19) | Medium | with an agent | fleet | An interrupted run reads `✗ failed` in the TUI but `killed` in `jod ls` and the database |
+| [BUG-19](#bug-19) | Medium | **merged** #87 | fleet | An interrupted run read `✗ failed` in the TUI but `killed` in `jod ls` and the database |
 | [BUG-20](#bug-20) | **High** | PR open #86 | destructive UI | The "cannot be undone" dialog clips its own warning and hides what cancels |
 | [BUG-21](#bug-21) | Medium | PR open #86 | diffs | The diff header's untruncated path pushes the promised `+N -M` counts off screen |
 | [BUG-15](#bug-15) | **High** | **merged** #83 | mentions | `@` in a non-git directory was ~95% `node_modules` noise; source was invisible |
@@ -138,8 +138,23 @@ found they duplicated #78) and drove the real TUI in a terminal. Results:
 | [BUG-6](#bug-6) | #81 | ✅ **fixed** — `Ctrl-G d` from a **cold start** now shows the projects panel. This was the one with the misleading green test; it is genuinely fixed in the default state. |
 | [BUG-1](#bug-1) | #82 | ✅ **fixed** — `/root` typed as the *first* action now prints its answer immediately. Verified the constraint too: the splash still appears on a fresh session. |
 | [BUG-2](#bug-2) | #82 | ✅ **fixed** — and better than I asked for (see below). |
-| [BUG-4](#bug-4) | #78 | ❌ **still open** — status bar reads `● auto · Claude Code · ready`. No directory. |
-| [BUG-14](#bug-14) | #78 | ❌ **STILL BITES** — see below. This is the last blocker. |
+| [BUG-4](#bug-4) | #78 | ✅ **fixed** *(re-verified after #78 merged)* — a band under the caption reads `▪ ~/tetris`, tilde-abbreviated. |
+| [BUG-14](#bug-14) | #78 | ✅ **cwd half fixed** *(re-verified)* — see below. The card half is still open as #84. |
+
+### ✅ Second re-drive, against `main` after #83/#85/#87 merged
+
+Rebuilt again (`jod --version` used to confirm the binary, which is what BUG-13's
+fix bought us) and drove the TUI from `~/tetris` — a non-git directory full of
+`node_modules`, which is the case that used to be worst.
+
+| Finding | PR | Hand-driven result |
+|---|---|---|
+| [BUG-14](#bug-14) | #78 | ✅ **cwd fixed** — `cli/src/main.rs` now calls `console_cwd()`, which is `current_dir()` with `$HOME` kept only as a last-resort fallback for a deleted working directory. Its doc comment names all three consequences I reported. **My own in-flight patch for this is now superseded — do not apply it.** |
+| [BUG-4](#bug-4) | #78 | ✅ **fixed** — `▪ ~/tetris` under the caption, and the same directory shown in the side panel. |
+| [BUG-15](#bug-15) | #83 | ✅ **fixed** — `@` in `~/tetris` now lists `index.html`, `package.json`, `src/`, `src/engine.js`. **Zero** `node_modules`, zero `dist`. It was 236 of 249 paths before. |
+| [BUG-16](#bug-16) | #83 | ✅ **fixed** — at 60 columns paths elide as `agent-…/…/components/Completions.tsx`, keeping the filename. Rows that used to render identically now end in distinct names. |
+| [BUG-5](#bug-5) | #85 | ✅ **fixed**, and past what I asked — `/project` exists *and* the panel's empty state now reads `none yet — /project add <path>`. That empty state was my specific complaint: it was the only one in the program naming no way out. |
+| [BUG-19](#bug-19) | #87 | ✅ **fixed** — a **freshly** killed run renders `■ killed` in the live fleet, and the dashboard reads `27 runs · 1 running · 0 failed`. It previously claimed `2 failed` for runs the database called `killed`. I tested a fresh kill deliberately: an old run reads `killed` after any restart, so only a same-session kill proves the live-state fix. |
 
 **#82's delegate confirmation is the best fix in this report.** It reads:
 
