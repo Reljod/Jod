@@ -44,6 +44,8 @@ see BUG-13.
 | [BUG-11](#bug-11) | Low | commands | Command descriptions are cut mid-word with no ellipsis |
 | [BUG-12](#bug-12) | Low | input | The input box is fixed at ~70 columns and single-line |
 | [BUG-13](#bug-13) | Medium | tooling | `jod --version` cannot distinguish two different builds |
+| [BUG-15](#bug-15) | **High** | mentions | `@` in a non-git directory is ~95% `node_modules` noise; source is invisible |
+| [BUG-16](#bug-16) | Medium | mentions | `@` clips paths from the right, so six different files render identically |
 
 ---
 
@@ -588,6 +590,115 @@ suspect, and nothing in the program's own output reveals it.
 **Suggested fix.** Put the git SHA and build timestamp in `--version`
 (`git describe --always --dirty` at build time via `build.rs`). Cheap, and it
 retires a whole category of phantom bug reports.
+
+---
+
+<a name="bug-15"></a>
+## BUG-15 — `@` in a non-git directory is ~95% `node_modules` noise · **High** · OPEN
+
+**Repro:** `/add-dir ~/tetris` (the project the delegated run just built — a
+plain directory, not a git repo), then type `@` in the chat box.
+
+**Actual:** the popup's first eight rows are:
+
+```
+▸ tetris/dist
+  tetris/dist/assets
+  tetris/dist/assets/index-CGus7geV.js
+  tetris/dist/assets/index-CWyD2mYX.css
+  tetris/dist/index.html
+  tetris/index.html
+  tetris/node_modules
+  tetris/node_modules/.bin
+```
+
+Build output and dependencies. **Not one file from `src/`** — the actual source
+— is visible without typing a query.
+
+**The numbers.** Jod runs this exact command (`core/src/rank.rs:629`):
+
+```
+rg --files --hidden --glob '!.git'
+```
+
+In `~/tetris` that returns **249 paths, 236 of them under `node_modules`** —
+95% noise. Plain `rg --files` returns **13**.
+
+**Root cause — and it is `--hidden`, specifically.** The doc comment at
+`core/src/rank.rs:623` states the design:
+
+> *"Everything else ripgrep leaves out — `target`, `node_modules` — it leaves
+> out by reading `.gitignore`, which is the whole reason it is preferred over
+> the walker below."*
+
+That reasoning holds **only inside a git repository**. `~/tetris` has no
+`.git` and no `.gitignore`, so no ignore rules apply at all. What was
+*accidentally* keeping `node_modules` down to 13 files is that pnpm stores the
+real files in the **hidden** `node_modules/.pnpm/` directory and exposes
+packages as symlinks — and ripgrep skips hidden dirs and does not follow
+symlinks. `--hidden` switches exactly that protection off and pulls the whole
+store in.
+
+So the flag added to make dotfiles mentionable is the flag that floods the
+list, in precisely the case where nothing else is filtering.
+
+**Why this matters more than it looks.** A brand-new project — scaffolded by a
+delegated agent, `npm install` run, not yet `git init`-ed — is the *normal*
+state of the thing you most want to `@`. It is exactly what the run in BUG-14
+produced. In a real dependency tree (thousands of packages, not 236 files),
+`@` stops being usable.
+
+**The fix already exists in this codebase, one module over.**
+`cli/src/tui/picker.rs:65`:
+
+```rust
+const NOISE: [&str; 6] = ["node_modules", "target", ".git", "dist", "build", "venv"];
+```
+
+and its comment (`picker.rs:63`) describes this exact failure — *"twenty matches
+for `src` are all inside `target/debug/build` is a picker \[nobody wants]"*.
+The `/add-dir` picker applies it; the `@` mention path does not. The two
+pickers disagree about what noise is, in the same program, on the same tree:
+`/add-dir ~/tetris` correctly showed only `.` and `src`, while `@` showed
+`dist` and `node_modules`.
+
+**Suggested fix.** Pass the denylist to ripgrep as globs
+(`--glob '!node_modules' --glob '!target' --glob '!dist' …`) so the ignore
+guarantee no longer depends on the directory happening to be a git repo, and
+share one constant between `picker.rs`, `rank.rs::SKIP` and the mention path
+instead of three.
+
+---
+
+<a name="bug-16"></a>
+## BUG-16 — `@` truncates paths from the right, hiding the filename · Medium · OPEN
+
+**Repro:** with `~/tetris` as a root, type `@engine`.
+
+**Actual:**
+
+```
+▸ tetris/src/engine.js
+  tetris/node_modules/.pnpm/tinyglobby@0.2.17/node_mod
+  tetris/node_modules/.pnpm/tinyglobby@0.2.17/node_mod
+  tetris/node_modules/.pnpm/tinyglobby@0.2.17/node_mod
+  tetris/node_modules/.pnpm/tinyglobby@0.2.17/node_mod
+  tetris/node_modules/.pnpm/tinyglobby@0.2.17/node_mod
+  tetris/node_modules/.pnpm/tinyglobby@0.2.17/node_mod
+```
+
+Six rows that are **character-for-character identical on screen** and name six
+different files. Choosing between them is impossible.
+
+The ranking itself is fine — `src/engine.js` is correctly first, and
+`docs/try-it.md:154` accurately describes the ranking rules. The defect is
+purely display: paths are clipped from the **right**, which is the end that
+distinguishes them. Same class as BUG-3, opposite module.
+
+**Suggested fix.** Elide from the left for paths (`…/tinyglobby@0.2.17/index.js`),
+as BUG-3 also needs. Fixing BUG-15 removes most of these rows, but the
+truncation is worth fixing independently — deep source paths collide the same
+way.
 
 ---
 
