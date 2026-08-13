@@ -464,6 +464,32 @@ impl Store {
             )));
         }
 
+        // Settle the stored path now that there is a directory to canonicalise.
+        //
+        // The row is written before `git worktree add` runs, so `normalise` at
+        // insert time had nothing to resolve and returned what it was given.
+        // Every other path on a lease is already canonical — `repo_path` comes
+        // from `toplevel`, and `add_root` normalises whatever it is handed — so
+        // leaving this one raw made the lease and its own root two spellings of
+        // one directory.
+        //
+        // That is not cosmetic. `claim_worktree` reports `worktree_path` and
+        // `list_roots` reports the root, and on macOS `$TMPDIR` is a symlink:
+        // the tool answered `/var/…` while the roots said `/private/var/…` for
+        // the same worktree. An agent handed two spellings has no way to tell
+        // they are the same place, and the comparison sites in this module were
+        // each wrapping `roots::normalise` around the field to paper over it.
+        let settled = roots::normalise(&worktree);
+        if settled != worktree {
+            self.write(|tx| {
+                tx.execute(
+                    "UPDATE leases SET worktree_path = ?2 WHERE id = ?1",
+                    params![lease_id, settled.to_string_lossy()],
+                )?;
+                Ok(())
+            })?;
+        }
+
         let lease = self
             .lease(lease_id)?
             .expect("the lease was just written in this process");
