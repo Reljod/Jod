@@ -2614,16 +2614,50 @@ mod tests {
         }
 
         /// A real detached process group that will sit there until it is killed.
+        ///
+        /// Built here rather than through `proc::spawn_detached`, and the
+        /// difference is the whole reason this helper exists. That function now
+        /// waits on its own children, so a finished run leaves no corpse on a
+        /// console that stays up for weeks — right for production, and fatal to
+        /// the proof below: an exit status goes to whoever collects it first,
+        /// and `a_stalled_run_is_stopped_marked_failed_and_unwatched` asserts
+        /// the group was *signalled* rather than merely absent. Reaped out from
+        /// under it, its `waitpid` gets `ECHILD` and the test reports a kill
+        /// that did happen as one that never did.
+        ///
+        /// So this spawns the same shape of process — `setsid`, its own group,
+        /// pid equal to pgid — and leaves it unreaped for the test to wait on.
         fn a_living_group() -> u32 {
+            use std::os::unix::process::CommandExt;
+
             let dir = std::env::temp_dir().join(format!("jod-hb-{}", std::process::id()));
             std::fs::create_dir_all(&dir).unwrap();
-            crate::proc::spawn_detached(
-                std::path::Path::new("/bin/sleep"),
-                &["300".to_string()],
-                &dir,
-                &dir.join("log"),
-            )
-            .expect("could not spawn a test process group")
+            let log = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(dir.join("log"))
+                .unwrap();
+
+            let mut cmd = std::process::Command::new("/bin/sleep");
+            cmd.arg("300")
+                .current_dir(&dir)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::from(log));
+            // SAFETY: `setsid` is async-signal-safe, which is the only
+            // requirement on code running between `fork` and `exec`.
+            unsafe {
+                cmd.pre_exec(|| {
+                    if libc::setsid() == -1 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
+            // The `Child` is dropped rather than held, which does not reap it —
+            // that is exactly the point. The pid stays waitable for the test.
+            cmd.spawn()
+                .expect("could not spawn a test process group")
+                .id()
         }
 
         /// Silent past its window, and alive — the case the module exists for,
