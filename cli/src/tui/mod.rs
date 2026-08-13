@@ -475,6 +475,40 @@ fn restore() {
     let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture);
 }
 
+/// The transcript line a delegation leaves behind.
+///
+/// The prompt in full rather than `default_name`'s summary, and the directory
+/// beside it. This is fire-and-forget spending on an agent nobody is watching:
+/// the confirmation is the one moment a person can notice that the run was
+/// pointed somewhere they did not intend, and neither a truncated title nor a
+/// status-bar count can show that.
+fn delegated(id: String, prompt: String, opts: &Options) -> Entry {
+    Entry::Delegated {
+        id,
+        prompt,
+        dir: opts.cwd.display().to_string(),
+    }
+}
+
+/// The line the console opens with.
+///
+/// A function rather than a literal at the one call site so a test can start an
+/// `App` in exactly the state a cold launch leaves it in. A test that pushed
+/// its own approximation of this line would still pass on the day the real one
+/// stopped being a [`Entry::Hint`] — which is the bug the splash rule turns on.
+fn startup_hint() -> Entry {
+    // No harness name here: this line is frozen into the scrollback, so naming
+    // the harness would leave a stale claim on screen the moment `/harness`
+    // switches. The status bar is the one place that tracks it.
+    //
+    // A hint and not a notice: nobody asked for it, so it must not count as
+    // output the splash would be covering up. See `ui::fresh`.
+    Entry::Hint(
+        "Ctrl-G opens every screen · / for commands · Enter send · Ctrl-B delegate in the background · ? for keys · Ctrl-C quit"
+            .to_string(),
+    )
+}
+
 async fn event_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     jod: Arc<Jod>,
@@ -515,13 +549,7 @@ async fn event_loop(
     bind_rail(&jod, &mut app, &thread);
     refresh_workspaces(&jod, &mut app);
     app.reconcile();
-    // No harness name here: this line is frozen into the scrollback, so naming
-    // the harness would leave a stale claim on screen the moment `/harness`
-    // switches. The status bar is the one place that tracks it.
-    app.push(Entry::Notice(
-        "Ctrl-G opens every screen · / for commands · Enter send · Ctrl-B delegate in the background · ? for keys · Ctrl-C quit"
-            .to_string(),
-    ));
+    app.push(startup_hint());
 
     let mut keys = EventStream::new();
     let mut events = jod.subscribe();
@@ -1042,11 +1070,7 @@ async fn perform(
             .await
             {
                 Ok(id) => {
-                    app.push(Entry::Notice(format!(
-                        "delegated {} — {} · runs in the background, Ctrl-F to watch",
-                        short(&id),
-                        crate::default_name(&prompt)
-                    )));
+                    app.push(delegated(id, prompt, opts));
                     app.scroll_to_bottom();
                 }
                 Err(e) => app.push(Entry::Notice(format!("could not delegate: {e}"))),
@@ -4325,7 +4349,10 @@ fn apply_slash(app: &mut App, slash: command::Slash) -> Option<Action> {
             app.session = None;
             app.cost_usd = 0.0;
             go_home(app);
-            app.push(Entry::Notice("new conversation".into()));
+            // A hint, like the startup line: `/new` clears the screen back to
+            // the splash on purpose, and a notice here would be output the
+            // splash was covering. See `ui::fresh`.
+            app.push(Entry::Hint("new conversation".into()));
             // Jod's conversation as well as the harness's. Without this, a
             // conversation handed over by `/harness` would keep collecting the
             // turns of the fresh one that replaced it — and it is how you leave
@@ -5591,6 +5618,7 @@ async fn list_agents(jod: &Arc<Jod>) -> Vec<AgentLine> {
             status: format!("{:?}", a.status).to_lowercase(),
             session: a.session_id,
             created_at_ms: a.created_at_ms,
+            cwd: a.cwd,
             cost_usd: a.usage.cost_usd,
             last: a.last_message,
         })
@@ -6077,12 +6105,14 @@ mod tests {
                 matches!(app.overlay, Overlay::None),
                 "{slash:?} drops the overlay"
             );
-            // `/new` leaves its own notice behind, and a notice is still fresh.
+            // `/new` leaves its own line behind, and it is a *hint* — Jod
+            // talking on its own account — which is the only class of entry
+            // the splash may still cover. A notice here would be output from
+            // something the user asked for, and would (correctly) take the
+            // screen off the splash.
             assert!(
-                !app.transcript
-                    .iter()
-                    .any(|e| !matches!(e, Entry::Notice(_))),
-                "{slash:?} leaves nothing but notices, which is what the splash needs"
+                !app.transcript.iter().any(|e| !matches!(e, Entry::Hint(_))),
+                "{slash:?} leaves nothing but hints, which is what the splash needs"
             );
         }
     }
@@ -6568,6 +6598,7 @@ mod tests {
             session: session.map(str::to_string),
             created_at_ms: 0,
             cost_usd: None,
+            cwd: "/srv/reljod/repo".into(),
             last: None,
         }
     }
@@ -6655,6 +6686,7 @@ mod tests {
             session: Some(format!("sess-{id}")),
             created_at_ms: 0,
             cost_usd: None,
+            cwd: "/srv/reljod/repo".into(),
             last: None,
         }
     }
@@ -9320,6 +9352,141 @@ mod tests {
             assert!(last.contains(NO_STORE), "{last}");
         }
         assert!(!app.should_quit, "and the session is still up");
+    }
+
+    // ---- a cold session answers out loud ----
+
+    /// What is actually on the screen, drawn by the real renderer.
+    ///
+    /// The whole class of bug this section exists for is output that is
+    /// produced correctly and then never drawn, so an assertion about the
+    /// transcript vector would have passed throughout — the transcript was
+    /// always right. Only the frame can tell.
+    fn on_screen(app: &App, w: u16, h: u16) -> String {
+        use ratatui::backend::TestBackend;
+
+        let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+        terminal
+            .draw(|f| {
+                ui::draw(f, app);
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The first thing a new user does must not render as nothing.
+    ///
+    /// From a cold `jod tui`, `/root` used to print absolutely nothing: the
+    /// roots reached the transcript, the splash kept the column because every
+    /// entry so far was a `Notice`, and the answer was painted over. The
+    /// command was correct and the screen was blank, which is the worst
+    /// possible pairing — it teaches you the program is broken on the first
+    /// keystroke you try.
+    ///
+    /// Driven through `perform` and drawn with `ui::draw` on purpose. A test
+    /// that asserted `fresh()` or counted transcript entries is what let this
+    /// ship.
+    #[tokio::test]
+    async fn a_cold_session_shows_what_a_notice_only_command_answered() {
+        let store = store();
+        let conversation = store
+            .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
+            .unwrap();
+        store
+            .add_root(
+                &conversation.id,
+                jod_core::roots::NewRoot::reading("/srv/reljod/notes"),
+            )
+            .unwrap();
+
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.conversation = Some(conversation.id.clone());
+        // Exactly the state a cold launch leaves: the hint and nothing else.
+        app.push(startup_hint());
+        let before = on_screen(&app, 120, 40);
+        assert!(
+            before.contains("an orchestrator, not a chat window"),
+            "the splash owns a session that has done nothing:\n{before}"
+        );
+
+        let jod = jod_with(store);
+        perform(
+            &jod,
+            &mut app,
+            &options(),
+            &mut Thread::default(),
+            Action::ListRoots,
+        )
+        .await;
+
+        let after = on_screen(&app, 120, 40);
+        assert!(
+            after.contains("/srv/reljod/notes"),
+            "the roots `/root` listed have to be on the screen:\n{after}"
+        );
+        assert!(
+            !after.contains("an orchestrator, not a chat window"),
+            "and the splash has to have got out of the way:\n{after}"
+        );
+    }
+
+    /// The startup hint is the one line that must *not* dismiss the splash.
+    ///
+    /// The narrow edge of the fix: "any notice drops the splash" would have
+    /// been simpler and would have meant no new session ever saw a wordmark,
+    /// because Jod says something the moment it opens.
+    #[test]
+    fn the_line_jod_opens_with_does_not_count_as_an_answer() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.push(startup_hint());
+        let frame = on_screen(&app, 120, 40);
+        assert!(
+            frame.contains("an orchestrator, not a chat window"),
+            "the splash survives Jod's own opening line:\n{frame}"
+        );
+    }
+
+    /// `Ctrl-B` spends money on an agent nobody is watching, so the transcript
+    /// says which agent, what it was told, and where it was pointed — on the
+    /// cold screen where delegation is most often the very first thing tried.
+    #[test]
+    fn delegating_says_which_agent_what_it_was_told_and_where() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.push(startup_hint());
+        // Built by the same function the delegate path pushes, and given the
+        // directory through `Options` exactly as `perform` does — a fixture
+        // assembled here would still pass on the day the wiring changed.
+        let launched_in = Options {
+            cwd: PathBuf::from("/srv/reljod/tetris"),
+            ..options()
+        };
+        app.push(delegated(
+            "87e84b92f1c04d".into(),
+            "Build a working Tetris game in Node and Vite".into(),
+            &launched_in,
+        ));
+        let frame = on_screen(&app, 120, 40);
+        assert!(frame.contains("87e84b92"), "the agent id:\n{frame}");
+        assert!(
+            frame.contains("Build a working Tetris game in Node and Vite"),
+            "what it was told, in full:\n{frame}"
+        );
+        assert!(
+            frame.contains("/srv/reljod/tetris"),
+            "and the directory it may write in:\n{frame}"
+        );
+        assert!(
+            !frame.contains("an orchestrator, not a chat window"),
+            "a delegation is not a session that has done nothing:\n{frame}"
+        );
     }
 
     // ---- preferences ----

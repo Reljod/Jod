@@ -1162,12 +1162,19 @@ fn caption(width: usize) -> &'static str {
 
 /// Whether this counts as a new session for rendering.
 ///
-/// It cannot be "the transcript is empty": `event_loop` pushes a hint notice at
+/// It cannot be "the transcript is empty": `event_loop` pushes a hint at
 /// startup and `/new` pushes "new conversation", so the transcript is never
-/// literally empty and the splash would never appear at all. A session is new
-/// while *nothing but notices* has happened — which is true at startup, true
-/// again after `/new`, and false the instant the first prompt is sent. Watching
-/// another run is excluded outright: that transcript belongs to somebody else's
+/// literally empty and the splash would never appear at all. Nor can it be
+/// "nothing but notices" — that was the first attempt, and it swallowed every
+/// command whose whole answer is notices (`/root`, `/config`, `/sessions`, the
+/// delegation confirmation, most errors): the splash kept the column and
+/// painted over real output, so a cold session's first command rendered as
+/// nothing at all.
+///
+/// So the test is "nothing but [`Entry::Hint`]" — the lines Jod prints on its
+/// own account. That is true at startup, true again after `/new`, and false
+/// the instant *anything* answers something the user did. Watching another run
+/// is excluded outright: that transcript belongs to somebody else's
 /// conversation, and its emptiness says the run has not spoken yet, not that
 /// you are starting fresh.
 fn fresh(app: &App) -> bool {
@@ -1175,7 +1182,7 @@ fn fresh(app: &App) -> bool {
         && !app
             .transcript
             .iter()
-            .any(|entry| !matches!(entry, Entry::Notice(_)))
+            .any(|entry| !matches!(entry, Entry::Hint(_)))
 }
 
 /// The new-session screen: the wordmark, large and centred, with the input box
@@ -2993,6 +3000,18 @@ fn draw_fleet(f: &mut Frame, app: &App, area: Rect) {
                     "session",
                     a.session.as_deref().unwrap_or("none reported yet"),
                 ),
+                // Above the spend on purpose: the question this pane is most
+                // often opened with is "did that do what I asked", and a run
+                // launched somewhere other than where you meant answers it
+                // before the cost does.
+                field(
+                    "in",
+                    if a.cwd.is_empty() {
+                        "not recorded"
+                    } else {
+                        &a.cwd
+                    },
+                ),
                 field(
                     "spend",
                     &a.cost_usd
@@ -4551,6 +4570,7 @@ fn render(entry: &Entry, width: u16) -> Vec<Line<'static>> {
         // still fails the build here rather than falling through to a default.
         Entry::Diff(edit) => return render_diff(edit, width),
         Entry::Plan(items) => return render_plan(items, width),
+        Entry::Delegated { id, prompt, dir } => return render_delegated(id, prompt, dir, width),
         Entry::You(t) => ("› ", bold(USER), t.clone()),
         Entry::Agent(t) => ("", fg(AGENT), t.clone()),
         Entry::Thinking(t) => ("  ", fg(MUTED).add_modifier(Modifier::ITALIC), t.clone()),
@@ -4582,7 +4602,9 @@ fn render(entry: &Entry, width: u16) -> Vec<Line<'static>> {
             };
             ("", style, body)
         }
-        Entry::Notice(t) => ("• ", fg(WARN), t.clone()),
+        // A hint reads exactly like a notice — the difference between them is
+        // about which entries the splash may cover, not about how they look.
+        Entry::Notice(t) | Entry::Hint(t) => ("• ", fg(WARN), t.clone()),
         Entry::Raw(t) => ("", fg(MUTED), t.clone()),
     };
 
@@ -4624,6 +4646,45 @@ fn render_plan(items: &[todo::Item], width: u16) -> Vec<Line<'static>> {
             Span::styled(format!("    {} ", item.state.glyph()), fg(colour)),
             Span::styled(cut(&item.text, room), style),
         ]));
+    }
+    lines
+}
+
+/// `Ctrl-B`, confirmed at the size of what it just did.
+///
+/// Three facts, because those are the three you would go and check afterwards
+/// and only the first of them was ever on screen: which agent to look at, what
+/// it was told to do, and — since a delegated agent edits files unattended —
+/// which directory it was pointed at. Both the prompt and the path are wrapped
+/// rather than cut: a confirmation you cannot read the end of is the thing
+/// being fixed here, not a smaller version of it.
+fn render_delegated(id: &str, prompt: &str, dir: &str, width: u16) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::from(vec![
+        Span::styled("  ⇢ ".to_string(), fg(GOOD)),
+        Span::styled("delegated ".to_string(), bold(AGENT)),
+        Span::styled(short(id), bold(USER)),
+        Span::styled(
+            " · in the background, Ctrl-F to watch".to_string(),
+            fg(MUTED),
+        ),
+    ])];
+    let indent = 6usize;
+    let pad = " ".repeat(indent);
+    for (label, text, style) in [("in ", dir, fg(MUTED)), ("", prompt, fg(AGENT))] {
+        for (i, row) in wrap(text, width as usize, indent + label.chars().count())
+            .into_iter()
+            .enumerate()
+        {
+            let lead = if i == 0 {
+                format!("{pad}{label}")
+            } else {
+                format!("{pad}{}", " ".repeat(label.chars().count()))
+            };
+            lines.push(Line::from(vec![
+                Span::styled(lead, fg(MUTED)),
+                Span::styled(row, style),
+            ]));
+        }
     }
     lines
 }
@@ -4962,6 +5023,7 @@ mod tests {
             session: None,
             created_at_ms: 0,
             cost_usd: None,
+            cwd: "/srv/reljod/repo".into(),
             last: None,
         }
     }
@@ -5449,13 +5511,19 @@ mod tests {
         assert!(screen.contains("you"), "and somewhere to type:\n{screen}");
     }
 
-    /// The event loop pushes a hint notice at startup and `/new` pushes one of
-    /// its own, so "the transcript is empty" would never be true and the splash
+    /// The event loop pushes a hint at startup and `/new` pushes one of its
+    /// own, so "the transcript is empty" would never be true and the splash
     /// would never appear. The first real turn is what ends it.
+    ///
+    /// This test used to push an `Entry::Notice` for the opening line and
+    /// assert the wordmark survived it, which is how the splash came to
+    /// swallow every notice-only command: a notice is what an *answer* is made
+    /// of. The opening line is an `Entry::Hint`, and that is the only thing the
+    /// splash now outlives — the second half of the test is unchanged.
     #[test]
-    fn the_wordmark_survives_a_notice_and_goes_when_the_conversation_starts() {
+    fn the_wordmark_survives_the_opening_line_and_goes_when_the_conversation_starts() {
         let mut a = app();
-        a.push(Entry::Notice("Ctrl-G opens every screen".into()));
+        a.push(Entry::Hint("Ctrl-G opens every screen".into()));
         assert!(rendered(&a, 100, 24).contains("an orchestrator"));
 
         a.push(Entry::You("summarise my inbox".into()));
@@ -6977,6 +7045,28 @@ mod tests {
 
     // ---- the fleet ----
 
+    /// Where a run *ran* is a fact about whether it did what you asked.
+    ///
+    /// A delegated run once wrote an entire project into the home directory,
+    /// outside every declared root, and was recorded `✓ done` with the money
+    /// spent — while the directory the user had actually pointed at stayed
+    /// empty. Nothing on any screen would have told them: the store has always
+    /// recorded the directory, and every pane dropped it on the way out.
+    #[test]
+    fn the_run_detail_says_which_directory_the_run_was_launched_in() {
+        let mut a = app();
+        a.agents = vec![super::super::AgentLine {
+            cwd: "/srv/reljod/tetris".into(),
+            ..agent_line("abcdef1234", "build a tetris game", "running")
+        }];
+        a.go(Workspace::Fleet);
+        let out = rendered(&a, 120, 24);
+        assert!(
+            out.contains("/srv/reljod/tetris"),
+            "the run detail has to say where it ran:\n{out}"
+        );
+    }
+
     #[test]
     fn the_fleet_screen_lists_the_runs_it_knows_about() {
         let mut a = app();
@@ -6989,6 +7079,7 @@ mod tests {
             session: None,
             created_at_ms: 0,
             cost_usd: None,
+            cwd: "/srv/reljod/repo".into(),
             last: None,
         }];
         a.go(Workspace::Fleet);

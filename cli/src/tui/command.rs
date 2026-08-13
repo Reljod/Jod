@@ -894,6 +894,7 @@ mod tests {
             session: None,
             created_at_ms: 0,
             cost_usd: None,
+            cwd: "/srv/reljod/repo".into(),
             last: None,
         }
     }
