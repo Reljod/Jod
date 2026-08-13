@@ -1479,7 +1479,57 @@ as a bug. If someone sees a blank TUI in the wild, start here.
 
 ---
 
-## The Tetris itself — delivered, and independently verified
+## The one-shot, after the cwd fix — it works
+
+The point of the exercise: **can the TUI build a working classic Tetris in one
+shot?** With BUG-14's fix in the tree, yes.
+
+One prompt, one run (`b8d6e5f1`), no follow-ups. And critically, the run
+recorded its working directory as the directory the TUI was launched in —
+
+```
+b8d6e5f1|completed|/…/worktrees/tui-dogfood-tetris/tetris-oneshot|Build a complete, working clas
+bfa2bef4|completed|/…/worktrees/tui-dogfood-tetris/tetris|create a file called HELLO.md
+ab8a6b9d|completed|/…/worktrees/tui-dogfood-tetris|reply with the single word
+```
+
+— not `$HOME`. Compare the same column before the fix, where every row read
+`/Users/reljodoreta`. **BUG-14 is fixed in practice, not just in theory.**
+
+### What the one shot produced, verified three ways
+
+`pnpm build` — clean, 5 modules, 118 ms. `pnpm test` — **40 tests, 40 pass, 0
+fail**, covering SRS rotation through four states, I-piece wall kicks, J-piece
+floor kicks, rotation refused when every kick is blocked, 7-bag determinism
+from a seed, single/double/triple/tetris scoring against level, the stack
+dropping after a clear, an unfinished row left alone, level-up every ten lines
+with gravity speeding up, and the engine running under plain Node with no DOM
+globals stubbed.
+
+Then I **played it in a real browser** — the thing no previous run managed,
+because the `browser` MCP was broken (`ModuleNotFoundError: No module named
+'camoufox'`). Driving Chrome against `vite dev`:
+
+- renders a 10×20 well, HOLD, NEXT (three deep), CONTROLS and STATS;
+- ←/→ move, ↑ rotates, Space hard-drops, and the score advanced 0 → 106 → 222;
+- **hold works** — `C` moved the I-piece into the HOLD box;
+- the ghost piece tracks the landing position;
+- both walls stop the piece instead of letting it escape;
+- `P` dims the board and shows `PAUSED · Press P to resume`;
+- `R` restarts to a clean board with score 0 and HOLD cleared;
+- **zero console errors** throughout.
+
+Line clearing is the one mechanic I could not force by hand in the browser (the
+engine is properly module-scoped, not on `window`), so it rests on the unit
+tests — which assert it deterministically, including the stack drop and the
+score multiplier.
+
+**Location:** `tetris-oneshot/` in this worktree. Run it with
+`cd tetris-oneshot && pnpm install && pnpm dev`.
+
+---
+
+## The earlier Tetris — same story, wrong directory
 
 The task did produce a real, working game. It is at **`/Users/reljodoreta/tetris`**
 — which is the wrong place (BUG-14), but the code is good.
