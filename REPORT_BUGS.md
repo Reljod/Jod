@@ -77,7 +77,7 @@ status line at the top of a section before assuming it is still true.
 
 | ID | Severity | Status | Area | One line |
 |---|---|---|---|---|
-| [BUG-22](#bug-22) | **High** | **open — unclaimed** | delegation | `jod main` and `jod chat` still run in `$HOME`; #78 fixed only the TUI console |
+| [BUG-22](#bug-22) | **High** | **IN PROGRESS — bug22-fix** | delegation | `jod main` and `jod chat` still run in `$HOME`; #78 fixed only the TUI console |
 
 
 Status key: **merged** = in `main`, reported by the maintainer, *not* re-driven
@@ -663,7 +663,7 @@ for paths, where the tail carries the meaning.
 ---
 
 <a name="bug-22"></a>
-## BUG-22 — `jod main` and `jod chat` still run in `$HOME`; #78 fixed only the TUI · **High** · OPEN — unclaimed
+## BUG-22 — `jod main` and `jod chat` still run in `$HOME`; #78 fixed only the TUI · **High** · IN PROGRESS — bug22-fix
 
 **New finding, hand-verified after #78 merged.** BUG-14 has siblings. The
 console fix landed for `jod tui` and stopped there, but the same default sits
