@@ -378,7 +378,19 @@ pub fn orchestrator_preamble() -> &'static str {
        Reljod's real checkout, read-only, and claims a **lease** — a worktree of \
        its own — the moment it needs to change anything.\n\
      - a **card** is one row on Reljod's rail. Every card raised anywhere below \
-       you arrives on yours, so this is where the fleet's questions surface.\n\n\
+       you arrives on yours, so this is where the fleet's questions surface.\n\
+     - a **project** is a repository he works on. It outlives every work and \
+       every session, which is why an instruction that names nothing is \
+       resolved against the catalog and not against what happens to be \
+       running.\n\n\
+     Reljod talks to you, and increasingly he *talks* — dictated speech, in \
+     Taglish, with the context typing would have carried left out. \"btw, \
+     let's fix this\" is a normal instruction here, not a malformed one. \
+     Before you decide it is unclear, check what this conversation is already \
+     about with `project_current`; the answer is usually the missing noun. \
+     Call `project_switch` the moment you conclude it is a different \
+     repository — including when you had to reason to get there — because the \
+     next thing he says will inherit whatever you leave set.\n\n\
      Answer in one or two sentences: what you did with it, and who has it now. \
      Say plainly when you delegated to an existing run rather than a new one, \
      and why — a routing decision nobody can see is one nobody can correct."
@@ -692,6 +704,70 @@ fn bus_lines(brief: &Brief) -> Vec<PreambleLine> {
     out
 }
 
+/// The catalog, and what this instruction was taken to be about.
+///
+/// Prepended to the orchestrator's framing on every turn, because the thing it
+/// most often needs is the noun the instruction left out and a tool call to
+/// fetch it is a round-trip on the critical path of a dictated sentence.
+///
+/// Pure, and takes what it renders rather than reading the store, for the same
+/// reason [`Brief`] does: what the orchestrator is told is a decision worth
+/// testing on its own, and a builder that opened a database could only be
+/// tested by writing to one.
+pub fn project_context(
+    catalog: &[crate::projects::Project],
+    settled: Option<&crate::projects::Resolution>,
+    current: Option<&crate::projects::Project>,
+) -> String {
+    use crate::projects::How;
+
+    if catalog.is_empty() {
+        return String::from(
+            "Reljod's project catalog is empty. If he mentions working somewhere, \
+             put it in the catalog with `project_add` — until a repository is \
+             listed, every later instruction about it has to name the path in full.",
+        );
+    }
+
+    let mut out = String::from("Reljod's projects, most recently worked in first:\n");
+    for p in catalog {
+        out.push_str(&format!("  - {}\n", p.summary_line()));
+    }
+
+    match (current, settled.map(|r| r.how)) {
+        (Some(p), Some(How::Sticky)) => {
+            out.push_str(&format!(
+                "\nThis conversation is about **{}**, carried over: nothing in this \
+                 instruction named a project. That is ordinary for dictated speech and \
+                 usually right — but it is also the way this gets quietly wrong, so if \
+                 the instruction reads like it belongs somewhere else, say so and call \
+                 `project_switch` rather than delegating into the wrong repository.\n",
+                p.name
+            ));
+        }
+        (Some(p), Some(How::Inferred)) => {
+            out.push_str(&format!(
+                "\nThis instruction named **{}**, so that is what the conversation is \
+                 now about.\n",
+                p.name
+            ));
+        }
+        (Some(p), _) => {
+            out.push_str(&format!("\nThis conversation is about **{}**.\n", p.name));
+        }
+        (None, _) => {
+            out.push_str(
+                "\nThis conversation is not about any project yet, and this instruction \
+                 did not settle it — it either named none, or named more than one. Do \
+                 not pick for him silently: ask which, or say which you are assuming \
+                 and why, and call `project_switch` so the next instruction inherits \
+                 the right one.\n",
+            );
+        }
+    }
+    out
+}
+
 /// What [`hand_to_orchestrator`] did, for a caller that has its own way of
 /// saying so. The CLI prints; the TUI pushes a notice; the Telegram bridge
 /// edits a progress bubble.
@@ -703,6 +779,13 @@ pub struct Handed {
     /// the caller, because "the pinned conversation" is a get-or-create and a
     /// second resolution is a second chance to disagree with the first.
     pub conversation_id: String,
+    /// Which project this instruction was taken to be about, when that was
+    /// settled before the orchestrator ran.
+    ///
+    /// Returned so the caller can *show* it. A sticky resolution is right most
+    /// of the time and silently wrong the rest, and the difference only becomes
+    /// correctable if Reljod can see which one he just got.
+    pub project: Option<crate::projects::Resolution>,
 }
 
 /// Give an instruction to the pinned main chat.
@@ -747,6 +830,19 @@ pub async fn hand_to_orchestrator(
     let compaction_due = should_compact(chars, store.last_human_ms(&id)?, now)
         .map(|reason| (reason.as_str(), chars));
 
+    // Settled here rather than left to the model, and settled *before* the
+    // turn: naming a project is not a judgement call, and paying a round-trip
+    // to be told what the words already said would put a model in the way of
+    // every dictated sentence. What the model gets is the residue — the cases
+    // that genuinely need judgement — plus the catalog to judge against.
+    //
+    // A catalog that cannot be read is not a reason to refuse the instruction:
+    // the orchestrator worked without projects until now and still can.
+    let settled = store.settle_project(&id, instruction).unwrap_or(None);
+    let catalog = store.projects(false).unwrap_or_default();
+    let current = store.current_project(&id).unwrap_or(None);
+    let projects = project_context(&catalog, settled.as_ref(), current.as_ref());
+
     // The orchestrator is a harness run holding Jod's own tools, so it
     // delegates by calling them rather than by describing what it would do.
     // `Resume` keeps it one conversation across restarts.
@@ -770,9 +866,14 @@ pub async fn hand_to_orchestrator(
                 // verbs are — and the summary is material it applies to. Leading
                 // with a transcript would have the model reading history before
                 // it knows what it is reading it for.
+                // The catalog goes after the preamble and before any carried
+                // summary, matching the same rule: standing brief, then the
+                // state it applies to, then history.
                 system: Some(match &carried {
-                    Some(context) => format!("{}\n\n{context}", orchestrator_preamble()),
-                    None => orchestrator_preamble().to_string(),
+                    Some(context) => {
+                        format!("{}\n\n{projects}\n\n{context}", orchestrator_preamble())
+                    }
+                    None => format!("{}\n\n{projects}", orchestrator_preamble()),
                 }),
                 cwd,
                 model: None,
@@ -822,6 +923,7 @@ pub async fn hand_to_orchestrator(
         agent,
         compaction_due,
         conversation_id: id,
+        project: settled,
     })
 }
 
@@ -1665,11 +1767,103 @@ mod tests {
     #[test]
     fn the_orchestrator_is_taught_the_words_the_rest_of_jod_uses() {
         let said = orchestrator_preamble();
-        for word in ["**work**", "**session**", "**root**", "**lease**", "**card**"] {
+        for word in [
+            "**work**",
+            "**session**",
+            "**root**",
+            "**lease**",
+            "**card**",
+            "**project**",
+        ] {
             assert!(said.contains(word), "{word} is not defined for the orchestrator");
         }
         assert!(said.contains("read-only"));
         assert!(said.contains("**You do not do the work.**"));
+    }
+
+    // ---- what the orchestrator is told about projects ----
+
+    fn catalogued(name: &str, notes: &str) -> crate::projects::Project {
+        crate::projects::Project {
+            id: name.into(),
+            name: name.into(),
+            path: PathBuf::from(format!("/home/reljod/repo/{name}")),
+            remote: None,
+            aliases: Vec::new(),
+            state: crate::projects::State::Active,
+            colour: "cyan".into(),
+            notes: notes.into(),
+            created_at_ms: 0,
+            last_touched_ms: 0,
+        }
+    }
+
+    fn resolution(how: crate::projects::How) -> crate::projects::Resolution {
+        crate::projects::Resolution {
+            id: 1,
+            conversation_id: "c".into(),
+            project_id: Some("tetris".into()),
+            utterance: "btw, let's fix this".into(),
+            how,
+            reason: String::new(),
+            corrected: false,
+            decided_at_ms: 0,
+        }
+    }
+
+    /// The catalog is the noun a dictated instruction left out, so it has to be
+    /// in the framing rather than a tool call away.
+    #[test]
+    fn the_orchestrator_is_told_the_whole_catalog() {
+        let catalog = [catalogued("tetris", ""), catalogued("jod", "the agent")];
+        let said = project_context(&catalog, None, None);
+        assert!(said.contains("tetris"), "{said}");
+        assert!(said.contains("jod"), "{said}");
+        assert!(said.contains("the agent"), "a project's note was dropped: {said}");
+    }
+
+    /// A carried project is right most of the time and silently wrong the rest,
+    /// so the framing has to say which kind of answer this is.
+    #[test]
+    fn a_sticky_project_is_flagged_as_carried_rather_than_stated_as_fact() {
+        let catalog = [catalogued("tetris", "")];
+        let said = project_context(
+            &catalog,
+            Some(&resolution(crate::projects::How::Sticky)),
+            Some(&catalog[0]),
+        );
+        assert!(said.contains("carried over"), "{said}");
+        assert!(said.contains("project_switch"), "no way out was offered: {said}");
+    }
+
+    /// A project he actually named needs no hedging.
+    #[test]
+    fn a_named_project_is_stated_plainly() {
+        let catalog = [catalogued("tetris", "")];
+        let said = project_context(
+            &catalog,
+            Some(&resolution(crate::projects::How::Inferred)),
+            Some(&catalog[0]),
+        );
+        assert!(said.contains("named **tetris**"), "{said}");
+        assert!(!said.contains("carried over"), "an explicit name was hedged: {said}");
+    }
+
+    /// The case the string matcher deliberately refuses to decide must reach
+    /// the model as a question, not as an absence.
+    #[test]
+    fn an_unsettled_instruction_tells_the_orchestrator_not_to_pick_silently() {
+        let catalog = [catalogued("tetris", ""), catalogued("jod", "")];
+        let said = project_context(&catalog, None, None);
+        assert!(said.contains("not about any project yet"), "{said}");
+        assert!(said.contains("Do not pick for him silently"), "{said}");
+    }
+
+    /// An empty catalog must read as "add one", not as a broken listing.
+    #[test]
+    fn an_empty_catalog_says_how_to_fill_it() {
+        let said = project_context(&[], None, None);
+        assert!(said.contains("project_add"), "{said}");
     }
 
     // ---- opening a work ----
