@@ -46,6 +46,7 @@ see BUG-13.
 | [BUG-13](#bug-13) | Medium | tooling | `jod --version` cannot distinguish two different builds |
 | [BUG-17](#bug-17) | Medium | interrupt | Interrupt is unacknowledged for 4–6s, then reported as both `✓ done` and `✗ failed` |
 | [BUG-18](#bug-18) | Medium | interrupt | Every interrupt falsely warns the run "may still be writing", worded as a *start* failure |
+| [BUG-19](#bug-19) | Medium | fleet | An interrupted run reads `✗ failed` in the TUI but `killed` in `jod ls` and the database |
 | [BUG-15](#bug-15) | **High** | mentions | `@` in a non-git directory is ~95% `node_modules` noise; source is invisible |
 | [BUG-16](#bug-16) | Medium | mentions | `@` clips paths from the right, so six different files render identically |
 
@@ -799,6 +800,63 @@ variant (or make it `Invalid`) so a stop failure stops claiming to be a spawn
 failure. Only warn about "may still be writing" when processes genuinely
 survive the grace period, which is a condition worth checking rather than
 assuming.
+
+---
+
+<a name="bug-19"></a>
+## BUG-19 — A run you interrupted is shown as `✗ failed` in the TUI and `killed` everywhere else · Medium · OPEN
+
+The TUI and the database disagree about the same run, in the same moment.
+
+**Repro:** interrupt a turn, then open the fleet (`Ctrl-F`) and run `jod ls`.
+
+**The TUI fleet:**
+
+```
+✗ f7eddfb9 failed     4m33s cc  run the shell command: sleep
+✗ 5a0a604c failed    10m14s cc  run the shell command: sleep
+■ f58fab53 killed    13h37m cc  continue
+```
+
+**`jod ls`, same two runs:**
+
+```
+5a0a604c   killed    Claude Code  run the shell command: sleep
+f7eddfb9   killed    Claude Code  run the shell command: sleep
+```
+
+**The store agrees with the CLI, not the TUI:**
+
+```
+$ sqlite3 ~/.jod/jod.db "select status, count(*) from runs group by status"
+completed|10
+killed|5          <-- and zero rows with status 'failed'
+```
+
+The menu's dashboard line inherits the error: `15 runs · 0 running · 2 failed`,
+counting two failures that do not exist in the record.
+
+**Root cause.** `cli/src/tui/app.rs:1655` counts on the *live* agent list:
+
+```rust
+let failed = self.agents.iter().filter(|a| a.status == "failed").count();
+```
+
+and the in-memory status of a run terminated by `kill_agent` comes back as
+`failed`, while the persisted status is `Killed`. The tell is in the fleet
+listing above: the two runs killed *in this session* show `failed`, and the
+older killed runs — reloaded from the store — correctly show `killed`. So the
+same run changes status when you restart the TUI.
+
+**Why it matters beyond tidiness.** A deliberate stop is not a failure. Red
+`✗ failed` invites the user to investigate something they themselves caused,
+and "0 running · 2 failed" on the dashboard is a standing false alarm. It is
+the same misclassification that produces the contradictory `✗ failed` entry in
+BUG-17 — worth fixing in one place.
+
+**Suggested fix.** Map a killed run to `killed` in the live state as well, so
+the two views cannot disagree, and count only genuine failures in
+`count_for`.
 
 ---
 
