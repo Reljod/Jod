@@ -36,7 +36,10 @@ mod rail;
 mod secret;
 mod sessions;
 mod todo;
-mod traffic;
+/// Public for `examples/screens.rs`, which compiles this module in by path and
+/// renders the traffic log off a real database — the same reason [`data`] and
+/// [`ui`] are public. Nothing outside the TUI links against this crate.
+pub mod traffic;
 mod yank;
 pub mod ui;
 mod workspace;

@@ -152,7 +152,7 @@ async fn main() -> anyhow::Result<()> {
     // empty state and says nothing about whether the loader works.
     if let Some(store) = jod.store() {
         let busiest = store
-            .works(jod_core::works::Filter::Any)
+            .works(jod_core::works::Filter::All)
             .unwrap_or_default()
             .into_iter()
             .map(|w| {
@@ -162,22 +162,20 @@ async fn main() -> anyhow::Result<()> {
                 (used, w.id)
             })
             .max_by_key(|(used, _)| *used);
-        if let Some((used, id)) = busiest.filter(|(used, _)| *used > 0) {
-            app.traffic_of = Some(tui::traffic::Watching::work(&id));
-            app.traffic = tui::data::traffic_from(&store, app.traffic_of.as_ref().unwrap());
-            app.go(Workspace::Traffic);
-            println!();
-            println!(
-                "── {} {}",
-                Workspace::Traffic.title(),
-                "─".repeat(52)
-            );
-            println!("{}", render(&app));
-        } else {
-            println!();
-            println!("── fleet · traffic ── no work has any traffic in this database");
+        match busiest.filter(|(used, _)| *used > 0) {
+            Some((_, id)) => {
+                app.traffic_of = Some(tui::traffic::Watching::work(&id));
+                app.traffic = tui::data::traffic_from(&store, app.traffic_of.as_ref().unwrap());
+                app.go(Workspace::Traffic);
+                println!();
+                println!("── {} {}", Workspace::Traffic.title(), "─".repeat(52));
+                println!("{}", render(&app));
+            }
+            None => {
+                println!();
+                println!("── fleet · traffic ── no work on this database has any traffic yet");
+            }
         }
-        let _ = used_is_only_for_the_filter(used_placeholder());
     }
 
     // A chat mid-turn, with the side panel open.
