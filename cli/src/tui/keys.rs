@@ -137,6 +137,15 @@ pub const GLOBAL: &[Key] = &[
     k("Alt-G", "team"),
     k("Alt-N", "the oldest thing unread"),
     k("Alt-J", "background shells"),
+    // The rail's two chords. Both are chords rather than letters for one
+    // reason, and it is the reason E2.S3 gives: the chat box owns every bare
+    // key, so a rail verb on `c` would type a `c` into the sentence being
+    // written. See [`RAIL`].
+    k("Alt-R", "show or hide the rail"),
+    k("Alt-C", "the rail's next card"),
+    k("Alt-P", "add a directory to work in"),
+    k("Alt-S", "search every transcript"),
+    k("Alt-Y", "copy the last reply"),
     k("Alt-B", "delegate the typed line"),
     k("Alt-X", "stop the run being watched"),
     k("Alt-F", "the typed line in $EDITOR"),
@@ -144,8 +153,24 @@ pub const GLOBAL: &[Key] = &[
     k("Alt-O", "show or hide tool output"),
     k("Alt-L", "clear the transcript"),
     k("Alt-↑↓", "scroll the transcript"),
-    k("Ctrl-A/Home", "start of the line"),
-    k("Ctrl-E/End", "end of the line"),
+    // One row for the pair, for the same reason `uU` above is one row.
+    //
+    // The `?` overlay promises to be complete at 100×30, and this branch and
+    // `main` each added chords to it — the rail's two, the picker, search,
+    // yank, and background shells — which together cost it one line more than
+    // it had. Something had to give, and a verb with its inverse gives up a
+    // row without giving up a verb: both keys still fire and both are still
+    // advertised.
+    //
+    // This pair rather than another because start-of-line and end-of-line are
+    // read as one idea by anyone who already knows them from a shell, and
+    // guessed as a pair by anyone who does not.
+    // All four spellings, because all four are dispatched. `press_of` splits on
+    // `/` and carries the modifier along, so this one row still advertises
+    // Ctrl-A, Ctrl-E, Ctrl-Home and Ctrl-End — and the drift net, which replays
+    // every printed label as a real keypress, is what caught the version of
+    // this that quietly dropped Home and End while still answering them.
+    k("Ctrl-A/E/Home/End", "start / end of the line"),
     k("Ctrl-U", "clear the input line"),
     k("Ctrl-W", "delete the previous word"),
     k("Ctrl-C/D", "quit — twice while agents run"),
@@ -194,13 +219,56 @@ const FLEET: &[Key] = &[
     // eighty columns, but matching the board is the reason.
     k("d", "delegate"),
     k("c", "conversations"),
+    // The work's bus. High in the table because it is the only verb here that
+    // answers "what are these agents saying to each other", and a work whose
+    // traffic cannot be read is a work you can only watch spend money — see
+    // `tui::traffic`. Capital because `t` already retries a run on this screen.
+    k("T", "traffic"),
     k("b", "branches"),
-    k("u", "undo"),
-    k("U", "redo"),
+    // One row for the pair, the way `→←` below is one row for two arrows.
+    //
+    // Both keys still fire and both are still advertised; what changed is that
+    // they cost the `?` overlay one line instead of two. The overlay is two
+    // columns of twenty-eight rows at the design size, and the fleet's own
+    // section plus the spine plus the global chords came to exactly one line
+    // more than that when `T traffic` arrived — so a screen that had promised
+    // to be complete at 100×30 started saying `1 more — widen the window`.
+    // Undo and redo are a verb and its inverse and read as one thing anyway,
+    // which is why this pair is the one that gives way rather than a verb that
+    // would have had to be dropped.
+    k("uU", "undo / redo"),
     k("g", "go to #"),
     k("f", "fork"),
     k("t", "retry"),
+    // The tree's own verbs, in force once there is a work to draw. Below the
+    // run verbs because those act on the row and these act on the shape, and
+    // the row is what people come here for; above `/` because that one is the
+    // spine's and means the same thing on every screen.
+    k("→←", "in / out"),
+    k("space", "expand / collapse"),
+    k("E", "expand all"),
+    k("C", "collapse all"),
+    k("z", "closed works"),
     k("/", "filter"),
+];
+
+/// The traffic log, opened from the tree with `T`.
+///
+/// `T` is capital because lower-case `t` is already *retry* on the fleet, and a
+/// letter that retried a run on one press and opened a screen on the next would
+/// be the worst kind of collision — one of the two is destructive. `E`, `C`,
+/// `U` and `S` set that pattern on this screen already: when the letter is
+/// spoken for, the verb goes to the capital rather than to an unrelated key
+/// nobody can guess.
+///
+/// `f` is the state cycle, spelled and ordered exactly as the rail's `f` is,
+/// because G5.S5 asks for one way to narrow a list in this program rather than
+/// a second idiom for the same job. `/` and `S` are the spine's and go last.
+const TRAFFIC: &[Key] = &[
+    k("⏎", "the message in full"),
+    k("f", "every / failed / waiting / delivered"),
+    k("/", "filter"),
+    k("S", "cycle sort"),
 ];
 
 const MEMORY: &[Key] = &[
@@ -284,6 +352,52 @@ const ACTIVITY: &[Key] = &[
 
 const TEAM: &[Key] = &[k("⏎", "mark done"), k("↑↓", "pick"), k("/", "filter")];
 
+/// The decision rail's own verbs, in force only while the rail has the
+/// keyboard — which `Alt-C` is what gives it, and `Esc` is what takes away.
+///
+/// **Why a focus rather than a chord per verb.** The chat input turns every
+/// bare key into text, so the rail could either have a chord for each of its
+/// eight verbs — eight more chords to find free, on a keymap that has already
+/// had to move off Ctrl once — or one chord that hands it the keyboard. It has
+/// the second. Getting *in* is free and safe mid-sentence (`Alt-C` never
+/// touches `App::input`); once in, the keys are ordinary letters, and `Esc`
+/// gives the keyboard back with the typed line exactly as it was.
+///
+/// `1–9` answers the numbered option under the cursor rather than jumping to a
+/// workspace. That collision is safe precisely *because* focus is explicit: the
+/// digits mean the rail's thing only while the rail is drawn, highlighted and
+/// named on the bar, and a workspace jump is one `Esc` away.
+///
+/// `t` cycles which stack is on show — open, then answered, then dismissed —
+/// which is how an answered card is toggled back into view once it has left the
+/// stack.
+pub const RAIL: &[Key] = &[
+    k("⏎", "expand / collapse"),
+    k("1–9", "answer by option"),
+    k("a", "answer in prose"),
+    k("x", "dismiss"),
+    k("t", "open / answered / dismissed"),
+    k("c", "this session / everything below"),
+    k("f", "kind"),
+    k("/", "filter"),
+    k("S", "sort"),
+];
+
+/// What the rail's keybar says on its right-hand half.
+pub const RAIL_EXIT: &str = "Esc back to the chat · ? keys";
+
+/// The footer printed inside the expanded card's border. Same relationship to
+/// [`RAIL`] that [`footer`] has to [`local`], and fitted the same way at the
+/// call site.
+pub fn rail_footer() -> String {
+    let verbs = items(RAIL)
+        .into_iter()
+        .take(4)
+        .collect::<Vec<_>>()
+        .join(SEP);
+    format!(" {verbs} ")
+}
+
 /// This screen's own verbs, in keybar order.
 ///
 /// Fleet's `s`, `a` and `r` are exactly what they are today. `S` is capital
@@ -300,14 +414,28 @@ pub fn local(ws: Workspace) -> &'static [Key] {
         Workspace::Tasks => TASKS,
         Workspace::Activity => ACTIVITY,
         Workspace::Team => TEAM,
+        Workspace::Traffic => TRAFFIC,
     }
 }
 
 /// The keybar's left half: this screen's verbs, as many as fit beside the way
 /// out. See the module header for why the exit wins the argument.
 pub fn keybar(ws: Workspace, width: u16) -> String {
-    let verbs = items(local(ws));
-    let budget = verb_budget(ws, width);
+    fit_bar(local(ws), verb_budget(ws, width))
+}
+
+/// The keybar while the decision rail has the keyboard.
+///
+/// A bar of its own rather than the screen's, because the screen's verbs are
+/// not the ones in force: printing `s stop` while `x` dismisses a card would
+/// teach a key that does something else entirely. Same fitting rule — the way
+/// out is reserved first — for the reason the module header gives.
+pub fn rail_keybar(width: u16) -> String {
+    fit_bar(RAIL, budget(RAIL_EXIT, width))
+}
+
+fn fit_bar(bindings: &'static [Key], budget: usize) -> String {
+    let verbs = items(bindings);
 
     let whole = verbs.join(SEP);
     if whole.chars().count() <= budget {
@@ -354,7 +482,11 @@ pub fn keybar(ws: Workspace, width: u16) -> String {
 /// lives here, and the test that pins it against the renderer calls it rather
 /// than repeating it.
 pub fn verb_budget(ws: Workspace, width: u16) -> usize {
-    (width as usize).saturating_sub(keybar_exit(ws).chars().count() + 3)
+    budget(keybar_exit(ws), width)
+}
+
+fn budget(exit: &str, width: u16) -> usize {
+    (width as usize).saturating_sub(exit.chars().count() + 3)
 }
 
 fn items(bindings: &'static [Key]) -> Vec<String> {
@@ -414,6 +546,21 @@ pub fn keymap(ws: Workspace) -> Vec<(String, &'static [Key])> {
     }
     sections.push(("anywhere".to_string(), GLOBAL));
     sections
+}
+
+/// The `?` overlay while the rail has the keyboard.
+///
+/// The screen's own verbs are deliberately **not** here, and neither is the
+/// list spine. Both are the same argument as [`rail_keybar`]'s: while the rail
+/// holds the keyboard those keys are not in force, and help that lists a key
+/// which currently does something else is worse than help that omits it. The
+/// two chords that got you here, and the way out, are in [`GLOBAL`], which
+/// stays.
+pub fn rail_keymap() -> Vec<(String, &'static [Key])> {
+    vec![
+        ("the rail — this has the keyboard".to_string(), RAIL),
+        ("anywhere".to_string(), GLOBAL),
+    ]
 }
 
 /// The which-key overlay's keybar line, which has to name the leader it is
@@ -501,6 +648,15 @@ pub fn all_documented_chords() -> Vec<String> {
         }
         found.extend(chords_in(keybar_exit(ws)));
     }
+    for (_, bindings) in rail_keymap() {
+        found.extend(
+            bindings
+                .iter()
+                .filter(|b| is_chord(b.key))
+                .map(|b| b.key.to_string()),
+        );
+    }
+    found.extend(chords_in(RAIL_EXIT));
     for making in [false, true] {
         found.extend(chords_in(&which_key_hint(making)));
         found.extend(chords_in(which_key_title(making)));
@@ -729,6 +885,73 @@ mod tests {
                 "{ws:?} does not carry `a {what}` in the overlay"
             );
         }
+    }
+
+    /// The rail's bar obeys the same invariant as every screen's: terse is
+    /// allowed, stranded is not. It is fitted against the *full* terminal
+    /// width rather than the rail's own thirty columns, because it is the
+    /// bottom bar and not something drawn inside the column.
+    #[test]
+    fn the_rails_way_out_fits_beside_its_verbs_at_every_realistic_width() {
+        for width in WIDTHS {
+            let left = rail_keybar(width).chars().count();
+            assert!(
+                left + RAIL_EXIT.chars().count() + 3 <= width as usize,
+                "the rail at {width} columns wants {}",
+                left + RAIL_EXIT.chars().count() + 3
+            );
+        }
+    }
+
+    /// A rail with the keyboard must say how to give it back, and must not
+    /// print the screen's verbs while the rail's are the ones in force.
+    #[test]
+    fn the_rail_names_its_own_verbs_and_the_way_out_of_them() {
+        let bar = rail_keybar(150);
+        assert!(bar.contains("x dismiss"), "{bar}");
+        assert!(bar.contains("a answer in prose"), "{bar}");
+        assert!(RAIL_EXIT.contains("Esc"), "{RAIL_EXIT}");
+        assert!(
+            !bar.contains("s stop"),
+            "the fleet's verbs are not in force here: {bar}"
+        );
+    }
+
+    /// `?` while the rail has the keyboard lists the rail's verbs and the
+    /// global chords, and deliberately not the screen's own — those letters are
+    /// not in force, and help that names a key which currently does something
+    /// else is worse than help that omits it.
+    #[test]
+    fn the_rails_overlay_lists_its_verbs_and_not_the_screens() {
+        let sections = rail_keymap();
+        assert!(sections[0].0.contains("rail"));
+        assert!(sections[0].1.iter().any(|b| b.what == "dismiss"));
+        assert!(sections.iter().any(|(name, _)| name == "anywhere"));
+        assert!(
+            !sections
+                .iter()
+                .any(|(_, bindings)| bindings.iter().any(|b| b.what == "stop")),
+            "the fleet's verbs are not in force while the rail holds the keyboard"
+        );
+    }
+
+    /// The way back to the screen's own keys is a chord, so it has to be in the
+    /// one section the rail's overlay does carry.
+    #[test]
+    fn the_rails_overlay_still_names_the_way_out() {
+        assert!(rail_keymap()
+            .into_iter()
+            .any(|(_, bindings)| bindings.iter().any(|b| b.key == "Alt-R")));
+        assert!(RAIL_EXIT.contains("Esc"));
+    }
+
+    /// The two chords are the whole reason the rail is usable mid-sentence, so
+    /// they are advertised where every screen can see them.
+    #[test]
+    fn the_rails_chords_are_taught_alongside_the_other_global_ones() {
+        let printed: Vec<&str> = GLOBAL.iter().map(|b| b.key).collect();
+        assert!(printed.contains(&"Alt-R"), "{printed:?}");
+        assert!(printed.contains(&"Alt-C"), "{printed:?}");
     }
 
     #[test]

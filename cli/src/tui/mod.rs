@@ -28,7 +28,19 @@ mod delivery;
 pub mod data;
 mod graph;
 mod keys;
+mod diff;
+mod fleet;
+mod mention;
+mod picker;
+mod rail;
+mod secret;
 mod sessions;
+mod todo;
+/// Public for `examples/screens.rs`, which compiles this module in by path and
+/// renders the traffic log off a real database — the same reason [`data`] and
+/// [`ui`] are public. Nothing outside the TUI links against this crate.
+pub mod traffic;
+mod yank;
 pub mod ui;
 mod workspace;
 
@@ -107,6 +119,33 @@ pub enum Action {
     EnterMain,
     /// Stop an agent and close its tmux session.
     Stop(String),
+    /// Run a command this repository offers, in the spelling its harness takes.
+    ///
+    /// Both fields come from `commands::Discovered::invoke`, which is the one
+    /// place that knows Claude Code and AGY expand `/name` from the prompt
+    /// while OpenCode needs `run --command <name>`. Nothing here branches on
+    /// the harness — a second copy of that measurement is how the two would
+    /// drift.
+    RunCommand {
+        prompt: String,
+        command: Option<String>,
+    },
+    /// Put text on the terminal's clipboard.
+    ///
+    /// An `Action` because it writes an escape sequence to stdout, which the
+    /// key handler may not do. What to copy is decided in `yank.rs`, off the
+    /// transcript rather than off the screen — the screen has wrapping and
+    /// borders in it.
+    Yank(String),
+    /// End the turn in flight and stay in the conversation.
+    ///
+    /// The same call as [`Action::Stop`] at the process level — Jod runs one
+    /// process per turn, so there is nothing else to end — and a different act
+    /// at every level above it. `Stop` is "I am done with this agent"; this is
+    /// "not like that, try again". The state that makes it the second one is
+    /// set in the key handler, so the session survives whether or not the kill
+    /// succeeds.
+    Interrupt(String),
     /// Put an agent's output on screen and follow it.
     Watch(String),
     /// Arm or disarm a run's heartbeat — see [`command::Slash::Heartbeat`].
@@ -171,6 +210,51 @@ pub enum Action {
     /// the binary, and available as `/reload` whenever a build landed some
     /// other way.
     Reload,
+    /// Answer a card in the rail: an option chosen by digit, prose typed at
+    /// the prompt, or both.
+    ///
+    /// Never applied here, and that is the design rather than a convenience.
+    /// Answering *queues* — [`Store::answer_card`] writes the answer and a
+    /// pending delivery in one transaction, and a handler in core decides when
+    /// the agent is told. A turn in flight is untouched, because its prompt was
+    /// assembled before the answer existed. See decision D2.
+    AnswerCard {
+        id: i64,
+        chosen: Option<String>,
+        answer: Option<String>,
+    },
+    /// Read a card and deliberately not answer it. Queues nothing: an agent
+    /// told about a dismissal could not tell it from an answer, and would act
+    /// on a decision nobody made.
+    DismissCard(i64),
+    /// Store a credential collected by a `Secret` card, and answer the card
+    /// with its *name*.
+    ///
+    /// The value rides in a [`secret::Typed`], which cannot print itself — this
+    /// enum derives `Debug`, and one diagnostic on a dispatched action would
+    /// otherwise be a live credential in a log file. It is written once and
+    /// dropped; nothing downstream of `put_secret` ever sees it, and the card's
+    /// answer says only that a name was stored.
+    PutSecret {
+        card: i64,
+        name: String,
+        scope: jod_core::secrets::Scope,
+        /// The work or conversation the scope refers to; empty for global.
+        scope_id: String,
+        value: secret::Typed,
+    },
+    /// Give this conversation another directory to work in, read-only.
+    ///
+    /// Read-only is not a default that could as easily have been the other
+    /// way: per D5 a session reads your real checkout and writes only in a
+    /// worktree it claims, so a root added by hand is somewhere to read until
+    /// something explicitly claims it.
+    AddRoot(PathBuf),
+    RemoveRoot(PathBuf),
+    /// Print this conversation's roots, in the user's own order, saying which
+    /// is writable — the one fact that decides whether an agent may change
+    /// anything there.
+    ListRoots,
     /// A verb the screens offer and the store cannot carry out yet. Named
     /// rather than silently ignored, and naming the missing call rather than
     /// apologising, so the gap is a to-do and not a mystery.
@@ -406,6 +490,16 @@ async fn event_loop(
     app.now_ms = now_ms();
     app.agents = list_agents(&jod).await;
     refresh_team(&jod, &mut app);
+    // Which Jod conversation the chat box is talking into. Starts derived —
+    // "the one the run on screen wrote" — and becomes explicit when a harness
+    // switch mints a conversation no run has reached yet, or when you enter the
+    // main chat.
+    //
+    // Declared before the first refresh because the rail is read against it: a
+    // refresh that ran first would ask for one conversation's cards and then be
+    // told it was looking at another.
+    let mut thread = Thread::default();
+    bind_rail(&jod, &mut app, &thread);
     refresh_workspaces(&jod, &mut app);
     app.reconcile();
     // No harness name here: this line is frozen into the scrollback, so naming
@@ -415,12 +509,6 @@ async fn event_loop(
         "Alt-K opens every screen · / for commands · Enter send · Alt-B delegate in the background · ? for keys · Ctrl-C quit"
             .to_string(),
     ));
-
-    // Which Jod conversation the chat box is talking into. Starts derived —
-    // "the one the run on screen wrote" — and becomes explicit when a harness
-    // switch mints a conversation no run has reached yet, or when you enter the
-    // main chat.
-    let mut thread = Thread::default();
 
     let mut keys = EventStream::new();
     let mut events = jod.subscribe();
@@ -456,6 +544,15 @@ async fn event_loop(
             Some(Ok(ev)) = keys.next() => {
                 match ev {
                     Event::Key(key) if key.kind == KeyEventKind::Press => {
+                        // What the rail is asking the store for, before the key
+                        // is allowed to change it. A filter, a sort or a stack
+                        // toggle has to re-read *now* — the tick that would
+                        // eventually catch up is a second away, and a filter
+                        // box that lags a second behind the letters is one
+                        // nobody trusts. Everything else must not pay for a
+                        // query per keystroke, which is what the comparison
+                        // buys.
+                        let asked = app.rail.query(app.conversation.clone());
                         match on_key(&mut app, key, viewport) {
                             // The editor takes the terminal, so it can only be
                             // done from here — with the same discipline as
@@ -470,6 +567,13 @@ async fn event_loop(
                             Some(action) => perform(&jod, &mut app, &opts, &mut thread, action).await,
                             None => {}
                         }
+                        if app.rail.query(app.conversation.clone()) != asked {
+                            refresh_rail(&jod, &mut app);
+                        }
+                        // Both cheap when their overlay is shut, which is
+                        // almost always.
+                        refresh_mention(&jod, &mut app);
+                        refresh_search(&jod, &mut app);
                     }
                     Event::Mouse(m) => match m.kind {
                         MouseEventKind::ScrollUp => app.scroll_up(3, app.transcript.len()),
@@ -586,6 +690,11 @@ async fn event_loop(
                 // shows a fleet that stopped moving minutes ago.
                 if app.tick.is_multiple_of(4) {
                     app.agents = list_agents(&jod).await;
+                    // Before the refresh, because the chat box may have been
+                    // rebound since the last one — `/resume`, a harness switch,
+                    // entering the main chat — and the rail would otherwise
+                    // spend a second showing the previous conversation's cards.
+                    bind_rail(&jod, &mut app, &thread);
                     refresh_workspaces(&jod, &mut app);
                     if matches!(app.workspace, Workspace::Team | Workspace::Tasks) {
                         refresh_team(&jod, &mut app);
@@ -834,61 +943,13 @@ async fn perform(
         // instructing the orchestrator — that is what being in it means. In any
         // other conversation it is what it always was: a turn to an agent whose
         // answer fills the screen.
-        Action::Send(prompt) => {
-            if thread.in_main(jod.store().map(Arc::as_ref)) {
-                orchestrate(jod, app, opts, thread, prompt).await;
-                return;
-            }
-            // The one place Jod's own verbs are handed over from the chat box.
-            //
-            // The rule this codebase already states is "the main chat is you,
-            // present, watching" — and a turn you just typed into the TUI is
-            // exactly that. The grant used to be withheld here on the grounds
-            // that "an agent started from the chat box is doing a task, not
-            // orchestrating", which conflated two different things reached
-            // through one function: a turn you are watching, and a delegation
-            // that goes off on its own. Only the second is unattended, and only
-            // the second still gets nothing.
-            //
-            // Without this you could ask Jod to schedule something and it would
-            // answer as if it had, having no verb to do it with.
-            match spawn(
-                jod,
-                app,
-                opts,
-                prompt.clone(),
-                app.resume.clone(),
-                WATCHED,
-                // Into the conversation the chat box is bound to, which after a
-                // handoff is the one carrying the summary. Everything else is
-                // still `New`, as it was.
-                thread.binding(),
-                thread.carried.clone(),
-            )
-            .await
-            {
-                Ok(id) => {
-                    // Only once. From here the harness has a session of its own
-                    // and is holding the context itself; re-sending it every
-                    // turn would hand the model a summary of a conversation it
-                    // is already in.
-                    thread.carried = None;
-                    // The first turn is what mints a conversation, so it is the
-                    // first moment anything chosen before it can be written
-                    // down.
-                    flush_pending(jod, app, thread, &id);
-                    app.watching = Some(id);
-                    app.busy = true;
-                    app.turn_started_ms = Some(app.now_ms);
-                    app.push(Entry::You(prompt));
-                    app.scroll_to_bottom();
-                }
-                Err(e) => app.push(Entry::Notice(format!("could not start: {e}"))),
-            }
+        Action::Send(prompt) => send_turn(jod, app, opts, thread, prompt, None).await,
+        // A repository's own command. Same turn, one field different — and
+        // that field is the whole of D7's measurement: Claude Code and AGY take
+        // `/name` in the prompt, OpenCode takes it in a flag.
+        Action::RunCommand { prompt, command } => {
+            send_turn(jod, app, opts, thread, prompt, command).await
         }
-        // One instruction to the main chat from wherever you happen to be, and
-        // it leaves you there. `Action::EnterMain` is the other thing — going
-        // to live in it.
         Action::Orchestrate(instruction) => orchestrate(jod, app, opts, thread, instruction).await,
         Action::EnterMain => enter_main(jod, app, opts, thread).await,
         Action::Delegate(prompt) => {
@@ -914,6 +975,7 @@ async fn perform(
                 // background job that silently joined the thread on screen would
                 // interleave two agents' turns in one transcript.
                 RunConversation::New,
+                None,
                 None,
             )
             .await
@@ -957,6 +1019,40 @@ async fn perform(
         Action::NewThread => {
             thread.conversation = None;
             thread.carried = None;
+        }
+        // The transcript already says the turn ended — `on_chat_key` said so on
+        // the keypress. All that is left is ending the process, and a failure
+        // here is reported without undoing any of it: the conversation is
+        // intact either way, and a harness that outlives its interruption is a
+        // supervisor problem rather than a reason to put the user back into a
+        // turn they have already abandoned.
+        // Straight to stdout, past ratatui: this is a message for the terminal
+        // emulator rather than something to draw, and the next frame repaints
+        // over anything the draw buffer thought was there.
+        //
+        // A failure is reported and nothing else — the clipboard cannot be read
+        // back, so there is no state to repair, and the notice has already gone
+        // out saying what was copied.
+        Action::Yank(sequence) => {
+            use std::io::Write as _;
+            let mut out = io::stdout();
+            if out
+                .write_all(sequence.as_bytes())
+                .and_then(|()| out.flush())
+                .is_err()
+            {
+                app.push(Entry::Notice(
+                    "the terminal would not take the clipboard sequence".into(),
+                ));
+            }
+        }
+        Action::Interrupt(id) => {
+            if let Err(e) = jod.kill_agent(&id).await {
+                app.push(Entry::Notice(format!(
+                    "the run would not stop ({e}) — it may still be writing; \
+                     Alt-X kills it outright"
+                )));
+            }
         }
         Action::Stop(id) => match jod.kill_agent(&id).await {
             Ok(()) => {
@@ -1062,6 +1158,106 @@ async fn perform(
         Action::ToggleHook(name) => on_store(jod, app, |store| toggle_hook(store, &name)),
         Action::DeleteHook(name) => on_store(jod, app, |store| delete_hook(store, &name)),
         Action::Forget(subject) => on_store(jod, app, |store| forget_about(store, &subject)),
+        // Both card verbs go through `on_store` like every other store verb,
+        // and the sentence they hand back is the whole feature: `Store::
+        // answer_card` writes the answer *and* a pending delivery in one
+        // transaction, so what actually happened is "recorded, and the agent
+        // will be told when it comes up for air". Saying "answered" alone would
+        // be the lie D2 is written against.
+        Action::AnswerCard { id, chosen, answer } => on_store(jod, app, |store| {
+            answered_card(store, id, chosen.as_deref(), answer.as_deref())
+        }),
+        // The one place a credential is revealed, and it goes straight to the
+        // store. `scope_id` is filled in here rather than in the key handler
+        // because only the loop knows which conversation the rail is bound to.
+        //
+        // Nothing about this arm logs, formats or returns the value: the
+        // sentence `on_store` pushes comes from `secret::stored_note`, which
+        // takes a `SecretMeta` — a type that cannot reconstruct a value.
+        Action::PutSecret {
+            card,
+            name,
+            scope,
+            scope_id,
+            value,
+        } => {
+            let scope_id = if scope_id.is_empty() {
+                app.conversation.clone().unwrap_or_default()
+            } else {
+                scope_id
+            };
+            on_store(jod, app, move |store| {
+                stored_secret(store, card, &name, scope, &scope_id, value)
+            })
+        }
+        Action::AddRoot(path) => {
+            let conversation = app.conversation.clone();
+            on_store(jod, app, move |store| match conversation {
+                Some(conversation) => {
+                    match store.add_root(&conversation, jod_core::roots::NewRoot::reading(&path)) {
+                        // The label rather than the path: `roots` normalises,
+                        // so what was typed and what was stored can differ, and
+                        // the stored one is the one that will be matched
+                        // against later.
+                        Ok(root) => format!(
+                            "added {} — read-only, as every root is until something claims it",
+                            root.path.display()
+                        ),
+                        Err(e) => format!("{} not added: {e}", path.display()),
+                    }
+                }
+                // Roots hang off a conversation, so there has to be one. Said
+                // rather than silently dropped: the picker just spent the
+                // user's attention.
+                None => "no conversation to add a root to yet — say something first".to_string(),
+            })
+        }
+        Action::RemoveRoot(path) => {
+            let conversation = app.conversation.clone();
+            on_store(jod, app, move |store| match conversation {
+                Some(conversation) => match store.remove_root(&conversation, &path) {
+                    Ok(true) => format!("removed {}", path.display()),
+                    Ok(false) => format!("{} was not one of this session's roots", path.display()),
+                    Err(e) => format!("{} not removed: {e}", path.display()),
+                },
+                None => NO_STORE.to_string(),
+            })
+        }
+        // Multi-line, like `/config` and `/sessions`: folding a list of roots
+        // into one notice is several directories in a paragraph.
+        Action::ListRoots => {
+            let lines = match (jod.store(), app.conversation.clone()) {
+                (Some(store), Some(conversation)) => {
+                    let roots = store.roots(&conversation).unwrap_or_default();
+                    if roots.is_empty() {
+                        vec![
+                            "no roots — Alt-P picks a directory, and `@` says so until there is one"
+                                .to_string(),
+                        ]
+                    } else {
+                        roots
+                            .iter()
+                            .map(|r| {
+                                format!(
+                                    "{}  {}  {}",
+                                    if r.writable { "rw" } else { "ro" },
+                                    r.label(),
+                                    r.path.display()
+                                )
+                            })
+                            .collect()
+                    }
+                }
+                _ => vec!["no conversation yet, so no roots to list".to_string()],
+            };
+            for line in lines {
+                app.push(Entry::Notice(line));
+            }
+        }
+        Action::DismissCard(id) => on_store(jod, app, |store| match store.dismiss_card(id) {
+            Ok(()) => format!("card #{id} dismissed — the agent is told nothing"),
+            Err(e) => format!("card #{id} not dismissed: {e}"),
+        }),
         Action::Remember {
             subject,
             predicate,
@@ -1374,6 +1570,7 @@ async fn begin_crossing(
                 },
                 // No Jod verbs. This run answers a question, it does not act.
                 tools: None,
+                ..SpawnRequest::default()
             };
             // Detached: its prompt is a request to summarise, and recording that
             // in the conversation being handed over would put "summarise this"
@@ -1712,6 +1909,62 @@ fn delete_hook(store: &Store, name: &str) -> String {
 /// The bare name survives, with no edges: `facts` cascades into `relations` but
 /// not into `entities`, so the row stays until the graph is rebuilt. Said out
 /// loud, because the row not disappearing otherwise reads as a key that failed.
+/// Write a credential, answer its card with a *name*, and say what happened.
+///
+/// The value is consumed here and reaches exactly one call. Note what the card
+/// is answered with: `secret::stored_summary`, a name and a scope. That string
+/// becomes the agent's delivery via `Card::answer_body`, so it is the sentence
+/// the model will read — which is precisely why it must not contain, hint at,
+/// or measure the value. The agent is told a name; it reads the value as an
+/// environment variable or not at all.
+///
+/// A failed write does **not** answer the card. A card marked answered against
+/// a secret that was never stored would take the request out of the rail and
+/// leave the run blocked on a credential nobody is going to supply.
+fn stored_secret(
+    store: &Store,
+    card: i64,
+    name: &str,
+    scope: jod_core::secrets::Scope,
+    scope_id: &str,
+    value: secret::Typed,
+) -> String {
+    let meta = match store.put_secret(name, scope, scope_id, value.reveal(), "") {
+        Ok(meta) => meta,
+        // The error is the store's own and names the rule that was broken —
+        // an illegal variable name, an empty value, a NUL byte. None of them
+        // can quote the value, because none of them were given it to quote.
+        Err(e) => return format!("`{name}` not stored: {e}"),
+    };
+    let said = secret::stored_note(&meta);
+    match store.answer_card(card, None, Some(&secret::stored_summary(name, scope))) {
+        Ok(_) => said,
+        Err(e) => format!("{said}. The card could not be closed, though: {e}"),
+    }
+}
+
+/// Answer a card, and say what that actually did.
+///
+/// The sentence is the feature. "Answered" alone would be the lie decision D2
+/// is written against: the answer is *recorded and queued*, and the agent hears
+/// it at the next turn boundary — immediately if it is idle, at the end of the
+/// current turn if it is not. A reader told only "answered" goes back to
+/// watching the transcript for a change that is not due yet, decides the key
+/// did not work, and answers again.
+fn answered_card(store: &Store, id: i64, chosen: Option<&str>, answer: Option<&str>) -> String {
+    match store.answer_card(id, chosen, answer) {
+        Ok(card) => {
+            let what = card.chosen.or(card.answer).unwrap_or_default();
+            format!(
+                "card #{id} answered “{}” — queued; it reaches the agent at the end of the turn \
+                 in flight",
+                app::one_line(&what, 60)
+            )
+        }
+        Err(e) => format!("card #{id} not answered: {e}"),
+    }
+}
+
 fn forget_about(store: &Store, subject: &str) -> String {
     let facts = match store.facts_about(subject) {
         Ok(facts) => facts,
@@ -1850,10 +2103,195 @@ fn on_key(app: &mut App, key: KeyEvent, viewport: usize) -> Option<Action> {
         }
         _ => {}
     }
+    // The rail sits above both of the layers below it, because it is drawn
+    // beside both and `Alt-C` may have been pressed on either. It only owns the
+    // keyboard once it has been given it, which is what keeps a rail that is
+    // merely *visible* from stealing the letters you are typing.
+    if app.rail.focused && app.rail.shown {
+        return on_rail_key(app, key);
+    }
     if app.workspace.is_list() {
         return on_workspace_key(app, key, viewport);
     }
     on_chat_key(app, key, viewport)
+}
+
+/// Keys while the decision rail has the keyboard.
+///
+/// Every one of these is a bare letter, which is only safe because the focus is
+/// explicit and printed: `Alt-C` gives the rail the keyboard, the keybar
+/// changes to the rail's verbs while it holds it, and `Esc` gives it back with
+/// the typed line untouched. See [`keys::RAIL`].
+fn on_rail_key(app: &mut App, key: KeyEvent) -> Option<Action> {
+    // A `/` line being typed owns the keyboard, letters and all — otherwise
+    // filtering for "sqlite" would try to sort, then dismiss a card.
+    if app.rail.editing_filter {
+        match key.code {
+            KeyCode::Char(c) => {
+                if let Some(f) = app.rail.filter.as_mut() {
+                    f.push(c);
+                }
+            }
+            KeyCode::Backspace => {
+                if let Some(f) = app.rail.filter.as_mut() {
+                    f.pop();
+                }
+            }
+            // Accepting keeps the filter and hands the letters back to being
+            // verbs. `Esc` is the one that clears it.
+            KeyCode::Enter => app.rail.editing_filter = false,
+            KeyCode::Esc => {
+                app.rail.filter = None;
+                app.rail.editing_filter = false;
+            }
+            _ => {}
+        }
+        return None;
+    }
+
+    let ids = app.card_ids();
+    match key.code {
+        KeyCode::Esc => {
+            app.rail.back();
+            None
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            app.rail.step(-1, &ids);
+            None
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            app.rail.step(1, &ids);
+            None
+        }
+        KeyCode::Home => {
+            app.rail.selected = ids.first().copied();
+            None
+        }
+        KeyCode::End => {
+            app.rail.selected = ids.last().copied();
+            None
+        }
+        // `→` expands and `←` collapses, spelled spatially, because the
+        // expanded card is wider than the collapsed one and the movement reads
+        // as the shape it makes. `⏎` is the same verb on the primary key.
+        KeyCode::Enter | KeyCode::Right => {
+            if app.rail.selected.is_some() {
+                app.rail.expanded = !app.rail.expanded;
+            }
+            None
+        }
+        KeyCode::Left => {
+            app.rail.expanded = false;
+            None
+        }
+        KeyCode::Char('/') => {
+            app.rail.filter = Some(String::new());
+            app.rail.editing_filter = true;
+            None
+        }
+        KeyCode::Char('S') => {
+            let sort = app.rail.cycle_sort();
+            app.push(Entry::Notice(format!("rail sorted by {}", sort.as_str())));
+            None
+        }
+        KeyCode::Char('t') => {
+            let stack = app.rail.cycle_stack();
+            app.push(Entry::Notice(format!("rail showing {} cards", stack.as_str())));
+            None
+        }
+        KeyCode::Char('f') => {
+            let kind = app.rail.cycle_kind();
+            let what = kind.map(|k| k.as_str()).unwrap_or("every kind of");
+            app.push(Entry::Notice(format!("rail showing {what} card")));
+            None
+        }
+        // The subtree scope. Cascade is upward only, so this widens to "this
+        // session and everything it started" and narrows back to "this session
+        // alone" — it can never show a parent's cards to a child.
+        KeyCode::Char('c') => {
+            app.rail.cascade = !app.rail.cascade;
+            app.push(Entry::Notice(
+                if app.rail.cascade {
+                    "rail showing this session and everything below it"
+                } else {
+                    "rail showing this session only"
+                }
+                .into(),
+            ));
+            None
+        }
+        KeyCode::Char('?') => {
+            app.overlay = Overlay::Keymap;
+            None
+        }
+        // No confirmation, unlike `x` on a list screen. Dismissing is a state
+        // change and not a deletion — the card stays, findable under the
+        // answered/dismissed toggle — and a card that took two keys to put down
+        // is a rail nobody clears.
+        KeyCode::Char('x') => app.selected_card().map(|c| Action::DismissCard(c.id)),
+        KeyCode::Char('a') => {
+            let card = app.selected_card()?;
+            let (id, title) = (card.id, card.title.clone());
+            // A credential takes a different field from an answer, and the
+            // difference is not cosmetic: `Overlay::Prompt` echoes what is
+            // typed and hands it on as an ordinary `String`, which is right
+            // for a schedule's name and disqualifying for a token. See
+            // `secret.rs`.
+            app.overlay = if card.kind == jod_core::cards::CardKind::Secret {
+                Overlay::Secret {
+                    card: id,
+                    name: card.secret_name.clone().unwrap_or_else(|| title.clone()),
+                    scope: card
+                        .secret_scope
+                        .as_deref()
+                        .map(jod_core::secrets::Scope::parse)
+                        // Work, matching the store's own default: a key given
+                        // for one project must not be handed to every session
+                        // on the box because a field was left blank.
+                        .unwrap_or_default(),
+                    value: secret::Typed::new(),
+                }
+            } else {
+                Overlay::Prompt {
+                    label: format!("answer #{id} · {}", app::one_line(&title, 40)),
+                    value: String::new(),
+                    intent: PromptIntent::AnswerCard(id),
+                }
+            };
+            None
+        }
+        KeyCode::Char(c) if c.is_ascii_digit() => answer_by_digit(app, c),
+        _ => None,
+    }
+}
+
+/// A digit in the rail picks the numbered option under the cursor.
+///
+/// A digit that names no option says so rather than doing nothing: the options
+/// are printed numbered beside the card, so pressing `4` on a card with three
+/// of them is a misread, and silence would leave the reader believing the
+/// answer went in.
+fn answer_by_digit(app: &mut App, c: char) -> Option<Action> {
+    let card = app.selected_card()?;
+    let (id, options) = (card.id, card.options.clone());
+    let at = c.to_digit(10)? as usize;
+    if at == 0 || at > options.len() {
+        app.push(Entry::Notice(if options.is_empty() {
+            format!("card #{id} offers no options — `a` answers it in prose")
+        } else {
+            format!(
+                "card #{id} offers {} — press 1–{}",
+                app::plural(options.len(), "option"),
+                options.len()
+            )
+        }));
+        return None;
+    }
+    Some(Action::AnswerCard {
+        id,
+        chosen: Some(options[at - 1].clone()),
+        answer: None,
+    })
 }
 
 /// Refuse to leave silently while work is in flight; a second press goes
@@ -1968,6 +2406,69 @@ fn on_chord(app: &mut App, key: KeyEvent) -> Option<Option<Action>> {
             )));
             handled(None)
         }
+        // The rail, on Alt only. `Ctrl-R` is readline's reverse search and
+        // `Ctrl-C` is quit, so claiming either spelling would be re-making the
+        // collision the move to Alt undid.
+        //
+        // A visibility toggle, deliberately separate from `Alt-C`: hiding the
+        // rail must not depend on where the cursor is, and showing it must not
+        // cost you the keyboard. Hiding it also hands the keyboard back, or the
+        // bare keys would still be the rail's with no rail on screen.
+        KeyCode::Char('r') if alt => {
+            app.rail.shown = !app.rail.shown;
+            if !app.rail.shown {
+                app.rail.focused = false;
+                app.rail.expanded = false;
+            }
+            handled(None)
+        }
+        // Focus the rail, and step through the cards. Safe in the middle of a
+        // sentence — this is the property E2.S3 asks for by name — because a
+        // chord never reaches `App::insert`.
+        KeyCode::Char('c') if alt => {
+            let ids = app.card_ids();
+            app.rail.cycle(&ids);
+            handled(None)
+        }
+        // Copy the last reply. The terminal's own selection stops working the
+        // moment a pane has scrollback and wrapping, which is always.
+        KeyCode::Char('y') if alt => handled(match yank::from_transcript(&app.transcript) {
+            Some(found) => {
+                let sequence = yank::osc52(&found.text);
+                app.push(Entry::Notice(yank::note(&found)));
+                Some(Action::Yank(sequence))
+            }
+            None => {
+                app.push(Entry::Notice("nothing to copy yet".into()));
+                None
+            }
+        }),
+        // Search every transcript. `/` is the command palette in chat and the
+        // list filter everywhere else, so the one thing it could never be is
+        // this — hence a chord. Alt only: `Ctrl-S` is XON and the terminal eats
+        // it before this process sees it.
+        KeyCode::Char('s') if alt => {
+            app.overlay = Overlay::Search {
+                query: String::new(),
+                selected: 0,
+                hits: Vec::new(),
+            };
+            handled(None)
+        }
+        // The full-screen picker. Alt only, and `p` because it is the picker —
+        // `Ctrl-P` is a history motion in every shell that has one.
+        //
+        // Enumerating from the key handler is the one place this file does
+        // I/O, and it is deliberate: the walk is bounded and happens once, on
+        // an explicit keystroke, rather than on the tick — a background walk of
+        // the filesystem to keep a picker warm that is opened twice a day is a
+        // cost nobody asked for. Every *keystroke* after this ranks in memory.
+        KeyCode::Char('p') if alt => {
+            let base = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            let (entries, truncated) = picker::directories(&base);
+            app.overlay = Overlay::Picker(picker::Picker::new(base, entries, truncated));
+            handled(None)
+        }
         // Delegate: the typed line becomes an agent that runs without taking
         // the screen. This is the key that makes several jobs at once possible
         // without leaving the UI — and the one the move to Alt was really for,
@@ -2054,6 +2555,139 @@ fn jump_to_oldest_unread(app: &mut App) {
 
 /// Keys while an overlay is up. `Esc` always cancels exactly this overlay.
 fn on_overlay_key(app: &mut App, key: KeyEvent) -> Option<Action> {
+    // A credential field, ahead of the ordinary prompt because it must never
+    // fall through to one. Every route out of here either moves the value to
+    // the store or drops it: there is no branch that keeps it.
+    if let Overlay::Secret {
+        card,
+        name,
+        scope,
+        value,
+    } = &mut app.overlay
+    {
+        match key.code {
+            KeyCode::Char(c) => {
+                value.push(c);
+                return None;
+            }
+            KeyCode::Backspace => {
+                value.pop();
+                return None;
+            }
+            KeyCode::Enter => {
+                if value.is_empty() {
+                    // Refused rather than stored. `put_secret` rejects an empty
+                    // value anyway, but a card answered with nothing would look
+                    // answered while the run stayed blocked.
+                    return None;
+                }
+                // Moved, not copied, and the overlay is closed in the same
+                // breath — so no frame drawn after this keypress has the value
+                // in it to draw.
+                let action = Action::PutSecret {
+                    card: *card,
+                    name: name.clone(),
+                    scope: *scope,
+                    // Filled in by the loop, which is the only layer that knows
+                    // which work or conversation this card belongs to.
+                    scope_id: String::new(),
+                    value: value.take(),
+                };
+                app.overlay = Overlay::None;
+                return Some(action);
+            }
+            KeyCode::Esc => {
+                // Cleared explicitly rather than left for the overlay to be
+                // overwritten: the value is the one piece of state in this
+                // program whose lifetime is worth being deliberate about.
+                value.clear();
+                app.overlay = Overlay::None;
+                return None;
+            }
+            _ => return None,
+        }
+    }
+
+    // Search owns every key while it is up. The store lookup itself happens in
+    // the loop — `refresh_search` — because this function does no I/O.
+    if let Overlay::Search {
+        query,
+        selected,
+        hits,
+    } = &mut app.overlay
+    {
+        match key.code {
+            KeyCode::Char(c) => {
+                query.push(c);
+                *selected = 0;
+                return None;
+            }
+            KeyCode::Backspace => {
+                query.pop();
+                *selected = 0;
+                return None;
+            }
+            KeyCode::Up => {
+                *selected = selected.saturating_sub(1);
+                return None;
+            }
+            KeyCode::Down => {
+                if *selected + 1 < hits.len() {
+                    *selected += 1;
+                }
+                return None;
+            }
+            // Land in the conversation holding the turn. That is the whole
+            // point of the screen: finding the hit is not the job, getting to
+            // it is.
+            KeyCode::Enter => {
+                let found = hits.get(*selected).map(|h| h.conversation_id.clone());
+                app.overlay = Overlay::None;
+                return found.map(|c| Action::Sessions(sessions::Request::Open(c)));
+            }
+            KeyCode::Esc => {
+                app.overlay = Overlay::None;
+                return None;
+            }
+            _ => return None,
+        }
+    }
+
+    // The full-screen picker, which owns every key while it is up for the same
+    // reason the `@` popup does: it is a line being typed into plus a cursor.
+    if let Overlay::Picker(p) = &mut app.overlay {
+        match key.code {
+            KeyCode::Char(c) => {
+                p.push(c);
+                return None;
+            }
+            KeyCode::Backspace => {
+                p.pop();
+                return None;
+            }
+            KeyCode::Up => {
+                p.prev();
+                return None;
+            }
+            KeyCode::Down => {
+                p.next();
+                return None;
+            }
+            KeyCode::Enter => {
+                let chosen = p.chosen();
+                app.overlay = Overlay::None;
+                // Nothing matched means nothing to add. Closing anyway is the
+                // right answer: the alternative is an `⏎` that appears dead.
+                return chosen.map(Action::AddRoot);
+            }
+            KeyCode::Esc => {
+                app.overlay = Overlay::None;
+                return None;
+            }
+            _ => return None,
+        }
+    }
+
     // A prompt is a line being typed, so it takes characters before anything
     // else looks at them.
     if let Overlay::Prompt {
@@ -2136,7 +2770,14 @@ fn on_overlay_key(app: &mut App, key: KeyEvent) -> Option<Action> {
                 _ => None,
             }
         }
-        Overlay::Prompt { .. } | Overlay::None => {
+        // Both are handled above and cannot reach here; closing rather than
+        // falling through keeps an unexpected state from stranding the
+        // keyboard in an overlay nothing dismisses.
+        Overlay::Search { .. }
+        | Overlay::Picker(_)
+        | Overlay::Secret { .. }
+        | Overlay::Prompt { .. }
+        | Overlay::None => {
             app.overlay = Overlay::None;
             None
         }
@@ -2337,7 +2978,187 @@ fn on_workspace_key(app: &mut App, key: KeyEvent, viewport: usize) -> Option<Act
         Workspace::Tasks => on_task_key(app, key),
         Workspace::Activity => on_activity_key(app, key),
         Workspace::Team => on_team_key(app, key),
+        Workspace::Traffic => on_traffic_key(app, key),
         Workspace::Chat | Workspace::MemoryGraph => None,
+    }
+}
+
+/// The traffic log's own verbs.
+///
+/// Two of them, because `/` and `S` are the spine's and are already handled
+/// above — which is the point of G5.S5: narrowing this list works exactly as
+/// narrowing every other one does.
+///
+/// No I/O, like every key handler here. `f` and `⏎` change what the *next*
+/// render draws out of state the tick already loaded; nothing reaches the
+/// store, so both are testable without a runtime.
+fn on_traffic_key(app: &mut App, key: KeyEvent) -> Option<Action> {
+    match key.code {
+        // The message in full, in the transcript rather than in an overlay: a
+        // message is prose of unknown length, and the transcript is the one
+        // pane in this program that scrolls.
+        KeyCode::Enter => {
+            let held = app.selected_is_held();
+            let envelope = app.selected_message()?.clone();
+            let mut said = format!(
+                "{} → {} · {} · depth {}\n{}",
+                envelope.message.from,
+                envelope.message.to,
+                traffic::state_word(&envelope, held),
+                envelope.depth,
+                envelope.message.text
+            );
+            // The reason last, so it is the thing left on screen. A refusal
+            // that printed its state and buried its cause would be the silence
+            // A8 exists to prevent, one layer along.
+            if let Some(trouble) = traffic::trouble(&envelope, held) {
+                said.push_str(&format!("\n{trouble}"));
+            }
+            app.push(Entry::Notice(said));
+            None
+        }
+        // The state cycle, spelled as the rail's `f` is. Said out loud, because
+        // a filter nobody can see is a screen that looks empty for no reason.
+        KeyCode::Char('f') => {
+            app.traffic_shown = app.traffic_shown.next();
+            app.reconcile();
+            app.push(Entry::Notice(format!(
+                "showing {}",
+                app.traffic_shown.label()
+            )));
+            None
+        }
+        _ => None,
+    }
+}
+
+/// The tree's own keys. `Some` means the tree took the key.
+///
+/// Returns `Option<Option<Action>>` for the reason [`on_chord`] does: the outer
+/// layer says whether it was handled at all, so a key the tree does not know
+/// falls through to the fleet's row verbs rather than being swallowed. `s`
+/// still stops a run, `d` still delegates.
+fn on_tree_key(app: &mut App, key: KeyEvent) -> Option<Option<Action>> {
+    let handled = |a: Option<Action>| Some(a);
+    let rows = app.tree_rows();
+    match key.code {
+        KeyCode::Up | KeyCode::Char('k') => {
+            app.tree.step(-1, &rows);
+            handled(None)
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            app.tree.step(1, &rows);
+            handled(None)
+        }
+        KeyCode::Right => {
+            let (forest, closed) = (app.forest.clone(), app.closed_works.clone());
+            app.tree.expand_or_descend(&forest, &closed);
+            handled(None)
+        }
+        KeyCode::Left => {
+            let (forest, closed) = (app.forest.clone(), app.closed_works.clone());
+            app.tree.collapse_or_parent(&forest, &closed);
+            handled(None)
+        }
+        KeyCode::Char(' ') => {
+            let closed = app.closed_works.clone();
+            app.tree.toggle(&closed);
+            handled(None)
+        }
+        // Capitals, because the lower-case pair is the cursor. `E`/`C` are the
+        // two keys that make a forty-node tree navigable at all.
+        KeyCode::Char('E') => {
+            let forest = app.forest.clone();
+            app.tree.expand_all(&forest);
+            handled(None)
+        }
+        KeyCode::Char('C') => {
+            let forest = app.forest.clone();
+            app.tree.collapse_all(&forest);
+            handled(None)
+        }
+        // The archives. Off by default and off again after looking, because a
+        // tree holding everything ever done is one people stop reading.
+        KeyCode::Char('z') => {
+            app.tree.show_closed = !app.tree.show_closed;
+            app.push(Entry::Notice(
+                if app.tree.show_closed {
+                    "closed works shown, collapsed, below the live ones"
+                } else {
+                    "closed works hidden"
+                }
+                .into(),
+            ));
+            handled(None)
+        }
+        // `T` — what these agents are saying to each other.
+        //
+        // From a session or a run as well as from a work, and it opens the
+        // *work's* bus in each case: G5.S1 is a message log per work, and a
+        // session's own half of a conversation is not a conversation. Walking
+        // up is what makes the key work from wherever the cursor happens to be,
+        // which is the difference between a screen people find and one they are
+        // told about.
+        //
+        // Capital because `t` retries a run on this screen, and a letter that
+        // retried on one press and navigated on the next would be a collision
+        // where one of the two is destructive.
+        KeyCode::Char('T') => {
+            let Some(work) = work_above(app) else {
+                app.push(Entry::Notice(
+                    "that row belongs to no work, so there is no bus to read — \
+                     traffic is a work's, and a session's half of it is not a conversation"
+                        .into(),
+                ));
+                return handled(None);
+            };
+            app.traffic_of = Some(traffic::Watching::work(work));
+            // Emptied rather than left holding the last work's messages: the
+            // tick fills it within a frame, and a screen that opens showing
+            // another work's conversation is worse than one that opens empty.
+            app.traffic = traffic::Log::default();
+            app.drill(Workspace::Traffic);
+            handled(None)
+        }
+        // `⏎` opens whatever the row stands for. A run is something to watch; a
+        // session is a conversation to go into; a work is a heading, so it
+        // toggles rather than pretending to open something.
+        KeyCode::Enter => {
+            let Some(node) = app.selected_node().cloned() else {
+                return handled(None);
+            };
+            match node.kind {
+                jod_core::tree::NodeKind::Run => {
+                    app.go(Workspace::Chat);
+                    handled(Some(Action::Watch(node.id.id)))
+                }
+                jod_core::tree::NodeKind::Session => {
+                    handled(Some(Action::Sessions(sessions::Request::Open(node.id.id))))
+                }
+                jod_core::tree::NodeKind::Work => {
+                    let closed = app.closed_works.clone();
+                    app.tree.toggle(&closed);
+                    handled(None)
+                }
+            }
+        }
+        _ => None,
+    }
+}
+
+/// The work the cursor is inside, whichever level of the tree it is on.
+///
+/// Climbs by parent id rather than by scanning back for a shallower row: two
+/// works' sessions sit at the same depth, and the nearest shallower row is not
+/// always the ancestor — the same trap `fleet::matching` walks around.
+fn work_above(app: &App) -> Option<String> {
+    let mut node = app.selected_node()?;
+    loop {
+        if node.kind == jod_core::tree::NodeKind::Work {
+            return Some(node.id.id.clone());
+        }
+        let parent = node.parent.clone()?;
+        node = app.forest.iter().find(|n| n.id == parent)?;
     }
 }
 
@@ -2379,6 +3200,9 @@ fn selected_label(app: &App, ws: Workspace) -> Option<String> {
         Workspace::Tasks => app.selected_board_task().map(|t| t.id),
         Workspace::Activity => app.selected_activity().map(|a| a.id.clone()),
         Workspace::Team => app.selected_task().map(|t| t.id.clone()),
+        Workspace::Traffic => app
+            .selected_message()
+            .map(|e| format!("message #{}", e.message.id)),
         Workspace::Chat | Workspace::MemoryGraph => None,
     }
 }
@@ -2469,6 +3293,14 @@ fn accept_prompt(
             verb: format!("new {} “{typed}”", ws.menu_name()),
             needs: "the $EDITOR form ladder — tier 3 of the report's §5.4",
         }),
+        // Prose, against the card the prompt was opened on rather than against
+        // whatever the cursor is on now — the rail re-queries underneath an
+        // overlay, so the two are not the same card.
+        PromptIntent::AnswerCard(id) => Some(Action::AnswerCard {
+            id,
+            chosen: None,
+            answer: Some(typed.clone()),
+        }),
         // Edges are derived from facts rather than written directly, so linking
         // two nodes by hand means asserting the fact the edge would come from —
         // a triple, which a one-line prompt cannot collect.
@@ -2484,6 +3316,15 @@ fn accept_prompt(
 }
 
 fn on_fleet_key(app: &mut App, key: KeyEvent) -> Option<Action> {
+    // With works on the board the fleet is a tree, and the arrows mean the
+    // tree's things. Without any, there is no tree to walk and the older flat
+    // list is what the screen shows — a session that belongs to no work has no
+    // node in the forest, which is every session started before works existed.
+    if app.has_tree() {
+        if let Some(action) = on_tree_key(app, key) {
+            return action;
+        }
+    }
     // The pinned row is a conversation, not a run, so the verbs that act on a
     // run are answered rather than attempted. Without this branch every one of
     // them is `selected_agent()?` — a silent `None`, which on the top row of
@@ -2654,6 +3495,20 @@ fn on_fleet_key(app: &mut App, key: KeyEvent) -> Option<Action> {
         KeyCode::Char('t') => Some(Action::Sessions(sessions::Request::Retry(
             app.selected_agent()?.id.clone(),
         ))),
+        // `T` belongs to the tree, and is answered here for the case where
+        // there is no tree — a fleet of sessions started before works existed.
+        // The keybar prints it on this screen whatever the fleet holds, so
+        // falling through would be an advertised key that silently does
+        // nothing, which is exactly the trap the keymap's drift net exists to
+        // stop one spelling of.
+        KeyCode::Char('T') => {
+            app.push(Entry::Notice(
+                "traffic is a work's bus, and nothing here belongs to a work yet — \
+                 delegate something and the tree will have one"
+                    .into(),
+            ));
+            None
+        }
         _ => None,
     }
 }
@@ -3010,6 +3865,47 @@ fn on_team_key(app: &mut App, key: KeyEvent) -> Option<Action> {
 fn on_chat_key(app: &mut App, key: KeyEvent, viewport: usize) -> Option<Action> {
     let max_scroll = app.transcript.len();
 
+    // The `@` popup owns the arrows and `⏎` while it is up, and `Esc` closes it
+    // *without* touching the line — D1's fourth requirement, and the one people
+    // notice: a picker that wipes what you typed when you change your mind is a
+    // picker you stop opening.
+    //
+    // Everything else falls through to the ordinary editing keys and then
+    // re-derives the popup from the line, so typing, backspacing and moving the
+    // cursor all keep it honest without each one having to remember to.
+    if app.mention.is_some() {
+        match key.code {
+            KeyCode::Up => {
+                if let Some(popup) = &mut app.mention {
+                    popup.prev();
+                }
+                return None;
+            }
+            KeyCode::Down => {
+                if let Some(popup) = &mut app.mention {
+                    popup.next();
+                }
+                return None;
+            }
+            KeyCode::Tab | KeyCode::Enter => {
+                // With no roots there is nothing to accept, so the key does
+                // nothing at all rather than closing the popup on a shrug — the
+                // message stays up, which is the answer to "why is this empty".
+                if app.accept_mention() {
+                    return None;
+                }
+                if app.mention.as_ref().is_some_and(|p| !p.rooted) {
+                    return None;
+                }
+            }
+            KeyCode::Esc => {
+                app.mention = None;
+                return None;
+            }
+            _ => {}
+        }
+    }
+
     // While the completion popup is up it owns Tab and the arrows, and Enter
     // finishes the word rather than sending a half-typed command.
     let suggestions = command::completions(&app.input, app);
@@ -3051,7 +3947,35 @@ fn on_chat_key(app: &mut App, key: KeyEvent, viewport: usize) -> Option<Action> 
             // A slash line is an instruction to Jod, not to the agent, so it
             // works while an agent is busy — switching the model for the *next*
             // turn is exactly the sort of thing you do while waiting.
-            if let Some(slash) = command::parse(app.input.trim()) {
+            let parsed = command::parse(app.input.trim());
+            // A repository's own command sits in exactly one gap: after Jod's
+            // own names, before the line becomes prose.
+            //
+            // Both edges are bugs a test caught here. Checked *first*, a repo
+            // shipping a `/model` would shadow Jod's — and Jod's `/model`
+            // changes this program's state, which no repository should be able
+            // to take over by choosing a filename. Checked *last*, it would
+            // never run at all: `parse` answers `Slash::Unknown` rather than
+            // `None` for an unrecognised name, so the line would be reported as
+            // an unknown command instead of forwarded.
+            //
+            // Hence the condition: only where Jod has no opinion.
+            let jod_has_no_opinion =
+                matches!(parsed, None | Some(command::Slash::Unknown(_)));
+            if jod_has_no_opinion {
+                if let Some((name, invocation)) = command::repo_invocation(&app.input, app) {
+                    let typed = app.input.trim().to_string();
+                    app.remember_typed(&typed);
+                    app.input.clear();
+                    app.cursor = 0;
+                    app.push(Entry::You(format!("/{name}")));
+                    return Some(Action::RunCommand {
+                        prompt: invocation.prompt,
+                        command: invocation.command,
+                    });
+                }
+            }
+            if let Some(slash) = parsed {
                 let typed = app.input.trim().to_string();
                 app.remember_typed(&typed);
                 app.input.clear();
@@ -3104,19 +4028,67 @@ fn on_chat_key(app: &mut App, key: KeyEvent, viewport: usize) -> Option<Action> 
         KeyCode::Down => app.history_next(),
         KeyCode::PageUp => app.scroll_up(viewport.max(1), max_scroll),
         KeyCode::PageDown => app.scroll_down(viewport.max(1)),
+        // **Stop, but stay.** The most-used key in a coding harness: you see a
+        // turn going the wrong way in the first two seconds and you correct it.
+        //
+        // Everything that makes this "interrupt" rather than `Alt-X`'s "kill"
+        // happens *here*, in a pure handler, and none of it touches
+        // `App::session` or `App::resume`. Those two are the harness's
+        // conversation id and how the next turn continues it — the run is one
+        // process of many in that conversation, so ending the process ends the
+        // turn and leaves the conversation exactly where it was. The next thing
+        // typed carries on the same session, which is the whole point and is
+        // what `escape_interrupts_the_turn_without_losing_the_session` pins.
+        //
+        // Only the kill itself travels as an `Action`, because only the loop
+        // has the service. Marking the turn over here rather than there is
+        // deliberate: the reader gets the input box back on the keypress rather
+        // than after a round trip through the supervisor.
+        KeyCode::Esc if app.busy && app.watching.is_some() => {
+            let id = app.watching.clone().expect("just checked");
+            // Recorded as what it was. A partial turn silently dropped would
+            // leave the transcript claiming the agent simply stopped talking,
+            // and the next reader cannot tell an interruption from a crash.
+            app.push(Entry::Done {
+                text: match app.elapsed() {
+                    Some(t) => format!("interrupted after {t}"),
+                    None => "interrupted".to_string(),
+                },
+                failed: false,
+            });
+            app.push(Entry::Notice(
+                "stopped — the conversation is kept, so just say what to do instead".into(),
+            ));
+            app.busy = false;
+            app.turn_started_ms = None;
+            // The line being typed is left alone: the correction is usually
+            // already half-written by the time you reach for Escape.
+            return Some(Action::Interrupt(id));
+        }
         KeyCode::Esc => app.back(),
         // `?` on an *empty* input opens the keymap; with anything typed it is
         // the character it looks like. Backspacing down to a lone `?` therefore
         // never fires it, which is the edge case that makes the rule usable.
         KeyCode::Char('?') if app.input.is_empty() => app.overlay = Overlay::Keymap,
         KeyCode::Char(c) => {
+            // `@` opens the picker under the cursor. The index is taken before
+            // the insert because the popup replaces the sign along with the
+            // query, so it has to know where the sign landed.
+            let at = app.cursor;
             app.insert(c);
+            if c == '@' {
+                app.open_mention(at);
+            }
             // Typing means the recalled line is now the user's own draft, so
             // ↓ must not silently replace what they are editing.
             app.history_at = None;
         }
         _ => {}
     }
+    // Derived rather than tracked: every edit key above would otherwise have to
+    // remember to keep the popup in step with the line, and the one that forgot
+    // would leave it ranking a query the line no longer holds.
+    app.sync_mention();
     None
 }
 
@@ -3234,6 +4206,22 @@ fn apply_slash(app: &mut App, slash: command::Slash) -> Option<Action> {
             // turns of the fresh one that replaced it — and it is how you leave
             // the main chat, which binds the same field.
             return Some(Action::NewThread);
+        }
+        Slash::Root(what) => {
+            return match what {
+                command::RootCmd::List => Some(Action::ListRoots),
+                // No path means the picker, which is the same screen `Alt-P`
+                // opens — one picker, reached two ways, rather than a second
+                // one that would drift.
+                command::RootCmd::Add(None) => {
+                    let base = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+                    let (entries, truncated) = picker::directories(&base);
+                    app.overlay = Overlay::Picker(picker::Picker::new(base, entries, truncated));
+                    None
+                }
+                command::RootCmd::Add(Some(path)) => Some(Action::AddRoot(PathBuf::from(path))),
+                command::RootCmd::Remove(path) => Some(Action::RemoveRoot(PathBuf::from(path))),
+            }
         }
         Slash::Sessions => {
             app.go(Workspace::Fleet);
@@ -3718,6 +4706,9 @@ async fn spawn(
     tools: Option<ToolAccess>,
     conversation: RunConversation,
     system: Option<String>,
+    // The harness's own command name, for the one harness that takes it in a
+    // flag rather than in the prompt. `None` for every ordinary turn.
+    command: Option<String>,
 ) -> Result<String> {
     let agent = jod
         .spawn_agent_in(
@@ -3750,11 +4741,86 @@ async fn spawn(
                 // Decided by the caller — see the parameter's own doc. Each of the
                 // two call sites says which situation it is in and why.
                 tools,
+                // Set only for a repository command on a harness that takes the
+                // name in a flag. `commands::Discovered::invoke` decides which
+                // spelling this is; nothing here branches on the harness.
+                command,
+                ..SpawnRequest::default()
             },
             conversation,
         )
         .await?;
     Ok(agent.id)
+}
+
+
+/// One turn from the chat box, with or without a repository command attached.
+///
+/// Extracted so `Action::Send` and `Action::RunCommand` cannot drift: they are
+/// the same turn, and the only difference is whether a command name rides along
+/// in the spawn request. A second copy of this would be a second place for the
+/// tool grant, the carried summary and the conversation binding to get out of
+/// step.
+async fn send_turn(
+    jod: &Arc<Jod>,
+    app: &mut App,
+    opts: &Options,
+    thread: &mut Thread,
+    prompt: String,
+    command: Option<String>,
+) {
+    if thread.in_main(jod.store().map(Arc::as_ref)) {
+        orchestrate(jod, app, opts, thread, prompt).await;
+        return;
+    }
+
+            // The one place Jod's own verbs are handed over from the chat box.
+            //
+            // The rule this codebase already states is "the main chat is you,
+            // present, watching" — and a turn you just typed into the TUI is
+            // exactly that. The grant used to be withheld here on the grounds
+            // that "an agent started from the chat box is doing a task, not
+            // orchestrating", which conflated two different things reached
+            // through one function: a turn you are watching, and a delegation
+            // that goes off on its own. Only the second is unattended, and only
+            // the second still gets nothing.
+            //
+            // Without this you could ask Jod to schedule something and it would
+            // answer as if it had, having no verb to do it with.
+            match spawn(
+                jod,
+                app,
+                opts,
+                prompt.clone(),
+                app.resume.clone(),
+                WATCHED,
+                // Into the conversation the chat box is bound to, which after a
+                // handoff is the one carrying the summary. Everything else is
+                // still `New`, as it was.
+                thread.binding(),
+                thread.carried.clone(),
+                command,
+            )
+            .await
+            {
+                Ok(id) => {
+                    // Only once. From here the harness has a session of its own
+                    // and is holding the context itself; re-sending it every
+                    // turn would hand the model a summary of a conversation it
+                    // is already in.
+                    thread.carried = None;
+                    // The first turn is what mints a conversation, so it is the
+                    // first moment anything chosen before it can be written
+                    // down.
+                    flush_pending(jod, app, thread, &id);
+                    app.watching = Some(id);
+                    app.busy = true;
+                    app.turn_started_ms = Some(app.now_ms);
+                    app.push(Entry::You(prompt));
+                    app.scroll_to_bottom();
+                }
+                Err(e) => app.push(Entry::Notice(format!("could not start: {e}"))),
+            }
 }
 
 /// Re-read the team from the store.
@@ -3798,6 +4864,105 @@ fn refresh_workspaces(jod: &Arc<Jod>, app: &mut App) {
     app.hooks = data::hooks(jod);
     app.activity = data::activity(jod);
     app.board = data::tasks(jod, app.team.as_deref());
+    // The forest, and then the cursor onto a row that still exists — the tree
+    // reshapes on every tick as runs finish, which is the whole reason the
+    // selection is an id.
+    // What this repository offers, for the harness on screen. On the tick
+    // because `/harness` changes the answer and the palette must not go stale
+    // mid-session.
+    app.discovered = data::discovered(jod, app.harness);
+    let (forest, closed) = data::forest(jod, app.tree.show_closed);
+    app.forest = forest;
+    app.closed_works = closed;
+    let rows = app.tree_rows();
+    app.tree.reconcile(&rows);
+    // The bus a work's agents are talking on. Loaded here rather than when `T`
+    // is pressed, for the reason every list on this tick is: agents write to it
+    // from other processes, so a copy read once at open would be stale by the
+    // second message. Cheap when nothing has been opened — `data::traffic`
+    // returns an empty log without touching the store.
+    app.traffic = data::traffic(jod, app.traffic_of.as_ref());
+    app.reconcile();
+    refresh_rail(jod, app);
+}
+
+/// Re-read the rail, and open it the first time something is blocked.
+///
+/// The whole rail travels as one query — filter, sort, kind and stack are all
+/// in it — so this is one indexed read however the rail is set up, which is why
+/// it can run on every keystroke of the filter box as well as on the tick.
+fn refresh_rail(jod: &Arc<Jod>, app: &mut App) {
+    app.cards = data::cards(jod, &app.rail.query(app.conversation.clone()));
+    app.reconcile_rail();
+    // Once per session, and said out loud when it happens: a column that
+    // appears on its own without explanation reads as a rendering fault.
+    if app.rail.auto_open(&app.cards) {
+        app.push(Entry::Notice(
+            "a run is blocked — the rail is open; Alt-C answers, Alt-R hides it".into(),
+        ));
+    }
+}
+
+/// Which conversation the rail and the `@` picker belong to.
+///
+/// The conversation the chat box is bound to, falling back to the pinned main
+/// chat. The fallback is what makes the rail useful before the first turn: an
+/// unbound chat box has no conversation of its own yet, and the cards worth
+/// looking at in that state are the orchestrator's — which is where anything
+/// delegated from here reports back to.
+fn bind_rail(jod: &Arc<Jod>, app: &mut App, thread: &Thread) {
+    app.conversation = jod.store().and_then(|store| {
+        current_conversation(store, app, thread)
+            .or_else(|| store.pinned_conversation().ok().flatten())
+    });
+}
+
+/// Give the `@` popup something to search, and re-rank it against it.
+///
+/// Loaded here rather than in `on_key`, which does no I/O by design:
+/// enumerating a hundred thousand paths is not something a keystroke may block
+/// on. [`jod_core::rank::candidates_shared`] caches for a few seconds, so a
+/// burst of typing costs one walk and the rest are pointer copies — which is
+/// what makes "live on every keystroke" true rather than aspirational.
+/// Re-run the transcript search against what has been typed.
+///
+/// In the loop for the same reason `refresh_mention` is: `on_key` does no I/O,
+/// and this is a full-text query. Cheap when no search is open, which is almost
+/// always.
+fn refresh_search(jod: &Arc<Jod>, app: &mut App) {
+    let Overlay::Search { query, .. } = &app.overlay else {
+        return;
+    };
+    // An empty box searches for nothing rather than for everything: `fts_query`
+    // would return no expression anyway, and a list of every message ever is
+    // not a starting point anyone wants.
+    let found = if query.trim().is_empty() {
+        Vec::new()
+    } else {
+        data::search(jod, &query.clone(), SEARCH_HITS)
+    };
+    if let Overlay::Search { hits, selected, .. } = &mut app.overlay {
+        *hits = found;
+        if *selected >= hits.len() {
+            *selected = 0;
+        }
+    }
+}
+
+/// How many hits the search screen asks for. The store caps lower than this in
+/// its own right; the number here is what fits on a screen worth reading.
+const SEARCH_HITS: usize = 40;
+
+fn refresh_mention(jod: &Arc<Jod>, app: &mut App) {
+    if app.mention.is_none() {
+        return;
+    }
+    app.roots = data::roots(jod, app.conversation.as_deref());
+    app.candidates = data::candidates(&app.roots);
+    let (roots, candidates) = (app.roots.clone(), app.candidates.clone());
+    if let Some(popup) = &mut app.mention {
+        popup.refresh(&roots, &candidates);
+    }
 }
 
 /// Hand the typed line to `$EDITOR`, and take back whatever comes out.
@@ -7022,6 +8187,7 @@ mod tests {
             permission: PermissionPolicy::Bypass,
             resume: Resume::Fresh,
             tools: None,
+            ..SpawnRequest::default()
         };
         let row = s.conversation(conversation).unwrap().unwrap();
         jod_core::service::prefer_conversation_settings(&mut req, &row);
@@ -7237,6 +8403,255 @@ mod tests {
         .await;
 
         assert!(app.schedules.is_empty());
+    }
+
+    // ---- the traffic log is reachable, and is fed ----
+
+    /// A work with one session and one run under it, exactly as
+    /// `Store::forest_of` flattens them.
+    fn forest_of_one_work() -> Vec<jod_core::tree::Node> {
+        use jod_core::tree::{Node, NodeId, NodeKind};
+        let node = |id: NodeId, parent: Option<NodeId>, kind, depth, label: &str| Node {
+            id,
+            parent,
+            kind,
+            depth,
+            label: label.into(),
+            summary: String::new(),
+            running: false,
+            cards: 0,
+            blocked: 0,
+            colour: "cyan".into(),
+            expanded: true,
+            has_children: false,
+        };
+        let mut work = node(NodeId::work("w1"), None, NodeKind::Work, 0, "port the parser");
+        work.has_children = true;
+        let mut session = node(
+            NodeId::session("s1"),
+            Some(NodeId::work("w1")),
+            NodeKind::Session,
+            1,
+            "port the lexer",
+        );
+        session.has_children = true;
+        let run = node(
+            NodeId::run("r1"),
+            Some(NodeId::session("s1")),
+            NodeKind::Run,
+            2,
+            "run one",
+        );
+        vec![work, session, run]
+    }
+
+    fn on_the_tree(selected: jod_core::tree::NodeId) -> App {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.forest = forest_of_one_work();
+        app.go(Workspace::Fleet);
+        app.tree.selected = Some(selected);
+        app
+    }
+
+    /// **G5.S2.** The screen is opened from the tree, through the router — not
+    /// by calling the handler, which would prove only that the handler works.
+    #[test]
+    fn t_on_a_work_in_the_tree_opens_that_works_traffic() {
+        let mut app = on_the_tree(jod_core::tree::NodeId::work("w1"));
+        assert_eq!(press(&mut app, KeyCode::Char('T')), None);
+        assert_eq!(app.workspace, Workspace::Traffic);
+        assert_eq!(
+            app.traffic_of,
+            Some(traffic::Watching::work("w1")),
+            "the screen opened on some other scope than the row under the cursor"
+        );
+    }
+
+    /// From a session or a run as well, and it is the *work's* bus in each
+    /// case: a session's half of a conversation is not a conversation.
+    #[test]
+    fn t_on_a_session_or_a_run_opens_the_work_above_it() {
+        for row in [
+            jod_core::tree::NodeId::session("s1"),
+            jod_core::tree::NodeId::run("r1"),
+        ] {
+            let mut app = on_the_tree(row.clone());
+            press(&mut app, KeyCode::Char('T'));
+            assert_eq!(app.workspace, Workspace::Traffic, "from {row:?}");
+            assert_eq!(app.traffic_of, Some(traffic::Watching::work("w1")), "from {row:?}");
+        }
+    }
+
+    /// Drilled rather than jumped to, so `Esc` comes back to the tree you were
+    /// reading rather than to the chat — the same relationship memory's local
+    /// graph has to its list.
+    #[test]
+    fn escape_comes_back_from_the_traffic_log_to_the_tree() {
+        let mut app = on_the_tree(jod_core::tree::NodeId::work("w1"));
+        press(&mut app, KeyCode::Char('T'));
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(app.workspace, Workspace::Fleet);
+    }
+
+    /// Opening a work's traffic must not show the last one's conversation for
+    /// the frame before the tick catches up.
+    #[test]
+    fn opening_a_works_traffic_starts_from_an_empty_log() {
+        let mut app = on_the_tree(jod_core::tree::NodeId::work("w1"));
+        press(&mut app, KeyCode::Char('T'));
+        app.traffic.title = "port the parser".into();
+        app.traffic.messages = vec![];
+        app.traffic.used = 12;
+
+        app.go(Workspace::Fleet);
+        app.tree.selected = Some(jod_core::tree::NodeId::work("w1"));
+        press(&mut app, KeyCode::Char('T'));
+        assert_eq!(app.traffic, traffic::Log::default(), "{:?}", app.traffic);
+    }
+
+    /// `T` on a session that belongs to no work has nothing to open, and says
+    /// so rather than looking broken.
+    #[test]
+    fn t_on_a_row_with_no_work_above_it_explains_itself() {
+        use jod_core::tree::{Node, NodeId, NodeKind};
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.forest = vec![Node {
+            id: NodeId::session("orphan"),
+            parent: None,
+            kind: NodeKind::Session,
+            depth: 0,
+            label: "started before works existed".into(),
+            summary: String::new(),
+            running: false,
+            cards: 0,
+            blocked: 0,
+            colour: String::new(),
+            expanded: true,
+            has_children: false,
+        }];
+        app.go(Workspace::Fleet);
+        app.tree.selected = Some(NodeId::session("orphan"));
+        press(&mut app, KeyCode::Char('T'));
+        assert_eq!(app.workspace, Workspace::Fleet, "nothing to open");
+        assert!(app.traffic_of.is_none());
+        let said = format!("{:?}", app.transcript.last().unwrap());
+        assert!(said.contains("no work"), "{said}");
+    }
+
+    /// The keybar prints `T traffic` on the fleet whatever the fleet holds, so
+    /// the one state where there is no tree to press it on has to answer rather
+    /// than do nothing.
+    #[test]
+    fn t_on_a_fleet_with_no_works_in_it_says_why_there_is_nothing_to_read() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.go(Workspace::Fleet);
+        assert!(!app.has_tree());
+        press(&mut app, KeyCode::Char('T'));
+        assert_eq!(app.workspace, Workspace::Fleet);
+        let said = format!("{:?}", app.transcript.last().unwrap());
+        assert!(said.contains("traffic is a work's bus"), "{said}");
+    }
+
+    /// **The screen is fed by the tick**, not by the keypress that opened it.
+    /// Agents write to this bus from other processes, so a log read once at
+    /// open would be stale by the second message — and a screen nothing
+    /// refreshes is a screen that quietly shows yesterday.
+    #[tokio::test]
+    async fn the_tick_loads_the_traffic_of_whichever_work_is_open() {
+        use jod_core::team::{Post, Scope};
+        let store = store();
+        let work = store.create_work("port the parser").unwrap();
+        store
+            .join_scope(
+                Scope::Work,
+                &work.id,
+                "asker",
+                HarnessKind::ClaudeCode,
+                "engineer",
+                None,
+            )
+            .unwrap();
+        store
+            .join_scope(
+                Scope::Work,
+                &work.id,
+                "answerer",
+                HarnessKind::ClaudeCode,
+                "engineer",
+                None,
+            )
+            .unwrap();
+        store
+            .post(&Post::new(Scope::Work, &work.id, "asker", "where is the lexer?").to("answerer"))
+            .unwrap();
+
+        let jod = jod_with(store);
+        let mut app = app_on(HarnessKind::ClaudeCode);
+
+        // Nothing open: the tick must not invent a scope, and must not pay for
+        // a query nobody asked for.
+        refresh_workspaces(&jod, &mut app);
+        assert!(app.traffic.messages.is_empty());
+
+        app.traffic_of = Some(traffic::Watching::work(&work.id));
+        refresh_workspaces(&jod, &mut app);
+        assert_eq!(app.traffic.messages.len(), 1, "the tick did not read the bus");
+        assert_eq!(app.traffic.messages[0].message.from, "asker");
+        assert_eq!(app.traffic.budget, jod_core::works::DEFAULT_MESSAGE_BUDGET);
+        assert_eq!(app.traffic.used, 1, "and it read the budget the bus enforces");
+        assert_eq!(
+            app.row_ids(Workspace::Traffic).len(),
+            1,
+            "the cursor has a row to sit on"
+        );
+    }
+
+    /// `f` is the screen's own verb and it reaches the screen's own handler.
+    /// Pressed through the router, because a handler nothing routes to is the
+    /// bug this suite exists to catch.
+    #[test]
+    fn f_on_the_traffic_log_cycles_which_states_are_shown() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.traffic_of = Some(traffic::Watching::work("w1"));
+        app.go(Workspace::Traffic);
+        assert_eq!(app.traffic_shown, traffic::Shown::Everything);
+
+        press(&mut app, KeyCode::Char('f'));
+        assert_eq!(app.traffic_shown, traffic::Shown::Problems);
+        let said = format!("{:?}", app.transcript.last().unwrap());
+        assert!(said.contains(traffic::Shown::Problems.label()), "{said}");
+
+        for _ in 1..traffic::Shown::ALL.len() {
+            press(&mut app, KeyCode::Char('f'));
+        }
+        assert_eq!(app.traffic_shown, traffic::Shown::Everything, "the cycle closes");
+    }
+
+    /// `⏎` puts the whole message in the transcript, reason and all — the row
+    /// is one line and a message is prose.
+    #[tokio::test]
+    async fn enter_on_a_refused_message_prints_the_reason_it_was_refused() {
+        use jod_core::team::{Post, Scope};
+        let store = store();
+        let work = store.create_work("port the parser").unwrap();
+        store
+            .post(&Post::new(Scope::Work, &work.id, "asker", "are you free?").to("nobody-here"))
+            .unwrap();
+
+        let jod = jod_with(store);
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.traffic_of = Some(traffic::Watching::work(&work.id));
+        refresh_workspaces(&jod, &mut app);
+        app.go(Workspace::Traffic);
+
+        press(&mut app, KeyCode::Enter);
+        let said = format!("{:?}", app.transcript.last().unwrap());
+        assert!(said.contains("asker"), "{said}");
+        assert!(said.contains("are you free?"), "the message itself: {said}");
+        assert!(
+            said.contains("`nobody-here` is not a member of this work"),
+            "and why nobody read it: {said}"
+        );
     }
 
     /// A TUI with no database must lose the keypress, not the session.
@@ -7982,5 +9397,1022 @@ mod tests {
             apply_slash(&mut app, command::Slash::Reload),
             Some(Action::Reload)
         );
+    }
+    // ---- the decision rail ----
+
+    fn a_card(id: i64, title: &str, blocking: bool, options: &[&str]) -> jod_core::cards::Card {
+        jod_core::cards::Card {
+            id,
+            conversation_id: "conv".into(),
+            work_id: None,
+            run_id: None,
+            kind: jod_core::cards::CardKind::Question,
+            importance: jod_core::cards::Importance::Normal,
+            blocking,
+            status: jod_core::cards::Status::Open,
+            delivery: jod_core::cards::Delivery::None,
+            title: title.into(),
+            body: String::new(),
+            options: options.iter().map(|o| (*o).to_string()).collect(),
+            chosen: None,
+            answer: None,
+            secret_name: None,
+            secret_scope: None,
+            source: jod_core::cards::Source::Mcp,
+            created_at_ms: 0,
+            updated_at_ms: 0,
+            answered_at_ms: None,
+            delivered_at_ms: None,
+        }
+    }
+
+    fn with_cards() -> App {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.cards = vec![
+            a_card(1, "which port for the API?", true, &["8080", "3000"]),
+            a_card(2, "chat DB: chose SQLite", false, &[]),
+        ];
+        app.reconcile_rail();
+        app
+    }
+
+    fn last_notice(app: &App) -> String {
+        match app.transcript.last() {
+            Some(Entry::Notice(text)) => text.clone(),
+            other => panic!("expected a notice, got {other:?}"),
+        }
+    }
+
+    /// The constraint E2.S3 states outright: the cycle key must not cost the
+    /// sentence you were typing. A chord cannot reach `App::insert`, which is
+    /// the whole reason the rail's way in is one.
+    #[test]
+    fn alt_c_focuses_the_rail_without_touching_the_typed_line() {
+        let mut app = with_cards();
+        type_line(&mut app, "ship the parser");
+
+        alt(&mut app, KeyCode::Char('c'));
+        assert!(app.rail.shown && app.rail.focused);
+        assert_eq!(app.rail.selected, Some(1), "on the most pressing card");
+        assert_eq!(app.input, "ship the parser", "the sentence is untouched");
+
+        alt(&mut app, KeyCode::Char('c'));
+        assert_eq!(app.rail.selected, Some(2), "and again steps on");
+        assert_eq!(app.input, "ship the parser");
+    }
+
+    /// Hiding the rail has to hand the keyboard back with it, or the bare keys
+    /// stay the rail's with no rail on screen to explain them.
+    #[test]
+    fn alt_r_shows_and_hides_the_rail_and_takes_the_focus_with_it() {
+        let mut app = with_cards();
+        alt(&mut app, KeyCode::Char('c'));
+        assert!(app.rail.focused);
+
+        alt(&mut app, KeyCode::Char('r'));
+        assert!(!app.rail.shown);
+        assert!(!app.rail.focused, "no rail, no rail keys");
+
+        type_line(&mut app, "hello");
+        assert_eq!(app.input, "hello", "the letters are the chat's again");
+    }
+
+    /// The focus is what makes the bare letters safe, and it has to be total:
+    /// a letter that reached both would be a letter that did two things.
+    #[test]
+    fn letters_typed_at_a_focused_rail_do_not_reach_the_input_box() {
+        let mut app = with_cards();
+        alt(&mut app, KeyCode::Char('c'));
+        type_line(&mut app, "jk");
+        assert_eq!(app.input, "");
+    }
+
+    /// `Esc` peels the rail's layers and gives the keyboard back, with the line
+    /// exactly as it was.
+    #[test]
+    fn esc_gives_the_keyboard_back_with_the_line_intact() {
+        let mut app = with_cards();
+        type_line(&mut app, "half a sentence");
+        alt(&mut app, KeyCode::Char('c'));
+        press(&mut app, KeyCode::Enter);
+        assert!(app.rail.expanded);
+
+        press(&mut app, KeyCode::Esc);
+        assert!(!app.rail.expanded, "the expanded card first");
+        press(&mut app, KeyCode::Esc);
+        assert!(!app.rail.focused, "then the focus");
+        assert!(app.rail.shown, "and the rail stays on screen");
+        assert_eq!(app.input, "half a sentence");
+    }
+
+    /// A digit picks the option it is printed beside. The label on screen *is*
+    /// the keystroke, so nobody counts rows to find out what `2` does.
+    #[test]
+    fn a_digit_in_the_rail_answers_the_option_it_names() {
+        let mut app = with_cards();
+        alt(&mut app, KeyCode::Char('c'));
+        assert_eq!(
+            press(&mut app, KeyCode::Char('2')),
+            Some(Action::AnswerCard {
+                id: 1,
+                chosen: Some("3000".into()),
+                answer: None,
+            })
+        );
+    }
+
+    /// A digit naming no option says so. Silence would leave the reader
+    /// believing the answer went in — and the run is still blocked.
+    #[test]
+    fn a_digit_that_names_no_option_says_so_rather_than_doing_nothing() {
+        let mut app = with_cards();
+        alt(&mut app, KeyCode::Char('c'));
+        assert_eq!(press(&mut app, KeyCode::Char('7')), None);
+        let said = last_notice(&app);
+        assert!(said.contains("press 1–2"), "{said}");
+
+        // ...and on a card with no options at all, it points at the prose key.
+        app.rail.selected = Some(2);
+        assert_eq!(press(&mut app, KeyCode::Char('1')), None);
+        let said = last_notice(&app);
+        assert!(said.contains("in prose"), "{said}");
+    }
+
+    /// No confirmation, unlike `x` on a list screen: dismissing is a state
+    /// change and not a deletion, and a card that costs two keys to put down is
+    /// a rail nobody clears.
+    #[test]
+    fn x_in_the_rail_dismisses_without_a_confirmation() {
+        let mut app = with_cards();
+        alt(&mut app, KeyCode::Char('c'));
+        assert_eq!(
+            press(&mut app, KeyCode::Char('x')),
+            Some(Action::DismissCard(1))
+        );
+        assert_eq!(app.overlay, Overlay::None, "nothing to confirm");
+    }
+
+    /// The prose answer goes to the card the prompt was opened on, not to
+    /// whatever the cursor is on when `⏎` lands — the rail re-queries
+    /// underneath an overlay, and an answer on the wrong card wakes the wrong
+    /// agent.
+    #[test]
+    fn a_prose_answer_lands_on_the_card_the_prompt_was_opened_on() {
+        let mut app = with_cards();
+        alt(&mut app, KeyCode::Char('c'));
+        press(&mut app, KeyCode::Char('a'));
+        let Overlay::Prompt { intent, .. } = app.overlay.clone() else {
+            panic!("`a` opens a prompt, got {:?}", app.overlay);
+        };
+        assert_eq!(intent, PromptIntent::AnswerCard(1));
+
+        // The rail moves under the overlay, as a tick would move it.
+        app.rail.selected = Some(2);
+        for c in "8080".chars() {
+            press(&mut app, KeyCode::Char(c));
+        }
+        assert_eq!(
+            press(&mut app, KeyCode::Enter),
+            Some(Action::AnswerCard {
+                id: 1,
+                chosen: None,
+                answer: Some("8080".into()),
+            }),
+            "the id came from the prompt, not from the cursor"
+        );
+    }
+
+    /// E2.S5, through the keys: the filter, the sort and both filters are held
+    /// in state, so leaving the rail and coming back finds them where they were.
+    #[test]
+    fn the_rails_filter_and_sort_survive_leaving_it_and_coming_back() {
+        let mut app = with_cards();
+        alt(&mut app, KeyCode::Char('c'));
+        press(&mut app, KeyCode::Char('S'));
+        press(&mut app, KeyCode::Char('t'));
+        press(&mut app, KeyCode::Char('f'));
+        press(&mut app, KeyCode::Char('/'));
+        type_line(&mut app, "port");
+        press(&mut app, KeyCode::Enter);
+        let asked = app.rail.query(Some("conv".into()));
+
+        // Away to another screen, and back. Deliberately not by `Esc`, which
+        // clears the filter on purpose — it is the key that undoes one level,
+        // and undoing the filter is exactly what it should do there.
+        alt(&mut app, KeyCode::Char('a'));
+        assert_eq!(app.workspace, Workspace::Fleet);
+        app.go(Workspace::Chat);
+        alt(&mut app, KeyCode::Char('c'));
+
+        assert_eq!(app.rail.query(Some("conv".into())), asked);
+        assert_eq!(asked.text.as_deref(), Some("port"));
+        assert_ne!(asked.sort, jod_core::cards::Sort::default());
+        assert!(asked.kind.is_some());
+        assert_ne!(asked.status, Some(jod_core::cards::Status::Open));
+    }
+
+    /// A `/` line being typed into owns the letters, or filtering for "stop"
+    /// would sort, toggle and dismiss on the way past.
+    #[test]
+    fn the_rails_filter_line_owns_the_letters_while_it_is_being_typed() {
+        let mut app = with_cards();
+        alt(&mut app, KeyCode::Char('c'));
+        press(&mut app, KeyCode::Char('/'));
+        type_line(&mut app, "sqlite");
+        assert_eq!(app.rail.filter.as_deref(), Some("sqlite"));
+        assert_eq!(app.rail.stack_now(), jod_core::cards::Status::Open);
+        assert_eq!(app.input, "");
+    }
+
+    /// D2, end to end and against a real store: answering a card while a turn
+    /// is in flight records the answer, *queues* the delivery, and touches
+    /// nothing about the run. Ten answers during one turn all sit queued.
+    #[test]
+    fn answering_queues_the_answer_rather_than_interrupting_the_turn() {
+        let s = store();
+        let conversation = s
+            .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
+            .expect("a conversation")
+            .id;
+        let ids: Vec<i64> = (0..10)
+            .map(|n| {
+                s.raise_card(jod_core::cards::NewCard {
+                    conversation_id: conversation.clone(),
+                    title: format!("question {n}"),
+                    ..Default::default()
+                })
+                .expect("a card")
+                .id
+            })
+            .collect();
+
+        for id in &ids {
+            let said = answered_card(&s, *id, None, Some("yes"));
+            assert!(said.contains("queued"), "{said}");
+        }
+
+        for id in &ids {
+            let card = s.card(*id).unwrap().expect("the card");
+            assert_eq!(card.status, jod_core::cards::Status::Answered);
+            assert_eq!(
+                card.delivery,
+                jod_core::cards::Delivery::Queued,
+                "answered is not delivered"
+            );
+        }
+        assert_eq!(
+            s.pending_for(&conversation).unwrap().len(),
+            10,
+            "ten answers are ten queued deliveries, waiting for one turn boundary"
+        );
+    }
+
+    /// Dismissing queues nothing. A dismissal the agent heard would be
+    /// indistinguishable from an answer, and it would act on a decision nobody
+    /// made.
+    #[test]
+    fn dismissing_tells_the_agent_nothing_at_all() {
+        let s = store();
+        let conversation = s
+            .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
+            .expect("a conversation")
+            .id;
+        let card = s
+            .raise_card(jod_core::cards::NewCard {
+                conversation_id: conversation.clone(),
+                title: "shall I rename the column?".into(),
+                ..Default::default()
+            })
+            .expect("a card");
+        s.dismiss_card(card.id).expect("dismissing");
+        assert!(s.pending_for(&conversation).unwrap().is_empty());
+    }
+
+    /// A refusal from the store reaches the reader as a sentence rather than as
+    /// silence — answering twice is refused, and the second press must say why
+    /// rather than looking like a key that stopped working.
+    #[test]
+    fn a_refused_answer_says_why() {
+        let s = store();
+        let conversation = s
+            .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
+            .expect("a conversation")
+            .id;
+        let card = s
+            .raise_card(jod_core::cards::NewCard {
+                conversation_id: conversation,
+                title: "which port?".into(),
+                ..Default::default()
+            })
+            .expect("a card");
+        answered_card(&s, card.id, None, Some("8080"));
+        let again = answered_card(&s, card.id, None, Some("3000"));
+        assert!(again.contains("not answered"), "{again}");
+        assert!(again.contains("already"), "{again}");
+    }
+
+    // ---- interrupting a turn without killing the session ----
+
+    fn mid_turn() -> App {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.agents = vec![running("run-1", "port the parser")];
+        app.watching = Some("run-1".into());
+        app.busy = true;
+        app.turn_started_ms = Some(0);
+        app.session = Some("sess-abc".into());
+        app.resume = Resume::Session("sess-abc".into());
+        app
+    }
+
+    /// **E7.S1's stated check**: the session id is unchanged across the
+    /// interruption. That is the whole difference between this and `Alt-X` —
+    /// the run is one process of many in a conversation, so ending it ends the
+    /// turn and leaves the conversation exactly where it was.
+    #[test]
+    fn escape_interrupts_the_turn_without_losing_the_session() {
+        let mut app = mid_turn();
+        let before = app.session.clone();
+
+        assert_eq!(
+            press(&mut app, KeyCode::Esc),
+            Some(Action::Interrupt("run-1".into())),
+            "Escape interrupts rather than backing out"
+        );
+
+        assert_eq!(app.session, before, "the harness conversation survives");
+        assert_eq!(
+            app.session.as_deref(),
+            Some("sess-abc"),
+            "and it is the same one, not a fresh id"
+        );
+        assert_eq!(
+            app.resume,
+            Resume::Session("sess-abc".into()),
+            "so the next turn continues it rather than starting over"
+        );
+        assert!(!app.busy, "the turn is over");
+        assert_eq!(app.turn_started_ms, None);
+    }
+
+    /// The correction is usually already half-written by the time you reach for
+    /// Escape, so the key that stops the run must not also clear the line.
+    #[test]
+    fn interrupting_leaves_you_typing_the_correction() {
+        let mut app = mid_turn();
+        type_line(&mut app, "no, use the other parser");
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(app.input, "no, use the other parser");
+        assert_eq!(app.cursor, app.input.len());
+    }
+
+    /// A partial turn dropped in silence leaves the transcript claiming the
+    /// agent simply stopped talking, and the next reader cannot tell an
+    /// interruption from a crash.
+    #[test]
+    fn an_interrupted_turn_is_recorded_as_what_it_was() {
+        let mut app = mid_turn();
+        app.now_ms = 9_000;
+        press(&mut app, KeyCode::Esc);
+        let said = format!("{:?}", app.transcript);
+        assert!(said.contains("interrupted"), "{said}");
+        assert!(
+            !said.contains("failed: true"),
+            "an interruption is not a failure: {said}"
+        );
+    }
+
+    /// The second Escape is the old behaviour, unchanged: with nothing running
+    /// it follows the tail again.
+    #[test]
+    fn a_second_escape_with_nothing_running_is_the_old_back_behaviour() {
+        let mut app = mid_turn();
+        press(&mut app, KeyCode::Esc);
+        assert!(!app.busy);
+
+        app.scroll_up(3, 10);
+        assert_eq!(press(&mut app, KeyCode::Esc), None, "nothing left to stop");
+        assert!(app.following(), "it follows the tail again");
+    }
+
+    /// Escape with nothing in flight never becomes an interrupt, or every way
+    /// out of a screen would try to kill something.
+    #[test]
+    fn escape_while_idle_interrupts_nothing() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.watching = Some("run-1".into());
+        app.busy = false;
+        assert_eq!(press(&mut app, KeyCode::Esc), None);
+    }
+
+    // ---- a repository's own commands reach the palette ----
+    //
+    // These are wiring tests on purpose. `commands.rs` works and `jod commands
+    // ls` proves it; what was missing was any TUI file calling it. So each of
+    // these fails if the *call* is deleted, not merely if the function behind
+    // it breaks — deleting `repo_commands` from `completions`, or the
+    // `repo_invocation` check in `on_chat_key`, turns them red.
+
+    fn found(name: &str, kind: jod_core::commands::Kind, harness: HarnessKind) -> jod_core::commands::Discovered {
+        jod_core::commands::Discovered {
+            id: 1,
+            root: PathBuf::from("/home/reljod/repo/Jod"),
+            scope: jod_core::commands::Scope::Root,
+            kind,
+            name: name.into(),
+            description: "open a pull request with evidence".into(),
+            path: PathBuf::from(".claude/commands/create-pr.md"),
+            harness: harness.id().to_string(),
+            body: String::new(),
+            scanned_at_ms: 0,
+        }
+    }
+
+    fn with_repo_commands(harness: HarnessKind) -> App {
+        let mut app = app_on(harness);
+        app.discovered = vec![found("create-pr", jod_core::commands::Kind::Command, harness)];
+        app
+    }
+
+    /// The gap this closes: the palette was a hardcoded enum, so a repository's
+    /// own commands were invisible in the one place they would be used.
+    #[test]
+    fn a_repo_command_is_offered_in_the_palette_beside_jods_own() {
+        let mut app = with_repo_commands(HarnessKind::ClaudeCode);
+        app.input = "/c".into();
+        let offered = command::completions(&app.input, &app);
+        assert!(
+            offered.iter().any(|c| c.line.starts_with("/create-pr")),
+            "the repo's command is missing: {offered:?}"
+        );
+        assert!(
+            offered.iter().any(|c| c.line.starts_with("/config")),
+            "and Jod's own are still there: {offered:?}"
+        );
+    }
+
+    /// `/review` from Jod and `/review` from the checkout are different things,
+    /// so which one a row is has to be on the row.
+    #[test]
+    fn a_repo_command_says_where_it_came_from() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.discovered = vec![
+            found("create-pr", jod_core::commands::Kind::Command, HarnessKind::ClaudeCode),
+            found("write-spec", jod_core::commands::Kind::Skill, HarnessKind::ClaudeCode),
+        ];
+        app.input = "/".into();
+        let offered = command::completions(&app.input, &app);
+        let pr = offered
+            .iter()
+            .find(|c| c.line.starts_with("/create-pr"))
+            .expect("the command");
+        assert!(pr.hint.contains("repo"), "{}", pr.hint);
+        assert!(pr.hint.contains("command"), "{}", pr.hint);
+        assert!(
+            pr.hint.contains("open a pull request"),
+            "the description is real now: {}",
+            pr.hint
+        );
+        let spec = offered
+            .iter()
+            .find(|c| c.line.starts_with("/write-spec"))
+            .expect("the skill");
+        assert!(spec.hint.contains("skill"), "{}", spec.hint);
+    }
+
+    /// D7's measurement, forwarded rather than reimplemented: Claude Code takes
+    /// `/name` in the prompt.
+    #[test]
+    fn enter_on_a_repo_command_forwards_it_in_the_prompt_for_claude_code() {
+        let mut app = with_repo_commands(HarnessKind::ClaudeCode);
+        type_line(&mut app, "/create-pr the rail");
+        assert_eq!(
+            press(&mut app, KeyCode::Enter),
+            Some(Action::RunCommand {
+                prompt: "/create-pr the rail".into(),
+                command: None,
+            })
+        );
+        assert_eq!(app.input, "", "the line is consumed");
+    }
+
+    /// ...and OpenCode needs the name in a flag. Given `/name` in the message
+    /// it passed the literal text to the model, which went hunting and answered
+    /// correctly — right for the wrong reason, which is the failure this
+    /// spelling prevents.
+    #[test]
+    fn enter_on_a_repo_command_uses_the_flag_for_opencode() {
+        let mut app = with_repo_commands(HarnessKind::OpenCode);
+        type_line(&mut app, "/create-pr the rail");
+        assert_eq!(
+            press(&mut app, KeyCode::Enter),
+            Some(Action::RunCommand {
+                prompt: "the rail".into(),
+                command: Some("create-pr".into()),
+            })
+        );
+    }
+
+    /// A `.claude/commands/foo.md` has no OpenCode equivalent. The palette
+    /// filters by harness at the query; this is the backstop, and it drops back
+    /// to the ordinary prose path rather than forwarding a spelling that cannot
+    /// resolve.
+    #[test]
+    fn a_command_from_another_harnesss_convention_is_not_forwarded() {
+        let mut app = app_on(HarnessKind::OpenCode);
+        app.discovered = vec![found(
+            "create-pr",
+            jod_core::commands::Kind::Command,
+            HarnessKind::ClaudeCode,
+        )];
+        type_line(&mut app, "/create-pr");
+        let action = press(&mut app, KeyCode::Enter);
+        assert!(
+            !matches!(action, Some(Action::RunCommand { .. })),
+            "it must not be forwarded: {action:?}"
+        );
+    }
+
+    /// Jod's own commands still win — a repo shipping a `/model` must not
+    /// shadow the built-in, because the built-in is what the rest of the
+    /// program documents.
+    #[test]
+    fn jods_own_commands_are_unaffected_by_a_repo_of_the_same_name() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.discovered = vec![found("model", jod_core::commands::Kind::Command, HarnessKind::ClaudeCode)];
+        type_line(&mut app, "/model opus");
+        let action = press(&mut app, KeyCode::Enter);
+        assert!(
+            !matches!(action, Some(Action::RunCommand { .. })),
+            "Jod's own /model must still be Jod's: {action:?}"
+        );
+    }
+
+    // ---- searching every transcript ----
+
+    fn searching(hits: &[(&str, &str, &str)]) -> App {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        alt(&mut app, KeyCode::Char('s'));
+        if let Overlay::Search { hits: into, .. } = &mut app.overlay {
+            *into = hits
+                .iter()
+                .map(|(conversation, title, text)| data::Hit {
+                    conversation_id: (*conversation).to_string(),
+                    title: (*title).to_string(),
+                    who: "agent".into(),
+                    text: (*text).to_string(),
+                })
+                .collect();
+        }
+        app
+    }
+
+    #[test]
+    fn alt_s_opens_the_search() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        alt(&mut app, KeyCode::Char('s'));
+        assert!(matches!(app.overlay, Overlay::Search { .. }));
+    }
+
+    /// The overlay owns every key, so a query never becomes a prompt.
+    #[test]
+    fn typing_into_the_search_never_reaches_the_chat_box() {
+        let mut app = searching(&[]);
+        for c in "parser".chars() {
+            press(&mut app, KeyCode::Char(c));
+        }
+        let Overlay::Search { query, .. } = &app.overlay else {
+            panic!("still open");
+        };
+        assert_eq!(query, "parser");
+        assert_eq!(app.input, "");
+    }
+
+    /// Finding the hit is not the job; getting to it is.
+    #[test]
+    fn enter_opens_the_conversation_holding_the_hit() {
+        let mut app = searching(&[
+            ("conv-a", "the parser", "port the lexer"),
+            ("conv-b", "the deploy", "fix the CI"),
+        ]);
+        press(&mut app, KeyCode::Down);
+        assert_eq!(
+            press(&mut app, KeyCode::Enter),
+            Some(Action::Sessions(sessions::Request::Open("conv-b".into())))
+        );
+        assert_eq!(app.overlay, Overlay::None);
+    }
+
+    #[test]
+    fn the_arrows_stop_at_both_ends_of_the_hits() {
+        let mut app = searching(&[("conv-a", "one", "first"), ("conv-b", "two", "second")]);
+        press(&mut app, KeyCode::Up);
+        press(&mut app, KeyCode::Up);
+        let Overlay::Search { selected, .. } = &app.overlay else {
+            panic!("open");
+        };
+        assert_eq!(*selected, 0, "it does not run off the top");
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Down);
+        let Overlay::Search { selected, .. } = &app.overlay else {
+            panic!("open");
+        };
+        assert_eq!(*selected, 1, "nor off the bottom");
+    }
+
+    #[test]
+    fn esc_closes_the_search_without_going_anywhere() {
+        let mut app = searching(&[("conv-a", "the parser", "port the lexer")]);
+        assert_eq!(press(&mut app, KeyCode::Esc), None);
+        assert_eq!(app.overlay, Overlay::None);
+    }
+
+    /// Enter with nothing found closes rather than looking dead.
+    #[test]
+    fn enter_with_no_hits_closes_the_search() {
+        let mut app = searching(&[]);
+        assert_eq!(press(&mut app, KeyCode::Enter), None);
+        assert_eq!(app.overlay, Overlay::None);
+    }
+
+    // ---- the full-screen picker ----
+
+    fn at_the_picker() -> App {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.conversation = Some("conv".into());
+        app.overlay = Overlay::Picker(picker::Picker::new(
+            PathBuf::from("/home/reljod/repo"),
+            vec![".".into(), "Jod/cli".into(), "Jod/core".into()],
+            false,
+        ));
+        app
+    }
+
+    /// The chord opens it against the directory you launched in, which is what
+    /// E1.S4 means by "starting at the current directory".
+    #[test]
+    fn alt_p_opens_the_picker_at_the_current_directory() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        alt(&mut app, KeyCode::Char('p'));
+        let Overlay::Picker(p) = &app.overlay else {
+            panic!("Alt-P opens the picker, got {:?}", app.overlay);
+        };
+        assert_eq!(
+            p.base,
+            std::env::current_dir().expect("a working directory")
+        );
+        assert!(
+            p.rows.iter().any(|r| r.path == "."),
+            "the directory you are in is the first offer"
+        );
+    }
+
+    /// The same four keys as the `@` popup, which is the whole claim of "one
+    /// picker at two sizes".
+    #[test]
+    fn the_picker_narrows_on_every_keystroke_and_moves_with_the_arrows() {
+        let mut app = at_the_picker();
+        for c in "cli".chars() {
+            press(&mut app, KeyCode::Char(c));
+        }
+        let Overlay::Picker(p) = &app.overlay else {
+            panic!("still up");
+        };
+        assert_eq!(p.query, "cli");
+        assert_eq!(p.rows[0].path, "Jod/cli", "{:?}", p.rows);
+        assert_eq!(app.input, "", "and none of it reached the chat box");
+    }
+
+    #[test]
+    fn enter_adds_the_highlighted_directory_as_a_read_only_root() {
+        let mut app = at_the_picker();
+        for c in "core".chars() {
+            press(&mut app, KeyCode::Char(c));
+        }
+        assert_eq!(
+            press(&mut app, KeyCode::Enter),
+            Some(Action::AddRoot(PathBuf::from("/home/reljod/repo/Jod/core")))
+        );
+        assert_eq!(app.overlay, Overlay::None);
+    }
+
+    /// Escape leaves nothing behind — the same promise the popup makes.
+    #[test]
+    fn escape_closes_the_picker_without_adding_anything() {
+        let mut app = at_the_picker();
+        for c in "cli".chars() {
+            press(&mut app, KeyCode::Char(c));
+        }
+        assert_eq!(press(&mut app, KeyCode::Esc), None);
+        assert_eq!(app.overlay, Overlay::None);
+        assert_eq!(app.input, "");
+    }
+
+    /// Nothing matched means nothing to add, and `⏎` still closes — an enter
+    /// that appeared dead would be worse than one that does nothing visible.
+    #[test]
+    fn enter_with_no_match_closes_without_adding() {
+        let mut app = at_the_picker();
+        for c in "zzzz".chars() {
+            press(&mut app, KeyCode::Char(c));
+        }
+        assert_eq!(press(&mut app, KeyCode::Enter), None);
+        assert_eq!(app.overlay, Overlay::None);
+    }
+
+    // ---- the secret card ----
+    //
+    // These assert the *terminal's* half of E3.S4: that a credential never
+    // becomes part of the UI. The storage half — that the value reaches the
+    // file and appears nowhere in the database — is core's, and is asserted
+    // against a real `JOD_HOME` in `core/src/secrets.rs` and
+    // `supervisor/tests/secrets_never_reach_the_record.rs`. Repeating it here
+    // would mean setting `JOD_HOME` from a test thread that runs in parallel
+    // with every other test in this binary, which is a race, and a racy
+    // security test is worse than none: it goes green for the wrong reason.
+
+    fn secret_card(id: i64, name: &str) -> jod_core::cards::Card {
+        let mut card = a_card(id, "a credential is needed", true, &[]);
+        card.kind = jod_core::cards::CardKind::Secret;
+        card.secret_name = Some(name.into());
+        card.secret_scope = Some("work".into());
+        card
+    }
+
+    fn at_a_secret_card() -> App {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.cards = vec![secret_card(9, "GITHUB_TOKEN")];
+        app.reconcile_rail();
+        alt(&mut app, KeyCode::Char('c'));
+        press(&mut app, KeyCode::Char('a'));
+        app
+    }
+
+    /// `Overlay::Prompt` echoes what is typed and hands it on as an ordinary
+    /// `String`. Correct for a schedule's name, disqualifying for a token.
+    #[test]
+    fn a_secret_card_opens_a_masked_field_rather_than_the_ordinary_prompt() {
+        let app = at_a_secret_card();
+        match &app.overlay {
+            Overlay::Secret { card, name, scope, .. } => {
+                assert_eq!(*card, 9);
+                assert_eq!(name, "GITHUB_TOKEN");
+                assert_eq!(*scope, jod_core::secrets::Scope::Work);
+            }
+            other => panic!("a secret card must not open a plain prompt: {other:?}"),
+        }
+    }
+
+    /// The copies people forget about: the input line, the transcript, and the
+    /// `↑` history. A credential in any of them can be sent to an agent by
+    /// pressing enter twice.
+    #[test]
+    fn the_typed_credential_reaches_no_part_of_the_ui() {
+        let mut app = at_a_secret_card();
+        for c in "sk-live-abcdef123456".chars() {
+            press(&mut app, KeyCode::Char(c));
+        }
+
+        assert_eq!(app.input, "", "not the input line");
+        assert!(app.history.is_empty(), "not the recall history");
+        let transcript = format!("{:?}", app.transcript);
+        assert!(!transcript.contains("sk-live"), "not the transcript");
+        // And not a `{:?}` of the overlay, which is one stray diagnostic away
+        // from a log file.
+        let printed = format!("{:?}", app.overlay);
+        assert!(!printed.contains("sk-live"), "not a Debug rendering: {printed}");
+        assert!(printed.contains("20 chars"), "only its length: {printed}");
+    }
+
+    /// Enter moves the value into the action and leaves the overlay empty, so
+    /// no frame drawn afterwards has anything left to draw.
+    #[test]
+    fn storing_moves_the_value_out_and_closes_the_field() {
+        let mut app = at_a_secret_card();
+        for c in "sk-live-abcdef123456".chars() {
+            press(&mut app, KeyCode::Char(c));
+        }
+        let Some(Action::PutSecret { card, name, scope, value, .. }) =
+            press(&mut app, KeyCode::Enter)
+        else {
+            panic!("⏎ stores the credential");
+        };
+        assert_eq!(card, 9);
+        assert_eq!(name, "GITHUB_TOKEN");
+        assert_eq!(scope, jod_core::secrets::Scope::Work);
+        assert_eq!(value.reveal(), "sk-live-abcdef123456");
+        assert_eq!(app.overlay, Overlay::None, "the field is gone");
+        // The action itself must not print the value either — it is the thing
+        // that travels furthest from here.
+        let printed = format!("{:?}", Action::PutSecret {
+            card,
+            name: "GITHUB_TOKEN".into(),
+            scope,
+            scope_id: String::new(),
+            value,
+        });
+        assert!(!printed.contains("sk-live"), "{printed}");
+    }
+
+    /// An empty field is refused rather than stored: `put_secret` would reject
+    /// it anyway, but a card answered with nothing looks answered while the run
+    /// stays blocked.
+    #[test]
+    fn an_empty_credential_is_refused_rather_than_stored() {
+        let mut app = at_a_secret_card();
+        assert_eq!(press(&mut app, KeyCode::Enter), None);
+        assert!(matches!(app.overlay, Overlay::Secret { .. }), "the field stays up");
+    }
+
+    #[test]
+    fn escape_discards_the_credential_and_keeps_no_copy() {
+        let mut app = at_a_secret_card();
+        for c in "sk-live-abc".chars() {
+            press(&mut app, KeyCode::Char(c));
+        }
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(app.overlay, Overlay::None);
+        assert_eq!(app.input, "");
+        let whole = format!("{:?} {:?}", app.overlay, app.transcript);
+        assert!(!whole.contains("sk-live"), "{whole}");
+    }
+
+    #[test]
+    fn backspace_shortens_the_credential_rather_than_leaking_it() {
+        let mut app = at_a_secret_card();
+        for c in "abcd".chars() {
+            press(&mut app, KeyCode::Char(c));
+        }
+        press(&mut app, KeyCode::Backspace);
+        let Overlay::Secret { value, .. } = &app.overlay else {
+            panic!("still collecting");
+        };
+        assert_eq!(value.len(), 3);
+    }
+
+    /// The sentence the *model* reads. `Card::answer_body` turns a card's
+    /// answer into the delivery, so whatever is stored as the answer is what
+    /// the agent is told — which is why it is a name and a scope and nothing
+    /// that could reconstruct a value.
+    #[test]
+    fn what_the_agent_is_told_about_a_secret_is_a_name_and_a_scope() {
+        let s = store();
+        let conversation = s
+            .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
+            .expect("a conversation")
+            .id;
+        let card = s
+            .raise_card(jod_core::cards::NewCard {
+                conversation_id: conversation.clone(),
+                kind: Some(jod_core::cards::CardKind::Secret),
+                title: "GITHUB_TOKEN is missing".into(),
+                secret_name: Some("GITHUB_TOKEN".into()),
+                secret_scope: Some("work".into()),
+                ..Default::default()
+            })
+            .expect("a card");
+
+        // Exactly what `stored_secret` writes once the value is safely down.
+        let answered = s
+            .answer_card(
+                card.id,
+                None,
+                Some(&secret::stored_summary(
+                    "GITHUB_TOKEN",
+                    jod_core::secrets::Scope::Work,
+                )),
+            )
+            .expect("answering");
+
+        let told = answered.answer_body();
+        assert!(told.contains("GITHUB_TOKEN"), "the name, so it knows what to reach for");
+        assert!(told.contains("work scope"), "{told}");
+        assert!(!told.contains('•'), "not even a masked value: {told}");
+
+        // And the queued delivery — the thing that actually reaches a prompt —
+        // carries the same words and no others.
+        let pending = s.pending_for(&conversation).expect("queued");
+        assert_eq!(pending.len(), 1);
+        assert!(
+            pending[0].body.contains("stored GITHUB_TOKEN"),
+            "{}",
+            pending[0].body
+        );
+    }
+
+    // ---- the `@` picker ----
+
+    fn with_a_root() -> App {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.roots = vec![jod_core::roots::Root {
+            id: 1,
+            conversation_id: "conv".into(),
+            path: PathBuf::from("/home/reljod/repo/jod"),
+            writable: false,
+            position: 0,
+            origin: jod_core::roots::Origin::Human,
+            added_at_ms: 0,
+        }];
+        app.candidates = vec![Arc::new(vec![
+            "cli/src/tui/mod.rs".to_string(),
+            "core/src/rank.rs".to_string(),
+        ])];
+        app
+    }
+
+    #[test]
+    fn typing_at_opens_the_picker_and_every_keystroke_re_ranks_it() {
+        let mut app = with_a_root();
+        type_line(&mut app, "look at @");
+        assert!(app.mention.is_some(), "the sign opens it");
+
+        type_line(&mut app, "rank");
+        let popup = app.mention.as_ref().expect("still open");
+        assert_eq!(popup.query, "rank");
+        assert_eq!(
+            popup.rows[0].path, "core/src/rank.rs",
+            "ranked, not filtered"
+        );
+        assert!(
+            !popup.rows[0].positions.is_empty(),
+            "and it says which characters matched"
+        );
+    }
+
+    /// D1's fourth requirement, and the one people notice: a picker that wipes
+    /// the line when you change your mind is a picker you stop opening.
+    #[test]
+    fn esc_closes_the_picker_and_leaves_what_you_typed_alone() {
+        let mut app = with_a_root();
+        type_line(&mut app, "look at @rank");
+        press(&mut app, KeyCode::Esc);
+        assert!(app.mention.is_none());
+        assert_eq!(app.input, "look at @rank");
+    }
+
+    #[test]
+    fn enter_puts_the_chosen_path_into_the_line() {
+        let mut app = with_a_root();
+        type_line(&mut app, "read @rank");
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.input, "read @core/src/rank.rs ");
+        assert_eq!(app.cursor, app.input.len());
+        assert!(app.mention.is_none());
+    }
+
+    /// With several roots the inserted path says which one it is from, because
+    /// `src/main.rs` names two files when a session can see two repositories.
+    #[test]
+    fn several_roots_insert_a_root_qualified_path() {
+        let mut app = with_a_root();
+        app.roots.push(jod_core::roots::Root {
+            id: 2,
+            conversation_id: "conv".into(),
+            path: PathBuf::from("/home/reljod/repo/notes"),
+            writable: false,
+            position: 1,
+            origin: jod_core::roots::Origin::Human,
+            added_at_ms: 0,
+        });
+        app.candidates.push(Arc::new(vec!["rank.md".to_string()]));
+        type_line(&mut app, "read @rank.md");
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.input, "read @notes/rank.md ");
+    }
+
+    /// E1.S3 in one line: with no roots it says so and accepts nothing. `⏎`
+    /// must not fall through and send the half-written line either.
+    #[test]
+    fn with_no_roots_the_picker_accepts_nothing_and_sends_nothing() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        type_line(&mut app, "read @main");
+        let popup = app.mention.as_ref().expect("the popup is up");
+        assert!(!popup.rooted);
+        assert!(popup.rows.is_empty());
+
+        assert_eq!(press(&mut app, KeyCode::Enter), None, "nothing is sent");
+        assert_eq!(app.input, "read @main", "and nothing is inserted");
+    }
+
+    /// A mention is a word, so whitespace ends it — otherwise the popup stays
+    /// up ranking the rest of the sentence.
+    #[test]
+    fn a_space_ends_the_mention() {
+        let mut app = with_a_root();
+        type_line(&mut app, "@rank and");
+        assert!(app.mention.is_none());
+    }
+
+    /// Backspacing over the sign closes it, which is the other way out and the
+    /// one people find by accident.
+    #[test]
+    fn backspacing_over_the_sign_closes_the_picker() {
+        let mut app = with_a_root();
+        type_line(&mut app, "@r");
+        assert!(app.mention.is_some());
+        press(&mut app, KeyCode::Backspace);
+        press(&mut app, KeyCode::Backspace);
+        assert!(app.mention.is_none());
+        assert_eq!(app.input, "");
     }
 }

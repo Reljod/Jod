@@ -9,6 +9,7 @@
 //! the ones the user's own theme controls and Jod runs on other people's boxes
 //! over SSH.
 
+use std::collections::HashSet;
 use std::sync::LazyLock;
 
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
@@ -22,9 +23,18 @@ use jod_core::PermissionPolicy;
 
 use super::app::{absolute, short_duration, since, until, App, Entry, JobState, Overlay};
 use super::data::{Outcome, Source};
+use super::diff;
+use super::todo;
 use super::graph::{self, Direction as EdgeDirection};
 use super::keys;
+use super::fleet;
+use super::mention;
+use super::picker;
+use super::rail;
+use super::secret;
+use super::traffic;
 use super::workspace::Workspace;
+use jod_core::cards::{Card, CardKind, Delivery, Importance, Sort, Status};
 
 const USER: Color = Color::Cyan;
 const AGENT: Color = Color::Reset;
@@ -83,6 +93,11 @@ pub fn draw(f: &mut Frame, app: &App) -> usize {
     // The two bars stay flush with the screen edge: they are chrome, and an
     // inset chrome row reads as content that has lost its border.
     let (body, side) = beside(app, pad(rows[0]));
+    // The decision rail comes off the left of whatever is left, before the
+    // chat/workspace branch below, because it is drawn beside both: a card can
+    // arrive while you are reading the fleet, and a rail that only existed on
+    // the chat screen would be a rail you have to navigate to.
+    let (rail, body) = rail_beside(app, body);
 
     // The completion popup is positioned against the input box, which is no
     // longer at a fixed place — the splash moves it — so the rect travels back
@@ -110,6 +125,9 @@ pub fn draw(f: &mut Frame, app: &App) -> usize {
         body.height.saturating_sub(4).max(1) as usize
     };
 
+    if let Some(rail) = rail {
+        draw_rail(f, app, rail);
+    }
     if let Some(side) = side {
         draw_panel(f, app, side);
     }
@@ -121,6 +139,7 @@ pub fn draw(f: &mut Frame, app: &App) -> usize {
         draw_floating_panel(f, app, body);
     }
     draw_completions(f, app, input);
+    draw_mention(f, app, input);
     draw_overlay(f, app);
     height
 }
@@ -176,6 +195,613 @@ fn beside(app: &App, area: Rect) -> (Rect, Option<Rect>) {
         ..halves[0]
     };
     (body, Some(halves[1]))
+}
+
+// ---- the decision rail -------------------------------------------------
+
+/// The rail's width while it is showing two-line cards.
+///
+/// Thirty-four rather than thirty: a card's second line carries an id, the word
+/// `blocked` and `answered, queued`, and at thirty the last of those truncated
+/// to `answered, queue…` — which is the one fact on the card the reader most
+/// needs whole.
+const RAIL: u16 = 34;
+
+/// ...and while one card is expanded.
+///
+/// Wider because an expanded card carries a wrapped body, a numbered option
+/// list and a provenance block, and thirty columns of prose is a column of
+/// syllables.
+const RAIL_WIDE: u16 = 58;
+
+/// The narrowest body that can hold the rail *beside* the content.
+///
+/// Below it the rail becomes a single line rather than being squeezed, which is
+/// what Reljod chose when the question was put: taking thirty columns off an
+/// eighty-column terminal leaves neither a readable rail nor a readable chat,
+/// and a rail you cannot read is worse than one sentence saying how many cards
+/// are waiting and which key opens them.
+const RAIL_BESIDE: u16 = 84;
+
+/// A collapsed card: a border, two lines of card, a border.
+const CARD_HEIGHT: u16 = 4;
+
+/// Where the rail goes, and what is left for everything else.
+///
+/// Three outcomes, and the middle one is the interesting one: hidden, a column
+/// down the left, or one line across the top when the terminal is too narrow
+/// for a column.
+fn rail_beside(app: &App, area: Rect) -> (Option<Rect>, Rect) {
+    if !app.rail.shown {
+        return (None, area);
+    }
+    let want = if app.rail.expanded { RAIL_WIDE } else { RAIL };
+    // Never past half the body. A sidebar wider than what it sits beside has
+    // stopped being a sidebar, and the expanded card is the case that would do
+    // it — fifty-eight columns is most of a hundred-column terminal.
+    let width = want.min(area.width / 2);
+    if area.width < RAIL_BESIDE || width < RAIL || area.height < 4 {
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Min(1)])
+            .split(area);
+        return (Some(rows[0]), rows[1]);
+    }
+    let halves = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Length(width), Constraint::Min(20)])
+        .split(area);
+    // One column of air between the rail and what it sits beside, so a card's
+    // border does not touch the chat's first character.
+    let body = Rect {
+        x: halves[1].x + 1,
+        width: halves[1].width.saturating_sub(1),
+        ..halves[1]
+    };
+    (Some(halves[0]), body)
+}
+
+fn draw_rail(f: &mut Frame, app: &App, area: Rect) {
+    if area.height <= 1 {
+        return draw_rail_summary(f, app, area);
+    }
+    match app.selected_card().filter(|_| app.rail.expanded) {
+        Some(card) => draw_card(f, app, card, area),
+        None => draw_rail_stack(f, app, area),
+    }
+}
+
+/// The rail on a terminal too narrow to hold it.
+///
+/// It owes the reader exactly two things — that something is blocked, and the
+/// key that opens the rail — and it must not pretend to be the rail. Hence a
+/// bar glyph and a sentence rather than a squeezed card.
+fn draw_rail_summary(f: &mut Frame, app: &App, area: Rect) {
+    let blocking = app.cards.iter().any(|c| c.blocking && c.is_open());
+    let text = rail::summary(&app.cards);
+    let line = if text.is_empty() {
+        Line::from(Span::styled(" ▌ rail · nothing waiting".to_string(), fg(MUTED)))
+    } else {
+        Line::from(vec![
+            Span::styled(" ▌ ".to_string(), fg(if blocking { BAD } else { USER })),
+            Span::styled(
+                cut(&text, area.width.saturating_sub(3) as usize),
+                if blocking { bold(BAD) } else { fg(MUTED) },
+            ),
+        ])
+    };
+    f.render_widget(Paragraph::new(line), area);
+}
+
+/// The stack: a header, and one bordered two-line card per row.
+fn draw_rail_stack(f: &mut Frame, app: &App, area: Rect) {
+    let ids = app.card_ids();
+    let selected = app.rail.index(&ids);
+
+    let mut head = vec![rail_header(app)];
+    // The sort and the two filters are printed whenever they are in force, and
+    // whenever the rail has the keyboard. A stack silently showing a subset is
+    // a stack whose missing card reads as a card that was never raised.
+    if let Some(line) = rail_settings(app) {
+        head.push(line);
+    }
+    if let Some(line) = rail_filter_line(app) {
+        head.push(line);
+    }
+    let used = (head.len() as u16).min(area.height);
+    f.render_widget(
+        Paragraph::new(head),
+        Rect {
+            height: used,
+            ..area
+        },
+    );
+
+    let rest = Rect {
+        y: area.y + used,
+        height: area.height.saturating_sub(used),
+        ..area
+    };
+    if rest.height == 0 {
+        return;
+    }
+    if app.cards.is_empty() {
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(empty_rail(app), fg(MUTED))))
+                .wrap(Wrap { trim: true }),
+            rest,
+        );
+        return;
+    }
+
+    let rows = (rest.height / CARD_HEIGHT).max(1) as usize;
+    let first = window_start(selected, rows, app.cards.len());
+    for (slot, (at, card)) in app.cards.iter().enumerate().skip(first).take(rows).enumerate() {
+        let y = rest.y + slot as u16 * CARD_HEIGHT;
+        if y + CARD_HEIGHT > rest.y + rest.height {
+            break;
+        }
+        let box_ = Rect {
+            y,
+            height: CARD_HEIGHT,
+            ..rest
+        };
+        let here = at == selected;
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(card_border(card))
+            // The cursor rides the top border rather than a column of its own:
+            // thirty-two columns has none to spare, and a marker inside the box
+            // would cost every card two cells of title to mark one card.
+            .title(if here { " ▸ " } else { "" });
+        f.render_widget(
+            Paragraph::new(card_lines(
+                card,
+                box_.width.saturating_sub(2) as usize,
+                here,
+                app.rail.cascade,
+            ))
+            .block(block),
+            box_,
+        );
+    }
+}
+
+/// The two lines of a collapsed card: what it says, and what state it is in.
+///
+/// `cascading` decides whether the second line has to name the session. With
+/// the subtree scope on, the rail holds cards from agents all over the fleet
+/// and answering writes against one specific one, so the provenance is not
+/// optional — it is what stops "answer the top one" being a coin flip about
+/// which agent gets unblocked. With the scope narrowed to one conversation
+/// every card came from the same place, and printing it would spend a third of
+/// a thirty-four column line saying so.
+fn card_lines(card: &Card, width: usize, here: bool, cascading: bool) -> Vec<Line<'static>> {
+    let title = Line::from(vec![
+        Span::styled(
+            format!("{} ", rail::kind_glyph(card.kind)),
+            fg(card_colour(card)),
+        ),
+        Span::styled(
+            cut(&card.title, width.saturating_sub(2)),
+            if here { bold(AGENT) } else { fg(AGENT) },
+        ),
+    ]);
+
+    // The session leads the line when cascading, ahead of the id: which agent
+    // is asking outranks which card number it is.
+    let stamp = if cascading {
+        match rail::work_tag(card) {
+            Some(work) => format!("{work}/{} ", rail::raised_by(card)),
+            None => format!("{} ", rail::raised_by(card)),
+        }
+    } else {
+        format!("#{} ", card.id)
+    };
+    let mut spans = vec![Span::styled(stamp.clone(), fg(MUTED))];
+    let mut used = stamp.chars().count();
+    // The literal word, beside the coloured border. Colour is never the only
+    // channel in this program, and on the one card that stopped a run that
+    // rule is not a nicety.
+    if card.blocking {
+        spans.push(Span::styled(format!("{} ", rail::BLOCKED), bold(BAD)));
+        used += rail::BLOCKED.chars().count() + 1;
+    }
+    let mut tail: Vec<String> = Vec::new();
+    // First, ahead of the kind, because it is the fact a reader of an answered
+    // card actually needs — `status` is what the human did and `delivery` is
+    // whether the agent has heard, and the second is the one that decides
+    // whether there is anything left to wait for. Last in the line is where a
+    // narrow rail truncates.
+    if let Some(note) = rail::delivery_note(card) {
+        tail.push(note.to_string());
+    }
+    tail.push(card.kind.as_str().to_string());
+    if card.importance != Importance::Normal {
+        tail.push(card.importance.as_str().to_string());
+    }
+    spans.push(Span::styled(
+        cut(&tail.join(" · "), width.saturating_sub(used)),
+        fg(MUTED),
+    ));
+    vec![title, Line::from(spans)]
+}
+
+fn rail_header(app: &App) -> Line<'static> {
+    let blocking = app
+        .cards
+        .iter()
+        .filter(|c| c.blocking && c.is_open())
+        .count();
+    let mut spans = vec![Span::styled(
+        " rail".to_string(),
+        if app.rail.focused {
+            bold(USER)
+        } else {
+            fg(MUTED)
+        },
+    )];
+    spans.push(Span::styled(
+        format!(
+            " · {} {}",
+            app.cards.len(),
+            app.rail.stack_now().as_str()
+        ),
+        fg(MUTED),
+    ));
+    // The scope rides the always-drawn header rather than the settings line,
+    // which is only drawn when something is non-default. A rail narrowed to one
+    // conversation and a fleet that has gone quiet look identical, and the
+    // difference between them is the whole reason the orchestrator's rail
+    // exists — so it is never something the reader has to infer.
+    spans.push(Span::styled(
+        if app.rail.cascade {
+            " · subtree".to_string()
+        } else {
+            " · here".to_string()
+        },
+        fg(MUTED),
+    ));
+    if blocking > 0 {
+        spans.push(Span::styled(
+            format!(" · {blocking} {}", rail::BLOCKED),
+            bold(BAD),
+        ));
+    }
+    Line::from(spans)
+}
+
+/// The sort and the kind filter, when either is worth saying.
+fn rail_settings(app: &App) -> Option<Line<'static>> {
+    let sort = app.rail.sort_now();
+    let kind = app.rail.kind_now();
+    let plain = sort == Sort::default() && kind.is_none();
+    if plain && !app.rail.focused {
+        return None;
+    }
+    let kind = kind.map(|k| k.as_str()).unwrap_or("any");
+    // The scope is on the header, which is always drawn — see `rail_header`.
+    Some(Line::from(Span::styled(
+        format!(" S {} · f {kind}", sort.as_str()),
+        fg(MUTED),
+    )))
+}
+
+fn rail_filter_line(app: &App) -> Option<Line<'static>> {
+    let filter = app.rail.filter.as_ref()?;
+    let cursor = if app.rail.editing_filter { "▏" } else { "" };
+    let what = if app.rail.filtering() {
+        format!("  {} match", app.cards.len())
+    } else {
+        "  type to search".to_string()
+    };
+    Some(Line::from(vec![
+        Span::styled(format!(" /{filter}{cursor}"), fg(USER)),
+        Span::styled(what, fg(MUTED)),
+    ]))
+}
+
+/// What an empty rail says, which depends on *why* it is empty — a filter that
+/// matched nothing and a fleet that has asked nothing are different answers.
+fn empty_rail(app: &App) -> String {
+    if app.rail.filtering() {
+        let needle = app.rail.filter.clone().unwrap_or_default();
+        return format!("  nothing matches “{}”", needle.trim());
+    }
+    match app.rail.stack_now() {
+        Status::Open => "  nothing waiting — no agent has asked anything".to_string(),
+        Status::Answered => "  nothing answered yet — t cycles back to the open ones".to_string(),
+        Status::Dismissed => "  nothing dismissed".to_string(),
+    }
+}
+
+/// One card in full: what it says, what it offers, and who raised it.
+fn draw_card(f: &mut Frame, app: &App, card: &Card, area: Rect) {
+    let width = area.width.saturating_sub(4) as usize;
+    let mut lines: Vec<Line> = vec![Line::from(vec![
+        Span::styled(
+            format!(" {} ", rail::kind_glyph(card.kind)),
+            fg(card_colour(card)),
+        ),
+        Span::styled(cut(&card.title, width), bold(AGENT)),
+    ])];
+
+    let mut facts = vec![card.kind.as_str().to_string(), card.importance.as_str().to_string()];
+    if card.blocking {
+        facts.insert(0, rail::BLOCKED.to_string());
+    }
+    lines.push(Line::from(Span::styled(
+        format!("   {}", facts.join(" · ")),
+        if card.blocking { bold(BAD) } else { fg(MUTED) },
+    )));
+
+    if !card.body.trim().is_empty() {
+        lines.push(Line::from(""));
+        for wrapped in wrap(&card.body, width, 3) {
+            lines.push(Line::from(Span::styled(wrapped, fg(AGENT))));
+        }
+    }
+
+    // A secret card explains where the value will live before `a` is ever
+    // pressed. E3.S4 asks for this on the card and not only in the field,
+    // because the card is what somebody reads while deciding whether to hand
+    // over a production token at all.
+    if card.kind == CardKind::Secret {
+        let scope = card
+            .secret_scope
+            .as_deref()
+            .map(jod_core::secrets::Scope::parse)
+            .unwrap_or_default();
+        let name = card.secret_name.as_deref().unwrap_or(&card.title);
+        lines.push(Line::from(""));
+        for said in secret::destination(name, scope) {
+            lines.push(Line::from(Span::styled(format!("   {said}"), fg(MUTED))));
+        }
+        // Once it is stored the card carries a name and a scope and nothing
+        // else — `card.answer` holds `secret::stored_summary`, never a value.
+        if card.status == Status::Open {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "   a — type the value; it is masked and never echoed".to_string(),
+                fg(WARN),
+            )));
+        }
+    }
+
+    // Numbered because the digits are the keys: the label on screen *is* the
+    // keystroke, so nobody has to count rows to find out what `2` does.
+    if !card.options.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "   options — press the digit".to_string(),
+            fg(MUTED),
+        )));
+        for (at, option) in card.options.iter().take(9).enumerate() {
+            let picked = card.chosen.as_deref() == Some(option.as_str());
+            lines.push(Line::from(vec![
+                Span::styled(format!("   {} ", at + 1), bold(USER)),
+                Span::styled(
+                    cut(option, width.saturating_sub(2)),
+                    if picked { bold(GOOD) } else { fg(AGENT) },
+                ),
+                Span::styled(
+                    if picked { "  ← chosen" } else { "" }.to_string(),
+                    fg(GOOD),
+                ),
+            ]));
+        }
+    }
+
+    if let Some(answer) = card.answer.as_ref().filter(|a| !a.trim().is_empty()) {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled("   answered".to_string(), fg(MUTED))));
+        for wrapped in wrap(answer, width, 3) {
+            lines.push(Line::from(Span::styled(wrapped, fg(GOOD))));
+        }
+    }
+
+    lines.push(Line::from(""));
+    lines.push(rule(area.width as usize));
+    // Provenance. "Which agent asked me this" is the first thing a blocking
+    // card provokes somebody to ask, and an answer landing on the wrong session
+    // is the failure it prevents.
+    lines.push(detail(
+        "raised by",
+        &card
+            .run_id
+            .as_deref()
+            .map(short)
+            .unwrap_or_else(|| "—".to_string()),
+    ));
+    lines.push(detail("session", &short(&card.conversation_id)));
+    if let Some(work) = &card.work_id {
+        lines.push(detail("work", &short(work)));
+    }
+    lines.push(detail("source", card.source.as_str()));
+    lines.push(detail("state", &card_state(card)));
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(card_border(card))
+        .title(format!(" card #{} ", card.id))
+        .title_bottom(fit_verbs(&keys::rail_footer(), area.width));
+    let _ = app;
+    // Wrapped, because the state sentence is the longest line here and it is
+    // the one that must not be clipped: "answered, queued — the agent is told
+    // at the end of the turn in flight" cut at fifty columns says "answered,
+    // queued — the agent is told at the", which reads as a promise about now.
+    // `trim: false` keeps the indentation the lines above were built with.
+    f.render_widget(
+        Paragraph::new(lines)
+            .block(block)
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
+/// The card's state as a sentence, which is where D2 is either honoured or
+/// broken.
+///
+/// An answered card is *queued*, and saying only "answered" would send the
+/// reader back to the transcript to watch for a change that is not due yet.
+/// They would conclude the key did not work and answer it again.
+fn card_state(card: &Card) -> String {
+    match (card.status, card.delivery) {
+        (Status::Open, _) if card.blocking => {
+            "blocked — the run is waiting on this".to_string()
+        }
+        (Status::Open, _) => "open".to_string(),
+        (Status::Answered, Delivery::Queued) => {
+            "answered, queued — the agent is told at the end of the turn in flight".to_string()
+        }
+        (Status::Answered, Delivery::Delivered) => {
+            "answered, and the agent has been told".to_string()
+        }
+        (Status::Answered, Delivery::Undeliverable) => {
+            "answered, but the session ended before it could be told".to_string()
+        }
+        (Status::Answered, Delivery::None) => "answered".to_string(),
+        (Status::Dismissed, _) => "dismissed — the agent is told nothing".to_string(),
+    }
+}
+
+/// A card's colour: blocking first, then kind.
+///
+/// Blocking wins over kind because the two answer different questions and only
+/// one of them is urgent — a blocking secret request and a blocking question
+/// are the same shade of "this run has stopped".
+fn card_colour(card: &Card) -> Color {
+    if card.blocking {
+        return BAD;
+    }
+    match card.kind {
+        CardKind::Decision => USER,
+        CardKind::Question => WARN,
+        CardKind::Secret => Color::Magenta,
+    }
+}
+
+/// The border: kind for the colour, importance for the weight.
+fn card_border(card: &Card) -> Style {
+    if card.blocking {
+        return bold(BAD);
+    }
+    match card.importance {
+        Importance::High => bold(card_colour(card)),
+        Importance::Normal => fg(card_colour(card)),
+        // Dimmed rather than tinted. The glyph still says which kind it is, and
+        // a low-importance card's whole job is to be there without competing
+        // with the one above it.
+        Importance::Low => fg(MUTED),
+    }
+}
+
+// ---- the `@` picker ----------------------------------------------------
+
+/// The mention popup, drawn under the `@` that opened it.
+///
+/// Under the cursor rather than in a corner, because the point of an inline
+/// picker is that you never leave the sentence — which is also why Jod ranks
+/// in-process instead of shelling out to `fzf`, a program that owns a whole
+/// terminal and could not draw this at all. See decision D1.
+fn draw_mention(f: &mut Frame, app: &App, input: Rect) {
+    let Some(popup) = &app.mention else {
+        return;
+    };
+    if app.workspace != Workspace::Chat || input.width < 8 {
+        return;
+    }
+
+    // Zero roots is a message, not an empty list: an empty list reads as "no
+    // matches" and invites another keystroke, and there is no keystroke that
+    // would help.
+    let rows: Vec<ListItem> = if !popup.rooted {
+        vec![ListItem::new(Line::from(Span::styled(
+            cut(mention::NO_ROOTS, input.width.saturating_sub(4) as usize),
+            fg(WARN),
+        )))]
+    } else if popup.rows.is_empty() {
+        vec![ListItem::new(Line::from(Span::styled(
+            "  no match".to_string(),
+            fg(MUTED),
+        )))]
+    } else {
+        popup
+            .rows
+            .iter()
+            .enumerate()
+            .map(|(at, row)| ListItem::new(mention_line(row, at == popup.selected)))
+            .collect()
+    };
+
+    let h = ((rows.len() + 2) as u16)
+        .min(input.y.saturating_sub(1))
+        .max(3);
+    let w = 56u16.min(input.width);
+    // Anchored on the `@` itself, then pulled back inside the box: a popup that
+    // hangs off the right edge of the terminal is drawn over nothing.
+    let col = app.input[..popup.at.min(app.input.len())].chars().count() as u16;
+    let x = (input.x + 1 + CARET.chars().count() as u16 + col).min(
+        input
+            .x
+            .saturating_add(input.width)
+            .saturating_sub(w)
+            .max(input.x),
+    );
+    let panel = Rect {
+        x,
+        y: input.y.saturating_sub(h),
+        width: w,
+        height: h,
+    };
+
+    f.render_widget(Clear, panel);
+    f.render_widget(
+        List::new(rows).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(fg(MUTED))
+                .title(" @ · ⏎ inserts · ↑↓ choose · Esc keeps what you typed "),
+        ),
+        panel,
+    );
+}
+
+/// One offered path, with the characters the query matched picked out.
+///
+/// The highlight is the whole reason [`jod_core::rank::Match`] carries
+/// positions rather than only a score: a fuzzy list you cannot read the match
+/// in is a list you stop trusting.
+fn mention_line(row: &mention::Row, here: bool) -> Line<'static> {
+    let (mark, base) = if here {
+        ("▸ ", fg(AGENT))
+    } else {
+        ("  ", fg(MUTED))
+    };
+    let mut spans = vec![Span::styled(mark.to_string(), bold(USER))];
+    if let Some(label) = &row.label {
+        spans.push(Span::styled(format!("{label}/"), fg(MUTED)));
+    }
+    // Walked by byte offset, which is what `Match::positions` holds, and sliced
+    // directly. The offsets are ascending and always land on a character
+    // boundary — `rank` takes a byte fast path only for an ASCII query and a
+    // char path otherwise, precisely so this loop does not have to check. A
+    // guard here would be a second, weaker copy of a guarantee core already
+    // makes, and it would turn a bug in the matcher into a row that silently
+    // lost its highlight instead of a panic naming the offset.
+    let mut at = 0usize;
+    for hit in row.positions.iter().copied() {
+        if hit > at {
+            spans.push(Span::styled(row.path[at..hit].to_string(), base));
+        }
+        let end = hit + row.path[hit..].chars().next().map_or(0, char::len_utf8);
+        spans.push(Span::styled(row.path[hit..end].to_string(), bold(USER)));
+        at = end;
+    }
+    if at < row.path.len() {
+        spans.push(Span::styled(row.path[at..].to_string(), base));
+    }
+    Line::from(spans)
 }
 
 // ---- the splash --------------------------------------------------------
@@ -886,6 +1512,33 @@ fn draw_keybar(f: &mut Frame, app: &App, area: Rect) {
             "y restarts into the new build · anything else stays".to_string(),
             "Esc stays",
         ),
+        // Named for what they do rather than borrowing the prompt's wording:
+        // "accepts" is the wrong verb for a credential, where the question a
+        // reader has at that moment is what pressing enter is about to commit
+        // them to and whether escape really throws it away.
+        Overlay::Secret { .. } => (
+            "typing is hidden · ⏎ stores it outside every repo".to_string(),
+            "Esc discards it",
+        ),
+        Overlay::Picker(_) => (
+            "type to narrow · ↑↓ choose · ⏎ adds it read-only".to_string(),
+            "Esc cancels",
+        ),
+        Overlay::Search { .. } => (
+            "searching every transcript · ⏎ opens the conversation".to_string(),
+            "Esc closes",
+        ),
+        // The rail is checked before the screen's own filter and before the
+        // screen's own verbs, because while it has the keyboard the screen's
+        // verbs are *not* in force — printing `s stop` beside a rail where `x`
+        // dismisses a card teaches a key that does something else.
+        Overlay::None if app.rail.focused && app.rail.shown && app.rail.editing_filter => (
+            "typing searches the rail".to_string(),
+            "⏎ keeps it · Esc clears it",
+        ),
+        Overlay::None if app.rail.focused && app.rail.shown => {
+            (keys::rail_keybar(area.width), keys::RAIL_EXIT)
+        }
         Overlay::None if app.here().editing_filter => (
             "typing filters this list".to_string(),
             "⏎ keeps it · Esc clears it",
@@ -1109,6 +1762,15 @@ fn draw_overlay(f: &mut Frame, app: &App) {
         Overlay::Prompt { label, value, .. } => draw_prompt(f, label, value),
         Overlay::Jobs => draw_jobs(f, app),
         Overlay::ConfirmReload => draw_confirm_reload(f),
+        Overlay::Secret {
+            name, scope, value, ..
+        } => draw_secret(f, name, *scope, value),
+        Overlay::Picker(p) => draw_picker(f, p),
+        Overlay::Search {
+            query,
+            selected,
+            hits,
+        } => draw_search(f, query, *selected, hits),
     }
 }
 
@@ -1166,6 +1828,127 @@ fn draw_jobs(f: &mut Frame, app: &App) {
     );
 }
 
+/// Full-text search over every transcript.
+///
+/// Each row says **which conversation** the turn is in, because the search is
+/// across all of them and a line of prose with no home is not something you can
+/// decide to open. `messages_fts` covers compacted messages too, so this
+/// reaches turns that have already fallen out of every context window — which
+/// is most of the reason to have it.
+fn draw_search(f: &mut Frame, query: &str, selected: usize, hits: &[crate::tui::data::Hit]) {
+    let screen = f.area();
+    let width = screen.width.saturating_sub(8).min(110).max(40);
+    let height = (hits.len() as u16 + 6).min(screen.height.saturating_sub(2)).max(6);
+    let panel = centred(screen, width, height);
+    let room = width.saturating_sub(4) as usize;
+
+    let mut lines: Vec<Line> = vec![
+        Line::from(vec![
+            Span::styled("  ▸ ".to_string(), fg(USER)),
+            Span::styled(query.to_string(), fg(AGENT)),
+            Span::styled("▏".to_string(), fg(USER)),
+        ]),
+        Line::from(""),
+    ];
+    if query.trim().is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  type to search every conversation, compacted turns included".to_string(),
+            fg(MUTED),
+        )));
+    } else if hits.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  no turn matches".to_string(),
+            fg(MUTED),
+        )));
+    }
+    let rows = height.saturating_sub(5) as usize;
+    let first = window_start(selected, rows.max(1), hits.len());
+    for (at, hit) in hits.iter().enumerate().skip(first).take(rows.max(1)) {
+        let here = at == selected;
+        lines.push(Line::from(vec![
+            Span::styled(if here { "▸ " } else { "  " }.to_string(), bold(USER)),
+            Span::styled(
+                format!("{:<10}", cut(&hit.title, 10)),
+                if here { bold(AGENT) } else { fg(MUTED) },
+            ),
+            Span::styled(format!("{:<6}", cut(&hit.who, 6)), fg(MUTED)),
+            Span::styled(
+                cut(&hit.text, room.saturating_sub(20)),
+                if here { fg(AGENT) } else { fg(MUTED) },
+            ),
+        ]));
+    }
+
+    f.render_widget(Clear, panel);
+    f.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(fg(USER))
+                .title(" search every transcript ")
+                .title_bottom(" ⏎ opens that conversation · ↑↓ choose · Esc closes "),
+        ),
+        panel,
+    );
+}
+
+/// The big half of the one picker.
+///
+/// Rows are drawn by [`mention_line`] — the same function the inline popup
+/// uses — so the matched characters are highlighted identically in both. That
+/// shared call is what makes "one picker at two sizes" true in the rendering
+/// as well as in the matcher.
+fn draw_picker(f: &mut Frame, p: &picker::Picker) {
+    let screen = f.area();
+    let width = (screen.width.saturating_sub(8)).min(96).max(40);
+    let height = (picker::ROWS as u16 + 6).min(screen.height.saturating_sub(2));
+    let panel = centred(screen, width, height);
+
+    let mut lines: Vec<Line> = vec![
+        Line::from(Span::styled(
+            format!("  in {}", p.base.display()),
+            fg(MUTED),
+        )),
+        Line::from(vec![
+            Span::styled("  ▸ ".to_string(), fg(USER)),
+            Span::styled(p.query.clone(), fg(AGENT)),
+            Span::styled("▏".to_string(), fg(USER)),
+        ]),
+        Line::from(""),
+    ];
+    if p.rows.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  no directory matches".to_string(),
+            fg(MUTED),
+        )));
+    }
+    for (at, row) in p.rows.iter().enumerate() {
+        lines.push(mention_line(row, at == p.selected));
+    }
+    // A list that is quietly partial is one you trust and should not.
+    if p.truncated {
+        lines.push(Line::from(Span::styled(
+            format!(
+                "  … more than {} directories here; type to narrow",
+                picker::MAX_DIRS
+            ),
+            fg(WARN),
+        )));
+    }
+
+    f.render_widget(Clear, panel);
+    f.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(fg(USER))
+                .title(" a directory to work in ")
+                .title_bottom(" ⏎ adds it read-only · ↑↓ choose · Esc cancels "),
+        ),
+        panel,
+    );
+}
+
 /// The one question an update cannot answer for itself.
 fn draw_confirm_reload(f: &mut Frame) {
     let panel = centred(f.area(), 62, 6);
@@ -1188,6 +1971,60 @@ fn draw_confirm_reload(f: &mut Frame) {
                 .border_style(fg(AGENT))
                 .title(" update installed ")
                 .title_bottom(" y restarts · anything else stays "),
+        ),
+        panel,
+    );
+}
+
+/// The credential field.
+///
+/// Three things distinguish it from [`draw_prompt`], and each is a rule from
+/// `secret.rs` made visible:
+///
+/// - the field shows `secret::masked`, never the characters — a shoulder, a
+///   screen share and a recorded terminal are all ordinary, and this is the
+///   one part of the flow a user cannot undo afterwards;
+/// - the destination is printed *above* the field, because the moment to learn
+///   where a production token is going is before pasting it, not after;
+/// - the border is `WARN` rather than `USER`, so the one overlay in this
+///   program that must not be typed into absent-mindedly does not look like
+///   the one that asks for a schedule's name.
+fn draw_secret(f: &mut Frame, name: &str, scope: jod_core::secrets::Scope, value: &secret::Typed) {
+    let destination = secret::destination(name, scope);
+    let mut lines: Vec<Line> = vec![Line::from("")];
+    for said in &destination {
+        lines.push(Line::from(Span::styled(format!("  {said}"), fg(MUTED))));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled(format!("  {name} ▸ "), fg(WARN)),
+        // The dots are the whole point: they prove the keystrokes are landing
+        // without saying what they were.
+        Span::styled(secret::masked(value), fg(AGENT)),
+        Span::styled("▏", fg(USER)),
+    ]));
+    lines.push(Line::from(Span::styled(
+        "  the value is not echoed, not stored in the transcript, and not shown to the agent"
+            .to_string(),
+        fg(MUTED),
+    )));
+
+    let width = destination
+        .iter()
+        .map(|l| l.chars().count())
+        .max()
+        .unwrap_or(40)
+        .max(64)
+        + 6;
+    let panel = centred(f.area(), width as u16, lines.len() as u16 + 2);
+    f.render_widget(Clear, panel);
+    f.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(fg(WARN))
+                .title(" a credential ")
+                .title_bottom(" ⏎ stores it · Esc discards it "),
         ),
         panel,
     );
@@ -1275,19 +2112,32 @@ fn draw_which_key(f: &mut Frame, app: &App) {
 /// quietly. Help that lies about being complete is worse than no help, because
 /// you stop looking.
 fn draw_keymap(f: &mut Frame, app: &App) {
-    let mut lines: Vec<Line> = Vec::new();
-    for (heading, bindings) in keys::keymap(app.workspace) {
-        if !lines.is_empty() {
-            lines.push(Line::from(""));
+    // Whichever layer actually has the keyboard, for the reason the overlay is
+    // screen-first at all: help that omits what is in force sends you to the
+    // source, and help that lists what is *not* in force teaches a key that
+    // does something else.
+    let sections = if app.rail.focused && app.rail.shown {
+        keys::rail_keymap()
+    } else {
+        keys::keymap(app.workspace)
+    };
+    let compose = |spaced: bool| {
+        let mut lines: Vec<Line> = Vec::new();
+        for (heading, bindings) in sections.clone() {
+            if spaced && !lines.is_empty() {
+                lines.push(Line::from(""));
+            }
+            lines.push(Line::from(Span::styled(heading, bold(USER))));
+            for binding in bindings {
+                lines.push(Line::from(vec![
+                    Span::styled(format!("  {:<12}", binding.key), fg(WARN)),
+                    Span::styled(binding.what.to_string(), fg(AGENT)),
+                ]));
+            }
         }
-        lines.push(Line::from(Span::styled(heading, bold(USER))));
-        for binding in bindings {
-            lines.push(Line::from(vec![
-                Span::styled(format!("  {:<12}", binding.key), fg(WARN)),
-                Span::styled(binding.what.to_string(), fg(AGENT)),
-            ]));
-        }
-    }
+        lines
+    };
+    let mut lines = compose(true);
     let width_of = |line: &Line| {
         line.spans
             .iter()
@@ -1301,8 +2151,16 @@ fn draw_keymap(f: &mut Frame, app: &App) {
     // a column and the next.
     let rows = screen.height.saturating_sub(2).max(1) as usize;
     let column = widest + 2;
-    let wanted = lines.len().div_ceil(rows);
     let affordable = ((screen.width.saturating_sub(2)) as usize / column.max(1)).max(1);
+    // The blank line between sections is the cheapest thing on this panel — a
+    // heading already separates them, and a separator teaches no key — so a map
+    // that does not fit drops the separators before it drops a binding. Same
+    // budget rule the keybar spends by, and for the same reason: what is
+    // dropped should be the thing you can learn nowhere else, last.
+    if lines.len() > affordable * rows {
+        lines = compose(false);
+    }
+    let wanted = lines.len().div_ceil(rows);
     let columns = wanted.min(affordable);
     let shown = (columns * rows).min(lines.len());
     let hidden = lines.len() - shown;
@@ -1421,6 +2279,7 @@ fn draw_workspace(f: &mut Frame, app: &App, area: Rect) {
         Workspace::Tasks => draw_tasks(f, app, area),
         Workspace::Activity => draw_activity(f, app, area),
         Workspace::Team => draw_team(f, app, area),
+        Workspace::Traffic => draw_traffic(f, app, area),
         Workspace::Chat => {}
     }
 }
@@ -1503,7 +2362,211 @@ fn empty(what: &str) -> Vec<ListItem<'static>> {
 /// A panel you can only look at makes you leave the UI to do anything about
 /// what you saw, so it says how long each has been going, what it last said,
 /// and which keys act on the selected row.
+/// The forest, as rows.
+///
+/// **The column drop order is declared here and nowhere else**: summary first,
+/// then the card count, then the spinner, and the label never. A label that
+/// survives every width is the difference between a narrow tree and a broken
+/// one — you can work out what a row is from its name and nothing else, and
+/// from a truncated name you cannot.
+fn draw_tree(f: &mut Frame, app: &App, area: Rect) {
+    let rows: Vec<&jod_core::tree::Node> = app
+        .tree
+        .visible(&app.forest, &app.closed_works, app.tree_filter())
+        .into_iter()
+        .map(|at| &app.forest[at])
+        .collect();
+    let ids = app.tree_rows();
+    let selected = app.tree.index(&ids);
+    let width = area.width.saturating_sub(2) as usize;
+    // The guides go plain when the terminal says it cannot draw the alphabet.
+    // `NO_COLOR` is the closest signal Jod has to "this terminal is minimal",
+    // and it is the same one the rest of the renderer already honours.
+    let ascii = *COLOURLESS;
+
+    let (start, height) = window(area, selected, rows.len());
+    let items: Vec<ListItem> = rows
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(height)
+        .map(|(at, node)| {
+            let here = at == selected;
+            let expanded = app.tree.is_expanded(&node.id, &app.closed_works);
+            let mut spans = vec![
+                Span::styled(
+                    if here { "▸ " } else { "  " }.to_string(),
+                    bold(USER),
+                ),
+                Span::styled(fleet::guides(&rows, at, ascii), fg(MUTED)),
+                Span::styled(fleet::marker(node, expanded).to_string(), fg(MUTED)),
+                Span::styled(
+                    format!("{} ", fleet::kind_glyph(node.kind)),
+                    fg(work_colour(&node.colour)),
+                ),
+                Span::styled(
+                    node.label.clone(),
+                    if here { bold(AGENT) } else { fg(AGENT) },
+                ),
+            ];
+            let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+            let mut room = width.saturating_sub(used);
+
+            // A spinner, so a running node reads as moving rather than stuck.
+            if node.running {
+                let glyph = format!(" {}", app.spinner());
+                if room >= glyph.chars().count() {
+                    room -= glyph.chars().count();
+                    spans.push(Span::styled(glyph, fg(WARN)));
+                }
+            }
+            // The card count says *where the questions are* without expanding
+            // anything, which is most of why the tree is worth looking at.
+            if node.cards > 0 {
+                let badge = if node.blocked > 0 {
+                    format!(" [{} {}]", node.blocked, rail::BLOCKED)
+                } else {
+                    format!(" [{} cards]", node.cards)
+                };
+                if room >= badge.chars().count() {
+                    room -= badge.chars().count();
+                    spans.push(Span::styled(
+                        badge,
+                        if node.blocked > 0 { bold(BAD) } else { fg(MUTED) },
+                    ));
+                }
+            }
+            // Last on, first off.
+            if !node.summary.is_empty() && room > LEAST_TEXT {
+                spans.push(Span::styled(
+                    format!("  {}", cut(&node.summary, room.saturating_sub(2))),
+                    fg(MUTED),
+                ));
+            }
+            ListItem::new(Line::from(spans))
+        })
+        .collect();
+
+    let blocked: usize = rows
+        .iter()
+        .filter(|n| n.kind == jod_core::tree::NodeKind::Work)
+        .map(|n| n.blocked)
+        .sum();
+    let title = if blocked > 0 {
+        format!(" fleet · {blocked} blocked ")
+    } else {
+        " fleet ".to_string()
+    };
+    f.render_widget(
+        List::new(if items.is_empty() {
+            empty(if app.here().filtering() {
+                "  nothing matches"
+            } else {
+                "  no works yet"
+            })
+        } else {
+            items
+        })
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(fg(USER))
+                .title(title)
+                .title_bottom(fit_verbs(
+                    " ↑↓ pick · →← in/out · space toggle · ⏎ open · z closed ",
+                    area.width,
+                )),
+        ),
+        area,
+    );
+}
+
+/// What the selected node is, in full.
+fn draw_tree_detail(f: &mut Frame, app: &App, area: Rect) {
+    let mut lines: Vec<Line> = Vec::new();
+    match app.selected_node() {
+        Some(node) => {
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("  {} ", fleet::kind_glyph(node.kind)),
+                    fg(work_colour(&node.colour)),
+                ),
+                Span::styled(node.label.clone(), bold(AGENT)),
+            ]));
+            lines.push(Line::from(""));
+            lines.push(detail(
+                "kind",
+                match node.kind {
+                    jod_core::tree::NodeKind::Work => "work",
+                    jod_core::tree::NodeKind::Session => "session",
+                    jod_core::tree::NodeKind::Run => "run",
+                },
+            ));
+            lines.push(detail("id", &short(&node.id.id)));
+            lines.push(detail(
+                "state",
+                if node.running { "running" } else { "idle" },
+            ));
+            if node.cards > 0 {
+                lines.push(detail(
+                    "cards",
+                    &format!("{} open · {} {}", node.cards, node.blocked, rail::BLOCKED),
+                ));
+            }
+            if !node.summary.is_empty() {
+                lines.push(Line::from(""));
+                for wrapped in wrap(&node.summary, area.width.saturating_sub(4) as usize, 2) {
+                    lines.push(Line::from(Span::styled(wrapped, fg(MUTED))));
+                }
+            }
+        }
+        None => lines.push(Line::from(Span::styled(
+            "  nothing selected".to_string(),
+            fg(MUTED),
+        ))),
+    }
+    f.render_widget(
+        Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(fg(MUTED))
+                    .title(" node "),
+            )
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
+/// A work's colour name as one of the eight the terminal's own theme controls.
+///
+/// Unknown names fall back to the ordinary foreground rather than to something
+/// arbitrary: a work whose colour Jod does not recognise should look plain, not
+/// look like a different work.
+fn work_colour(name: &str) -> Color {
+    match name {
+        "red" => BAD,
+        "green" => GOOD,
+        "yellow" => WARN,
+        "blue" => Color::Blue,
+        "magenta" => Color::Magenta,
+        "cyan" => USER,
+        _ => AGENT,
+    }
+}
+
 fn draw_fleet(f: &mut Frame, app: &App, area: Rect) {
+    // The tree the moment there is one. Not a replacement for the flat list
+    // below but the other half of the same screen: a session belonging to no
+    // work has no node in the forest, and the list is what shows it.
+    if app.has_tree() {
+        let (left, right) = split(area);
+        draw_tree(f, app, left);
+        if let Some(right) = right {
+            draw_tree_detail(f, app, right);
+        }
+        return;
+    }
     let (left, right) = split(area);
     let rows = app.fleet_rows();
     let selected = app
@@ -2690,6 +3753,236 @@ fn draw_activity(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(page(Workspace::Activity, app, lines, area.width), area);
 }
 
+/// One work's bus: who said what to whom, threaded, and what did not arrive.
+///
+/// **The column drop order is declared here and nowhere else**: the message
+/// text is what gives way, and never the sender, the recipient or the reason a
+/// message failed. Two of those three are the row's identity and the third is
+/// the only thing on this screen that is *wrong* — a log that clipped
+/// `` `nobody-here` is not a member of this work `` down to `undeliverable`
+/// would have printed the state everybody already suspected and dropped the
+/// half worth reading.
+fn draw_traffic(f: &mut Frame, app: &App, area: Rect) {
+    let (left, right) = split(area);
+    draw_traffic_log(f, app, left);
+    if let Some(right) = right {
+        draw_traffic_detail(f, app, right);
+    }
+}
+
+fn draw_traffic_log(f: &mut Frame, app: &App, area: Rect) {
+    let rows = app.traffic_rows();
+    let selected = app
+        .list(Workspace::Traffic)
+        .index(&app.row_ids(Workspace::Traffic));
+    let width = area.width.saturating_sub(2) as usize;
+
+    let mut items: Vec<ListItem> = Vec::new();
+    items.push(ListItem::new(traffic_header(app, width)));
+
+    if app.traffic_of.is_none() {
+        items.extend(empty("  no work chosen — T on a fleet row opens its bus"));
+    } else if rows.is_empty() {
+        items.extend(empty(if app.here().filtering() {
+            "  nothing matches — Esc clears the filter"
+        } else {
+            "  nothing has been said on this bus yet"
+        }));
+    }
+
+    // One row shorter than the other lists, because the header above is drawn
+    // out of the same budget.
+    let (first, height) = window(area, selected, rows.len());
+    // Which threads a row is the first of, so the pause marker lands on the
+    // thread rather than on every message in it.
+    let mut thread_seen: HashSet<&str> = HashSet::new();
+    for (i, envelope) in rows.iter().enumerate() {
+        let opens_thread = thread_seen.insert(envelope.thread_id.as_str());
+        if i < first || i >= first + height.saturating_sub(1) {
+            continue;
+        }
+        let chosen = i == selected;
+        let held = app.traffic.held.contains(&envelope.message.id);
+        let trouble = traffic::trouble(envelope, held);
+        let colour = if trouble.is_some() { BAD } else { MUTED };
+        let mut spans = vec![
+            Span::styled(if chosen { "▸" } else { " " }, fg(USER)),
+            Span::styled(format!("{} ", traffic::glyph(envelope, held)), fg(colour)),
+            Span::styled(traffic::indent(envelope.depth), fg(MUTED)),
+            Span::styled(traffic::depth_marker(envelope.depth), fg(MUTED)),
+            Span::styled(
+                format!("{} → {}  ", envelope.message.from, envelope.message.to),
+                if chosen { bold(USER) } else { fg(USER) },
+            ),
+        ];
+        let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+        // A paused thread says so on its opening message: G4.S3 pauses a
+        // thread and never the work, so the marker belongs to the thread.
+        let marker = match app.traffic.paused.get(&envelope.thread_id) {
+            Some(state) if state.is_paused() && opens_thread => "  ← paused",
+            _ => "",
+        };
+        // The reason a message failed takes the text's place rather than
+        // sitting after it. On a failure the text is what the sender *tried* to
+        // say and the reason is what happened, and at eighty columns there is
+        // room for exactly one of them.
+        let said = trouble.unwrap_or_else(|| envelope.message.text.clone());
+        let (said, marked) = fit_row(used, &one_line(&said), marker, width);
+        spans.push(Span::styled(
+            said,
+            match (chosen, colour) {
+                (_, BAD) => bold(BAD),
+                (true, _) => bold(AGENT),
+                _ => fg(AGENT),
+            },
+        ));
+        if marked {
+            spans.push(Span::styled(marker.to_string(), fg(WARN)));
+        }
+        items.push(ListItem::new(Line::from(spans)));
+    }
+
+    if let Some(line) = filter_line(app) {
+        items.push(ListItem::new(Line::from("")));
+        items.push(ListItem::new(line));
+    }
+    f.render_widget(body(Workspace::Traffic, items, area.width), area);
+}
+
+/// The line above the log: whose bus this is, and what is left of its budget.
+///
+/// G4.S5 asks for the budget to be visible *before* it is spent, and this is
+/// the row that does it — the escalation card is far too late to be the first
+/// time anybody hears that two agents have been talking for two hundred turns.
+/// The work's colour tints the glyph, so one work's traffic is distinguishable
+/// from another's at a glance; the figures are the channel that survives
+/// `NO_COLOR`.
+fn traffic_header(app: &App, width: usize) -> Line<'static> {
+    if app.traffic_of.is_none() {
+        return Line::from(Span::styled("  nothing open", fg(MUTED)));
+    }
+    let left = app.traffic.budget_left();
+    // Bold and warning-coloured once the allowance is nearly gone, because a
+    // number that looks the same at 190 left and at 3 is a number nobody reads.
+    let tight = left * 10 <= app.traffic.budget;
+    let mut budget = format!("{left} of {} messages left", app.traffic.budget);
+    // The state filter, on the header rather than only in the notice `f`
+    // prints. A notice scrolls away and the narrowing does not, so a log that
+    // said nothing here would look empty for no reason the next time it was
+    // opened.
+    if app.traffic_shown != traffic::Shown::Everything {
+        budget.push_str(&format!(" · {}", app.traffic_shown.label()));
+    }
+    // Six cells of fixed furniture: the margin, the glyph and its space, and
+    // the gap before the budget. The budget is what survives a narrow pane —
+    // the title is repeated in the status bar and the allowance is not.
+    let room = width.saturating_sub(budget.chars().count() + 6);
+    let spans = vec![
+        Span::styled("  ", fg(MUTED)),
+        Span::styled("■ ", fg(work_colour(&app.traffic.colour))),
+        Span::styled(cut(&app.traffic.title, room), bold(AGENT)),
+        Span::styled("  ", fg(MUTED)),
+        Span::styled(budget, if tight { bold(WARN) } else { fg(MUTED) }),
+    ];
+    Line::from(spans)
+}
+
+/// The selected message, whole — which is what the log's rows cannot be.
+fn draw_traffic_detail(f: &mut Frame, app: &App, area: Rect) {
+    let lines: Vec<Line> = match app.selected_message() {
+        None => vec![Line::from(Span::styled(" nothing selected", fg(MUTED)))],
+        Some(envelope) => {
+            let held = app.traffic.held.contains(&envelope.message.id);
+            let mut lines = vec![
+                Line::from(vec![
+                    Span::styled(
+                        format!(" {} → {}", envelope.message.from, envelope.message.to),
+                        bold(USER),
+                    ),
+                    Span::styled(
+                        format!("   #{}", envelope.message.id),
+                        fg(MUTED),
+                    ),
+                ]),
+                Line::from(Span::styled(
+                    format!(
+                        " {} · depth {} · {}",
+                        traffic::state_word(envelope, held),
+                        envelope.depth,
+                        clock(envelope.message.at_ms)
+                    ),
+                    fg(MUTED),
+                )),
+            ];
+            // The reason above the message rather than below it. What a refused
+            // message *said* is the least useful thing about it — nobody read
+            // it — and burying why under the body is how a reader concludes
+            // the row was merely slow.
+            if let Some(trouble) = traffic::trouble(envelope, held) {
+                lines.push(Line::from(""));
+                // Wrapped like the body, and for a sharper reason: this is the
+                // sentence the whole screen exists to deliver, and a reason cut
+                // off at `is not a member o` is a reason nobody can act on.
+                for line in wrapped(&trouble, area.width.saturating_sub(3) as usize) {
+                    lines.push(Line::from(Span::styled(format!(" {line}"), bold(BAD))));
+                }
+            }
+            if let Some(state) = app.traffic.paused.get(&envelope.thread_id) {
+                if state.is_paused() {
+                    lines.push(Line::from(Span::styled(
+                        format!(" this thread is paused · {}", state.as_str().replace('_', " ")),
+                        fg(WARN),
+                    )));
+                }
+            }
+            lines.push(Line::from(""));
+            for line in wrapped(&envelope.message.text, area.width.saturating_sub(3) as usize) {
+                lines.push(Line::from(Span::styled(format!(" {line}"), fg(AGENT))));
+            }
+            lines
+        }
+    };
+    f.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(fg(USER))
+                .title(" the message ")
+                .title_bottom(fit_verbs(&keys::footer(Workspace::Traffic), area.width)),
+        ),
+        area,
+    );
+}
+
+/// A message as one line, because a row is one line and a message is prose.
+fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Wrap prose to a width, on whole words.
+///
+/// Hand-rolled rather than `Wrap`, because the detail pane mixes wrapped body
+/// text with lines that must not wrap — the header, the reason, the thread
+/// state — and `Paragraph::wrap` is all or nothing.
+fn wrapped(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(LEAST_TEXT);
+    let mut lines: Vec<String> = Vec::new();
+    for paragraph in text.lines() {
+        let mut line = String::new();
+        for word in paragraph.split_whitespace() {
+            if !line.is_empty() && line.chars().count() + 1 + word.chars().count() > width {
+                lines.push(std::mem::take(&mut line));
+            }
+            if !line.is_empty() {
+                line.push(' ');
+            }
+            line.push_str(word);
+        }
+        lines.push(line);
+    }
+    lines
+}
+
 /// The team: who is on it, and what each of them is doing.
 ///
 /// Members and the board share one screen because they are one question — "is
@@ -2957,6 +4250,13 @@ fn draw_transcript(f: &mut Frame, app: &App, area: Rect) -> usize {
 /// One transcript entry as styled lines, already wrapped to `width`.
 fn render(entry: &Entry, width: u16) -> Vec<Line<'static>> {
     let (prefix, style, body) = match entry {
+        // Returns from inside the match rather than before it: the other
+        // entries share a prefix/style/body shape that makes one-line entries
+        // uniform, and a diff is the one entry whose whole point is that it is
+        // not one line. An arm keeps the match exhaustive, so a new `Entry`
+        // still fails the build here rather than falling through to a default.
+        Entry::Diff(edit) => return render_diff(edit, width),
+        Entry::Plan(items) => return render_plan(items, width),
         Entry::You(t) => ("› ", bold(USER), t.clone()),
         Entry::Agent(t) => ("", fg(AGENT), t.clone()),
         Entry::Thinking(t) => ("  ", fg(MUTED).add_modifier(Modifier::ITALIC), t.clone()),
@@ -3004,6 +4304,72 @@ fn render(entry: &Entry, width: u16) -> Vec<Line<'static>> {
             Line::from(vec![Span::styled(lead, style), Span::styled(text, style)])
         })
         .collect()
+}
+
+/// The agent's plan, as a block that updates in place.
+///
+/// A count in the header because the thing you want at a glance is *how far
+/// through* it is; the items themselves answer "through what".
+fn render_plan(items: &[todo::Item], width: u16) -> Vec<Line<'static>> {
+    let (done, total) = todo::progress(items);
+    let room = (width as usize).saturating_sub(8);
+    let mut lines = vec![Line::from(vec![
+        Span::styled("  ☰ ".to_string(), fg(USER)),
+        Span::styled("plan".to_string(), bold(AGENT)),
+        Span::styled(format!("  {done}/{total}"), fg(MUTED)),
+    ])];
+    for item in items {
+        let (colour, style) = match item.state {
+            // The one in flight is the only line worth finding at a glance, so
+            // it is the only one in the foreground colour.
+            todo::State::Doing => (WARN, bold(AGENT)),
+            todo::State::Done => (GOOD, fg(MUTED)),
+            todo::State::Pending => (MUTED, fg(MUTED)),
+        };
+        lines.push(Line::from(vec![
+            Span::styled(format!("    {} ", item.state.glyph()), fg(colour)),
+            Span::styled(cut(&item.text, room), style),
+        ]));
+    }
+    lines
+}
+
+/// A file edit, as a diff.
+///
+/// The path is a header rather than a prefix on every line: repeated down forty
+/// rows it would cost the width the code needs, and it is the same file
+/// throughout by construction.
+fn render_diff(edit: &diff::Edit, width: u16) -> Vec<Line<'static>> {
+    let room = (width as usize).saturating_sub(6);
+    let mut lines = vec![Line::from(vec![
+        Span::styled("  ± ".to_string(), fg(WARN)),
+        Span::styled(edit.path.clone(), bold(AGENT)),
+        Span::styled(
+            format!("  +{} -{}", edit.added(), edit.removed()),
+            fg(MUTED),
+        ),
+    ])];
+    for line in &edit.lines {
+        let colour = match line {
+            diff::Line::Added(_) => GOOD,
+            diff::Line::Removed(_) => BAD,
+            diff::Line::Context(_) => MUTED,
+        };
+        lines.push(Line::from(Span::styled(
+            // The sign is inside the styled text rather than a separate span:
+            // it has to survive `NO_COLOR`, and a reader who cannot tell red
+            // from green reads this column instead of the colour.
+            format!("    {}{}", line.sign(), cut(line.text(), room)),
+            fg(colour),
+        )));
+    }
+    if edit.elided > 0 {
+        lines.push(Line::from(Span::styled(
+            format!("    … {} more lines", edit.elided),
+            fg(MUTED),
+        )));
+    }
+    lines
 }
 
 /// Break text to fit, on word boundaries where possible.
@@ -3240,8 +4606,11 @@ mod tests {
     };
     use crate::tui::delivery::Verdict;
     use crate::tui::graph::GraphView;
+    use crate::tui::rail::RailState;
     use crate::tui::PromptIntent;
-    use jod_core::team::{Member, TeamTask};
+    use jod_core::cards::NewCard;
+    use jod_core::store::Store as RealStore;
+    use jod_core::team::{Member, Post, Scope, Sent, TeamTask};
     use jod_core::{HarnessKind, Resume};
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
@@ -3604,6 +4973,11 @@ mod tests {
     fn the_completion_hints_line_up_in_a_column() {
         let mut a = app();
         a.input = "/".into();
+        // Tall enough to hold the whole palette. The two rows sampled below
+        // are the first and the last, deliberately — alignment is only worth
+        // checking across the full width of the list — so the viewport has to
+        // fit every command, and it grows when the palette does. Nothing about
+        // the assertion changes with it.
         let screen = rendered(&a, 100, popup_height());
         // Counted in characters, not bytes: the selection marker is three bytes
         // wide and one column wide, and a byte index would call the two rows
@@ -4003,6 +5377,9 @@ mod tests {
     fn the_splash_yields_to_the_completion_popup_rather_than_clipping_it() {
         let mut a = app();
         a.input = "/".into();
+        // Sized to the palette, as in `the_completion_hints_line_up_in_a_column`:
+        // `/team` is the sentinel for "the far end of the list is reachable",
+        // so the screen has to be tall enough to hold the list it is the end of.
         let screen = rendered(&a, 100, popup_height());
         assert!(screen.contains("this list"), "/help:\n{screen}");
         assert!(
@@ -5989,5 +7366,1036 @@ mod tests {
             !screen.contains("cannot be undone"),
             "a reload is reversible and must not be dressed as a deletion: {screen}"
         );
+    }
+    // ---- the decision rail ----
+
+    /// A conversation with four cards in it, one of them already answered.
+    ///
+    /// Built against a **real store** rather than by assigning to `app.cards`,
+    /// because "the answered one is hidden until toggled" is a fact about the
+    /// query the rail issues, not about the renderer. A fixture assigned by
+    /// hand would assert that the renderer draws whatever it is given, which
+    /// nobody doubted.
+    fn rail_store() -> (RealStore, String) {
+        let store = RealStore::in_memory().expect("an in-memory store");
+        let conversation = store
+            .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
+            .expect("a conversation")
+            .id;
+        let raise = |title: &str, kind: CardKind, blocking: bool, options: Vec<String>| {
+            store
+                .raise_card(NewCard {
+                    conversation_id: conversation.clone(),
+                    run_id: Some("3f2ab1c0".into()),
+                    kind: Some(kind),
+                    importance: Some(if blocking {
+                        Importance::High
+                    } else {
+                        Importance::Normal
+                    }),
+                    blocking,
+                    title: title.into(),
+                    body: "The alternatives were weighed and one was picked.".into(),
+                    options,
+                    ..Default::default()
+                })
+                .expect("a card")
+        };
+        raise(
+            "chat DB: chose SQLite",
+            CardKind::Decision,
+            false,
+            vec!["SQLite".into(), "Postgres".into()],
+        );
+        raise("which port for the API?", CardKind::Question, true, vec![]);
+        raise("GITHUB_TOKEN is missing", CardKind::Secret, false, vec![]);
+        let answered = raise("retry the flaky test?", CardKind::Question, false, vec![]);
+        store
+            .answer_card(answered.id, None, Some("yes, twice"))
+            .expect("answering queues");
+        (store, conversation)
+    }
+
+    /// Read the rail exactly as the running program does: one query, built from
+    /// the rail's own state.
+    fn rail_app(store: &RealStore, conversation: &str, rail: RailState) -> App {
+        let mut a = app();
+        a.conversation = Some(conversation.to_string());
+        a.rail = rail;
+        a.rail.shown = true;
+        a.cards = store
+            .cards(&a.rail.query(a.conversation.clone()))
+            .expect("the rail's query");
+        a.reconcile_rail();
+        a
+    }
+
+    /// **E2's check, word for word:** a rendered frame showing three cards, one
+    /// bordered `blocked`, the answered one hidden until toggled.
+    #[test]
+    fn the_rail_shows_three_cards_one_bordered_blocked_and_the_answered_one_only_on_toggle() {
+        let (store, conversation) = rail_store();
+
+        let open = rail_app(&store, &conversation, Default::default());
+        assert_eq!(open.cards.len(), 3, "the answered card left the stack");
+        let frame = rendered(&open, 150, 40);
+        assert!(frame.contains("chat DB: chose SQLite"), "{frame}");
+        assert!(frame.contains("which port for the API?"), "{frame}");
+        assert!(frame.contains("GITHUB_TOKEN is missing"), "{frame}");
+        assert!(
+            frame.contains(rail::BLOCKED),
+            "the blocking card must carry the word as well as the colour: {frame}"
+        );
+        assert!(
+            !frame.contains("retry the flaky test?"),
+            "an answered card is out of the stack until it is toggled back: {frame}"
+        );
+        // Bordered, not merely listed: three cards means three boxes.
+        assert!(
+            frame.matches('┌').count() >= 3,
+            "each card gets a border of its own: {frame}"
+        );
+
+        // `t` cycles the stack, and the answered card comes back — saying both
+        // what the human did and whether the agent has heard.
+        let mut rail = RailState::default();
+        rail.cycle_stack();
+        let answered = rail_app(&store, &conversation, rail);
+        let frame = rendered(&answered, 150, 40);
+        assert!(frame.contains("retry the flaky test?"), "{frame}");
+        assert!(
+            frame.contains("answered, queued"),
+            "an answer is asynchronous and the rail must not pretend otherwise: {frame}"
+        );
+    }
+
+    /// The lie D2 exists to prevent. Answering while a turn is in flight queues
+    /// the answer; a rail that printed "answered" alone would send the reader
+    /// back to watch for a change that is not due yet.
+    #[test]
+    fn an_expanded_answered_card_says_when_the_agent_will_actually_hear() {
+        let (store, conversation) = rail_store();
+        let mut rail = RailState::default();
+        rail.cycle_stack();
+        rail.expanded = true;
+        let a = rail_app(&store, &conversation, rail);
+        let frame = rendered(&a, 150, 40);
+        assert!(
+            frame.contains("answered, queued"),
+            "{frame}"
+        );
+        assert!(
+            frame.contains("end of the turn"),
+            "it has to say when, not only that it is waiting: {frame}"
+        );
+    }
+
+    /// E2.S4: the full card, with the options numbered as the keys that pick
+    /// them and the run that raised it named.
+    #[test]
+    fn an_expanded_card_numbers_its_options_and_names_who_raised_it() {
+        let (store, conversation) = rail_store();
+        let mut rail = RailState::default();
+        rail.expanded = true;
+        let mut a = rail_app(&store, &conversation, rail);
+        // The decision, which is the one with options on it.
+        a.rail.selected = a
+            .cards
+            .iter()
+            .find(|c| c.kind == CardKind::Decision)
+            .map(|c| c.id);
+        let frame = rendered(&a, 150, 40);
+        assert!(frame.contains("1 SQLite"), "{frame}");
+        assert!(frame.contains("2 Postgres"), "{frame}");
+        assert!(frame.contains("press the digit"), "{frame}");
+        assert!(frame.contains("raised by"), "{frame}");
+        assert!(
+            frame.contains("3f2ab1c0"),
+            "the run that raised it is the first thing anyone asks: {frame}"
+        );
+    }
+
+    /// Reljod's own answer to "rail or third column": on a narrow terminal it
+    /// is one line, not a squeezed rail.
+    #[test]
+    fn a_narrow_terminal_gets_one_line_instead_of_a_squeezed_rail() {
+        let (store, conversation) = rail_store();
+        let a = rail_app(&store, &conversation, Default::default());
+
+        let wide = rendered(&a, 150, 40);
+        assert!(wide.contains("chat DB: chose SQLite"), "{wide}");
+
+        let narrow = rendered(&a, 78, 30);
+        assert!(
+            narrow.contains("3 cards"),
+            "the one-liner still says how many: {narrow}"
+        );
+        assert!(
+            narrow.contains("1 blocked"),
+            "and that one of them stopped a run: {narrow}"
+        );
+        assert!(
+            narrow.contains("Alt-C"),
+            "and which key answers it: {narrow}"
+        );
+        assert!(
+            !narrow.contains("chat DB: chose SQLite"),
+            "a squeezed rail is what this replaces: {narrow}"
+        );
+    }
+
+    /// A rail that is merely shown does not own the keyboard, and the bar has
+    /// to say which of the two states it is in — the letters mean different
+    /// things in each.
+    #[test]
+    fn the_keybar_carries_the_rails_verbs_only_while_the_rail_has_the_keyboard() {
+        let (store, conversation) = rail_store();
+        let mut a = rail_app(&store, &conversation, Default::default());
+
+        let watching = rendered(&a, 150, 40);
+        assert!(!watching.contains("x dismiss"), "{watching}");
+
+        a.rail.focused = true;
+        let holding = rendered(&a, 150, 40);
+        assert!(holding.contains("x dismiss"), "{holding}");
+        assert!(
+            holding.contains("Esc back to the chat"),
+            "the way out is always printed: {holding}"
+        );
+    }
+
+    /// A hidden rail costs the chat nothing, which is what makes `Alt-R` worth
+    /// pressing rather than something you turn off once and forget.
+    #[test]
+    fn a_hidden_rail_takes_no_columns_at_all() {
+        let (store, conversation) = rail_store();
+        let mut a = rail_app(&store, &conversation, Default::default());
+        a.rail.shown = false;
+        let frame = rendered(&a, 150, 40);
+        assert!(!frame.contains("chat DB: chose SQLite"), "{frame}");
+        assert!(!frame.contains(" rail ·"), "{frame}");
+    }
+
+    /// An empty rail says *why* it is empty. "No cards" after typing a filter
+    /// reads as "the agents stopped asking".
+    #[test]
+    fn an_empty_rail_says_which_kind_of_empty_it_is() {
+        let (store, conversation) = rail_store();
+        let mut rail = RailState::default();
+        rail.filter = Some("zzzz".into());
+        let filtered = rail_app(&store, &conversation, rail);
+        assert!(filtered.cards.is_empty());
+        let frame = rendered(&filtered, 150, 40);
+        assert!(frame.contains("nothing matches"), "{frame}");
+
+        let mut bare = rail_app(&store, &conversation, Default::default());
+        bare.cards.clear();
+        bare.reconcile_rail();
+        let frame = rendered(&bare, 150, 40);
+        // A fragment rather than the whole sentence: thirty-four columns wrap
+        // it, and asserting the wrapped shape would pin the rail's width.
+        assert!(frame.contains("nothing waiting"), "{frame}");
+    }
+
+    /// Colour by kind, weight by importance, and `blocked` overriding both —
+    /// asserted here because a flattened frame carries symbols and not styles.
+    #[test]
+    fn a_cards_border_takes_its_colour_from_the_kind_and_its_weight_from_the_importance() {
+        let base = |kind: CardKind, importance: Importance, blocking: bool| Card {
+            id: 1,
+            conversation_id: "c".into(),
+            work_id: None,
+            run_id: None,
+            kind,
+            importance,
+            blocking,
+            status: Status::Open,
+            delivery: jod_core::cards::Delivery::None,
+            title: "t".into(),
+            body: String::new(),
+            options: vec![],
+            chosen: None,
+            answer: None,
+            secret_name: None,
+            secret_scope: None,
+            source: jod_core::cards::Source::Mcp,
+            created_at_ms: 0,
+            updated_at_ms: 0,
+            answered_at_ms: None,
+            delivered_at_ms: None,
+        };
+
+        assert_eq!(
+            card_colour(&base(CardKind::Decision, Importance::Normal, false)),
+            USER
+        );
+        assert_eq!(
+            card_colour(&base(CardKind::Question, Importance::Normal, false)),
+            WARN
+        );
+        // Blocking outranks kind: a blocking secret and a blocking question are
+        // the same shade of "this run has stopped".
+        assert_eq!(
+            card_colour(&base(CardKind::Secret, Importance::Low, true)),
+            BAD
+        );
+        assert!(card_border(&base(CardKind::Decision, Importance::High, false))
+            .add_modifier
+            .contains(Modifier::BOLD));
+        assert!(!card_border(&base(CardKind::Decision, Importance::Normal, false))
+            .add_modifier
+            .contains(Modifier::BOLD));
+    }
+
+    // ---- the plan, inline and in place ----
+
+    fn todo_call(items: &[(&str, &str)]) -> jod_core::AgentEvent {
+        jod_core::AgentEvent::ToolCall {
+            name: "TodoWrite".into(),
+            input: Some(serde_json::json!({
+                "todos": items
+                    .iter()
+                    .map(|(text, status)| serde_json::json!({
+                        "content": text, "status": status
+                    }))
+                    .collect::<Vec<_>>()
+            })),
+        }
+    }
+
+    /// **The slice's whole point**: a revision replaces the block rather than
+    /// following it. A harness rewrites its list once per item finished, and
+    /// appending would put a dozen near-identical lists between two sentences.
+    #[test]
+    fn a_revised_plan_replaces_the_block_rather_than_adding_one() {
+        let mut a = app();
+        a.apply(&todo_call(&[("port the lexer", "in_progress"), ("write the docs", "pending")]));
+        a.apply(&todo_call(&[("port the lexer", "completed"), ("write the docs", "in_progress")]));
+
+        let blocks = a
+            .transcript
+            .iter()
+            .filter(|e| matches!(e, Entry::Plan(_)))
+            .count();
+        assert_eq!(blocks, 1, "one block, however many revisions");
+
+        let frame = rendered(&a, 120, 30);
+        assert!(frame.contains("1/2"), "and it shows the newest state:\n{frame}");
+    }
+
+    /// The block stays where it first appeared. Its position says when the
+    /// agent started planning, and a block that jumped to the bottom on every
+    /// revision would be a second kind of noise in place of the first.
+    #[test]
+    fn the_plan_block_stays_where_it_first_appeared() {
+        let mut a = app();
+        a.apply(&todo_call(&[("port the lexer", "pending")]));
+        a.push(Entry::Agent("starting on the lexer now".into()));
+        a.apply(&todo_call(&[("port the lexer", "completed")]));
+
+        assert!(
+            matches!(a.transcript.first(), Some(Entry::Plan(_))),
+            "still first: {:?}",
+            a.transcript
+        );
+        assert!(matches!(a.transcript.last(), Some(Entry::Agent(_))));
+    }
+
+    #[test]
+    fn the_plan_renders_inline_with_a_glyph_per_state() {
+        let mut a = app();
+        a.apply(&todo_call(&[
+            ("port the lexer", "completed"),
+            ("write the docs", "in_progress"),
+            ("cut a release", "pending"),
+        ]));
+        let frame = rendered(&a, 120, 30);
+        assert!(frame.contains("plan"), "{frame}");
+        assert!(frame.contains("1/3"), "{frame}");
+        assert!(frame.contains("port the lexer"), "{frame}");
+        assert!(frame.contains("write the docs"), "{frame}");
+        // A glyph per state, so the column reads without colour.
+        assert!(frame.contains('●'), "done:\n{frame}");
+        assert!(frame.contains('◐'), "in flight:\n{frame}");
+        assert!(frame.contains('○'), "pending:\n{frame}");
+    }
+
+    // ---- diffs render as diffs ----
+
+    /// **E7's check, the second half**: a rendered frame shows a file edit as a
+    /// diff rather than as a one-line summary.
+    #[test]
+    fn a_file_edit_renders_as_a_diff_with_the_path_as_a_header() {
+        let mut a = app();
+        a.apply(&jod_core::AgentEvent::ToolCall {
+            name: "Edit".into(),
+            input: Some(serde_json::json!({
+                "file_path": "cli/src/tui/ui.rs",
+                "old_string": "let width = 80;\nlet height = 24;\n",
+                "new_string": "let width = 100;\nlet height = 24;\n",
+            })),
+        });
+        let frame = rendered(&a, 120, 30);
+
+        assert!(frame.contains("cli/src/tui/ui.rs"), "the path is a header:\n{frame}");
+        assert!(frame.contains("+1 -1"), "and the shape of the change:\n{frame}");
+        assert!(
+            frame.contains("-let width = 80;"),
+            "the removed line, signed:\n{frame}"
+        );
+        assert!(
+            frame.contains("+let width = 100;"),
+            "the added line, signed:\n{frame}"
+        );
+        assert!(
+            frame.contains(" let height = 24;"),
+            "and unchanged context around it:\n{frame}"
+        );
+    }
+
+    /// Everything that is not an edit keeps its one-line summary, so the
+    /// transcript does not turn into a wall of diffs.
+    #[test]
+    fn a_tool_that_is_not_an_edit_still_renders_as_one_line() {
+        let mut a = app();
+        a.apply(&jod_core::AgentEvent::ToolCall {
+            name: "Bash".into(),
+            input: Some(serde_json::json!({ "command": "cargo test" })),
+        });
+        let frame = rendered(&a, 120, 30);
+        assert!(frame.contains("Bash · cargo test"), "{frame}");
+        assert!(!frame.contains('±'), "no diff header:\n{frame}");
+    }
+
+    // ---- searching every transcript ----
+
+    /// The search is across *every* conversation, so a hit that did not say
+    /// where it came from would be a line of prose you cannot decide to open.
+    #[test]
+    fn the_search_names_the_conversation_each_hit_is_in() {
+        let mut a = app();
+        a.overlay = Overlay::Search {
+            query: "lexer".into(),
+            selected: 0,
+            hits: vec![
+                crate::tui::data::Hit {
+                    conversation_id: "conv-a".into(),
+                    title: "the parser".into(),
+                    who: "agent".into(),
+                    text: "porting the lexer now".into(),
+                },
+                crate::tui::data::Hit {
+                    conversation_id: "conv-b".into(),
+                    title: "the deploy".into(),
+                    who: "you".into(),
+                    text: "does the lexer matter here".into(),
+                },
+            ],
+        };
+        let frame = rendered(&a, 120, 24);
+        assert!(frame.contains("the parser"), "{frame}");
+        assert!(frame.contains("the deploy"), "{frame}");
+        assert!(frame.contains("porting the lexer"), "{frame}");
+        assert!(frame.contains("opens that conversation"), "{frame}");
+    }
+
+    /// An empty box says what it is for rather than listing every message ever.
+    #[test]
+    fn an_empty_search_box_says_what_it_searches() {
+        let mut a = app();
+        a.overlay = Overlay::Search {
+            query: String::new(),
+            selected: 0,
+            hits: vec![],
+        };
+        let frame = rendered(&a, 120, 24);
+        assert!(frame.contains("compacted turns included"), "{frame}");
+    }
+
+    // ---- the fleet tree ----
+
+    fn tree_node(
+        id: jod_core::tree::NodeId,
+        parent: Option<jod_core::tree::NodeId>,
+        kind: jod_core::tree::NodeKind,
+        depth: usize,
+        label: &str,
+    ) -> jod_core::tree::Node {
+        jod_core::tree::Node {
+            id,
+            parent,
+            kind,
+            depth,
+            label: label.into(),
+            summary: String::new(),
+            running: false,
+            cards: 0,
+            blocked: 0,
+            colour: "cyan".into(),
+            expanded: true,
+            has_children: false,
+        }
+    }
+
+    /// **E5's check**: two works, four sessions, one expanded run, and a
+    /// blocked count in the gutter.
+    fn two_works() -> App {
+        use jod_core::tree::{NodeId, NodeKind};
+        let mut a = app();
+
+        let mut parser = tree_node(NodeId::work("w1"), None, NodeKind::Work, 0, "the parser");
+        parser.has_children = true;
+        parser.cards = 3;
+        parser.blocked = 1;
+        parser.colour = "cyan".into();
+
+        let mut lexer = tree_node(
+            NodeId::session("s1"),
+            Some(NodeId::work("w1")),
+            NodeKind::Session,
+            1,
+            "port the lexer",
+        );
+        lexer.has_children = true;
+        lexer.running = true;
+        lexer.cards = 1;
+        lexer.blocked = 1;
+        lexer.summary = "editing tokens.rs".into();
+
+        let mut run = tree_node(
+            NodeId::run("r1"),
+            Some(NodeId::session("s1")),
+            NodeKind::Run,
+            2,
+            "cargo test",
+        );
+        run.running = true;
+
+        let docs = tree_node(
+            NodeId::session("s2"),
+            Some(NodeId::work("w1")),
+            NodeKind::Session,
+            1,
+            "write the docs",
+        );
+
+        let mut deploy = tree_node(NodeId::work("w2"), None, NodeKind::Work, 0, "the deploy");
+        deploy.has_children = true;
+        deploy.colour = "green".into();
+
+        let ci = tree_node(
+            NodeId::session("s3"),
+            Some(NodeId::work("w2")),
+            NodeKind::Session,
+            1,
+            "fix the CI",
+        );
+        let release = tree_node(
+            NodeId::session("s4"),
+            Some(NodeId::work("w2")),
+            NodeKind::Session,
+            1,
+            "cut a release",
+        );
+
+        a.forest = vec![parser, lexer, run, docs, deploy, ci, release];
+        a.go(Workspace::Fleet);
+        let rows = a.tree_rows();
+        a.tree.reconcile(&rows);
+        a
+    }
+
+    #[test]
+    fn the_fleet_tree_draws_two_works_four_sessions_and_an_expanded_run() {
+        let a = two_works();
+        let frame = rendered(&a, 150, 30);
+
+        assert!(frame.contains("the parser"), "{frame}");
+        assert!(frame.contains("the deploy"), "{frame}");
+        for session in [
+            "port the lexer",
+            "write the docs",
+            "fix the CI",
+            "cut a release",
+        ] {
+            assert!(frame.contains(session), "{session} missing:\n{frame}");
+        }
+        assert!(
+            frame.contains("cargo test"),
+            "the expanded run:\n{frame}"
+        );
+        assert!(
+            frame.contains("1 blocked"),
+            "the blocked count in the gutter:\n{frame}"
+        );
+        // Guides, so the shape reads as a tree rather than as an indented list.
+        assert!(frame.contains('├') || frame.contains('└'), "{frame}");
+    }
+
+    /// Collapsing a work takes its sessions off the screen and leaves the other
+    /// work alone — the property the whole navigation hangs off.
+    #[test]
+    fn collapsing_a_work_hides_only_its_own_sessions() {
+        let mut a = two_works();
+        a.tree.selected = Some(jod_core::tree::NodeId::work("w1"));
+        let closed = a.closed_works.clone();
+        a.tree.toggle(&closed);
+
+        let frame = rendered(&a, 150, 30);
+        assert!(!frame.contains("port the lexer"), "{frame}");
+        assert!(!frame.contains("cargo test"), "{frame}");
+        assert!(frame.contains("the parser"), "the work itself stays:\n{frame}");
+        assert!(frame.contains("fix the CI"), "the other work is untouched:\n{frame}");
+    }
+
+    /// A filter keeps the path to every hit, so a matching session never floats
+    /// at a depth with nothing above it.
+    #[test]
+    fn a_filtered_tree_keeps_the_work_above_every_hit() {
+        let mut a = two_works();
+        // Through the screen's own `/`, which is what the key actually writes
+        // to — and `reconcile` after it, because a cursor left on a
+        // filtered-out node would keep the detail pane on a row the list no
+        // longer shows. That was a real bug this test found.
+        a.list_mut(Workspace::Fleet).filter = Some("release".into());
+        a.reconcile();
+        let frame = rendered(&a, 150, 30);
+        assert!(frame.contains("cut a release"), "{frame}");
+        assert!(
+            frame.contains("the deploy"),
+            "its work is kept as the path to it:\n{frame}"
+        );
+        assert!(!frame.contains("port the lexer"), "{frame}");
+        assert!(!frame.contains("the parser"), "{frame}");
+    }
+
+    /// The declared drop order: the summary goes first, the label never.
+    #[test]
+    fn a_narrow_tree_drops_the_summary_before_the_label() {
+        let a = two_works();
+        let wide = rendered(&a, 150, 30);
+        assert!(wide.contains("editing tokens.rs"), "{wide}");
+
+        // Narrow enough that the drop actually bites: the row's fixed part —
+        // guides, marker, glyph, label, spinner, card badge — is already near
+        // forty columns, so the summary only goes when there is less than
+        // `LEAST_TEXT` left after it.
+        let narrow = rendered(&a, 50, 30);
+        assert!(
+            narrow.contains("port the lexer"),
+            "the label survives every width:\n{narrow}"
+        );
+        assert!(
+            !narrow.contains("editing tokens.rs"),
+            "the summary is the first thing to go:\n{narrow}"
+        );
+    }
+
+    /// With no works the screen is the older flat list, because a session that
+    /// belongs to no work has no node in the forest.
+    #[test]
+    fn the_fleet_falls_back_to_its_list_when_there_are_no_works() {
+        // Its own fixture rather than `tui::tests`'s: a test module cannot see
+        // a sibling's helpers, and reaching for one is what left this file not
+        // compiling.
+        let mut a = app();
+        a.agents = vec![
+            agent_line("aaa11111", "port the parser", "running"),
+            agent_line("bbb22222", "write the docs", "completed"),
+        ];
+        a.go(Workspace::Fleet);
+        assert!(!a.has_tree());
+        let frame = rendered(&a, 150, 30);
+        assert!(frame.contains("aaa11111"), "the flat list still draws:\n{frame}");
+    }
+
+    // ---- the secret card ----
+
+    /// The moment to learn where a production token is going is before pasting
+    /// it, so the destination is on the card as well as in the field.
+    #[test]
+    fn an_expanded_secret_card_says_where_the_value_will_live() {
+        let store = RealStore::in_memory().expect("an in-memory store");
+        let conversation = store
+            .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
+            .expect("a conversation")
+            .id;
+        store
+            .raise_card(NewCard {
+                conversation_id: conversation.clone(),
+                kind: Some(CardKind::Secret),
+                title: "GITHUB_TOKEN is missing".into(),
+                secret_name: Some("GITHUB_TOKEN".into()),
+                secret_scope: Some("work".into()),
+                ..Default::default()
+            })
+            .expect("a card");
+
+        let mut rail = RailState {
+            expanded: true,
+            ..Default::default()
+        };
+        rail.shown = true;
+        let a = rail_app(&store, &conversation, rail);
+        // Fragments short enough to survive the pane's wrap. The *wording* is
+        // pinned in `secret::tests`, which reads the unwrapped source; what
+        // this asserts is that the block reaches the screen at all.
+        let frame = rendered(&a, 150, 40);
+        assert!(frame.contains("stored outside"), "{frame}");
+        assert!(frame.contains("0600"), "{frame}");
+        assert!(
+            frame.contains("only this work's sessions"),
+            "the scope as who can use it: {frame}"
+        );
+        assert!(
+            frame.contains("never echoed"),
+            "and how the field will behave: {frame}"
+        );
+    }
+
+    /// The one part of this flow a user cannot undo afterwards. A shoulder, a
+    /// screen share and a recorded terminal are all ordinary.
+    #[test]
+    fn the_credential_field_shows_dots_and_never_the_value() {
+        let mut a = app();
+        a.transcript.push(Entry::Notice("hello".into()));
+        let mut value = secret::Typed::new();
+        for c in "sk-live-abcdef".chars() {
+            value.push(c);
+        }
+        a.overlay = Overlay::Secret {
+            card: 9,
+            name: "GITHUB_TOKEN".into(),
+            scope: jod_core::secrets::Scope::Work,
+            value,
+        };
+        let frame = rendered(&a, 120, 34);
+        assert!(!frame.contains("sk-live"), "the value is on screen: {frame}");
+        assert!(frame.contains("••••••••••••••"), "{frame}");
+        assert!(frame.contains("GITHUB_TOKEN"), "the name is not a secret: {frame}");
+        assert!(frame.contains("Esc discards it"), "{frame}");
+    }
+
+    // ---- cascading cards ----
+
+    /// E4.S5: with the subtree scope on, the rail holds cards from agents all
+    /// over the fleet and answering writes against one of them, so every row
+    /// has to say whose question it is.
+    #[test]
+    fn a_cascaded_rail_names_the_session_on_every_card() {
+        let store = RealStore::in_memory().expect("an in-memory store");
+        let conversation = store
+            .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
+            .expect("a conversation")
+            .id;
+        store
+            .raise_card(NewCard {
+                conversation_id: conversation.clone(),
+                run_id: Some("3f2ab1c0".into()),
+                title: "which port for the API?".into(),
+                ..Default::default()
+            })
+            .expect("a card");
+
+        let mut a = rail_app(&store, &conversation, RailState::default());
+        assert!(a.rail.cascade, "the orchestrator's rail is the default");
+        let frame = rendered(&a, 150, 40);
+        let session: String = conversation.chars().take(8).collect();
+        assert!(frame.contains(&session), "the session that raised it: {frame}");
+        assert!(frame.contains("3f2a"), "and which run: {frame}");
+        assert!(
+            frame.contains("· subtree"),
+            "the scope is on the header, always: {frame}"
+        );
+
+        // Narrowed to one conversation, every card came from the same place,
+        // so the line spends its columns on the card instead — and the header
+        // says which of the two states this is, because a narrowed rail and a
+        // quiet fleet look identical otherwise.
+        a.rail.cascade = false;
+        let frame = rendered(&a, 150, 40);
+        assert!(frame.contains("· here"), "{frame}");
+        assert!(
+            !frame.contains(&session),
+            "narrowed, every card came from here, so the columns go to the card: {frame}"
+        );
+    }
+
+    // ---- the traffic log ----
+
+    /// A work with three agents on its bus, one exchange threaded, and one
+    /// message sent to somebody who is not a member of it.
+    ///
+    /// Built against a **real store** and read through `data::traffic_from` —
+    /// the loader the tick actually calls — rather than by assigning to
+    /// `app.traffic`. Threading, the depth, and the sentence explaining a
+    /// refusal are all facts about what `Store::post` wrote; a fixture built by
+    /// hand would assert that the renderer draws whatever it is handed, which
+    /// nobody doubted.
+    fn traffic_store() -> (RealStore, String) {
+        let store = RealStore::in_memory().expect("an in-memory store");
+        let work = store.create_work("port the parser").expect("a work");
+        store
+            .set_work_title(&work.id, "port the parser")
+            .expect("a title");
+        for name in ["asker", "answerer", "scribe"] {
+            store
+                .join_scope(
+                    Scope::Work,
+                    &work.id,
+                    name,
+                    HarnessKind::ClaudeCode,
+                    "engineer",
+                    None,
+                )
+                .expect("a member");
+        }
+
+        let post = |from: &str, to: &str, text: &str, replying_to: Option<i64>| -> Sent {
+            let mut p = Post::new(Scope::Work, &work.id, from, text).to(to);
+            if let Some(id) = replying_to {
+                p = p.replying_to(id);
+            }
+            store.post(&p).expect("a post")
+        };
+
+        let question = match post("asker", "answerer", "where does the lexer live?", None) {
+            Sent::Queued { ids, .. } => ids[0],
+            other => panic!("the question did not go on the bus: {other:?}"),
+        };
+        post(
+            "answerer",
+            "asker",
+            "in core, beside the tokeniser",
+            Some(question),
+        );
+        post("scribe", "asker", "the docs are written", None);
+        // The one that could not be delivered. `reljod` is the person's name on
+        // this bus and *is* a member of the work, so the refusal a real fleet
+        // produces needs a name that is not — exactly as `tests/e2e/jod/out/a2a.txt`
+        // records it.
+        let refused = post("asker", "nobody-here", "are you free?", None);
+        assert!(
+            matches!(refused, Sent::Undeliverable { .. }),
+            "the fixture must actually produce a refusal: {refused:?}"
+        );
+        (store, work.id)
+    }
+
+    fn traffic_app(store: &RealStore, work: &str) -> App {
+        let mut a = app();
+        a.traffic_of = Some(traffic::Watching::work(work));
+        a.traffic = crate::tui::data::traffic_from(store, a.traffic_of.as_ref().unwrap());
+        a.go(Workspace::Traffic);
+        a
+    }
+
+    /// **G5's check, word for word:** a rendered frame showing a threaded
+    /// exchange between three members with one undelivered message marked.
+    #[test]
+    fn the_traffic_log_shows_a_threaded_exchange_between_three_members_with_one_undelivered() {
+        let (store, work) = traffic_store();
+        let a = traffic_app(&store, &work);
+        let frame = rendered(&a, 150, 30);
+
+        for member in ["asker", "answerer", "scribe"] {
+            assert!(frame.contains(member), "{member} is not on the log:\n{frame}");
+        }
+
+        // Threaded: the reply is drawn *further in* than the question it
+        // answers, which is the whole of "a reply should be visibly under what
+        // it answers". Measured as a column rather than as a substring,
+        // because an indent is a position and asserting on spaces in a
+        // formatted string proves only that the string was formatted.
+        let question = column_of(&frame, "asker → answerer");
+        let answer = column_of(&frame, "answerer → asker");
+        assert!(
+            answer > question,
+            "the reply is not indented under its question — {answer} vs {question}:\n{frame}"
+        );
+
+        // Marked, and marked with the reason rather than with the state word.
+        // A8: mail that fails silently is worse than mail that fails.
+        assert!(
+            frame.contains("undeliverable"),
+            "the refusal is not marked:\n{frame}"
+        );
+        assert!(
+            frame.contains("`nobody-here` is not a member of this work"),
+            "the row says what went wrong but not why:\n{frame}"
+        );
+    }
+
+    /// Which column a phrase starts in, or a panic naming the frame — the
+    /// indent test is worthless if a missing row reads as column zero.
+    fn column_of(frame: &str, needle: &str) -> usize {
+        frame
+            .lines()
+            .find_map(|line| line.find(needle))
+            .unwrap_or_else(|| panic!("{needle:?} is not on the frame:\n{frame}"))
+    }
+
+    /// G4.S5: the allowance is on screen before it is spent, because the
+    /// escalation card is far too late to be the first time anybody hears that
+    /// two agents have been talking for two hundred turns.
+    #[test]
+    fn the_traffic_log_says_what_is_left_of_the_works_message_budget() {
+        let (store, work) = traffic_store();
+        let a = traffic_app(&store, &work);
+        let frame = rendered(&a, 150, 30);
+        // Three delivered messages spend the budget; the refused one does not,
+        // which is `MailState::counts_against_budget` and is core's rule rather
+        // than this screen's.
+        assert!(
+            frame.contains("197 of 200 messages left"),
+            "the budget is not on the screen:\n{frame}"
+        );
+    }
+
+    /// The work's colour is what tells one work's traffic from another's at a
+    /// glance, and it has to reach the header rather than staying in the store.
+    #[test]
+    fn the_traffic_header_is_tinted_with_the_works_own_colour() {
+        let (store, work) = traffic_store();
+        let colour = store
+            .work(&work)
+            .expect("the work")
+            .expect("the work exists")
+            .colour;
+        let a = traffic_app(&store, &work);
+        assert_eq!(a.traffic.colour, colour, "the loader dropped the colour");
+        let line = traffic_header(&a, 60);
+        let glyph = line
+            .spans
+            .iter()
+            .find(|s| s.content.trim() == "■")
+            .expect("the header carries a work glyph");
+        assert_eq!(
+            glyph.style.fg,
+            Some(work_colour(&colour)),
+            "the glyph is not the work's colour"
+        );
+        assert!(
+            line.spans.iter().any(|s| s.content.contains("port the parser")),
+            "and the header names the work"
+        );
+    }
+
+    /// The screen has to be honest before anything has been opened on it —
+    /// an empty box with no explanation reads as a broken screen.
+    #[test]
+    fn a_traffic_log_with_no_work_chosen_says_how_to_choose_one() {
+        let mut a = app();
+        a.go(Workspace::Traffic);
+        let frame = rendered(&a, 120, 20);
+        assert!(frame.contains("T on a fleet row"), "{frame}");
+    }
+
+    /// The state cycle narrows the log to what did not arrive, which is the
+    /// question this screen is opened to answer.
+    #[test]
+    fn the_state_filter_narrows_the_log_to_what_never_arrived() {
+        let (store, work) = traffic_store();
+        let mut a = traffic_app(&store, &work);
+        a.traffic_shown = traffic::Shown::Problems;
+        a.reconcile();
+        let frame = rendered(&a, 150, 30);
+        assert!(
+            frame.contains("`nobody-here` is not a member of this work"),
+            "{frame}"
+        );
+        assert!(
+            !frame.contains("the docs are written"),
+            "a delivered message survived the problems filter:\n{frame}"
+        );
+        // And the screen says it is narrowed. A notice scrolls away; the
+        // narrowing does not, so a log that only announced it once would look
+        // empty for no reason the next time it was opened.
+        assert!(
+            frame.contains(traffic::Shown::Problems.label()),
+            "the header does not say the log is narrowed:\n{frame}"
+        );
+    }
+
+    // ---- the `@` picker ----
+
+    /// D1's second requirement: the matched characters are picked out, so a row
+    /// says *why* it matched.
+    #[test]
+    fn a_mention_row_highlights_exactly_the_characters_that_matched() {
+        let row = crate::tui::mention::Row {
+            label: None,
+            path: "core/src/rank.rs".into(),
+            positions: vec![9, 10, 11, 12],
+        };
+        let line = mention_line(&row, true);
+        let lit: String = line
+            .spans
+            .iter()
+            .filter(|s| s.style.add_modifier.contains(Modifier::BOLD))
+            // The cursor marker is bold too, and it is not part of the path.
+            .filter(|s| s.content.trim() != "▸")
+            .map(|s| s.content.to_string())
+            .collect();
+        assert_eq!(lit, "rank");
+        let whole: String = line.spans.iter().map(|s| s.content.to_string()).collect();
+        assert!(whole.contains("core/src/rank.rs"), "{whole}");
+    }
+
+    /// Several roots means every row says which one it came from, because
+    /// `src/main.rs` names two files when a session can see two repositories.
+    #[test]
+    fn a_mention_row_from_a_qualified_root_prints_the_root() {
+        let row = crate::tui::mention::Row {
+            label: Some("jod".into()),
+            path: "src/main.rs".into(),
+            positions: vec![],
+        };
+        let whole: String = mention_line(&row, false)
+            .spans
+            .iter()
+            .map(|s| s.content.to_string())
+            .collect();
+        assert!(whole.contains("jod/src/main.rs"), "{whole}");
+    }
+
+    /// The spec's own words: with zero roots it says so. An empty list would
+    /// read as "no matches" and invite another keystroke that cannot help.
+    #[test]
+    fn the_picker_with_no_roots_says_so_rather_than_showing_an_empty_list() {
+        let mut a = app();
+        a.transcript.push(Entry::Notice("hello".into()));
+        a.input = "look at @".into();
+        a.cursor = a.input.len();
+        a.open_mention(8);
+        let frame = rendered(&a, 120, 30);
+        assert!(frame.contains("no roots set"), "{frame}");
+    }
+
+    /// With a root set, the popup ranks live under the cursor.
+    #[test]
+    fn the_picker_ranks_what_is_under_the_cursor() {
+        let mut a = app();
+        a.transcript.push(Entry::Notice("hello".into()));
+        a.roots = vec![jod_core::roots::Root {
+            id: 1,
+            conversation_id: "c".into(),
+            path: std::path::PathBuf::from("/home/reljod/repo/jod"),
+            writable: false,
+            position: 0,
+            origin: jod_core::roots::Origin::Human,
+            added_at_ms: 0,
+        }];
+        a.candidates = vec![std::sync::Arc::new(vec![
+            "cli/src/tui/mod.rs".to_string(),
+            "core/src/rank.rs".to_string(),
+        ])];
+        a.input = "@rank".into();
+        a.cursor = a.input.len();
+        a.open_mention(0);
+        a.sync_mention();
+        let frame = rendered(&a, 120, 30);
+        assert!(frame.contains("core/src/rank.rs"), "{frame}");
+        assert!(frame.contains("Esc keeps what you typed"), "{frame}");
     }
 }

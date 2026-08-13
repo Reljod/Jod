@@ -22,16 +22,27 @@ use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use std::collections::HashSet;
+
+use jod_core::cards::{Card, Query};
+use jod_core::commands::Discovered;
+use jod_core::HarnessKind;
+use jod_core::rank;
+use jod_core::roots::Root;
+use jod_core::tree::{Node, NodeId, NodeKind};
+use jod_core::works::Filter;
 use jod_core::schedule::{
     Fire, FireOutcome, Goal, GoalState as StoredGoalState, Schedule,
     ScheduleState as StoredScheduleState,
 };
 use jod_core::store::{Edge, Fact, Origin, Store, StoredRun};
-use jod_core::team::TeamTask;
+use jod_core::team::{Scope, TeamTask};
 use jod_core::webhook::{Delivery as StoredDelivery, DeliveryStatus, Rule};
 use jod_core::Jod;
 
 use super::app::short_duration;
+use super::traffic;
+use super::traffic::Watching;
 use super::workspace::Workspace;
 
 /// How a run, a fire or a delivery ended.
@@ -1341,6 +1352,229 @@ pub fn tasks(jod: &Arc<Jod>, team: Option<&str>) -> Vec<TaskRow> {
         .iter()
         .flat_map(|t| store.team_tasks(t).unwrap_or_default())
         .map(task_row)
+        .collect()
+}
+
+// ---- what a repository offers -------------------------------------------
+
+/// The slash commands and skills found under this session's roots, for the
+/// harness on screen.
+///
+/// **Filtered by harness in the query, not afterwards.** A
+/// `.claude/commands/foo.md` has no OpenCode equivalent, so offering it to
+/// OpenCode would be offering something that cannot resolve — and the honest
+/// alternative, pasting the body in, is the inlining branch D7's measurement
+/// deleted. `Discovered::invoke` refuses a mismatch as a backstop; this is what
+/// keeps one from ever being on screen to pick.
+pub fn discovered(jod: &Arc<Jod>, harness: HarnessKind) -> Vec<Discovered> {
+    match jod.store() {
+        Some(store) => store.discovered(Some(harness)).unwrap_or_default(),
+        None => Vec::new(),
+    }
+}
+
+// ---- searching the transcript -------------------------------------------
+
+/// One hit, flattened to what the screen draws.
+///
+/// A view model rather than `conversation::SearchHit` because that carries a
+/// window and two bookends — everything needed to *open* a hit — and the list
+/// draws one line per hit. Keeping the id means opening it is still one step.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Hit {
+    pub conversation_id: String,
+    /// What the conversation is called, so a hit says where it is from.
+    pub title: String,
+    pub who: String,
+    pub text: String,
+}
+
+/// Full-text search across every conversation.
+///
+/// Across *all* of them, which is what `search_messages` offers: it takes a
+/// query and a limit and nothing else. Narrowing the query to one conversation
+/// would need a parameter the store does not have — see `search` in the TUI for
+/// why filtering the results here instead would under-report.
+pub fn search(jod: &Arc<Jod>, query: &str, limit: usize) -> Vec<Hit> {
+    let Some(store) = jod.store() else {
+        return Vec::new();
+    };
+    store
+        .search_messages(query, limit)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|hit| Hit {
+            who: hit.message.role.as_str().to_string(),
+            text: one_line(&hit.message.text),
+            conversation_id: hit.conversation_id,
+            title: hit.title,
+        })
+        .collect()
+}
+
+// ---- the fleet tree -----------------------------------------------------
+
+/// The forest, with closed works after the live ones, and the set of works
+/// that are closed.
+///
+/// Two queries rather than one sort. `works()` orders by recency, so closed and
+/// live are interleaved, and E5.S3b wants the archives below — asking core
+/// twice with its own [`Filter`] gets that from core's own semantics instead of
+/// re-ordering its output here. It also answers "which of these is an archive"
+/// exactly, which a [`Node`] cannot: it carries no state, and inferring one
+/// from a label would be guessing.
+///
+/// `show_closed` off is the cheaper path *and* the default, because a tree that
+/// opens as a list of everything ever done is one people stop reading.
+pub fn forest(jod: &Arc<Jod>, show_closed: bool) -> (Vec<Node>, HashSet<NodeId>) {
+    let Some(store) = jod.store() else {
+        return (Vec::new(), HashSet::new());
+    };
+    let mut nodes = store.forest_of(Filter::Live).unwrap_or_default();
+    let mut closed = HashSet::new();
+    if show_closed {
+        let archived = store.forest_of(Filter::Closed).unwrap_or_default();
+        for node in &archived {
+            if node.kind == NodeKind::Work {
+                closed.insert(node.id.clone());
+            }
+        }
+        nodes.extend(archived);
+    }
+    (nodes, closed)
+}
+
+/// One scope's agent-to-agent traffic, and the bounds it is running against.
+///
+/// Five reads rather than one, and deliberately: `traffic` is the log,
+/// `bounds_for` and `messages_used` are the budget the bus itself enforces,
+/// `thread_state` is per thread because G4.S3 pauses a thread and never a work,
+/// and `mail_held` is the only thing that knows a queued message is waiting for
+/// a work that has already closed. Every one of them is an indexed read over a
+/// table bounded by one work's conversation, on the same tick the fleet already
+/// refreshes on.
+///
+/// A store error leaves the field as it is loaded so far rather than taking the
+/// UI down, like every other loader here.
+pub fn traffic(jod: &Arc<Jod>, watching: Option<&Watching>) -> traffic::Log {
+    let (Some(store), Some(watching)) = (jod.store(), watching) else {
+        return traffic::Log::default();
+    };
+    traffic_from(store, watching)
+}
+
+pub fn traffic_from(store: &Store, watching: &Watching) -> traffic::Log {
+    let messages = store
+        .traffic(watching.scope, &watching.id)
+        .unwrap_or_default();
+
+    // The title and the colour come from the work itself. A team has neither,
+    // and says so by being named after itself rather than by borrowing a
+    // work's tint — the colour is what distinguishes one *work* from another.
+    let (title, colour) = match watching.scope {
+        Scope::Work => match store.work(&watching.id) {
+            Ok(Some(work)) => {
+                let title = if work.title.trim().is_empty() {
+                    work.id.chars().take(8).collect()
+                } else {
+                    work.title
+                };
+                (title, work.colour)
+            }
+            _ => (watching.id.chars().take(8).collect(), String::new()),
+        },
+        Scope::Team => (watching.id.clone(), String::new()),
+    };
+
+    // Read from the bus rather than off `works.messages_used`: `bounds_for` is
+    // the function that actually refuses a message, so a second number on the
+    // screen that could disagree with it would be worse than no number.
+    let bounds = store
+        .bounds_for(watching.scope, &watching.id)
+        .unwrap_or_default();
+    let used = store
+        .messages_used(watching.scope, &watching.id)
+        .unwrap_or_default();
+
+    // One state per distinct thread. The list is short — it is bounded by the
+    // conversations one work has had — and asking per message would ask the
+    // same question once per hop.
+    let mut paused: HashMap<String, jod_core::team::ThreadState> = HashMap::new();
+    for envelope in &messages {
+        if paused.contains_key(&envelope.thread_id) {
+            continue;
+        }
+        if let Ok(state) = store.thread_state(watching.scope, &watching.id, &envelope.thread_id) {
+            paused.insert(envelope.thread_id.clone(), state);
+        }
+    }
+
+    // Mail that is waiting and will never move, because the work it was
+    // addressed into is over. `queued` is the honest state and the misleading
+    // word; this is what tells the two apart.
+    let held: HashSet<i64> = store
+        .mail_held()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|w| w.scope == watching.scope && w.team == watching.id)
+        .flat_map(|w| w.pending.into_iter().map(|m| m.id))
+        .collect();
+
+    traffic::Log {
+        title,
+        colour,
+        used,
+        budget: bounds.message_budget,
+        messages,
+        paused,
+        held,
+    }
+}
+
+// ---- the decision rail, and the `@` picker ------------------------------
+
+/// The cards the rail is showing.
+///
+/// The whole filter travels as a [`Query`] rather than being applied here,
+/// which is the rule E2.S5 sets: the text filter is full-text search through
+/// the same index `jod card ls` and the MCP tool go through, so a card found in
+/// the terminal is the card found on a phone. A filter re-implemented in Rust
+/// would drift from those two on the first keystroke.
+pub fn cards(jod: &Arc<Jod>, query: &Query) -> Vec<Card> {
+    match jod.store() {
+        Some(store) => store.cards(query).unwrap_or_default(),
+        None => Vec::new(),
+    }
+}
+
+/// The directories a conversation may work in, in the user's own order.
+///
+/// Empty with no conversation *and* empty with no roots, which are the same
+/// thing to the picker: both mean there is nothing to search, and E1.S3 says
+/// the popup must say so rather than fall back to the process's own directory.
+pub fn roots(jod: &Arc<Jod>, conversation: Option<&str>) -> Vec<Root> {
+    let (Some(store), Some(conversation)) = (jod.store(), conversation) else {
+        return Vec::new();
+    };
+    store.roots(conversation).unwrap_or_default()
+}
+
+/// Every root's candidate paths, positionally aligned with `roots`.
+///
+/// Loaded on the tick rather than when `@` is pressed. The enumeration is
+/// cached inside [`rank::candidates_shared`] with a short TTL, so this is
+/// usually a lock and a pointer copy — but *usually* is not a guarantee, and
+/// the one call that misses the cache walks a repository. Doing that from the
+/// key handler would stall the keystroke that opened the popup; doing it here
+/// costs a frame of a background refresh instead.
+///
+/// A root that cannot be read contributes an empty list rather than failing the
+/// lot: a conversation with two roots and one unmounted disk should still be
+/// able to mention a file in the other.
+pub fn candidates(roots: &[Root]) -> Vec<Arc<Vec<String>>> {
+    roots
+        .iter()
+        .map(|root| rank::candidates_shared(&root.path).unwrap_or_default())
         .collect()
 }
 

@@ -260,6 +260,49 @@ enum Command {
         #[arg(short, long, default_value_t = 20)]
         limit: usize,
     },
+    /// The decision rail, from the command line.
+    ///
+    /// The same cards the terminal shows, answered the same way — which is the
+    /// point: a blocker raised at midnight is answerable over SSH from a phone
+    /// without opening the full-screen interface.
+    Card {
+        #[command(subcommand)]
+        what: CardCommand,
+    },
+    /// The directories a conversation may work in.
+    ///
+    /// A session can be pointed at several repositories at once. Exactly one of
+    /// them is ever writable — a worktree the session claimed — and the real
+    /// checkout stays beside it, readable.
+    Root {
+        #[command(subcommand)]
+        what: RootCommand,
+    },
+    /// Credentials an agent can use and cannot read.
+    ///
+    /// Values live outside every repository at owner-only permissions, are
+    /// injected into the agent's environment at spawn, and are scrubbed out of
+    /// everything it prints. The agent is told a *name*, so a missing key
+    /// blocks one test rather than a session.
+    Secret {
+        #[command(subcommand)]
+        what: SecretCommand,
+    },
+    /// The slash commands and skills the repositories on this box define.
+    ///
+    /// Jod reimplements none of them. It finds them, says which harness's
+    /// convention each one follows, and forwards the name to a harness that can
+    /// resolve it — measured per harness in `docs/harness-support.md`, never
+    /// assumed.
+    Commands {
+        #[command(subcommand)]
+        what: CommandsCommand,
+    },
+    /// Works: one intent, spanning several sessions.
+    Work {
+        #[command(subcommand)]
+        what: WorkCommand,
+    },
     /// Conversations Jod owns: list them, fork one, take one back.
     ///
     /// A conversation here is a tree, not a line. Two of the three harnesses
@@ -459,6 +502,289 @@ enum McpCommand {
 }
 
 #[derive(Subcommand)]
+enum CardCommand {
+    /// Cards, most pressing first. Open ones only, unless you say otherwise.
+    Ls {
+        /// Only this conversation's. A prefix of its id is enough.
+        #[arg(short, long)]
+        conversation: Option<String>,
+        /// This conversation's *and every session below it* — what the
+        /// orchestrator's rail shows. Cascade is upward only.
+        #[arg(long, conflicts_with = "conversation")]
+        subtree: Option<String>,
+        #[arg(short, long)]
+        work: Option<String>,
+        #[arg(short, long, value_enum)]
+        kind: Option<KindArg>,
+        #[arg(short, long, value_enum, default_value_t = StatusArg::Open)]
+        status: StatusArg,
+        /// Only the ones that stopped a run.
+        #[arg(short, long)]
+        blocking: bool,
+        /// Full-text match over title, body and answer.
+        #[arg(short, long)]
+        text: Option<String>,
+        #[arg(long, value_enum, default_value_t = SortArg::Pressing)]
+        sort: SortArg,
+        #[arg(short, long, default_value_t = 30)]
+        limit: u32,
+        #[arg(long)]
+        json: bool,
+    },
+    /// One card in full, with its options and where it came from.
+    Show {
+        id: i64,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Answer it. The agent is told at the end of its current turn, never
+    /// mid-turn — see `jod card show` for whether it has heard yet.
+    ///
+    /// For a secret card this asks for the value on the terminal and writes it
+    /// straight through to the secret store; it never appears in an argument,
+    /// in this database, or in the agent's context.
+    Answer {
+        id: i64,
+        /// Pick one of the card's numbered options.
+        #[arg(short = 'o', long)]
+        option: Option<usize>,
+        /// Answer in prose. Combined with --option when both are given.
+        text: Vec<String>,
+    },
+    /// Read it and deliberately leave it unanswered. The agent is told nothing,
+    /// which is the difference between this and an empty answer.
+    Dismiss { id: i64 },
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, ValueEnum)]
+enum KindArg {
+    Decision,
+    Question,
+    Secret,
+}
+
+impl From<KindArg> for jod_core::cards::CardKind {
+    fn from(a: KindArg) -> Self {
+        use jod_core::cards::CardKind;
+        match a {
+            KindArg::Decision => CardKind::Decision,
+            KindArg::Question => CardKind::Question,
+            KindArg::Secret => CardKind::Secret,
+        }
+    }
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, ValueEnum)]
+enum StatusArg {
+    Open,
+    Answered,
+    Dismissed,
+}
+
+impl From<StatusArg> for jod_core::cards::Status {
+    fn from(a: StatusArg) -> Self {
+        use jod_core::cards::Status;
+        match a {
+            StatusArg::Open => Status::Open,
+            StatusArg::Answered => Status::Answered,
+            StatusArg::Dismissed => Status::Dismissed,
+        }
+    }
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, ValueEnum)]
+enum SortArg {
+    /// Blocking first, then importance, then newest.
+    Pressing,
+    Importance,
+    Created,
+    Updated,
+}
+
+impl From<SortArg> for jod_core::cards::Sort {
+    fn from(a: SortArg) -> Self {
+        use jod_core::cards::Sort;
+        match a {
+            SortArg::Pressing => Sort::Pressing,
+            SortArg::Importance => Sort::Importance,
+            SortArg::Created => Sort::Created,
+            SortArg::Updated => Sort::Updated,
+        }
+    }
+}
+
+#[derive(Subcommand)]
+enum RootCommand {
+    /// Every directory this conversation may work in, in its own order.
+    Ls {
+        #[arg(short, long)]
+        conversation: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Add a directory, read-only.
+    ///
+    /// Read-only is not a flag you can lift here: a root becomes writable only
+    /// by a session claiming a worktree, which is what keeps a run's
+    /// half-finished state off your checkout.
+    Add {
+        path: PathBuf,
+        #[arg(short, long)]
+        conversation: Option<String>,
+    },
+    /// Drop a directory. Its files are not touched.
+    Rm {
+        path: PathBuf,
+        #[arg(short, long)]
+        conversation: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum SecretCommand {
+    /// The names a run here would be given, and nothing else about them.
+    ///
+    /// With no scope, the globals. With `--work`, what a session on that work
+    /// resolves — narrower scopes overriding wider ones by name, exactly as
+    /// the spawn path resolves them.
+    Ls {
+        #[arg(short, long)]
+        work: Option<String>,
+        #[arg(short, long)]
+        conversation: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Store a value.
+    ///
+    /// **The value is never an argument.** Anything on a command line is
+    /// world-readable through `/proc` for as long as the process lives, and it
+    /// is in your shell history for ever afterwards. This asks for it on the
+    /// terminal with the echo off, or reads it from stdin when you pipe one in
+    /// — `printf %s "$KEY" | jod secret set NAME --global`, with `printf` and
+    /// not `echo`, because a trailing newline becomes part of the credential.
+    Set {
+        /// A legal environment variable name: a letter or underscore, then
+        /// letters, digits and underscores.
+        name: String,
+        /// What it is for. Shown to the agent, which is how it knows which
+        /// variable to reach for.
+        #[arg(long, default_value = "")]
+        hint: String,
+        #[command(flatten)]
+        scope: ScopeArgs,
+    },
+    /// Forget a value. The file holding it is removed.
+    Rm {
+        name: String,
+        #[command(flatten)]
+        scope: ScopeArgs,
+    },
+}
+
+/// Who a secret is for — asked for explicitly, every time.
+///
+/// Deliberately without a default. The scope is the blast radius if the value
+/// leaks, and a default would make the widest choice the quiet one: `--global`
+/// hands a key to every session on the box, and that should be a thing somebody
+/// typed rather than a thing they omitted.
+#[derive(clap::Args)]
+#[group(required = true, multiple = false)]
+struct ScopeArgs {
+    /// Every session on this machine.
+    #[arg(long)]
+    global: bool,
+    /// One work. The scope to prefer: a key given for one project is not then
+    /// handed to every session on the box.
+    #[arg(long)]
+    work: Option<String>,
+    /// One conversation.
+    #[arg(long)]
+    conversation: Option<String>,
+}
+
+impl ScopeArgs {
+    fn resolve(&self) -> (jod_core::secrets::Scope, String) {
+        use jod_core::secrets::Scope;
+        match (&self.work, &self.conversation) {
+            (Some(work), _) => (Scope::Work, work.clone()),
+            (_, Some(conversation)) => (Scope::Conversation, conversation.clone()),
+            // The group is `required = true` and mutually exclusive, so this is
+            // `--global` and clap has already refused every other shape.
+            _ => (Scope::Global, String::new()),
+        }
+    }
+}
+
+#[derive(Subcommand)]
+enum CommandsCommand {
+    /// Every command and skill found under a conversation's roots and in your
+    /// own config.
+    ///
+    /// Rescans by default, because a listing that answered from a stale cache
+    /// would offer a command somebody deleted this morning. `--cached` reads
+    /// what was last found instead, which is what the palette does on every
+    /// keystroke.
+    Ls {
+        /// Whose roots to scan. Defaults to the main chat's.
+        #[arg(short, long)]
+        conversation: Option<String>,
+        /// Scan these directories instead of a conversation's roots.
+        #[arg(long = "root")]
+        roots: Vec<PathBuf>,
+        /// Only what this harness can resolve. A command is offered to the
+        /// harness whose convention it follows and to no other — Jod does not
+        /// forward one across conventions.
+        #[arg(short = 'H', long, value_enum)]
+        harness: Option<HarnessArg>,
+        /// Answer from the cache rather than looking at the disk.
+        #[arg(long)]
+        cached: bool,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum WorkCommand {
+    /// Works, most recently touched first. Live ones by default.
+    Ls {
+        #[arg(long, conflicts_with = "closed")]
+        all: bool,
+        #[arg(long)]
+        closed: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// One work: its sessions, its board, its leases and its open cards.
+    Show {
+        id: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// End it now, without waiting for its board to empty.
+    ///
+    /// Closing destroys nothing — the record, the tree and the worktrees all
+    /// stay. A work whose sessions are still running becomes *finishing*
+    /// rather than closed.
+    Close { id: String },
+    /// Remove the work and every session in it: transcripts, cards, bus
+    /// traffic. Its worktrees and branches are left exactly where they are.
+    Delete { id: String },
+    /// The worktrees works have claimed, and what state each one is in.
+    Leases {
+        /// One work's. Omit for every lease Jod knows about.
+        id: Option<String>,
+        /// Only those whose work has been deleted — the ones nothing else will
+        /// ever mention again.
+        #[arg(long)]
+        orphaned: bool,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum ConvCommand {
     /// Every conversation, newest first.
     Ls {
@@ -507,6 +833,14 @@ enum ConvCommand {
         /// whoever ran the summarising agent.
         summary: String,
     },
+    /// Delete a conversation and everything it holds: its transcript, its
+    /// cards, its roots, its queued answers.
+    ///
+    /// Refuses two things, and both refusals are the point. The main chat is
+    /// the one conversation that is always there. And a session belonging to a
+    /// work can only go when the work does — removing one on its own would
+    /// leave a tree pointing at a session that is gone.
+    Rm { id: String },
     /// What this conversation would be handed to another harness as.
     ///
     /// Prints the carrier rather than moving anything, because seeing what
@@ -1048,24 +1382,65 @@ async fn main() -> Result<()> {
             }
             require_supervisor(&jod)?;
 
+            let resume = match session {
+                Some(id) => Resume::Session(id),
+                None if continue_last => Resume::Last,
+                None => Resume::Fresh,
+            };
+            // What this run may reach, folded in from the conversation it
+            // continues — the same move `prefer_conversation_settings` makes
+            // for the model and the permission, and for the same reason: these
+            // are facts about the thread, not about the command line.
+            //
+            // Secret *names*, never values. The value is read at exec time by
+            // the supervisor, out of a file only its owner can open; nothing in
+            // this process, this argv or `spawn.json` ever holds one.
+            let (roots, secrets) = match jod.store() {
+                Some(store) => grants_for_run(store, &resume, harness.into())?,
+                None => (Vec::new(), Vec::new()),
+            };
+            // Where the session *lives*, not where the command was typed.
+            //
+            // A resumed run in the wrong directory is not a cosmetic mistake.
+            // OpenCode resolves its project from `--dir` and scopes sessions to
+            // it, and `--session <id>` naming a session from another project
+            // does not error — **it hangs, silently, for ever**. Measured:
+            // `opencode run --format json --dir <other> --session <id> "…"`
+            // emitted nothing at all on either stream and was still running
+            // when killed at 90 seconds, while the identical command with the
+            // session's own `--dir` answered in under a second. That is what
+            // made a resumed OpenCode run in the parity suite produce one bare
+            // `finished` event and never terminate — the directory, not the
+            // session id, which was correct all along.
+            //
+            // Jod knows the answer, so it uses it. An explicit `--cwd` still
+            // wins: somebody who names a directory means it, and being told
+            // where their session lives is [`continuing_conversation`]'s job
+            // rather than this one's.
+            let cwd = match (cwd, jod.store()) {
+                (Some(given), _) => given,
+                (None, Some(store)) => session_cwd(store, &resume, harness.into())?
+                    .unwrap_or_else(jod_core::service::default_cwd),
+                (None, None) => jod_core::service::default_cwd(),
+            };
+
             let req = SpawnRequest {
                 name: name.unwrap_or_else(|| default_name(&prompt)),
                 harness: harness.into(),
                 prompt,
                 system: None,
-                cwd: cwd.unwrap_or_else(jod_core::service::default_cwd),
+                cwd,
                 model,
                 permission: permission.into(),
-                resume: match session {
-                    Some(id) => Resume::Session(id),
-                    None if continue_last => Resume::Last,
-                    None => Resume::Fresh,
-                },
+                resume,
+                roots,
+                secrets,
                 // `jod run` is one task, not an orchestrator. Handing it Jod's
                 // own verbs would let a one-liner create schedules that spend
                 // money nightly, which is a decision that should be made on
                 // purpose rather than inherited from a default.
                 tools: None,
+                ..SpawnRequest::default()
             };
 
             // Subscribe *before* spawning, so no early event is missed.
@@ -1254,6 +1629,11 @@ async fn main() -> Result<()> {
         } => {
             main_chat(&jod, instruction.join(" "), wait, harness, cwd, limit).await?;
         }
+        Command::Card { what } => card_command(&jod, what)?,
+        Command::Root { what } => root_command(&jod, what)?,
+        Command::Secret { what } => secret_command(&jod, what)?,
+        Command::Commands { what } => commands_command(&jod, what)?,
+        Command::Work { what } => work_command(&jod, what)?,
         Command::Conv { what } => conv_command(&jod, what)?,
         Command::Schedule { what } => schedule_command(&jod, what)?,
         Command::Webhook { what } => webhook_command(&jod, what)?,
@@ -1472,6 +1852,7 @@ async fn main() -> Result<()> {
                                 permission: permission.into(),
                                 resume: Resume::Session(order.session_id),
                                 tools: None,
+                                ..SpawnRequest::default()
                             })
                             .await?;
                         // Drain only once the spawn succeeded, so a failure
@@ -1531,6 +1912,7 @@ async fn main() -> Result<()> {
                             permission: permission.into(),
                             resume: Resume::Fresh,
                             tools: None,
+                            ..SpawnRequest::default()
                         })
                         .await?;
                     store.set_member_status(&team, &member, MemberStatus::Busy)?;
@@ -1774,6 +2156,19 @@ fn conv_command(jod: &Jod, what: ConvCommand) -> Result<()> {
                 done.before_chars, done.after_chars
             );
         }
+        ConvCommand::Rm { id } => {
+            let id = resolve(&id)?;
+            // Unrecoverable, so it says what went rather than "ok". The counts
+            // are read before the delete because afterwards there is nothing
+            // left to count.
+            let messages = store.thread(&id)?.len();
+            let (open, _) = store.count_open_cards(&id, false)?;
+            store.delete_conversation(&id)?;
+            println!(
+                "deleted {} — {messages} message(s), {open} unanswered card(s)",
+                short_id(&id)
+            );
+        }
         ConvCommand::Handoff { id, to } => {
             let id = resolve(&id)?;
             let carrier = store.handoff(&id, HarnessKind::from(to))?;
@@ -1803,6 +2198,543 @@ fn conv_command(jod: &Jod, what: ConvCommand) -> Result<()> {
         }
     }
     Ok(())
+}
+
+// ---- the rail, the roots, the secrets and the works ----------------------
+
+/// Carry out a `jod card …` subcommand.
+///
+/// Everything here goes through the same [`jod_core::cards::Query`] the
+/// terminal rail uses, so a card listed on a phone is the card that is on the
+/// screen at home, sorted the same way. A second query builder here would drift
+/// within a week — that is the whole reason the store takes a filter rather
+/// than offering a function per caller.
+fn card_command(jod: &Jod, what: CardCommand) -> Result<()> {
+    use jod_core::cards::{Query, Sort};
+    let store = jod.store().context("this command needs the database")?;
+    let now = chrono::Utc::now().timestamp_millis();
+    match what {
+        CardCommand::Ls {
+            conversation,
+            subtree,
+            work,
+            kind,
+            status,
+            blocking,
+            text,
+            sort,
+            limit,
+            json,
+        } => {
+            let query = Query {
+                conversation_id: conversation
+                    .map(|c| resolve_conversation(store, &c))
+                    .transpose()?,
+                subtree_of: subtree.map(|c| resolve_conversation(store, &c)).transpose()?,
+                work_id: work,
+                kind: kind.map(Into::into),
+                status: Some(status.into()),
+                blocking_only: blocking,
+                text,
+                sort: Sort::from(sort),
+                limit: Some(limit),
+            };
+            let cards = store.cards(&query)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&cards)?);
+            } else if cards.is_empty() {
+                println!("no cards");
+            } else {
+                render::cards(&cards, now);
+            }
+        }
+        CardCommand::Show { id, json } => {
+            let card = require_card(store, id)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&card)?);
+            } else {
+                render::card(&card, now);
+            }
+        }
+        CardCommand::Answer { id, option, text } => {
+            let card = require_card(store, id)?;
+            let chosen = match option {
+                // One-based, because that is how the rail numbers them and how
+                // the card prints them. Refused rather than clamped: answering
+                // the wrong option is worse than being told to look again.
+                Some(n) => Some(
+                    card.options
+                        .get(n.checked_sub(1).context("options are numbered from 1")?)
+                        .with_context(|| {
+                            format!(
+                                "card #{id} has {} option(s); `jod card show {id}` lists them",
+                                card.options.len()
+                            )
+                        })?
+                        .clone(),
+                ),
+                None => None,
+            };
+            let text = text.join(" ");
+            let answered = match card.kind {
+                jod_core::cards::CardKind::Secret => answer_secret_card(store, &card)?,
+                _ => store.answer_card(
+                    id,
+                    chosen.as_deref(),
+                    Some(text.as_str()).filter(|t| !t.is_empty()),
+                )?,
+            };
+            render::card(&answered, now);
+            // The asynchrony is stated rather than implied. Somebody who
+            // answered ten cards during one turn should not be waiting for
+            // something to happen.
+            println!(
+                "\nqueued for {} — it reaches the agent at the end of its current turn, \
+                 not now",
+                short_id(&answered.conversation_id)
+            );
+        }
+        CardCommand::Dismiss { id } => {
+            store.dismiss_card(id)?;
+            println!("card #{id} dismissed — the agent is told nothing");
+        }
+    }
+    Ok(())
+}
+
+fn require_card(store: &Store, id: i64) -> Result<jod_core::cards::Card> {
+    store
+        .card(id)?
+        .with_context(|| format!("no card #{id} — `jod card ls` lists them"))
+}
+
+/// Answer a secret card by storing the value, never by carrying it.
+///
+/// The value goes from the terminal to [`Store::put_secret`] and nowhere else.
+/// What is written on the card is a confirmation — the name and the scope —
+/// because that card is delivered to the agent, and the whole of D3 is that the
+/// agent is told a name and never a value.
+fn answer_secret_card(store: &Store, card: &jod_core::cards::Card) -> Result<jod_core::cards::Card> {
+    use jod_core::secrets::{Scope, MIN_REDACTABLE_LEN};
+    let name = card
+        .secret_name
+        .as_deref()
+        .context("this secret card carries no variable name, so there is nothing to store")?;
+    let scope = Scope::parse(card.secret_scope.as_deref().unwrap_or("work"));
+    // The card records where the value *would* go; the id comes from the card's
+    // own conversation and work, which is the only place it could honestly come
+    // from — the agent that asked has no say in how widely it is shared.
+    let scope_id = match scope {
+        Scope::Global => String::new(),
+        Scope::Work => card.work_id.clone().unwrap_or_default(),
+        Scope::Conversation => card.conversation_id.clone(),
+    };
+    if scope != Scope::Global && scope_id.is_empty() {
+        bail!(
+            "card #{} asks for a {} secret and has no {} to attach it to — \
+             `jod secret set {name} --global` stores it for every session instead",
+            card.id,
+            scope.as_str(),
+            scope.as_str()
+        );
+    }
+
+    let value = read_secret_value(&format!("value for {name}"))?;
+    let meta = store.put_secret(name, scope, &scope_id, &value, &card.body)?;
+    drop(value);
+    if !meta.redactable {
+        // Said out loud, because a silent exception here is a leak nobody was
+        // told about: a value this short would match half of ordinary output,
+        // so it is injected and not scrubbed.
+        println!(
+            "note: {name} is shorter than {MIN_REDACTABLE_LEN} characters, so it is injected \
+             but NOT redacted from what the agent prints"
+        );
+    }
+    Ok(store.answer_card(
+        card.id,
+        None,
+        Some(&format!(
+            "{name} is stored, {} scope. It is injected into the environment of the next run \
+             — not the one in flight — and you will never be shown its value.",
+            scope.as_str()
+        )),
+    )?)
+}
+
+/// Carry out a `jod root …` subcommand.
+fn root_command(jod: &Jod, what: RootCommand) -> Result<()> {
+    use jod_core::roots::NewRoot;
+    let store = jod.store().context("this command needs the database")?;
+    match what {
+        RootCommand::Ls { conversation, json } => {
+            let id = which_conversation(store, conversation)?;
+            let roots = store.roots(&id)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&roots)?);
+            } else if roots.is_empty() {
+                println!("no roots on {} — `jod root add <path>` sets one", short_id(&id));
+            } else {
+                render::roots(&roots);
+            }
+        }
+        RootCommand::Add { path, conversation } => {
+            let id = which_conversation(store, conversation)?;
+            let root = store.add_root(&id, NewRoot::reading(&path))?;
+            render::roots(&[root]);
+        }
+        RootCommand::Rm { path, conversation } => {
+            let id = which_conversation(store, conversation)?;
+            if store.remove_root(&id, &path)? {
+                println!("{} is no longer a root of {}", path.display(), short_id(&id));
+            } else {
+                bail!("{} is not a root of {}", path.display(), short_id(&id));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The conversation a root command acts on: the one named, or the main chat.
+///
+/// The main chat is not created here if it is missing. `jod root ls` on a fresh
+/// machine should say there is nothing rather than mint a conversation as a
+/// side effect of looking.
+fn which_conversation(store: &Store, typed: Option<String>) -> Result<String> {
+    match typed {
+        Some(typed) => resolve_conversation(store, &typed),
+        None => store.pinned_conversation()?.context(
+            "no conversation given and there is no main chat yet — pass --conversation, \
+             or start one with `jod main \"…\"`",
+        ),
+    }
+}
+
+/// Carry out a `jod secret …` subcommand.
+fn secret_command(jod: &Jod, what: SecretCommand) -> Result<()> {
+    let store = jod.store().context("this command needs the database")?;
+    match what {
+        SecretCommand::Ls {
+            work,
+            conversation,
+            json,
+        } => {
+            // The resolution the spawn path performs, not a raw listing:
+            // "which `OPENAI_API_KEY` would a run here actually get" is the
+            // question somebody is asking, and two rows of the same name would
+            // not answer it.
+            let names = store.secrets_for(conversation.as_deref(), work.as_deref())?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&names)?);
+            } else if names.is_empty() {
+                println!("no secrets in scope — `jod secret set <NAME> --global` stores one");
+            } else {
+                render::secrets(&names);
+            }
+        }
+        SecretCommand::Set { name, hint, scope } => {
+            let (scope, scope_id) = scope.resolve();
+            let value = read_secret_value(&format!("value for {name}"))?;
+            let meta = store.put_secret(&name, scope, &scope_id, &value, &hint)?;
+            drop(value);
+            println!("{} stored, {} scope", meta.name, meta.scope.as_str());
+            if !meta.redactable {
+                println!(
+                    "note: shorter than {} characters, so it is injected but NOT redacted \
+                     from what an agent prints — redacting something this short would mangle \
+                     ordinary output",
+                    jod_core::secrets::MIN_REDACTABLE_LEN
+                );
+            }
+            println!("it applies from the next spawn; runs already going were built without it");
+        }
+        SecretCommand::Rm { name, scope } => {
+            let (scope, scope_id) = scope.resolve();
+            if store.remove_secret(&name, scope, &scope_id)? {
+                println!("{name} forgotten");
+            } else {
+                bail!("no {} secret named {name}", scope.as_str());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Read a credential from the terminal without echoing it, or from stdin.
+///
+/// Two paths because both are real. At a terminal the value is typed and must
+/// not appear on screen or in the scrollback; in a script it arrives on stdin,
+/// where there is nothing to echo. What neither path is, ever, is an argument:
+/// `/proc/<pid>/cmdline` is world-readable for the life of the process, and the
+/// shell keeps a copy in its history for ever after that.
+///
+/// Read exactly as given, with only a trailing newline removed — the one the
+/// terminal adds when you press enter. Everything else is part of the value.
+fn read_secret_value(prompt: &str) -> Result<String> {
+    use std::io::IsTerminal;
+    if !std::io::stdin().is_terminal() {
+        let piped = read_stdin()?;
+        let value = piped.strip_suffix('\n').unwrap_or(&piped);
+        if value.is_empty() {
+            bail!("nothing arrived on stdin — pipe the value in, or run this at a terminal");
+        }
+        return Ok(value.to_string());
+    }
+    eprint!("{prompt}: ");
+    std::io::Write::flush(&mut std::io::stderr()).ok();
+    let value = read_without_echo();
+    eprintln!();
+    let value = value?;
+    if value.trim().is_empty() {
+        bail!("nothing typed");
+    }
+    Ok(value)
+}
+
+/// One line from the terminal with the echo off.
+///
+/// Raw mode rather than a crate: `crossterm` is already here for the
+/// full-screen interface and this is a dozen lines against a dependency whose
+/// whole job is to turn one flag off. Raw mode is disabled on every path out,
+/// including the error ones — a terminal left raw is a terminal that stops
+/// responding to Ctrl-C, which for a command that has just failed is a worse
+/// outcome than the failure.
+fn read_without_echo() -> Result<String> {
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    crossterm::terminal::enable_raw_mode().context("could not turn the terminal's echo off")?;
+    let mut value = String::new();
+    let outcome = loop {
+        match crossterm::event::read() {
+            Ok(Event::Key(KeyEvent { code, modifiers, .. })) => match code {
+                KeyCode::Enter => break Ok(()),
+                KeyCode::Backspace => {
+                    value.pop();
+                }
+                // Ctrl-C at a password prompt means "stop", and it must not
+                // leave a half-typed credential behind to be stored.
+                KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
+                    value.clear();
+                    break Err(anyhow::anyhow!("cancelled"));
+                }
+                KeyCode::Char(c) => value.push(c),
+                _ => {}
+            },
+            Ok(_) => {}
+            Err(e) => break Err(anyhow::anyhow!("could not read the value: {e}")),
+        }
+    };
+    crossterm::terminal::disable_raw_mode().ok();
+    outcome.map(|()| value)
+}
+
+/// Carry out a `jod commands …` subcommand.
+///
+/// The first thing in Jod that calls discovery at all. `scan`, `cache_discovered`
+/// and `discovered` were written, tested, and reachable from nothing — the same
+/// shape as the webhook rules and the Telegram bridge before them, where every
+/// piece was green and the feature did not exist. This is the missing verb, and
+/// it is deliberately the whole loop: scan the disk, write the cache, read it
+/// back, so the path the palette will use is exercised rather than assumed.
+fn commands_command(jod: &Jod, what: CommandsCommand) -> Result<()> {
+    let store = jod.store().context("this command needs the database")?;
+    match what {
+        CommandsCommand::Ls {
+            conversation,
+            roots,
+            harness,
+            cached,
+            json,
+        } => {
+            let kind = harness.map(HarnessKind::from);
+            if !cached {
+                // Roots from the flag, else the conversation's, else the main
+                // chat's. A scan of nothing is not an error: it caches an empty
+                // set, which correctly empties a palette whose repository has
+                // been unmounted.
+                let scanning: Vec<PathBuf> = if roots.is_empty() {
+                    let id = which_conversation(store, conversation)?;
+                    store.roots(&id)?.into_iter().map(|r| r.path).collect()
+                } else {
+                    roots
+                };
+                let found = jod_core::commands::scan(&scanning)?;
+                store.cache_discovered(&scanning, &found)?;
+            }
+
+            let all = store.discovered(kind)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&all)?);
+            } else if all.is_empty() {
+                println!(
+                    "nothing found — Jod looks for `.claude/commands/`, `.claude/skills/`, \
+                     `.opencode/command/` and `.agents/skills/` under each root"
+                );
+            } else {
+                render::discovered(&all);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Carry out a `jod work …` subcommand.
+fn work_command(jod: &Jod, what: WorkCommand) -> Result<()> {
+    use jod_core::works::{Deletion, Filter};
+    let store = jod.store().context("this command needs the database")?;
+    let now = chrono::Utc::now().timestamp_millis();
+    match what {
+        WorkCommand::Ls { all, closed, json } => {
+            let filter = match (all, closed) {
+                (true, _) => Filter::All,
+                (_, true) => Filter::Closed,
+                _ => Filter::Live,
+            };
+            let works = store.works(filter)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&works)?);
+            } else if works.is_empty() {
+                println!("no works — `jod main \"work on @repo, do X\"` opens one");
+            } else {
+                render::works(&works, now);
+            }
+        }
+        WorkCommand::Show { id, json } => {
+            let id = resolve_work(store, &id)?;
+            let work = store.work(&id)?.expect("resolve_work found it a moment ago");
+            let sessions = store.work_sessions(&id)?;
+            let tasks = store.work_tasks(&id)?;
+            let leases = store.work_leases(&id)?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "work": work,
+                        "sessions": sessions,
+                        "tasks": tasks,
+                        "leases": leases,
+                    }))?
+                );
+            } else {
+                // Cards per session, because "where are the questions" is the
+                // reason to open a work at all and the tree is where they hide.
+                let mut cards = Vec::new();
+                for session in &sessions {
+                    cards.push(store.count_open_cards(&session.conversation_id, false)?);
+                }
+                render::work(&work, &sessions, &cards, &tasks, &leases, now);
+            }
+        }
+        WorkCommand::Close { id } => {
+            let id = resolve_work(store, &id)?;
+            let closing = store.close_work(&id)?;
+            print!("{}", closing.summary());
+            if let Some(card) = closing.card_id {
+                println!("raised as card #{card}");
+            }
+        }
+        WorkCommand::Delete { id } => {
+            let id = resolve_work(store, &id)?;
+            // `None` on both attempts, deliberately. The refusal arms a
+            // confirmation in the database and the second call finds it, so
+            // D8's "the same command, repeated" is literally the same command
+            // — two processes sharing nothing but the file. Passing a
+            // confirmation from here would put the expiry in the CLI's hands,
+            // which is exactly what the store is refusing to allow.
+            let armed = store.armed_deletion(&id)?.is_some();
+            match store.delete_work(&id, None)? {
+                Deletion::Refused { doomed, .. } => {
+                    print!("{}", doomed.report());
+                    // Said only when it is true. A refusal that promised a
+                    // repeat would go through, when a lease cut in between had
+                    // silently disarmed it, would teach somebody to type the
+                    // command twice without reading it.
+                    let seconds = store
+                        .armed_deletion(&id)?
+                        .map(|c| {
+                            (c.expires_at_ms() - chrono::Utc::now().timestamp_millis()).max(0) / 1000
+                        })
+                        .unwrap_or(0);
+                    bail!(
+                        "refused: nothing was touched. Repeat the identical command within {seconds}s \
+                         to go ahead — the worktrees and branches above are left on disk either way{}",
+                        if armed {
+                            ", and the lease set changed since the last attempt, so that \
+                             confirmation no longer stands"
+                        } else {
+                            ""
+                        }
+                    );
+                }
+                Deletion::Done {
+                    doomed,
+                    worktrees_left,
+                } => {
+                    println!(
+                        "deleted {} — {} session(s), {} transcript(s), {} unanswered card(s)",
+                        doomed.title, doomed.sessions, doomed.transcripts, doomed.unanswered_cards
+                    );
+                    // Printed so nothing is orphaned silently: Jod's records
+                    // are cheap to recreate and a branch with uncommitted work
+                    // on it is not.
+                    for path in &worktrees_left {
+                        println!("  left on disk: {}", path.display());
+                    }
+                    if !worktrees_left.is_empty() {
+                        println!("`jod work leases --orphaned` finds them again");
+                    }
+                }
+            }
+        }
+        WorkCommand::Leases { id, orphaned, json } => {
+            let leases = match (&id, orphaned) {
+                (_, true) => store.orphaned_leases()?,
+                (Some(id), _) => store.work_leases(&resolve_work(store, id)?)?,
+                (None, _) => {
+                    let mut all = Vec::new();
+                    for work in store.works(Filter::All)? {
+                        all.extend(store.work_leases(&work.id)?);
+                    }
+                    all.extend(store.orphaned_leases()?);
+                    all
+                }
+            };
+            if json {
+                println!("{}", serde_json::to_string_pretty(&leases)?);
+                return Ok(());
+            }
+            if leases.is_empty() {
+                println!("no worktrees claimed");
+                return Ok(());
+            }
+            // Read from git now rather than from the row: a worktree that was
+            // clean an hour ago says nothing about whether removing it today
+            // would lose somebody's afternoon.
+            let mut conditions = Vec::new();
+            for lease in &leases {
+                conditions.push(store.lease_condition(lease)?);
+            }
+            render::leases(&leases, &conditions, now);
+        }
+    }
+    Ok(())
+}
+
+/// Resolve a typed work-id prefix, refusing an ambiguous one.
+///
+/// The same rule [`resolve_conversation`] follows, for a sharper reason:
+/// `jod work delete` on the wrong work takes every transcript in it.
+fn resolve_work(store: &Store, typed: &str) -> Result<String> {
+    use jod_core::works::Filter;
+    let all = store.works(Filter::All)?;
+    if all.iter().any(|w| w.id == typed) {
+        return Ok(typed.to_string());
+    }
+    let hits: Vec<_> = all.iter().filter(|w| w.id.starts_with(typed)).collect();
+    match hits.as_slice() {
+        [only] => Ok(only.id.clone()),
+        [] => bail!("no work starts with {typed} — `jod work ls` lists them"),
+        many => bail!("{typed} matches {} works — type more of it", many.len()),
+    }
 }
 
 /// Resolve a typed id prefix against the conversations that exist.
@@ -2756,6 +3688,103 @@ fn require_supervisor(jod: &Jod) -> Result<()> {
     Ok(())
 }
 
+/// The roots and secret names a `jod run` should carry into its request.
+///
+/// Both are properties of the *thread*, not of the command line, so a run that
+/// continues a conversation inherits what that conversation was given — exactly
+/// as [`jod_core::service::prefer_conversation_settings`] does for the model and
+/// the permission. Without this the two features are storage and nothing else:
+/// `jod root add` records a directory no harness is ever granted, and
+/// `jod secret set` records a name no run is ever given.
+///
+/// **Names, never values.** The list handed over is what the supervisor
+/// resolves at exec, out of a file only its owner can read. A value in this
+/// process would be a value in `spawn.json`, in `ps`, and in whatever logs the
+/// launcher writes.
+///
+/// A fresh run has no conversation yet and therefore no roots — but it does get
+/// the global secrets, because "every session on this box" is what global
+/// means. Anything narrower would need a thread to be narrow *about*.
+fn grants_for_run(
+    store: &Store,
+    resume: &Resume,
+    harness: jod_core::HarnessKind,
+) -> Result<(Vec<PathBuf>, Vec<String>)> {
+    let Some(conversation) = continuing_conversation(store, resume, harness)? else {
+        let names = store.secrets_for(None, None)?;
+        return Ok((Vec::new(), names.into_iter().map(|s| s.name).collect()));
+    };
+    let roots = store
+        .roots(&conversation)?
+        .into_iter()
+        .map(|r| r.path)
+        .collect();
+    // The work matters: a key given for one project is not handed to every
+    // session on the box, and a session's work is where that scoping lives.
+    let work = store.work_for_conversation(&conversation)?;
+    let secrets = store
+        .secrets_for(Some(&conversation), work.as_deref())?
+        .into_iter()
+        .map(|s| s.name)
+        .collect();
+    Ok((roots, secrets))
+}
+
+/// The directory a resumed session belongs to, when Jod knows it.
+///
+/// `None` for a fresh run, and for a session id Jod has never seen — somebody
+/// resuming a session started outside Jod, where there is nothing to look up
+/// and the caller's own directory is the only answer available.
+///
+/// Separate from [`grants_for_run`] rather than folded into it because the two
+/// answer different questions and one of them can be wrong without the other
+/// noticing: that one asks what this run may *reach*, this one asks where it
+/// must *happen*. Sharing [`continuing_conversation`] keeps them agreeing about
+/// which thread is being rejoined.
+fn session_cwd(
+    store: &Store,
+    resume: &Resume,
+    harness: jod_core::HarnessKind,
+) -> Result<Option<PathBuf>> {
+    let Some(id) = continuing_conversation(store, resume, harness)? else {
+        return Ok(None);
+    };
+    Ok(store
+        .conversation(&id)?
+        .map(|c| c.cwd)
+        .filter(|cwd| !cwd.trim().is_empty())
+        .map(PathBuf::from))
+}
+
+/// Which conversation a `--continue` or `--session` run is rejoining.
+///
+/// `jod run` binds its *transcript* to a new conversation every time
+/// ([`RunConversation::New`]), so this is not that question. It asks the other
+/// one: which existing thread is the harness being resumed into, and therefore
+/// whose roots and secrets apply.
+fn continuing_conversation(
+    store: &Store,
+    resume: &Resume,
+    harness: jod_core::HarnessKind,
+) -> Result<Option<String>> {
+    let recent = store.conversations(200)?;
+    Ok(match resume {
+        Resume::Fresh => None,
+        // The harness's own id for the session, which is what `--session` takes.
+        Resume::Session(id) => recent
+            .into_iter()
+            .find(|c| c.session_id.as_deref() == Some(id.as_str()))
+            .map(|c| c.id),
+        // Newest first, and filtered by harness: `--continue` resumes *this*
+        // harness's last session, so picking the newest conversation of any
+        // harness would hand one harness's roots to another.
+        Resume::Last => recent
+            .into_iter()
+            .find(|c| c.harness == harness.id() && c.session_id.is_some())
+            .map(|c| c.id),
+    })
+}
+
 /// One conversation, many turns.
 ///
 /// Every turn after the first resumes the harness session the previous turn
@@ -2813,6 +3842,7 @@ async fn chat(
                     permission: permission.into(),
                     resume: resume.clone(),
                     tools: None,
+                    ..SpawnRequest::default()
                 },
                 conversation.clone(),
             )
@@ -2939,6 +3969,472 @@ mod tests {
     fn the_cli_definition_is_valid() {
         use clap::CommandFactory;
         Cli::command().debug_assert();
+    }
+
+    // ---- the rail, the roots, the secrets and the works ----
+
+    fn arg_names(path: &[&str]) -> Vec<String> {
+        use clap::CommandFactory;
+        let mut command = Cli::command();
+        for name in path {
+            command = command
+                .find_subcommand(name)
+                .unwrap_or_else(|| panic!("no `{name}` subcommand"))
+                .clone();
+        }
+        command
+            .get_arguments()
+            .map(|a| a.get_id().to_string())
+            .collect()
+    }
+
+    /// **The property `jod secret set` exists to have.** Anything on a command
+    /// line is world-readable through `/proc` for the life of the process and
+    /// in the shell's history for ever afterwards, so there must be no argument
+    /// a value could be typed into — asserted, because adding one back would be
+    /// a one-line convenience with no visible symptom.
+    #[test]
+    fn setting_a_secret_takes_no_argument_a_value_could_arrive_in() {
+        let args = arg_names(&["secret", "set"]);
+        for forbidden in ["value", "secret", "token", "key"] {
+            assert!(
+                !args.iter().any(|a| a == forbidden),
+                "`jod secret set` grew a `{forbidden}` argument: {args:?}"
+            );
+        }
+        assert!(args.iter().any(|a| a == "name"));
+    }
+
+    /// The scope is the blast radius if a value leaks, so it is typed rather
+    /// than defaulted — `--global` hands a key to every session on the box.
+    #[test]
+    fn storing_a_secret_without_saying_who_it_is_for_is_refused() {
+        use clap::CommandFactory;
+        let refused = Cli::command()
+            .try_get_matches_from(["jod", "secret", "set", "STRIPE_API_KEY"])
+            .is_err();
+        assert!(refused, "a secret was stored without a scope being chosen");
+        for scope in [
+            ["jod", "secret", "set", "K", "--global"],
+            ["jod", "secret", "set", "K", "--work=w1"],
+            ["jod", "secret", "set", "K", "--conversation=c1"],
+        ] {
+            assert!(
+                Cli::command().try_get_matches_from(scope).is_ok(),
+                "{scope:?} was refused"
+            );
+        }
+        // And never two at once: a value cannot be global *and* one work's.
+        assert!(Cli::command()
+            .try_get_matches_from(["jod", "secret", "set", "K", "--global", "--work=w1"])
+            .is_err());
+    }
+
+    #[test]
+    fn a_scope_flag_resolves_to_the_scope_it_names() {
+        use jod_core::secrets::Scope;
+        let global = ScopeArgs {
+            global: true,
+            work: None,
+            conversation: None,
+        };
+        assert_eq!(global.resolve(), (Scope::Global, String::new()));
+        let work = ScopeArgs {
+            global: false,
+            work: Some("w1".into()),
+            conversation: None,
+        };
+        assert_eq!(work.resolve(), (Scope::Work, "w1".to_string()));
+        let conversation = ScopeArgs {
+            global: false,
+            work: None,
+            conversation: Some("c1".into()),
+        };
+        assert_eq!(conversation.resolve(), (Scope::Conversation, "c1".to_string()));
+    }
+
+    #[test]
+    fn every_card_filter_maps_to_the_one_the_store_takes() {
+        use jod_core::cards::{CardKind, Sort, Status};
+        assert_eq!(CardKind::from(KindArg::Decision), CardKind::Decision);
+        assert_eq!(CardKind::from(KindArg::Question), CardKind::Question);
+        assert_eq!(CardKind::from(KindArg::Secret), CardKind::Secret);
+        assert_eq!(Status::from(StatusArg::Open), Status::Open);
+        assert_eq!(Status::from(StatusArg::Answered), Status::Answered);
+        assert_eq!(Status::from(StatusArg::Dismissed), Status::Dismissed);
+        // Every order the rail cycles through is one the command line can name,
+        // or the two surfaces sort the same cards differently.
+        let named: Vec<Sort> = [SortArg::Pressing, SortArg::Importance, SortArg::Created, SortArg::Updated]
+            .into_iter()
+            .map(Sort::from)
+            .collect();
+        assert_eq!(named, Sort::ALL.to_vec());
+    }
+
+    /// A temporary `JOD_HOME`, held for one test.
+    ///
+    /// `put_secret` writes the value to a file under `$JOD_HOME/secrets`, so a
+    /// test that stores one without redirecting the variable writes a
+    /// credential file into the developer's real Jod home — which is exactly
+    /// what an orchestrator test did until this session, and it went unnoticed
+    /// because the row it asserted on lived in an in-memory database while the
+    /// file did not. `JOD_HOME` is process-wide, so the lock is what stops two
+    /// of these from landing in each other's directory.
+    struct TempHome {
+        dir: PathBuf,
+        previous: Option<String>,
+        _guard: std::sync::MutexGuard<'static, ()>,
+    }
+
+    static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    impl TempHome {
+        fn new(tag: &str) -> TempHome {
+            let guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let previous = std::env::var("JOD_HOME").ok();
+            let dir = std::env::temp_dir().join(format!(
+                "jod-cli-{tag}-{}-{:?}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or_default()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            std::env::set_var("JOD_HOME", &dir);
+            TempHome {
+                dir,
+                previous,
+                _guard: guard,
+            }
+        }
+    }
+
+    impl Drop for TempHome {
+        fn drop(&mut self) {
+            // Restored rather than unset: on the box Jod runs on `JOD_HOME` is
+            // set, and clearing it would send every later reader to `~/.jod`.
+            match self.previous.take() {
+                Some(value) => std::env::set_var("JOD_HOME", value),
+                None => std::env::remove_var("JOD_HOME"),
+            }
+            std::fs::remove_dir_all(&self.dir).ok();
+        }
+    }
+
+    /// The bug this pins: `jod root add` and `jod secret set` both wrote rows
+    /// that no run ever read, so the two features were storage and nothing
+    /// else. It asserts the **request** — what the harness is actually handed —
+    /// because a test that read the conversation back would have gone on
+    /// passing for as long as the wiring was missing.
+    #[test]
+    fn a_continued_run_is_handed_the_conversation_s_roots_and_secret_names() {
+        let _home = TempHome::new("grants");
+        let store = Store::in_memory().unwrap();
+        let conversation = store
+            .new_conversation(HarnessKind::ClaudeCode, "/tmp/repo", None)
+            .unwrap()
+            .id;
+        store
+            .set_conversation_session(&conversation, Some("sess-abc"))
+            .unwrap();
+        store
+            .add_root(&conversation, jod_core::roots::NewRoot::reading("/tmp/repo"))
+            .unwrap();
+        store
+            .add_root(&conversation, jod_core::roots::NewRoot::reading("/tmp/notes"))
+            .unwrap();
+        store
+            .put_secret(
+                "OPENAI_API_KEY",
+                jod_core::secrets::Scope::Global,
+                "",
+                "a-value-long-enough-to-redact",
+                "",
+            )
+            .unwrap();
+
+        let (roots, secrets) = grants_for_run(
+            &store,
+            &Resume::Session("sess-abc".into()),
+            HarnessKind::ClaudeCode,
+        )
+        .unwrap();
+        assert_eq!(
+            roots,
+            vec![PathBuf::from("/tmp/repo"), PathBuf::from("/tmp/notes")],
+            "both roots must reach the request, in the user's order"
+        );
+        assert_eq!(secrets, vec!["OPENAI_API_KEY".to_string()]);
+
+        // `--continue` finds the same thread through the harness rather than
+        // through an id, and must not reach across harnesses to do it.
+        let (roots, _) = grants_for_run(&store, &Resume::Last, HarnessKind::ClaudeCode).unwrap();
+        assert_eq!(roots.len(), 2);
+        let (roots, secrets) = grants_for_run(&store, &Resume::Last, HarnessKind::OpenCode).unwrap();
+        assert!(
+            roots.is_empty(),
+            "one harness's roots were handed to another: {roots:?}"
+        );
+        assert_eq!(
+            secrets,
+            vec!["OPENAI_API_KEY".to_string()],
+            "a run with no thread still gets the globals — that is what global means"
+        );
+    }
+
+    /// The rule the whole design rests on, asserted where it would be easiest
+    /// to break: what leaves this process is a list of names.
+    #[test]
+    fn what_a_run_carries_is_names_and_never_values() {
+        let _home = TempHome::new("names-only");
+        let store = Store::in_memory().unwrap();
+        let value = "sk-not-a-real-key-but-long-enough";
+        store
+            .put_secret(
+                "STRIPE_API_KEY",
+                jod_core::secrets::Scope::Global,
+                "",
+                value,
+                "",
+            )
+            .unwrap();
+
+        let (_, secrets) = grants_for_run(&store, &Resume::Fresh, HarnessKind::ClaudeCode).unwrap();
+        assert_eq!(secrets, vec!["STRIPE_API_KEY".to_string()]);
+        assert!(
+            !secrets.iter().any(|s| s.contains(value)),
+            "a value reached the spawn request, which is written to spawn.json"
+        );
+    }
+
+    /// **A resumed run happens where its session lives.**
+    ///
+    /// Measured, not guessed: OpenCode scopes a session to the project it
+    /// resolves from `--dir`, and `--session <id>` naming a session from
+    /// another project neither errors nor starts fresh — it hangs silently for
+    /// ever. So resuming in whatever directory the command was typed in is not
+    /// a cosmetic mistake, and this is the lookup that prevents it.
+    #[tokio::test]
+    async fn resuming_a_session_uses_the_directory_that_session_belongs_to() {
+        let store = Store::in_memory().unwrap();
+        let conversation = store
+            .new_conversation(HarnessKind::OpenCode, "/tmp/the-project", None)
+            .unwrap();
+        store
+            .set_conversation_session(&conversation.id, Some("ses_abc"))
+            .unwrap();
+
+        assert_eq!(
+            session_cwd(
+                &store,
+                &Resume::Session("ses_abc".into()),
+                HarnessKind::OpenCode
+            )
+            .unwrap(),
+            Some(PathBuf::from("/tmp/the-project"))
+        );
+        // A fresh run has no session to belong to, and a session Jod never saw
+        // cannot be looked up — both fall back to the caller's directory rather
+        // than inventing one.
+        assert_eq!(
+            session_cwd(&store, &Resume::Fresh, HarnessKind::OpenCode).unwrap(),
+            None
+        );
+        assert_eq!(
+            session_cwd(
+                &store,
+                &Resume::Session("ses_started_outside_jod".into()),
+                HarnessKind::OpenCode
+            )
+            .unwrap(),
+            None
+        );
+    }
+
+    /// `--continue` resumes *this* harness's last session, so it must not hand
+    /// one harness's directory to another — the same rule
+    /// `continuing_conversation` already applies to roots and secrets.
+    #[tokio::test]
+    async fn continuing_takes_the_directory_of_that_harnesss_own_last_session() {
+        let store = Store::in_memory().unwrap();
+        let opencode = store
+            .new_conversation(HarnessKind::OpenCode, "/tmp/opencode-project", None)
+            .unwrap();
+        store
+            .set_conversation_session(&opencode.id, Some("ses_oc"))
+            .unwrap();
+        let claude = store
+            .new_conversation(HarnessKind::ClaudeCode, "/tmp/claude-project", None)
+            .unwrap();
+        store
+            .set_conversation_session(&claude.id, Some("ses_cc"))
+            .unwrap();
+
+        assert_eq!(
+            session_cwd(&store, &Resume::Last, HarnessKind::OpenCode).unwrap(),
+            Some(PathBuf::from("/tmp/opencode-project"))
+        );
+        assert_eq!(
+            session_cwd(&store, &Resume::Last, HarnessKind::ClaudeCode).unwrap(),
+            Some(PathBuf::from("/tmp/claude-project"))
+        );
+    }
+
+    /// Deleting the wrong work takes every transcript in it, so an ambiguous
+    /// prefix is refused rather than guessed.
+    #[test]
+    fn a_work_prefix_that_matches_two_works_is_refused() {
+        let store = Store::in_memory().unwrap();
+        let first = store.create_work("port the parser").unwrap();
+        let second = store.create_work("and the tests").unwrap();
+
+        assert_eq!(resolve_work(&store, &first.id).unwrap(), first.id);
+        assert_eq!(
+            resolve_work(&store, &first.id[..8]).unwrap(),
+            first.id,
+            "a prefix long enough to be unique should resolve"
+        );
+        assert!(resolve_work(&store, "nothing-like-this").is_err());
+        // Both uuids start with a hex digit, so *some* one-character prefix is
+        // shared: whichever it is must be refused rather than picked.
+        let shared: String = first.id.chars().take(1).collect();
+        if second.id.starts_with(&shared) {
+            assert!(resolve_work(&store, &shared).is_err());
+        }
+    }
+
+    /// Both refusals are the point, and neither is the CLI's to relax: the main
+    /// chat is the one conversation that is always there, and a session cut out
+    /// of a work leaves a tree pointing at something that is gone.
+    #[test]
+    fn deleting_a_conversation_refuses_the_main_chat_and_anything_inside_a_work() {
+        let store = Store::in_memory().unwrap();
+        let main = store
+            .main_conversation(HarnessKind::ClaudeCode, "/tmp/repo")
+            .unwrap();
+        assert!(store.delete_conversation(&main).is_err());
+
+        let work = store.create_work("port the parser").unwrap();
+        let session = store
+            .new_conversation(HarnessKind::ClaudeCode, "/tmp/repo", None)
+            .unwrap()
+            .id;
+        store
+            .attach_conversation(&session, &work.id, None, jod_core::works::Origin::Orchestrator)
+            .unwrap();
+        assert!(store.delete_conversation(&session).is_err());
+
+        // An ordinary one goes.
+        let loose = store
+            .new_conversation(HarnessKind::ClaudeCode, "/tmp/repo", None)
+            .unwrap()
+            .id;
+        store.delete_conversation(&loose).unwrap();
+        assert!(store.conversation(&loose).unwrap().is_none());
+    }
+
+    /// D8: a work with nothing on disk deletes on the *first* command, because
+    /// there is nothing to lose by it. The repeat exists to protect worktrees,
+    /// and making every delete need two commands would teach people to type it
+    /// twice without reading the first answer.
+    // `Jod::with_store` starts the task that drains the event channel, so this
+    // needs a runtime even though nothing here is awaited.
+    #[tokio::test]
+    async fn deleting_a_work_that_holds_no_worktree_goes_through_first_time() {
+        let store = std::sync::Arc::new(Store::in_memory().unwrap());
+        let jod = Jod::with_store(store.clone());
+        let work = store.create_work("port the parser").unwrap();
+
+        work_command(&jod, WorkCommand::Delete { id: work.id.clone() }).unwrap();
+        assert!(store.work(&work.id).unwrap().is_none());
+        // And the id stops resolving, so a repeat says so rather than
+        // reporting a second success.
+        assert!(work_command(&jod, WorkCommand::Delete { id: work.id }).is_err());
+    }
+
+    /// Discovery was written, tested and reachable from nothing. This asserts
+    /// the whole loop rather than any one piece: a real command file on disk is
+    /// scanned, cached, and read back out — which is the path the palette will
+    /// take, and the one that was missing.
+    #[tokio::test]
+    async fn listing_commands_scans_the_disk_caches_it_and_reads_it_back() {
+        let store = std::sync::Arc::new(Store::in_memory().unwrap());
+        let jod = Jod::with_store(store.clone());
+        let root = std::env::temp_dir().join(format!("jod-commands-{}", std::process::id()));
+        let commands = root.join(".claude/commands");
+        std::fs::create_dir_all(&commands).unwrap();
+        std::fs::write(
+            commands.join("ship-it.md"),
+            "---\ndescription: open a draft PR\n---\nbody\n",
+        )
+        .unwrap();
+
+        commands_command(
+            &jod,
+            CommandsCommand::Ls {
+                conversation: None,
+                roots: vec![root.clone()],
+                harness: None,
+                cached: false,
+                json: false,
+            },
+        )
+        .unwrap();
+
+        let cached = store.discovered(None).unwrap();
+        let found = cached
+            .iter()
+            .find(|d| d.name == "ship-it")
+            .expect("the scan did not reach the cache");
+        assert_eq!(found.description, "open a draft PR");
+        // A command is offered to the harness whose convention it follows and
+        // to no other: Jod never forwards one across conventions.
+        assert_eq!(found.harness, HarnessKind::ClaudeCode.id());
+        assert!(store
+            .discovered(Some(HarnessKind::OpenCode))
+            .unwrap()
+            .iter()
+            .all(|d| d.name != "ship-it"));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_root_command_with_no_conversation_and_no_main_chat_says_so() {
+        let store = Store::in_memory().unwrap();
+        let refused = which_conversation(&store, None).unwrap_err().to_string();
+        assert!(refused.contains("--conversation"), "{refused}");
+    }
+
+    /// A secret card whose scope has nothing to attach to must not quietly
+    /// become a second global bucket — a key meant for one work handed to every
+    /// session on the box is the failure the default scope exists to prevent.
+    #[test]
+    fn answering_a_work_scoped_secret_card_with_no_work_is_refused_before_anything_is_read() {
+        use jod_core::cards::{CardKind, NewCard};
+        let store = Store::in_memory().unwrap();
+        let conversation = store
+            .new_conversation(HarnessKind::ClaudeCode, "/tmp/repo", None)
+            .unwrap()
+            .id;
+        let card = store
+            .raise_card(NewCard {
+                conversation_id: conversation,
+                kind: Some(CardKind::Secret),
+                title: "STRIPE_API_KEY needed".into(),
+                secret_name: Some("STRIPE_API_KEY".into()),
+                secret_scope: Some("work".into()),
+                ..NewCard::default()
+            })
+            .unwrap();
+
+        let refused = answer_secret_card(&store, &card).unwrap_err().to_string();
+        assert!(refused.contains("--global"), "{refused}");
+        assert!(
+            store.secret_names(jod_core::secrets::Scope::Global, "").unwrap().is_empty(),
+            "a refusal still stored something"
+        );
     }
 
     fn extraction() -> Consolidation {

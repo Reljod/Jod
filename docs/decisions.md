@@ -1852,3 +1852,229 @@ through git by session-exit cleanup, which is why they were absent from
 `git worktree list` as well as from disk, where an `rm -rf` would have left the
 administrative entry behind. The guard and its test exist because the question
 was worth being able to answer with a test instead of an assurance.
+
+## An answer is queued, never spliced into a turn already running
+
+A prompt is assembled once, at spawn. Anything that arrives afterwards reaches
+a model whose context was fixed before it existed, so an answer delivered
+mid-turn is either ignored or acted on twice — and which one you get depends on
+timing nobody controls.
+
+So answering a card is a write and a *queue*, not an interruption. The rail
+carries two independent facts about every card: `status`, what the human did,
+and `delivery`, whether the agent has heard about it yet. "Answered, queued" is
+an ordinary state rather than an inconsistency, and the UI must show it —
+pretending an answer landed immediately is a lie the user makes decisions on.
+Answer ten cards while a run is mid-turn and none of them touch it until it
+comes up for air.
+
+The queue is one table for three sources — card answers, mail from another
+agent, a nudge typed by a human — because "is this session ready to be spoken
+to" is the same question whoever is speaking, and it was already written down
+once, correctly, in `team::wake_order`. A second copy of that judgement is a
+second thing to keep right. Delivery itself stays the synthetic user turn the
+bus already uses, so nothing new has to be true on any harness.
+
+Batching is part of the design rather than an optimisation of it. Ten queued
+answers become one turn carrying ten, not ten turns: that is a cost control,
+and an agent reading everything that changed in one go also answers better than
+one woken ten times with a line each.
+
+## A secret travels as a name; only the supervisor ever holds the value
+
+Inject at exec, mask on output, reference by name — the model GitHub Actions,
+Doppler, Infisical and `op run` all arrived at separately, which is about as
+much corroboration as a design gets.
+
+`SpawnRequest` and `SpawnPlan` therefore carry secret *names*, never values.
+That is not fastidiousness: `spawn.json` is written to disk precisely so a
+person can read afterwards exactly what was launched, so a value in it would be
+a second copy of the credential sitting at ordinary permissions — the leak the
+whole design exists to prevent, created by the file meant to make the system
+auditable. The supervisor resolves each name at exec time from a file outside
+every repository at owner-only permissions, verified on read.
+
+Redaction is the belt to injection's braces. The supervisor is the only process
+holding both the values it injected and the lines the child printed, so it
+scrubs the output before anything is parsed — an agent that echoes the variable
+still cannot get the value into the transcript. It runs *before* parsing rather
+than after, because a value scrubbed after decoding has already been through a
+parser, and a parser is a thing that can log.
+
+Values below a length floor are injected and deliberately **not** redacted: a
+four-character secret would match half of ordinary output and replace
+legitimate text with the marker. The rail says so when one is stored, because a
+silent exception here is a leak nobody was told about.
+
+What this buys is narrower than "the agent cannot leak the key", and worth
+having anyway: the value is not in the database, not in the prompt, not in the
+transcript, and not in the launch record. A missing key blocks one test rather
+than a session — which is the point, and why the agent is told to treat an
+absent credential as a *blocked* ending rather than a reason to invent one.
+
+### What the machinery does not do, measured
+
+An earlier version of this entry implied the model never sees the value. It is
+not true, and an agent found it rather than a test — asked to print a secret
+through a shell command, it reported back:
+
+> the value came back to me **unredacted** in the tool result. So whatever
+> scrubbing Jod does, it isn't happening on the tool-output path into the
+> model's context — it can only be happening later, at storage time.
+
+It is right, and the reason is structural. The supervisor sits between the
+harness and Jod's store, **not** between the harness and the model. A harness
+runs its own tool loop: it executes the command, hands the output back to the
+model, and only then prints a line that Jod reads and scrubs. By the time
+redaction happens the model has already seen it.
+
+So the guarantee to state is **the value never reaches the record** — not the
+database, not the transcript, not the launch plan, not a backup. Whether the
+*model* sees it is decided by the preamble telling it not to go looking, and by
+nothing else. That sentence in the preamble is therefore load-bearing rather
+than decorative, and anyone trimming the brief for length should know it is
+the whole of that control.
+
+Two smaller limits follow from the same shape. The scrubber replaces exact
+occurrences, so an agent that retypes a fragment, or breaks the value across a
+line, defeats it — which is a reason to keep values long and opaque rather than
+a reason to build a cleverer matcher. And redaction cannot see an outbound
+request at all: the exfiltration path that actually matters is the agent
+calling something with the key, which no scrubber is positioned to observe.
+
+None of this makes the design worse than the alternative — a credential in the
+prompt is seen by the model *and* stored. It makes the claim smaller and true.
+
+## A worktree outlives the work that cut it
+
+Deleting a work removes its sessions, their transcripts, their unanswered cards
+and their bus traffic, in one transaction — a half-deleted tree is not a state
+that should exist. It does **not** remove the git worktrees or their branches,
+and the `leases` row survives with a null work rather than cascading.
+
+The asymmetry is the whole point. Jod's records are cheap to recreate; a branch
+with uncommitted work on it is not. And the moment somebody deletes a session's
+history is exactly the moment nobody is left to remember what was on that
+branch — so the cheap thing goes and the expensive thing stays. The paths are
+printed so nothing is orphaned silently, `work_title` is kept on the row so an
+orphaned lease can still say what it was for, and removing a tree is a separate
+deliberate flag that still refuses one that is dirty or unmerged.
+
+The delete itself refuses the first time whenever a work holds a worktree,
+printing each lease's path, branch, and whether it is dirty or merged, and
+proceeds only when the same command is repeated. The confirmation is bound to
+that work and expires, so a stale one cannot arm a later delete. A work with no
+leases deletes on the first command, because there is nothing on disk to lose —
+a confirmation that fires when there is no risk is one people learn to type
+through without reading.
+
+## A unit test proves a function; only an entry-point test proves a feature
+
+This repository has now produced the same defect at scale twice. The first
+entry about it — "Six guards were green, and none of them were guarding" —
+turned out not to be enough on its own, so here is the general form.
+
+An audit of one large build found **twenty-four functions with no caller
+outside their own tests**, and five user-visible promises broken behind a fully
+green suite:
+
+- answering a card never reached the agent — the handler that injects a queued
+  answer at a turn boundary had no caller, so an answer sat queued for ever
+  unless the agent happened to re-poll for it;
+- nothing could claim a worktree — a session was pointed at a read-only
+  checkout and told to claim one before writing, with no way to do so, making
+  the instruction unfollowable;
+- no pull request was ever recorded — schema, stream parser and forge poller
+  all built, all tested, referenced by exactly one file: their own;
+- discovered commands never reached the palette they were discovered for;
+- a work never closed when its last task completed, because the three functions
+  that would have noticed were called by nothing.
+
+Every component passed its tests. Every seam between components was missing.
+
+**The reason the tests cannot see it is structural, not careless.** A unit test
+calls the function directly, so it proves the function works when called — and
+says nothing about whether anything calls it. The test and the missing caller
+are independent, so the suite stays green at exactly the moment the feature
+stops existing. Adding more unit tests makes this *worse*, because the green
+count grows while coverage of the actual product does not.
+
+Three things follow, and they are cheap:
+
+**Wire it before you finish it.** A function with no caller is not a
+half-finished feature, it is a zero-finished one with convincing decoration.
+Landing the caller in the same change as the function is the only reliable
+moment — afterwards there is nothing to notice the gap.
+
+**Write at least one test that fails when the caller is removed.** Not when the
+function breaks: when the *wiring* breaks. That is a different test and usually
+a coarser one — drive the entry point a person or an agent would actually
+reach, and assert the observable effect.
+
+**Grep for callers before believing a green suite.** `grep -rn 'name(' --include=*.rs | grep -v test`
+is fifteen seconds and it is the only check that caught any of these. Three of
+the five were found not by testing but by *trying to use the feature* — writing
+the end-to-end script, or giving the module a caller and watching what it
+produced.
+
+The counting error underneath all of it is worth naming: a test count measures
+how much code has been exercised, and it is routinely read as measuring how
+much of the product works. Those diverge silently, and the gap between them is
+invisible from inside the suite.
+
+## A protocol given once at session start does not survive into a later turn
+
+Jod briefs an agent when its run begins. That brief is one user turn among
+many, and by the time something arrives that depends on it — a message from a
+peer, an answer to a card — it may be several turns back in a resumed
+conversation.
+
+Measured, not theorised. In a cross-harness exchange the answerer was told at
+session start how to use the bus, and when a question arrived some turns later
+it replied **in prose and never touched the bus at all**. The exchange
+half-happened, in silence: the asker waited, the answer existed, and nothing
+Jod could see had gone wrong. Nothing failed loudly, because nothing failed —
+an agent that has forgotten a protocol is an agent behaving reasonably in the
+absence of one.
+
+Two consequences.
+
+**A standing protocol belongs in the standing framing**, re-sent every turn,
+rather than in the opening prompt. That is what a system prompt is for, and the
+harnesses that have one (`--append-system-prompt`) should carry it there; the
+ones that do not need it prepended to each prompt rather than only the first.
+
+**Anything delivered as a synthetic turn should carry what the recipient needs
+to act on it.** A message that says "reply with `reply(message_id=…)`" is
+self-describing; one that assumes the recipient remembers the verb is a message
+that works on turn two and quietly stops working on turn twelve. The same
+argument the message-id fix already made: the recipient must be able to act
+from what it was just handed, not from what it was told once.
+
+The failure mode is worth naming because it is invisible from inside a test
+suite. Every unit test gives its agent the instruction and the stimulus in the
+same breath, so the gap between them — which is where this lives — never opens.
+
+## A repair belongs in a migration, not on the read path
+
+When a bug leaves rows wrong, the data is often recoverable from something
+durable nearby — and the tempting fix is to fold the repair into the reader, so
+the wrong value silently becomes right the next time anyone asks.
+
+Do not. Put it in a migration that runs once, or behind an explicit repair
+command.
+
+Two costs, and the second is the one that matters. A fold makes a hot read into
+a query that sometimes writes, so it acquires new failure modes — a locked
+database now breaks a lookup that used to only ever read. And it **permanently
+masks the bug it was written for**: if whatever should have populated the value
+ever stops again, the reader keeps producing the right answer and nothing
+surfaces until something further downstream, with less context, fails instead.
+
+That is the worst failure shape this repository has: silently correct. A
+migration is auditable, ordered with the rest of the schema, and — crucially —
+does not run tomorrow. If the writer regresses, resume breaks loudly, which is
+what makes it fixable.
+
+The general rule: **a fallback that hides a missing writer is not resilience,
+it is a second implementation of the writer with nobody watching it.**

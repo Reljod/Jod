@@ -515,9 +515,35 @@ missing piece.
 Mail is drained only *after* a spawn succeeds, so a failure leaves it waiting
 rather than losing it.
 
-**Still to build:** a `jod-mcp` server exposing `send_message` / `read_inbox` to
-agents directly. Today a teammate cannot message another from inside a run —
-only the human, or a script between turns, can.
+**Agents reach the bus themselves.** Jod's MCP server exposes `send_message`,
+`read_messages`, `roster`, `ask`, `reply` and `handoff`, so a teammate messages
+another from inside a run with no human and no script between turns. Measured
+across harnesses: an asker on Claude Code and an answerer on OpenCode exchange a
+question and a reply, sharing one thread id, with the reply one hop deeper than
+what it answers.
+
+**The sender is the run, never an argument.** Jod's MCP server resolves its own
+process group against `runs.pgid` — the server is a child of the harness, which
+sits in the run's group — so identity is something the model cannot argue its
+way into. A per-run config names the run as well, and the two are only ever
+allowed to *agree*: a disagreement refuses the call and names both answers
+rather than picking a winner, because quietly choosing is how a wrong answer
+becomes a permanent one. An agent that passes `from`, `sender` or `as` has all
+three ignored.
+
+**Mail delivers itself.** The ticker consults `wake_order` for every member
+holding waiting mail and resumes the idle ones; `wake_order` gained a caller,
+not a rewrite. A member is resumed at most once per interval, so ten messages
+arriving together become one turn carrying ten rather than ten turns — a cost
+control and a coherence one, since an agent reading everything at once answers
+better than one woken per line.
+
+**Every conversation is bounded, and hitting a bound raises a card rather than
+killing anything.** Depth in a thread, messages per work, and a deadline on any
+wait. Two agents in a polite loop are a way to spend money at machine speed, and
+the failure is invisible because every individual message looks reasonable.
+Waiting for a reply is always bounded: an agent that can hang waiting for a peer
+is an agent that can hang for ever, because the peer might be dead.
 
 **Collaboration on code** uses git rather than messages: each agent gets its own
 worktree, and integration is a merge. → [`teamwork.md`](teamwork.md)

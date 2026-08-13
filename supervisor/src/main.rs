@@ -17,13 +17,21 @@
 //! It reports failure loudly. A run that could not start, could not be parsed,
 //! or was killed all end with a terminal event and a recorded status, because a
 //! run that simply stops being mentioned looks exactly like one that succeeded.
+//!
+//! It is also the only process that ever holds a secret's value. It reads the
+//! value out of its owner-only file, puts it in the child's environment, and
+//! scrubs it back out of everything the child prints — see [`inject`]. That
+//! works only because this one process sits on both sides of the harness at
+//! once; nothing upstream of it, and nothing downstream, sees the value at all.
 
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
 
 use jod_core::event::{AgentEnvelope, AgentEvent};
+use jod_core::redact::Scrubber;
 use jod_core::runner::SpawnPlan;
+use jod_core::secrets::read_secret_value;
 use jod_core::service::AgentStatus;
 use jod_core::store::Store;
 
@@ -64,9 +72,34 @@ async fn run(plan_path: &PathBuf) -> Result<(), String> {
     let mut writer = EventWriter::new(plan.run_id.clone(), store.clone());
     let mut harness = plan.harness.build();
 
+    // Resolved before the child exists, because both halves of the promise are
+    // built from the same list: what goes into the environment is exactly what
+    // comes back out of the output.
+    let injected = inject(&store, &plan, &mut writer);
+    let scrubber = Scrubber::new(injected.iter().map(|(_, value)| value.clone()));
+
     let child = Command::new(&plan.program)
         .args(&plan.args)
         .current_dir(&plan.cwd)
+        // Stamp *this* run's id over whatever was inherited, before anything
+        // else in the environment is applied.
+        //
+        // The supervisor is the only process that knows, without being told,
+        // which run it is supervising — that is its whole job. Everything below
+        // it inherits this: the harness, and the Jod MCP server the harness
+        // starts. So an agent's tools resolve the right identity even on a
+        // harness with no per-run config document to carry one.
+        //
+        // Without it the variable simply flowed down the spawn chain. On the
+        // path that opens a work the supervisor's own parent is the
+        // orchestrator's MCP server, so its run id reached every descendant,
+        // and `identify` — correctly — refused to act for a server whose
+        // environment named one run while its process group named another.
+        // Clearing it in the config writers was necessary and not sufficient:
+        // it stops Jod *writing* a stale id, and this stops one *arriving*.
+        .env(jod_core::mcp_config::RUN_ID_ENV, &plan.run_id)
+        .envs(plan.env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+        .envs(injected.iter().map(|(k, v)| (k.as_str(), v.as_str())))
         // Nothing may read a terminal: this process has none, and a harness
         // that stops to ask a question would hang for an answer that can never
         // come. `agy --conversation` does exactly that on a resumed run.
@@ -74,6 +107,10 @@ async fn run(plan_path: &PathBuf) -> Result<(), String> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn();
+
+    // The child has them now, and the scrubber has its own copies. Nothing else
+    // in this process needs the values, so it stops holding them.
+    drop(injected);
 
     let mut child = match child {
         Ok(c) => c,
@@ -118,6 +155,16 @@ async fn run(plan_path: &PathBuf) -> Result<(), String> {
 
             line = lines.recv() => match line {
                 Some(line) => {
+                    // Before the parser, not after. A value scrubbed after the
+                    // JSON is decoded has already passed through code that can
+                    // log, and `Raw` would carry the undecoded line verbatim
+                    // into the transcript. `is_empty` is the common case — no
+                    // secrets in play — and costs one branch.
+                    let line = if scrubber.is_empty() {
+                        line
+                    } else {
+                        scrubber.scrub(&line)
+                    };
                     for event in harness.parse_line(&line) {
                         if let AgentEvent::Started { session_id: Some(id), .. } = &event {
                             writer.set_session(id);
@@ -163,6 +210,52 @@ async fn run(plan_path: &PathBuf) -> Result<(), String> {
     });
 
     Ok(())
+}
+
+/// Turn the plan's secret *names* into environment pairs.
+///
+/// This is the only place in Jod that reads a secret's value, and it is the
+/// only place that can be: the plan on disk names secrets, the database records
+/// what exists, and the value itself lives in a `0600` file that
+/// [`read_secret_value`] refuses to open if its mode has widened. The pairs
+/// returned here go straight into the child's environment and into the
+/// scrubber, and nowhere else.
+///
+/// Applied *after* `plan.env`, so a secret always beats a plain variable of the
+/// same name. The alternative — last writer wins by list order — would make
+/// whether a credential arrived depend on the order two unrelated pieces of
+/// code appended to a vector.
+///
+/// **A name that will not resolve is not fatal.** A missing key blocks one
+/// test, not a session: the run proceeds without the variable, the reason is
+/// recorded as an event and in `supervisor.log`, and the agent is expected to
+/// end *blocked* rather than invent a credential. Killing the run here would
+/// instead lose everything it had already been asked to do.
+fn inject(store: &Store, plan: &SpawnPlan, writer: &mut EventWriter) -> Vec<(String, String)> {
+    let mut resolved = Vec::new();
+    for name in &plan.secrets {
+        let outcome = store
+            .secret_by_name(name)
+            .map_err(|e| format!("looking it up: {e}"))
+            .and_then(|meta| meta.ok_or_else(|| "no secret of that name is stored".to_string()))
+            .and_then(|meta| read_secret_value(&meta).map_err(|e| e.to_string()));
+
+        match outcome {
+            Ok(value) => resolved.push((name.clone(), value)),
+            Err(why) => {
+                // `why` is built from the store's and the reader's errors, both
+                // of which name paths and modes but never contents — a refusal
+                // that quoted the value would be the leak it exists to stop.
+                let message = format!(
+                    "secret `{name}` was not available and was not injected ({why}); \
+                     the run continues without it"
+                );
+                eprintln!("jod-run: {message}");
+                writer.emit(AgentEvent::Error { message });
+            }
+        }
+    }
+    resolved
 }
 
 /// How the harness ended.
@@ -259,9 +352,45 @@ impl EventWriter {
         }
     }
 
+    /// Record the harness's session id on the run **and on its conversation**.
+    ///
+    /// The conversation half used to be somewhere else entirely, and that is
+    /// why it was missing. `set_conversation_session` had exactly one caller:
+    /// the drain task inside whatever process launched the run. So the session
+    /// id only ever landed if the launcher outlived the turn — and for a
+    /// session opened through `open_work` the launcher is Jod's own MCP
+    /// server, which exits when the harness closes stdin, which is roughly
+    /// when the turn ends.
+    ///
+    /// The consequence was total rather than cosmetic: `resume_for` found
+    /// nothing, so the session could not be resumed, so a work's session could
+    /// not be spoken to again — no mail, no card answer, no second turn. On
+    /// every harness; OpenCode was merely where it was noticed, because
+    /// Claude Code's per-run config masked the related identity problem.
+    ///
+    /// It belongs here because the supervisor is the process that cannot miss
+    /// it. It already owns "what actually happened", it already writes every
+    /// event durably, and it outlives the launcher by construction — that is
+    /// the whole reason a run is a detached process group.
     fn set_session(&self, session_id: &str) {
         if let Err(e) = self.store.set_run_session(&self.run_id, session_id) {
             eprintln!("jod-run: could not record the session id: {e}");
+        }
+        // The spawn writes the prompt row before the harness starts, so the
+        // conversation exists by the time a `Started` event arrives. A run with
+        // no conversation is an ordinary case — a detached summariser, a probe
+        // — and not an error.
+        match self.store.conversation_for_run(&self.run_id) {
+            Ok(Some(conversation)) => {
+                if let Err(e) = self
+                    .store
+                    .set_conversation_session(&conversation, Some(session_id))
+                {
+                    eprintln!("jod-run: could not record the session on its conversation: {e}");
+                }
+            }
+            Ok(None) => {}
+            Err(e) => eprintln!("jod-run: could not find the run's conversation: {e}"),
         }
     }
 

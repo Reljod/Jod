@@ -413,6 +413,38 @@ impl Jod {
                     if let Some(id) = &conversation {
                         record_in_conversation(store, id, &envelope);
                     }
+                    // The passive half of D2: a run launched without Jod's MCP
+                    // server still puts its questions on the rail, lifted out
+                    // of what the harness prints. Cheap on the ordinary event —
+                    // `lift` matches a tool name and returns — and idempotent
+                    // through the card's dedupe key, so a harness that both
+                    // calls Jod's tool and prints its own question produces one
+                    // card rather than two.
+                    if let Err(e) =
+                        crate::mcp::lift_into_cards(store, &envelope.agent_id, &envelope.event)
+                    {
+                        // Reported, never fatal. A card that could not be
+                        // raised is a question nobody sees; a run taken down by
+                        // one is work nobody gets.
+                        eprintln!("[jod] could not raise a card from the stream: {e}");
+                    }
+                    // The stream half of E6.S3, here rather than on a tick
+                    // because immediacy is the entire reason this half exists:
+                    // a pull request URL is worth showing the moment it is
+                    // printed, and the poll that follows is what gives it a
+                    // state. Cheap on the ordinary event — no text, or text
+                    // with no `/pull/` in it, costs one scan — and idempotent
+                    // on the URL, so a replayed stream produces one row.
+                    if let Err(e) = crate::prs::note_from_stream(
+                        store,
+                        conversation.as_deref(),
+                        &envelope.event,
+                    ) {
+                        // Same rule as the card above. A pull request nobody
+                        // recorded is a row missing from a panel; a run taken
+                        // down by one is work nobody gets.
+                        eprintln!("[jod] could not record a pull request from the stream: {e}");
+                    }
                 }
                 // A closed broadcast channel just means no client is attached.
                 let _ = broadcast_tx.send(envelope);
@@ -1219,6 +1251,74 @@ mod tests {
         store
     }
 
+    /// The wiring test for the stream half of E6.S3, and it is the *point* of
+    /// that half rather than a formality.
+    ///
+    /// Everything in `prs` was built, unit-tested and green while nothing
+    /// called any of it, which is a state unit tests cannot detect: a test on
+    /// an unreachable function passes for ever. So this one drives the real
+    /// event loop — `events_tx` is private, which is why the test has to live
+    /// here — and asserts the side effect. Delete the `note_from_stream` call
+    /// in `build` and this fails.
+    ///
+    /// The broadcast is the synchronisation point rather than a sleep: the loop
+    /// sends the envelope on only after the store side effects, so receiving it
+    /// back is proof they have happened.
+    #[tokio::test]
+    async fn a_pull_request_printed_by_a_run_is_recorded_as_the_event_goes_past() {
+        let store = std::sync::Arc::new(Store::in_memory().unwrap());
+        let jod = Jod::with_store(store.clone());
+        let mut watching = jod.subscribe();
+
+        jod.events_tx
+            .send(envelope(
+                "run-1",
+                0,
+                AgentEvent::ToolResult {
+                    name: "Bash".into(),
+                    // What `gh pr create` prints, which is where a pull request
+                    // URL actually appears — a tool result, not prose.
+                    summary: Some("https://github.com/Reljod/Jod/pull/61".into()),
+                    is_error: false,
+                },
+            ))
+            .unwrap();
+        watching.recv().await.expect("the loop handled the event");
+
+        let recorded = store
+            .pull_request("https://github.com/Reljod/Jod/pull/61")
+            .unwrap()
+            .expect("the run's pull request was recorded as it went past");
+        assert_eq!(recorded.number, Some(61));
+        assert_eq!(
+            recorded.state,
+            crate::prs::State::Unknown,
+            "a URL is not a status; the poll is what gives it one"
+        );
+    }
+
+    /// The other half of the same guard: this runs on every event of every run,
+    /// so it must record nothing at all from ordinary output.
+    #[tokio::test]
+    async fn ordinary_output_going_past_records_no_pull_request() {
+        let store = std::sync::Arc::new(Store::in_memory().unwrap());
+        let jod = Jod::with_store(store.clone());
+        let mut watching = jod.subscribe();
+
+        jod.events_tx
+            .send(envelope(
+                "run-1",
+                0,
+                AgentEvent::Message {
+                    text: "I have pushed the branch and the tests are green.".into(),
+                },
+            ))
+            .unwrap();
+        watching.recv().await.expect("the loop handled the event");
+
+        assert!(store.stale_pull_requests(10).unwrap().is_empty());
+    }
+
     #[tokio::test]
     async fn a_restarted_service_sees_nothing_until_it_rehydrates() {
         let jod = Jod::with_store(store_with_one_finished_run());
@@ -1437,6 +1537,7 @@ mod tests {
                 permission: PermissionPolicy::Ask,
                 resume: crate::harness::Resume::Fresh,
                 tools: None,
+                ..SpawnRequest::default()
             })
             .await;
 
@@ -1463,6 +1564,7 @@ mod tests {
                 permission: PermissionPolicy::Ask,
                 resume: crate::harness::Resume::Fresh,
                 tools: None,
+                ..SpawnRequest::default()
             })
             .await;
         assert!(matches!(result, Err(JodError::StoreRequired)));
@@ -1499,6 +1601,7 @@ mod tests {
             permission: PermissionPolicy::Ask,
             resume: crate::harness::Resume::Fresh,
             tools: None,
+            ..SpawnRequest::default()
         }
     }
 

@@ -72,6 +72,7 @@ async fn main() {
             resume: jod_core::Resume::Fresh,
             // An example, so no access to Jod's own verbs.
             tools: None,
+            ..Default::default()
         })
         .await
         .unwrap_or_else(|e| {

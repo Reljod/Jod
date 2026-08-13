@@ -61,6 +61,23 @@ impl Harness for Agy {
         // run that edited nothing in the repo looks like one that worked.
         args.push(ArgPart::lit("--add-dir"));
         args.push(ArgPart::lit(req.cwd.to_string_lossy().to_string()));
+        // The same flag again, once per root. `agy --help` calls it repeatable
+        // and it measurably is: a run given two of them listed exactly those
+        // two as its workspace.
+        //
+        // That measurement also confirmed the grant above is not redundant.
+        // Asked what its workspace contained, AGY named the two added
+        // directories and *not* the shell's working directory — so a run whose
+        // cwd went unpassed would have a workspace that simply omitted the
+        // repository it was started in.
+        //
+        // Unlike Claude Code's, this flag is not variadic, so it is safe beside
+        // the prompt. Granting still is not confining; see
+        // `docs/harness-support.md`.
+        for root in &req.roots {
+            args.push(ArgPart::lit("--add-dir"));
+            args.push(ArgPart::lit(root.to_string_lossy().to_string()));
+        }
         if let Some(model) = &req.model {
             args.push(ArgPart::lit("--model"));
             args.push(ArgPart::lit(model));
@@ -369,6 +386,76 @@ mod tests {
         assert_eq!(args[at + 1], "/work/repo");
     }
 
+    /// The cwd first, then one `--add-dir` per root.
+    ///
+    /// The order matters to nothing AGY does, but the *count* does: repeating
+    /// the flag accumulates, measured against agy 1.1.12, which named exactly
+    /// the two added directories as its workspace.
+    #[test]
+    fn every_root_is_added_to_the_workspace_beside_the_cwd() {
+        let mut r = req();
+        r.cwd = std::path::PathBuf::from("/work/repo");
+        r.roots = vec![
+            std::path::PathBuf::from("/work/one"),
+            std::path::PathBuf::from("/work/two"),
+        ];
+        let args = lits(&Agy::default().args(&r));
+        let granted: Vec<&String> = args
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| *a == "--add-dir")
+            .map(|(i, _)| &args[i + 1])
+            .collect();
+        assert_eq!(
+            granted,
+            vec!["/work/repo", "/work/one", "/work/two"],
+            "the cwd must survive alongside the roots"
+        );
+    }
+
+    /// The cwd grant is not redundant with the roots. Asked what its workspace
+    /// held, AGY listed the added directories and *not* the shell's working
+    /// directory — so a build that dropped this in favour of roots alone would
+    /// leave a run unable to see the repository it was started in.
+    #[test]
+    fn a_request_with_no_roots_still_grants_the_working_directory() {
+        let mut r = req();
+        r.cwd = std::path::PathBuf::from("/work/repo");
+        let args = lits(&Agy::default().args(&r));
+        let granted: Vec<&String> = args
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| *a == "--add-dir")
+            .map(|(i, _)| &args[i + 1])
+            .collect();
+        assert_eq!(granted, vec!["/work/repo"]);
+    }
+
+    /// AGY expands `/name` from the prompt, so forwarding is passing the line
+    /// through — no flag, no rewriting.
+    ///
+    /// It survives having framing in front of it, which is the case that
+    /// matters here: AGY answers `false` to `takes_system_prompt`, so
+    /// `runner.rs` prepends the system prompt to the message and the slash is
+    /// no longer the first thing in it. Measured rather than assumed — a
+    /// preamble followed by `/jodskill` still fired the skill — because the
+    /// obvious guess is that a slash command has to lead the line, and had that
+    /// been true every forwarded command under AGY would have been silently
+    /// downgraded to prose.
+    #[test]
+    fn a_command_rides_in_the_prompt_untouched() {
+        let mut r = req();
+        r.prompt = "/planning now".into();
+        let args = Agy::default().args(&r);
+        assert!(args.contains(&ArgPart::Prompt), "the prompt is a placeholder");
+        let flat = lits(&args);
+        assert!(!flat.iter().any(|a| a == "--command"));
+        assert!(
+            !flat.iter().any(|a| a.contains("/planning")),
+            "the prompt must not be inlined into argv"
+        );
+    }
+
     fn req() -> SpawnRequest {
         SpawnRequest {
             name: "t".into(),
@@ -380,6 +467,7 @@ mod tests {
             permission: PermissionPolicy::Ask,
             resume: Resume::Fresh,
             tools: None,
+            ..SpawnRequest::default()
         }
     }
 

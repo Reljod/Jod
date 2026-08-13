@@ -60,11 +60,13 @@ pub trait Tick: Send + Sync {
 }
 
 impl Tick for Ticker {
-    /// Heartbeats first, then schedules, then goals, and all three every pass.
+    /// Heartbeats first, then schedules, then goals, then the mail, then the
+    /// delivery queue, then the titlers, then the works, then the pull
+    /// requests — every step every pass.
     ///
     /// Separate claims rather than one, because they are different contended
     /// resources — a process holding a goal must not thereby hold a schedule —
-    /// and a failure in one must not stop the other. A goal whose harness is
+    /// and a failure in one must not stop the others. A goal whose harness is
     /// wedged should not silently stop the nightly backup.
     ///
     /// **The sweep goes first, and the order is load-bearing.**
@@ -78,6 +80,34 @@ impl Tick for Ticker {
     /// A sweep that fails does not stop the pass. It watches runs that are
     /// already going; schedules that are due are a separate promise, and one
     /// unkillable process group must not become a scheduler that stopped.
+    ///
+    /// The two delivery steps are last and deliberately so: both resume agents
+    /// that are already working, and nothing else in a tick waits on either.
+    /// They are also the halves that turn Jod from something a person operates
+    /// into something that runs — without [`Ticker::tick_mail`] a teammate's
+    /// message sits in an inbox until somebody types `jod team wake`, and
+    /// without [`Ticker::tick_deliveries`] a card answered in the rail is
+    /// queued and never spoken. [`Ticker::tick_works`] is the third of the
+    /// same kind: without it a work whose board has emptied stays open until a
+    /// person closes it by hand, and *finishing* is a state nothing reaches.
+    /// [`Ticker::tick_titlers`] is the fourth: without it a work opened by a
+    /// process that then exits — Jod's own MCP server, every time — keeps its
+    /// fallback name and leaves its throwaway conversation behind.
+    /// [`Ticker::tick_pull_requests`] is the fifth: the stream half of E6.S3
+    /// records a pull request the moment a run prints its URL, but a URL is not
+    /// a status, and one merged an hour after the session ended produces no
+    /// event anywhere — without this line nothing ever asks the forge, and
+    /// every pull request Jod knows about stays `unknown` for ever. It is also
+    /// the only step here that leaves the machine, so it keeps its own interval
+    /// and does real work on roughly one tick in five.
+    ///
+    /// **This function is the whole wiring.** All five were built and tested
+    /// against nothing for a while, and unit tests on an uncalled function stay
+    /// green for ever. Each step has its own guard test that calls `Tick::tick`
+    /// rather than the step, so removing a line here fails one of them — but
+    /// note that they are *per step* and assert a state change only that step
+    /// causes. A further step added without its own guard would be covered by
+    /// none of them, however well it was unit-tested.
     async fn tick(&self, now_ms: i64) -> Result<TickReport> {
         let swept = match self.tick_heartbeats(now_ms).await {
             Ok(report) => report,
@@ -88,15 +118,37 @@ impl Tick for Ticker {
         };
         let schedules = Ticker::tick(self, now_ms).await?;
         let goals = self.tick_goals(now_ms).await?;
+        let mail = self.tick_mail(now_ms).await?;
+        let queued = self.tick_deliveries(now_ms).await?;
+        // Titles before works, so that a work which closes on this same pass
+        // is reported under the name its titler gave it rather than under the
+        // first eight words of its instruction.
+        let titles = self.tick_titlers(now_ms)?;
+        // Last, and after the delivery queue rather than before it — the order
+        // matters. Closing a work marks whatever is *still* queued against its
+        // stopped sessions as undeliverable; run first, it would mark answers
+        // undeliverable a moment before the step that would have delivered
+        // them. This way the queue gets its chance and only the leftovers are
+        // reported. Nothing here starts a run.
+        let works = self.tick_works()?;
+        // Last, because it is the only step that waits on a network round trip
+        // and nothing else in a tick depends on what it learns. It keeps its
+        // own interval, so on most passes this returns having done nothing.
+        let prs = self.tick_pull_requests(now_ms).await?;
+        // Folded over an array rather than five addition chains: a step added
+        // to the list above and forgotten in one of the four sums would be a
+        // step whose work is invisible in the report, which is exactly how a
+        // tick stops being trusted.
+        let all = [schedules, goals, mail, queued, titles, works, prs];
         Ok(TickReport {
-            claimed: schedules.claimed + goals.claimed,
-            started: schedules.started + goals.started,
-            held: schedules.held + goals.held,
+            claimed: all.iter().map(|r| r.claimed).sum(),
+            started: all.iter().map(|r| r.started).sum(),
+            held: all.iter().map(|r| r.held).sum(),
             // A reaped run is a failure that happened, and the daemon's own log
             // line is where a person finds out that anything did. Counting it
             // here rather than in a fourth field keeps `TickReport` meaning
             // "what went wrong this pass", which is what reads it.
-            failed: schedules.failed + goals.failed + swept.stopped,
+            failed: all.iter().map(|r| r.failed).sum::<usize>() + swept.stopped,
         })
     }
 }

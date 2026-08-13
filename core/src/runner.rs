@@ -39,6 +39,24 @@ pub struct SpawnPlan {
     pub program: PathBuf,
     pub args: Vec<String>,
     pub cwd: PathBuf,
+    /// Non-secret environment for the child process.
+    ///
+    /// This file is written so a person can read afterwards exactly what was
+    /// launched, which is precisely why no credential may appear in it.
+    #[serde(default)]
+    pub env: Vec<(String, String)>,
+    /// Names of secrets the supervisor should resolve and inject.
+    ///
+    /// Names, never values: the value is read at exec time from the owner-only
+    /// secret file and exists only in the supervisor's memory and the child's
+    /// environment. A plan on disk that named a value would be a second copy
+    /// of the credential at ordinary permissions.
+    ///
+    /// The supervisor also builds its output scrubber from whatever these
+    /// resolve to, so injection and redaction can never disagree about what is
+    /// secret.
+    #[serde(default)]
+    pub secrets: Vec<String>,
 }
 
 /// Resolve `ArgPart::Prompt` into the real prompt.
@@ -118,6 +136,18 @@ pub async fn launch(
     };
     tokio::fs::write(paths::prompt_path(agent_id), &prompt).await?;
 
+    // The run's own id, stamped over whatever the caller supplied.
+    //
+    // `args` is handed nothing but the request, and it needs the id to write a
+    // per-run MCP config — that config is how Jod's own tools know which member
+    // is calling them. Overwritten rather than trusted, because a caller that
+    // set this would be naming a run it does not own, and sender identity is
+    // the one thing on this path that must not be an argument.
+    let req = &SpawnRequest {
+        run_id: Some(agent_id.to_string()),
+        ..req.clone()
+    };
+
     let plan = SpawnPlan {
         run_id: agent_id.to_string(),
         harness: harness.kind(),
@@ -125,6 +155,8 @@ pub async fn launch(
         program: program.to_path_buf(),
         args: resolve_args(&harness.args(req), &prompt),
         cwd: req.cwd.clone(),
+        env: req.env.clone(),
+        secrets: req.secrets.clone(),
     };
     let plan_file = paths::spawn_path(agent_id);
     tokio::fs::write(&plan_file, serde_json::to_vec_pretty(&plan)?).await?;
@@ -253,6 +285,8 @@ mod tests {
             program: "/bin/claude".into(),
             args: vec!["-p".into(), "hello".into()],
             cwd: "/work".into(),
+            env: Vec::new(),
+            secrets: Vec::new(),
         };
         let json = serde_json::to_string(&plan).unwrap();
         assert_eq!(serde_json::from_str::<SpawnPlan>(&json).unwrap(), plan);

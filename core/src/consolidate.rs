@@ -226,6 +226,7 @@ impl Consolidation {
             // format is predictable.
             resume: Resume::Fresh,
             tools: None,
+            ..SpawnRequest::default()
         }
     }
 

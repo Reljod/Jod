@@ -11,11 +11,27 @@ use jod_core::team::{Member, TeamTask};
 use jod_core::{AgentEvent, HarnessKind, Model, PermissionPolicy, Resume};
 
 use super::data::{
-    ActivityItem, GoalRow, HookRow, MemoryKind, MemoryNode, ScheduleRow, Source, TaskRow, TaskState,
+    ActivityItem, GoalRow, Hit, HookRow, MemoryKind, MemoryNode, ScheduleRow, Source, TaskRow,
+    TaskState,
 };
 use super::delivery::Verdict;
 use super::graph::GraphView;
+use super::diff;
+use super::fleet::TreeState;
+use super::todo;
+use super::mention::Mention;
+use super::picker::Picker;
+use super::rail::RailState;
+use super::secret::Typed;
+use super::traffic;
 use super::workspace::{matches, ListState, Workspace};
+use jod_core::cards::Card;
+use jod_core::commands::Discovered;
+use jod_core::roots::Root;
+use jod_core::secrets::Scope;
+use jod_core::tree::{Node, NodeId};
+use std::collections::HashSet;
+use std::sync::Arc;
 
 /// One line in the transcript, tagged with what produced it so the renderer can
 /// style it without re-inspecting the event.
@@ -41,6 +57,19 @@ pub enum Entry {
     Done { text: String, failed: bool },
     /// Something Jod itself wants to say.
     Notice(String),
+    /// A file edit, as a diff rather than as a one-line summary.
+    ///
+    /// Its own entry rather than a decorated `Tool`, because it is the one tool
+    /// call whose *arguments* are the interesting part. Everything else is
+    /// summarised to one line on purpose; an edit summarised to one line is the
+    /// difference between watching an agent work and being able to trust it
+    /// afterwards.
+    Diff(diff::Edit),
+    /// The agent's plan, updating in place.
+    ///
+    /// One block per turn, not one per revision — see `todo.rs`. `App::apply`
+    /// replaces the existing block rather than pushing a new one.
+    Plan(Vec<todo::Item>),
     /// A line the harness printed that we could not classify.
     Raw(String),
 }
@@ -84,6 +113,40 @@ pub enum Overlay {
         /// What to do with it once `⏎` is pressed.
         intent: PromptIntent,
     },
+    /// A credential being collected for a `Secret` card.
+    ///
+    /// Deliberately **not** an `Overlay::Prompt`. A prompt's `value` is an
+    /// ordinary `String` that the renderer echoes and that `accept_prompt`
+    /// hands around as text — both correct for a schedule's name and both
+    /// disqualifying for a token. This variant masks its field, keeps the value
+    /// in a [`Typed`] that cannot print itself, and moves rather than copies it
+    /// on the way out. See `secret.rs` for the full rule.
+    Secret {
+        /// The card this answers, carried rather than read off the rail's
+        /// cursor for the reason [`PromptIntent::AnswerCard`] gives.
+        card: i64,
+        /// The environment variable's name, already validated by whoever
+        /// raised the card.
+        name: String,
+        scope: Scope,
+        /// The value, so far. Never rendered, never logged, never recalled.
+        value: Typed,
+    },
+    /// The full-screen directory picker — the big half of the one picker `@`
+    /// is the small half of. See `picker.rs`.
+    Picker(Picker),
+    /// Full-text search over every transcript.
+    ///
+    /// An overlay rather than a workspace because it is a way *to* somewhere:
+    /// you open it, find the turn, and land in the conversation holding it. A
+    /// screen you navigate to would be a place you then have to leave.
+    Search {
+        query: String,
+        selected: usize,
+        /// Filled by the loop, which is the only layer that may touch the
+        /// store. Empty until the first keystroke has been searched for.
+        hits: Vec<Hit>,
+    },
 }
 
 /// What a tier-1 prompt is collecting.
@@ -102,6 +165,16 @@ pub enum PromptIntent {
     /// left. Without it those branches are listed, numbered, and unreachable,
     /// which is a worse state than not listing them at all.
     Branch,
+    /// Answer a card in prose rather than by picking one of its options.
+    ///
+    /// Carries the card id rather than reading it off the rail's cursor, which
+    /// is the one place here that departs from the "an overlay owns the
+    /// keyboard, so the selection cannot have moved" rule that `confirmed` and
+    /// [`PromptIntent::Branch`] rely on. It has to: the rail re-queries on the
+    /// tick *underneath* the prompt, so an answer that landed on whatever card
+    /// had sorted to the cursor by the time `⏎` was pressed would be an answer
+    /// given to the wrong agent.
+    AnswerCard(i64),
 }
 
 impl Overlay {
@@ -260,6 +333,58 @@ pub struct App {
     /// without offering a way to see it is asking to be trusted about work it
     /// never shows.
     pub jobs: Vec<Job>,
+
+    // ---- the decision rail, and the `@` picker --------------------------
+    /// The conversation the rail and the `@` picker belong to.
+    ///
+    /// Kept here rather than derived at each use because both need it and
+    /// neither may do I/O: the loop works it out — the conversation the chat
+    /// box is bound to, or the pinned main chat when it is bound to nothing —
+    /// and writes it down.
+    pub conversation: Option<String>,
+    /// The cards the rail is showing, already filtered and ordered by the
+    /// store. Refreshed on the tick, off the render path, so `draw()` stays a
+    /// pure function of state.
+    pub cards: Vec<Card>,
+    pub rail: RailState,
+    /// The conversation's roots, in the user's own order. The first is the one
+    /// an unqualified mention resolves against.
+    pub roots: Vec<Root>,
+    /// Every root's candidate paths, positionally aligned with `roots`.
+    ///
+    /// Shared rather than owned: a hundred thousand paths is a few megabytes,
+    /// and `@` re-ranks on every keystroke. `Arc` is what makes that a pointer
+    /// copy rather than a stall — see [`jod_core::rank::candidates_shared`].
+    pub candidates: Vec<Arc<Vec<String>>>,
+    /// The `@` popup, while it is up.
+    pub mention: Option<Mention>,
+    /// The slash commands and skills this repository offers, already filtered
+    /// to the harness on screen. Refreshed on the tick, off the render path.
+    pub discovered: Vec<Discovered>,
+
+    // ---- the fleet tree -------------------------------------------------
+    /// Works, their sessions and their runs, flattened by core in one pass.
+    /// Empty until a work exists, which is what keeps the fleet's older flat
+    /// list meaningful for a session that belongs to no work.
+    pub forest: Vec<Node>,
+    /// Which of those works are closed. Core's answer, not an inference: a
+    /// [`Node`] carries no state.
+    pub closed_works: HashSet<NodeId>,
+    pub tree: TreeState,
+
+    // ---- the traffic log ------------------------------------------------
+    /// Which scope's bus the traffic screen is reading, or `None` before one
+    /// has been opened from the tree.
+    ///
+    /// The *request*, kept apart from the loaded [`traffic::Log`] on purpose:
+    /// the log is rebuilt from the store on every tick, so a scope stored only
+    /// on the data would be forgotten by the first refresh after opening the
+    /// screen.
+    pub traffic_of: Option<traffic::Watching>,
+    /// That scope's messages, refreshed on the tick like every other list.
+    pub traffic: traffic::Log,
+    /// Which states the log is narrowed to. `f` cycles it.
+    pub traffic_shown: traffic::Shown,
 }
 
 /// One background shell this console started.
@@ -485,7 +610,7 @@ fn tool_detail(input: &serde_json::Value) -> Option<String> {
 }
 
 /// Collapse to one line and truncate, so a payload cannot own the transcript.
-fn one_line(s: &str, max: usize) -> String {
+pub fn one_line(s: &str, max: usize) -> String {
     let flat = s.split_whitespace().collect::<Vec<_>>().join(" ");
     if flat.chars().count() <= max {
         return flat;
@@ -627,7 +752,155 @@ impl App {
             panel: false,
             context_tokens: 0,
             jobs: Vec::new(),
+            conversation: None,
+            cards: Vec::new(),
+            rail: RailState::default(),
+            roots: Vec::new(),
+            candidates: Vec::new(),
+            mention: None,
+            discovered: Vec::new(),
+            forest: Vec::new(),
+            closed_works: HashSet::new(),
+            tree: TreeState::default(),
+            traffic_of: None,
+            traffic: traffic::Log::default(),
+            traffic_shown: traffic::Shown::Everything,
         }
+    }
+
+    // ---- the fleet tree --------------------------------------------------
+
+    /// The visible tree rows, in the order they are drawn.
+    ///
+    /// The filter comes from the fleet screen's own `ListState`, not from a
+    /// second one on `TreeState`. `/` is already wired there, on every list
+    /// screen, with its own `Esc` and its own line under the box — a private
+    /// copy would have been a filter the key never reached, which is exactly
+    /// what it was until a render test caught it.
+    pub fn tree_rows(&self) -> Vec<NodeId> {
+        self.tree
+            .row_ids(&self.forest, &self.closed_works, self.tree_filter())
+    }
+
+    /// What the fleet's `/` line currently holds.
+    pub fn tree_filter(&self) -> Option<&str> {
+        self.list(Workspace::Fleet).filter.as_deref()
+    }
+
+    /// The node under the cursor.
+    pub fn selected_node(&self) -> Option<&Node> {
+        let id = self.tree.selected.as_ref()?;
+        self.forest.iter().find(|n| n.id == *id)
+    }
+
+    /// Whether the fleet shows the tree rather than its older flat list.
+    ///
+    /// A session that belongs to no work has no node in the forest, so the flat
+    /// list is not legacy — it is what the screen shows when there is no tree
+    /// to show, which is every session started before works existed.
+    pub fn has_tree(&self) -> bool {
+        !self.forest.is_empty()
+    }
+
+    // ---- the decision rail ----------------------------------------------
+
+    /// The cards on screen, by id, in the order they are drawn. This is what
+    /// the rail's cursor moves over.
+    pub fn card_ids(&self) -> Vec<i64> {
+        self.cards.iter().map(|c| c.id).collect()
+    }
+
+    pub fn selected_card(&self) -> Option<&Card> {
+        let id = self.rail.selected?;
+        self.cards.iter().find(|c| c.id == id)
+    }
+
+    /// Keep the rail's cursor on a card that still exists.
+    ///
+    /// Separate from [`App::reconcile`], which walks the workspaces: the rail
+    /// is drawn beside all of them and refreshes on its own query, so it is
+    /// reconciled whenever *its* cards change rather than whenever a list does.
+    pub fn reconcile_rail(&mut self) {
+        let ids = self.card_ids();
+        self.rail.reconcile(&ids);
+    }
+
+    // ---- the `@` picker --------------------------------------------------
+
+    /// Open the popup for an `@` that has just been typed.
+    ///
+    /// `at` is the byte index of the `@` itself, which is the cursor *before*
+    /// the character was inserted — the popup replaces the sign along with the
+    /// query, so it has to know where the sign is.
+    pub fn open_mention(&mut self, at: usize) {
+        let mut popup = Mention::new(at);
+        popup.refresh(&self.roots, &self.candidates);
+        self.mention = Some(popup);
+    }
+
+    /// Re-derive the popup from the line as it now stands, closing it if the
+    /// text no longer supports one.
+    ///
+    /// Derived rather than tracked, because every edit key would otherwise have
+    /// to remember to keep the popup in step — and the one that forgot would
+    /// leave a popup ranking a query the line no longer contains. The rule is
+    /// that a mention runs from its `@` to the cursor and holds no whitespace;
+    /// backspacing over the `@`, or moving the cursor before it, ends it.
+    pub fn sync_mention(&mut self) {
+        let Some(popup) = &self.mention else {
+            return;
+        };
+        let at = popup.at;
+        let ended = at >= self.cursor
+            || !self.input.is_char_boundary(at)
+            || self.input[at..].chars().next() != Some('@')
+            || self.input[at + 1..self.cursor]
+                .chars()
+                .any(char::is_whitespace);
+        if ended {
+            self.mention = None;
+            return;
+        }
+        let query = self.input[at + 1..self.cursor].to_string();
+        let Some(popup) = &mut self.mention else {
+            return;
+        };
+        if popup.query == query {
+            return;
+        }
+        popup.query = query;
+        let (roots, candidates) = (self.roots.clone(), self.candidates.clone());
+        if let Some(popup) = &mut self.mention {
+            popup.refresh(&roots, &candidates);
+        }
+    }
+
+    /// Put the highlighted path into the line, replacing the `@` and the query.
+    ///
+    /// A trailing space is added because a mention is a word in a sentence and
+    /// the next thing typed is the rest of it. Answers `false` when there was
+    /// nothing to accept — which is what zero roots means, per E1.S3.
+    pub fn accept_mention(&mut self) -> bool {
+        let Some(popup) = &self.mention else {
+            return false;
+        };
+        let Some(row) = popup.acceptable() else {
+            return false;
+        };
+        let span = popup.span();
+        let inserted = format!("@{} ", row.insertion());
+        // Clamped rather than trusted: the span is derived from the line, but
+        // an edit key that landed between the derivation and this call would
+        // otherwise panic on a slice that is no longer inside the string.
+        let end = span.end.min(self.input.len());
+        if span.start > end || !self.input.is_char_boundary(span.start) {
+            self.mention = None;
+            return false;
+        }
+        self.input.replace_range(span.start..end, &inserted);
+        self.cursor = span.start + inserted.len();
+        self.mention = None;
+        true
     }
 
     /// Move to the next permission mode, and say what happened.
@@ -734,6 +1007,24 @@ impl App {
 
     pub fn running_jobs(&self) -> usize {
         self.jobs.iter().filter(|j| j.is_running()).count()
+    }
+
+    /// Replace the plan on screen, or start one.
+    ///
+    /// In place, and *where it already was*. A harness rewrites its todo list
+    /// once per item finished, so appending would put fifteen near-identical
+    /// lists between two sentences — and moving the block to the bottom on each
+    /// revision would be a second kind of noise in place of the first. Its
+    /// position says when the agent started planning, which does not change.
+    pub fn revise_plan(&mut self, plan: Vec<todo::Item>) {
+        match self
+            .transcript
+            .iter_mut()
+            .rfind(|e| matches!(e, Entry::Plan(_)))
+        {
+            Some(existing) => *existing = Entry::Plan(plan),
+            None => self.push(Entry::Plan(plan)),
+        }
     }
 
     pub fn push(&mut self, entry: Entry) {
@@ -918,6 +1209,15 @@ impl App {
             Workspace::Tasks => self.task_rows().iter().map(|t| t.id.clone()).collect(),
             Workspace::Activity => self.activity_rows().iter().map(|a| a.id.clone()).collect(),
             Workspace::Team => self.tasks.iter().map(|t| t.id.clone()).collect(),
+            // A message id is a number and every other list here keys on a
+            // string, so it is spelled as one. The cursor is still the id and
+            // never the row: the log reshapes under it every tick as agents
+            // answer each other.
+            Workspace::Traffic => self
+                .traffic_rows()
+                .iter()
+                .map(|e| e.message.id.to_string())
+                .collect(),
             Workspace::Chat | Workspace::MemoryGraph => Vec::new(),
         }
     }
@@ -944,6 +1244,11 @@ impl App {
             }
             self.list_mut(ws).reconcile(&ids);
         }
+        // The tree's cursor too, and for the same reason: `/` changes what is
+        // visible, and a cursor left on a filtered-out node would put the
+        // detail pane on something the list no longer shows.
+        let rows = self.tree_rows();
+        self.tree.reconcile(&rows);
     }
 
     fn keep(&self, ws: Workspace, text: &str) -> bool {
@@ -1126,6 +1431,38 @@ impl App {
         rows
     }
 
+    /// The traffic on screen: filtered, threaded and in the order it is drawn.
+    ///
+    /// The `/` filter and the sort come out of the screen's own [`ListState`],
+    /// like every other list here, so `Esc` clears it and the line under the
+    /// box reports it without anything extra being wired.
+    pub fn traffic_rows(&self) -> Vec<&jod_core::team::Envelope> {
+        let list = self.list(Workspace::Traffic);
+        traffic::rows(
+            &self.traffic.messages,
+            &self.traffic.held,
+            self.traffic_shown,
+            list.filter.as_deref(),
+            list.sort,
+        )
+    }
+
+    pub fn selected_message(&self) -> Option<&jod_core::team::Envelope> {
+        let id: i64 = self
+            .list(Workspace::Traffic)
+            .selected
+            .as_deref()?
+            .parse()
+            .ok()?;
+        self.traffic.messages.iter().find(|e| e.message.id == id)
+    }
+
+    /// Whether the selected message is one nobody will ever read.
+    pub fn selected_is_held(&self) -> bool {
+        self.selected_message()
+            .is_some_and(|e| self.traffic.held.contains(&e.message.id))
+    }
+
     pub fn selected_agent(&self) -> Option<&AgentLine> {
         let id = self.list(Workspace::Fleet).selected.as_deref()?;
         self.agents.iter().find(|a| a.id == id)
@@ -1295,6 +1632,30 @@ impl App {
                     )
                 }
             },
+            // The budget is in the count line rather than only in the pane,
+            // because G4.S5 asks for it to be seen *before* it is spent and the
+            // status bar is the one row that is always on screen.
+            Workspace::Traffic => {
+                if self.traffic_of.is_none() {
+                    return "no work chosen — T on a fleet row opens one".into();
+                }
+                let mut line = format!(
+                    "{} · {} in {}",
+                    self.traffic.title,
+                    plural(self.traffic.messages.len(), "message"),
+                    plural(self.traffic.threads(), "thread")
+                );
+                let troubled = self.traffic.troubled();
+                if troubled > 0 {
+                    line.push_str(&format!(" · {troubled} undelivered"));
+                }
+                line.push_str(&format!(
+                    " · {} of {} budget left",
+                    self.traffic.budget_left(),
+                    self.traffic.budget
+                ));
+                line
+            }
         }
     }
 
@@ -1472,11 +1833,29 @@ impl App {
                 }
             }
             AgentEvent::Message { text } => self.push(Entry::Agent(text.clone())),
-            AgentEvent::ToolCall { name, input } => self.push(Entry::Tool {
-                name: name.clone(),
-                detail: input.as_ref().and_then(tool_detail),
-                failed: false,
-            }),
+            AgentEvent::ToolCall { name, input } => {
+                // A todo call *is* the plan block, and gets no summary line of
+                // its own. The line would be pushed again on every revision —
+                // a dozen `⚙ TodoWrite` rows around one block — which is the
+                // noise this whole slice exists to remove.
+                if let Some(plan) = input.as_ref().and_then(|i| todo::from_tool(name, i)) {
+                    self.revise_plan(plan);
+                    return;
+                }
+                // A file edit becomes a diff; everything else keeps its
+                // one-line summary. An edit *does* keep its `Tool` line above
+                // the diff — unlike the plan it is pushed once per edit, and it
+                // makes the transcript read as "it did this, and here is what
+                // it was".
+                self.push(Entry::Tool {
+                    name: name.clone(),
+                    detail: input.as_ref().and_then(tool_detail),
+                    failed: false,
+                });
+                if let Some(edit) = input.as_ref().and_then(|i| diff::from_tool(name, i)) {
+                    self.push(Entry::Diff(edit));
+                }
+            }
             AgentEvent::ToolResult {
                 name,
                 summary,

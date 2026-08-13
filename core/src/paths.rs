@@ -16,9 +16,36 @@ pub fn jod_home() -> PathBuf {
     PathBuf::from(home).join(".jod")
 }
 
+/// Where Jod keeps its things when nobody has said otherwise.
+///
+/// Separate from [`jod_home`] so that code can ask "is this the real
+/// installation?" rather than only "where am I writing?". The one caller that
+/// needs the distinction is MCP registration, which rewrites files outside the
+/// repository that every tool on the machine reads: a daemon running against a
+/// scratch home must not repoint a working Claude Code at a binary that will be
+/// gone tomorrow.
+pub fn default_jod_home() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    PathBuf::from(home).join(".jod")
+}
+
 /// The one SQLite file that holds events, run history and memory.
 pub fn db_path() -> PathBuf {
     jod_home().join("jod.db")
+}
+
+/// Secret values, one file each, at owner-only permissions.
+///
+/// Deliberately *beside* `jod.db` rather than inside it. A value in SQLite is a
+/// value in every backup, every `jod conv show` and every screen share, and a
+/// row cannot carry file permissions. Here the operating system enforces the
+/// rule instead: the directory is `0700`, each file is `0600`, and
+/// [`crate::secrets::read_secret_value`] refuses to read one whose mode has
+/// since been widened. Being under `$JOD_HOME` rather than a repository is the
+/// other half of it — nothing here can be committed by an agent working in a
+/// checkout.
+pub fn secrets_dir() -> PathBuf {
+    jod_home().join("secrets")
 }
 
 pub fn runs_dir() -> PathBuf {
@@ -117,12 +144,45 @@ pub fn browser_python() -> PathBuf {
 mod tests {
     use super::*;
 
+    /// Point `JOD_HOME` somewhere for the length of one test, and put it back
+    /// exactly as it was found.
+    ///
+    /// Restoring rather than unsetting, because `JOD_HOME` is genuinely set on
+    /// the box Jod runs on: a test that ends with `remove_var` leaves the rest
+    /// of the suite resolving `~/.jod` instead of the configured home, and the
+    /// difference only shows up as a file written somewhere nobody looked.
+    /// Holds [`crate::ENV_LOCK`] and restores on drop, so a panicking test
+    /// cannot leave the variable pointing at its scratch directory.
+    struct Override {
+        previous: Option<String>,
+        _guard: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl Override {
+        fn to(path: &str) -> Override {
+            let guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let previous = std::env::var("JOD_HOME").ok();
+            std::env::set_var("JOD_HOME", path);
+            Override {
+                previous,
+                _guard: guard,
+            }
+        }
+    }
+
+    impl Drop for Override {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => std::env::set_var("JOD_HOME", value),
+                None => std::env::remove_var("JOD_HOME"),
+            }
+        }
+    }
+
     #[test]
     fn jod_home_honours_an_explicit_override() {
-        let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        std::env::set_var("JOD_HOME", "/tmp/jod-test-home");
+        let _home = Override::to("/tmp/jod-test-home");
         assert_eq!(jod_home(), PathBuf::from("/tmp/jod-test-home"));
-        std::env::remove_var("JOD_HOME");
     }
 
     /// The installed layout, which is not the layout this started out
@@ -172,8 +232,7 @@ mod tests {
 
     #[test]
     fn every_run_file_lives_under_that_run_s_directory() {
-        let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        std::env::set_var("JOD_HOME", "/tmp/jod-test-home");
+        let _home = Override::to("/tmp/jod-test-home");
         let dir = run_dir("abc");
         for p in [
             prompt_path("abc"),
@@ -183,6 +242,17 @@ mod tests {
         ] {
             assert!(p.starts_with(&dir), "{p:?} escaped {dir:?}");
         }
-        std::env::remove_var("JOD_HOME");
+    }
+
+    #[test]
+    fn the_secrets_directory_is_under_the_home_it_is_told_about() {
+        // The one path where getting this wrong writes a credential into a
+        // directory nobody meant — which is exactly what an unlocked caller
+        // resolving `JOD_HOME` mid-test does.
+        let _home = Override::to("/tmp/jod-test-home");
+        assert_eq!(
+            secrets_dir(),
+            PathBuf::from("/tmp/jod-test-home").join("secrets")
+        );
     }
 }

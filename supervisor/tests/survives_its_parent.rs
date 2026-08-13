@@ -102,6 +102,84 @@ fn a_run_outlives_its_spawner_and_keeps_writing_events() {
     assert_eq!(seqs, (0..seqs.len() as u64).collect::<Vec<_>>());
 }
 
+/// The session id has to be on the *conversation*, written by the supervisor,
+/// because there may be nobody else left to write it.
+///
+/// This is the bug that made a work's session unspeakable-to: no mail, no card
+/// answer, no second turn, because `resume_for` had nothing to resume. It went
+/// unnoticed because the only caller of `set_conversation_session` was a drain
+/// task inside whatever process launched the run — and in every test and every
+/// interactive `jod run`, that process is still there. On the path that opens a
+/// work it is Jod's own MCP server, which exits when the harness closes stdin.
+///
+/// So the load-bearing clause is not the assertion, it is the fixture: the
+/// launcher is **already gone** before anything below is read. A version of
+/// this test that kept it alive would have passed against the broken build.
+#[test]
+fn the_session_id_reaches_the_conversation_even_though_the_launcher_is_gone() {
+    let fixture = Fixture::new("session-id", CHATTY_HARNESS, 0);
+
+    // What `spawn_agent` arranges before a harness starts: a conversation, and
+    // the prompt recorded against this run. `conversation_for_run` finds the
+    // conversation through that message, so without it the supervisor has
+    // nothing to attach the session to.
+    let store = Store::open(&fixture.db).unwrap();
+    let conversation = store
+        .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
+        .unwrap()
+        .id;
+    store
+        .append_message(
+            &conversation,
+            jod_core::conversation::NewMessage {
+                run_id: Some(fixture.run_id.clone()),
+                ..jod_core::conversation::NewMessage::new(
+                    jod_core::conversation::Role::User,
+                    "say three things",
+                )
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        store.conversation(&conversation).unwrap().unwrap().session_id,
+        None,
+        "the fixture must start with nothing recorded, or this proves nothing"
+    );
+    drop(store);
+
+    fixture.launch_from_a_process_that_exits();
+
+    // A fresh handle, in a process that never held a pipe to anything — the
+    // same view a `jod` started tomorrow would get.
+    let store = Store::open(&fixture.db).unwrap();
+    fixture.wait_for_finish(&store);
+
+    assert_eq!(
+        store.run(&fixture.run_id).unwrap().unwrap().session_id.as_deref(),
+        Some("sess-abc"),
+        "the run row lost the harness's session id"
+    );
+    assert_eq!(
+        store
+            .conversation(&conversation)
+            .unwrap()
+            .unwrap()
+            .session_id
+            .as_deref(),
+        Some("sess-abc"),
+        "the conversation cannot be resumed: nothing recorded the session id, \
+         because the process that used to do it had already exited"
+    );
+    // The consequence, stated as the thing a caller actually asks for.
+    assert!(
+        matches!(
+            store.resume_for(&conversation).unwrap(),
+            jod_core::harness::Resume::Session(id) if id == "sess-abc"
+        ),
+        "resume_for still cannot resume this conversation"
+    );
+}
+
 #[test]
 fn a_failing_harness_is_recorded_as_failed_not_quietly_finished() {
     let fixture = Fixture::new("failing", CHATTY_HARNESS, 3);
@@ -226,6 +304,8 @@ impl Fixture {
             program: harness,
             args: vec![],
             cwd: dir.clone(),
+            env: Vec::new(),
+            secrets: Vec::new(),
         };
 
         // The row has to exist before the supervisor updates it, exactly as

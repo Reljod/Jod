@@ -254,6 +254,108 @@ pub struct SpawnRequest {
     /// anything untrusted, and the reason this is opt-in rather than automatic.
     #[serde(default)]
     pub tools: Option<ToolAccess>,
+    /// Directories this run may read, beyond [`cwd`](Self::cwd).
+    ///
+    /// A conversation can be pointed at several repositories at once, and the
+    /// one the process happens to start in is not the only one it may look at.
+    /// Each harness spells this differently and one of them cannot spell it at
+    /// all, so [`Harness::args`] translates and the gap is documented rather
+    /// than pretended away — a directory a harness will not accept is a
+    /// directory Jod must not claim to have granted.
+    ///
+    /// Not a sandbox. Passing a root grants reading; withholding one does not
+    /// prevent it.
+    #[serde(default)]
+    pub roots: Vec<PathBuf>,
+    /// Ordinary, non-secret environment variables for the harness process.
+    ///
+    /// Safe to read, log and write into the run's `spawn.json`, because
+    /// nothing confidential is permitted here. Credentials go in
+    /// [`secrets`](Self::secrets), which is a different field for exactly that
+    /// reason.
+    #[serde(default)]
+    pub env: Vec<(String, String)>,
+    /// A repository command to invoke, named rather than pasted.
+    ///
+    /// Only OpenCode needs this, and it needs it because of a measured quirk:
+    /// alone of the three, it does *not* expand `/name` written into the
+    /// message. Given one it hands the literal text to the model, which — in
+    /// the run that found this — went looking with `ls` and `cat`, happened to
+    /// find the file in the working directory, and answered correctly. Right
+    /// answer, wrong mechanism, and it would have failed the moment the command
+    /// lived anywhere else. `opencode run --command <name>` resolves it
+    /// properly, in one step.
+    ///
+    /// Claude Code and AGY leave this `None` and put `/name` in the prompt,
+    /// which they expand themselves. So this is not a general "run a command"
+    /// verb — it is one harness's spelling of a thing the other two say in the
+    /// prompt, and [`crate::commands::Discovered::invoke`] is what decides
+    /// which spelling a given command gets.
+    ///
+    /// **With a command set, `prompt` is the command's *arguments*, not a
+    /// message.** Measured: `--command jodargs "hello world"` reached the
+    /// command as `$ARGUMENTS` = `["hello world"]`. That matters beside
+    /// [`system`](Self::system) — a harness that answers `false` to
+    /// [`Harness::takes_system_prompt`] has its framing prepended to the
+    /// prompt by the runner, and under a command that framing would arrive as
+    /// argument text. Setting both on one OpenCode spawn is therefore a caller
+    /// error rather than a supported combination, and it is written down here
+    /// because nothing at the type level stops it.
+    #[serde(default)]
+    pub command: Option<String>,
+    /// Names of secrets to inject, and *only* the names.
+    ///
+    /// This is how a credential reaches an agent's tools without reaching the
+    /// agent's context. The value is never here, never in `spawn.json`, and
+    /// never in this process: the supervisor looks each name up in the
+    /// owner-only secret file at exec time, puts it in the child's
+    /// environment, and uses the same values to scrub the child's output
+    /// before anything is parsed or stored.
+    ///
+    /// Carrying names rather than values is the whole safety property. A plan
+    /// is written to disk so a person can read it afterwards; a value in it
+    /// would be a second copy of the credential at ordinary permissions, which
+    /// is the leak the design exists to prevent. The model, meanwhile, is told
+    /// the name — enough to use the variable, never enough to print it.
+    #[serde(default)]
+    pub secrets: Vec<String>,
+    /// The run's id — filled in by the launcher, never by the caller.
+    ///
+    /// Every other field on this struct is a *request*: something the caller
+    /// asked for. This one is an answer, and it is here for one reason —
+    /// [`Harness::args`] needs it to hand the harness a per-run MCP config, and
+    /// `args` is given nothing but this struct.
+    ///
+    /// It carries the run's identity to Jod's own MCP server, which is how the
+    /// messaging tools know which member is calling. A caller that set this
+    /// itself would be naming a run it does not own, so [`crate::runner::launch`]
+    /// overwrites whatever is here.
+    #[serde(default)]
+    pub run_id: Option<String>,
+}
+
+impl Default for SpawnRequest {
+    /// Exists so a caller that cares about three fields does not have to name
+    /// nine. Every field added here after the fact is one that would otherwise
+    /// have to be threaded through every construction site in the workspace.
+    fn default() -> Self {
+        SpawnRequest {
+            name: String::new(),
+            harness: HarnessKind::ClaudeCode,
+            prompt: String::new(),
+            system: None,
+            cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            model: None,
+            permission: PermissionPolicy::default(),
+            resume: Resume::default(),
+            tools: None,
+            roots: Vec::new(),
+            env: Vec::new(),
+            command: None,
+            secrets: Vec::new(),
+            run_id: None,
+        }
+    }
 }
 
 /// What an agent may do to Jod itself.
