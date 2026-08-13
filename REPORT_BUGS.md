@@ -523,8 +523,28 @@ repository is listed, saying 'let's fix this' has nothing to resolve to and
 every instruction about it has to spell the path out."* So an empty catalog
 degrades every instruction — and the TUI gives no way to fill it.
 
+**The display side works — only creation is missing.** I registered one from a
+shell (`jod project add ~/tetris --name tetris`) and the panel picked it up
+immediately, listing `tetris`. So the panel is not broken; it is unreachable
+from the only surface the user is sitting in. (I archived the entry afterwards
+to leave the catalog as I found it — `jod project restore tetris` brings it
+back.)
+
+Two smaller things found while confirming that:
+
+- **The header says `projects · none set` even while listing a project.**
+  `cli/src/tui/ui.rs:1451` derives the title from `app.current_project` — which
+  project is *active* — not from whether the catalog has entries. Technically
+  correct, but "none set" doing double duty for "catalog is empty" and "no
+  current project" reads as a contradiction once a project is listed beneath
+  it. Worth distinguishing: `· none current` vs `· none catalogued`.
+- **Even the CLI's empty state names its remedy** — `no projects yet —
+  \`jod project add .\` catalogs the repository you are in` — which makes the
+  TUI's bare `nothing set` the only place in the whole program that leaves the
+  user without a next step.
+
 **Suggested fix.** Add `/project add|ls`, and make the empty state say how to
-fix itself.
+fix itself — the sentence the CLI already prints would do.
 
 ---
 
@@ -583,6 +603,11 @@ is fixed.
 **Regression guard worth adding:** assert the key does something observable
 starting from `App::default()`, i.e. without pre-setting `app.panel`. That one
 missing precondition is what hid this through an entire refactor.
+
+**Ruled out: this is not "the catalog is empty".** I registered a real project
+(`jod project add ~/tetris`) and retried from a cold start — `Ctrl-G d` still
+renders nothing, while `Shift-Tab` immediately shows the panel *with* `tetris`
+in it. The gate is `app.panel`, confirmed.
 
 ---
 
