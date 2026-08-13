@@ -1015,6 +1015,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "hound"
+version = "3.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "62adaabb884c94955b19907d60019f4e145d091c75345379e70d1ee696f7854f"
+
+[[package]]
 name = "http"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1405,6 +1411,7 @@ dependencies = [
  "crossterm",
  "futures",
  "jod-core",
+ "jod-voice-core",
  "ratatui",
  "serde",
  "serde_json",
@@ -1438,6 +1445,19 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "jod-core",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "jod-voice-core"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "hound",
+ "libc",
+ "reqwest",
+ "serde",
  "serde_json",
  "tokio",
 ]

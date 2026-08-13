@@ -144,6 +144,12 @@ pub const GLOBAL: &[Key] = &[
     k("Alt-R", "show or hide the rail"),
     k("Alt-C", "the rail's next card"),
     k("Alt-P", "add a directory to work in"),
+    // A switch, not a button: it stays on, and everything said streams into
+    // the box until it is switched off. Saying "go ahead" sends, "stop
+    // listening" switches off — the keyboard is optional once it is on, which
+    // is the point.
+    k("Alt-V", "listen, and keep listening"),
+    k("Alt-D", "show or hide the projects"),
     k("Alt-S", "search every transcript"),
     k("Alt-Y", "copy the last reply"),
     k("Alt-B", "delegate the typed line"),

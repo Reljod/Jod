@@ -28,6 +28,7 @@ pub mod daemon;
 pub mod delivery;
 pub mod discovery;
 pub mod leases;
+pub mod projects;
 pub mod prs;
 pub mod rank;
 pub mod redact;

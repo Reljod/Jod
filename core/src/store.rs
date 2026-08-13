@@ -1206,6 +1206,106 @@ const MIGRATIONS: &[(&str, &str)] = &[
     ALTER TABLE team_members ADD COLUMN last_woken_at_ms INTEGER;
     "#,
     ),
+    (
+        "0016_projects",
+        r#"
+    -- The catalog: the repositories Reljod actually works on.
+    --
+    -- Deliberately a third noun beside the two that already exist, because
+    -- neither can answer the question this one is for:
+    --
+    --   * a **work** is one intent, and it closes. "Fix the CI failure" is a
+    --     work; the repository it happened in is not.
+    --   * a **root** is a directory one conversation may read. It is per
+    --     session and it dies with the session.
+    --   * a **project** outlives both. It is the checkout itself — the thing
+    --     "the tetris thing" names out loud, and the thing still there next
+    --     month.
+    --
+    -- Without this table a dictated "btw, let's fix this" has nothing to
+    -- resolve against: the roots belong to sessions that have already exited
+    -- and the works have already closed.
+    CREATE TABLE IF NOT EXISTS projects (
+      id            TEXT PRIMARY KEY,
+      -- What Reljod calls it out loud, stored rather than derived from the
+      -- path. A basename is a coincidence: renaming the directory would
+      -- silently invalidate every alias if the name were only a view over it.
+      name          TEXT NOT NULL,
+      -- The checkout. Canonicalised on the way in and UNIQUE, because two rows
+      -- for one directory is how a catalog starts disagreeing with itself
+      -- about where the work happened.
+      path          TEXT NOT NULL UNIQUE,
+      -- Origin remote, when there is one. Nullable on purpose: a scratch repo
+      -- with no remote is still a project, and requiring one would push
+      -- exactly the experiments most worth tracking out of the catalog.
+      remote        TEXT,
+      -- Everything else he might *say* for it — "the tetris thing", "my
+      -- agent", "jod-cloud". A JSON array of lowercased strings, because the
+      -- router matches against what was spoken, not against what was typed,
+      -- and speech does not contain paths.
+      aliases       TEXT NOT NULL DEFAULT '[]',
+      -- active | paused | archived. Archived rows stay rather than being
+      -- deleted: the point of a catalog is to still answer "what was that
+      -- repo called" months later, and a deleted row cannot.
+      state         TEXT NOT NULL DEFAULT 'active',
+      -- Distinguishes projects at a glance in the panel — same convention as
+      -- a work's colour, so the two rails read alike.
+      colour        TEXT NOT NULL DEFAULT '',
+      -- One line, for the panel and for the router's context. Short by
+      -- construction: this is carried into every orchestrator turn, so a
+      -- paragraph here is a paragraph paid for on every single instruction.
+      notes         TEXT NOT NULL DEFAULT '',
+      created_at_ms INTEGER NOT NULL,
+      -- When work last actually happened here — written when a session
+      -- touches the project, not when the row is edited. This is the tiebreak
+      -- the router leans on for a bare "let's fix this" that carries no other
+      -- cue, so an edit must not be able to fake recency.
+      last_touched_ms INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS ix_projects_state
+      ON projects(state, last_touched_ms DESC);
+
+    -- The sticky pointer: which project this conversation is currently about.
+    --
+    -- On the conversation rather than in `settings`, because the main chat is
+    -- not the only conversation with a subject and one global "current" would
+    -- have every background session fighting the main chat to own it.
+    --
+    -- No default and hence NULL, which SQLite requires for an added column
+    -- carrying a REFERENCES clause — and which is also the honest starting
+    -- state: a fresh conversation is about nothing yet.
+    ALTER TABLE conversations ADD COLUMN current_project_id TEXT
+      REFERENCES projects(id) ON DELETE SET NULL;
+
+    -- Every time the current project changed, and on what evidence.
+    --
+    -- The charter's rule for routing applies here for the same reason: a
+    -- decision nobody can see is a decision nobody can correct. When the
+    -- orchestrator hears "this" as Jod and it meant tetris, this is the row
+    -- that says when it decided and why.
+    CREATE TABLE IF NOT EXISTS project_resolutions (
+      id              INTEGER PRIMARY KEY,
+      conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+      project_id      TEXT REFERENCES projects(id) ON DELETE SET NULL,
+      -- What was said that made this the answer, kept verbatim. A paraphrase
+      -- here would lose the mis-transcription that caused a wrong guess,
+      -- which is the whole reason to look at this table.
+      utterance       TEXT NOT NULL DEFAULT '',
+      -- human | inferred | sticky. `sticky` is the one worth separating:
+      -- it records that nothing in the message named a project and the
+      -- previous one simply carried, which is the case most likely to be
+      -- silently wrong.
+      how             TEXT NOT NULL DEFAULT 'inferred',
+      reason          TEXT NOT NULL DEFAULT '',
+      -- Set when Reljod overrode this resolution afterwards, so the panel can
+      -- show which guesses had to be taken back.
+      corrected       INTEGER NOT NULL DEFAULT 0,
+      decided_at_ms   INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS ix_project_resolutions
+      ON project_resolutions(conversation_id, decided_at_ms DESC);
+    "#,
+    ),
 ];
 
 /// Who asserted a fact. Kept out of the fact's text so that content Jod

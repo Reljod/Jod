@@ -27,6 +27,7 @@ use super::traffic;
 use super::workspace::{matches, ListState, Workspace};
 use jod_core::cards::Card;
 use jod_core::commands::Discovered;
+use jod_core::projects::{How, Project};
 use jod_core::roots::Root;
 use jod_core::secrets::Scope;
 use jod_core::tree::{Node, NodeId};
@@ -180,6 +181,88 @@ pub enum PromptIntent {
 impl Overlay {
     pub fn is_open(&self) -> bool {
         *self != Overlay::None
+    }
+}
+
+/// What the microphone is doing.
+///
+/// ## The microphone is a switch, not a button
+///
+/// `Alt-V` turns listening on and it stays on. Everything said while it is on
+/// streams into the composer, sentence by sentence, and `⏎` is replaced by
+/// saying so — "go ahead", "sige". The point is coding with your hands
+/// somewhere else entirely.
+///
+/// Two things follow from that, and both are why this is a state rather than a
+/// boolean:
+///
+/// * **It has to be obvious that it is on.** A microphone nobody remembers
+///   switching on is a microphone in a room having a different conversation,
+///   so the state carries what it needs to say so on every frame.
+/// * **Utterances overlap.** A sentence is transcribed while the next one is
+///   being spoken, so "listening" and "transcribing" are not exclusive —
+///   `pending` counts what is in flight rather than replacing the state.
+///
+/// A hold-to-talk key was never available anyway: terminals report key
+/// *presses*, and releases arrive only under the kitty keyboard protocol,
+/// which most terminals and every plain SSH session lack.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Dictation {
+    Off,
+    Listening {
+        /// When the microphone was switched on.
+        since_ms: i64,
+        /// The recorder program, so a wrong input device is diagnosable.
+        backend: String,
+        /// What is transcribing right now. Utterances overlap, so this is a
+        /// count rather than a flag.
+        pending: usize,
+        /// Whether he is speaking at this instant, for the meter.
+        speaking: bool,
+        /// Loudest frame in the last poll, for the meter.
+        level: f32,
+        /// How many sentences have landed in the composer this session.
+        heard: usize,
+    },
+}
+
+impl Dictation {
+    pub fn is_active(&self) -> bool {
+        !matches!(self, Dictation::Off)
+    }
+
+    /// Whether anything is still being transcribed.
+    ///
+    /// Read when the microphone is switched off: sentences in flight still
+    /// have to land, and a session that dropped them would lose the last thing
+    /// said every time.
+    pub fn pending(&self) -> usize {
+        match self {
+            Dictation::Off => 0,
+            Dictation::Listening { pending, .. } => *pending,
+        }
+    }
+
+    pub fn note_pending(&mut self, delta: i64) {
+        if let Dictation::Listening { pending, .. } = self {
+            *pending = pending.saturating_add_signed(delta as isize);
+        }
+    }
+
+    pub fn note_heard(&mut self) {
+        if let Dictation::Listening { heard, .. } = self {
+            *heard += 1;
+        }
+    }
+
+    pub fn note_level(&mut self, at: f32, talking: bool) {
+        if let Dictation::Listening {
+            level, speaking, ..
+        } = self
+        {
+            *level = at;
+            *speaking = talking;
+        }
     }
 }
 
@@ -361,6 +444,44 @@ pub struct App {
     /// The slash commands and skills this repository offers, already filtered
     /// to the harness on screen. Refreshed on the tick, off the render path.
     pub discovered: Vec<Discovered>,
+
+    // ---- the project catalog --------------------------------------------
+    /// Reljod's repositories, most recently worked in first. Refreshed on the
+    /// tick like every other list, because another session touching a project
+    /// reorders it and a copy read once at open would be stale by the second
+    /// instruction.
+    pub projects: Vec<Project>,
+    /// Which project the conversation on screen is about, and how that was
+    /// decided.
+    ///
+    /// The `how` is carried rather than dropped because it is the whole point
+    /// of showing this: a project he *named* needs no attention, and one that
+    /// merely carried over is the one worth a glance before an agent starts
+    /// working in the wrong repository.
+    pub current_project: Option<(String, How)>,
+    /// Whether the catalog section of the panel is expanded.
+    ///
+    /// Open by default and collapsible, rather than hidden by default: the
+    /// point of putting it on screen is that he can see which repository a
+    /// dictated sentence will land in without asking. A twenty-project catalog
+    /// would eat the panel, though, which is what the collapse is for.
+    pub projects_open: bool,
+
+    // ---- dictation -------------------------------------------------------
+    /// What the microphone is doing, if anything.
+    pub dictation: Dictation,
+    /// The sentences dictated into the composer, newest last.
+    ///
+    /// Kept so "undo that" can take back exactly the last sentence rather than
+    /// a guessed number of words — the thing that makes a mis-heard sentence
+    /// cheap to fix without reaching for the keyboard.
+    pub dictated: Vec<String>,
+    /// Set when a spoken "stop listening" was heard.
+    ///
+    /// A flag rather than an action because the recorder is owned by the event
+    /// loop, and the transcript that carries this command arrives on a channel
+    /// rather than through the key handler.
+    pub stop_listening_requested: bool,
 
     // ---- the fleet tree -------------------------------------------------
     /// Works, their sessions and their runs, flattened by core in one pass.
@@ -759,6 +880,15 @@ impl App {
             candidates: Vec::new(),
             mention: None,
             discovered: Vec::new(),
+            projects: Vec::new(),
+            current_project: None,
+            // Open, because the catalog is only useful if seeing it costs
+            // nothing — the point is to know where a dictated sentence lands
+            // without having to ask.
+            projects_open: true,
+            dictation: Dictation::Off,
+            dictated: Vec::new(),
+            stop_listening_requested: false,
             forest: Vec::new(),
             closed_works: HashSet::new(),
             tree: TreeState::default(),

@@ -455,6 +455,71 @@ pub fn catalogue() -> Vec<Tool> {
             schema: obj(json!({}), &[]),
         },
         Tool {
+            name: "project_list",
+            description:
+                "Every repository Reljod works on, most recently worked in first, with the \
+                 other names he calls each one. This is what an instruction that names no \
+                 project has to be resolved against — the roots belong to sessions that have \
+                 already exited and the works have already closed, so this is the only record \
+                 that outlives them.",
+            needs: ToolAccess::ReadOnly,
+            schema: obj(
+                json!({
+                    "include_archived": {
+                        "type": "boolean",
+                        "description": "Include finished and abandoned projects. Default false."
+                    }
+                }),
+                &[],
+            ),
+        },
+        Tool {
+            name: "project_current",
+            description:
+                "Which project this conversation is currently about, and how that was decided. \
+                 Read it before assuming: when `how` is `sticky` nothing in the last instruction \
+                 named a project and this one simply carried, which is exactly the case most \
+                 likely to be wrong.",
+            needs: ToolAccess::ReadOnly,
+            schema: obj(json!({}), &[]),
+        },
+        Tool {
+            name: "project_switch",
+            description:
+                "Point this conversation at a different project. Call it when you work out \
+                 which repository an instruction meant and it is not the current one — \
+                 including when Reljod's words were ambiguous and you resolved them. The \
+                 reason is shown to him, so a switch he did not intend is one he can correct.",
+            needs: ToolAccess::Delegate,
+            schema: obj(
+                json!({
+                    "project": text("The project's name, or any name he calls it."),
+                    "reason": text("Why this instruction is about that project. Shown to Reljod.")
+                }),
+                &["project"],
+            ),
+        },
+        Tool {
+            name: "project_add",
+            description:
+                "Put a repository in the catalog. Use it when Reljod mentions working somewhere \
+                 that is not listed yet — an unlisted project cannot be inferred, so every \
+                 later instruction about it has to name the path in full.",
+            needs: ToolAccess::Delegate,
+            schema: obj(
+                json!({
+                    "path": text("The checkout's directory."),
+                    "name": text("What he calls it. Defaults to the directory's name."),
+                    "aliases": strings(
+                        "Other things he says for it — \"the tetris thing\", \"my agent\". \
+                         Lowercased, and matched against what he actually says."
+                    ),
+                    "notes": text("One line about it, carried into every main-chat turn. Keep it short.")
+                }),
+                &["path"],
+            ),
+        },
+        Tool {
             name: "claim_worktree",
             description:
                 "Claim somewhere to write, before you change anything. Your roots start \
@@ -871,6 +936,10 @@ impl Server {
             "ask_question" => self.ask_question(args).await,
             "request_secret" => self.request_secret(args),
             "list_roots" => self.list_roots(),
+            "project_list" => self.project_list(args),
+            "project_current" => self.project_current(),
+            "project_switch" => self.project_switch(args),
+            "project_add" => self.project_add(args),
             "claim_worktree" => self.claim_worktree(args),
             "release_worktree" => self.release_worktree(args),
             "open_work" => self.open_work(args).await,
@@ -1634,6 +1703,153 @@ impl Server {
                 })
                 .collect::<Vec<_>>(),
         )
+    }
+
+    /// The catalog, in the order that makes the first entry the best guess.
+    fn project_list(&self, args: &Value) -> Result<String, ToolError> {
+        let include_archived = opt_bool(args, "include_archived").unwrap_or(false);
+        let projects = self
+            .store()?
+            .projects(include_archived)
+            .map_err(|e| ToolError::Refused(format!("could not read the catalog: {e}")))?;
+        as_json(
+            &projects
+                .iter()
+                .map(|p| {
+                    json!({
+                        "name": p.name,
+                        "path": p.path.to_string_lossy(),
+                        "also_called": p.spoken_forms(),
+                        "state": p.state.as_str(),
+                        "notes": p.notes,
+                        "last_touched_ms": p.last_touched_ms,
+                    })
+                })
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    /// What this conversation is about, and how sure that is.
+    ///
+    /// `how` is carried out to the model rather than kept internal, because a
+    /// sticky answer and an inferred one deserve different confidence and the
+    /// model cannot tell them apart from the project alone.
+    fn project_current(&self) -> Result<String, ToolError> {
+        let raiser = self.raiser()?;
+        let store = self.store()?;
+        let current = store
+            .current_project(&raiser.conversation_id)
+            .map_err(|e| ToolError::Refused(format!("could not read the current project: {e}")))?;
+        let Some(project) = current else {
+            return as_json(&json!({
+                "project": Value::Null,
+                "note": "this conversation is not about any project yet — ask, or call \
+                         project_switch once you know which one",
+            }));
+        };
+        let last = store
+            .project_resolutions(&raiser.conversation_id, 1)
+            .map_err(|e| ToolError::Refused(format!("could not read the resolution log: {e}")))?;
+        as_json(&json!({
+            "project": project.name,
+            "path": project.path.to_string_lossy(),
+            "notes": project.notes,
+            "how": last.first().map(|r| r.how.as_str()).unwrap_or("human"),
+            "reason": last.first().map(|r| r.reason.clone()).unwrap_or_default(),
+        }))
+    }
+
+    /// The model's override of a sticky project.
+    ///
+    /// Named rather than given by id: the model is resolving something Reljod
+    /// *said*, and making it carry an opaque id would mean it had to list the
+    /// catalog first on every switch just to translate a word it already has.
+    fn project_switch(&self, args: &Value) -> Result<String, ToolError> {
+        let raiser = self.raiser()?;
+        let wanted = required_str(args, "project")?;
+        let reason = opt_str(args, "reason").unwrap_or_default();
+        let store = self.store()?;
+
+        let found = store
+            .project_by_name(&wanted)
+            .map_err(|e| ToolError::Refused(format!("could not search the catalog: {e}")))?;
+        let Some(project) = found else {
+            // Listing what does exist, because the usual cause is a name that
+            // is nearly right, and a bare "not found" makes the model guess
+            // again rather than pick from what is there.
+            let known: Vec<String> = store
+                .projects(false)
+                .map_err(|e| ToolError::Refused(format!("could not read the catalog: {e}")))?
+                .into_iter()
+                .map(|p| p.name)
+                .collect();
+            return Err(ToolError::Refused(format!(
+                "no project called `{wanted}`. The catalog has: {}. \
+                 Use project_add if this is somewhere new.",
+                if known.is_empty() {
+                    "(nothing yet)".to_string()
+                } else {
+                    known.join(", ")
+                }
+            )));
+        };
+
+        // A switch away from an inferred project is Reljod's correction
+        // arriving late, so the guess it replaces is marked as taken back.
+        let previous = store
+            .current_project(&raiser.conversation_id)
+            .map_err(|e| ToolError::Refused(format!("could not read the current project: {e}")))?;
+        if previous.as_ref().is_some_and(|p| p.id != project.id) {
+            let _ = store.mark_resolution_corrected(&raiser.conversation_id);
+        }
+
+        store
+            .set_current_project(
+                &raiser.conversation_id,
+                Some(&project.id),
+                &reason,
+                crate::projects::How::Human,
+                &reason,
+            )
+            .map_err(|e| ToolError::Refused(format!("could not switch project: {e}")))?;
+
+        as_json(&json!({
+            "project": project.name,
+            "path": project.path.to_string_lossy(),
+            "switched_from": previous.map(|p| p.name),
+        }))
+    }
+
+    fn project_add(&self, args: &Value) -> Result<String, ToolError> {
+        let path = required_str(args, "path")?;
+        let aliases: Vec<String> = args
+            .get("aliases")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let mut new = crate::projects::NewProject::at(&path).with_aliases(aliases);
+        if let Some(name) = opt_str(args, "name") {
+            new = new.named(name);
+        }
+        if let Some(notes) = opt_str(args, "notes") {
+            new = new.with_notes(notes);
+        }
+
+        let project = self
+            .store()?
+            .add_project(new)
+            .map_err(|e| ToolError::Refused(format!("could not add the project: {e}")))?;
+        as_json(&json!({
+            "name": project.name,
+            "path": project.path.to_string_lossy(),
+            "also_called": project.spoken_forms(),
+        }))
     }
 
     /// Claim somewhere to write — D5's explicit step.
@@ -2931,7 +3147,7 @@ mod tests {
     /// agree with any mistake made there, and the whole question is whether the
     /// line falls where the design says it does — reading is free and visible,
     /// delegating spends money now, scheduling spends it at 2am for ever.
-    const READ_ONLY_TOOLS: [&str; 13] = [
+    const READ_ONLY_TOOLS: [&str; 15] = [
         "list_agents",
         "schedule_list",
         "goal_list",
@@ -2953,11 +3169,16 @@ mod tests {
         // Knowing where you may write is the precondition for not writing
         // where you may not.
         "list_roots",
+        // Reading the catalog is how an instruction that names no project gets
+        // resolved at all. It reveals which repositories exist, which the most
+        // confined agent already learns from its own roots.
+        "project_list",
+        "project_current",
     ];
     // Writing to a peer spends a turn of theirs, which is money now — the same
     // line `delegate` sits on. What stops it running away is not the access
     // level but the bounds in `team`: depth, budget, and a deadline on a wait.
-    const DELEGATE_TOOLS: [&str; 10] = [
+    const DELEGATE_TOOLS: [&str; 12] = [
         "delegate",
         "continue_agent",
         "stop_agent",
@@ -2973,6 +3194,11 @@ mod tests {
         // the rail's side only writes rows.
         "claim_worktree",
         "release_worktree",
+        // Both change what a *later* instruction resolves to, which is the
+        // quiet kind of consequential: a run that mis-switches the project
+        // sends the next thing Reljod says to the wrong repository.
+        "project_switch",
+        "project_add",
     ];
     const ORCHESTRATE_TOOLS: [&str; 5] = [
         "schedule_create",
