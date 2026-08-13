@@ -36,6 +36,32 @@ see BUG-13.
 
 ---
 
+## Where this stands — 19 of 21 findings are closed in `main`
+
+As of `3e39c2c`, **only two PRs remain open**, and between them they carry the
+last five findings:
+
+| PR | Findings | State |
+|---|---|---|
+| [#86](https://github.com/Reljod/Jod/pull/86) | [BUG-3](#bug-3), [BUG-11](#bug-11), [BUG-20](#bug-20), [BUG-21](#bug-21) | draft — the whole of **Pattern B** in one sweep |
+| [#89](https://github.com/Reljod/Jod/pull/89) | [BUG-10](#bug-10), [BUG-12](#bug-12) | draft |
+
+Everything else has merged: **#75** (BUG-8, BUG-9), **#80** (BUG-13), **#81**
+(BUG-6, BUG-7), **#82** (BUG-1, BUG-2), **#78** (BUG-14, BUG-4), **#85**
+(BUG-5), **#87** (BUG-17, BUG-18, BUG-19), **#83** (BUG-15, BUG-16), **#84**
+(BUG-14's carding half).
+
+**The headline result: the TUI now builds a working classic Tetris in one
+shot, in the directory you launched it in.** That was not true when this
+report was opened — the same instruction put the project in `$HOME` and
+reported `✓ done`.
+
+The per-bug sections below still describe the **broken** behaviour on purpose:
+each one is the regression reference for the fix that closed it. Read the
+status line at the top of a section before assuming it is still true.
+
+---
+
 ## Severity summary
 
 Status key: **merged** = in `main`, reported by the maintainer, *not* re-driven
