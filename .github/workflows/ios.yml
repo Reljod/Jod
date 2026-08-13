@@ -53,9 +53,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           # Empty on `pull_request` and on a bare dispatch, which is exactly
-          # what checkout already defaults to. Set when `build-clients.yml`
-          # calls this to build a specific tag, so a released .app is the tag's
-          # code and not whatever main had moved on to.
+          # what checkout already defaults to. Set when `release.yml` calls this
+          # to build the tag it has just created, so a released .app is the
+          # tag's code and not whatever main had moved on to.
           ref: ${{ inputs.ref }}
 
       - uses: actions/setup-node@v4
@@ -214,9 +214,9 @@ jobs:
         if: inputs.package
         uses: actions/upload-artifact@v4
         with:
-          # `release-` prefix: build-clients.yml collects release assets by that
-          # pattern, which is what keeps the screenshot and the raw .app tree
-          # uploaded below out of the GitHub release.
+          # `release-` prefix: release.yml's attach job collects release assets
+          # by that pattern, which is what keeps the screenshot and the raw .app
+          # tree uploaded below out of the GitHub release.
           name: release-ios
           path: ${{ runner.temp }}/dist/*
           if-no-files-found: error

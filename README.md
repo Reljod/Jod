@@ -19,7 +19,7 @@
 
 ## Install
 
-Three clients, built from the same tag by the **Build clients** workflow and attached to the [latest release](https://github.com/Reljod/Jod/releases/latest). Every download below also has a `.sha256` beside it on the release page.
+Three clients, built from the same tag by the **Release** workflow and attached to the [latest release](https://github.com/Reljod/Jod/releases/latest). Every download below also has a `.sha256` beside it on the release page.
 
 > **None of these are code-signed or notarised.** Signing needs an Apple Developer certificate this repo does not hold, so each section below carries the one command your OS needs to accept an unsigned build. If you would rather not, [build from source](#jod-tui--from-source) — that path is signed by nothing because nothing is downloaded.
 
@@ -108,17 +108,19 @@ xcrun simctl launch booted dev.reljod.jod
 
 ### Cutting a release
 
-Two steps, and the split is deliberate — deciding a version and shipping binaries are different acts:
+One button. It runs the suite and the e2e check, tags, creates the GitHub release, builds the three clients **from that tag**, and attaches them to it:
 
 ```sh
-# 1. Tag it. Runs the suite, tags, creates the GitHub release.
 gh workflow run release.yml --ref main -f version=v0.2.0
-
-# 2. Build the three clients and attach them to that release.
-gh workflow run build-clients.yml --ref main -f version=v0.2.0
 ```
 
-Run step 2 with the version left **blank** to build all three clients from `main` without publishing anything — the results stay on the workflow run as artifacts. Individual clients can be switched off with the `tui`, `desktop` and `ios` toggles. See [`.github/workflows/build-clients.yml`](./.github/workflows/build-clients.yml).
+To check the clients still build without shipping anything, dispatch it with `build_only`. That runs the suite and all three builds against whatever ref you dispatched, mints no tag, and leaves the results on the workflow run as artifacts:
+
+```sh
+gh workflow run release.yml --ref main -f build_only=true
+```
+
+Individual clients can be switched off either way with the `tui`, `desktop` and `ios` toggles. See [`.github/workflows/release.yml`](./.github/workflows/release.yml).
 
 ---
 

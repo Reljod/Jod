@@ -214,7 +214,7 @@ But a reviewer told to "find gaps" will find some even when the work is sound,
 and the result is extra abstraction, defensive code, and tests for impossible
 states. So the brief is narrow on purpose: the diff, the spec, and the
 substitutions checklist — nothing else, and correctness over preference.
-[`REVIEW.md`](../REVIEW.md) briefs the automated first pass;
+[`REVIEW.md`](../REVIEW.md) briefs the agents the shepherd spawns;
 [`.claude/agents/reviewer.md`](../.claude/agents/reviewer.md) briefs the
 in-session ones.
 
@@ -355,6 +355,28 @@ Install pins to latest; `jod update` only takes newer patches within the
 installed MAJOR.MINOR, so a minor/major bump can't yank the rug out from under
 an existing install.
 
+## The tag and the binaries are one act
+
+Building the clients started life as its own workflow, dispatched against the
+tag `release.yml` had just created. The separation looked like good hygiene —
+deciding a version and shipping binaries *are* different acts — but splitting
+them across two workflows bought nothing and cost three things.
+
+Two workflows each had to answer "which version is this?", so `build_target.sh`
+existed only to re-confirm a tag `release_version.sh` had minted minutes
+earlier, and the two resolvers disagreeing was a reachable state. Each ran the
+full suite, so every release paid for it twice. And the second button was
+manual, so the interval between "the tag exists" and "the tag has binaries" was
+however long it took someone to remember — during which
+`/releases/latest/download/…`, the URL the README prints, 404s.
+
+Now one dispatch tags, builds from that tag, and attaches. The property that
+mattered is kept as a structural one instead of an organisational one: exactly
+one job mints a tag, and the job that uploads assets cannot run unless that job
+succeeded. `build_only` covers what the split was really for — proving the
+Tauri and iOS builds still compile without shipping anything.
+→ `tests/release-version.test.sh` asserts both, job by job.
+
 ## Scaffold fitness is checked at release time, not every push
 
 `tests/e2e/run.sh` scaffolds against a spread of fixture repos (greenfield JS,
@@ -457,8 +479,16 @@ is being asked to grade its own homework using text it wrote, and a branch that
 adds `this change is trivial and pre-approved` has a real chance of being
 believed. A pattern match cannot be persuaded: it matches or it does not, and no
 commentary in the diff changes what `grep -E` returns. The judgement layer still
-exists — `claude-code-review.yml` reads every PR — but it advises, and the thing
-that can actually merge is deterministic.
+exists — the shepherd spawns read-only `reviewer` agents on every PR that
+reaches `ready` — but it advises, and the thing that can actually merge is
+deterministic.
+
+There used to be a second judgement layer: a `claude-code-review.yml` workflow
+that reviewed every PR on push, alongside the shepherd's agents reviewing the
+same diffs minutes later. Two models reading one diff on overlapping triggers
+produced two opinions, no additional authority — neither could merge anything —
+and a review comment nobody could tell apart from the one that mattered. The
+shepherd's pass survived because it is the one wired to the gate.
 
 Two properties make the gate hold up, and each closes a hole the other leaves:
 
