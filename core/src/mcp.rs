@@ -37,6 +37,7 @@ use crate::cards::{Card, CardKind, Importance, NewCard, Source, Status};
 use crate::delivery;
 use crate::event::AgentEvent;
 use crate::harness::ToolAccess;
+use crate::orchestrator::Delegation;
 use crate::schedule::{Goal, GoalState, Schedule, ScheduleState};
 use crate::secrets;
 use crate::service::{default_cwd, AgentStatus, RunConversation};
@@ -1034,12 +1035,70 @@ impl Server {
             .spawn_agent(req)
             .await
             .map_err(|e| ToolError::Refused(format!("could not start the agent: {e}")))?;
+        // Who asked for this, written down. `spawn_agent` binds
+        // `RunConversation::New`, so without these two rows a delegated run is
+        // a conversation nothing points at and a decision nothing records: the
+        // orchestrator's own `jod main` listed the handoff *to* it and never
+        // one of the agents it started.
+        self.record_handoff("delegate", &agent.id, true);
         as_json(&json!({
             "run_id": agent.id,
             "name": agent.name,
             "harness": agent.harness.id(),
             "watch": agent.watch_command,
         }))
+    }
+
+    /// Write down that this session set something in motion.
+    ///
+    /// `link_child` hangs the new run's conversation under the caller's, which
+    /// is right for `delegate` — it opened a fresh conversation — and wrong for
+    /// `continue_agent`, whose target already sits wherever it sits.
+    ///
+    /// Best-effort in every part, and deliberately so: a delegation that
+    /// happened and was recorded badly is a smaller problem than one refused
+    /// over bookkeeping, and the caller may legitimately have no conversation
+    /// at all — a `jod mcp` started by hand has no run behind it. Every failure
+    /// here is a line on stderr and nothing more.
+    fn record_handoff(&self, kind: &str, run_id: &str, link_child: bool) {
+        let Ok(raiser) = self.raiser() else { return };
+        let Ok(store) = self.store() else { return };
+
+        if link_child {
+            match store.conversation_for_run(run_id) {
+                Ok(Some(child)) => {
+                    if let Err(e) = store.set_conversation_parent(&child, &raiser.conversation_id) {
+                        eprintln!(
+                            "[jod] could not hang {child} under {}: {e}",
+                            raiser.conversation_id
+                        );
+                    }
+                }
+                // The run has not written into a conversation yet. Nothing to
+                // link, and the delegation row below still records the choice.
+                Ok(None) => {}
+                Err(e) => {
+                    eprintln!("[jod] could not resolve the conversation for {run_id}: {e}")
+                }
+            }
+        }
+
+        if let Err(e) = store.record_delegation(&Delegation {
+            id: 0,
+            conversation_id: raiser.conversation_id.clone(),
+            // No message id: this is a tool call inside a turn, not a turn of
+            // its own. `hand_to_orchestrator` has one because the instruction
+            // it records *is* the user's message.
+            message_id: None,
+            kind: kind.to_string(),
+            run_id: Some(run_id.to_string()),
+            schedule_name: None,
+            goal_name: None,
+            reason: String::new(),
+            at_ms: chrono::Utc::now().timestamp_millis(),
+        }) {
+            eprintln!("[jod] could not record the {kind} of {run_id}: {e}");
+        }
     }
 
     async fn continue_agent(&self, args: &Value) -> Result<String, ToolError> {
@@ -1102,6 +1161,10 @@ impl Server {
             .spawn_agent_in(req, conversation)
             .await
             .map_err(|e| ToolError::Refused(format!("could not continue that agent: {e}")))?;
+        // No link: the run being continued already sits wherever it sits, and
+        // re-parenting it onto whoever happened to send this follow-up would
+        // move a session in the tree for saying a second thing to it.
+        self.record_handoff("continue", &next.id, false);
         as_json(&json!({
             "run_id": next.id,
             "continued": run_id,
@@ -2094,6 +2157,12 @@ impl Server {
         let opened = crate::orchestrator::open_work(&self.jod, opening)
             .await
             .map_err(|e| ToolError::Refused(format!("could not open that work: {e}")))?;
+        // The parent link is already written — `Opening::under` carried it into
+        // `attach_conversation`, which is the richer form of it — so this
+        // records the decision only. Without it, the routing outcome the
+        // orchestrator is now told to prefer would be the one outcome missing
+        // from what `jod main` says the chat set in motion.
+        self.record_handoff("open_work", &opened.agent.id, false);
         as_json(&json!({
             "work_id": opened.work.id,
             "title": opened.work.title,
