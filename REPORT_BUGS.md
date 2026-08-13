@@ -45,6 +45,7 @@ see BUG-13.
 | [BUG-12](#bug-12) | Low | input | The input box is fixed at ~70 columns and single-line |
 | [BUG-13](#bug-13) | Medium | tooling | `jod --version` cannot distinguish two different builds |
 | [BUG-17](#bug-17) | Medium | interrupt | Interrupt is unacknowledged for 4–6s, then reported as both `✓ done` and `✗ failed` |
+| [BUG-18](#bug-18) | Medium | interrupt | Every interrupt falsely warns the run "may still be writing", worded as a *start* failure |
 | [BUG-15](#bug-15) | **High** | mentions | `@` in a non-git directory is ~95% `node_modules` noise; source is invisible |
 | [BUG-16](#bug-16) | Medium | mentions | `@` clips paths from the right, so six different files render identically |
 
@@ -725,16 +726,64 @@ interruption from a crash."* The interrupt entry does that job. The trailing
 is acknowledged immediately, and suppress the generic terminal entry when the
 turn already has an interrupt entry — a deliberate stop is not a failure.
 
-**Related, seen once during the same test.** After an interrupt Jod printed:
+See [BUG-18](#bug-18) for the false "would not stop" warning that accompanies
+every interrupt.
 
-> `the run would not stop (could not stop process group 7003: Operation not
-> permitted (os error 1)) — it may still be writing; Ctrl-X kills it outright`
+---
 
-`ps` showed pid 7003 as `<defunct>` and no `sleep` process survived, so the run
-**had** already stopped and nothing leaked. The warning is alarming, names a
-consequence that did not happen ("may still be writing"), and appears to be a
-race against an already-reaped process group. Worth a cheap guard: treat
-`ESRCH`/an already-dead group as success rather than as a failure to stop.
+<a name="bug-18"></a>
+## BUG-18 — Every interrupt prints a false "would not stop" warning, worded as a start failure · Medium · OPEN
+
+**Repro:** interrupt any running turn (`Esc` or `Ctrl-X`). Observed on **2 of
+2** interrupts, with different pgids — this is systematic, not a one-off.
+
+**Actual:**
+
+```
+• the run would not stop (could not start the agent: could not stop
+  process group 37237: Operation not permitted (os error 1))
+  — it may still be writing; Ctrl-X kills it outright
+```
+
+Two separate defects in one line.
+
+**1. The claim is false, and it is the alarming kind of false.** The run *had*
+stopped. `ps -p 7003` showed `<defunct>` — a reaped zombie — and no `sleep`
+process survived either interrupt. Nothing leaked. Yet the user is told the
+agent "may still be writing", which for a file-modifying agent is the most
+worrying sentence the program could produce, and is told to press a key that
+will do nothing.
+
+The cause looks like a race with an already-dead process group: by the time
+`terminate_group` fires, the group leader is a zombie and the `killpg` fails
+rather than reporting "already gone".
+
+**2. The wording contradicts itself twice.** `core/src/service.rs:881`, inside
+`kill_agent`, wraps a *stop* failure in the *spawn* error variant:
+
+```rust
+proc::terminate_group(pgid, KILL_GRACE).await.map_err(|e| {
+    JodError::Spawn(format!("could not stop process group {pgid}: {e}"))
+})?;
+```
+
+and `core/src/error.rs:14` renders that variant as:
+
+```rust
+#[error("could not start the agent: {0}")]
+Spawn(String),
+```
+
+So a failure to **stop** is reported as a failure to **start**, nested inside a
+message that says the run "would not stop". Three contradictory claims in one
+sentence, in the one message a worried user reads most carefully.
+
+**Suggested fix.** Treat an already-dead or already-reaped process group as
+success — the goal state is "not running", and it is. Add a `JodError::Kill`
+variant (or make it `Invalid`) so a stop failure stops claiming to be a spawn
+failure. Only warn about "may still be writing" when processes genuinely
+survive the grace period, which is a condition worth checking rather than
+assuming.
 
 ---
 
