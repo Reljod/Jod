@@ -728,6 +728,53 @@ mod tests {
         dir
     }
 
+    /// Point `HOME` at an empty directory for the length of one test.
+    ///
+    /// [`scan`] reads user-scope commands out of the real home on purpose, so a
+    /// developer who has `~/.claude/commands` of their own — which is to say
+    /// anybody who uses the tool — had those rows counted by every assertion
+    /// about what a *root* contains. It passed on CI, whose home is bare, and
+    /// failed on the machine of the person most likely to run the suite: the
+    /// worst way round for a test to be wrong.
+    ///
+    /// The sibling tests here dodge it by filtering to [`Scope::Root`], which
+    /// is right when the assertion is about names. It is not enough when the
+    /// assertion is a *count*, because the point of the count is that nothing
+    /// else is there.
+    ///
+    /// Holds [`crate::ENV_LOCK`] and restores the previous value on drop, so a
+    /// panicking test cannot leave the rest of the suite resolving a scratch
+    /// directory as home.
+    struct Home {
+        previous: Option<std::ffi::OsString>,
+        _guard: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl Home {
+        /// An empty home *beside* the root's convention directories, never
+        /// inside one, or the isolation would show up as a root-scope find.
+        fn empty(root: &Path) -> Home {
+            let guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let previous = std::env::var_os("HOME");
+            let home = root.join("scratch-home");
+            std::fs::create_dir_all(&home).unwrap();
+            std::env::set_var("HOME", &home);
+            Home {
+                previous,
+                _guard: guard,
+            }
+        }
+    }
+
+    impl Drop for Home {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+    }
+
     /// A conversation to hang roots off.
     fn conversation(store: &Store) -> String {
         store
@@ -784,6 +831,7 @@ mod tests {
     #[test]
     fn a_shared_directory_is_recorded_once_per_harness_that_reads_it() {
         let root = temp();
+        let _home = Home::empty(&root);
         write(&root, ".agents/skills/planning/SKILL.md", "Plan it.\n");
         let found = scan(std::slice::from_ref(&root)).unwrap();
         let mut harnesses: Vec<&str> = found.iter().map(|d| d.harness.as_str()).collect();
@@ -1195,6 +1243,7 @@ mod tests {
     #[test]
     fn a_deleted_command_leaves_the_cache_on_the_next_scan() {
         let root = temp();
+        let _home = Home::empty(&root);
         write(&root, ".claude/commands/gone.md", "Doomed.\n");
         write(&root, ".claude/commands/stays.md", "Kept.\n");
         let store = Store::in_memory().unwrap();
