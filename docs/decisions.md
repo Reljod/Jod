@@ -2231,3 +2231,53 @@ what entering the main chat already did. Found by launching the program against
 an empty `JOD_HOME` and reading the tables afterwards: `conversations` and
 `conversation_roots` were both still empty after minutes, with every unit test
 green. → [why that is the only check that finds this](#a-unit-test-proves-a-function-only-an-entry-point-test-proves-a-feature)
+
+## A bare directory name is resolved against the roots, or the launch is refused
+
+"Build it in the tetris directory" is how people talk, and `tetris` is not a
+path. Whatever resolved it had to pick something, and what it picked was
+`$HOME/tetris` — a whole project, `node_modules` and all, in the home
+directory, while the directory the user had actually added stayed empty.
+
+The roots are the answer, because they are the only directories anybody named.
+So a relative `cwd` now resolves against them — the root's own name, or an
+existing directory inside one — and when it matches none of them the launch is
+**refused** with a blocking card that lists what was on offer. There is no
+fallback, deliberately: every candidate default here is a guess, and the guess
+this replaced was the worst one available. Only a conversation with no roots at
+all falls back, and it falls back to the directory the caller is standing in.
+
+The refusal happens before the harness is located, so "`tetris` is not one of
+your directories" is what a person is told rather than having it masked by
+whichever harness happens to be missing on that machine.
+
+## A run that lands nowhere anybody asked for is a card, not a failed run
+
+Roots are a convention, not a sandbox — passing one grants, withholding one does
+not deny — so nothing stops a run writing outside them and nothing should
+pretend to. What was missing is narrower and worse: **nothing looked
+afterwards.** The harness exited 0, the supervisor recorded `completed`, the
+fleet drew a green check against $1.18 of real spend, and every file produced
+was somewhere nobody had named. The failure was silent in both directions at
+once — the agent believed it had succeeded and the record agreed.
+
+The supervisor already sees every tool call, so it now keeps the paths and, on a
+run it is about to call `completed`, compares them against the directory the run
+was given plus whatever its conversation declares by then — read at the end, so
+a worktree claimed mid-run counts as somewhere it was meant to write.
+
+Two rules keep it from becoming noise:
+
+**A card, not a status.** The run really did complete; relabelling its exit code
+would be a lie, and the next person would have to work out which `failed` runs
+actually failed. What it did not do is land anywhere anybody asked for, and that
+is a thing to tell a person.
+
+**All, not any.** One write inside the workspace and nothing is said, however
+many scratch files went elsewhere. A run that found its way is not worth a card,
+and a warning that fires on ordinary work is one people learn to dismiss — which
+would cost exactly the case it exists for.
+
+`Bash` is the acknowledged gap: `pnpm install` created the `node_modules` tree in
+`$HOME` in the original run and no argument inspection would have caught it.
+What catches that is the working directory being right to begin with.

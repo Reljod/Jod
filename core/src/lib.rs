@@ -55,6 +55,7 @@ pub mod service;
 pub mod telegram;
 pub mod ticker;
 pub mod webhook;
+pub mod workdir;
 pub mod store;
 pub mod team;
 

@@ -12,12 +12,14 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc, RwLock};
 
+use crate::cards::{CardKind, Importance, NewCard, Source};
 use crate::conversation::{Conversation, NewMessage};
 use crate::error::{JodError, Result};
 use crate::event::{AgentEnvelope, AgentEvent, Usage};
 use crate::harness::{HarnessKind, PermissionPolicy, SpawnRequest};
 use crate::store::{Store, StoredRun};
-use crate::{paths, proc, recall, runner};
+use crate::workdir::Workdir;
+use crate::{paths, proc, recall, runner, workdir};
 
 /// The persisted view of one agent. The whole summary is kept verbatim so
 /// adding a field to `AgentSummary` never needs a schema migration.
@@ -177,6 +179,88 @@ fn title_from(prompt: &str) -> String {
 /// Returns the row and not just its id, because the row is what
 /// [`Jod::spawn_agent_in`] has to read the model and the mode off before it
 /// launches anything.
+/// Turn a directory *name* on a request into the directory a run starts in.
+///
+/// A caller that names `tetris` means one of the directories this conversation
+/// was pointed at. It has never meant `$HOME/tetris`, which is nonetheless
+/// where a relative name ended up — either as a home-directory project nobody
+/// asked for, or, once the supervisor got hold of it, as a failed `chdir` into
+/// the run's own scratch directory.
+///
+/// So: resolve against the declared roots, and when the name answers to none of
+/// them, **refuse**. A blocking card says which directories were on offer, and
+/// the launch does not happen. Guessing is the one option ruled out — see
+/// [`crate::workdir`], and the run this was written for, whose entire output
+/// landed in `$HOME` while the directory the user had added stayed empty.
+///
+/// An absolute path is left alone, which is every ordinary spawn: it is a
+/// decision somebody made, and roots are a convention rather than a sandbox.
+fn settle_cwd(store: &Store, req: &mut SpawnRequest, binding: &RunConversation) -> Result<()> {
+    if req.cwd.is_absolute() {
+        return Ok(());
+    }
+    // The conversation's roots first, because those are the ones a person
+    // added and can see. `req.roots` is the fallback for a run that carries
+    // its grants rather than inheriting them — `jod run` builds them from the
+    // command line.
+    let declared: Vec<PathBuf> = match binding {
+        RunConversation::Existing(id) => store
+            .roots(id)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|r| r.path)
+            .collect(),
+        _ => Vec::new(),
+    };
+    let declared = if declared.is_empty() {
+        req.roots.clone()
+    } else {
+        declared
+    };
+
+    match workdir::launch_cwd(&req.cwd, &declared) {
+        Workdir::At(path) => {
+            req.cwd = path;
+            Ok(())
+        }
+        Workdir::Refused(refusal) => {
+            // The card is what a person acts on; the error is what the caller
+            // shows immediately. Both, because a delegation refused in the
+            // status bar and nowhere else is the silence this whole area is
+            // being fixed for.
+            if let RunConversation::Existing(id) = binding {
+                let card = NewCard {
+                    conversation_id: id.clone(),
+                    kind: Some(CardKind::Question),
+                    importance: Some(Importance::High),
+                    // The run cannot start until somebody says where. That is
+                    // the definition of blocking, rather than a judgement about
+                    // how much it matters.
+                    blocking: true,
+                    title: refusal.title(),
+                    body: refusal.body(),
+                    options: refusal
+                        .roots
+                        .iter()
+                        .map(|p| p.to_string_lossy().to_string())
+                        .collect(),
+                    source: Some(Source::Jod),
+                    dedupe_key: Some(format!("workdir:{}", refusal.name)),
+                    ..NewCard::default()
+                };
+                if let Err(e) = store.raise_card(card) {
+                    eprintln!("[jod] could not raise the working-directory card: {e}");
+                }
+            }
+            Err(JodError::Invalid(format!(
+                "{}\n\n{}",
+                refusal.title(),
+                refusal.body()
+            )))
+        }
+    }
+}
+
 fn open_conversation(
     store: &Store,
     req: &SpawnRequest,
@@ -701,6 +785,17 @@ impl Jod {
         conversation: RunConversation,
     ) -> Result<AgentSummary> {
         let store = self.store.clone().ok_or(JodError::StoreRequired)?;
+
+        // Before anything is written down, because everything written down
+        // afterwards records this directory: the conversation's `cwd`, the
+        // run's row, and the plan the supervisor chdirs into.
+        //
+        // And before the harness is located, so that "`tetris` is not one of
+        // your directories" is what a person is told rather than having it
+        // masked by whichever harness happens to be missing on this machine.
+        // Neither question depends on the other.
+        settle_cwd(&store, &mut req, &conversation)?;
+
         let program = req
             .harness
             .locate()
@@ -1745,6 +1840,158 @@ mod tests {
                 serde_json::Value::String(status.as_str().into())
             );
         }
+    }
+
+    // ---- where a run is pointed -------------------------------------------
+
+    /// A real directory, canonicalised — `std::env::temp_dir()` is a symlink on
+    /// macOS and this whole area is path comparison.
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "jod-settle-{}-{name}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        crate::roots::normalise(&dir)
+    }
+
+    /// BUG-14 through the store, with nothing pre-arranged: a conversation, a
+    /// root added exactly as `/add-dir` adds one, and a request that names that
+    /// directory the way a person does — by its name alone.
+    ///
+    /// The answer is the directory the user added. It is not `$HOME/tetris`,
+    /// and the home directory is never consulted to find that out.
+    #[test]
+    fn a_bare_directory_name_is_resolved_to_the_root_the_user_added() {
+        let dir = scratch("added");
+        let tetris = dir.join("dogfood").join("tetris");
+        std::fs::create_dir_all(&tetris).unwrap();
+
+        let store = Store::in_memory().unwrap();
+        let conversation = store
+            .new_conversation(HarnessKind::ClaudeCode, &dir.to_string_lossy(), None)
+            .unwrap();
+        store
+            .add_root(&conversation.id, crate::roots::NewRoot::reading(&tetris))
+            .unwrap();
+
+        let mut req = SpawnRequest {
+            cwd: PathBuf::from("tetris"),
+            ..request("build a tetris game in the tetris directory")
+        };
+        settle_cwd(
+            &store,
+            &mut req,
+            &RunConversation::Existing(conversation.id.clone()),
+        )
+        .expect("a name that is one of this session's directories resolves");
+
+        assert_eq!(req.cwd, tetris);
+    }
+
+    /// The refusal. `tetris` names nothing this session was pointed at, so
+    /// there is no honest answer — and the answer that shipped was
+    /// `$HOME/tetris`, written to silently while the run reported success.
+    ///
+    /// A card, because the status bar is where the last one of these went
+    /// unnoticed.
+    #[test]
+    fn a_bare_name_matching_no_root_is_refused_and_raises_a_blocking_card() {
+        let dir = scratch("unmatched");
+        let checkout = dir.join("checkout");
+        std::fs::create_dir_all(&checkout).unwrap();
+
+        let store = Store::in_memory().unwrap();
+        let conversation = store
+            .new_conversation(HarnessKind::ClaudeCode, &dir.to_string_lossy(), None)
+            .unwrap();
+        store
+            .add_root(&conversation.id, crate::roots::NewRoot::reading(&checkout))
+            .unwrap();
+
+        let mut req = SpawnRequest {
+            cwd: PathBuf::from("tetris"),
+            ..request("build a tetris game in the tetris directory")
+        };
+        let refused = settle_cwd(
+            &store,
+            &mut req,
+            &RunConversation::Existing(conversation.id.clone()),
+        );
+
+        assert!(
+            matches!(refused, Err(JodError::Invalid(_))),
+            "a directory nobody declared must not be guessed at: {refused:?}"
+        );
+        let home = std::env::var("HOME").unwrap_or_default();
+        assert!(
+            !home.is_empty() && !req.cwd.starts_with(&home),
+            "the guess this replaced was the home directory; cwd is {:?}",
+            req.cwd
+        );
+
+        let cards = store
+            .cards(&crate::cards::Query {
+                conversation_id: Some(conversation.id.clone()),
+                ..Default::default()
+            })
+            .unwrap();
+        let card = cards
+            .first()
+            .expect("a refused launch is worth a card, not a line in the status bar");
+        assert!(card.blocking, "{card:?}");
+        assert!(
+            card.body.contains(&checkout.display().to_string()),
+            "the card has to say what was on offer: {}",
+            card.body
+        );
+    }
+
+    /// The wiring, which is the part that goes missing.
+    ///
+    /// A resolver that is correct and never called is this repository's
+    /// characteristic failure — `SpawnRequest::roots` is translated into
+    /// `--add-dir` by three harness adapters, each with its own passing test,
+    /// and no caller has ever filled it. So this asserts the entry point:
+    /// `spawn_agent_in` itself refuses, before it goes looking for a harness,
+    /// and no run is recorded as having started.
+    #[tokio::test]
+    async fn spawning_at_a_directory_nobody_declared_is_refused_at_the_entry_point() {
+        let dir = scratch("entry-point");
+        let checkout = dir.join("checkout");
+        std::fs::create_dir_all(&checkout).unwrap();
+
+        let store = std::sync::Arc::new(Store::in_memory().unwrap());
+        let conversation = store
+            .new_conversation(HarnessKind::ClaudeCode, &dir.to_string_lossy(), None)
+            .unwrap();
+        store
+            .add_root(&conversation.id, crate::roots::NewRoot::reading(&checkout))
+            .unwrap();
+
+        let result = Jod::with_store(store.clone())
+            .spawn_agent_in(
+                SpawnRequest {
+                    cwd: PathBuf::from("tetris"),
+                    ..request("build a tetris game in the tetris directory")
+                },
+                RunConversation::Existing(conversation.id.clone()),
+            )
+            .await;
+
+        assert!(
+            matches!(result, Err(JodError::Invalid(_))),
+            "a directory nobody declared must stop the launch, whatever \
+             harnesses this machine has: {result:?}"
+        );
+        assert!(
+            store.runs(10).unwrap().is_empty(),
+            "nothing may be recorded as running when nothing was launched"
+        );
     }
 
     // ---- runs populate conversations --------------------------------------
