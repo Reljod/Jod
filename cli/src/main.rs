@@ -1265,6 +1265,13 @@ enum TeamCommand {
         /// The task to close, as `jod team show <TEAM>` lists it. It does not
         /// have to have been claimed first.
         id: String,
+        /// Which team you expect to own this id. Task ids are unique across
+        /// every board, so this is optional and existing scripts calling
+        /// `done <ID>` keep working — but when it's given and the id
+        /// actually belongs to a different team (or none), the close is
+        /// refused instead of silently landing on the wrong board.
+        #[arg(short, long)]
+        team: Option<String>,
     },
     /// Send a message. Without --to it goes to every member but the sender.
     Msg {
@@ -1912,7 +1919,25 @@ async fn main() -> Result<()> {
                         bail!("{id} is already owned by someone else");
                     }
                 }
-                TeamCommand::Done { id } => {
+                TeamCommand::Done { id, team } => {
+                    // A team was named: refuse to close anything that is not
+                    // actually on that board, rather than trusting the
+                    // caller's assumption about who owns the id.
+                    if let Some(team) = &team {
+                        match store.team_owning_task(&id)? {
+                            Some(owner) if &owner != team => {
+                                bail!(
+                                    "{id} belongs to {owner}'s board, not {team}'s — refusing to close it"
+                                );
+                            }
+                            None => {
+                                bail!(
+                                    "no task {id} on {team}'s board — `jod team show {team}` lists them"
+                                );
+                            }
+                            Some(_) => {}
+                        }
+                    }
                     if !store.complete_task(&id)? {
                         bail!("no task {id} — `jod team show <team>` lists them");
                     }

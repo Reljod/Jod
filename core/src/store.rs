@@ -2077,8 +2077,16 @@ impl Store {
         })
     }
 
-    /// Put a task on a team's board. Re-adding an id leaves the original alone,
-    /// so a retry cannot orphan work someone already claimed.
+    /// Put a task on a team's board. Re-adding an id already on *this* board
+    /// leaves the original alone, so a retry cannot orphan work someone
+    /// already claimed.
+    ///
+    /// `id` is the table's primary key, though — global, not per-team — so an
+    /// id that already names a task on a *different* board cannot mean "my
+    /// board too". `ON CONFLICT(id) DO NOTHING` used to swallow that insert
+    /// silently and let the caller print success over a write that never
+    /// happened; this refuses it instead, naming the board that actually
+    /// owns the id.
     pub fn add_team_task(&self, team: &str, id: &str, title: &str) -> Result<()> {
         self.write(|tx| {
             tx.execute(
@@ -2086,8 +2094,38 @@ impl Store {
                  ON CONFLICT(id) DO NOTHING",
                 params![id, team, title],
             )?;
-            Ok(())
+            // The insert above is silent about whether it won, so ask
+            // explicitly whose board the id landed on.
+            let owner: Option<Option<String>> = tx
+                .query_row(
+                    "SELECT team FROM tasks WHERE id = ?1",
+                    params![id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            match owner.flatten() {
+                Some(owning_team) if owning_team == team => Ok(()),
+                Some(owning_team) => Err(JodError::Invalid(format!(
+                    "{id} already belongs to {owning_team}'s board — task ids are unique across every team, `jod team show {owning_team}` shows it"
+                ))),
+                None => Err(JodError::Invalid(format!(
+                    "{id} is already in use as a task with no team — task ids are unique across every team"
+                ))),
+            }
         })
+    }
+
+    /// Which team's board this id is on, if any. `None` covers both "no such
+    /// id" and "a loose lease task with no team" — `done` treats both the
+    /// same way: it cannot vouch that the caller's team owns it.
+    pub fn team_owning_task(&self, id: &str) -> Result<Option<String>> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        let owner: Option<Option<String>> = conn
+            .query_row("SELECT team FROM tasks WHERE id = ?1", params![id], |r| {
+                r.get(0)
+            })
+            .optional()?;
+        Ok(owner.flatten())
     }
 
     pub fn team_tasks(&self, team: &str) -> Result<Vec<TeamTask>> {
@@ -3871,6 +3909,56 @@ mod tests {
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].title, "original");
         assert_eq!(tasks[0].owner.as_deref(), Some("scout"));
+    }
+
+    /// The id-collision bug: creating a task whose id already exists on
+    /// *another* team used to print success naming your own board and write
+    /// nothing. It must now fail loudly instead, and the other team's task
+    /// must be untouched.
+    #[test]
+    fn creating_a_task_whose_id_belongs_to_another_team_fails_loudly() {
+        let s = store();
+        s.add_team_task("probe-team-c", "collide-x", "C original")
+            .unwrap();
+
+        let err = s
+            .add_team_task("jod-dogfood", "collide-x", "A wants this")
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("probe-team-c"),
+            "error should name the team that actually owns the id: {err}"
+        );
+
+        // Nothing landed on the second team's board.
+        assert!(s.team_tasks("jod-dogfood").unwrap().is_empty());
+        // The original is untouched.
+        let original = &s.team_tasks("probe-team-c").unwrap()[0];
+        assert_eq!(original.title, "C original");
+    }
+
+    /// A task id that already exists as a loose lease (no team at all) is
+    /// just as much a collision as one that belongs to another team.
+    #[test]
+    fn creating_a_task_over_a_teamless_id_also_fails_loudly() {
+        let s = store();
+        s.claim_task("loose", "someone").unwrap();
+
+        assert!(s.add_team_task("crew", "loose", "steal it").is_err());
+        assert!(s.team_tasks("crew").unwrap().is_empty());
+    }
+
+    /// `team_owning_task` is what `jod team done --team` checks before
+    /// closing anything — it must tell "owned by someone else" apart from
+    /// "not a team task at all".
+    #[test]
+    fn team_owning_task_names_the_actual_board() {
+        let s = store();
+        s.add_team_task("crew", "t1", "port the parser").unwrap();
+        s.claim_task("loose", "someone").unwrap();
+
+        assert_eq!(s.team_owning_task("t1").unwrap().as_deref(), Some("crew"));
+        assert_eq!(s.team_owning_task("loose").unwrap(), None);
+        assert_eq!(s.team_owning_task("no-such-id").unwrap(), None);
     }
 
     #[test]
