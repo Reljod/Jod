@@ -140,6 +140,47 @@ b2dd9d66|/Users/reljodoreta|reply with the word
 directory**. [PR #78](https://github.com/Reljod/Jod/pull/78) is the fix and is
 still a draft — **merging it is the highest-value action available.**
 
+### ✅ PR #78 verified by hand — it fixes BUG-14. Merge it.
+
+I did not stop at reading the diff. I checked out
+`origin/worktree-tui-launch-dir-root` (`412125e`) into its own worktree, built
+it, and drove it exactly as I drove `main` — same machine, same launch
+directory, same single action. The two runs sit side by side in the same
+table:
+
+```
+540db7a2|/…/worktrees/tui-dogfood-tetris/tetris-oneshot|reply with the word pr   <-- PR #78
+b2dd9d66|/Users/reljodoreta                             |reply with the word he   <-- main
+```
+
+**The only difference is the build.** PR #78 records the launch directory;
+`main` records `$HOME`.
+
+It also delivers BUG-4, though not where I suggested. The launch directory is
+named on the **splash**, `~`-abbreviated and elided sensibly:
+
+```
+▪ ~/Developer/Repositories/Projects/Jod/.claude/worktrees/tui-dogfood-tetris/tetris-oneshot
+```
+
+and the delegate confirmation carries the full path on its own continuation
+line.
+
+**One residual worth a follow-up, not a block:** the splash is only on screen
+while the session is fresh. Once the first turn lands, the splash gives way to
+the transcript and the directory is no longer visible anywhere — the status bar
+still reads `● auto · Claude Code · ready`. So "which directory am I in?"
+is answered at the moment you start and at each delegation, but not
+continuously. That is a large improvement over nothing, and the status-bar
+field suggested in [BUG-4](#bug-4) would close the gap.
+
+**Recommendation: merge #78.** It is the last thing standing between this
+program and a clean one-shot, it is verified working by hand rather than by
+assertion, and it is a strictly smaller behaviour change than the two PRs
+already merged.
+
+---
+
 The consolation is that #82 turned a silent failure into a loud one: the
 confirmation now prints `in /Users/reljodoreta` right under the delegation, so
 the mistake is visible the moment it happens instead of after a paid run has
