@@ -1598,7 +1598,36 @@ source the count came from — which is the bug stated as plainly as it can be:
 ---
 
 <a name="bug-15"></a>
-## BUG-15 — `@` in a non-git directory is ~95% `node_modules` noise · **High** · OPEN
+## BUG-15 — `@` in a non-git directory is ~95% `node_modules` noise · ~~High~~ · **FIXED by #83** (`303113e`)
+
+> **Re-driven by hand in the same directory that produced the original
+> finding** — `~/tetris`, still not a git repository. `@` now offers:
+>
+> ```
+> ▸ tetris/HELLO.md
+>   tetris/index.html
+>   tetris/package.json
+>   tetris/pnpm-lock.yaml
+>   tetris/pnpm-workspace.yaml
+>   tetris/src
+>   tetris/src/constants.js
+>   tetris/src/engine.js
+> ```
+>
+> Source files, and **not one `node_modules` or `dist` row**. Before the fix
+> the first eight rows were `dist/…` and `node_modules/…` with no source
+> visible at all.
+>
+> Fixed the way this report suggested, and then one better: `core/src/rank.rs`
+> now has a single `pub const NOISE` consumed by **three** call sites — the
+> ripgrep `--glob` exclusions, the fallback walker, and the `/add-dir` picker —
+> so the two pickers can no longer disagree. The doc comment names the exact
+> symptom found here: *"`/add-dir ~/tetris` offered `src`, while `@` in the
+> same tree offered `dist` and `node_modules`."* It also adds `.venv`
+> specifically because the mention path passes `--hidden` — the mechanism this
+> report diagnosed.
+>
+> Original finding kept below as the regression reference.
 
 **Repro:** `/add-dir ~/tetris` (the project the delegated run just built — a
 plain directory, not a git repo), then type `@` in the chat box.
