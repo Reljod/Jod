@@ -38,121 +38,153 @@ see BUG-13.
 
 ## Severity summary
 
-| ID | Severity | Area | One line |
-|---|---|---|---|
-| [BUG-14](#bug-14) | **Critical** | delegation | **The TUI runs every agent in `$HOME`** — work lands outside every root and the run is recorded `✓ done` |
-| [BUG-1](#bug-1) | **Critical** | rendering | A fresh session hides *all* notice-only output — most slash commands render nothing |
-| [BUG-2](#bug-2) | **High** | delegation | `Ctrl-B` delegates with almost no confirmation; it looks like nothing happened |
-| [BUG-3](#bug-3) | **High** | directory clarity | The directory picker's header is truncated, so you cannot tell which tree you are in |
-| [BUG-4](#bug-4) | **High** | directory clarity | The working directory appears nowhere in the chat UI |
-| [BUG-5](#bug-5) | **High** | projects | A project cannot be created or cited from the TUI at all |
-| [BUG-6](#bug-6) | **High** | discoverability | `Ctrl-G d` (projects) is a silent no-op unless an undiscoverable panel is already open — **survived #75 and got worse** |
-| [BUG-7](#bug-7) | Medium | discoverability | `Shift-Tab` — the only way to reach projects/sessions/context — is undocumented |
-| [BUG-8](#bug-8) | ~~Medium~~ | rendering | ~~Keymap overlay: key label collides with its description~~ — **FIXED by #75** |
-| [BUG-9](#bug-9) | ~~Medium~~ | honesty | ~~The splash claims "Alt-K opens every screen"~~ — **largely FIXED by #75** |
-| [BUG-10](#bug-10) | Low | commands | `/main` is listed twice, with two different meanings |
-| [BUG-11](#bug-11) | Low | commands | Command descriptions are cut mid-word with no ellipsis |
-| [BUG-12](#bug-12) | Low | input | The input box is fixed at ~70 columns and single-line |
-| [BUG-13](#bug-13) | Medium | tooling | `jod --version` cannot distinguish two different builds |
-| [BUG-17](#bug-17) | Medium | interrupt | Interrupt is unacknowledged for 4–6s, then reported as both `✓ done` and `✗ failed` |
-| [BUG-18](#bug-18) | Medium | interrupt | Every interrupt falsely warns the run "may still be writing", worded as a *start* failure |
-| [BUG-19](#bug-19) | Medium | fleet | An interrupted run reads `✗ failed` in the TUI but `killed` in `jod ls` and the database |
-| [BUG-20](#bug-20) | **High** | destructive UI | The "cannot be undone" dialog clips its own warning and hides what cancels |
-| [BUG-21](#bug-21) | Medium | diffs | The diff header's untruncated path pushes the promised `+N -M` counts off screen |
-| [BUG-15](#bug-15) | **High** | mentions | `@` in a non-git directory is ~95% `node_modules` noise; source is invisible |
-| [BUG-16](#bug-16) | Medium | mentions | `@` clips paths from the right, so six different files render identically |
+Status key: **merged** = in `main`, reported by the maintainer, *not* re-driven
+by me. **PR open** = CI-green draft awaiting merge. **open** = nobody on it.
+
+| ID | Severity | Status | Area | One line |
+|---|---|---|---|---|
+| [BUG-14](#bug-14) | **Critical** | ½ **merged** #82 · #84 open | delegation | **The TUI ran every agent in `$HOME`** — work landed outside every root and the run was recorded `✓ done` |
+| [BUG-1](#bug-1) | **Critical** | **merged** #82 | rendering | A fresh session hid *all* notice-only output — most slash commands rendered nothing |
+| [BUG-2](#bug-2) | **High** | **merged** #82 | delegation | `Ctrl-B` delegated with almost no confirmation; it looked like nothing happened |
+| [BUG-3](#bug-3) | **High** | PR open #86 | directory clarity | The directory picker's header is truncated, so you cannot tell which tree you are in |
+| [BUG-4](#bug-4) | **High** | PR open #78 | directory clarity | The working directory appears nowhere in the chat UI |
+| [BUG-5](#bug-5) | **High** | PR open #85 | projects | A project cannot be created or cited from the TUI at all |
+| [BUG-6](#bug-6) | **High** | **merged** #81 | discoverability | The projects key was a silent no-op unless an undiscoverable panel was already open |
+| [BUG-7](#bug-7) | Medium | **merged** #81 | discoverability | `Shift-Tab` — the only way to reach projects/sessions/context — was undocumented |
+| [BUG-8](#bug-8) | ~~Medium~~ | **fixed** #75 | rendering | ~~Keymap overlay: key label collides with its description~~ |
+| [BUG-9](#bug-9) | ~~Medium~~ | **largely fixed** #75 | honesty | ~~The splash claims "Alt-K opens every screen"~~ |
+| [BUG-10](#bug-10) | Low | **open — unclaimed** | commands | `/main` is listed twice, with two different meanings |
+| [BUG-11](#bug-11) | Low | PR open #86 | commands | Command descriptions are cut mid-word with no ellipsis |
+| [BUG-12](#bug-12) | Low | **open — unclaimed** | input | The input box is fixed at ~70 columns and single-line |
+| [BUG-13](#bug-13) | Medium | **merged** #80 | tooling | `jod --version` could not distinguish two different builds |
+| [BUG-17](#bug-17) | Medium | with an agent | interrupt | Interrupt is unacknowledged for 4–6s, then reported as both `✓ done` and `✗ failed` |
+| [BUG-18](#bug-18) | Medium | with an agent | interrupt | Every interrupt falsely warns the run "may still be writing", worded as a *start* failure |
+| [BUG-19](#bug-19) | Medium | with an agent | fleet | An interrupted run reads `✗ failed` in the TUI but `killed` in `jod ls` and the database |
+| [BUG-20](#bug-20) | **High** | PR open #86 | destructive UI | The "cannot be undone" dialog clips its own warning and hides what cancels |
+| [BUG-21](#bug-21) | Medium | PR open #86 | diffs | The diff header's untruncated path pushes the promised `+N -M` counts off screen |
+| [BUG-15](#bug-15) | **High** | PR open #83 | mentions | `@` in a non-git directory is ~95% `node_modules` noise; source is invisible |
+| [BUG-16](#bug-16) | Medium | PR open #83 | mentions | `@` clips paths from the right, so six different files render identically |
+
+**Nothing is unclaimed except [BUG-10](#bug-10) and [BUG-12](#bug-12).** Check
+this column before starting; five findings have merged since the body text
+below was written, and the per-bug sections still describe the *broken*
+behaviour so the repro survives as a regression reference.
 
 ---
 
-## Verification status — rebased onto `f3aaf45`
+## Verification status — five findings have now merged into `main` (`27a7072`)
 
-Re-checked after rebasing onto `f3aaf45` (#79). That PR touches only CI
-workflows, `README`, `REVIEW.md`, `docs/decisions.md` and shell tests —
-`git diff f43e7a7 f3aaf45 -- '*.rs'` is **empty** — so the binary under test is
-still exactly this tree's, and no finding needed re-running for that reason.
+**Read the provenance line on every row before trusting it.** This report's
+value is that its claims were driven by hand in a real terminal. The merge
+statuses below are **not** that — they were reported to me by the maintainer,
+and I could not re-drive them: this session is restricted to editing this file,
+with no builds. They are recorded as *reported merged*, not as *re-verified*.
 
-Six draft PRs are open against these findings (#80, #81, #82, #83, #84, #78).
-**None are merged**, and I confirmed that by re-running the two cheapest
-reproductions from a cold session on the rebased tree rather than taking it on
-trust:
+An earlier revision of this section said "six draft PRs are open… **none are
+merged**" and carried three rows reading "still renders nothing". That was true
+when written and is now **out of date** — those rows predate the merges below
+and have been removed rather than left to mislead.
 
-| Check | Result on `f3aaf45` |
-|---|---|
-| BUG-1 — `/root` on a cold session | still renders **nothing**; splash still up |
-| BUG-6 — `Ctrl-G d` on a cold session | still renders **nothing** |
-| BUG-13 — `jod --version` | still bare `jod 0.1.0` |
-| BUG-21 — diff header | re-verified with a second file; path still clipped, counts still absent |
-| BUG-14 — TUI cwd | **fix verified working** — see below. Not in `main` yet. |
+### Merged into `main`
 
-### BUG-14's fix works — verified, though it is not merged
+| PR | Commit | Findings | What landed | Re-verified by me? |
+|---|---|---|---|---|
+| #80 | `0ca9f2e` | [BUG-13](#bug-13) | `jod --version` stamps the commit | ✗ reported |
+| #81 | `2c0963f` | [BUG-7](#bug-7), [BUG-6](#bug-6) | `Shift-Tab` advertised; the projects key opens the panel from a cold start | ✗ reported |
+| #82 | `27a7072` | [BUG-1](#bug-1), [BUG-2](#bug-2), [BUG-14](#bug-14) *(display half)* | notice-only output no longer swallowed; the delegation confirmation names id, full prompt **and cwd**; fleet detail shows the run's cwd | ✗ reported |
 
-While I was re-verifying, an **uncommitted** change appeared in this worktree's
-`cli/src/main.rs` (not mine — another agent is working in this checkout, see
-the collision note below):
+That closes the two findings I most wanted closed. [BUG-1](#bug-1) was the one
+hiding every other message in the program, and #82 taking [BUG-2](#bug-2) with
+it matches what I predicted after testing the delegate confirmation in a
+non-fresh session: the message was always good, it was only ever invisible.
+#82 also adds the cwd to that confirmation — the single field whose absence let
+[BUG-14](#bug-14) run a paid agent into the wrong tree unnoticed.
 
-```rust
--  cwd: cwd.unwrap_or_else(jod_core::service::default_cwd),
-+  cwd: tui_cwd(cwd)?,
-```
+### Still open — CI-green drafts
 
-with `tui_cwd` at `cli/src/main.rs:4002` falling back to
-`std::env::current_dir()`. That is exactly fix #1 as recommended below, so I
-built it and drove it rather than assume.
+| PR | Findings | Note |
+|---|---|---|
+| #78 | [BUG-4](#bug-4) | status-bar cwd |
+| #83 | [BUG-15](#bug-15), [BUG-16](#bug-16) | `@` noise and right-clipping |
+| #84 | [BUG-14](#bug-14) *(backend half)* | the card for a run that wrote outside every root |
+| #85 | [BUG-5](#bug-5) | `/project ls\|add` |
+| #86 | [BUG-3](#bug-3), [BUG-11](#bug-11), [BUG-20](#bug-20), [BUG-21](#bug-21) | Pattern B — four sites, one shared helper |
 
-**It works.** Launched from the worktree with **no `--cwd` flag at all** — the
-condition that originally sent Tetris into `$HOME`:
+**#86 is stacked on #83's branch, so #83 must merge first.**
+
+#86 is the shape this report was arguing for: four width bugs taken as one
+sweep through one helper, not four agents in one 9,000-line file. See
+[Pattern B](#pattern-b--a-width-computed-from-content-ignoring-the-chrome-around-it).
+
+### Open and unclaimed
+
+[BUG-10](#bug-10) and [BUG-12](#bug-12). [BUG-17](#bug-17),
+[BUG-18](#bug-18) and [BUG-19](#bug-19) are with an agent.
+
+### What to check first, once the rest land
+
+[BUG-14](#bug-14) has **two halves in two PRs** — #82 (display, merged) and #84
+(backend, open). Worth confirming that a run writing outside every root *both*
+raises the card **and** shows its cwd, rather than one landing without the
+other. A half-fixed BUG-14 is the dangerous state: the cwd is now visible, so
+it looks handled, while nothing yet objects when work lands outside every root.
+
+### BUG-14's fix: independently confirmed before it merged
+
+Earlier in this session an uncommitted `cli/src/main.rs` change appeared in
+this worktree, replacing `cwd.unwrap_or_else(default_cwd)` with a `tui_cwd`
+helper falling back to `std::env::current_dir()`. I built and drove it rather
+than assume, launching with **no `--cwd` flag at all** — the exact condition
+that originally sent Tetris into `$HOME`:
 
 ```
 ab8a6b9d|/…/worktrees/tui-dogfood-tetris|reply with the single word verified
+87e84b92|/Users/reljodoreta|Build a working Tetris game          <-- the original failure
 ```
 
-against the original failure for comparison:
-
-```
-87e84b92|/Users/reljodoreta|Build a working Tetris game
-```
-
-The run now lands where the console was launched. Whoever owns that PR can
-treat this as an independent confirmation. **Caveat:** this was an uncommitted
-working-tree change built locally, not `main` — BUG-14 stays `OPEN` here until
-it merges.
-
-So every `OPEN` item below is open against `f3aaf45` as of this writing. When
-those PRs merge, the items to re-check first are BUG-1 (which should also close
-BUG-2) and BUG-14 — and BUG-14 has two halves in two PRs (#82 display, #84
-backend), so it is worth confirming that a run writing outside its roots
-*both* raises the card and shows its cwd, rather than one landing without the
-other.
+The run landed where the console was launched. That change turned out to be a
+stray process's work and duplicates **#78**, which does the same thing via
+`console_cwd` — so it has no independent value as a patch, but the behavioural
+confirmation stands on its own.
 
 ---
 
-## ⚠ Collision notice — someone is editing inside this worktree
+## ⚠ Collision notice — resolved, and worth learning from
 
-At the time of writing, `git status` in
-`.claude/worktrees/tui-dogfood-tetris` shows:
+**Resolved.** The stray processes have been stopped. The cause is now known and
+is worth recording, because it is an easy trap: *messaging an agent in this
+worktree spawned a second process inside it*, and that process started
+**implementing** a BUG-14 fix in place rather than just relaying the message.
+Two source trees then compiled into one `CARGO_TARGET_DIR`, and my build
+printed `Blocking waiting for file lock on build directory`.
+
+The working tree still carries their edits:
 
 ```
- M cli/src/main.rs          <-- not mine; a BUG-14 fix in progress
-?? tetris-oneshot/          <-- not mine; another agent's test project
+ M cli/src/main.rs          <-- stray process's BUG-14 fix; duplicates #78
+ M cli/src/tui/ui.rs        <-- stray process's edits
+?? tetris/  tetris-oneshot/ <-- the dogfood projects
 ```
 
-I have **not** committed or reverted either — someone else's uncommitted work
-is not mine to touch, and reverting it would destroy it. But two consequences
-matter for anyone working here:
+They have deliberately **not** been reverted. Someone else's uncommitted work
+is not mine to destroy, and that judgement was upheld. `cli/src/main.rs`
+duplicates #78 (which does the same job via `console_cwd`), so it has no
+independent value as a patch — but deleting it was still not my call to make
+unasked.
 
-1. **This worktree is not a clean room any more.** A `cargo build` here now
-   compiles somebody's in-flight fix, not `f3aaf45`. My earlier findings were
-   all taken against the clean tree; the one exception is the BUG-14 fix
-   verification above, which is labelled as such.
-2. **The shared `target/` is contended.** My build printed
-   `Blocking waiting for file lock on build directory` — two source trees are
-   compiling into one `CARGO_TARGET_DIR`, so `target/release/jod` may be built
-   from *either* tree at any moment. If you are testing behaviour, do not trust
-   that binary without checking what it actually does; I confirmed the fix
-   behaviourally (recorded `cwd`) rather than by trusting the build.
+Three things to carry forward:
 
-This is the "one owner per path" rule in `docs/teamwork.md` being crossed in
-practice. Worth a fresh worktree per agent.
+1. **A worktree with uncommitted foreign edits is not a clean room.** A build
+   here compiles somebody's in-flight fix, not the base commit. Every finding
+   in this report was taken against the clean tree; the single exception is the
+   BUG-14 confirmation above, which says so explicitly.
+2. **Confirm behaviour, not builds.** With a contended `target/`,
+   `target/release/jod` may be built from *either* tree at any moment. I
+   confirmed the cwd fix by what it *recorded* in the database, not by trusting
+   the binary.
+3. **One worktree per agent.** This is the "one owner per path" rule in
+   `docs/teamwork.md` being crossed in practice — and the crossing came from
+   the dispatch mechanism, not from any agent misbehaving.
 
 ---
 
@@ -240,18 +272,37 @@ describes.
 
 ### In flight right now
 
-| Bug | Agent | State |
-|---|---|---|
-| [BUG-14](#bug-14) | `cwd-fix` | IN PROGRESS — `cli/src/main.rs`, `core/src/service.rs` |
-| [BUG-1](#bug-1), [BUG-4](#bug-4) | `ui-fix` | IN PROGRESS — `cli/src/tui/ui.rs` |
+Superseded by the [verification status](#verification-status--five-findings-have-now-merged-into-main-27a7072)
+table above — that is the live one; keep it current rather than this note.
+Summary as of `main` = `27a7072`:
 
-### Citations are verified — trust them, but re-check after a rebase
+- **Merged:** BUG-1, BUG-2, BUG-6, BUG-7, BUG-13, and BUG-14's display half.
+- **PR open, CI-green:** #78 (BUG-4), #83 (BUG-15, BUG-16), #84 (BUG-14
+  backend), #85 (BUG-5), #86 (BUG-3, BUG-11, BUG-20, BUG-21).
+  **#86 is stacked on #83 — merge #83 first.**
+- **With an agent:** BUG-17, BUG-18, BUG-19.
+- **Unclaimed:** BUG-10, BUG-12.
 
-Every `file:line` in this report has been machine-checked against the tree at
-the tip of this branch: all 24 resolve to the code they claim. If you rebase,
-re-run the check before trusting them — an earlier revision of this file cited
-eleven line numbers read from a **stale checkout of `main`**, which is an easy
-mistake to make in a repo with a worktree beside it. Verify with:
+**Dispatch note that proved out.** #86 took four `ui.rs` width bugs as a single
+sweep through one shared helper, rather than four agents in one 9,000-line
+file. That is the one-owner-per-path table above doing its job, and it is the
+recommended shape for the rest.
+
+### ⚠ Citations were verified against this branch — they are now stale against `main`
+
+All 24 `file:line` citations were machine-checked and resolved correctly
+against **this branch's tree**. That was before #80, #81 and #82 merged, and
+those PRs changed `cli/src/tui/ui.rs`, `cli/src/main.rs` and
+`cli/src/tui/keys.rs` — the files holding most of the citations. **Assume every
+line number below is now off against `main` (`27a7072`)**, and re-run the check
+before trusting one.
+
+The **repros and root causes are still accurate**; only the line numbers drift.
+Grep for the quoted code rather than jumping to the line.
+
+An earlier revision of this file cited eleven line numbers read from a **stale
+checkout of `main`** — an easy mistake in a repo with a worktree beside it, and
+the reason this check exists. Verify with:
 
 ```bash
 grep -oE '(cli/src/tui/[a-z_]+\.rs|core/src/[a-z_]+\.rs|cli/src/main\.rs)[:.]*[0-9]+' REPORT_BUGS.md \
@@ -313,7 +364,16 @@ for paths, where the tail carries the meaning.
 ---
 
 <a name="bug-14"></a>
-## BUG-14 — A delegated run wrote into `$HOME`, outside every root, and reported success · **Critical** · OPEN
+## BUG-14 — A delegated run wrote into `$HOME`, outside every root, and reported success · **Critical** · **HALF MERGED**
+
+> **Two halves, two PRs.** The **display** half merged via #82 (`27a7072`):
+> the delegation confirmation and the fleet detail now name the run's cwd. The
+> **backend** half — the card raised when a run writes outside every declared
+> root — is **still open as #84**. The launch-directory fix itself is #78.
+>
+> **This is the dangerous in-between state:** the cwd is now visible, so it
+> looks handled, while nothing yet objects when work lands outside every root.
+> Check both halves together, not either alone.
 
 This is the finding that matters most, and it is the one the whole exercise was
 for. It is also **not** a one-off: your own run history shows the same failure.
@@ -462,7 +522,11 @@ unrelated tree in `$HOME` that silently did.
 ---
 
 <a name="bug-1"></a>
-## BUG-1 — A fresh session silently swallows every notice-only command · **Critical** · OPEN
+## BUG-1 — A fresh session silently swallows every notice-only command · **Critical** · **MERGED (#82)**
+
+> **Fixed in `main` via #82 (`27a7072`)** — reported by the maintainer, not
+> re-driven by me. The repro below is kept verbatim as the regression
+> reference: `/root` on a cold session must print something.
 
 This is the highest-value finding in this report, and it is the root cause of
 BUG-2. It makes the TUI look broken on the *first* thing a new user does.
@@ -543,7 +607,12 @@ simply drop the splash on any notice, or the startup hint alone would kill it.
 ---
 
 <a name="bug-2"></a>
-## BUG-2 — delegate gives almost no confirmation · **High** · OPEN
+## BUG-2 — delegate gives almost no confirmation · **High** · **MERGED (#82)**
+
+> **Fixed in `main` via #82**, exactly as predicted below: it was never a
+> missing message, only a hidden one, so fixing BUG-1 restored it. #82 also
+> adds the **cwd** to the confirmation — the field this report argued for,
+> and the one that would have exposed BUG-14 in seconds.
 
 You suspected "delegate task does not spawn". **It does spawn.** The bug is
 that the UI barely admits it, which is indistinguishable from failure — and
@@ -761,7 +830,13 @@ fix itself — the sentence the CLI already prints would do.
 ---
 
 <a name="bug-6"></a>
-## BUG-6 — projects toggle is a silent no-op unless an undiscoverable panel is open · **High** · OPEN
+## BUG-6 — projects toggle is a silent no-op unless an undiscoverable panel is open · **High** · **MERGED (#81)**
+
+> **Fixed in `main` via #81 (`2c0963f`)** — the projects key now opens the
+> panel from a cold start. Regression reference: press it from
+> `App::default()`, with no panel already open, and something must appear.
+> That missing precondition (see [Pattern A](#pattern-a--a-fixture-supplies-a-precondition-the-real-entry-point-never-has))
+> is what hid this through an entire refactor.
 
 > **Re-verified after #75 — still broken, and now worse.** The binding moved
 > from `Alt-D` to `Ctrl-G d` and was *promoted* into the workspace menu, where
@@ -824,7 +899,10 @@ in it. The gate is `app.panel`, confirmed.
 ---
 
 <a name="bug-7"></a>
-## BUG-7 — `Shift-Tab` is undocumented, and it is the only way in · Medium · OPEN
+## BUG-7 — `Shift-Tab` is undocumented, and it is the only way in · Medium · **MERGED (#81)**
+
+> **Fixed in `main` via #81** — `Shift-Tab` is now advertised rather than
+> discoverable only from the border of the panel it opens.
 
 `Shift-Tab` opens the side panel holding **projects, sessions, mode, harness,
 spend and context usage** — a large fraction of the program's state.
@@ -963,7 +1041,12 @@ mitigation, but it is a detour for something the box could show.
 ---
 
 <a name="bug-13"></a>
-## BUG-13 — `jod --version` cannot distinguish two different builds · Medium · OPEN
+## BUG-13 — `jod --version` cannot distinguish two different builds · Medium · **MERGED (#80)**
+
+> **Fixed in `main` via #80 (`0ca9f2e`)** — `jod --version` now stamps the
+> commit. This retires a whole category of phantom bug report: at the start of
+> this session 58 source files were newer than the binary, and nothing in the
+> program's own output revealed it.
 
 `~/.local/bin/jod` is a **copy**, not a symlink, so rebuilding the repo does
 not update the binary on `PATH`. Both report the same version:
