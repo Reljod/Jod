@@ -56,8 +56,23 @@ pub enum Entry {
     ToolOut { text: String, failed: bool },
     /// A run finished: the summary line.
     Done { text: String, failed: bool },
-    /// Something Jod itself wants to say.
+    /// Something Jod itself wants to say *because you asked it something* —
+    /// the roots list, a confirmation, an error.
+    ///
+    /// The renderer treats this as output, which is what separates it from
+    /// [`Entry::Hint`]: a session holding one of these has answered a question
+    /// and must not be painted over by the splash.
     Notice(String),
+    /// Something Jod says on its own account, before anyone has asked
+    /// anything: the startup keymap line, and `/new`'s "new conversation".
+    ///
+    /// Its own variant rather than a `Notice` because `ui::fresh` has to tell
+    /// the two apart, and the only other ways to do that are to sniff the
+    /// notice's text or to carry a "has the user run anything" flag beside the
+    /// transcript that every producer must remember to set. Both can be got
+    /// wrong silently; a variant cannot — the entry either was pushed as a
+    /// hint or it was not.
+    Hint(String),
     /// A file edit, as a diff rather than as a one-line summary.
     ///
     /// Its own entry rather than a decorated `Tool`, because it is the one tool
@@ -73,6 +88,19 @@ pub enum Entry {
     Plan(Vec<todo::Item>),
     /// A line the harness printed that we could not classify.
     Raw(String),
+    /// `Ctrl-B` sent work off to a background agent.
+    ///
+    /// Not a `Notice`, and the distinction is the whole point. Delegation is
+    /// the one key that spends money unattended, and its old confirmation was
+    /// a single notice — invisible on a cold session, and a line at the bottom
+    /// of the status bar otherwise. It gets a block of its own naming all
+    /// three things you would want to check afterwards: which agent, what it
+    /// was told, and which directory it was pointed at.
+    Delegated {
+        id: String,
+        prompt: String,
+        dir: String,
+    },
 }
 
 /// What is drawn over everything else, and owns the keyboard while it is.
@@ -626,6 +654,15 @@ pub struct AgentLine {
     pub session: Option<String>,
     /// When it was launched, so the panel can show how long it has been going.
     pub created_at_ms: i64,
+    /// The directory the run was launched in.
+    ///
+    /// Carried onto the row because it is the one fact that distinguishes a
+    /// run that did the work from a run that did the work *somewhere else*.
+    /// The store has recorded it since the first migration and the summary has
+    /// always carried it; it was dropped here, so no screen could show it, and
+    /// a delegated run that wrote its whole output outside every declared root
+    /// looked identical to one that had not.
+    pub cwd: String,
     pub cost_usd: Option<f64>,
     /// The last thing it said, which is the only summary an unattended run
     /// offers of what it actually did.
@@ -2831,6 +2868,7 @@ mod tests {
             session: None,
             created_at_ms: 0,
             cost_usd: None,
+            cwd: "/srv/reljod/repo".into(),
             last: None,
         }
     }
