@@ -549,7 +549,14 @@ async fn event_loop(
     // console frozen for a second per sentence is worse than typing.
     let (voice_tx, mut voice_rx) =
         tokio::sync::mpsc::unbounded_channel::<Result<String, String>>();
-    let mut recorder: Option<jod_voice_core::Recorder> = None;
+    // The listening session, while the microphone is on. Held here rather than
+    // on `App` because it owns a child process and a read position in the file
+    // that process is writing.
+    //
+    // The engine is resolved once when listening starts and reused for every
+    // utterance in the session, so the engine announced on switch-on is the one
+    // that transcribes.
+    let mut session: Option<(jod_voice_core::Session, crate::voice::Engine)> = None;
 
     loop {
         terminal.draw(|f| viewport = ui::draw(f, &app))?;
@@ -585,25 +592,10 @@ async fn event_loop(
                                 start_update(&mut app, &update_tx, check);
                             }
                             Some(Action::Dictate) => {
-                                toggle_dictation(&mut app, &mut recorder, &voice_tx);
+                                toggle_listening(&jod, &mut app, &mut session, &voice_tx);
                             }
                             Some(Action::CancelDictation) => {
-                                if let Some(rec) = recorder.take() {
-                                    rec.cancel();
-                                }
-                                // Also clears a `Transcribing`, which has no
-                                // recorder left to cancel: the upload is still
-                                // in flight and its result is dropped on
-                                // arrival, because he has said he does not want
-                                // it. Better than a transcript appearing in the
-                                // box seconds after Escape.
-                                let was = std::mem::replace(
-                                    &mut app.dictation,
-                                    app::Dictation::Off,
-                                );
-                                if was.is_active() {
-                                    app.push(Entry::Notice("dictation cancelled".into()));
-                                }
+                                stop_listening(&mut app, &mut session, &voice_tx, true);
                             }
                             Some(Action::Reload) => reload(terminal, &mut app),
                             Some(action) => perform(&jod, &mut app, &opts, &mut thread, action).await,
@@ -711,16 +703,25 @@ async fn event_loop(
             }
 
             Some(said) = voice_rx.recv() => {
-                // Only if this console is still waiting for it. Escape sets
-                // `dictation` to `Off` while the upload is in flight, and a
-                // transcript landing in the box seconds after it was cancelled
-                // is text he did not ask for and may not notice arriving.
-                if matches!(app.dictation, app::Dictation::Transcribing { .. }) {
-                    app.dictation = app::Dictation::Off;
-                    match said {
-                        Ok(text) => insert_dictation(&mut app, &text),
-                        Err(why) => app.push(Entry::Notice(why)),
+                app.dictation.note_pending(-1);
+                match said {
+                    Ok(text) => {
+                        if let Some(instruction) = heard_utterance(&mut app, &text) {
+                            // The same function `⏎` reaches, so a spoken send
+                            // routes to the orchestrator or to the watched
+                            // agent by exactly the rule a typed one does.
+                            // A private path here would be a second answer to
+                            // "where does a prompt go".
+                            send_turn(&jod, &mut app, &opts, &mut thread, instruction, None).await;
+                        }
                     }
+                    Err(why) => app.push(Entry::Notice(why)),
+                }
+                // A spoken "stop listening" is the one command that has to
+                // reach the recorder, which only this loop holds.
+                if app.stop_listening_requested {
+                    app.stop_listening_requested = false;
+                    stop_listening(&mut app, &mut session, &voice_tx, false);
                 }
             }
 
@@ -736,6 +737,10 @@ async fn event_loop(
 
             _ = ticks.tick() => {
                 app.advance(now_ms());
+                // The microphone, four times a second. Cheap when the room is
+                // quiet: a file length check and a short read, with no model
+                // involved until a sentence has actually ended.
+                poll_listening(&mut app, &mut session, &voice_tx);
                 // Every tick rather than at startup only, because `/harness`
                 // changes the answer. `ask_models` returns immediately when the
                 // list on hand already belongs to the current harness, which is
@@ -5085,122 +5090,246 @@ fn refresh_mention(jod: &Arc<Jod>, app: &mut App) {
 }
 
 // ---- dictation -----------------------------------------------------------
+//
+// Hands-free, which changes the shape of everything here. The microphone is a
+// switch: turned on once, it stays on, and sentences arrive on their own as
+// they are finished. Nothing below waits for a key.
+//
+// The session owns a child process and a read position in the file that
+// process is writing, so it lives in the event loop and is threaded through
+// these functions rather than sitting on `App`.
 
-/// Start recording, or stop and send the utterance off to be transcribed.
-///
-/// The recorder is a child process, so it is owned by the loop and passed in.
-/// Everything here is deliberately non-blocking except the stop, which waits
-/// only as long as it takes the recorder to finalise a WAV header — see
-/// [`jod_voice_core::record`] for why that wait cannot be skipped.
-fn toggle_dictation(
-    app: &mut App,
-    recorder: &mut Option<jod_voice_core::Recorder>,
-    tx: &tokio::sync::mpsc::UnboundedSender<Result<String, String>>,
-) {
-    // Stopping.
-    if let Some(rec) = recorder.take() {
-        let started = match &app.dictation {
-            app::Dictation::Listening { started_ms, .. } => *started_ms,
-            _ => app.now_ms,
-        };
-        match rec.finish() {
-            Ok(recording) => {
-                // Gated here, before the upload: a key-tap misfire or a muted
-                // microphone must not cost a network round trip, and "nothing
-                // was said" is a better answer than a hallucinated one. Whisper
-                // fed silence emits canned subtitle phrases.
-                let verdict = jod_voice_core::guard::assess(&recording.samples, recording.rate);
-                if verdict != jod_voice_core::Speech::Present {
-                    app.dictation = app::Dictation::Off;
-                    app.push(Entry::Notice(verdict.message().to_string()));
-                    return;
-                }
-                app.dictation = app::Dictation::Transcribing { started_ms: started };
-                let tx = tx.clone();
-                let wav = recording.wav;
-                tokio::spawn(async move {
-                    let said = jod_voice_core::transcribe::transcribe(
-                        &wav,
-                        jod_voice_core::DEFAULT_MODEL,
-                        None,
-                        None,
-                    )
-                    .await
-                    .map(|t| t.text);
-                    // The receiver is gone only when the console is exiting,
-                    // and a transcript nobody can receive is not an error worth
-                    // reporting to a screen that is being torn down.
-                    let _ = tx.send(said);
-                });
-            }
-            Err(why) => {
-                app.dictation = app::Dictation::Off;
-                app.push(Entry::Notice(why));
-            }
+/// Type alias for the listening session and the engine transcribing it.
+type Listening = Option<(jod_voice_core::Session, crate::voice::Engine)>;
+
+/// The channel a finished transcript comes back on.
+type VoiceTx = tokio::sync::mpsc::UnboundedSender<Result<String, String>>;
+
+/// Switch the microphone on, or off.
+fn toggle_listening(jod: &Arc<Jod>, app: &mut App, session: &mut Listening, tx: &VoiceTx) {
+    if session.is_some() {
+        stop_listening(app, session, tx, false);
+        return;
+    }
+
+    // Resolved before he speaks rather than after. A sentence dictated into a
+    // console that was never going to transcribe it is a sentence said twice,
+    // and the message says which of the three parts is missing.
+    let Some(store) = jod.store() else {
+        app.push(Entry::Notice(
+            "dictation needs Jod's database, which this console does not have open".into(),
+        ));
+        return;
+    };
+    let engine = match crate::voice::resolve(store, &jod_core::paths::jod_home()) {
+        Ok(engine) => engine,
+        Err(why) => {
+            app.push(Entry::Notice(why));
+            return;
         }
-        return;
-    }
+    };
 
-    // Starting.
-    if !app.dictation.can_start() {
-        app.push(Entry::Notice(
-            "still transcribing the last one — it will land in the box in a moment".into(),
-        ));
-        return;
-    }
-    // Checked before he speaks rather than after: a sentence dictated into a
-    // console that was never going to transcribe it is a sentence said twice.
-    if !jod_voice_core::transcribe::is_configured() {
-        app.push(Entry::Notice(
-            "dictation needs OPENROUTER_API_KEY, which is not set in this console's \
-             environment"
-                .into(),
-        ));
-        return;
-    }
-    match jod_voice_core::Recorder::start() {
-        Ok(rec) => {
+    match jod_voice_core::Session::start() {
+        Ok(live) => {
             app.dictation = app::Dictation::Listening {
-                started_ms: app.now_ms,
-                backend: rec.backend().program().to_string(),
+                since_ms: app.now_ms,
+                backend: live.backend().to_string(),
+                pending: 0,
+                speaking: false,
+                level: 0.0,
+                heard: 0,
             };
-            *recorder = Some(rec);
+            app.push(Entry::Notice(format!(
+                "listening · {} · say \"go ahead\" to send, \"stop listening\" to switch off",
+                engine.label()
+            )));
+            *session = Some((live, engine));
         }
         Err(why) => app.push(Entry::Notice(why)),
     }
 }
 
-/// Put a transcript into the composer, where it can be read before it is sent.
+/// Switch the microphone off.
 ///
-/// **Never sent automatically.** Dictation is good, not perfect, and an
-/// instruction that reaches the orchestrator is one that spawns agents in a
-/// repository — a mis-heard sentence should cost a keystroke to fix, not a
-/// run to undo. So it lands in the box at the cursor, exactly as if it had
-/// been typed, and `⏎` is still his.
-fn insert_dictation(app: &mut App, text: &str) {
-    let text = text.trim();
-    if text.is_empty() {
-        app.push(Entry::Notice("nothing was transcribed".into()));
+/// `discard` throws away the part-spoken sentence; without it, whatever was
+/// being said when the switch was flipped is still transcribed. Switching off
+/// mid-sentence should not silently lose the sentence — that is the difference
+/// between a toggle you can trust and one you have to time.
+fn stop_listening(app: &mut App, session: &mut Listening, tx: &VoiceTx, discard: bool) {
+    let Some((live, engine)) = session.take() else {
         return;
-    }
-    // A space between what was already there and what was just said, so
-    // dictating twice in a row does not run two sentences together — but not a
-    // leading space in an empty box.
-    let needs_space = app
-        .input
-        .get(..app.cursor)
-        .and_then(|s| s.chars().next_back())
-        .is_some_and(|c| !c.is_whitespace());
-    let addition = if needs_space {
-        format!(" {text}")
-    } else {
-        text.to_string()
     };
-    let at = app.cursor.min(app.input.len());
-    app.input.insert_str(at, &addition);
-    app.cursor = at + addition.len();
+    // Read before the state is cleared: sentences already being transcribed
+    // are still on their way, and saying how many is what stops the pause that
+    // follows from looking like something went wrong.
+    let mut in_flight = app.dictation.pending();
+    let tail = live.finish();
+    app.dictation = app::Dictation::Off;
+
+    if let (Some(samples), false) = (tail, discard) {
+        transcribe_in_background(samples, engine, tx);
+        in_flight += 1;
+    }
+
+    app.push(Entry::Notice(match (discard, in_flight) {
+        (true, _) => "stopped listening — dropped what was being said".to_string(),
+        (false, 0) => "stopped listening".to_string(),
+        (false, 1) => "stopped listening — one sentence still coming".to_string(),
+        (false, n) => format!("stopped listening — {n} sentences still coming"),
+    }));
 }
 
+/// Read the microphone, and start transcribing anything that finished.
+///
+/// Called on the tick. Deliberately does no model work itself: it hands
+/// finished audio to a background task and returns, so the console stays
+/// responsive while a sentence is being transcribed and the next one spoken.
+fn poll_listening(app: &mut App, session: &mut Listening, tx: &VoiceTx) {
+    let Some((live, engine)) = session.as_mut() else {
+        return;
+    };
+
+    // A recorder that died leaves a console that looks like it is listening
+    // and is deaf — the worst state for something being talked to by somebody
+    // whose hands are full, so it is said out loud rather than left to be
+    // discovered.
+    if !live.is_running() {
+        app.push(Entry::Notice(
+            "the recorder stopped — listening is off. `jod voice check` says what is wrong."
+                .into(),
+        ));
+        *session = None;
+        app.dictation = app::Dictation::Off;
+        return;
+    }
+
+    match live.poll() {
+        Ok(jod_voice_core::Heard::Nothing { level, speaking }) => {
+            app.dictation.note_level(level, speaking);
+        }
+        Ok(jod_voice_core::Heard::Utterance { samples }) => {
+            app.dictation.note_level(0.0, false);
+            app.dictation.note_pending(1);
+            transcribe_in_background(samples, engine.clone(), tx);
+        }
+        Err(why) => {
+            app.push(Entry::Notice(format!("listening stopped: {why}")));
+            *session = None;
+            app.dictation = app::Dictation::Off;
+        }
+    }
+}
+
+/// Transcribe one utterance off the event loop.
+fn transcribe_in_background(samples: Vec<f32>, engine: crate::voice::Engine, tx: &VoiceTx) {
+    let wav = jod_voice_core::stream::to_wav(&samples);
+    let tx = tx.clone();
+    // `spawn_blocking`, because the local engine is whisper.cpp occupying a
+    // core for a second or so. On `spawn` that would sit on a runtime worker
+    // and stall the event loop this channel exists to keep free.
+    tokio::task::spawn_blocking(move || {
+        let said = tokio::runtime::Handle::current().block_on(async { engine.transcribe(&wav).await });
+        // The receiver is gone only when the console is exiting, and a
+        // transcript nobody can receive is not an error worth reporting to a
+        // screen that is being torn down.
+        let _ = tx.send(said);
+    });
+}
+
+/// Act on one transcribed sentence.
+///
+/// Returns the instruction to send when he asked for it out loud, and `None`
+/// when the sentence was dictation, a correction, or nothing usable.
+///
+/// **Sending is the only thing here that leaves the console**, and it happens
+/// only on an explicit spoken command — never because a sentence sounded
+/// finished. See [`jod_voice_core::spoken`] for why that rule is a narrow
+/// phrase match rather than a model's judgement.
+fn heard_utterance(app: &mut App, transcript: &str) -> Option<String> {
+    use jod_voice_core::Spoken;
+
+    match jod_voice_core::spoken::interpret(transcript) {
+        Spoken::Nothing => None,
+        Spoken::Text(said) => {
+            append_dictation(app, &said);
+            app.dictation.note_heard();
+            None
+        }
+        Spoken::Clear => {
+            app.input.clear();
+            app.cursor = 0;
+            app.dictated.clear();
+            app.push(Entry::Notice("cleared".into()));
+            None
+        }
+        Spoken::Undo => {
+            match app.dictated.pop() {
+                Some(last) => {
+                    // Only if it is still the tail. Anything typed since means
+                    // the words this would remove are no longer the ones he
+                    // means, and guessing is worse than saying so.
+                    if app.input.trim_end().ends_with(&last) {
+                        let cut = app.input.trim_end().len() - last.len();
+                        app.input.truncate(cut);
+                        let trimmed = app.input.trim_end().to_string();
+                        app.input = trimmed;
+                        app.cursor = app.input.len();
+                        app.push(Entry::Notice(format!("took back: {last}")));
+                    } else {
+                        app.push(Entry::Notice(
+                            "that is no longer the end of the line — nothing taken back".into(),
+                        ));
+                    }
+                }
+                None => app.push(Entry::Notice("nothing to take back".into())),
+            }
+            None
+        }
+        Spoken::Stop => {
+            // The recorder lives in the event loop, so this is a request the
+            // loop picks up rather than something done here.
+            app.stop_listening_requested = true;
+            None
+        }
+        Spoken::Send(before) => {
+            if !before.is_empty() {
+                append_dictation(app, &before);
+                app.dictation.note_heard();
+            }
+            let instruction = app.input.trim().to_string();
+            if instruction.is_empty() {
+                app.push(Entry::Notice("nothing to send yet".into()));
+                return None;
+            }
+            // Cleared here rather than by the send path, so a spoken send
+            // leaves the composer exactly as `⏎` would.
+            app.input.clear();
+            app.cursor = 0;
+            app.dictated.clear();
+            Some(instruction)
+        }
+    }
+}
+
+/// Put a transcribed sentence into the composer.
+///
+/// Appended at the end rather than at the cursor: while listening, the cursor
+/// is wherever it was last left, and sentences arriving in the middle of
+/// earlier ones would scramble a paragraph nobody is watching closely.
+fn append_dictation(app: &mut App, text: &str) {
+    let text = text.trim();
+    if text.is_empty() {
+        return;
+    }
+    if !app.input.is_empty() && !app.input.ends_with(char::is_whitespace) {
+        app.input.push(' ');
+    }
+    app.input.push_str(text);
+    app.cursor = app.input.len();
+    // Remembered so "undo that" can take back exactly this sentence rather
+    // than a guessed number of words.
+    app.dictated.push(text.to_string());
+}
 /// Hand the typed line to `$EDITOR`, and take back whatever comes out.
 ///
 /// The user already has a configured editor; a one-line TUI field will never
@@ -6058,47 +6187,159 @@ mod tests {
     }
 
     // ---- dictation ----
+    //
+    // The microphone is a switch and sentences arrive on their own, so these
+    // are about what happens to a sentence *after* it has been transcribed —
+    // the part that decides whether hands-free is safe.
 
-    /// A transcript is text he might not have meant to say, and `⏎` from here
-    /// spawns agents in a repository. It lands in the box; sending stays his.
-    #[test]
-    fn a_transcript_lands_in_the_box_rather_than_being_sent() {
+    fn listening() -> App {
         let mut app = app_on(HarnessKind::ClaudeCode);
-        insert_dictation(&mut app, "i-refactor natin yung parser");
-        assert_eq!(app.input, "i-refactor natin yung parser");
-        assert_eq!(app.cursor, app.input.len(), "the cursor is not after it");
+        app.dictation = app::Dictation::Listening {
+            since_ms: 0,
+            backend: "arecord".into(),
+            pending: 0,
+            speaking: false,
+            level: 0.0,
+            heard: 0,
+        };
+        app
     }
 
-    /// Dictating twice in a row is how a long instruction gets built, so the
-    /// second utterance must not weld itself onto the first.
+    /// Ordinary speech goes into the composer and nowhere else.
     #[test]
-    fn a_second_utterance_is_spaced_off_the_first() {
-        let mut app = app_on(HarnessKind::ClaudeCode);
-        insert_dictation(&mut app, "fix the parser");
-        insert_dictation(&mut app, "and run the tests");
+    fn a_dictated_sentence_lands_in_the_box_and_is_not_sent() {
+        let mut app = listening();
+        let sent = heard_utterance(&mut app, "i-refactor natin yung parser");
+        assert!(sent.is_none(), "plain dictation was sent");
+        assert_eq!(app.input, "i-refactor natin yung parser");
+    }
+
+    /// Sentences arrive one after another while listening, so they have to
+    /// build a paragraph rather than weld together.
+    #[test]
+    fn consecutive_sentences_are_spaced_apart() {
+        let mut app = listening();
+        heard_utterance(&mut app, "fix the parser");
+        heard_utterance(&mut app, "and run the tests");
         assert_eq!(app.input, "fix the parser and run the tests");
     }
 
-    /// ...but an empty box must not start with a space.
     #[test]
-    fn the_first_utterance_does_not_start_with_a_space() {
-        let mut app = app_on(HarnessKind::ClaudeCode);
-        insert_dictation(&mut app, "fix the parser");
+    fn the_first_sentence_does_not_start_with_a_space() {
+        let mut app = listening();
+        heard_utterance(&mut app, "fix the parser");
         assert!(!app.input.starts_with(' '));
     }
 
-    /// Transcription can legitimately return nothing; an empty insert would
-    /// leave the console looking like the key did not work.
+    // ---- sending by voice, which is the whole point ----
+
+    /// The request: say "go ahead" and it goes.
     #[test]
-    fn an_empty_transcript_says_so_rather_than_inserting_nothing() {
-        let mut app = app_on(HarnessKind::ClaudeCode);
-        insert_dictation(&mut app, "   ");
-        assert!(app.input.is_empty());
-        assert!(matches!(app.transcript.last(), Some(Entry::Notice(_))));
+    fn saying_go_ahead_sends_what_is_in_the_box() {
+        let mut app = listening();
+        heard_utterance(&mut app, "fix the parser");
+        let sent = heard_utterance(&mut app, "go ahead");
+        assert_eq!(sent.as_deref(), Some("fix the parser"));
+        assert!(app.input.is_empty(), "the box was not cleared after sending");
     }
 
+    /// Saying the instruction and the command in one breath is how this is
+    /// actually used.
     #[test]
-    fn dictation_is_toggled_from_the_loop_because_it_owns_a_process() {
+    fn an_instruction_and_the_command_in_one_breath_both_land() {
+        let mut app = listening();
+        let sent = heard_utterance(&mut app, "run the tests, go ahead");
+        assert_eq!(sent.as_deref(), Some("run the tests"));
+    }
+
+    /// The command word must never reach the orchestrator as part of the work.
+    #[test]
+    fn the_command_phrase_is_not_part_of_what_is_sent() {
+        let mut app = listening();
+        let sent = heard_utterance(&mut app, "deploy the api, sige na").unwrap();
+        assert!(!sent.to_lowercase().contains("sige"), "{sent:?}");
+    }
+
+    /// The misfire that would matter most: this sentence is about work and
+    /// must not dispatch anything.
+    #[test]
+    fn go_ahead_inside_a_sentence_does_not_send() {
+        let mut app = listening();
+        let sent = heard_utterance(&mut app, "let's go ahead and refactor the parser");
+        assert!(sent.is_none(), "a sentence about work was sent");
+        assert!(app.input.contains("refactor"));
+    }
+
+    /// Nothing to send is not an error worth dispatching an empty prompt over.
+    #[test]
+    fn sending_an_empty_box_sends_nothing() {
+        let mut app = listening();
+        assert!(heard_utterance(&mut app, "go ahead").is_none());
+    }
+
+    // ---- taking things back, hands-free ----
+
+    #[test]
+    fn saying_scratch_that_empties_the_box() {
+        let mut app = listening();
+        heard_utterance(&mut app, "fix the parser");
+        heard_utterance(&mut app, "scratch that");
+        assert!(app.input.is_empty());
+    }
+
+    /// A mis-heard sentence has to be cheap to remove without a keyboard.
+    #[test]
+    fn saying_undo_takes_back_only_the_last_sentence() {
+        let mut app = listening();
+        heard_utterance(&mut app, "fix the parser");
+        heard_utterance(&mut app, "and delete the database");
+        heard_utterance(&mut app, "undo that");
+        assert_eq!(app.input, "fix the parser");
+    }
+
+    /// Undo works off remembered sentences, so it must refuse rather than
+    /// guess once the tail is no longer the sentence it would remove.
+    #[test]
+    fn undo_refuses_when_the_line_has_been_edited_since() {
+        let mut app = listening();
+        heard_utterance(&mut app, "fix the parser");
+        app.input.push_str(" by hand");
+        heard_utterance(&mut app, "undo that");
+        assert_eq!(app.input, "fix the parser by hand", "it guessed anyway");
+    }
+
+    /// The command that has to work when nothing else does.
+    #[test]
+    fn saying_stop_listening_asks_the_loop_to_switch_off() {
+        let mut app = listening();
+        heard_utterance(&mut app, "stop listening");
+        assert!(app.stop_listening_requested);
+    }
+
+    /// Cancelling and sending in one breath must cancel: one reading loses a
+    /// sentence, the other starts agents on a sentence just withdrawn.
+    #[test]
+    fn cancelling_beats_sending_when_both_are_heard() {
+        let mut app = listening();
+        heard_utterance(&mut app, "delete everything");
+        let sent = heard_utterance(&mut app, "scratch that, go ahead");
+        assert!(sent.is_none(), "a withdrawn instruction was sent");
+        assert!(app.input.is_empty());
+    }
+
+    /// A transcript can legitimately be empty — whisper returns nothing for a
+    /// door closing — and that must not put a stray space in the prompt.
+    #[test]
+    fn an_empty_transcript_changes_nothing() {
+        let mut app = listening();
+        heard_utterance(&mut app, "   ");
+        assert!(app.input.is_empty());
+    }
+
+    // ---- the switch ----
+
+    #[test]
+    fn alt_v_is_handled_by_the_loop_because_it_owns_the_recorder() {
         let mut app = app_on(HarnessKind::ClaudeCode);
         assert!(matches!(alt(&mut app, KeyCode::Char('v')), Some(Action::Dictate)));
     }
@@ -6107,19 +6348,15 @@ mod tests {
     /// microphone is live it has exactly one, and it must not depend on where
     /// the cursor happens to be.
     #[test]
-    fn escape_drops_a_live_utterance_from_anywhere() {
-        let mut app = app_on(HarnessKind::ClaudeCode);
-        app.dictation = app::Dictation::Listening {
-            started_ms: 0,
-            backend: "arecord".into(),
-        };
+    fn escape_stops_listening_from_anywhere() {
+        let mut app = listening();
         assert!(matches!(
             press(&mut app, KeyCode::Esc),
             Some(Action::CancelDictation)
         ));
     }
 
-    /// ...and no meaning at all when nothing is recording, or Escape would
+    /// ...and no meaning at all when the microphone is off, or Escape would
     /// stop closing overlays.
     #[test]
     fn escape_is_left_alone_when_the_microphone_is_off() {

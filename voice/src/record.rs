@@ -43,11 +43,22 @@ pub const TARGET_RATE: u32 = 16_000;
 /// milliseconds of waiting against losing what was just said.
 const FINALISE_TIMEOUT_MS: u64 = 2_000;
 
-/// Longest utterance a recorder is allowed to run for.
+/// Longest one-shot recording a recorder is allowed to run for.
 ///
 /// A backstop, not a limit anyone should reach. It exists because a recorder
 /// whose stop signal was missed would otherwise fill the disk quietly.
 pub const MAX_SECONDS: u64 = 300;
+
+/// The bound for a continuous listening session.
+///
+/// Four hours. Long enough that hands-free work is never interrupted by it,
+/// short enough that a console left running overnight with the microphone on
+/// stops on its own rather than filling a disk with a silent room.
+///
+/// At 16 kHz mono 16-bit this is about 460 MB — which is the reason the
+/// streaming reader discards audio as it consumes it rather than keeping the
+/// session in memory.
+pub const SESSION_SECONDS: u64 = 4 * 60 * 60;
 
 /// A recording program this module knows how to drive.
 ///
@@ -94,7 +105,7 @@ impl Backend {
     /// Every backend is pinned to the same rate and channel count so the guard
     /// and the uploader see one shape regardless of which program ran, and so
     /// the conversion happens in C rather than in a resampler written here.
-    pub fn args(&self, path: &Path) -> Vec<String> {
+    pub fn args(&self, path: &Path, max_seconds: u64) -> Vec<String> {
         let out = path.to_string_lossy().to_string();
         let rate = TARGET_RATE.to_string();
         match self {
@@ -120,7 +131,7 @@ impl Backend {
                 // `arecord` needs a duration or it records until signalled;
                 // the bound is the runaway guard, not the expected path.
                 "-d".into(),
-                MAX_SECONDS.to_string(),
+                max_seconds.to_string(),
                 out,
             ],
             Backend::Rec => vec![
@@ -134,7 +145,7 @@ impl Backend {
                 out,
                 "trim".into(),
                 "0".into(),
-                MAX_SECONDS.to_string(),
+                max_seconds.to_string(),
             ],
             Backend::Ffmpeg => {
                 // The input spec is the one genuinely platform-shaped thing
@@ -157,7 +168,7 @@ impl Backend {
                     "-ac".into(),
                     "1".into(),
                     "-t".into(),
-                    MAX_SECONDS.to_string(),
+                    max_seconds.to_string(),
                     "-y".into(),
                     out,
                 ]
@@ -232,10 +243,30 @@ impl Recorder {
                     .join(", ")
             )
         })?;
-        Recorder::start_with(backend)
+        Recorder::start_with(backend, MAX_SECONDS)
     }
 
-    pub fn start_with(backend: Backend) -> Result<Recorder, String> {
+    /// Start a continuous listening session.
+    ///
+    /// The same recorder, bounded by [`SESSION_SECONDS`] rather than by one
+    /// utterance, meant to be read while it runs by [`crate::stream`].
+    pub fn start_session() -> Result<Recorder, String> {
+        let backend = Backend::detect().ok_or_else(|| {
+            format!(
+                "no recording program found. Dictation runs one of: {}. \
+                 Install one on the machine running this console — note that \
+                 over SSH that is the server, not your laptop.",
+                Backend::all()
+                    .iter()
+                    .map(|b| b.program())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })?;
+        Recorder::start_with(backend, SESSION_SECONDS)
+    }
+
+    pub fn start_with(backend: Backend, max_seconds: u64) -> Result<Recorder, String> {
         let path = std::env::temp_dir().join(format!(
             "jod-dictation-{}-{}.wav",
             std::process::id(),
@@ -243,7 +274,7 @@ impl Recorder {
         ));
 
         let child = Command::new(backend.program())
-            .args(backend.args(&path))
+            .args(backend.args(&path, max_seconds))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             // Kept, not discarded: when a recorder refuses the device this is
@@ -261,6 +292,11 @@ impl Recorder {
 
     pub fn backend(&self) -> Backend {
         self.backend
+    }
+
+    /// The file being written to, for a reader that tails it while it runs.
+    pub fn path(&self) -> &Path {
+        &self.path
     }
 
     /// Whether the recorder is still alive.
@@ -444,7 +480,7 @@ mod tests {
     #[test]
     fn every_backend_records_mono_at_the_rate_the_models_expect() {
         for b in Backend::all() {
-            let args = b.args(Path::new("/tmp/x.wav")).join(" ");
+            let args = b.args(Path::new("/tmp/x.wav"), MAX_SECONDS).join(" ");
             assert!(
                 args.contains("16000"),
                 "{} does not pin the sample rate: {args}",
@@ -461,7 +497,7 @@ mod tests {
     #[test]
     fn every_backend_writes_to_the_file_it_was_given() {
         for b in Backend::all() {
-            let args = b.args(Path::new("/tmp/utterance.wav"));
+            let args = b.args(Path::new("/tmp/utterance.wav"), MAX_SECONDS);
             assert!(
                 args.iter().any(|a| a == "/tmp/utterance.wav"),
                 "{} does not write to the requested path: {args:?}",
@@ -480,7 +516,7 @@ mod tests {
             if b == Backend::PwRecord {
                 continue;
             }
-            let args = b.args(Path::new("/tmp/x.wav")).join(" ");
+            let args = b.args(Path::new("/tmp/x.wav"), MAX_SECONDS).join(" ");
             assert!(
                 args.contains(&MAX_SECONDS.to_string()),
                 "{} is unbounded: {args}",

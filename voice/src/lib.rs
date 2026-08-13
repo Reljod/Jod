@@ -6,8 +6,17 @@
 //! 1. [`record`] captures an utterance — by running a recorder *program*,
 //!    never by linking an audio backend. See that module for why.
 //! 2. [`guard`] decides whether what came back is speech at all, before a
-//!    single byte is uploaded.
-//! 3. [`transcribe`] sends it to OpenRouter and returns Taglish.
+//!    single byte leaves the machine.
+//! 3. Transcription, by whichever of two engines is configured:
+//!    - [`local`] runs whisper.cpp here. No key, no network, no per-utterance
+//!      cost, and nothing said at a desk arriving at somebody's API. **This is
+//!      the default** once a model is downloaded.
+//!    - [`transcribe`] calls OpenRouter, for a machine with no model on it.
+//!
+//! The two are the same family of model on purpose — the cloud research picked
+//! `whisper-large-v3-turbo` by measurement, and [`local::RECOMMENDED`] is its
+//! GGML build — so switching engines changes the latency and the bill, not
+//! whether Taglish survives.
 //!
 //! ## Why this is a crate and not a module in the CLI
 //!
@@ -27,11 +36,17 @@
 //! [`guard`] and [`transcribe`].
 
 pub mod guard;
+pub mod local;
 pub mod record;
+pub mod spoken;
+pub mod stream;
 pub mod transcribe;
 
 pub use guard::Speech;
+pub use local::{Model, Whisper};
 pub use record::{Recorder, Recording};
+pub use spoken::Spoken;
+pub use stream::{Heard, Session};
 pub use transcribe::Transcript;
 
 /// The model dictation uses unless told otherwise.

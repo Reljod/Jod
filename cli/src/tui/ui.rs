@@ -1769,21 +1769,58 @@ fn draw_keybar(f: &mut Frame, app: &App, area: Rect) {
 /// The permission mode leads it on every screen. What the next turn may do
 /// without asking changes while you are talking, and a setting you have to
 /// press a key to see is one you will be wrong about exactly when it matters.
-/// What the status row says about the microphone, if anything.
+/// What the status row says about the microphone.
 ///
-/// Carries the elapsed seconds while listening, for one reason: this is a
-/// toggle, so the failure mode it has and push-to-talk does not is a recorder
-/// left running because the second press never landed. A number climbing on
-/// screen is what makes that obvious rather than expensive.
+/// The microphone stays on for as long as it is wanted, which makes *forgetting
+/// it is on* the failure this line exists to prevent — a live microphone in a
+/// room having a different conversation. So it is unmissable, it says how long,
+/// and it moves: the meter tracks what is being heard right now, which is the
+/// only part that distinguishes a working microphone from a dead one.
 fn dictation_badge(app: &App) -> Option<String> {
-    match &app.dictation {
-        Dictation::Off => None,
-        Dictation::Listening { started_ms, .. } => Some(format!(
-            "● listening {} (Alt-V stop · Esc drop)",
-            short_duration(app.now_ms.saturating_sub(*started_ms))
-        )),
-        Dictation::Transcribing { .. } => Some("◌ transcribing".to_string()),
+    let Dictation::Listening {
+        since_ms,
+        pending,
+        speaking,
+        level,
+        ..
+    } = &app.dictation
+    else {
+        return None;
+    };
+
+    let mut said = format!(
+        "● listening {} {}",
+        short_duration(app.now_ms.saturating_sub(*since_ms)),
+        meter(*level, *speaking),
+    );
+    if *pending > 0 {
+        // Sentences overlap — one is transcribed while the next is spoken — so
+        // this is a count, and it is what explains a pause before words appear.
+        said.push_str(&format!(" · {pending} transcribing"));
     }
+    said.push_str(" · say \"go ahead\"");
+    Some(said)
+}
+
+/// A five-cell level meter.
+///
+/// Blocks rather than a number: this is read out of the corner of an eye by
+/// somebody whose hands are elsewhere, and "is it moving" is the whole
+/// question. Silence still shows the empty meter rather than nothing, because
+/// a meter that vanished would read as the microphone having stopped.
+fn meter(level: f32, speaking: bool) -> String {
+    const CELLS: usize = 5;
+    // Speech sits well below full scale, so the meter is scaled to the range
+    // dictation actually occupies. Against full scale it would never move.
+    let filled = ((level / 0.15).clamp(0.0, 1.0) * CELLS as f32).round() as usize;
+    let mut out = String::new();
+    for i in 0..CELLS {
+        out.push(if i < filled { '▮' } else { '▯' });
+    }
+    if speaking {
+        out.push_str(" ▸");
+    }
+    out
 }
 
 fn draw_status(f: &mut Frame, app: &App, area: Rect) {
@@ -5945,23 +5982,36 @@ mod tests {
     fn a_live_microphone_is_on_the_always_visible_row() {
         let mut a = app();
         a.dictation = Dictation::Listening {
-            started_ms: 0,
+            since_ms: 0,
             backend: "arecord".into(),
+            pending: 0,
+            speaking: false,
+            level: 0.0,
+            heard: 0,
         };
         a.now_ms = 3_000;
         let screen = rendered(&a, 140, 24);
         assert!(screen.contains("listening"), "{screen}");
-        assert!(screen.contains("Esc"), "no way out was offered: {screen}");
+        // The way out has to be sayable, not typeable: somebody using this has
+        // their hands somewhere else, which is the whole reason it exists.
+        assert!(
+            screen.contains("go ahead"),
+            "the hands-free way to act on it was not offered: {screen}"
+        );
     }
 
-    /// The failure a toggle has and push-to-talk does not: a recorder still
-    /// running because the second press never landed.
+    /// The failure a switch has that a button does not: a microphone left on
+    /// in a room having a different conversation.
     #[test]
-    fn the_listening_badge_counts_up_so_a_stuck_recorder_is_obvious() {
+    fn the_listening_badge_counts_up_so_a_forgotten_microphone_is_obvious() {
         let mut a = app();
         a.dictation = Dictation::Listening {
-            started_ms: 0,
+            since_ms: 0,
             backend: "arecord".into(),
+            pending: 0,
+            speaking: false,
+            level: 0.0,
+            heard: 0,
         };
         a.now_ms = 75_000;
         assert!(
@@ -5973,6 +6023,52 @@ mod tests {
     #[test]
     fn nothing_is_said_about_the_microphone_when_it_is_off() {
         assert!(dictation_badge(&app()).is_none());
+    }
+
+    /// The meter is the only thing on screen that distinguishes a working
+    /// microphone from a dead one, so it has to move with what is heard.
+    #[test]
+    fn the_meter_moves_with_the_level() {
+        let quiet = meter(0.0, false);
+        let loud = meter(0.15, true);
+        assert_ne!(quiet, loud, "the meter does not respond to sound");
+        assert!(
+            loud.matches('▮').count() > quiet.matches('▮').count(),
+            "louder did not read as fuller: {quiet:?} vs {loud:?}"
+        );
+    }
+
+    /// Silence shows an empty meter, never nothing — a meter that vanished
+    /// would read as the microphone having stopped.
+    #[test]
+    fn silence_still_draws_a_meter() {
+        assert!(meter(0.0, false).contains('▯'));
+    }
+
+    /// Speech sits well below full scale, so a meter against full scale would
+    /// never leave the first cell.
+    #[test]
+    fn ordinary_speech_moves_the_meter_off_the_floor() {
+        assert!(
+            meter(0.05, true).contains('▮'),
+            "a normal speaking level did not register"
+        );
+    }
+
+    /// Sentences overlap — one transcribes while the next is spoken — and the
+    /// pause before words appear needs an explanation on screen.
+    #[test]
+    fn work_still_in_flight_is_shown() {
+        let mut a = app();
+        a.dictation = Dictation::Listening {
+            since_ms: 0,
+            backend: "arecord".into(),
+            pending: 2,
+            speaking: false,
+            level: 0.0,
+            heard: 3,
+        };
+        assert!(dictation_badge(&a).is_some_and(|b| b.contains("2 transcribing")));
     }
 
     // ---- the right-hand panel ----

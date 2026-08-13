@@ -9,6 +9,7 @@ mod render;
 mod render_time;
 mod tui;
 mod update;
+mod voice;
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
@@ -312,6 +313,11 @@ enum Command {
     Project {
         #[command(subcommand)]
         what: ProjectCommand,
+    },
+    /// Dictation: which model transcribes you, and whether it runs here.
+    Voice {
+        #[command(subcommand)]
+        what: VoiceCommand,
     },
     /// Conversations Jod owns: list them, fork one, take one back.
     ///
@@ -753,6 +759,34 @@ enum CommandsCommand {
         #[arg(long)]
         json: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum VoiceCommand {
+    /// Is dictation ready, and what would it use?
+    ///
+    /// Answers the question `Alt-V` would otherwise answer by failing: whether
+    /// there is a recorder, an engine and a model on this machine.
+    Check,
+    /// The models that can transcribe you, and which are downloaded.
+    ///
+    /// English-only builds are deliberately not offered — they cannot
+    /// represent Tagalog, so they would delete half of what you said.
+    Models,
+    /// Download a model so transcription runs on this machine.
+    ///
+    /// Nothing leaves the laptop after this: no key, no network, no
+    /// per-utterance cost.
+    Download {
+        /// Which one. Defaults to the recommended model.
+        name: Option<String>,
+    },
+    /// Transcribe with this model from now on.
+    Use { name: String },
+    /// Go back to transcribing over the network.
+    ///
+    /// For a machine with no model on it. Needs `OPENROUTER_API_KEY`.
+    Cloud,
 }
 
 #[derive(Subcommand)]
@@ -1684,6 +1718,7 @@ async fn main() -> Result<()> {
         Command::Commands { what } => commands_command(&jod, what)?,
         Command::Work { what } => work_command(&jod, what)?,
         Command::Project { what } => project_command(&jod, what)?,
+        Command::Voice { what } => voice_command(&jod, what).await?,
         Command::Conv { what } => conv_command(&jod, what)?,
         Command::Schedule { what } => schedule_command(&jod, what)?,
         Command::Webhook { what } => webhook_command(&jod, what)?,
@@ -2628,6 +2663,103 @@ fn commands_command(jod: &Jod, what: CommandsCommand) -> Result<()> {
 }
 
 /// Carry out a `jod work …` subcommand.
+async fn voice_command(jod: &Jod, what: VoiceCommand) -> Result<()> {
+    use jod_voice_core::local;
+    let store = jod.store().context("this command needs the database")?;
+    let home = jod_core::paths::jod_home();
+
+    match what {
+        VoiceCommand::Check => {
+            let s = voice::status(store, &home);
+            match &s.recorder {
+                Some(p) => println!("recorder   {p}"),
+                None => println!(
+                    "recorder   none — install one of: pw-record, arecord, rec, ffmpeg\n\
+                     \x20          (on the machine running the console, which over SSH is the server)"
+                ),
+            }
+            match &s.engine {
+                Ok(e) => println!("engine     {}", e.label()),
+                Err(why) => println!("engine     not ready — {why}"),
+            }
+            if s.installed.is_empty() {
+                println!("models     none downloaded");
+            } else {
+                println!(
+                    "models     {}",
+                    s.installed
+                        .iter()
+                        .map(|m| m.name)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
+            if s.recorder.is_some() && s.engine.is_ok() {
+                println!("\nready — press Alt-V in the console and talk.");
+            }
+        }
+        VoiceCommand::Models => {
+            println!("Multilingual models only: an English-only build cannot represent Tagalog.\n");
+            for m in local::CATALOG {
+                let mark = if m.is_installed(&home) { "✓" } else { " " };
+                let star = if m.name == local::RECOMMENDED { " ←" } else { "" };
+                println!("{mark} {:<22} {:>5} MB  {}{star}", m.name, m.mb, m.note);
+            }
+            println!("\n`jod voice download <name>` fetches one. ✓ means already here.");
+        }
+        VoiceCommand::Download { name } => {
+            let name = name.unwrap_or_else(|| local::RECOMMENDED.to_string());
+            let m = local::model(&name).with_context(|| {
+                format!("`{name}` is not a model this build knows — `jod voice models` lists them")
+            })?;
+            if m.is_installed(&home) {
+                println!("{} is already downloaded.", m.name);
+            } else {
+                println!("downloading {} ({} MB) from the weights host…", m.name, m.mb);
+                let mut last_pct = 0u64;
+                let path = local::download(m, &home, |got, total| {
+                    // Every whole percent, not every chunk: a progress line per
+                    // 8 KB would be thousands of lines of scrollback.
+                    if let Some(total) = total {
+                        let pct = got * 100 / total.max(1);
+                        if pct > last_pct {
+                            last_pct = pct;
+                            eprint!("\r  {pct}%");
+                        }
+                    }
+                })
+                .await
+                .map_err(anyhow::Error::msg)?;
+                eprintln!("\r  done");
+                println!("installed at {}", path.display());
+            }
+            voice::set_model(store, m.name).map_err(anyhow::Error::msg)?;
+            println!("transcription now runs on this machine, with {}.", m.name);
+            if jod_voice_core::local::Whisper::detect().is_none() {
+                println!(
+                    "\nwhisper.cpp is not installed yet, so nothing can run the model.\n\
+                     `brew install whisper-cpp`, or build it and point WHISPER_CLI at whisper-cli."
+                );
+            }
+        }
+        VoiceCommand::Use { name } => {
+            voice::set_model(store, &name).map_err(anyhow::Error::msg)?;
+            match voice::resolve(store, &home) {
+                Ok(e) => println!("dictation uses {}", e.label()),
+                Err(why) => println!("chosen, but not usable yet — {why}"),
+            }
+        }
+        VoiceCommand::Cloud => {
+            voice::set_cloud(store).map_err(anyhow::Error::msg)?;
+            match voice::resolve(store, &home) {
+                Ok(e) => println!("dictation uses {}", e.label()),
+                Err(why) => println!("switched, but not usable yet — {why}"),
+            }
+        }
+    }
+    Ok(())
+}
+
 fn project_command(jod: &Jod, what: ProjectCommand) -> Result<()> {
     use jod_core::projects::{NewProject, State};
     let store = jod.store().context("this command needs the database")?;

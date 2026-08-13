@@ -35,6 +35,11 @@ mod tui;
 // stub would be one more thing that can drift.
 #[path = "../src/update.rs"]
 mod update;
+// And again for dictation: the TUI resolves which engine would transcribe
+// before it starts recording, so `crate::voice` has to exist here even though
+// nothing this example renders will ever press Alt-V.
+#[path = "../src/voice.rs"]
+mod voice;
 
 use std::path::PathBuf;
 use std::sync::Arc;
