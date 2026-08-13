@@ -1032,7 +1032,7 @@ impl App {
     /// query, so it has to know where the sign is.
     pub fn open_mention(&mut self, at: usize) {
         let mut popup = Mention::new(at);
-        popup.refresh(&self.roots, &self.candidates);
+        popup.refresh(&self.cwd, &self.roots, &self.candidates);
         self.mention = Some(popup);
     }
 
@@ -1067,9 +1067,13 @@ impl App {
             return;
         }
         popup.query = query;
-        let (roots, candidates) = (self.roots.clone(), self.candidates.clone());
+        let (cwd, roots, candidates) = (
+            self.cwd.clone(),
+            self.roots.clone(),
+            self.candidates.clone(),
+        );
         if let Some(popup) = &mut self.mention {
-            popup.refresh(&roots, &candidates);
+            popup.refresh(&cwd, &roots, &candidates);
         }
     }
 

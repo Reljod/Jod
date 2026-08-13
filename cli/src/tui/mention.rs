@@ -17,11 +17,31 @@
 //! paths the agent has not been given access to, and inserting one would
 //! produce a mention that resolves to nothing at the far end. So zero roots is
 //! a *message*, not an empty list, and `⏎` on it does nothing at all.
+//!
+//! ## Roots overlap, and the list has to survive it
+//!
+//! A conversation collects roots over its whole life — `/add-dir`, a claimed
+//! worktree, and the launch directory every `jod tui` hands to the conversation
+//! on screen — and nothing makes them disjoint. The pinned main chat on this
+//! machine holds `~/repo`, a jobs scratch directory and `~/repo/contra-dogfood`
+//! at once, the first of which *contains* the third. Two consequences, both of
+//! which people met on screen:
+//!
+//! - every file of a nested root is enumerated twice, once under each prefix,
+//!   so the popup offered the same file on disk as two rows; and
+//! - roots are ordered by when they were added, so a repository added months
+//!   ago sorted above the one the console is standing in — `@` opened onto a
+//!   stranger's files.
+//!
+//! So the merge below canonicalises before it dedupes, and treats *being under
+//! the launch directory* as a ranking signal in its own right.
 
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use jod_core::rank;
-use jod_core::roots::Root;
+use jod_core::roots::{normalise, Root};
 
 /// How many rows the popup shows.
 ///
@@ -113,9 +133,14 @@ impl Mention {
     }
 
     /// Re-rank against what has been typed, keeping the highlight in range.
-    pub fn refresh(&mut self, roots: &[Root], candidates: &[Arc<Vec<String>>]) {
+    ///
+    /// `cwd` is the directory the console was launched in — the repository the
+    /// person typing is standing in, which is not the same question as which
+    /// roots the conversation has collected. Empty means a session standing
+    /// nowhere, and then nothing is local to it.
+    pub fn refresh(&mut self, cwd: &Path, roots: &[Root], candidates: &[Arc<Vec<String>>]) {
         self.rooted = !roots.is_empty();
-        self.rows = rank_roots(&self.query, roots, candidates);
+        self.rows = rank_roots(&self.query, cwd, roots, candidates);
         if self.selected >= self.rows.len() {
             self.selected = 0;
         }
@@ -128,14 +153,31 @@ impl Mention {
     }
 }
 
+/// What a candidate is worth for lying inside the launch directory.
+///
+/// Sized against core's own scale rather than picked round: larger than the
+/// biggest placement bonus core awards a single character — a match starting at
+/// a path segment boundary, which counts double — and smaller than its filename
+/// bonus. So standing in a repository outranks *where in the path* a match
+/// happens to land, and does not outrank a file you named outright somewhere
+/// else. A hard partition was the other option and is worse: it would let eight
+/// mediocre local matches hide the exact file you typed the name of, in a root
+/// you added for exactly that reason.
+const BONUS_LOCAL: i32 = 30;
+
 /// Rank every root's candidates against one query and interleave the results.
 ///
 /// [`rank::rank`] takes one slice and a conversation has several roots, so this
-/// calls it once per root and merges. The merge is a **stable sort on the score
-/// core returned** and nothing else: no second pass, no bonus of its own, no
-/// filtering. Ordering is core's decision and there is one place for it — if
-/// the ranking ever looks wrong, it is wrong in `rank.rs`, and correcting it
-/// here would hide that from the tests that specify it.
+/// calls it once per root and merges. Ordering *within* a root is core's
+/// decision and there is one place for it — if two files in one repository come
+/// back in the wrong order, that is wrong in `rank.rs`, and correcting it here
+/// would hide it from the tests that specify it.
+///
+/// What the merge adds is the one thing core cannot know, because core ranks a
+/// bare list of strings and has never heard of a root: **where the path is**.
+/// Two roots that overlap enumerate one file twice, and roots arrive in the
+/// order they were added rather than in order of relevance, so the merge
+/// canonicalises and applies [`BONUS_LOCAL`] — see the module note.
 ///
 /// Merging rather than concatenating, because a second root is not a second
 /// list — it is more of the same list. Appending would put every path from the
@@ -145,22 +187,44 @@ impl Mention {
 /// not open: `rank` needs a contiguous `&[String]`, and building one would copy
 /// a hundred thousand paths on every keystroke, which is the stall
 /// [`rank::candidates_shared`] hands back an `Arc` to avoid.
-pub fn rank_roots(query: &str, roots: &[Root], candidates: &[Arc<Vec<String>>]) -> Vec<Row> {
+pub fn rank_roots(
+    query: &str,
+    cwd: &Path,
+    roots: &[Root],
+    candidates: &[Arc<Vec<String>>],
+) -> Vec<Row> {
     // Several roots means every path has to say which one it is from; one root
     // means qualifying is noise. Decided here rather than per row so a list of
     // rows cannot come out half-qualified.
     let qualify = roots.len() > 1;
-    let mut scored: Vec<(i32, Row)> = Vec::new();
+    // Resolved once per keystroke, not once per row. Guarded on empty because
+    // `Path::starts_with("")` is true of every path, and a fixture standing
+    // nowhere would otherwise find the whole world local to it.
+    let here = (!cwd.as_os_str().is_empty()).then(|| normalise(cwd));
+    let mut scored: Vec<(i32, PathBuf, Row)> = Vec::new();
     for (root, paths) in roots.iter().zip(candidates) {
         for hit in rank::rank(query, paths, ROWS) {
+            // Indexed rather than `get`: `Match::index` is an index into the
+            // slice that was just passed in, and the slice has not moved
+            // between the two lines.
+            let path = paths[hit.index].clone();
+            // The path as offered, before symlinks are resolved: locality is
+            // about the mention the user is about to insert, and a root that
+            // *contains* the launch directory offers both local and foreign
+            // paths — `~/repo` holds this checkout and a stranger's alike — so
+            // it can only be decided per row.
+            let offered = root.path.join(&path);
+            let local = here.as_ref().is_some_and(|here| offered.starts_with(here));
             scored.push((
-                hit.score,
+                hit.score + if local { BONUS_LOCAL } else { 0 },
+                // And the identity of the file *on disk*, which is what two
+                // rows have to agree on to be one row. A few dozen resolutions
+                // per keystroke, against the several hundred thousand string
+                // comparisons core has just done.
+                normalise(&offered),
                 Row {
                     label: qualify.then(|| root.label()),
-                    // Indexed rather than `get`: `Match::index` is an index into
-                    // the slice that was just passed in, and the slice has not
-                    // moved between the two lines.
-                    path: paths[hit.index].clone(),
+                    path,
                     positions: hit.positions,
                 },
             ));
@@ -170,7 +234,16 @@ pub fn rank_roots(query: &str, roots: &[Root], candidates: &[Arc<Vec<String>>]) 
     // zero, in input order — keeps the roots in the user's own order rather
     // than shuffling them per keystroke.
     scored.sort_by(|a, b| b.0.cmp(&a.0));
-    scored.into_iter().take(ROWS).map(|(_, row)| row).collect()
+    // Deduped after the sort and before the truncation: the row that survives
+    // is the best-placed spelling of the file, and eight rows means eight
+    // *files* rather than eight entries of which two are the same one.
+    let mut seen: HashSet<PathBuf> = HashSet::new();
+    scored
+        .into_iter()
+        .filter(|(_, real, _)| seen.insert(real.clone()))
+        .take(ROWS)
+        .map(|(_, _, row)| row)
+        .collect()
 }
 
 #[cfg(test)]
@@ -195,6 +268,12 @@ mod tests {
         Arc::new(entries.iter().map(|s| (*s).to_string()).collect())
     }
 
+    /// A session standing nowhere, which is what a fixture that is not about
+    /// locality is: no row is local to it, so the ordering is core's alone.
+    fn nowhere() -> &'static Path {
+        Path::new("")
+    }
+
     /// D1's bar: ranked, not filtered. A deep exact path beats a coincidence of
     /// the same letters scattered through a longer one.
     #[test]
@@ -205,7 +284,7 @@ mod tests {
             "core/src/rank.rs",
             "docs/harness-config.md",
         ])];
-        let rows = rank_roots("rank", &roots, &candidates);
+        let rows = rank_roots("rank", nowhere(), &roots, &candidates);
         assert_eq!(rows[0].path, "core/src/rank.rs", "{rows:?}");
     }
 
@@ -215,7 +294,7 @@ mod tests {
     fn every_row_says_which_of_its_characters_matched() {
         let roots = [root("jod")];
         let candidates = [paths(&["core/src/rank.rs"])];
-        let rows = rank_roots("rank", &roots, &candidates);
+        let rows = rank_roots("rank", nowhere(), &roots, &candidates);
         let matched: String = rows[0]
             .positions
             .iter()
@@ -233,7 +312,7 @@ mod tests {
             paths(&["docs/r-a-n-d-o-m/k.md"]),
             paths(&["rank.md"]),
         ];
-        let rows = rank_roots("rank", &roots, &candidates);
+        let rows = rank_roots("rank", nowhere(), &roots, &candidates);
         assert_eq!(rows[0].path, "rank.md", "{rows:?}");
     }
 
@@ -242,10 +321,10 @@ mod tests {
     #[test]
     fn several_roots_qualify_the_path_and_one_root_does_not() {
         let candidates = [paths(&["src/main.rs"]), paths(&["src/main.rs"])];
-        let two = rank_roots("main", &[root("jod"), root("notes")], &candidates);
+        let two = rank_roots("main", nowhere(), &[root("jod"), root("notes")], &candidates);
         assert_eq!(two[0].insertion(), "jod/src/main.rs");
 
-        let one = rank_roots("main", &[root("jod")], &candidates[..1]);
+        let one = rank_roots("main", nowhere(), &[root("jod")], &candidates[..1]);
         assert_eq!(one[0].insertion(), "src/main.rs", "one root needs no prefix");
     }
 
@@ -256,7 +335,7 @@ mod tests {
     fn with_no_roots_there_is_nothing_to_accept() {
         let mut popup = Mention::new(0);
         popup.query = "main".into();
-        popup.refresh(&[], &[]);
+        popup.refresh(nowhere(), &[], &[]);
         assert!(!popup.rooted);
         assert!(popup.acceptable().is_none());
         assert!(popup.rows.is_empty());
@@ -267,7 +346,7 @@ mod tests {
     #[test]
     fn an_empty_query_offers_the_first_candidates_rather_than_nothing() {
         let mut popup = Mention::new(0);
-        popup.refresh(&[root("jod")], &[paths(&["a.rs", "b.rs"])]);
+        popup.refresh(nowhere(), &[root("jod")], &[paths(&["a.rs", "b.rs"])]);
         assert_eq!(popup.rows.len(), 2);
         assert!(popup.acceptable().is_some());
     }
@@ -275,14 +354,14 @@ mod tests {
     #[test]
     fn the_popup_shows_at_most_its_own_height() {
         let many: Vec<String> = (0..40).map(|n| format!("file{n}.rs")).collect();
-        let rows = rank_roots("file", &[root("jod")], &[Arc::new(many)]);
+        let rows = rank_roots("file", nowhere(), &[root("jod")], &[Arc::new(many)]);
         assert_eq!(rows.len(), ROWS);
     }
 
     #[test]
     fn the_arrows_wrap_and_never_point_past_the_list() {
         let mut popup = Mention::new(0);
-        popup.refresh(&[root("jod")], &[paths(&["a.rs", "b.rs"])]);
+        popup.refresh(nowhere(), &[root("jod")], &[paths(&["a.rs", "b.rs"])]);
         popup.prev();
         assert_eq!(popup.selected, 1, "up from the top lands on the bottom");
         popup.next();
@@ -294,11 +373,11 @@ mod tests {
     #[test]
     fn narrowing_the_list_pulls_the_highlight_back_into_it() {
         let mut popup = Mention::new(0);
-        popup.refresh(&[root("jod")], &[paths(&["alpha.rs", "beta.rs"])]);
+        popup.refresh(nowhere(), &[root("jod")], &[paths(&["alpha.rs", "beta.rs"])]);
         popup.next();
         assert_eq!(popup.selected, 1);
         popup.query = "alpha".into();
-        popup.refresh(&[root("jod")], &[paths(&["alpha.rs", "beta.rs"])]);
+        popup.refresh(nowhere(), &[root("jod")], &[paths(&["alpha.rs", "beta.rs"])]);
         assert_eq!(popup.selected, 0);
         assert_eq!(popup.acceptable().map(|r| r.path.as_str()), Some("alpha.rs"));
     }
@@ -360,7 +439,7 @@ mod tests {
         jod_core::rank::clear_candidate_cache();
         let paths = Arc::new(jod_core::rank::candidates(&dir).unwrap());
         let mut popup = Mention::new(0);
-        popup.refresh(&[rooted_at(&dir)], &[paths]);
+        popup.refresh(&dir, &[rooted_at(&dir)], &[paths]);
 
         let shown: Vec<&str> = popup.rows.iter().map(|r| r.path.as_str()).collect();
         assert!(
@@ -385,13 +464,85 @@ mod tests {
         let paths = Arc::new(jod_core::rank::candidates(&dir).unwrap());
         let mut popup = Mention::new(0);
         popup.query = "env".into();
-        popup.refresh(&[rooted_at(&dir)], &[paths]);
+        popup.refresh(&dir, &[rooted_at(&dir)], &[paths]);
 
         assert_eq!(
             popup.acceptable().map(|r| r.path.as_str()),
             Some(".env"),
             "{:?}",
             popup.rows
+        );
+    }
+
+    // ---- where the file actually is -----------------------------------
+
+    /// BUG-16 as it was met: `@` in a console standing in one repository put
+    /// another repository's files at the top of the list.
+    ///
+    /// The fixture is the shape the machine's own pinned chat is in — a root
+    /// added long ago, the launch directory added today, so the stranger sorts
+    /// first on position — and the two files are the same name, which is the
+    /// case where the merge has nothing but locality to go on.
+    #[test]
+    fn a_file_in_the_launch_directory_outranks_the_same_name_elsewhere() {
+        let base = scratch("locality");
+        write(&base.join("mine/src/main.rs"), "");
+        write(&base.join("other/src/main.rs"), "");
+
+        let roots = [
+            rooted_at(&base.join("other")),
+            rooted_at(&base.join("mine")),
+        ];
+        let candidates = [paths(&["src/main.rs"]), paths(&["src/main.rs"])];
+        let here = base.join("mine");
+
+        let rows = rank_roots("main", &here, &roots, &candidates);
+        assert_eq!(
+            rows[0].insertion(),
+            "mine/src/main.rs",
+            "the repository you are standing in comes first: {rows:?}"
+        );
+        assert_eq!(rows.len(), 2, "and the other one is still reachable");
+    }
+
+    /// A root inside another root enumerates every file twice, once under each
+    /// prefix — which is the state `~/repo` plus `~/repo/contra-dogfood` leaves
+    /// this machine's main chat in. One file on disk is one row.
+    #[test]
+    fn a_file_reachable_through_two_roots_is_offered_once() {
+        let base = scratch("nested-roots");
+        write(&base.join("project/notes/todo.md"), "");
+
+        let roots = [
+            rooted_at(&base.join("project")),
+            rooted_at(&base.join("project/notes")),
+        ];
+        let candidates = [paths(&["notes/todo.md"]), paths(&["todo.md"])];
+
+        let rows = rank_roots("todo", nowhere(), &roots, &candidates);
+        assert_eq!(rows.len(), 1, "one file, two prefixes, one row: {rows:?}");
+    }
+
+    /// And the spelling of a path is not what makes two rows one file: a root
+    /// reached through a symlink joins to a different string entirely, so the
+    /// dedupe has to resolve before it compares.
+    #[test]
+    fn two_roots_that_resolve_to_one_directory_offer_each_file_once() {
+        let base = scratch("linked-roots");
+        write(&base.join("real/notes.md"), "");
+        std::os::unix::fs::symlink(base.join("real"), base.join("link")).unwrap();
+
+        let roots = [
+            rooted_at(&base.join("real")),
+            rooted_at(&base.join("link")),
+        ];
+        let candidates = [paths(&["notes.md"]), paths(&["notes.md"])];
+
+        let rows = rank_roots("notes", nowhere(), &roots, &candidates);
+        assert_eq!(
+            rows.len(),
+            1,
+            "`real/notes.md` and `link/notes.md` are one file: {rows:?}"
         );
     }
 

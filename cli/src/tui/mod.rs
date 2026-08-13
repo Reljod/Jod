@@ -5374,9 +5374,13 @@ fn refresh_mention(jod: &Arc<Jod>, app: &mut App) {
     }
     app.roots = data::roots(jod, app.conversation.as_deref());
     app.candidates = data::candidates(&app.roots);
-    let (roots, candidates) = (app.roots.clone(), app.candidates.clone());
+    let (cwd, roots, candidates) = (
+        app.cwd.clone(),
+        app.roots.clone(),
+        app.candidates.clone(),
+    );
     if let Some(popup) = &mut app.mention {
-        popup.refresh(&roots, &candidates);
+        popup.refresh(&cwd, &roots, &candidates);
     }
 }
 
