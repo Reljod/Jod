@@ -264,6 +264,20 @@ pub enum Action {
     /// something explicitly claims it.
     AddRoot(PathBuf),
     RemoveRoot(PathBuf),
+    /// Put a repository in the catalog an unqualified instruction is resolved
+    /// against.
+    ///
+    /// Distinct from [`Action::AddRoot`], which is about *permission* — what
+    /// this one conversation may read. A project is about *reference*: it is
+    /// what "let's fix this" resolves to, it outlives the conversation, and
+    /// until one is listed every instruction has to spell the path out.
+    ///
+    /// The path is already resolved by the time it gets here — see
+    /// `apply_slash`, which refuses one that is not a directory rather than
+    /// writing a row nothing will ever match.
+    AddProject(PathBuf),
+    /// Print the catalog, and put it on screen.
+    ListProjects,
     /// Print this conversation's roots, in the user's own order, saying which
     /// is writable — the one fact that decides whether an agent may change
     /// anything there.
@@ -1315,6 +1329,48 @@ async fn perform(
                 app.push(Entry::Notice(line));
             }
         }
+        Action::AddProject(path) => {
+            // The catalog itself is the answer, so the box that holds it comes
+            // out. A notice alone would be the whole of the feedback, and on a
+            // fresh session the transcript is not on screen at all — see
+            // `ui::fresh`. The panel is drawn beside every screen, so it is the
+            // one channel that shows the new row whatever you are looking at.
+            reveal_catalog(app);
+            on_store(jod, app, move |store| {
+                match store.add_project(jod_core::projects::NewProject::at(&path)) {
+                    // What it will answer to, not merely that it worked: the
+                    // spoken forms are what an offhand mention is matched
+                    // against, and they are derived rather than typed, so this
+                    // is the only place you find out what they came out as.
+                    Ok(project) => format!(
+                        "{} — say {}",
+                        project.summary_line(),
+                        project.spoken_forms().join(", ")
+                    ),
+                    Err(e) => format!("{} not catalogued: {e}", path.display()),
+                }
+            })
+        }
+        // Multi-line, like `/root` and `/sessions`: a catalog folded into one
+        // notice is a paragraph of directories.
+        Action::ListProjects => {
+            reveal_catalog(app);
+            let lines = match jod.store() {
+                Some(store) => {
+                    let projects = store.projects(false).unwrap_or_default();
+                    if projects.is_empty() {
+                        vec![CATALOG_EMPTY.to_string()]
+                    } else {
+                        projects.iter().map(|p| p.summary_line()).collect()
+                    }
+                }
+                None => vec![NO_STORE.to_string()],
+            };
+            for line in lines {
+                app.push(Entry::Notice(line));
+            }
+            refresh_workspaces(jod, app);
+        }
         Action::DismissCard(id) => on_store(jod, app, |store| match store.dismiss_card(id) {
             Ok(()) => format!("card #{id} dismissed — the agent is told nothing"),
             Err(e) => format!("card #{id} not dismissed: {e}"),
@@ -1403,6 +1459,24 @@ const NO_STORE: &str = "no database is open, so nothing was changed";
 /// four seconds away. Errors come back as a sentence rather than as a `Result`,
 /// because a locked database must cost the user a notice and not the session —
 /// the same discipline `refresh_team` already keeps.
+/// What an empty catalog is told, in the transcript's width rather than the
+/// panel's. The panel says the same thing in thirty columns — see
+/// `ui::CATALOG_REMEDY` — and both name the command, because a remedy the
+/// empty state does not name is one you have to already know.
+const CATALOG_EMPTY: &str = "no projects — /project add <path> catalogs one, and until one is \
+                             listed “let's fix this” has nothing to resolve to";
+
+/// Put the catalog where it can be seen before writing to it.
+///
+/// Both `/project` verbs answer in the panel, and the panel is shut by default
+/// and can be collapsed on top of that. Opening it is not a liberty: the whole
+/// complaint is that the catalog is unreachable from the console, and a verb
+/// that filled it while leaving it invisible would fix half of that.
+fn reveal_catalog(app: &mut App) {
+    app.panel = true;
+    app.projects_open = true;
+}
+
 fn on_store(jod: &Arc<Jod>, app: &mut App, verb: impl FnOnce(&Store) -> String) {
     let said = match jod.store() {
         Some(store) => verb(store),
@@ -4358,6 +4432,33 @@ fn apply_slash(app: &mut App, slash: command::Slash) -> Option<Action> {
                     None
                 }
                 command::RootCmd::Remove(path) => Some(Action::RemoveRoot(PathBuf::from(path))),
+            }
+        }
+        Slash::Project(what) => {
+            return match what {
+                command::ProjectCmd::List => Some(Action::ListProjects),
+                // Nothing after `add` is the directory the console was launched
+                // in — the same default `jod project add` takes from the shell.
+                command::ProjectCmd::Add(None) => Some(Action::AddProject(launch_dir())),
+                // Resolved through the picker's own opener, which expands `~`,
+                // makes a relative path absolute and canonicalises the result:
+                // the catalog is matched against later, so two spellings of one
+                // checkout would be two projects.
+                //
+                // Refused rather than stored when it is not a directory. The
+                // CLI keeps an unresolvable path as given, which is right for a
+                // script that is ahead of the filesystem; here it is a typo,
+                // and a row nothing will ever match is worse than no row.
+                command::ProjectCmd::Add(Some(named)) => match picker::base_named(&named) {
+                    Some(path) => Some(Action::AddProject(path)),
+                    None => {
+                        app.push(Entry::Notice(format!(
+                            "{named} is not a directory — /project add takes a checkout that \
+                             exists, or nothing at all for the one Jod was launched in"
+                        )));
+                        None
+                    }
+                },
             }
         }
         Slash::Sessions => {
@@ -10775,6 +10876,173 @@ mod tests {
             command::parse("/add-dir /no/such/folder/anywhere").expect("parses"),
         );
         assert_eq!(app.overlay, Overlay::None);
+        assert!(
+            last_notice(&app).contains("not a directory"),
+            "got {:?}",
+            last_notice(&app)
+        );
+    }
+
+    // ---- the catalog, from inside the console ----
+
+    /// What is actually on the screen, so a test can assert on the panel
+    /// rather than on the field behind it.
+    fn screen(app: &App, w: u16, h: u16) -> String {
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap();
+        terminal
+            .draw(|f| {
+                ui::draw(f, app);
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// A directory to catalog, named after the test so two cannot collide.
+    fn a_checkout(name: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!("jod-project-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).expect("a fixture checkout");
+        // Canonical, because `add_project` normalises what it stores and the
+        // temp directory is a symlink on macOS.
+        std::fs::canonicalize(&path).expect("a real path")
+    }
+
+    /// BUG-5. The capability existed in `core` and in `jod project add`, and
+    /// the console could reach neither: the catalog that resolves an
+    /// unqualified instruction could only be filled from a second terminal.
+    ///
+    /// Driven from a default `App` and a real store, through `parse` — no
+    /// field set by hand, and the panel opened by the key that opens it —
+    /// because the state going non-empty is only half of "it visibly worked".
+    #[tokio::test]
+    async fn a_project_typed_into_the_console_reaches_the_catalog_and_the_panel() {
+        let checkout = a_checkout("tetris");
+        let jod = jod_with(store());
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        let mut thread = Thread::default();
+
+        // The panel a fresh console has, opened the way a user opens it.
+        assert!(!app.panel, "a fresh console has the panel shut");
+        press(&mut app, KeyCode::BackTab);
+        assert!(app.projects.is_empty(), "and an empty catalog");
+
+        let line = format!("/project add {}", checkout.display());
+        let action = apply_slash(
+            &mut app,
+            command::parse(&line).expect("/project add parses"),
+        )
+        .expect("/project add is a store action, not a screen one");
+        perform(&jod, &mut app, &options(), &mut thread, action).await;
+
+        assert_eq!(
+            app.projects.len(),
+            1,
+            "the catalog is still empty after /project add"
+        );
+        let name = checkout.file_name().unwrap().to_string_lossy().into_owned();
+        assert_eq!(app.projects[0].name, name);
+        assert_eq!(app.projects[0].path, checkout);
+
+        // And it is on the screen, not merely in the struct.
+        let after = screen(&app, 100, 30);
+        assert!(
+            after.contains(&name),
+            "the panel does not show it:\n{after}"
+        );
+
+        // The store is the system of record, so it survives this console.
+        let listed = jod.store().unwrap().projects(false).unwrap();
+        assert_eq!(listed.len(), 1, "and it was written down");
+
+        let _ = std::fs::remove_dir_all(&checkout);
+    }
+
+    /// The empty state has to name its own remedy, the way the roots one does.
+    /// `nothing set` named none, and there was none to name.
+    #[tokio::test]
+    async fn the_empty_catalog_says_how_to_fill_itself() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        press(&mut app, KeyCode::BackTab);
+        assert!(app.projects.is_empty());
+
+        // Expanded, which is how a fresh console draws it...
+        assert!(app.projects_open);
+        let open = screen(&app, 100, 30);
+        assert!(
+            open.contains("/project add"),
+            "the expanded empty state names no remedy:\n{open}"
+        );
+
+        // ...and collapsed, which is one keypress away and used to say only
+        // `nothing set`.
+        ctrl(&mut app, KeyCode::Char('g'));
+        press(&mut app, KeyCode::Char('d'));
+        assert!(!app.projects_open);
+        let shut = screen(&app, 100, 30);
+        assert!(
+            shut.contains("/project add"),
+            "the collapsed empty state names no remedy:\n{shut}"
+        );
+    }
+
+    /// `/project` with nothing after it lists, and brings the box it is
+    /// listing into with it — on a fresh session the transcript is not on
+    /// screen at all, so a notice alone would be a command with no visible
+    /// answer.
+    #[tokio::test]
+    async fn listing_the_catalog_brings_the_panel_with_it() {
+        let checkout = a_checkout("listed");
+        let jod = jod_with(store());
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        let mut thread = Thread::default();
+
+        let empty = apply_slash(&mut app, command::parse("/project").expect("parses"))
+            .expect("/project lists");
+        perform(&jod, &mut app, &options(), &mut thread, empty).await;
+        assert!(app.panel, "listing an empty catalog still shows the box");
+        assert!(
+            last_notice(&app).contains("/project add"),
+            "got {:?}",
+            last_notice(&app)
+        );
+
+        let line = format!("/project add {}", checkout.display());
+        let add = apply_slash(&mut app, command::parse(&line).expect("parses")).expect("adds");
+        perform(&jod, &mut app, &options(), &mut thread, add).await;
+
+        let listed = apply_slash(&mut app, command::parse("/project ls").expect("parses"))
+            .expect("/project ls lists");
+        perform(&jod, &mut app, &options(), &mut thread, listed).await;
+        let name = checkout.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(
+            last_notice(&app).contains(&name),
+            "the listing does not name it: {:?}",
+            last_notice(&app)
+        );
+
+        let _ = std::fs::remove_dir_all(&checkout);
+    }
+
+    /// A typo must not become a row. The catalog is matched against later, so
+    /// a project pointing nowhere is a mention that resolves to nothing —
+    /// worse than no project, because it looks like it worked.
+    #[test]
+    fn cataloguing_somewhere_that_does_not_exist_says_so_and_stores_nothing() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        let action = apply_slash(
+            &mut app,
+            command::parse("/project add /no/such/checkout/anywhere").expect("parses"),
+        );
+        assert!(action.is_none(), "a typo must not reach the store");
         assert!(
             last_notice(&app).contains("not a directory"),
             "got {:?}",

@@ -37,6 +37,12 @@ pub enum Slash {
     /// are one subject and the palette is already long: `/root` lists, `/root
     /// add` opens the picker, `/root rm <path>` removes.
     Root(RootCmd),
+    /// The repositories an instruction that names none is resolved against.
+    ///
+    /// Shaped like [`Slash::Root`] and for the same reason: one subject, two
+    /// verbs, one word to remember. It is deliberately the *narrow* half of
+    /// `jod project` — see [`ProjectCmd`].
+    Project(ProjectCmd),
     /// Start a fresh conversation, forgetting the session cursor.
     New,
     /// List conversations that can be resumed.
@@ -149,6 +155,24 @@ pub enum RootCmd {
     Remove(String),
 }
 
+/// What `/project` was asked to do.
+///
+/// Two verbs where `jod project` has four. `archive` and `restore` are catalog
+/// housekeeping — they need a name you can only have got by listing first, and
+/// neither is what stops an instruction resolving. The gap this closes is that
+/// a catalog cannot be *started* from the console, so the two verbs that fill
+/// it are the two that are here; the rest stay at the shell, where the flags
+/// they take (`--name`, `--alias`, `--notes`, `--json`) belong. Prose
+/// arguments only, for the reason `/heartbeat` takes `off` rather than
+/// `--off`: a single flag in a set that has none is a spelling nobody guesses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProjectCmd {
+    List,
+    /// `None` catalogs the directory the console was launched in, exactly as
+    /// `jod project add` with no path catalogs the shell's working directory.
+    Add(Option<String>),
+}
+
 pub fn parse(line: &str) -> Option<Slash> {
     let rest = line.strip_prefix('/')?;
     let mut parts = rest.split_whitespace();
@@ -233,6 +257,22 @@ pub fn parse(line: &str) -> Option<Slash> {
                 Slash::Root(RootCmd::Add(None))
             } else {
                 Slash::Root(RootCmd::AddFrom(arg.to_string()))
+            }
+        }
+        // Bare `/project` lists, for the reason bare `/root` does: half the
+        // people who type it mean "show me" and the other half will reach for
+        // the subcommand out of habit. Anything that is neither verb is named
+        // back rather than read as a path — `/project ~/Jod` is a person
+        // guessing at the shape, and cataloguing on a guess writes a row.
+        "project" | "projects" | "repo" | "repos" => {
+            let mut words = arg.split_whitespace();
+            match words.next() {
+                None | Some("ls") | Some("list") => Slash::Project(ProjectCmd::List),
+                Some("add") => {
+                    let path = words.collect::<Vec<_>>().join(" ");
+                    Slash::Project(ProjectCmd::Add((!path.is_empty()).then_some(path)))
+                }
+                Some(other) => Slash::Unknown(format!("/project {other}")),
             }
         }
         "memory" | "memories" => {
@@ -507,6 +547,10 @@ pub const HELP: &[(&str, &str)] = &[
         "/root [add|rm]",
         "the directories this session works in (Ctrl-P picks one)",
     ),
+    (
+        "/project [add]",
+        "the repositories an instruction resolves against; `add [path]` catalogs one",
+    ),
     ("/sessions", "conversations you can pick up"),
     ("/resume <id>", "continue one of them"),
     ("/delegate <prompt>", "run it in the background (Ctrl-B)"),
@@ -762,6 +806,21 @@ pub fn completions(input: &str, app: &crate::tui::App) -> Vec<Completion> {
             );
             out
         }
+        // The two verbs, offered rather than remembered. Without this the only
+        // way to learn that `/project` takes `add` is the one-line hint in
+        // `/help`, which scrolls — and a catalog you cannot start is the whole
+        // of the bug this command exists to close.
+        "project" | "projects" | "repo" | "repos" => [
+            (
+                "add ",
+                "catalog a repository — no path means the one Jod was launched in",
+            ),
+            ("ls", "the catalog, most recently worked in first"),
+        ]
+        .into_iter()
+        .filter(|(verb, _)| verb.trim_end().starts_with(&typed))
+        .map(|(verb, what)| Completion::new(format!("/{name} {verb}"), what))
+        .collect(),
         "new" => KINDS
             .iter()
             .filter(|kind| kind.starts_with(&typed))
@@ -1647,6 +1706,75 @@ mod tests {
             parse("/remember"),
             Some(Slash::NeedsArgument(REMEMBER_USAGE))
         );
+    }
+
+    // ---- /project ----
+
+    /// The catalog could be filled by `jod project add` and by nothing inside
+    /// the console: `/project` did not parse, so the only way to make the
+    /// panel non-empty was to quit or open a second terminal.
+    #[test]
+    fn a_project_can_be_catalogued_and_listed_from_the_chat_box() {
+        for text in ["/project", "/projects", "/project ls", "/project list"] {
+            assert_eq!(
+                parse(text),
+                Some(Slash::Project(ProjectCmd::List)),
+                "{text}"
+            );
+        }
+        // Bare `add` is the directory Jod was launched in, which is the same
+        // default `jod project add` takes from the shell.
+        assert_eq!(
+            parse("/project add"),
+            Some(Slash::Project(ProjectCmd::Add(None)))
+        );
+        assert_eq!(
+            parse("/project add /home/reljod/repo/Jod"),
+            Some(Slash::Project(ProjectCmd::Add(Some(
+                "/home/reljod/repo/Jod".into()
+            ))))
+        );
+        // A checkout with a space in its name is one path, not a verb and an
+        // argument — the same rejoin `/add-dir` does.
+        assert_eq!(
+            parse("/project add ~/My Projects/Jod"),
+            Some(Slash::Project(ProjectCmd::Add(Some(
+                "~/My Projects/Jod".into()
+            ))))
+        );
+        // The name is case-insensitive like every other command's. The verb is
+        // not, and deliberately: `/root` treats its subcommand the same way,
+        // and one command tolerating a shouted verb while its twin does not is
+        // worse than both being strict.
+        assert_eq!(parse("/REPOS"), parse("/project"), "the name, at least");
+        // Neither verb. Named back rather than read as a path: cataloguing on
+        // a guess writes a row that has to be found again to be undone.
+        assert!(matches!(parse("/project ~/Jod"), Some(Slash::Unknown(_))));
+    }
+
+    /// Typeable is not the same as findable, and the complaint was that `/`
+    /// offered no route to the catalog at all.
+    #[test]
+    fn the_slash_list_offers_project_and_both_its_verbs() {
+        assert!(
+            lines("/").contains(&"/project".to_string()),
+            "{:?}",
+            lines("/")
+        );
+        assert_eq!(lines("/proj"), vec!["/project".to_string()]);
+
+        let offered = lines("/project ");
+        assert_eq!(offered, vec!["/project add ", "/project ls"]);
+        // Nothing may be offered that the parser then calls unknown — the rule
+        // `/harness`, `/mode` and `/config` each keep.
+        for line in offered {
+            let parsed = parse(line.trim_end());
+            assert!(
+                matches!(parsed, Some(Slash::Project(_))),
+                "{line} was suggested but parses as {parsed:?}"
+            );
+        }
+        assert_eq!(lines("/project a"), vec!["/project add "], "typing narrows");
     }
 
     /// `/help` must not list a command the parser rejects.
