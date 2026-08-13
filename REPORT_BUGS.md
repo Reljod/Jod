@@ -1704,7 +1704,20 @@ instead of three.
 ---
 
 <a name="bug-16"></a>
-## BUG-16 — `@` truncates paths from the right, hiding the filename · Medium · OPEN
+## BUG-16 — `@` truncates paths from the right, hiding the filename · ~~Medium~~ · **FIXED by #83** (`303113e`)
+
+> Fixed with the *shared helper* this report asked for, not a local patch.
+> #83 adds `cli/src/tui/text.rs` — `pub fn elide_left(s, width) -> Elided` —
+> and its module doc states the principle the report argued from:
+>
+> > *"For a **path** it is the exact opposite: the tail is the filename, and
+> > the head is a prefix a dozen sibling rows share."*
+>
+> The commit message is explicit that it is built to be adopted: *"The helper
+> lives in `cli/src/tui/text.rs` so the other two clip sites can adopt it."*
+> That is **Pattern B getting a single answer** rather than a fourth
+> hand-rolled clip — and [#86](https://github.com/Reljod/Jod/pull/86) is the PR
+> adopting it for BUG-3, BUG-11, BUG-20 and BUG-21.
 
 **Repro:** with `~/tetris` as a root, type `@engine`.
 
