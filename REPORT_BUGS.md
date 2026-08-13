@@ -304,15 +304,30 @@ $ jod ls
 
 and the fleet shows `● 87e84b92 running 20s cc Build a working Tetris game`.
 
-**Root cause:** the delegation confirmation is an `Entry::Notice`, hidden by
-BUG-1. Fixing BUG-1 likely fixes most of this. It is filed separately because
-delegation deserves a *loud* confirmation regardless — it is the single most
-consequential key in the program, it spends money, and it is fire-and-forget.
+**Root cause — confirmed by experiment: this is entirely a symptom of BUG-1.**
+I re-ran the same `Ctrl-B` in a session that already had a real turn in its
+transcript, and the confirmation is *good*:
 
-**Suggested fix.** On delegate, push a non-notice transcript entry naming the
-agent id, the prompt, **and the working directory** it was given (see BUG-4 and
-BUG-14). That last field is not cosmetic: it is the one piece of information
-that would have exposed BUG-14 the moment it happened.
+```
+• delegated cbe879eb — echo hello from a delegated · runs in the background, Ctrl-F to watch
+```
+
+Agent id, the prompt, where it went, and which key follows it. Nothing needs
+writing — the message already exists and is well judged. It is a
+`Entry::Notice`, so at startup the splash eats it (BUG-1), and startup is
+exactly when a first-time user presses `Ctrl-B`.
+
+**So: fix BUG-1 and BUG-2 goes away.** Whoever takes BUG-1 should verify this
+case as their regression test — it is the highest-consequence instance of it.
+
+**One thing still missing from that message**, independent of BUG-1: it does
+not name the **working directory** the run was launched with. Had it said
+`in /Users/reljodoreta`, BUG-14 would have been caught in the first thirty
+seconds instead of after a $1.18 run wrote a project into the wrong tree.
+
+**Suggested fix.** Fix BUG-1 (which restores the existing message), then add
+the working directory to it. Do not rewrite the message otherwise — it is
+already the right message.
 
 ---
 
