@@ -43,8 +43,14 @@ last five findings:
 
 | PR | Findings | State |
 |---|---|---|
-| [#86](https://github.com/Reljod/Jod/pull/86) | [BUG-3](#bug-3), [BUG-11](#bug-11), [BUG-20](#bug-20), [BUG-21](#bug-21) | draft — the whole of **Pattern B** in one sweep |
-| [#89](https://github.com/Reljod/Jod/pull/89) | [BUG-10](#bug-10), [BUG-12](#bug-12) | draft |
+| [#86](https://github.com/Reljod/Jod/pull/86) | [BUG-3](#bug-3), [BUG-11](#bug-11), [BUG-20](#bug-20), [BUG-21](#bug-21) | draft, **CI green** (`test` pass, `triage` pass) — the whole of **Pattern B** in one sweep, adopting #83's `elide_left` helper |
+| [#89](https://github.com/Reljod/Jod/pull/89) | [BUG-10](#bug-10), [BUG-12](#bug-12) | draft, no checks reported yet |
+
+**#86 is the one worth landing next.** It is green, it carries the only
+remaining **High** finding ([BUG-20](#bug-20) — the destructive-action dialog
+that clips its own "cannot be undone" warning and hides what cancels), and it
+retires Pattern B by adopting the shared helper rather than adding a fifth
+hand-rolled clip.
 
 Everything else has merged: **#75** (BUG-8, BUG-9), **#80** (BUG-13), **#81**
 (BUG-6, BUG-7), **#82** (BUG-1, BUG-2), **#78** (BUG-14, BUG-4), **#85**
