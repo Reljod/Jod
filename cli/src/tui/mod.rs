@@ -3492,6 +3492,20 @@ fn on_fleet_key(app: &mut App, key: KeyEvent) -> Option<Action> {
         KeyCode::Char('t') => Some(Action::Sessions(sessions::Request::Retry(
             app.selected_agent()?.id.clone(),
         ))),
+        // `T` belongs to the tree, and is answered here for the case where
+        // there is no tree — a fleet of sessions started before works existed.
+        // The keybar prints it on this screen whatever the fleet holds, so
+        // falling through would be an advertised key that silently does
+        // nothing, which is exactly the trap the keymap's drift net exists to
+        // stop one spelling of.
+        KeyCode::Char('T') => {
+            app.push(Entry::Notice(
+                "traffic is a work's bus, and nothing here belongs to a work yet — \
+                 delegate something and the tree will have one"
+                    .into(),
+            ));
+            None
+        }
         _ => None,
     }
 }
@@ -8386,6 +8400,255 @@ mod tests {
         .await;
 
         assert!(app.schedules.is_empty());
+    }
+
+    // ---- the traffic log is reachable, and is fed ----
+
+    /// A work with one session and one run under it, exactly as
+    /// `Store::forest_of` flattens them.
+    fn forest_of_one_work() -> Vec<jod_core::tree::Node> {
+        use jod_core::tree::{Node, NodeId, NodeKind};
+        let node = |id: NodeId, parent: Option<NodeId>, kind, depth, label: &str| Node {
+            id,
+            parent,
+            kind,
+            depth,
+            label: label.into(),
+            summary: String::new(),
+            running: false,
+            cards: 0,
+            blocked: 0,
+            colour: "cyan".into(),
+            expanded: true,
+            has_children: false,
+        };
+        let mut work = node(NodeId::work("w1"), None, NodeKind::Work, 0, "port the parser");
+        work.has_children = true;
+        let mut session = node(
+            NodeId::session("s1"),
+            Some(NodeId::work("w1")),
+            NodeKind::Session,
+            1,
+            "port the lexer",
+        );
+        session.has_children = true;
+        let run = node(
+            NodeId::run("r1"),
+            Some(NodeId::session("s1")),
+            NodeKind::Run,
+            2,
+            "run one",
+        );
+        vec![work, session, run]
+    }
+
+    fn on_the_tree(selected: jod_core::tree::NodeId) -> App {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.forest = forest_of_one_work();
+        app.go(Workspace::Fleet);
+        app.tree.selected = Some(selected);
+        app
+    }
+
+    /// **G5.S2.** The screen is opened from the tree, through the router — not
+    /// by calling the handler, which would prove only that the handler works.
+    #[test]
+    fn t_on_a_work_in_the_tree_opens_that_works_traffic() {
+        let mut app = on_the_tree(jod_core::tree::NodeId::work("w1"));
+        assert_eq!(press(&mut app, KeyCode::Char('T')), None);
+        assert_eq!(app.workspace, Workspace::Traffic);
+        assert_eq!(
+            app.traffic_of,
+            Some(traffic::Watching::work("w1")),
+            "the screen opened on some other scope than the row under the cursor"
+        );
+    }
+
+    /// From a session or a run as well, and it is the *work's* bus in each
+    /// case: a session's half of a conversation is not a conversation.
+    #[test]
+    fn t_on_a_session_or_a_run_opens_the_work_above_it() {
+        for row in [
+            jod_core::tree::NodeId::session("s1"),
+            jod_core::tree::NodeId::run("r1"),
+        ] {
+            let mut app = on_the_tree(row.clone());
+            press(&mut app, KeyCode::Char('T'));
+            assert_eq!(app.workspace, Workspace::Traffic, "from {row:?}");
+            assert_eq!(app.traffic_of, Some(traffic::Watching::work("w1")), "from {row:?}");
+        }
+    }
+
+    /// Drilled rather than jumped to, so `Esc` comes back to the tree you were
+    /// reading rather than to the chat — the same relationship memory's local
+    /// graph has to its list.
+    #[test]
+    fn escape_comes_back_from_the_traffic_log_to_the_tree() {
+        let mut app = on_the_tree(jod_core::tree::NodeId::work("w1"));
+        press(&mut app, KeyCode::Char('T'));
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(app.workspace, Workspace::Fleet);
+    }
+
+    /// Opening a work's traffic must not show the last one's conversation for
+    /// the frame before the tick catches up.
+    #[test]
+    fn opening_a_works_traffic_starts_from_an_empty_log() {
+        let mut app = on_the_tree(jod_core::tree::NodeId::work("w1"));
+        press(&mut app, KeyCode::Char('T'));
+        app.traffic.title = "port the parser".into();
+        app.traffic.messages = vec![];
+        app.traffic.used = 12;
+
+        app.go(Workspace::Fleet);
+        app.tree.selected = Some(jod_core::tree::NodeId::work("w1"));
+        press(&mut app, KeyCode::Char('T'));
+        assert_eq!(app.traffic, traffic::Log::default(), "{:?}", app.traffic);
+    }
+
+    /// `T` on a session that belongs to no work has nothing to open, and says
+    /// so rather than looking broken.
+    #[test]
+    fn t_on_a_row_with_no_work_above_it_explains_itself() {
+        use jod_core::tree::{Node, NodeId, NodeKind};
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.forest = vec![Node {
+            id: NodeId::session("orphan"),
+            parent: None,
+            kind: NodeKind::Session,
+            depth: 0,
+            label: "started before works existed".into(),
+            summary: String::new(),
+            running: false,
+            cards: 0,
+            blocked: 0,
+            colour: String::new(),
+            expanded: true,
+            has_children: false,
+        }];
+        app.go(Workspace::Fleet);
+        app.tree.selected = Some(NodeId::session("orphan"));
+        press(&mut app, KeyCode::Char('T'));
+        assert_eq!(app.workspace, Workspace::Fleet, "nothing to open");
+        assert!(app.traffic_of.is_none());
+        let said = format!("{:?}", app.transcript.last().unwrap());
+        assert!(said.contains("no work"), "{said}");
+    }
+
+    /// The keybar prints `T traffic` on the fleet whatever the fleet holds, so
+    /// the one state where there is no tree to press it on has to answer rather
+    /// than do nothing.
+    #[test]
+    fn t_on_a_fleet_with_no_works_in_it_says_why_there_is_nothing_to_read() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.go(Workspace::Fleet);
+        assert!(!app.has_tree());
+        press(&mut app, KeyCode::Char('T'));
+        assert_eq!(app.workspace, Workspace::Fleet);
+        let said = format!("{:?}", app.transcript.last().unwrap());
+        assert!(said.contains("traffic is a work's bus"), "{said}");
+    }
+
+    /// **The screen is fed by the tick**, not by the keypress that opened it.
+    /// Agents write to this bus from other processes, so a log read once at
+    /// open would be stale by the second message — and a screen nothing
+    /// refreshes is a screen that quietly shows yesterday.
+    #[tokio::test]
+    async fn the_tick_loads_the_traffic_of_whichever_work_is_open() {
+        use jod_core::team::{Post, Scope};
+        let store = store();
+        let work = store.create_work("port the parser").unwrap();
+        store
+            .join_scope(
+                Scope::Work,
+                &work.id,
+                "asker",
+                HarnessKind::ClaudeCode,
+                "engineer",
+                None,
+            )
+            .unwrap();
+        store
+            .join_scope(
+                Scope::Work,
+                &work.id,
+                "answerer",
+                HarnessKind::ClaudeCode,
+                "engineer",
+                None,
+            )
+            .unwrap();
+        store
+            .post(&Post::new(Scope::Work, &work.id, "asker", "where is the lexer?").to("answerer"))
+            .unwrap();
+
+        let jod = jod_with(store);
+        let mut app = app_on(HarnessKind::ClaudeCode);
+
+        // Nothing open: the tick must not invent a scope, and must not pay for
+        // a query nobody asked for.
+        refresh_workspaces(&jod, &mut app);
+        assert!(app.traffic.messages.is_empty());
+
+        app.traffic_of = Some(traffic::Watching::work(&work.id));
+        refresh_workspaces(&jod, &mut app);
+        assert_eq!(app.traffic.messages.len(), 1, "the tick did not read the bus");
+        assert_eq!(app.traffic.messages[0].message.from, "asker");
+        assert_eq!(app.traffic.budget, jod_core::works::DEFAULT_MESSAGE_BUDGET);
+        assert_eq!(app.traffic.used, 1, "and it read the budget the bus enforces");
+        assert_eq!(
+            app.row_ids(Workspace::Traffic).len(),
+            1,
+            "the cursor has a row to sit on"
+        );
+    }
+
+    /// `f` is the screen's own verb and it reaches the screen's own handler.
+    /// Pressed through the router, because a handler nothing routes to is the
+    /// bug this suite exists to catch.
+    #[test]
+    fn f_on_the_traffic_log_cycles_which_states_are_shown() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.traffic_of = Some(traffic::Watching::work("w1"));
+        app.go(Workspace::Traffic);
+        assert_eq!(app.traffic_shown, traffic::Shown::Everything);
+
+        press(&mut app, KeyCode::Char('f'));
+        assert_eq!(app.traffic_shown, traffic::Shown::Problems);
+        let said = format!("{:?}", app.transcript.last().unwrap());
+        assert!(said.contains(traffic::Shown::Problems.label()), "{said}");
+
+        for _ in 1..traffic::Shown::ALL.len() {
+            press(&mut app, KeyCode::Char('f'));
+        }
+        assert_eq!(app.traffic_shown, traffic::Shown::Everything, "the cycle closes");
+    }
+
+    /// `⏎` puts the whole message in the transcript, reason and all — the row
+    /// is one line and a message is prose.
+    #[tokio::test]
+    async fn enter_on_a_refused_message_prints_the_reason_it_was_refused() {
+        use jod_core::team::{Post, Scope};
+        let store = store();
+        let work = store.create_work("port the parser").unwrap();
+        store
+            .post(&Post::new(Scope::Work, &work.id, "asker", "are you free?").to("nobody-here"))
+            .unwrap();
+
+        let jod = jod_with(store);
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.traffic_of = Some(traffic::Watching::work(&work.id));
+        refresh_workspaces(&jod, &mut app);
+        app.go(Workspace::Traffic);
+
+        press(&mut app, KeyCode::Enter);
+        let said = format!("{:?}", app.transcript.last().unwrap());
+        assert!(said.contains("asker"), "{said}");
+        assert!(said.contains("are you free?"), "the message itself: {said}");
+        assert!(
+            said.contains("`nobody-here` is not a member of this work"),
+            "and why nobody read it: {said}"
+        );
     }
 
     /// A TUI with no database must lose the keypress, not the session.

@@ -146,6 +146,40 @@ async fn main() -> anyhow::Result<()> {
         println!("{}", render(&app));
     }
 
+    // The traffic log, which has no digit and so is not in the menu above: it
+    // is the fleet's second level, reached with `T` on a row. Rendered for the
+    // first work that has one, because a work with an empty bus renders the
+    // empty state and says nothing about whether the loader works.
+    if let Some(store) = jod.store() {
+        let busiest = store
+            .works(jod_core::works::Filter::Any)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|w| {
+                let used = store
+                    .messages_used(jod_core::team::Scope::Work, &w.id)
+                    .unwrap_or_default();
+                (used, w.id)
+            })
+            .max_by_key(|(used, _)| *used);
+        if let Some((used, id)) = busiest.filter(|(used, _)| *used > 0) {
+            app.traffic_of = Some(tui::traffic::Watching::work(&id));
+            app.traffic = tui::data::traffic_from(&store, app.traffic_of.as_ref().unwrap());
+            app.go(Workspace::Traffic);
+            println!();
+            println!(
+                "── {} {}",
+                Workspace::Traffic.title(),
+                "─".repeat(52)
+            );
+            println!("{}", render(&app));
+        } else {
+            println!();
+            println!("── fleet · traffic ── no work has any traffic in this database");
+        }
+        let _ = used_is_only_for_the_filter(used_placeholder());
+    }
+
     // A chat mid-turn, with the side panel open.
     //
     // Worth a screen of its own because it is the only state in which three

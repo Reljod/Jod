@@ -8185,9 +8185,6 @@ mod tests {
         let (store, work) = traffic_store();
         let a = traffic_app(&store, &work);
         let frame = rendered(&a, 150, 30);
-        println!("EYEBALL150\n{frame}");
-        println!("EYEBALL100\n{}", rendered(&a, 100, 22));
-        println!("EYEBALL80\n{}", rendered(&a, 80, 22));
 
         for member in ["asker", "answerer", "scribe"] {
             assert!(frame.contains(member), "{member} is not on the log:\n{frame}");
