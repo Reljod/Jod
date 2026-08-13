@@ -140,6 +140,12 @@ pub enum RootCmd {
     /// `None` opens the picker; a path adds it without one, which is what a
     /// script or a paste wants.
     Add(Option<String>),
+    /// Open the picker somewhere other than the directory `jod` was launched
+    /// in. Distinct from [`RootCmd::Add`] with a path, which adds that exact
+    /// directory and offers no choice — here the path says *where to browse*,
+    /// which is the only way to reach a tree the launch directory does not
+    /// contain.
+    AddFrom(String),
     Remove(String),
 }
 
@@ -211,6 +217,22 @@ pub fn parse(line: &str) -> Option<Slash> {
                     }
                 }
                 Some(other) => Slash::Unknown(format!("/root {other}")),
+            }
+        }
+        // The folder-first spelling, and the one people arrive with from other
+        // consoles. `/root` is a noun you have to know Jod uses; `/add-dir` is
+        // the thing you are trying to do, so it is the name in `/help`.
+        //
+        // Bare, it is exactly `/root add` — the same picker, at the same base.
+        // With an argument it is [`RootCmd::AddFrom`], because somebody who
+        // names a directory here is nearly always naming the *parent* of the
+        // one they want, and `.` is the picker's first row so "this one,
+        // exactly" is still a single `⏎`.
+        "add-dir" | "adddir" | "add_dir" => {
+            if arg.is_empty() {
+                Slash::Root(RootCmd::Add(None))
+            } else {
+                Slash::Root(RootCmd::AddFrom(arg.to_string()))
             }
         }
         "memory" | "memories" => {
@@ -476,6 +498,10 @@ pub const HELP: &[(&str, &str)] = &[
     (
         "/new [kind]",
         "a fresh conversation, or a new schedule/goal/hook/task",
+    ),
+    (
+        "/add-dir [where]",
+        "pick a folder this session can work in and `@` — a path browses there, not here",
     ),
     (
         "/root [add|rm]",
@@ -1242,6 +1268,45 @@ mod tests {
         // A removal with nothing to remove is refused by name rather than
         // silently becoming a list, which would look like the key did nothing.
         assert!(matches!(parse("/root rm"), Some(Slash::Unknown(_))));
+    }
+
+    /// Bare `/add-dir` is `/root add` and nothing else — the same picker, so
+    /// the folder-first name is a name and not a second implementation.
+    #[test]
+    fn add_dir_with_nothing_after_it_is_the_picker_where_you_are() {
+        assert_eq!(parse("/add-dir"), Some(Slash::Root(RootCmd::Add(None))));
+        assert_eq!(parse("/add-dir"), parse("/root add"));
+        // Three spellings, because the hyphen is the part nobody remembers.
+        assert_eq!(parse("/adddir"), parse("/add-dir"));
+        assert_eq!(parse("/add_dir"), parse("/add-dir"));
+        assert_eq!(parse("/ADD-DIR"), parse("/add-dir"), "and the case is not");
+    }
+
+    /// The argument says *where to browse*, which is the whole reason the
+    /// command exists: without it no tree outside the launch directory is
+    /// reachable at all.
+    #[test]
+    fn add_dir_with_a_path_browses_there_rather_than_adding_it_blind() {
+        assert_eq!(
+            parse("/add-dir ~/Developer"),
+            Some(Slash::Root(RootCmd::AddFrom("~/Developer".into())))
+        );
+        // Deliberately *not* `RootCmd::Add`: `/root add <path>` adds exactly
+        // that directory, and these two must not collapse into each other.
+        assert_ne!(
+            parse("/add-dir /home/reljod/repo"),
+            parse("/root add /home/reljod/repo")
+        );
+    }
+
+    /// A folder with a space in its name is a folder, not a subcommand and an
+    /// argument — `parse` rejoins what `split_whitespace` took apart.
+    #[test]
+    fn a_directory_name_with_a_space_survives_parsing() {
+        assert_eq!(
+            parse("/add-dir ~/My Projects"),
+            Some(Slash::Root(RootCmd::AddFrom("~/My Projects".into())))
+        );
         // `/agents` and `/team` now name workspaces rather than panels, which
         // is what lets one variant cover all nine screens.
         assert_eq!(parse("/agents"), Some(Slash::Open(Workspace::Fleet)));

@@ -30,8 +30,10 @@ use jod_core::roots::Root;
 pub const ROWS: usize = 8;
 
 /// What a narrow terminal, or a conversation with nothing set, is told.
-pub const NO_ROOTS: &str =
-    "no roots set — `jod root add <path>`, or launch with --root";
+/// Named as the command you can run from where you are standing. The popup is
+/// open, the cursor is in the chat box, and `jod root add` in another terminal
+/// is not a next step anybody takes from here.
+pub const NO_ROOTS: &str = "no folder to search — /add-dir picks one (Alt-P)";
 
 /// One offered path.
 #[derive(Debug, Clone, PartialEq, Eq)]

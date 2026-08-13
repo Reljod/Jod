@@ -128,9 +128,22 @@ knowing on day one.
 conversation owns an ordered set of roots, each writable or not.
 
 ```
-jod root add <path>          # or Alt-P in the TUI for a fuzzy picker
+jod root add <path>          # from a shell
 jod root ls
 ```
+
+In the TUI the same thing is `/add-dir`, which opens the fuzzy directory picker
+(`Alt-P` is the chord for it). The picker walks the directory `jod` was launched
+in — so to reach a tree outside it, name where to start:
+
+```
+/add-dir                     # browse from where you launched
+/add-dir ~/Developer         # browse from there instead
+```
+
+`.` is always the first row, so `/add-dir ~/notes` then `⏎` adds exactly that
+folder. There is no other way to add a directory the launch directory does not
+contain without typing its full path.
 
 In the chat box, `@` opens a picker under the cursor: type scattered letters,
 matches rank live with the matched characters highlighted, arrows move, enter
@@ -231,7 +244,7 @@ rate-limited so ten messages become one turn carrying ten rather than ten turns.
 |---|---|
 | `Esc` | interrupt the turn, keep the session — the conversation survives |
 | `@` | mention a file across every root |
-| `Alt-P` | pick a directory to add as a root |
+| `Alt-P` | pick a directory to add as a root (`/add-dir`, or `/add-dir <where>` to browse elsewhere) |
 | `Alt-S` | search every transcript, including compacted turns |
 | `Alt-Y` | copy the last reply, or its code block without the fences |
 | `Alt-K` | which-key |
