@@ -336,6 +336,19 @@ struct Thread {
     /// Applied in order, so choosing twice before typing leaves the second
     /// choice — which is what the user would expect from having chosen it last.
     pending: Vec<Setting>,
+    /// Whether the composer is showing `offer_models`'s auto-prefilled
+    /// `/model ` line, and nothing has been pressed since it landed.
+    ///
+    /// `offer_models` cannot tell a chosen suggestion from a prompt that simply
+    /// starts with the same characters, because both are just text in
+    /// `app.input` by the time a key arrives. This is the one bit that makes
+    /// the difference legible: true only for the key immediately after the
+    /// offer, so `on_chat_key` can tell "the next thing typed is the offer
+    /// being read" from "the next thing typed is a sentence that happens to
+    /// begin where the offer left the cursor" — and clear the prefill instead
+    /// of typing into it. Consumed by the very next key, of any kind, so it
+    /// never survives to misjudge a later, unrelated keystroke.
+    model_offer_unread: bool,
 }
 
 impl Thread {
@@ -634,7 +647,7 @@ async fn event_loop(
                         // query per keystroke, which is what the comparison
                         // buys.
                         let asked = app.rail.query(app.conversation.clone());
-                        match on_key(&mut app, key, viewport) {
+                        match on_key(&mut app, &mut thread, key, viewport) {
                             // The editor takes the terminal, so it can only be
                             // done from here — with the same discipline as
                             // `enter`/`restore`, panic hook included.
@@ -1901,7 +1914,11 @@ fn point_at(
     app.cost_usd = 0.0;
     thread.conversation = conversation.map(str::to_string);
     thread.carried = carried;
-    offer_models(app, "/model ");
+    // Set only when the offer actually landed in the box: `offer_models`
+    // refuses to clobber a prompt that was already half-typed, and if it did
+    // not touch `app.input` there is nothing for the next key to be mistaken
+    // for.
+    thread.model_offer_unread = offer_models(app, "/model ");
 }
 
 /// Put the model picker in front of somebody who has just changed harness.
@@ -1918,11 +1935,17 @@ fn point_at(
 /// Only into an empty box. A prompt half-typed is worth more than a hint, and a
 /// switch that finishes while somebody is mid-sentence must not eat the
 /// sentence.
-fn offer_models(app: &mut App, line: &str) {
+///
+/// Answers whether it actually prefilled the box, so the caller can mark the
+/// line unread for `on_chat_key` — typing over the offer is the common case
+/// (see `Thread::model_offer_unread`), and only a call that changed the box
+/// needs that guard armed.
+fn offer_models(app: &mut App, line: &str) -> bool {
     if !app.input.is_empty() {
-        return;
+        return false;
     }
     app.accept_completion(line);
+    true
 }
 
 /// The harness a preference value names, if it names one.
@@ -2263,7 +2286,7 @@ fn short(id: &str) -> String {
 /// are in: an **overlay** owns the keyboard while it is up, a **workspace**
 /// makes letters into commands, and **chat** makes them text again. Quitting is
 /// ahead of all three, because a key that cannot always leave is a trap.
-fn on_key(app: &mut App, key: KeyEvent, viewport: usize) -> Option<Action> {
+fn on_key(app: &mut App, thread: &mut Thread, key: KeyEvent, viewport: usize) -> Option<Action> {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let alt = key.modifiers.contains(KeyModifiers::ALT);
 
@@ -2329,7 +2352,7 @@ fn on_key(app: &mut App, key: KeyEvent, viewport: usize) -> Option<Action> {
     if app.workspace.is_list() {
         return on_workspace_key(app, key, viewport);
     }
-    on_chat_key(app, key, viewport)
+    on_chat_key(app, thread, key, viewport)
 }
 
 /// Keys while the decision rail has the keyboard.
@@ -4134,7 +4157,18 @@ fn on_team_key(app: &mut App, key: KeyEvent) -> Option<Action> {
 }
 
 /// Keys in chat, where letters are text and the input box owns them.
-fn on_chat_key(app: &mut App, key: KeyEvent, viewport: usize) -> Option<Action> {
+fn on_chat_key(
+    app: &mut App,
+    thread: &mut Thread,
+    key: KeyEvent,
+    viewport: usize,
+) -> Option<Action> {
+    // Consumed here, once, regardless of which arm below ends up handling the
+    // key — Tab or Enter on the suggestion list is reading the offer exactly
+    // as intended, and every other key means the box is being edited by hand
+    // either way. Only a plain character typed while this was still true
+    // means "that offer was never read"; see the `KeyCode::Char(c)` arm.
+    let offer_was_unread = std::mem::take(&mut thread.model_offer_unread);
     let max_scroll = app.transcript.len();
 
     // The `@` popup owns the arrows and `⏎` while it is up, and `Esc` closes it
@@ -4349,6 +4383,17 @@ fn on_chat_key(app: &mut App, key: KeyEvent, viewport: usize) -> Option<Action> 
         // never fires it, which is the edge case that makes the rule usable.
         KeyCode::Char('?') if app.input.is_empty() => app.overlay = Overlay::Keymap,
         KeyCode::Char(c) => {
+            // The line on screen is `offer_models`'s prefill, not anything the
+            // user typed — so this character is not extending a `/model`
+            // invocation, it is the first letter of whatever they actually
+            // meant to say. Dropping the offer here, rather than appending
+            // into it, is the whole fix for `harness-eats-prompt`: without
+            // this, "PONG" typed after a switch became "/model PONG" and the
+            // turn that should have run silently never spawned.
+            if offer_was_unread {
+                app.input.clear();
+                app.cursor = 0;
+            }
             // `@` opens the picker under the cursor. The index is taken before
             // the insert because the popup replaces the sign along with the
             // query, so it has to know where the sign landed.
@@ -5925,6 +5970,56 @@ mod tests {
         );
     }
 
+    /// `harness-eats-prompt`: typing a plain word right after a switch used to
+    /// land inside the auto-offered `/model ` line instead of starting a
+    /// prompt of its own, so "hello" became "/model hello" — a model rename,
+    /// not a turn — and the reply that finally *did* spawn failed a run later,
+    /// naming neither Jod nor the cause.
+    ///
+    /// One word on purpose, not a sentence: `/model` now refuses anything with
+    /// a space in it (see `command::parse`'s validation), which already turns
+    /// a multi-word prompt into a visible, immediate refusal instead of a
+    /// silent swallow. A bare word is indistinguishable from a real model name
+    /// at that layer — `hello`, `continue`, `go`, `yes` are all one token —
+    /// so it sails straight through and is exactly the case still left for
+    /// this fix to close: the offer must never reach the parser as an
+    /// argument in the first place.
+    ///
+    /// The offer is a hint, not something the user asked to type into, so the
+    /// first character typed after it must begin a fresh line and the whole
+    /// word must reach `Action::Send`.
+    #[test]
+    fn typing_after_a_switch_starts_a_prompt_not_a_model_name() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        let mut thread = Thread::default();
+        point_at(&mut app, &mut thread, HarnessKind::OpenCode, None, None);
+        assert_eq!(app.input, "/model ", "the offer landed as documented");
+        assert!(thread.model_offer_unread, "and nobody has read it yet");
+
+        for c in "hello".chars() {
+            on_key(
+                &mut app,
+                &mut thread,
+                KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE),
+                20,
+            );
+        }
+        assert_eq!(app.input, "hello", "not \"/model hello\"");
+        assert!(!thread.model_offer_unread, "the first keystroke reads it");
+
+        let action = on_key(
+            &mut app,
+            &mut thread,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            20,
+        );
+        assert_eq!(
+            action,
+            Some(Action::Send("hello".to_string())),
+            "a run should spawn with this prompt, not a model change"
+        );
+    }
+
     /// A half-typed prompt is worth more than a hint. The switch can finish at
     /// any moment — the summariser is a whole run — and landing on somebody
     /// mid-sentence must not eat the sentence.
@@ -6411,7 +6506,18 @@ mod tests {
     }
 
     fn press(app: &mut App, code: KeyCode) -> Option<Action> {
-        on_key(app, KeyEvent::new(code, KeyModifiers::NONE), 20)
+        // A fresh, throwaway `Thread` every press: none of the many callers of
+        // this helper care about state that lives on `Thread`, and giving each
+        // press its own means adding `model_offer_unread` here never had to
+        // touch the 200+ call sites that only ever wanted a keystroke and an
+        // `App`. Tests that *do* need the flag to survive across presses call
+        // `on_key` directly with a `Thread` they hold onto.
+        on_key(
+            app,
+            &mut Thread::default(),
+            KeyEvent::new(code, KeyModifiers::NONE),
+            20,
+        )
     }
 
     fn type_line(app: &mut App, text: &str) {
@@ -6897,11 +7003,21 @@ mod tests {
     // ---- running several agents at once ----
 
     fn ctrl(app: &mut App, code: KeyCode) -> Option<Action> {
-        on_key(app, KeyEvent::new(code, KeyModifiers::CONTROL), 20)
+        on_key(
+            app,
+            &mut Thread::default(),
+            KeyEvent::new(code, KeyModifiers::CONTROL),
+            20,
+        )
     }
 
     fn alt(app: &mut App, code: KeyCode) -> Option<Action> {
-        on_key(app, KeyEvent::new(code, KeyModifiers::ALT), 20)
+        on_key(
+            app,
+            &mut Thread::default(),
+            KeyEvent::new(code, KeyModifiers::ALT),
+            20,
+        )
     }
 
     fn running(id: &str, name: &str) -> AgentLine {
