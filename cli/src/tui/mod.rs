@@ -5970,6 +5970,45 @@ mod tests {
         );
     }
 
+    /// `harness-eats-prompt`: typing a plain sentence right after a switch used
+    /// to land inside the auto-offered `/model ` line instead of starting a
+    /// prompt of its own, so "PONG" became "/model PONG" — a model rename, not
+    /// a turn — and the reply that finally *did* spawn failed a run later,
+    /// naming neither Jod nor the cause. The offer is a hint, not something the
+    /// user asked to type into, so the first character typed after it must
+    /// begin a fresh line and the whole sentence must reach `Action::Send`.
+    #[test]
+    fn typing_after_a_switch_starts_a_prompt_not_a_model_name() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        let mut thread = Thread::default();
+        point_at(&mut app, &mut thread, HarnessKind::OpenCode, None, None);
+        assert_eq!(app.input, "/model ", "the offer landed as documented");
+        assert!(thread.model_offer_unread, "and nobody has read it yet");
+
+        for c in "PONG".chars() {
+            on_key(
+                &mut app,
+                &mut thread,
+                KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE),
+                20,
+            );
+        }
+        assert_eq!(app.input, "PONG", "not \"/model PONG\"");
+        assert!(!thread.model_offer_unread, "the first keystroke reads it");
+
+        let action = on_key(
+            &mut app,
+            &mut thread,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            20,
+        );
+        assert_eq!(
+            action,
+            Some(Action::Send("PONG".to_string())),
+            "a run should spawn with this prompt, not a model change"
+        );
+    }
+
     /// A half-typed prompt is worth more than a hint. The switch can finish at
     /// any moment — the summariser is a whole run — and landing on somebody
     /// mid-sentence must not eat the sentence.

@@ -9704,6 +9704,7 @@ mod tests {
         assert!(!a.panel, "a cold start has the panel shut");
         crate::tui::on_key(
             &mut a,
+            &mut crate::tui::Thread::default(),
             KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE),
             20,
         );
@@ -9724,13 +9725,16 @@ mod tests {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         let mut a = app();
         assert!(!a.panel, "a cold start has the panel shut");
+        let mut thread = crate::tui::Thread::default();
         crate::tui::on_key(
             &mut a,
+            &mut thread,
             KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL),
             20,
         );
         crate::tui::on_key(
             &mut a,
+            &mut thread,
             KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
             20,
         );
