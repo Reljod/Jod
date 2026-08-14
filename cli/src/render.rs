@@ -406,6 +406,26 @@ fn hidden_rows(shown: usize, total: usize) -> Option<usize> {
     total.checked_sub(shown).filter(|n| *n > 0)
 }
 
+/// One line of `jod team list`: the team's name, annotated when it has no
+/// members.
+///
+/// `jod team task` opens a board before anyone joins it, so `jod team list`
+/// now names teams that only have a task. Left as a bare name, such a team
+/// would print identically to a staffed one — this is what keeps an
+/// empty-but-active board visibly distinct rather than silently the same.
+///
+/// Not yet called from `TeamCommand::List` — that arm lives in a region of
+/// `main.rs` owned by a parallel change to `jod team task`/`jod team done`,
+/// so wiring it in is left to whoever next touches that match arm.
+#[allow(dead_code)]
+pub fn team_list_line(name: &str, member_count: usize) -> String {
+    if member_count == 0 {
+        format!("{name}  {}", paint(DIM, "(no members)"))
+    } else {
+        name.to_string()
+    }
+}
+
 /// A team: who is on it, then what is on its board.
 pub fn team(members: &[jod_core::team::Member], tasks: &[jod_core::team::TeamTask]) {
     use jod_core::team::MemberStatus;
@@ -1037,5 +1057,21 @@ mod tests {
     fn colour_is_omitted_when_output_is_not_a_terminal() {
         // The test harness captures stdout, so `tty()` is false here.
         assert_eq!(paint(RED, "plain"), "plain");
+    }
+
+    /// A staffed team's line is unchanged: just its name, the way `jod team
+    /// list` always printed it.
+    #[test]
+    fn a_staffed_teams_list_line_is_just_its_name() {
+        assert_eq!(team_list_line("crew", 3), "crew");
+    }
+
+    /// A team with a task and no members reads differently from a staffed
+    /// one, so the list itself says which boards are empty.
+    #[test]
+    fn a_memberless_teams_list_line_says_so() {
+        let line = team_list_line("probe-team-b", 0);
+        assert!(line.starts_with("probe-team-b"), "{line}");
+        assert!(line.contains("no members"), "{line}");
     }
 }

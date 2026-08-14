@@ -1971,11 +1971,21 @@ impl Store {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
-    /// Every team that has a member.
+    /// Every team that has a member, or a task on its board.
+    ///
+    /// `jod team task` opens a board before anyone joins it, so membership
+    /// alone used to miss it: `jod team show` would happily render a
+    /// task-only team while this left it off the list — the one place a
+    /// later session would learn the team's name exists at all. Work parked
+    /// on such a board was undiscoverable.
     pub fn teams(&self) -> Result<Vec<String>> {
         let conn = self.conn.lock().expect("store lock poisoned");
-        let mut stmt =
-            conn.prepare("SELECT DISTINCT team FROM team_members ORDER BY team")?;
+        let mut stmt = conn.prepare(
+            "SELECT team FROM team_members
+             UNION
+             SELECT team FROM tasks WHERE team IS NOT NULL
+             ORDER BY team",
+        )?;
         let rows = stmt.query_map([], |r| r.get(0))?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
@@ -3705,6 +3715,33 @@ mod tests {
             s.team_members("beta").unwrap()[0].harness,
             HarnessKind::ClaudeCode
         );
+    }
+
+    /// Regression: `jod team task` creates a team's board before anyone
+    /// joins it. `teams()` used to enumerate `team_members` alone, so a
+    /// team that only had a task was invisible to `jod team list` even
+    /// though `jod team show` rendered its board just fine — work parked
+    /// there was undiscoverable by a later session that only knew to list.
+    #[test]
+    fn a_team_with_only_a_task_still_shows_up_in_the_list() {
+        let s = store();
+        s.add_team_task("probe-team-b", "t1", "do the thing")
+            .unwrap();
+
+        assert!(s.team_members("probe-team-b").unwrap().is_empty());
+        assert_eq!(s.teams().unwrap(), vec!["probe-team-b"]);
+    }
+
+    /// A team with a task and a team with a member both show up, merged
+    /// into one alphabetical list rather than two separate answers.
+    #[test]
+    fn task_only_and_member_only_teams_are_merged_in_the_listing() {
+        let s = store();
+        s.join_team("alpha", "scout", HarnessKind::OpenCode, "r")
+            .unwrap();
+        s.add_team_task("zeta", "t1", "park this").unwrap();
+
+        assert_eq!(s.teams().unwrap(), vec!["alpha", "zeta"]);
     }
 
     #[test]
