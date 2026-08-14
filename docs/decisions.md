@@ -329,20 +329,64 @@ restarted process, and silence there reads as "the fix didn't work".
 `tests/install.test.sh` holds a process open across an update and asserts both
 halves.
 
-## Installing means building, not downloading
+## `install.sh` builds; `jod upgrade` downloads
 
-Releases carry no binary assets, so `install.sh` runs `cargo build --release
---locked`. The alternative — cross-compiled tarballs per platform, attached by
-the release workflow — buys a faster first install and costs a build matrix,
-asset naming, checksums and a fallback path for anything unbuilt. It is worth
-revisiting when there is a second machine that cannot build. Until then the box
-running an agent supervisor is one that should be able to rebuild it, and
-`--locked` means the build is the release rather than whatever the registry
-resolved that day.
+`install.sh` runs `cargo build --release --locked`, and that is still the
+install path: the box running an agent supervisor is one that should be able to
+rebuild it, and `--locked` means the build is the release rather than whatever
+the registry resolved that day.
 
-Re-running is cheap because the install is idempotent: the ref *and* the commit
-are recorded (`.jod-version`, `.jod-commit`), and a run whose target commit is
-already installed skips the build entirely and says so.
+The reason originally given for building was that releases carried no binary
+assets. They do now — [the tag and the binaries are one
+act](#the-tag-and-the-binaries-are-one-act) put a build matrix, asset naming
+and checksums in the release workflow, which is exactly the cost this decision
+said it was deferring. So the condition it named — "worth revisiting when there
+is a second machine that cannot build" — has been met, and the revisit is a
+*second* command rather than a rewrite of the first.
+
+Re-running `install.sh` is cheap because the install is idempotent: the ref
+*and* the commit are recorded (`.jod-version`, `.jod-commit`), and a run whose
+target commit is already installed skips the build entirely and says so.
+
+## `update` and `upgrade` are two commands because they are two acts
+
+| | `jod update` | `jod upgrade` |
+|---|---|---|
+| Gets the bits by | `cargo build` in `$JOD_SRC` | downloading `jod-<target>.tar.gz` |
+| Needs | git, a Rust toolchain, a checkout | curl, tar |
+| Moves to | newest patch of the installed MAJOR.MINOR | newest release, any major/minor |
+| Takes | minutes | seconds |
+
+Neither subsumes the other. `update` cannot run at all on a box installed from
+the prebuilt tarball — the README's first install path, the one that advertises
+needing no Rust toolchain — because there is no checkout to build from, and
+before `upgrade` existed such a box had no way to take a new release short of
+reinstalling by hand. `upgrade` in turn cannot install a branch or a commit,
+because no tarball is published for one.
+
+They are not folded into one verb with a flag. A single command whose mechanism
+depended on what happened to be on the box would mean the safe patch-only move
+and the minor-crossing one were the same keystroke, and which you got was a fact
+about the machine rather than about what you asked for.
+
+`upgrade` moves across a minor deliberately, which `update` never does. That is
+the compensating discipline: it is not what runs unattended, and the console
+refuses `/upgrade <version>` outright — landing on a release nobody else is on
+is not a decision to take from inside the console the move replaces.
+
+The published `.sha256` is checked before anything is installed, and a download
+that cannot be verified — bad checksum, or no checksum on the release at all —
+is refused rather than installed with a warning. These binaries are not signed,
+so that check is the only integrity guarantee in the path; skipping it when it
+is inconvenient would make it decorative.
+→ `bin/jod-upgrade.sh`, `cli/src/upgrade.rs`, `tests/upgrade.test.sh`
+
+The script is compiled into the `jod` binary rather than only shipped in the
+repo, and writes itself to a private temp directory to run. The box that most
+needs to upgrade is precisely the one with no copy of this repo on disk, so an
+upgrader that lived only in a checkout would be missing wherever it mattered.
+`bin/lib/semver.sh` is embedded beside it, so the version-comparison rules have
+one implementation shared with `install.sh` rather than two that can disagree.
 
 ## Releases are semver tags, cut manually
 

@@ -218,6 +218,17 @@ pub enum Action {
     Update {
         check: bool,
     },
+    /// Install the newest release of those binaries, downloaded prebuilt.
+    ///
+    /// Runs through the same background-job machinery as [`Action::Update`]
+    /// and differs in what it asks for: a verified tarball off the release
+    /// rather than a `cargo build`, and the newest release rather than the
+    /// newest patch of the installed minor. It is usually seconds instead of
+    /// minutes, and it is the only one of the two that works on a box with no
+    /// checkout to build from.
+    Upgrade {
+        check: bool,
+    },
     /// Restart this console into whatever `jod` is now on disk.
     ///
     /// The one thing an update cannot do to itself: replacing the file does
@@ -655,7 +666,10 @@ async fn event_loop(
                             // Both take something only the loop has: the
                             // terminal, or the job slot the update occupies.
                             Some(Action::Update { check }) => {
-                                start_update(&mut app, &update_tx, check);
+                                start_take(&mut app, &update_tx, check, Take::Update);
+                            }
+                            Some(Action::Upgrade { check }) => {
+                                start_take(&mut app, &update_tx, check, Take::Upgrade);
                             }
                             Some(Action::Dictate) => {
                                 toggle_listening(&jod, &mut app, &mut session, &voice_tx);
@@ -1515,6 +1529,10 @@ async fn perform(
         // so they say so rather than pretending to have run.
         Action::Update { .. } => app.push(Entry::Notice(
             "/update runs from the console's own loop — run `jod update` at a shell instead".into(),
+        )),
+        Action::Upgrade { .. } => app.push(Entry::Notice(
+            "/upgrade runs from the console's own loop — run `jod upgrade` at a shell instead"
+                .into(),
         )),
         Action::Reload => app.push(Entry::Notice(
             "/reload restarts the console, which only the console can do".into(),
@@ -4723,6 +4741,7 @@ fn apply_slash(app: &mut App, slash: command::Slash) -> Option<Action> {
         Slash::Done(id) => return Some(Action::FinishTask(id)),
         Slash::Clear => go_home(app),
         Slash::Update { check } => return Some(Action::Update { check }),
+        Slash::Upgrade { check } => return Some(Action::Upgrade { check }),
         Slash::Jobs => app.overlay = Overlay::Jobs,
         Slash::Reload => return Some(Action::Reload),
         Slash::Exit => app.should_quit = true,
@@ -5748,33 +5767,67 @@ enum UpdateMsg {
     },
 }
 
-/// `/update` — build and install a newer Jod, from inside the Jod you are
+/// Which of the two ways to take a newer Jod a background job is running.
+///
+/// They share every part of this machinery — the job slot, the streamed
+/// output, the "still running the old build" summary — and differ only in
+/// which script does the work and what it is called on screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Take {
+    /// Rebuild from the checkout: patch-only, needs git and cargo, minutes.
+    Update,
+    /// Download the newest release: any major/minor, needs neither, seconds.
+    Upgrade,
+}
+
+impl Take {
+    /// The word this is called by, at a shell and on screen alike.
+    fn verb(self) -> &'static str {
+        match self {
+            Self::Update => "update",
+            Self::Upgrade => "upgrade",
+        }
+    }
+}
+
+/// `/update` and `/upgrade` — install a newer Jod, from inside the Jod you are
 /// running.
 ///
 /// The console on the VPS is where Jod is used, so it is where noticing that
 /// Jod is out of date happens; a command that could only be typed at a shell
 /// would mean quitting the thing you wanted to keep. It runs as a background
-/// job: the installer's output streams into the transcript, and the console
-/// stays usable — agents keep streaming, screens keep refreshing — for the
-/// several minutes a cold `cargo build` takes.
+/// job: the script's output streams into the transcript, and the console stays
+/// usable — agents keep streaming, screens keep refreshing — for the several
+/// minutes a cold `cargo build` takes, or the seconds a download does.
 ///
-/// Safe to run against yourself. The installer renames each new binary over
-/// the old one, so nothing here is writing the file this process is executing.
-fn start_update(app: &mut App, tx: &tokio::sync::mpsc::UnboundedSender<UpdateMsg>, check: bool) {
+/// Safe to run against yourself. Both scripts rename each new binary over the
+/// old one, so nothing here is writing the file this process is executing.
+fn start_take(
+    app: &mut App,
+    tx: &tokio::sync::mpsc::UnboundedSender<UpdateMsg>,
+    check: bool,
+    how: Take,
+) {
+    let verb = how.verb();
     // One at a time, derived from the job table rather than tracked beside it:
-    // two installers writing the same binaries and the same checkout is a race
-    // with a corrupt install at the end of it.
-    if app
-        .jobs
-        .iter()
-        .any(|j| j.is_running() && j.label.starts_with("update"))
-    {
-        app.push(Entry::Notice(
-            "an update is already running — Ctrl-G j shows it".into(),
-        ));
+    // two installers writing the same binaries is a race with a corrupt
+    // install at the end of it. Both verbs are checked, not just this one —
+    // they write the same files, so an update racing an upgrade is the same
+    // race as two updates.
+    if app.jobs.iter().any(|j| {
+        j.is_running() && (j.label.starts_with("update") || j.label.starts_with("upgrade"))
+    }) {
+        app.push(Entry::Notice(format!(
+            "an {verb} is already running — Ctrl-G j shows it"
+        )));
         return;
     }
-    let label = if check { "update --check" } else { "update" };
+    let label = if check {
+        format!("{verb} --check")
+    } else {
+        verb.to_string()
+    };
+    let label = label.as_str();
     let job = app.job_start(label, app.now_ms);
     app.push(Entry::Notice(format!(
         "{label} running in the background · Ctrl-G j lists background shells"
@@ -5793,15 +5846,20 @@ fn start_update(app: &mut App, tx: &tokio::sync::mpsc::UnboundedSender<UpdateMsg
             }
         }
     });
-    // Blocking on purpose: `install.sh` is a subprocess this waits on, and a
+    // Blocking on purpose: the script is a subprocess this waits on, and a
     // blocking wait on a runtime worker would starve the console it is meant
     // to leave usable.
     tokio::task::spawn_blocking(move || {
-        let msg = match crate::update::run_streaming(check, None, false, lines_tx) {
+        let ran = match how {
+            Take::Update => crate::update::run_streaming(check, None, false, lines_tx),
+            Take::Upgrade => crate::upgrade::run_streaming(check, None, false, lines_tx),
+        };
+        let msg = match ran {
             Ok(o) if o.replaced => UpdateMsg::Done {
                 job,
-                said: "update installed — this console is still running the build it started with"
-                    .to_string(),
+                said: format!(
+                    "{verb} installed — this console is still running the build it started with"
+                ),
                 ok: true,
                 replaced: true,
             },
@@ -5813,13 +5871,13 @@ fn start_update(app: &mut App, tx: &tokio::sync::mpsc::UnboundedSender<UpdateMsg
             },
             Ok(_) => UpdateMsg::Done {
                 job,
-                said: "update finished — this console is already running that build".to_string(),
+                said: format!("{verb} finished — this console is already running that build"),
                 ok: true,
                 replaced: false,
             },
             Err(e) => UpdateMsg::Done {
                 job,
-                said: format!("update failed: {e:#}"),
+                said: format!("{verb} failed: {e:#}"),
                 ok: false,
                 replaced: false,
             },
@@ -10539,6 +10597,63 @@ mod tests {
             command::parse("/update v2.0.0"),
             Some(command::Slash::Refused(_))
         ));
+        assert!(matches!(
+            command::parse("/upgrade v2.0.0"),
+            Some(command::Slash::Refused(_))
+        ));
+    }
+
+    /// `/upgrade` used to be a silent alias for `/update`, from before there
+    /// was anything else for it to mean. There is now: at a shell the two
+    /// words name two different acts — rebuild the newest patch from a
+    /// checkout, or download the newest release — and a console where
+    /// `/upgrade` quietly did the first would make one word mean two things
+    /// depending on where it was typed.
+    #[test]
+    fn upgrade_is_its_own_command_and_not_an_alias_of_update() {
+        assert_eq!(
+            command::parse("/upgrade"),
+            Some(command::Slash::Upgrade { check: false })
+        );
+        assert_eq!(
+            command::parse("/upgrade check"),
+            Some(command::Slash::Upgrade { check: true })
+        );
+        assert_eq!(
+            command::parse("/upgrade --check"),
+            Some(command::Slash::Upgrade { check: true })
+        );
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        assert_eq!(
+            apply_slash(&mut app, command::Slash::Upgrade { check: false }),
+            Some(Action::Upgrade { check: false }),
+            "/upgrade hands the work back to the loop, which owns the job table"
+        );
+    }
+
+    /// Both verbs write the same binaries, so they contend for the same job
+    /// slot. An upgrade started while an update is mid-`cargo build` would
+    /// have two processes renaming over the same files.
+    #[test]
+    fn an_upgrade_will_not_start_on_top_of_a_running_update() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        app.job_start("update", 1_000);
+
+        start_take(&mut app, &tx, false, Take::Upgrade);
+        assert_eq!(
+            app.running_jobs(),
+            1,
+            "the upgrade queued a second installer over a running update"
+        );
+        let said = app.transcript.iter().rev().find_map(|e| match e {
+            Entry::Notice(text) => Some(text.clone()),
+            _ => None,
+        });
+        assert!(
+            said.as_deref().is_some_and(|t| t.contains("already running")),
+            "refusing has to say why: {said:?}"
+        );
     }
 
     /// Backgrounding something and giving no way to look at it is asking to be

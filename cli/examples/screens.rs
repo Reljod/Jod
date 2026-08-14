@@ -35,6 +35,10 @@ mod tui;
 // stub would be one more thing that can drift.
 #[path = "../src/update.rs"]
 mod update;
+// `/upgrade` is the other half of that, reaching `crate::upgrade`, and needs
+// to resolve here for exactly the same reason.
+#[path = "../src/upgrade.rs"]
+mod upgrade;
 // And again for dictation: the TUI resolves which engine would transcribe
 // before it starts recording, so `crate::voice` has to exist here even though
 // nothing this example renders will ever press Ctrl-V.

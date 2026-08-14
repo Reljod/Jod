@@ -9,6 +9,7 @@ mod render;
 mod render_time;
 mod tui;
 mod update;
+mod upgrade;
 mod version;
 mod voice;
 
@@ -510,6 +511,30 @@ enum Command {
         #[arg(long)]
         version: Option<String>,
         /// Rebuild and reinstall even when already at the target commit.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Install the newest release of this machine's Jod binaries, downloaded
+    /// prebuilt.
+    ///
+    /// Takes `jod-<target>.tar.gz` off the GitHub release — the artifact the
+    /// Release workflow built from that tag — checks it against the `.sha256`
+    /// published beside it, and renames the binaries into place, so the
+    /// console can upgrade itself while it is running.
+    ///
+    /// Needs curl and tar and nothing else: no checkout, no Rust toolchain.
+    /// That is the difference from `jod update`, which rebuilds from source
+    /// and cannot run at all on a box installed from the prebuilt tarball.
+    /// Unlike `update`, this takes the newest release whatever its major and
+    /// minor — say which one you want with `--version`.
+    Upgrade {
+        /// Say what an upgrade would do, and change nothing.
+        #[arg(long)]
+        check: bool,
+        /// Install a specific release (vX.Y.Z) instead of the newest.
+        #[arg(long)]
+        version: Option<String>,
+        /// Download and reinstall even when already on the target release.
         #[arg(long)]
         force: bool,
     },
@@ -1504,19 +1529,35 @@ async fn main() -> Result<()> {
     // recover a build whose store it cannot open, and a command that needed a
     // working database to fix a broken one would be no use on the day it was
     // needed.
-    if let Command::Update {
-        check,
-        version,
-        force,
-    } = cli.command
-    {
-        let outcome = update::run(check, version, force)?;
-        if outcome.replaced {
-            // Said here rather than by the installer, because only this
-            // process knows it is *itself* the binary that just moved.
-            println!("Anything already running is still the previous build — restart it.");
+    match cli.command {
+        Command::Update {
+            check,
+            version,
+            force,
+        } => {
+            let outcome = update::run(check, version, force)?;
+            if outcome.replaced {
+                // Said here rather than by the installer, because only this
+                // process knows it is *itself* the binary that just moved.
+                println!("Anything already running is still the previous build — restart it.");
+            }
+            return Ok(());
         }
-        return Ok(());
+        // The same reasoning, and more sharply: the box this exists for has no
+        // checkout to rebuild from, so an upgrade is the *only* way it takes a
+        // new release — and a broken store must not stand in the way of one.
+        Command::Upgrade {
+            check,
+            version,
+            force,
+        } => {
+            let outcome = upgrade::run(check, version, force)?;
+            if outcome.replaced {
+                println!("Anything already running is still the previous build — restart it.");
+            }
+            return Ok(());
+        }
+        _ => {}
     }
 
     // Persistent by default: an assistant that forgets every run when the
@@ -2187,7 +2228,9 @@ async fn main() -> Result<()> {
 
         // Returned above, before the store was opened — an update must not
         // need a working database to fix a broken one.
-        Command::Update { .. } => unreachable!("handled before the store is opened"),
+        Command::Update { .. } | Command::Upgrade { .. } => {
+            unreachable!("handled before the store is opened")
+        }
     }
 
     Ok(())
