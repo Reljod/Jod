@@ -190,6 +190,8 @@ pub fn parse(line: &str) -> Option<Slash> {
         "model" | "models" => {
             if arg.is_empty() || arg == "default" || arg == "clear" {
                 Slash::Model(None)
+            } else if let Some(said) = model_refusal(arg) {
+                Slash::Refused(said)
             } else {
                 Slash::Model(Some(arg.to_string()))
             }
@@ -484,6 +486,54 @@ pub(super) fn triple(arg: &str) -> Option<(String, String, String)> {
         }
         _ => None,
     }
+}
+
+/// The longest a model id gets. Not a real limit any harness documents — it is
+/// the point past which the API itself has been seen to refuse the value
+/// (`model: String should have at most 256 characters`), so anything at or
+/// past it is refused here first, with a sentence that names the mistake.
+const MODEL_MAX_LEN: usize = 256;
+
+/// Why `/model <arg>` cannot be a model name, if it cannot be one.
+///
+/// Two checks only, and both are true for every harness Jod knows about:
+/// a model id is one token, and none of them come close to
+/// [`MODEL_MAX_LEN`]. That is deliberately short of "is this actually a model
+/// this harness offers" — this function is a pure read of the typed string,
+/// run before an `App` or a harness choice exists, so it has no model list to
+/// check against. A harness's own list (`app.models`) is the finer sieve and
+/// belongs where that list lives; this is the coarse one that catches what is
+/// *always* wrong regardless of harness or list — chiefly a whole prompt, or a
+/// long paste, landing in the model slot. Catching that here means it reads
+/// back as Jod's own refusal immediately, not as the harness's "model not
+/// found" a whole turn later.
+fn model_refusal(arg: &str) -> Option<String> {
+    let len = arg.chars().count();
+    if len >= MODEL_MAX_LEN {
+        return Some(format!(
+            "/model does not take {len} characters — a model name is well under {MODEL_MAX_LEN}; try /model <name> or /model default"
+        ));
+    }
+    if arg.contains(char::is_whitespace) {
+        return Some(format!(
+            "/model does not take “{}” — a model name is one word, no spaces; try /model <name> or /model default",
+            truncated(arg)
+        ));
+    }
+    None
+}
+
+/// `arg`, or the first stretch of it, so a refusal never puts a wall of text
+/// on screen — the point of the sentence is the diagnosis, not an echo of the
+/// whole mistake.
+fn truncated(arg: &str) -> String {
+    const SHOWN: usize = 60;
+    if arg.chars().count() <= SHOWN {
+        return arg.to_string();
+    }
+    let mut shown: String = arg.chars().take(SHOWN).collect();
+    shown.push('…');
+    shown
 }
 
 /// What `/new <kind>` is asking to make. Named after the singular of the
@@ -1272,6 +1322,54 @@ mod tests {
         assert_eq!(parse("/model"), Some(Slash::Model(None)));
         assert_eq!(parse("/model default"), Some(Slash::Model(None)));
         assert_eq!(parse("/model clear"), Some(Slash::Model(None)));
+    }
+
+    /// A whole sentence in the model slot — what the `harness-eats-prompt`
+    /// sibling bug can put there if its own fix ever slips — is refused by
+    /// Jod at the moment it is typed, not accepted and left for the harness to
+    /// fail a turn later.
+    #[test]
+    fn model_refuses_a_value_with_whitespace() {
+        assert_eq!(
+            parse("/model please summarize the last three commits for me"),
+            Some(Slash::Refused(
+                "/model does not take \u{201c}please summarize the last three commits for \
+                 me\u{201d} — a model name is one word, no spaces; try /model <name> or \
+                 /model default"
+                    .into()
+            ))
+        );
+    }
+
+    /// The API itself has been seen to refuse a model id at 256 characters
+    /// (`model: String should have at most 256 characters`); Jod refuses it
+    /// first, immediately, and says why.
+    #[test]
+    fn model_refuses_a_value_that_is_too_long() {
+        let long = "a".repeat(300);
+        match parse(&format!("/model {long}")) {
+            Some(Slash::Refused(said)) => {
+                assert!(said.contains("300 characters"), "{said}");
+                assert!(!said.contains(&long), "refusal echoed the whole value: {said}");
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    /// A single well-formed token — including one with punctuation a real
+    /// model id uses, like a provider prefix — is still accepted exactly as
+    /// before: this backstop is a coarse, harness-agnostic sieve, not a
+    /// lookup against the model list.
+    #[test]
+    fn model_still_accepts_an_ordinary_looking_name() {
+        assert_eq!(
+            parse("/model opuss"),
+            Some(Slash::Model(Some("opuss".into())))
+        );
+        assert_eq!(
+            parse("/model claude-sonnet-5"),
+            Some(Slash::Model(Some("claude-sonnet-5".into())))
+        );
     }
 
     /// Every mode has to be nameable, or a mode would exist that Tab can reach
