@@ -943,7 +943,7 @@ async fn enter_main(jod: &Arc<Jod>, app: &mut App, opts: &Options, thread: &mut 
     // only a slice.
     match store.live_window(&id) {
         Ok(live) => {
-            for entry in replay(&live) {
+            for entry in replay(&live, app.show_thinking) {
                 app.push(entry);
             }
         }
@@ -962,7 +962,7 @@ async fn enter_main(jod: &Arc<Jod>, app: &mut App, opts: &Options, thread: &mut 
 /// sent, which is the honest thing to put on screen. A message compacted out of
 /// it is still on disk and deliberately not here — showing it would suggest the
 /// model can see something it cannot.
-fn replay(live: &[jod_core::conversation::Message]) -> Vec<Entry> {
+fn replay(live: &[jod_core::conversation::Message], show_thinking: bool) -> Vec<Entry> {
     use jod_core::conversation::Role;
     if live.is_empty() {
         return vec![Entry::Notice(
@@ -972,8 +972,14 @@ fn replay(live: &[jod_core::conversation::Message]) -> Vec<Entry> {
     }
     let mut entries: Vec<Entry> = live
         .iter()
+        .filter(|message| show_thinking || message.role != Role::Thinking)
         .map(|message| match message.role {
             Role::User => Entry::You(message.text.clone()),
+            // Reasoning replays as reasoning. Folded into `Agent` it was
+            // rendered as the chat's own words, so re-entering the chat turned
+            // a model muttering to itself into something it had said to you —
+            // and the same text read differently live and on the way back.
+            Role::Thinking => Entry::Thinking(message.text.clone()),
             _ => Entry::Agent(message.text.clone()),
         })
         .collect();
@@ -6449,7 +6455,7 @@ mod tests {
         let id = s.main_conversation(HarnessKind::ClaudeCode, "/tmp").unwrap();
 
         // Empty: a sentence saying so, not a blank screen.
-        let empty = replay(&s.live_window(&id).unwrap());
+        let empty = replay(&s.live_window(&id).unwrap(), true);
         assert!(
             matches!(&empty[..], [Entry::Notice(n)] if n.contains("nothing said yet")),
             "{empty:?}"
@@ -6460,7 +6466,7 @@ mod tests {
         s.append_message(&id, NewMessage::new(Role::Assistant, "started an agent"))
             .unwrap();
 
-        let entries = replay(&s.live_window(&id).unwrap());
+        let entries = replay(&s.live_window(&id).unwrap(), true);
         // Your turns read as yours and the chat's as the chat's — a replay that
         // flattened both to prose would be a transcript of nobody.
         assert!(matches!(&entries[0], Entry::You(t) if t == "count the rust files"));
@@ -6469,6 +6475,42 @@ mod tests {
             matches!(entries.last(), Some(Entry::Notice(n)) if n.contains("2 messages")
                 && n.contains("live window")),
             "and says how much of it the harness is actually carrying: {entries:?}"
+        );
+    }
+
+    /// The other half of "your turns read as yours": reasoning is neither, and
+    /// replaying it as the chat's own prose put words in the chat's mouth.
+    #[test]
+    fn replayed_reasoning_reads_as_reasoning_and_goes_when_it_is_off() {
+        use jod_core::conversation::{NewMessage, Role};
+        let s = store();
+        let id = s.main_conversation(HarnessKind::ClaudeCode, "/tmp").unwrap();
+        s.append_message(&id, NewMessage::new(Role::User, "count them"))
+            .unwrap();
+        s.append_message(&id, NewMessage::new(Role::Thinking, "two ways to do this"))
+            .unwrap();
+        s.append_message(&id, NewMessage::new(Role::Assistant, "started an agent"))
+            .unwrap();
+        let live = s.live_window(&id).unwrap();
+
+        let shown = replay(&live, true);
+        assert!(
+            matches!(&shown[1], Entry::Thinking(t) if t == "two ways to do this"),
+            "{shown:?}"
+        );
+
+        let hidden = replay(&live, false);
+        assert!(
+            !hidden.iter().any(|e| matches!(e, Entry::Thinking(_))),
+            "{hidden:?}"
+        );
+        // Hiding it drops the line, not the turn it belonged to.
+        assert!(matches!(&hidden[1], Entry::Agent(t) if t == "started an agent"));
+        // And the window is still reported at its true size — the chat carries
+        // the reasoning whether or not this screen is drawing it.
+        assert!(
+            matches!(hidden.last(), Some(Entry::Notice(n)) if n.contains("3 messages")),
+            "{hidden:?}"
         );
     }
 

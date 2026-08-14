@@ -159,6 +159,18 @@ fn exit_status(is_error: bool, exit_code: Option<i32>) -> i32 {
     }
 }
 
+/// One block of reasoning, indented and dimmed so it reads as the agent
+/// muttering rather than as the agent answering.
+///
+/// Shared rather than duplicated because two different commands follow a live
+/// run — `jod run`/`jod watch` here, and `jod main --wait` in `main.rs` — and
+/// reasoning that looked like an answer in one of them would be worse than
+/// showing none at all. Each caller chooses its own stream: this one puts
+/// progress on stderr, `jod main --wait` puts its whole live view on stdout.
+pub fn thinking_block(text: &str) -> String {
+    paint(DIM, &indent(text, "  "))
+}
+
 fn print_event(event: &AgentEvent, show_thinking: bool) {
     match event {
         AgentEvent::Started { model, .. } => {
@@ -168,18 +180,23 @@ fn print_event(event: &AgentEvent, show_thinking: bool) {
         }
         AgentEvent::Thinking { text } => {
             if show_thinking {
-                emit(&paint(DIM, &indent(text, "  ")));
+                emit(&thinking_block(text));
             }
         }
-        // Not behind `--thinking`, and not dim: this is the reason the run is
-        // about to end having done nothing, and a person who cannot see it is
-        // left with an instant unexplained failure.
+        // Not silenced by `--no-thinking`, and not dim: this is the reason the
+        // run is about to end having done nothing, and a person who cannot see
+        // it is left with an instant unexplained failure.
         AgentEvent::SessionLost { session_id } => emit(&format!(
             "  session {session_id} is gone from the harness; the next turn starts fresh"
         )),
         // The same information as `Thinking`, counted rather than quoted, so it
-        // rides the same flag: `--thinking` turns the silent stretch of a long
-        // reasoning turn into a running count instead of nothing at all.
+        // rides the same flag: shown by default, the silent stretch of a long
+        // reasoning turn is a running count instead of nothing at all, and
+        // `--no-thinking` gives up both together.
+        //
+        // On a model that withholds its reasoning text this tick is the *only*
+        // signal — `claude-sonnet-5` sends thinking blocks with no sentences in
+        // them, so there is a count and never a quote.
         //
         // A tick without a count still prints — "it is alive" is the whole
         // message, and swallowing the tick because its counter is missing would

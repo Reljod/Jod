@@ -2329,3 +2329,35 @@ One consequence beyond the UI: [heartbeats](#alive-is-not-working-and-only-one-o
 ask whether a run is *producing events*, and a long think used to produce none.
 Ticks now advance the run's high-water `seq`, so thinking reads as working —
 which is what it is.
+
+## Reasoning is shown by default, and hiding it is the flag
+
+Every surface that follows a run had the toggle and three of them started with
+it off, so the default answer to "what is it doing" was a list of tool names.
+That is the least informative half of a run: `Read`, `Grep`, `Bash`, `Edit`
+says which files were touched and never why one branch was taken over another.
+`jod main --wait` was worse than off — it matched on `Message` and `ToolCall`
+and let every other event fall through, so no toggle would have helped it.
+
+So the default is *shown*, and the flag is `--no-thinking`. The inversion is the
+point: the thing worth a flag is turning the noise off, and a person who wants
+less reads it in the help. Recording was never in question — a `thinking`
+message is stored whatever any of this says, because a conversation read back
+tomorrow must not be missing its reasoning because a display toggle was off
+yesterday.
+
+One consequence worth stating: on `jod run` and `jod watch` reasoning goes to
+stderr with the rest of the progress, so `jod run … > out.txt` still captures
+the answer and nothing else. `jod main --wait` puts its whole live view on
+stdout and continues to.
+
+And a finding that arrived with it, which is why the ticks above matter more
+than they look: on `claude-sonnet-5` the reasoning **has no text**. The block
+arrives signed and empty — `{"type":"thinking","thinking":"","signature":"…"}` —
+where the same binary on `claude-sonnet-4-6` sends the sentences, so it is the
+model withholding rather than the CLI version, and `--include-partial-messages`
+does not recover it either: its `thinking_delta`s are empty too. Every one of
+the 112 `thinking` rows in the store was the empty string, drawn faithfully as a
+blank line between the tool calls. The adapter now drops an empty block — the
+guard the `text` arm has always had. So on a Claude 5 model the tick *is* the
+whole signal, and no display setting can produce sentences that were never sent.

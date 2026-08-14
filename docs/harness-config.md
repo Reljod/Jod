@@ -98,8 +98,13 @@ Claude Code and OpenCode both surface reasoning, and Jod stores it as a
 `thinking` message distinct from the assistant's text. OpenCode needs
 `--thinking` to emit any, which Jod now always passes — what gets *recorded* is
 not a display preference, and a conversation read back tomorrow should not be
-missing its reasoning because a toggle was off yesterday. Whether it is *shown*
-is `/thinking`.
+missing its reasoning because a toggle was off yesterday.
+
+Whether it is *shown* defaults to yes, everywhere: the console, the phone and
+the web HUD, `jod run`, `jod watch` and `jod main --wait`. `/thinking` turns it
+off in the console and on the phone (and the console remembers the choice);
+`--no-thinking` does it for one invocation of `jod run` or `jod watch`.
+→ [why](decisions.md#reasoning-is-shown-by-default-and-hiding-it-is-the-flag)
 
 AGY's stream has no reasoning message type at all, only `agent_response` and
 `tool` steps, so there is nothing to show there and Jod does not pretend

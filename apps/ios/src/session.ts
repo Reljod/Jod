@@ -118,6 +118,12 @@ export interface SessionState {
   /** What the *next* turn will ask the harness to continue. */
   resume: Resume;
   costUsd: number;
+  /**
+   * Whether the agent's reasoning is shown. On by default, like
+   * {@link SessionState.showDetails} and for the same reason: with it off the
+   * transcript is a list of tool calls, and a list of tool calls does not say
+   * why any of them happened.
+   */
   showThinking: boolean;
   /**
    * Whether tool output is shown. On by default: the reason to watch a harness
@@ -165,7 +171,7 @@ export function newSession(
     session: null,
     resume,
     costUsd: 0,
-    showThinking: false,
+    showThinking: true,
     showDetails: true,
     pane: "chat",
     busy: false,

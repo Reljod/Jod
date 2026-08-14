@@ -321,9 +321,25 @@ impl ClaudeCode {
         let mut out = vec![];
         for block in blocks(v) {
             match block.get("type").and_then(Value::as_str) {
+                // A block with no readable text is not reasoning that happened
+                // to be short — it is reasoning the model **withheld**, and
+                // measured rather than guessed: on `claude-sonnet-5` this build
+                // sends `{"type":"thinking","thinking":"","signature":"…"}` for
+                // every turn, while the same binary on `claude-sonnet-4-6`
+                // sends the sentences. `--include-partial-messages` does not
+                // help; its `thinking_delta`s are empty too.
+                //
+                // Emitting it anyway put an empty `Thinking` event into the
+                // stream, which every surface faithfully drew as a blank line
+                // between the tool calls and stored as a `thinking` row with
+                // nothing in it. A hundred of those is a transcript that looks
+                // like it lost something. The same guard the `text` arm below
+                // has always had, for the same reason.
                 Some("thinking") => {
                     if let Some(t) = str_at(block, "thinking") {
-                        out.push(AgentEvent::Thinking { text: t });
+                        if !t.trim().is_empty() {
+                            out.push(AgentEvent::Thinking { text: t });
+                        }
                     }
                 }
                 Some("text") => {
@@ -1237,6 +1253,38 @@ mod tests {
                 },
             ]
         );
+    }
+
+    /// The shape `claude-sonnet-5` actually sends: the block is there, signed,
+    /// and empty. Recorded as an event it became a blank line in the console,
+    /// on the phone and in `jod watch`, and a `thinking` row with nothing in it
+    /// in the store — a transcript that reads as though it lost something.
+    ///
+    /// Withheld reasoning is not something Jod can fix, but it can decline to
+    /// draw it. A model that *does* send the sentences is unaffected: that is
+    /// the assertion above this one.
+    #[test]
+    fn reasoning_the_model_withheld_is_not_reported_as_an_empty_thought() {
+        let mut h = ClaudeCode::default();
+        let out = h.parse_line(
+            r#"{"type":"assistant","message":{"content":[
+                {"type":"thinking","thinking":"","signature":"EqQCCkYIBRgCKkA…"},
+                {"type":"text","text":"PONG"}]}}"#,
+        );
+        assert_eq!(
+            out,
+            vec![AgentEvent::Message {
+                text: "PONG".into()
+            }],
+            "an empty thought reached the stream"
+        );
+        // Whitespace is the same nothing.
+        assert!(h
+            .parse_line(
+                r#"{"type":"assistant","message":{"content":[
+                    {"type":"thinking","thinking":"  \n "}]}}"#
+            )
+            .is_empty());
     }
 
     #[test]
