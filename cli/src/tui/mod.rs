@@ -5970,13 +5970,24 @@ mod tests {
         );
     }
 
-    /// `harness-eats-prompt`: typing a plain sentence right after a switch used
-    /// to land inside the auto-offered `/model ` line instead of starting a
-    /// prompt of its own, so "PONG" became "/model PONG" — a model rename, not
-    /// a turn — and the reply that finally *did* spawn failed a run later,
-    /// naming neither Jod nor the cause. The offer is a hint, not something the
-    /// user asked to type into, so the first character typed after it must
-    /// begin a fresh line and the whole sentence must reach `Action::Send`.
+    /// `harness-eats-prompt`: typing a plain word right after a switch used to
+    /// land inside the auto-offered `/model ` line instead of starting a
+    /// prompt of its own, so "hello" became "/model hello" — a model rename,
+    /// not a turn — and the reply that finally *did* spawn failed a run later,
+    /// naming neither Jod nor the cause.
+    ///
+    /// One word on purpose, not a sentence: `/model` now refuses anything with
+    /// a space in it (see `command::parse`'s validation), which already turns
+    /// a multi-word prompt into a visible, immediate refusal instead of a
+    /// silent swallow. A bare word is indistinguishable from a real model name
+    /// at that layer — `hello`, `continue`, `go`, `yes` are all one token —
+    /// so it sails straight through and is exactly the case still left for
+    /// this fix to close: the offer must never reach the parser as an
+    /// argument in the first place.
+    ///
+    /// The offer is a hint, not something the user asked to type into, so the
+    /// first character typed after it must begin a fresh line and the whole
+    /// word must reach `Action::Send`.
     #[test]
     fn typing_after_a_switch_starts_a_prompt_not_a_model_name() {
         let mut app = app_on(HarnessKind::ClaudeCode);
@@ -5985,7 +5996,7 @@ mod tests {
         assert_eq!(app.input, "/model ", "the offer landed as documented");
         assert!(thread.model_offer_unread, "and nobody has read it yet");
 
-        for c in "PONG".chars() {
+        for c in "hello".chars() {
             on_key(
                 &mut app,
                 &mut thread,
@@ -5993,7 +6004,7 @@ mod tests {
                 20,
             );
         }
-        assert_eq!(app.input, "PONG", "not \"/model PONG\"");
+        assert_eq!(app.input, "hello", "not \"/model hello\"");
         assert!(!thread.model_offer_unread, "the first keystroke reads it");
 
         let action = on_key(
@@ -6004,7 +6015,7 @@ mod tests {
         );
         assert_eq!(
             action,
-            Some(Action::Send("PONG".to_string())),
+            Some(Action::Send("hello".to_string())),
             "a run should spawn with this prompt, not a model change"
         );
     }
