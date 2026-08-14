@@ -182,6 +182,135 @@ fn the_session_id_reaches_the_conversation_even_though_the_launcher_is_gone() {
     );
 }
 
+/// A session the harness has lost must stop being resumed — durably, and by
+/// the supervisor, because there may be nobody else left to notice.
+///
+/// The bug, observed on the developer's own machine: a conversation held a
+/// session id Claude Code no longer had. Every turn was launched
+/// `--resume <that id>`, and every turn was refused in under a second, having
+/// done nothing and spent nothing. Three in a row in the run table, identical.
+/// Nothing anywhere cleared the pointer, so the thread could not take another
+/// turn — not that day, not ever. A conversation is not supposed to be
+/// reachable only until its harness forgets it.
+///
+/// *Why* the harness forgot is deliberately not claimed here: the session file
+/// was gone from `~/.claude/projects` along with a whole sibling project
+/// directory, and nothing in Jod deletes either. The repair does not depend on
+/// knowing — a pointer the harness has disowned is dead however it died.
+///
+/// The load-bearing clause is the fixture, as in the test above: the launcher
+/// is **already gone**. Recovery that needs the console to still be open is
+/// not recovery, because the console is exactly what a person closes and
+/// reopens before typing the turn that fails.
+#[test]
+fn a_session_the_harness_has_lost_stops_being_resumed() {
+    let fixture = Fixture::new("lost-session", LOST_SESSION_HARNESS, 1);
+
+    let store = Store::open(&fixture.db).unwrap();
+    let conversation = store
+        .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
+        .unwrap()
+        .id;
+    store
+        .append_message(
+            &conversation,
+            jod_core::conversation::NewMessage {
+                run_id: Some(fixture.run_id.clone()),
+                ..jod_core::conversation::NewMessage::new(
+                    jod_core::conversation::Role::User,
+                    "carry on",
+                )
+            },
+        )
+        .unwrap();
+    // The state the bug leaves behind: a pointer to a session that is gone.
+    store
+        .set_conversation_session(&conversation, Some("sess-gone"))
+        .unwrap();
+    drop(store);
+
+    fixture.launch_from_a_process_that_exits();
+
+    let store = Store::open(&fixture.db).unwrap();
+    let events = fixture.wait_for_finish(&store);
+    let kinds: Vec<&str> = events.iter().map(kind_of).collect();
+    assert!(
+        kinds.contains(&"session_lost"),
+        "the refusal was not recognised, so nothing could act on it: {kinds:?}"
+    );
+
+    assert_eq!(
+        store
+            .conversation(&conversation)
+            .unwrap()
+            .unwrap()
+            .session_id,
+        None,
+        "the dead session id is still on the conversation, so the next turn \
+         resumes it and fails in exactly the same way"
+    );
+    // Stated as the thing a caller actually asks, which is what decides how
+    // the next turn is launched.
+    assert_eq!(
+        store
+            .resume_for(&conversation, HarnessKind::ClaudeCode)
+            .unwrap(),
+        jod_core::harness::Resume::Fresh,
+        "resume_for still hands out the dead session"
+    );
+}
+
+/// Repair is not licence to clear whatever is there. A refusal naming a
+/// session the conversation has already moved off — a turn that raced a
+/// handoff, a straggling supervisor reporting late — must leave the live
+/// pointer alone.
+///
+/// Without the guard the failure is worse than the one being fixed: the thread
+/// is on a perfectly good session, and a stale message drops it.
+#[test]
+fn a_refusal_naming_some_other_session_leaves_a_live_one_alone() {
+    let fixture = Fixture::new("lost-other", LOST_SESSION_HARNESS, 1);
+
+    let store = Store::open(&fixture.db).unwrap();
+    let conversation = store
+        .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
+        .unwrap()
+        .id;
+    store
+        .append_message(
+            &conversation,
+            jod_core::conversation::NewMessage {
+                run_id: Some(fixture.run_id.clone()),
+                ..jod_core::conversation::NewMessage::new(
+                    jod_core::conversation::Role::User,
+                    "carry on",
+                )
+            },
+        )
+        .unwrap();
+    // The harness above refuses `sess-gone`; this thread has since moved on.
+    store
+        .set_conversation_session(&conversation, Some("sess-current"))
+        .unwrap();
+    drop(store);
+
+    fixture.launch_from_a_process_that_exits();
+
+    let store = Store::open(&fixture.db).unwrap();
+    fixture.wait_for_finish(&store);
+
+    assert_eq!(
+        store
+            .conversation(&conversation)
+            .unwrap()
+            .unwrap()
+            .session_id
+            .as_deref(),
+        Some("sess-current"),
+        "a refusal about a different session dropped this thread's live one"
+    );
+}
+
 #[test]
 fn a_failing_harness_is_recorded_as_failed_not_quietly_finished() {
     let fixture = Fixture::new("failing", CHATTY_HARNESS, 3);
@@ -270,6 +399,15 @@ exit $JOD_TEST_EXIT
 const SLOW_HARNESS: &str = r#"
 echo '{"type":"system","subtype":"init","session_id":"sess-abc","model":"test-model"}'
 sleep 120
+"#;
+
+/// Claude Code refusing `--resume` for a session it no longer holds: one line
+/// on stderr, exit 1, and nothing else on the wire — no `init`, so no
+/// `Started`, so nothing that would otherwise record a session id. Copied from
+/// a real failure rather than invented.
+const LOST_SESSION_HARNESS: &str = r#"
+echo 'No conversation found with session ID: sess-gone' >&2
+exit $JOD_TEST_EXIT
 "#;
 
 struct Fixture {
@@ -414,6 +552,7 @@ fn kind_of(e: &jod_core::event::AgentEnvelope) -> &'static str {
         AgentEvent::ToolResult { .. } => "tool_result",
         AgentEvent::Finished { .. } => "finished",
         AgentEvent::Raw { .. } => "raw",
+        AgentEvent::SessionLost { .. } => "session_lost",
         AgentEvent::Error { .. } => "error",
     }
 }

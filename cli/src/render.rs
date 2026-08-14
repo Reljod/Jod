@@ -171,6 +171,12 @@ fn print_event(event: &AgentEvent, show_thinking: bool) {
                 emit(&paint(DIM, &indent(text, "  ")));
             }
         }
+        // Not behind `--thinking`, and not dim: this is the reason the run is
+        // about to end having done nothing, and a person who cannot see it is
+        // left with an instant unexplained failure.
+        AgentEvent::SessionLost { session_id } => emit(&format!(
+            "  session {session_id} is gone from the harness; the next turn starts fresh"
+        )),
         // The same information as `Thinking`, counted rather than quoted, so it
         // rides the same flag: `--thinking` turns the silent stretch of a long
         // reasoning turn into a running count instead of nothing at all.

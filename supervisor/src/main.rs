@@ -175,6 +175,9 @@ async fn run(plan_path: &PathBuf) -> Result<(), String> {
                         if let AgentEvent::Started { session_id: Some(id), .. } = &event {
                             writer.set_session(id);
                         }
+                        if let AgentEvent::SessionLost { session_id } = &event {
+                            writer.clear_session(session_id);
+                        }
                         if let AgentEvent::ToolCall { name, input } = &event {
                             if let Some(path) = workdir::written_path(name, input.as_ref()) {
                                 // Relative to the harness, which is running in
@@ -516,6 +519,50 @@ impl EventWriter {
             }
             Ok(None) => {}
             Err(e) => eprintln!("jod-run: could not find the run's conversation: {e}"),
+        }
+    }
+
+    /// Drop a conversation's session pointer once the harness has disowned it.
+    ///
+    /// The exact inverse of [`set_session`](EventWriter::set_session), and here
+    /// for the same reason: this is the process that cannot miss it. Without it
+    /// the pointer is permanent — `resume_for` keeps answering with a dead id,
+    /// every turn is launched as `--resume <gone>`, and the harness refuses
+    /// before it starts. That is not a run that failed; it is a thread that can
+    /// never take another turn. Three consecutive turns died this way on the
+    /// developer's own box, each in under a second, each naming the same id.
+    ///
+    /// **Only when the rejected id is the one the row still holds.** A turn
+    /// that raced a handoff — or a straggling supervisor reporting on a session
+    /// the thread has already moved off — would otherwise clear a *live*
+    /// pointer and cost the very continuity this exists to protect. A mismatch
+    /// is left alone deliberately: there is nothing here to repair.
+    ///
+    /// Clearing it is enough on its own. A conversation with no session id is
+    /// the ordinary "not on a harness yet" state, which `resume_for` answers
+    /// `Fresh` for and which the caller replays its own transcript into — so
+    /// the next turn carries the thread's history rather than starting
+    /// amnesiac.
+    fn clear_session(&self, rejected: &str) {
+        let conversation = match self.store.conversation_for_run(&self.run_id) {
+            Ok(Some(id)) => id,
+            // A run with no conversation has no pointer to repair.
+            Ok(None) => return,
+            Err(e) => {
+                eprintln!("jod-run: could not find the run's conversation: {e}");
+                return;
+            }
+        };
+        match self.store.conversation(&conversation) {
+            Ok(Some(row)) if row.session_id.as_deref() == Some(rejected) => {}
+            Ok(_) => return,
+            Err(e) => {
+                eprintln!("jod-run: could not read the conversation's session: {e}");
+                return;
+            }
+        }
+        if let Err(e) = self.store.set_conversation_session(&conversation, None) {
+            eprintln!("jod-run: could not drop the dead session pointer: {e}");
         }
     }
 

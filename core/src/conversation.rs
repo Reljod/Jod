@@ -249,11 +249,19 @@ impl NewMessage {
             // `Progress` and `Delta` join them: a liveness tick with no
             // content, and a fragment whose complete form is handled above —
             // neither belongs in a transcript replayed into another harness.
+            //
+            // `SessionLost` too, and it is the clearest case of the three: it
+            // is a fact about Jod's bookkeeping, not about the conversation.
+            // The thread it interrupts is *about* to be replayed into a fresh
+            // session, and telling that session its predecessor could not be
+            // found would put Jod's plumbing into the model's context as though
+            // somebody had said it.
             AgentEvent::Started { .. }
             | AgentEvent::Finished { .. }
             | AgentEvent::Raw { .. }
             | AgentEvent::Progress { .. }
-            | AgentEvent::Delta { .. } => None,
+            | AgentEvent::Delta { .. }
+            | AgentEvent::SessionLost { .. } => None,
         }
     }
 }

@@ -2141,6 +2141,32 @@ impl App {
                     self.reported_model = Some(m.clone());
                 }
             }
+            // The exact inverse of the arm above, and it has to be here rather
+            // than only in the database: this cursor is held in memory, so a
+            // console that had already advanced onto a session goes on asking
+            // for it every turn no matter what the row says. That is what three
+            // identical one-second failures in a row looked like from the
+            // outside — the same dead id, resent by the same live `App`.
+            //
+            // Only when it is *this* chat's session. A background delegation
+            // resuming something of its own is not evidence about the cursor
+            // here, and clearing on it would drop a live thread's continuity.
+            //
+            // `Fresh` rather than `Last`: the next turn carries the transcript
+            // Jod itself holds, which is a thing Jod can prove, where "the most
+            // recent conversation in this directory" is the harness guessing.
+            AgentEvent::SessionLost { session_id } => {
+                if self.session.as_deref() != Some(session_id.as_str()) {
+                    return;
+                }
+                self.session = None;
+                self.resume = Resume::Fresh;
+                self.push(Entry::Notice(
+                    "that harness session is gone — the next message replays \
+                     this thread into a fresh one"
+                        .into(),
+                ));
+            }
             AgentEvent::Thinking { text } => {
                 if self.show_thinking {
                     self.push(Entry::Thinking(text.clone()));
@@ -2640,6 +2666,52 @@ mod tests {
         let mut a = app();
         a.apply(&AgentEvent::Message { text: "hi".into() });
         assert_eq!(a.transcript, vec![Entry::Agent("hi".into())]);
+    }
+
+    /// The database half of this fix cannot reach a console that is already
+    /// running: the cursor it launches turns from is this field. Without this
+    /// arm the row is repaired and the very next keystroke sends the dead id
+    /// again — which is what three identical failures in a row actually were.
+    #[test]
+    fn a_lost_session_drops_the_cursor_that_keeps_asking_for_it() {
+        let mut a = app();
+        a.apply(&AgentEvent::Started {
+            session_id: Some("sess-abc".into()),
+            model: None,
+        });
+        assert_eq!(a.resume, Resume::Session("sess-abc".into()));
+
+        a.apply(&AgentEvent::SessionLost {
+            session_id: "sess-abc".into(),
+        });
+        assert_eq!(
+            a.resume,
+            Resume::Fresh,
+            "the console would go on resuming a session the harness has lost"
+        );
+        assert_eq!(a.session, None);
+        assert!(
+            a.transcript.iter().any(|e| matches!(e, Entry::Notice(_))),
+            "a thread that silently starts over is a thread that lost its \
+             memory without telling anyone"
+        );
+    }
+
+    /// A background delegation losing its own session says nothing about this
+    /// chat's cursor. Clearing on it would drop a live thread's continuity to
+    /// repair one that was never broken.
+    #[test]
+    fn another_runs_lost_session_leaves_this_chats_cursor_alone() {
+        let mut a = app();
+        a.apply(&AgentEvent::Started {
+            session_id: Some("sess-mine".into()),
+            model: None,
+        });
+        a.apply(&AgentEvent::SessionLost {
+            session_id: "sess-somebody-elses".into(),
+        });
+        assert_eq!(a.resume, Resume::Session("sess-mine".into()));
+        assert_eq!(a.session.as_deref(), Some("sess-mine"));
     }
 
     #[test]
