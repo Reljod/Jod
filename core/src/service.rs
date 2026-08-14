@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
-use tokio::sync::{broadcast, mpsc, RwLock};
+use tokio::sync::{broadcast, mpsc, RwLock, Semaphore};
 
 use crate::cards::{CardKind, Importance, NewCard, Source};
 use crate::conversation::{Conversation, NewMessage};
@@ -441,6 +441,35 @@ fn record_in_conversation(store: &Store, conversation_id: &str, envelope: &Agent
 /// leaves the run marked running with no explanation.
 const KILL_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// How often the concurrency watcher checks whether a launched run's process
+/// group is still alive. Same order of magnitude as [`runner::follow`]'s own
+/// poll, which this deliberately does not share — this one exists even when
+/// nobody is watching the run's output, and coupling the two would mean a
+/// change to one silently retunes the other.
+const CAPACITY_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(150);
+
+/// The cap on agents running at once, before an eighth agent takes a four-core
+/// box to a load of 60. `available_parallelism` unless `JOD_MAX_CONCURRENT_AGENTS`
+/// says otherwise — the same override shape [`crate::discovery::find_binary`]
+/// uses, so one environment variable can pin this on a box that wants a
+/// different number than its own core count.
+///
+/// A box that cannot even ask how many cores it has gets 1, not 0 — a cap of
+/// zero would refuse every spawn forever, which is a worse failure than
+/// running one agent at a time on hardware nobody could size.
+pub fn default_max_concurrent_agents() -> usize {
+    if let Ok(v) = std::env::var("JOD_MAX_CONCURRENT_AGENTS") {
+        if let Ok(n) = v.parse::<usize>() {
+            if n > 0 {
+                return n;
+            }
+        }
+    }
+    std::thread::available_parallelism()
+        .map(std::num::NonZeroUsize::get)
+        .unwrap_or(1)
+}
+
 struct AgentRecord {
     summary: AgentSummary,
     events: Vec<AgentEnvelope>,
@@ -461,6 +490,13 @@ pub struct Jod {
     events_tx: mpsc::UnboundedSender<AgentEnvelope>,
     broadcast_tx: broadcast::Sender<AgentEnvelope>,
     store: Option<Arc<Store>>,
+    /// Bounds how many launched processes may be running at once. Every
+    /// caller funnels through [`Jod::spawn_agent_in`], which acquires a
+    /// permit before [`runner::launch`] and hands it to a watcher that holds
+    /// it for the launched process's whole life — so the (N+1)th concurrent
+    /// spawn queues on `acquire_owned` rather than piling another process
+    /// onto a box that is already at capacity. → `default_max_concurrent_agents`
+    concurrency: Arc<Semaphore>,
 }
 
 impl Jod {
@@ -490,6 +526,7 @@ impl Jod {
             events_tx,
             broadcast_tx: broadcast_tx.clone(),
             store: store.clone(),
+            concurrency: Arc::new(Semaphore::new(default_max_concurrent_agents())),
         });
 
         let state = jod.state.clone();
@@ -913,6 +950,22 @@ impl Jod {
             eprintln!("[jod] could not persist run: {e}");
         }
 
+        // Wait for a slot before starting a process, not before accepting the
+        // request — the request is already recorded above. This is the one
+        // seam every caller funnels through (the TUI calls this directly; the
+        // API's own pre-check at `max_concurrent_agents` runs before it ever
+        // gets here), so queueing here is what keeps an eighth agent on a
+        // four-core box from becoming an eighth process. `acquire_owned` is a
+        // fair FIFO wait, not a rejection: a queued caller's `spawn_agent_in`
+        // simply takes longer to return, which is the whole of "queue, don't
+        // reject."
+        let permit = self
+            .concurrency
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("the concurrency semaphore is never closed");
+
         let launch = runner::launch(
             &id,
             &req,
@@ -926,6 +979,8 @@ impl Jod {
         let launched = match launch {
             Ok(l) => l,
             Err(e) => {
+                // `permit` drops here, freeing the slot immediately: nothing
+                // was ever running, so nothing should be waited on.
                 let mut guard = self.state.write().await;
                 if let Some(record) = guard.agents.get_mut(&id) {
                     record.summary.status = AgentStatus::Failed;
@@ -934,6 +989,23 @@ impl Jod {
                 return Err(e);
             }
         };
+
+        // Hand the permit to a watcher that holds it for the process's whole
+        // life and releases it the moment the process group is gone —
+        // however the run ends: it finishes, it is killed, or its supervisor
+        // dies without ever writing a `Finished` event. Tied to the process
+        // group rather than to the event stream on purpose: a slot the event
+        // stream forgot to free is a concurrency cap that silently stops
+        // admitting anyone, which is worse than the bug this fixes.
+        {
+            let pgid = launched.pgid;
+            tokio::spawn(async move {
+                let _permit = permit;
+                while proc::group_alive(pgid) {
+                    tokio::time::sleep(CAPACITY_POLL_INTERVAL).await;
+                }
+            });
+        }
 
         let summary = {
             let mut guard = self.state.write().await;
@@ -2160,6 +2232,128 @@ mod tests {
             store.runs(10).unwrap().is_empty(),
             "nothing may be recorded as running when nothing was launched"
         );
+    }
+
+    /// The regression this whole cap exists to fix: 8 agents took a 4-core box
+    /// to a load of 60, because nothing on the `spawn_agent_in` path — the one
+    /// seam the TUI and the API both funnel through — ever consulted a core
+    /// count. With the cap set to 2, a third concurrent spawn must not start a
+    /// third process; it must sit queued until one of the first two ends.
+    ///
+    /// Stands up fake `claude` and `jod-run` binaries under `JOD_CLAUDE_BIN`
+    /// and `JOD_SUPERVISOR_BIN` — the same override discovery.rs already
+    /// supports for pointing at a real install — so this exercises the actual
+    /// launch path (`runner::launch`, `proc::spawn_detached`, a real process
+    /// group) rather than asserting a config value is merely read.
+    #[tokio::test]
+    async fn a_spawn_past_the_cap_queues_instead_of_launching() {
+        let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let dir = scratch("cap");
+
+        // A `claude` that discovery can find and `runner::launch` can exec.
+        let claude_bin = dir.join("claude");
+        std::fs::write(&claude_bin, "#!/bin/sh\nexit 0\n").unwrap();
+        // A `jod-run` stand-in: it holds its process group open for two
+        // seconds, standing in for a harness actually doing work, so a slot
+        // it occupies stays occupied long enough for the assertions below to
+        // land inside that window rather than racing it.
+        let supervisor_bin = dir.join("jod-run");
+        std::fs::write(&supervisor_bin, "#!/bin/sh\nsleep 2\n").unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&claude_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+            std::fs::set_permissions(&supervisor_bin, std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+        }
+
+        let saved_home = std::env::var("JOD_HOME").ok();
+        let saved_claude = std::env::var("JOD_CLAUDE_BIN").ok();
+        let saved_supervisor = std::env::var("JOD_SUPERVISOR_BIN").ok();
+        let saved_cap = std::env::var("JOD_MAX_CONCURRENT_AGENTS").ok();
+        std::env::set_var("JOD_HOME", &dir);
+        std::env::set_var("JOD_CLAUDE_BIN", &claude_bin);
+        std::env::set_var("JOD_SUPERVISOR_BIN", &supervisor_bin);
+        std::env::set_var("JOD_MAX_CONCURRENT_AGENTS", "2");
+
+        // A file-backed store, not `Store::in_memory()`: `runner::launch`
+        // needs a `db_path` to hand the supervisor, and an in-memory store's
+        // `path()` is `None` — which would fail every launch before it ever
+        // reached a process, and this test would queue nothing because
+        // nothing would ever be occupying a slot.
+        let store = std::sync::Arc::new(Store::open(&dir.join("jod.db")).unwrap());
+        let jod = Jod::with_store(store.clone());
+
+        let first = jod.spawn_agent(request("first")).await;
+        let second = jod.spawn_agent(request("second")).await;
+
+        // Restore the environment before any assertion can fail this test —
+        // a panic must not leave the rest of the suite pointed at a scratch
+        // `JOD_HOME` or a fake harness.
+        macro_rules! restore_env {
+            () => {
+                match saved_home.clone() {
+                    Some(v) => std::env::set_var("JOD_HOME", v),
+                    None => std::env::remove_var("JOD_HOME"),
+                }
+                match saved_claude.clone() {
+                    Some(v) => std::env::set_var("JOD_CLAUDE_BIN", v),
+                    None => std::env::remove_var("JOD_CLAUDE_BIN"),
+                }
+                match saved_supervisor.clone() {
+                    Some(v) => std::env::set_var("JOD_SUPERVISOR_BIN", v),
+                    None => std::env::remove_var("JOD_SUPERVISOR_BIN"),
+                }
+                match saved_cap.clone() {
+                    Some(v) => std::env::set_var("JOD_MAX_CONCURRENT_AGENTS", v),
+                    None => std::env::remove_var("JOD_MAX_CONCURRENT_AGENTS"),
+                }
+            };
+        }
+
+        let first = match first {
+            Ok(a) => a,
+            Err(e) => {
+                restore_env!();
+                panic!("the first spawn, well under the cap, must launch: {e:?}");
+            }
+        };
+        let second = match second {
+            Ok(a) => a,
+            Err(e) => {
+                restore_env!();
+                panic!("the second spawn, exactly at the cap, must launch: {e:?}");
+            }
+        };
+        assert!(first.pid.is_some(), "a launched run has a pid");
+        assert!(second.pid.is_some(), "a launched run has a pid");
+
+        // The third spawn is past the cap. Race it against a timeout well
+        // inside the fake supervisor's 2-second lifetime: if the cap did
+        // nothing, `spawn_agent` returns almost immediately and this fails.
+        let jod_for_third = jod.clone();
+        let mut third_task =
+            tokio::spawn(async move { jod_for_third.spawn_agent(request("third")).await });
+        let raced =
+            tokio::time::timeout(std::time::Duration::from_millis(700), &mut third_task).await;
+        if raced.is_ok() {
+            restore_env!();
+            panic!(
+                "a third spawn on a cap of two must still be queued 700ms in, \
+                 while both slots are held by a process that sleeps for 2s; \
+                 instead it returned: {raced:?}"
+            );
+        }
+
+        // It must still get its turn once a slot frees — queued, not lost.
+        let third =
+            tokio::time::timeout(std::time::Duration::from_secs(5), third_task).await;
+        restore_env!();
+        let third = third
+            .expect("the queued spawn must eventually get a slot, not hang forever")
+            .expect("the spawning task must not panic")
+            .expect("the queued spawn must eventually succeed");
+        assert!(third.pid.is_some(), "the queued run must actually launch");
     }
 
     // ---- runs populate conversations --------------------------------------
