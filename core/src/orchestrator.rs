@@ -899,7 +899,13 @@ pub async fn hand_to_orchestrator(
                 // delegates should be little — but it cannot be nothing, or it
                 // cannot delegate at all.
                 permission: PermissionPolicy::AcceptEdits,
-                resume: store.resume_for(&id)?,
+                // Asked against `kind` — the harness this spawn actually
+                // launches — and not bare, because the pinned conversation is
+                // resolved by `main_conversation` without reference to it. An
+                // old `/harness` switch therefore leaves the pin naming one
+                // harness while the console runs another, and a session id read
+                // off that row goes straight to a program that never issued it.
+                resume: store.resume_for(&id, kind)?,
                 tools: Some(ToolAccess::Orchestrate),
                 ..SpawnRequest::default()
             },
