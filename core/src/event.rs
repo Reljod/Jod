@@ -113,6 +113,19 @@ pub enum AgentEvent {
     /// dropped so a harness upgrade degrades to "shown verbatim", never to
     /// "silently swallowed".
     Raw { line: String },
+    /// The harness was asked to resume a conversation it no longer holds.
+    ///
+    /// Its own class of event rather than a [`Raw`](AgentEvent::Raw) line,
+    /// because it is the one harness failure Jod can *repair*: the session id on
+    /// the conversation row is now known to be dead, and a thread that keeps
+    /// resuming it fails on every future turn for the same reason. A run that
+    /// ends this way did nothing — the harness refused before it started — so
+    /// there is no work to reconcile, only a stale pointer to drop.
+    ///
+    /// Carries the id the harness rejected, not the one Jod believes in, so a
+    /// listener can tell "the session I asked for is gone" from "some session
+    /// somewhere is gone" and refuse to clear a pointer that has moved on.
+    SessionLost { session_id: String },
     /// The runner itself failed (spawn error, unreadable stream, killed).
     Error { message: String },
 }

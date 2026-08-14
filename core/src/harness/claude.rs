@@ -223,9 +223,11 @@ impl Harness for ClaudeCode {
         let Ok(v) = serde_json::from_str::<Value>(line) else {
             // Claude prints human-readable warnings (e.g. workspace trust) to
             // the same stream. Surface them rather than dropping them.
-            return vec![AgentEvent::Raw {
-                line: strip_ansi(line),
-            }];
+            let plain = strip_ansi(line);
+            if let Some(session_id) = rejected_session(&plain) {
+                return vec![AgentEvent::SessionLost { session_id }];
+            }
+            return vec![AgentEvent::Raw { line: plain }];
         };
 
         match v.get("type").and_then(Value::as_str) {
@@ -457,6 +459,34 @@ fn usage_from(v: &Value) -> Usage {
         cache_write_tokens: u.and_then(|u| u64_at(u, "cache_creation_input_tokens")),
         cost_usd: v.get("total_cost_usd").and_then(Value::as_f64),
     }
+}
+
+/// The session id in a "that conversation is gone" refusal, if this is one.
+///
+/// Claude Code answers `--resume <id>` for an id it does not have with a bare
+/// line on stderr and exit 1 — no JSON, no `init`, nothing else on the wire:
+///
+/// ```text
+/// No conversation found with session ID: 22c6a14d-2d8c-49ef-b21b-27e3fb76edd1
+/// ```
+///
+/// Anchored at the start of the line, so a *model* quoting the error in its
+/// prose cannot be mistaken for the harness raising it — that text arrives
+/// inside a JSON assistant block and never reaches this function at all.
+///
+/// The id is returned rather than a bool because the caller must be able to
+/// check it against the session it actually asked for. Clearing a pointer on
+/// the strength of an id nobody recognises would be repairing a thread by
+/// guess.
+fn rejected_session(line: &str) -> Option<String> {
+    let rest = line
+        .trim()
+        .strip_prefix("No conversation found with session ID:")?
+        .trim();
+    // One token: the id and nothing after it. A trailing clause would mean this
+    // is a differently-shaped message that happens to share an opening.
+    let id = rest.split_whitespace().next()?;
+    (!id.is_empty()).then(|| id.to_string())
 }
 
 /// Drop ANSI colour codes so warnings render cleanly in the UI.
@@ -1087,6 +1117,67 @@ mod tests {
         // And nothing in the whole sequence became Raw, including the last line.
         let last = h.parse_line(lines[lines.len() - 1]);
         assert!(!last.iter().any(|e| matches!(e, AgentEvent::Raw { .. })));
+    }
+
+    /// The refusal that bricks a thread, verbatim from a real failure. As
+    /// `Raw` it was one more unreadable line in a transcript; classified, it
+    /// is something the supervisor can repair.
+    #[test]
+    fn a_refused_resume_is_recognised_rather_than_shrugged_at() {
+        let mut h = ClaudeCode::default();
+        let out = h.parse_line(
+            "No conversation found with session ID: 22c6a14d-2d8c-49ef-b21b-27e3fb76edd1",
+        );
+        assert_eq!(
+            out,
+            vec![AgentEvent::SessionLost {
+                session_id: "22c6a14d-2d8c-49ef-b21b-27e3fb76edd1".into(),
+            }],
+            "the one harness failure Jod can fix must not arrive as Raw"
+        );
+    }
+
+    /// The id has to survive colouring and padding, because the message
+    /// arrives on stderr where Claude Code paints things.
+    #[test]
+    fn the_refusal_is_recognised_through_colour_and_padding() {
+        let mut h = ClaudeCode::default();
+        let out =
+            h.parse_line("  \u{1b}[31mNo conversation found with session ID: sess-abc\u{1b}[0m  ");
+        assert_eq!(
+            out,
+            vec![AgentEvent::SessionLost {
+                session_id: "sess-abc".into(),
+            }]
+        );
+    }
+
+    /// Everything that is *not* the harness refusing must stay `Raw`. The
+    /// consequence of a false positive is not a wasted branch: it drops a live
+    /// session id, so a working thread starts over.
+    #[test]
+    fn prose_that_merely_mentions_a_missing_session_is_still_raw() {
+        let mut h = ClaudeCode::default();
+        for line in [
+            "warning: No conversation found with session ID: sess-abc",
+            "No conversation found.",
+            "No conversation found with session ID:",
+        ] {
+            assert!(
+                matches!(h.parse_line(line).as_slice(), [AgentEvent::Raw { .. }]),
+                "{line:?} must not be read as the harness disowning a session"
+            );
+        }
+        // A model quoting the error in an ordinary turn is a message, not a
+        // refusal — it is JSON, so it never reaches the text path at all.
+        let quoted = h.parse_line(
+            r#"{"type":"assistant","message":{"content":[{"type":"text",
+               "text":"No conversation found with session ID: sess-abc"}]}}"#,
+        );
+        assert!(
+            matches!(quoted.as_slice(), [AgentEvent::Message { .. }]),
+            "an agent talking about the error is not the harness raising it"
+        );
     }
 
     /// Everything else `stream_event` carries is structural — bracketing a

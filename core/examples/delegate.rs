@@ -139,6 +139,7 @@ fn print_event(event: &AgentEvent) {
                 if *is_error { " (error)" } else { "" }
             )
         }
+        AgentEvent::SessionLost { session_id } => println!("[lost]     {session_id}"),
         AgentEvent::Raw { line } => println!("[raw]      {}", first_line(line)),
         AgentEvent::Error { message } => println!("[error]    {message}"),
         AgentEvent::Finished {
