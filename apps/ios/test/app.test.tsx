@@ -284,7 +284,7 @@ describe("the shell", () => {
     expect(conversation.getSnapshot().session.busy).toBe(false);
   });
 
-  it("hides reasoning until THINK is pressed", async () => {
+  it("shows reasoning until THINK is pressed to hide it", async () => {
     await mounted();
     http.on("POST /v1/agents", { body: agent({ id: "a1" }) });
     http.on("GET /v1/agents", { body: [] });
@@ -299,7 +299,7 @@ describe("the shell", () => {
       spy.last.send({ kind: "thinking", text: "pondering", agent_id: "a1", at_ms: 1, seq: 0 });
       await settle();
     });
-    expect(screen.queryByText("pondering")).toBeNull();
+    await screen.findByText("pondering");
 
     fireEvent.click(screen.getByText("THINK"));
     await act(async () => {
@@ -312,7 +312,7 @@ describe("the shell", () => {
       });
       await settle();
     });
-    await screen.findByText("still pondering");
+    expect(screen.queryByText("still pondering")).toBeNull();
   });
 });
 

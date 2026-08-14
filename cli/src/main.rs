@@ -95,9 +95,15 @@ enum Command {
         /// Emit raw event JSON, one per line, instead of formatted output.
         #[arg(long)]
         json: bool,
-        /// Show the agent's thinking as it streams.
+        /// Hide the agent's thinking, leaving its tool calls and its answer.
+        ///
+        /// Thinking is shown by default. Hidden, a run that spends a minute
+        /// deciding *not* to do something shows a gap and then an answer, and
+        /// the reasoning that produced it is the part you most needed to read.
+        /// It goes to stderr like every other progress line, so
+        /// `jod run … > out.txt` still captures the answer alone.
         #[arg(long)]
-        thinking: bool,
+        no_thinking: bool,
     },
     /// List the agents this process knows about, newest first.
     Ls {
@@ -125,9 +131,13 @@ enum Command {
         id: String,
         #[arg(long)]
         json: bool,
-        /// Show the agent's reasoning as well as its output.
+        /// Hide the agent's reasoning, leaving its tool calls and its output.
+        ///
+        /// Shown by default, for the same reason as `jod run`: a replayed run
+        /// with its reasoning stripped is a list of tool calls, and a list of
+        /// tool calls does not say why.
         #[arg(long)]
-        thinking: bool,
+        no_thinking: bool,
     },
     /// Stop an agent and everything it started.
     Kill { id: String },
@@ -1536,7 +1546,7 @@ async fn main() -> Result<()> {
             watch,
             stall_after,
             json,
-            thinking,
+            no_thinking,
         } => {
             let prompt = match prompt {
                 Some(p) => p,
@@ -1634,7 +1644,7 @@ async fn main() -> Result<()> {
                 return Ok(());
             }
             render::launched_waiting(&agent);
-            let code = render::stream(events, &agent.id, json, thinking).await;
+            let code = render::stream(events, &agent.id, json, !no_thinking).await;
             std::process::exit(code);
         }
 
@@ -1657,7 +1667,12 @@ async fn main() -> Result<()> {
             }
         }
 
-        Command::Watch { id, json, thinking } => {
+        Command::Watch {
+            id,
+            json,
+            no_thinking,
+        } => {
+            let thinking = !no_thinking;
             // Subscribe before rehydrating: rehydrate starts the followers that
             // produce the live events, and one that fired first would be lost.
             let events = jod.subscribe();
@@ -2226,14 +2241,36 @@ async fn wait_for_orchestrator(jod: &Jod, run_id: &str) -> Result<()> {
         if envelope.agent_id != run_id {
             continue;
         }
-        match &envelope.event {
-            jod_core::AgentEvent::Message { text } => println!("{text}"),
-            jod_core::AgentEvent::ToolCall { name, .. } => println!("  · {name}"),
-            jod_core::AgentEvent::Finished { .. } => break,
-            _ => {}
+        if matches!(envelope.event, jod_core::AgentEvent::Finished { .. }) {
+            break;
+        }
+        if let Some(line) = live_line(&envelope.event) {
+            println!("{line}");
         }
     }
     Ok(())
+}
+
+/// One event as the line `jod main --wait` shows for it, or `None` for the ones
+/// it stays quiet about.
+///
+/// Pure, so what the screen shows is testable without a running orchestrator.
+fn live_line(event: &jod_core::AgentEvent) -> Option<String> {
+    match event {
+        jod_core::AgentEvent::Message { text } => Some(text.clone()),
+        // Shown, and shown above the tool calls it explains. Left out, this was
+        // a list of tool names — you could watch the orchestrator open four
+        // files and never see it decide anything, which is the half of a run
+        // worth waiting for.
+        jod_core::AgentEvent::Thinking { text } => Some(render::thinking_block(text)),
+        jod_core::AgentEvent::ToolCall { name, .. } => Some(format!("  · {name}")),
+        // `Progress` and `Delta` stay out, and that is a decision rather than an
+        // oversight. A tick's place is a status line — in a transcript it is
+        // nine minutes of scrollback saying "still working" — and a delta
+        // prints in full a moment later as the `Message` or `ToolCall` it is a
+        // fragment of. This view has no status line to put a tick on.
+        _ => None,
+    }
 }
 
 /// Read the main chat: what was said, and what it set in motion.
@@ -4353,6 +4390,68 @@ mod tests {
     fn the_cli_definition_is_valid() {
         use clap::CommandFactory;
         Cli::command().debug_assert();
+    }
+
+    /// The complaint this default answers: a run followed from a shell printed
+    /// its tool calls and none of the reasoning that chose them, so the visible
+    /// half of a run was the half that says least.
+    ///
+    /// Written as an inverse flag rather than a defaulted `--thinking` because
+    /// the flag a person reaches for is the one that turns the noise *off*.
+    #[test]
+    fn following_a_run_shows_its_reasoning_unless_asked_not_to() {
+        use clap::Parser;
+        fn shown(args: &[&str]) -> bool {
+            match Cli::try_parse_from(args).expect("parses").command {
+                Command::Run { no_thinking, .. } | Command::Watch { no_thinking, .. } => {
+                    !no_thinking
+                }
+                _ => panic!("{args:?} is not a command that follows a run"),
+            }
+        }
+        assert!(shown(&["jod", "run", "do it"]), "`jod run` hid it");
+        assert!(shown(&["jod", "watch", "abc123"]), "`jod watch` hid it");
+        assert!(!shown(&["jod", "run", "do it", "--no-thinking"]));
+        assert!(!shown(&["jod", "watch", "abc123", "--no-thinking"]));
+    }
+
+    /// `jod main --wait` used to match on two event kinds and drop the rest, so
+    /// the reasoning was not hidden by a setting — it was never considered.
+    #[test]
+    fn waiting_on_the_main_chat_shows_the_reasoning_with_the_tool_calls() {
+        use jod_core::AgentEvent;
+        let thinking = live_line(&AgentEvent::Thinking {
+            text: "two ways to do this".into(),
+        })
+        .expect("reasoning is shown");
+        assert!(thinking.contains("two ways to do this"), "{thinking:?}");
+        // Indented, so it reads as muttering beside the answer rather than as
+        // the answer.
+        assert!(thinking.contains("  "), "{thinking:?}");
+
+        assert_eq!(
+            live_line(&AgentEvent::Message {
+                text: "done".into()
+            }),
+            Some("done".into()),
+        );
+        assert_eq!(
+            live_line(&AgentEvent::ToolCall {
+                name: "Read".into(),
+                input: None,
+            }),
+            Some("  · Read".into()),
+        );
+        // Still quiet about the rest: a tool's output is what `jod watch` is
+        // for, and this view is meant to stay readable.
+        assert_eq!(
+            live_line(&AgentEvent::ToolResult {
+                name: "Read".into(),
+                summary: Some("400 lines".into()),
+                is_error: false,
+            }),
+            None,
+        );
     }
 
     // ---- the rail, the roots, the secrets and the works ----

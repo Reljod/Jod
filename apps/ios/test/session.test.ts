@@ -137,24 +137,26 @@ describe("folding events into the transcript", () => {
     expect(s.resume).toEqual({ session: "b" });
   });
 
-  it("hides reasoning until asked", () => {
+  // Without this, a transcript is tool calls and an answer, and nothing in it
+  // says why the agent chose either.
+  it("shows reasoning without being asked", () => {
     const s = applyEvent(session(), { kind: "thinking", text: "hmm" });
-    expect(s.transcript).toEqual([]);
+    expect(s.transcript).toContainEqual({ kind: "thinking", text: "hmm" });
   });
 
-  it("shows reasoning once toggled on", () => {
+  it("hides reasoning once toggled off", () => {
     const s = applyEvent(toggleThinking(session()), { kind: "thinking", text: "hmm" });
-    expect(s.transcript).toContainEqual({ kind: "thinking", text: "hmm" });
+    expect(s.transcript).not.toContainEqual({ kind: "thinking", text: "hmm" });
   });
 
   it("says which way the toggle went", () => {
     expect(toggleThinking(session()).transcript).toContainEqual({
       kind: "notice",
-      text: "thinking shown",
+      text: "thinking hidden",
     });
     expect(toggleThinking(toggleThinking(session())).transcript).toContainEqual({
       kind: "notice",
-      text: "thinking hidden",
+      text: "thinking shown",
     });
   });
 
