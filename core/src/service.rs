@@ -387,13 +387,39 @@ fn record_in_conversation(store: &Store, conversation_id: &str, envelope: &Agent
     // The session id belongs on the conversation row, not in the transcript: it
     // is how `Store::resume_for` puts the *next* run back into this thread
     // instead of replaying it from text.
+    //
+    // Written together with the harness that minted it, because `resume_for`
+    // hands the id back only to that same harness and a row where the two
+    // disagree resumes nothing. The harness comes off the run rather than the
+    // conversation for exactly that reason: the run is what actually just
+    // spoke, and when it is not what the row expected, the row is the thing
+    // that is wrong.
     if let AgentEvent::Started {
         session_id: Some(session),
         ..
     } = &envelope.event
     {
-        if let Err(e) = store.set_conversation_session(conversation_id, Some(session)) {
-            eprintln!("[jod] could not record the session on {conversation_id}: {e}");
+        // A run that reported a session but has no row is not a state worth
+        // guessing through: writing the id under the conversation's existing
+        // harness is the very pairing this avoids, so the id is dropped and
+        // the thread starts fresh next turn rather than resuming wrongly.
+        match store.run(&envelope.agent_id) {
+            Ok(Some(run)) => match HarnessKind::from_id(&run.harness) {
+                Some(on) => {
+                    if let Err(e) = store.record_session(conversation_id, on, session) {
+                        eprintln!("[jod] could not record the session on {conversation_id}: {e}");
+                    }
+                }
+                None => eprintln!(
+                    "[jod] run {} reported a session on unknown harness {:?}; not recording it",
+                    envelope.agent_id, run.harness
+                ),
+            },
+            Ok(None) => eprintln!(
+                "[jod] run {} reported a session before it was stored; not recording it",
+                envelope.agent_id
+            ),
+            Err(e) => eprintln!("[jod] could not read run {}: {e}", envelope.agent_id),
         }
     }
 
@@ -2162,6 +2188,28 @@ mod tests {
         }
     }
 
+    /// The row `spawn_agent_in` writes before it launches anything.
+    ///
+    /// Present in the fixture because it is present in production: a session id
+    /// is recorded against the harness that minted it, and the run row is where
+    /// `record_in_conversation` reads that from.
+    fn launched(store: &Store, run: &str, harness: HarnessKind) {
+        store
+            .save_run(&crate::store::StoredRun {
+                id: run.into(),
+                name: "n".into(),
+                harness: harness.id().into(),
+                status: AgentStatus::Running.as_str().into(),
+                cwd: "/work".into(),
+                session_id: None,
+                pid: None,
+                pgid: None,
+                created_at_ms: 0,
+                summary: serde_json::Value::Null,
+            })
+            .expect("the run row");
+    }
+
     #[test]
     fn a_run_opens_exactly_one_conversation_named_after_its_prompt() {
         let store = Store::in_memory().unwrap();
@@ -2433,6 +2481,7 @@ mod tests {
         let id = open_conversation(&store, &request("go"), "run-1", &RunConversation::New)
             .unwrap()
             .id;
+        launched(&store, "run-1", HarnessKind::ClaudeCode);
         record_in_conversation(
             &store,
             &id,
@@ -2446,8 +2495,93 @@ mod tests {
             ),
         );
         assert_eq!(
-            store.resume_for(&id).unwrap(),
+            store.resume_for(&id, HarnessKind::ClaudeCode).unwrap(),
             crate::harness::Resume::Session("sess-1".into())
+        );
+    }
+
+    /// The bug the pinned main chat died of, as a unit.
+    ///
+    /// A `/harness agy` switch left the conversation naming AGY and holding an
+    /// AGY session id. The console came back up on Claude Code, and because
+    /// nothing compared the two, every turn spawned `claude --resume
+    /// <agy-session>` — rejected in about a second, zero tokens, no output, and
+    /// nothing on screen to say why.
+    #[test]
+    fn a_session_is_never_offered_to_a_harness_that_did_not_mint_it() {
+        let store = Store::in_memory().unwrap();
+        let id = open_conversation(&store, &request("go"), "run-1", &RunConversation::New)
+            .unwrap()
+            .id;
+        launched(&store, "run-1", HarnessKind::Agy);
+        record_in_conversation(
+            &store,
+            &id,
+            &envelope(
+                "run-1",
+                0,
+                AgentEvent::Started {
+                    session_id: Some("agy-session".into()),
+                    model: None,
+                },
+            ),
+        );
+
+        assert_eq!(
+            store.resume_for(&id, HarnessKind::Agy).unwrap(),
+            crate::harness::Resume::Session("agy-session".into()),
+            "the harness that minted it must still get it back"
+        );
+        assert_eq!(
+            store.resume_for(&id, HarnessKind::ClaudeCode).unwrap(),
+            crate::harness::Resume::Fresh,
+            "an AGY session id was offered to Claude Code, which is the crash"
+        );
+    }
+
+    /// ...and the thread then accumulates on the new harness rather than
+    /// restarting on every turn, which is what a row left naming the old one
+    /// would have caused: mismatch, fresh, mismatch, fresh, forever.
+    #[test]
+    fn a_thread_that_changed_harness_resumes_normally_from_the_next_turn() {
+        let store = Store::in_memory().unwrap();
+        let id = open_conversation(&store, &request("go"), "run-1", &RunConversation::New)
+            .unwrap()
+            .id;
+        launched(&store, "run-1", HarnessKind::Agy);
+        record_in_conversation(
+            &store,
+            &id,
+            &envelope(
+                "run-1",
+                0,
+                AgentEvent::Started {
+                    session_id: Some("agy-session".into()),
+                    model: None,
+                },
+            ),
+        );
+
+        // The console is on Claude Code now: the turn starts fresh, and reports
+        // a Claude Code session of its own.
+        launched(&store, "run-2", HarnessKind::ClaudeCode);
+        record_in_conversation(
+            &store,
+            &id,
+            &envelope(
+                "run-2",
+                0,
+                AgentEvent::Started {
+                    session_id: Some("claude-session".into()),
+                    model: None,
+                },
+            ),
+        );
+
+        assert_eq!(
+            store.resume_for(&id, HarnessKind::ClaudeCode).unwrap(),
+            crate::harness::Resume::Session("claude-session".into()),
+            "the thread started over instead of carrying on"
         );
     }
 

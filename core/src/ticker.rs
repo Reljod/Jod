@@ -1431,11 +1431,14 @@ impl Ticker {
                 report.held += 1;
                 continue;
             };
-            let Resume::Session(session_id) = store.resume_for(&conversation_id)? else {
+            let Some(harness) = conversation.harness_kind() else {
                 report.held += 1;
                 continue;
             };
-            let Some(harness) = conversation.harness_kind() else {
+            // Resolved before the resume, and passed into it: a session id is
+            // only valid on the harness that minted it, and this is the harness
+            // the spawn below uses.
+            let Resume::Session(session_id) = store.resume_for(&conversation_id, harness)? else {
                 report.held += 1;
                 continue;
             };

@@ -83,7 +83,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{JodError, Result};
 use crate::event::AgentEvent;
-use crate::harness::{HarnessKind, Resume};
+use crate::harness::HarnessKind;
 use crate::orchestrator::hand_to_orchestrator;
 use crate::service::Jod;
 use crate::store::Store;
@@ -1766,7 +1766,14 @@ impl<B: BotApi + 'static> Bridge<B> {
             return Ok(false);
         };
         let id = store.main_conversation(self.harness, &self.cwd.display().to_string())?;
-        let had_session = matches!(store.resume_for(&id)?, Resume::Session(_));
+        // Read off the row rather than through `resume_for`, which answers "how
+        // would this resume *on this harness*" and so reports nothing to forget
+        // when the row was left naming a different one. A stale id is exactly
+        // what `/new` is for: the question here is whether one is stored at all.
+        let had_session = store
+            .conversation(&id)?
+            .and_then(|c| c.session_id)
+            .is_some();
         if had_session {
             store.set_conversation_session(&id, None)?;
         }
@@ -2040,6 +2047,7 @@ impl<B: BotApi + 'static> Bridge<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::harness::Resume;
 
     /// A live credential must not survive into anything printable.
     ///
@@ -2990,7 +2998,7 @@ mod tests {
         let s = store();
         let main = main_of(&s);
         assert_eq!(
-            s.resume_for(&main).unwrap(),
+            s.resume_for(&main, HarnessKind::ClaudeCode).unwrap(),
             Resume::Fresh,
             "a desk nobody has sat at has nothing to resume"
         );
@@ -3009,7 +3017,7 @@ mod tests {
             "the restart started the chat over: {:?}",
             sent[0]
         );
-        assert_eq!(s.resume_for(&main).unwrap(), Resume::Fresh);
+        assert_eq!(s.resume_for(&main, HarnessKind::ClaudeCode).unwrap(), Resume::Fresh);
     }
 
     /// `/new` from one chat is `/new` everywhere, because there is only one
@@ -3023,7 +3031,7 @@ mod tests {
 
         let mine = bridge(Arc::clone(&s));
         Arc::clone(&mine).handle(incoming("/new")).await.unwrap();
-        assert_eq!(s.resume_for(&main).unwrap(), Resume::Fresh);
+        assert_eq!(s.resume_for(&main, HarnessKind::ClaudeCode).unwrap(), Resume::Fresh);
         assert!(mine.poller().bot().sent_texts()[0].starts_with(FRESH_START));
 
         let theirs = bridge(Arc::clone(&s));
@@ -3054,7 +3062,7 @@ mod tests {
         let b = bridge(Arc::clone(&s));
         Arc::clone(&b).handle(incoming("/clear")).await.unwrap();
 
-        assert_eq!(s.resume_for(&main).unwrap(), Resume::Fresh);
+        assert_eq!(s.resume_for(&main, HarnessKind::ClaudeCode).unwrap(), Resume::Fresh);
         let live = s.live_window(&main).unwrap();
         assert!(
             live.iter().any(|m| m.text == "what were we doing?"),
@@ -3073,7 +3081,7 @@ mod tests {
             Arc::clone(&b).handle(incoming(word)).await.unwrap();
 
             assert_eq!(
-                s.resume_for(&main).unwrap(),
+                s.resume_for(&main, HarnessKind::ClaudeCode).unwrap(),
                 Resume::Fresh,
                 "{word} left the session in place"
             );

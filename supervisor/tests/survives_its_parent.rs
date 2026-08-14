@@ -173,7 +173,9 @@ fn the_session_id_reaches_the_conversation_even_though_the_launcher_is_gone() {
     // The consequence, stated as the thing a caller actually asks for.
     assert!(
         matches!(
-            store.resume_for(&conversation).unwrap(),
+            store
+                .resume_for(&conversation, jod_core::harness::HarnessKind::ClaudeCode)
+                .unwrap(),
             jod_core::harness::Resume::Session(id) if id == "sess-abc"
         ),
         "resume_for still cannot resume this conversation"

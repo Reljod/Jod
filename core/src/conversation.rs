@@ -569,6 +569,32 @@ impl Store {
         })
     }
 
+    /// Record the session a run just minted, and the harness that minted it, as
+    /// one write.
+    ///
+    /// The pair moves together or not at all. A session id is the *harness's*
+    /// handle on a conversation, meaningless to any other harness, so a row
+    /// holding one harness's id under another harness's name is not a stale
+    /// field — it is an id that will be handed to a program guaranteed to
+    /// reject it. That is not hypothetical: a `/harness agy` switch left the
+    /// pinned main chat naming `agy` while the console came back up on Claude
+    /// Code, and every turn after it spawned `claude --resume <agy-session>` and
+    /// died in a second with "No conversation found with session ID".
+    ///
+    /// So the harness is written from the run that reported the session rather
+    /// than left as whatever the row said before. A thread whose harness changed
+    /// under it starts fresh once — see [`Store::resume_for`] — and accumulates
+    /// normally from the next turn, instead of restarting on every one.
+    pub fn record_session(&self, id: &str, on: HarnessKind, session_id: &str) -> Result<bool> {
+        self.write(|tx| {
+            Ok(tx.execute(
+                "UPDATE conversations SET session_id = ?2, harness = ?3, updated_at_ms = ?4 \
+                 WHERE id = ?1",
+                params![id, session_id, on.id(), now_ms()],
+            )? > 0)
+        })
+    }
+
     /// Choose the model this conversation runs on from now on, or hand the
     /// choice back to the caller with `None`.
     ///
@@ -610,23 +636,38 @@ impl Store {
         })
     }
 
-    /// How to relaunch this conversation on its harness.
+    /// How to relaunch this conversation on `on`.
     ///
     /// A conversation Jod has a session id for resumes it; one without starts
     /// fresh and is replayed from [`Store::transcript`]. There is no `Last`
     /// here on purpose — "the most recent conversation in this directory" is
     /// the harness's guess, and once Jod owns the graph it does not need to
     /// guess.
-    pub fn resume_for(&self, conversation_id: &str) -> Result<Resume> {
-        Ok(
-            match self
-                .conversation(conversation_id)?
-                .and_then(|c| c.session_id)
-            {
-                Some(session) => Resume::Session(session),
-                None => Resume::Fresh,
-            },
-        )
+    ///
+    /// **`on` is not decoration.** A session id belongs to the harness that
+    /// minted it and means nothing to any other, so asking how to resume a
+    /// Claude Code thread *on AGY* has one honest answer — start fresh — and the
+    /// caller's job is to replay the transcript into it. Answering with the id
+    /// anyway is how the main chat broke: the pin sat on a conversation left
+    /// naming `agy` by an old `/harness` switch while the console ran Claude
+    /// Code, and `claude --resume <agy-session>` failed in a second, every turn,
+    /// having produced nothing. The mismatch was invisible because nothing
+    /// compared the two.
+    ///
+    /// A harness this build does not recognise reads as a mismatch and starts
+    /// fresh, which is the safe direction: an id Jod cannot attribute is an id
+    /// it must not hand to a program that might reject it.
+    pub fn resume_for(&self, conversation_id: &str, on: HarnessKind) -> Result<Resume> {
+        let Some(conversation) = self.conversation(conversation_id)? else {
+            return Ok(Resume::Fresh);
+        };
+        if conversation.harness_kind() != Some(on) {
+            return Ok(Resume::Fresh);
+        }
+        Ok(match conversation.session_id {
+            Some(session) => Resume::Session(session),
+            None => Resume::Fresh,
+        })
     }
 
     // ---- appending -----------------------------------------------------
@@ -2806,9 +2847,12 @@ mod tests {
 
         let fork = s.fork_conversation(&id, ids[0], None).unwrap();
         assert_eq!(fork.session_id, None);
-        assert_eq!(s.resume_for(&fork.id).unwrap(), Resume::Fresh);
         assert_eq!(
-            s.resume_for(&id).unwrap(),
+            s.resume_for(&fork.id, HarnessKind::ClaudeCode).unwrap(),
+            Resume::Fresh
+        );
+        assert_eq!(
+            s.resume_for(&id, HarnessKind::ClaudeCode).unwrap(),
             Resume::Session("claude-session-1".into())
         );
     }
@@ -3674,7 +3718,7 @@ mod tests {
         let source = s.conversation(&id).unwrap().unwrap();
         assert_eq!(source.harness_kind(), Some(HarnessKind::ClaudeCode));
         assert_eq!(
-            s.resume_for(&id).unwrap(),
+            s.resume_for(&id, HarnessKind::ClaudeCode).unwrap(),
             Resume::Session("claude-session-1".into()),
             "the original still resumes where it always did"
         );
@@ -3683,7 +3727,8 @@ mod tests {
         // means nothing to AGY. It is replayed through the carrier instead.
         assert_eq!(switch.conversation.session_id, None);
         assert_eq!(
-            s.resume_for(&switch.conversation.id).unwrap(),
+            s.resume_for(&switch.conversation.id, HarnessKind::Agy)
+                .unwrap(),
             Resume::Fresh
         );
     }
