@@ -128,7 +128,7 @@ frame of physics, not a hundred component renders.
 
 **No graph or charting library.** Every mark needs to be bound to a real field of
 `AgentSummary` or the event stream; a general-purpose library would draw pretty
-circles that mean nothing. The whole bundle is 272 kB (88 kB gzipped).
+circles that mean nothing. The whole bundle is 276 kB (89 kB gzipped).
 
 **The store keeps each agent's own events, capped.** A trajectory needs the
 structured event, not the feed line, and the global feed is a ring across the
@@ -232,7 +232,7 @@ delegate rather than firing a request that 403s. Anything other than an explicit
 
 ## Tests
 
-111 tests, no browser required — the physics, the world reducer, the transcript
+130 tests, no browser required — the physics, the world reducer, the transcript
 join and both time derivations are all pure.
 
 ```
