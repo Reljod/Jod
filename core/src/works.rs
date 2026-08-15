@@ -537,6 +537,15 @@ pub struct Doomed {
     pub unanswered_cards: usize,
     /// Messages on the work's bus.
     pub mail: usize,
+    /// Runs that lose their last transcript to this delete, and are kept.
+    ///
+    /// Nothing ties a run to a work: the only link is `messages.run_id`, so a
+    /// run whose every message was written into this work's conversations is
+    /// unreachable from any tree once they are gone, while its own row and its
+    /// events — the record of what it cost — stay. The row is not deleted with
+    /// them, and this count is why the deletion can say so instead of leaving
+    /// it to be discovered in `jod history` months later.
+    pub orphaned_runs: usize,
     /// Every lease this work holds, read from git at the moment asked. This is
     /// what the refusal prints.
     pub leases: Vec<Condition>,
@@ -560,6 +569,26 @@ impl Doomed {
         format!("{:016x}", fnv1a(parts.join("\n").as_bytes()))
     }
 
+    /// What a finished delete says it took.
+    ///
+    /// It lives here rather than in the CLI because the orphaned runs are the
+    /// half of the answer nobody would think to ask for, and a caller that
+    /// formats its own line would leave them out again.
+    pub fn summary(&self) -> String {
+        let mut out = format!(
+            "deleted {} — {} session(s), {} transcript(s), {} unanswered card(s)\n",
+            self.title, self.sessions, self.transcripts, self.unanswered_cards
+        );
+        if self.orphaned_runs > 0 {
+            out.push_str(&format!(
+                "{} run(s) kept, with the transcripts that explained them now gone — \
+                 `jod history` still lists them by id\n",
+                self.orphaned_runs
+            ));
+        }
+        out
+    }
+
     /// The lines a refusal prints.
     pub fn report(&self) -> String {
         let mut out = format!(
@@ -567,6 +596,13 @@ impl Doomed {
              and {} message(s) of agent traffic\n",
             self.title, self.sessions, self.transcripts, self.unanswered_cards, self.mail
         );
+        if self.orphaned_runs > 0 {
+            out.push_str(&format!(
+                "  and leave {} run(s) with no transcript, kept but reachable only \
+                 from `jod history`\n",
+                self.orphaned_runs
+            ));
+        }
         for c in &self.leases {
             out.push_str(&format!(
                 "  lease {} on `{}` — {}, {}\n",
@@ -1352,6 +1388,7 @@ impl Store {
             transcripts,
             unanswered_cards: unanswered,
             mail: self.work_mail_count(work_id)?,
+            orphaned_runs: self.runs_losing_their_last_transcript(work_id)?,
             leases: conditions,
         })
     }
@@ -1512,6 +1549,38 @@ impl Store {
         let n: i64 = conn.query_row(
             "SELECT COUNT(*) FROM team_messages WHERE scope = ?1 AND team = ?2",
             params![Scope::Work.as_str(), work_id],
+            |r| r.get(0),
+        )?;
+        Ok(n as usize)
+    }
+
+    /// Runs whose last transcript would go with this work.
+    ///
+    /// The doomed conversations are exactly the ones `delete_work` removes:
+    /// this work's, minus a pinned one, which is detached instead and kept. A
+    /// run counts only when every message it ever wrote is in that set, so a
+    /// run that also spoke into the main chat, or into a second work, is not
+    /// reported as a loss — it still has somewhere to be read from.
+    ///
+    /// `IS NOT` rather than `<>` in the second half on purpose: a conversation
+    /// that belongs to no work has a null `work_id`, and `<>` would answer
+    /// null for it, which would drop a surviving transcript out of the check
+    /// and over-report the losses.
+    fn runs_losing_their_last_transcript(&self, work_id: &str) -> Result<usize> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        let n: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM (
+               SELECT DISTINCT m.run_id AS run_id
+                 FROM messages m
+                 JOIN conversations c ON c.id = m.conversation_id
+                WHERE m.run_id IS NOT NULL AND c.work_id = ?1 AND c.pinned = 0
+             ) doomed
+              WHERE NOT EXISTS (
+                SELECT 1 FROM messages m2
+                  JOIN conversations c2 ON c2.id = m2.conversation_id
+                 WHERE m2.run_id = doomed.run_id
+                   AND (c2.work_id IS NOT ?1 OR c2.pinned = 1))",
+            params![work_id],
             |r| r.get(0),
         )?;
         Ok(n as usize)
@@ -1975,6 +2044,55 @@ mod tests {
             })
             .unwrap()
             .is_empty());
+    }
+
+    /// A run is tied to a conversation only through `messages.run_id`, so
+    /// deleting the work deletes the last thing that pointed at the run while
+    /// the run row itself stays. The row still carries a name, a status and
+    /// the events that say what it cost, and after this it is reachable only
+    /// from `jod history`, as an id with no transcript behind it. The delete
+    /// has to say how many of those it just made; a silent one is how a person
+    /// ends up asking what a piece of work cost and getting an answer that is
+    /// quietly missing a run.
+    #[test]
+    fn deleting_a_work_counts_the_runs_it_leaves_without_a_transcript() {
+        let s = store();
+        let work = s.create_work("a job").unwrap();
+        let c = session(&s, &work.id, None, "worker");
+        run_for(&s, &c, "run-orphaned", "completed");
+
+        // A run that also wrote somewhere this delete does not touch keeps a
+        // transcript afterwards, so it is not one of the losses.
+        let outside = s
+            .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
+            .unwrap()
+            .id;
+        run_for(&s, &c, "run-also-elsewhere", "completed");
+        s.append_message(
+            &outside,
+            NewMessage::new(crate::conversation::Role::Assistant, "still here")
+                .from_run("run-also-elsewhere"),
+        )
+        .unwrap();
+
+        let preview = s.work_deletion_preview(&work.id).unwrap();
+        assert_eq!(
+            preview.orphaned_runs, 1,
+            "only the run whose every message dies with this work"
+        );
+
+        let Deletion::Done { doomed, .. } = s.delete_work(&work.id, None).unwrap() else {
+            panic!("a work with nothing on disk deletes first time");
+        };
+        assert!(
+            s.run("run-orphaned").unwrap().is_some(),
+            "the row survives the delete — that is the whole problem"
+        );
+        let summary = doomed.summary();
+        assert!(
+            summary.contains("1 run(s)"),
+            "the delete must not be silent about it: {summary}"
+        );
     }
 
     #[test]

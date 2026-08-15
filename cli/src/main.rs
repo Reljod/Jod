@@ -3263,10 +3263,9 @@ fn work_command(jod: &Jod, what: WorkCommand) -> Result<()> {
                     doomed,
                     worktrees_left,
                 } => {
-                    println!(
-                        "deleted {} — {} session(s), {} transcript(s), {} unanswered card(s)",
-                        doomed.title, doomed.sessions, doomed.transcripts, doomed.unanswered_cards
-                    );
+                    // Formatted by the store, so the runs it stranded are
+                    // named in the same breath as the sessions it took.
+                    print!("{}", doomed.summary());
                     // Printed so nothing is orphaned silently: Jod's records
                     // are cheap to recreate and a branch with uncommitted work
                     // on it is not.
