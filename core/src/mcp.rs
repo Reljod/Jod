@@ -226,7 +226,10 @@ pub fn catalogue() -> Vec<Tool> {
         },
         Tool {
             name: "stop_agent",
-            description: "Stop a running agent and everything it started.",
+            description:
+                "Stop a running agent, together with the commands it ran itself. An agent it \
+                 started with `delegate` or `open_work` is a separate run, and it keeps going: \
+                 stop each one by its own run id.",
             needs: ToolAccess::Delegate,
             schema: obj(json!({ "run_id": text("The run to stop.") }), &["run_id"]),
         },
@@ -3412,6 +3415,38 @@ mod tests {
         assert_eq!(
             offered(ToolAccess::Orchestrate),
             expected(&[&READ_ONLY_TOOLS, &DELEGATE_TOOLS, &ORCHESTRATE_TOOLS])
+        );
+    }
+
+    /// `stop_agent` reaches one process group, and a delegated run is never in
+    /// it — `runner::launch` gives every run its own session through `setsid`,
+    /// so the run a session starts is a sibling of that session rather than a
+    /// member of it. Observed on a real pair: killing the parent emptied its
+    /// group and left the delegated child's four processes running.
+    ///
+    /// The model reads this description and decides from it whether one call
+    /// has finished the job. It therefore has to say the part that surprises:
+    /// the agent this one started is still going.
+    #[test]
+    fn stop_agent_says_that_a_delegated_run_keeps_going() {
+        let stop = catalogue()
+            .into_iter()
+            .find(|t| t.name == "stop_agent")
+            .expect("`stop_agent` is not in the catalogue");
+        let said = stop.description.to_lowercase();
+        assert!(
+            said.contains("delegate"),
+            "`stop_agent` does not mention delegation, so a caller cannot tell \
+             that a delegated run survives the call: {said}"
+        );
+        assert!(
+            said.contains("keeps going") || said.contains("keeps running"),
+            "`stop_agent` does not say the delegated run keeps going: {said}"
+        );
+        assert!(
+            !said.contains("everything it started"),
+            "`stop_agent` still promises to stop everything the agent started, \
+             which is more than one process group can reach: {said}"
         );
     }
 

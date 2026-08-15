@@ -1173,13 +1173,30 @@ impl Jod {
             .ok_or_else(|| JodError::UnknownAgent(id.to_string()))
     }
 
-    /// Stop an agent, and everything it started.
+    /// Stop one run, together with the commands it ran itself.
     ///
     /// The signal goes to the whole process group, so a harness that spawned
     /// children does not leave them behind — the same reach `tmux kill-session`
     /// had. `SIGTERM` first, so the supervisor gets to record how the run ended
     /// rather than disappearing and leaving it marked running for ever;
     /// `SIGKILL` only for a group that ignores it.
+    ///
+    /// **A run this one delegated to is not in that group, and survives.**
+    /// [`crate::runner::launch`] starts every supervisor through `setsid`, so
+    /// each run leads its own session — the property that lets a run outlive
+    /// its launcher. A delegated run is therefore a sibling of the run that
+    /// asked for it, whatever the conversation tree says, and signalling one
+    /// group cannot reach the other. Seen on a real pair: the child's
+    /// supervisor was forked by the parent's own MCP server, which sat inside
+    /// the parent's group, and still came out in a group of its own; stopping
+    /// the parent emptied the parent's group and left the child running.
+    ///
+    /// Walking `parent_conversation_id` and stopping the descendants too is a
+    /// decision about what the verb should mean, not a repair of this one, and
+    /// it would make a destructive call destroy strictly more than it does
+    /// today. Until that decision is made, the wording on `stop_agent` and
+    /// `jod kill` says what this reaches, and
+    /// `stopping_a_run_leaves_the_run_it_delegated_to_alive` holds it there.
     ///
     /// Works from any process, including one that never launched this run: the
     /// process-group id is a column, not a handle.
@@ -1968,6 +1985,146 @@ mod tests {
             "killed",
             "and the live view agrees with the row `jod ls` reads"
         );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// How far a stop actually reaches: one process group, and no further.
+    ///
+    /// This is the behaviour the wording on `stop_agent` and `jod kill` now
+    /// describes, pinned so a later change to either has to change this test
+    /// too. Every run leads its own session — `runner::launch` starts the
+    /// supervisor through `setsid` — so a run started by delegation is a
+    /// sibling of the run that asked for it, not a member of its group. The
+    /// two fixtures here are each `spawn_detached`, which is the same call,
+    /// so they stand in the same relation to each other that two real runs do.
+    ///
+    /// Watched happen on a real pair before it was written down. A Claude Code
+    /// run delegated a second one; the child's supervisor was forked by the
+    /// parent's own MCP server, which sat inside the parent's group, and still
+    /// came out in a group of its own. Stopping the parent emptied the parent's
+    /// group and left all four of the child's processes running, with its
+    /// `runs.status` still `running`.
+    ///
+    /// Stopping the child as well is a separate decision about what the verb
+    /// should mean, not a repair of this one. Nothing here argues against it —
+    /// the parentage the walk would need is written and asserted below.
+    #[tokio::test]
+    async fn stopping_a_run_leaves_the_run_it_delegated_to_alive() {
+        let dir = std::env::temp_dir().join(format!("jod-cascade-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let prog = dir.join("run.sh");
+        // No `TERM` trap: both fixtures die the moment their own group is
+        // signalled, so "the child is still there" cannot be a slow death.
+        std::fs::write(
+            &prog,
+            "#!/usr/bin/env bash\n: > \"$1\"\nfor _ in $(seq 1 600); do sleep 0.1; done\n",
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&prog, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let started = |ready: &str| {
+            crate::proc::spawn_detached(
+                &prog,
+                &[ready.to_string()],
+                &dir,
+                &dir.join(format!("{ready}.log")),
+            )
+            .unwrap()
+        };
+        let parent_pgid = started("parent-ready");
+        let child_pgid = started("child-ready");
+        for _ in 0..300 {
+            if dir.join("parent-ready").exists() && dir.join("child-ready").exists() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_ne!(
+            parent_pgid, child_pgid,
+            "two runs never share a process group"
+        );
+        assert!(crate::proc::group_alive(parent_pgid) && crate::proc::group_alive(child_pgid));
+
+        let store = std::sync::Arc::new(Store::in_memory().unwrap());
+        for (id, pgid) in [("parent", parent_pgid), ("child", child_pgid)] {
+            let mut summary = record().summary;
+            summary.id = id.into();
+            summary.status = AgentStatus::Running;
+            summary.pid = Some(pgid);
+            summary.pgid = Some(pgid);
+            store.save_run(&stored_run(&summary)).unwrap();
+        }
+
+        // The delegation, written the way `Server::record_handoff` writes it:
+        // the child's conversation hangs under the parent's, and the choice
+        // itself is a row. This is the whole trail a cascade would have to walk.
+        let conversation = |run: &str| {
+            let c = store
+                .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
+                .unwrap()
+                .id;
+            store.append_prompt(&c, run, "do the thing").unwrap();
+            c
+        };
+        let parent_conversation = conversation("parent");
+        let child_conversation = conversation("child");
+        store
+            .set_conversation_parent(&child_conversation, &parent_conversation)
+            .unwrap();
+        store
+            .record_delegation(&crate::orchestrator::Delegation {
+                id: 0,
+                conversation_id: parent_conversation.clone(),
+                message_id: None,
+                kind: "delegate".into(),
+                run_id: Some("child".into()),
+                schedule_name: None,
+                goal_name: None,
+                reason: String::new(),
+                at_ms: 0,
+            })
+            .unwrap();
+        assert_eq!(
+            store.conversation_for_run("child").unwrap().as_deref(),
+            Some(child_conversation.as_str()),
+            "the child has to be reachable from its run id, or the fixture is \
+             not the shape delegation leaves behind"
+        );
+
+        let jod = Jod::with_store(store.clone());
+        jod.rehydrate(100).await.unwrap();
+        jod.kill_agent("parent").await.unwrap();
+
+        assert!(
+            !crate::proc::group_alive(parent_pgid),
+            "the run that was asked to stop is still running"
+        );
+        assert_eq!(
+            store.run("parent").unwrap().unwrap().status,
+            "killed",
+            "the run that was asked to stop should read as stopped on purpose"
+        );
+
+        assert!(
+            crate::proc::group_alive(child_pgid),
+            "the delegated run's process group was reached after all — the \
+             stop now goes further than `stop_agent` and `jod kill` say it does"
+        );
+        assert_eq!(
+            store.run("child").unwrap().unwrap().status,
+            "running",
+            "stopping the parent must leave the delegated run's own row alone"
+        );
+        assert_eq!(
+            jod.agent("child").await.unwrap().status,
+            AgentStatus::Running,
+            "and the live view has to agree with the row"
+        );
+
+        let _ = crate::proc::signal_group(child_pgid, libc::SIGKILL);
         std::fs::remove_dir_all(&dir).ok();
     }
 
