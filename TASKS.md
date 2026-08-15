@@ -24,6 +24,23 @@ Every file ends with a "Scenarios run" table listing what was tried, what was
 expected, and what happened — passes included. A clean pass is worth recording;
 it is what stops the same ground being covered twice.
 
+## Running a check is itself something to check
+
+Verifying these tasks produced two near-misses in the verification, both of the
+shape everything else here has:
+
+- **`cargo test -- a b c` silently ran only one of the three filters.** The run
+  reported "ok. 43 passed; 0 failed" and looked like a clean pass, while two of
+  the three checks had never executed. Caught only by grepping the output for
+  the specific test names rather than reading the summary line. **Always confirm
+  the named test appears in the output.**
+- **An O2 run told the model to use no tools**, which left the
+  `ToolCall`/`ToolResult` half of that check unexercised while the result looked
+  like a pass.
+
+Both would have produced a wrong "verified". A green summary is not evidence
+the thing you meant to run ran.
+
 ## A merge closes a pull request. The `Check:` line closes the task.
 
 Learned the hard way, twice in one afternoon, and worth more than any single
