@@ -34,7 +34,15 @@ number rather than refiled.
 ---
 
 ## F1. Once any work exists, every delegated run disappears from the fleet screen
-Status: **fixed — merged as #121** · Severity was: high
+Status: **verified fixed — check run against main, passes** · Severity was: high
+
+The check was executed, not inferred from the merge.
+`the_fleet_still_shows_a_run_that_belongs_to_no_work`
+(`cli/src/tui/ui.rs`) seeds one work with a session and one loose delegated run
+off a real store, renders at 150x30, and asserts the run's id and name are both
+on screen. It first asserts the loose run has **no** node in the forest, so it
+cannot pass because the run quietly acquired one — a guard my own check did not
+ask for. Ran green against main.
 
 A `delegate`d run (or any session started before works existed) belongs to no
 work — `conversations.work_id IS NULL`. `Store::forest_of` only ever looks at
@@ -104,7 +112,15 @@ test can run) and assert the delegated run's id appears somewhere on it.
 ---
 
 ## F2. A run's tree node cannot say finished, failed, or killed — only "running" or not
-Status: **fixed — merged as #130** · Severity was: high
+Status: **verified fixed — check run against main, passes** · Severity was: high
+
+The check was executed, not inferred.
+`a_finished_a_failed_and_a_killed_run_each_read_differently`
+(`cli/src/tui/ui.rs`) seeds completed, failed and killed under one session,
+asserts each row's glyph and each state line names the right word, and then puts
+the three state lines in a `HashSet` and asserts they are distinct. That last
+assertion is this task's "assert each renders a different state line" literally
+rather than approximately. Ran green against main.
 
 `Node` (`core/src/tree.rs:59-80`) carries a single `running: bool` for a run,
 set by `RawRun.running = status == "running"` (`core/src/tree.rs:132-133,

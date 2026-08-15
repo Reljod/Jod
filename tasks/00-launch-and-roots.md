@@ -200,7 +200,18 @@ Fix: add the subcommand, printing the conversation's current project and how it
 was resolved. `project_resolutions` already records the how.
 
 ## L7. Re-adding a root you already hold silently takes write access away
-Status: **fix open as #155** · Owner: — · Severity: high
+Status: **fixed — merged as #155** · Severity was: high
+
+**The wider worry was checked and came back negative, which is worth keeping.**
+This task asked whether every `ON CONFLICT DO UPDATE` in the codebase shared the
+shape — an upsert guarding some columns and not others. All sixteen upsert sites
+were audited: thirteen `DO UPDATE`, three `DO NOTHING`, and none of the
+remaining ones needed a fix. So L7 and P1 were two isolated bugs rather than a
+pattern.
+
+Recorded because a negative result is a finding. Without it written down, the
+next person reads "worth checking every `ON CONFLICT DO UPDATE`" as outstanding
+work and audits sixteen sites a second time.
 
 `Store::add_root` (`core/src/roots.rs:179`) upserts:
 
