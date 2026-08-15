@@ -3011,20 +3011,39 @@ impl Store {
         })
     }
 
-    /// Remove a goal, and the memory it wrote along with it.
+    /// Forget a goal, the memory it wrote, and say what that left running.
+    ///
+    /// `None` means there was no such goal. Otherwise the report names the run
+    /// the goal had in flight, which this deliberately does not stop.
     ///
     /// The row and the facts go together because they are one thing. A goal's
     /// progress lives in the fact store rather than in its columns, so
     /// deleting the row alone leaves the whole episodic record behind with no
     /// goal left to explain it — rows nothing will ever read again, and, until
     /// the reads were scoped, rows the next goal of that name read as its own.
-    ///
     /// The scope belongs to this goal and to nothing else, so the delete can
     /// take all of it. `relations` cascades on `fact_id`, which is what keeps
     /// the graph from outliving the facts it was built from.
-    pub fn delete_goal(&self, name: &str) -> Result<bool> {
+    ///
+    /// **It does not stop the run, and that is a decision rather than an
+    /// omission.** Stopping it is what the words "remove this goal" sound like
+    /// they should mean, and the run does go on spending after the goal that
+    /// justified the spending is gone. Against that: a goal's iteration is a
+    /// harness working in a real directory, `jod goal rm` asks for no
+    /// confirmation, and terminating a process group mid-edit can leave
+    /// half-written files behind — a hard-to-reverse act performed by a command
+    /// whose contract today is "forget this row". So the delete stays a delete
+    /// and pays what it owes the person in information: the id of the run still
+    /// going and the command that stops it, which is one more keystroke for
+    /// anyone who did mean "and stop it". At most one iteration's cost is at
+    /// stake either way, because a deleted goal starts no more of them.
+    pub fn delete_goal(&self, name: &str) -> Result<Option<GoalForgotten>> {
+        // Read before the delete. The goal's row and its facts both go away
+        // below, so the in-flight run has to be read while there is still a
+        // goal to read it from.
+        let still_running = self.goal_run_in_flight(name)?;
         let scope = self.goal_named(name)?.map(|g| g.memory_scope());
-        self.write(|tx| {
+        let gone = self.write(|tx| {
             let gone = tx.execute("DELETE FROM goals WHERE name = ?1", params![name])?;
             if gone > 0 {
                 if let Some(scope) = &scope {
@@ -3032,7 +3051,40 @@ impl Store {
                 }
             }
             Ok(gone > 0)
-        })
+        })?;
+        Ok(gone.then(|| GoalForgotten {
+            name: name.to_string(),
+            still_running,
+        }))
+    }
+
+    /// The run a goal has in flight, if it has one that is still going.
+    ///
+    /// Two lookups, because neither half answers on its own. The goal's
+    /// `current-run` fact names the run its latest iteration started, and it is
+    /// superseded every iteration, so the newest one is the only candidate. But
+    /// a fact is not retracted when the run it names ends, so it points at a
+    /// finished run just as readily as a working one. The `runs` row is what
+    /// says which of the two this is.
+    ///
+    /// The status comes from the row rather than from a live probe of the
+    /// process group, so this reports what `jod ls` reports. A run whose
+    /// process died without saying so still reads as running in both places,
+    /// and one answer that is occasionally stale beats two answers that
+    /// disagree.
+    pub fn goal_run_in_flight(&self, name: &str) -> Result<Option<String>> {
+        let Some(run_id) = self
+            .facts_about(&format!("goal/{name}"))?
+            .into_iter()
+            .find(|f| f.predicate == "current-run")
+            .map(|f| f.object)
+        else {
+            return Ok(None);
+        };
+        let running = self
+            .run(&run_id)?
+            .is_some_and(|r| r.status == crate::AgentStatus::Running.as_str());
+        Ok(running.then_some(run_id))
     }
 
     // ---- the memory graph -----------------------------------------------
@@ -3791,6 +3843,50 @@ fn row_to_fact(r: &rusqlite::Row) -> rusqlite::Result<Fact> {
         recorded_at_ms: r.get(9)?,
         state: r.get(10)?,
     })
+}
+
+/// What deleting a goal took, and what it left behind.
+///
+/// A goal is a row. The iteration it has in flight is a process that keeps
+/// working and keeps being billed, and deleting the row does not touch it. The
+/// person who typed `jod goal rm` has no other way of finding that out: the run
+/// is still in `jod ls`, listed under the name of a goal that no longer exists,
+/// and `jod goal log` can no longer say what it was for. So the delete carries
+/// the run's id back out with it, and every caller says so.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GoalForgotten {
+    /// The goal that is gone.
+    pub name: String,
+    /// The run it had in flight, which the delete leaves running.
+    pub still_running: Option<String>,
+}
+
+impl GoalForgotten {
+    /// What a finished delete says it did.
+    ///
+    /// Written here rather than in each caller, for the reason
+    /// [`crate::works::Doomed::summary`] gives about the runs a work delete
+    /// strands: the run left running is the half nobody would think to ask
+    /// for, and a caller composing its own line would leave it out again.
+    ///
+    /// The id is printed in full because the next thing to do with it is paste
+    /// it into `jod kill`.
+    ///
+    /// The first line stays exactly what `jod goal rm` printed before this
+    /// existed. The delete now takes the goal's memory with it, so there is
+    /// nothing reassuring to add about what was kept, and the only news worth
+    /// a second line is the run still costing money.
+    pub fn summary(&self) -> String {
+        let mut out = format!("{} forgotten", self.name);
+        if let Some(run) = &self.still_running {
+            out.push_str(&format!(
+                "\nits iteration is still working and still being billed. Removing a \
+                 goal does not stop a run: stop this one with `jod kill {run}`, or \
+                 leave it to finish."
+            ));
+        }
+        out
+    }
 }
 
 /// One persisted delegation.
@@ -6116,7 +6212,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(s.delete_goal("nightly-tidy").unwrap());
+        assert!(s.delete_goal("nightly-tidy").unwrap().is_some());
 
         assert!(
             s.facts_about("goal/nightly-tidy").unwrap().is_empty(),
@@ -6131,6 +6227,84 @@ mod tests {
         g.cron = "not a cron".into();
         assert!(s.add_goal(&g).is_err());
         assert!(s.goals().unwrap().is_empty());
+    }
+
+    /// Deleting a goal was a bare `DELETE FROM goals`, so an iteration already
+    /// in flight kept working and kept being billed, then finished as a run
+    /// with no goal to attribute it to — while the delete printed one word,
+    /// "forgotten", and mentioned none of it.
+    ///
+    /// Both halves are asserted because either one alone can be passed by the
+    /// wrong code. A delete that killed the run would satisfy "the goal is
+    /// gone" while quietly destroying a harness's work in progress, and a
+    /// delete that says nothing would satisfy "the run survives".
+    #[test]
+    fn deleting_a_goal_leaves_its_iteration_running_and_says_which_one() {
+        let s = store();
+        let goal = a_goal("delete-midflight");
+        s.add_goal(&goal).unwrap();
+        s.save_run(&run("iteration-1", "claude_code", 1)).unwrap();
+        s.remember(
+            NewFact::new("goal/delete-midflight", "current-run", "iteration-1")
+                .in_scope(&goal.memory_scope())
+                .from(Origin::System),
+        )
+        .unwrap();
+
+        let forgotten = s.delete_goal("delete-midflight").unwrap().unwrap();
+
+        assert!(
+            s.goal_named("delete-midflight").unwrap().is_none(),
+            "the goal itself has to be gone"
+        );
+        assert_eq!(
+            s.run("iteration-1").unwrap().unwrap().status,
+            "running",
+            "the run is left to finish on purpose — a delete is not a kill"
+        );
+        assert_eq!(
+            forgotten.still_running.as_deref(),
+            Some("iteration-1"),
+            "and the delete has to know it left one"
+        );
+        let said = forgotten.summary();
+        assert!(
+            said.contains("iteration-1") && said.contains("jod kill"),
+            "the delete must name the run and how to stop it: {said}"
+        );
+    }
+
+    /// The other side of it. A goal whose last iteration has already finished
+    /// leaves nothing running, and must not be reported as though it did. The
+    /// `current-run` fact is still there — a fact is not retracted when the run
+    /// it names ends — so reading the fact alone would accuse every deleted
+    /// goal of stranding a run.
+    #[test]
+    fn deleting_a_goal_whose_iteration_is_over_reports_nothing_left_running() {
+        let s = store();
+        let goal = a_goal("finished");
+        s.add_goal(&goal).unwrap();
+        let mut over = run("iteration-1", "claude_code", 1);
+        over.status = "completed".into();
+        s.save_run(&over).unwrap();
+        s.remember(
+            NewFact::new("goal/finished", "current-run", "iteration-1")
+                .in_scope(&goal.memory_scope())
+                .from(Origin::System),
+        )
+        .unwrap();
+
+        let forgotten = s.delete_goal("finished").unwrap().unwrap();
+        assert_eq!(forgotten.still_running, None);
+        assert!(
+            !forgotten.summary().contains("jod kill"),
+            "nothing is running, so nothing should be offered to stop"
+        );
+    }
+
+    #[test]
+    fn deleting_a_goal_that_was_never_there_says_there_was_no_goal() {
+        assert_eq!(store().delete_goal("ghost").unwrap(), None);
     }
 
     // ---- trust admission ----

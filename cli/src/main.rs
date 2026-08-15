@@ -4474,8 +4474,12 @@ fn goal_command(jod: &Jod, what: GoalCommand) -> Result<()> {
             }
         }
         GoalCommand::Rm { name } => {
-            let gone = store.delete_goal(&name)?;
-            println!("{}", if gone { format!("{name} forgotten") } else { format!("no goal {name}") });
+            // Formatted by the store, so the iteration it leaves running is
+            // named in the same breath as the goal it took.
+            match store.delete_goal(&name)? {
+                Some(forgotten) => println!("{}", forgotten.summary()),
+                None => println!("no goal {name}"),
+            }
         }
         GoalCommand::Log { name, limit } => {
             let Some(goal) = store.goal_named(&name)? else {
@@ -5583,7 +5587,7 @@ mod tests {
             "the goal that wrote the verdict cannot read it back"
         );
 
-        assert!(store.delete_goal("nightly-tidy").unwrap());
+        assert!(store.delete_goal("nightly-tidy").unwrap().is_some());
         let second = a_goal(
             "g-second",
             "nightly-tidy",
