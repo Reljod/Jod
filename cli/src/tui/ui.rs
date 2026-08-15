@@ -2977,7 +2977,12 @@ fn draw_tree(f: &mut Frame, app: &App, area: Rect) {
                 if here { bold(AGENT) } else { fg(AGENT) },
             ),
         ];
-        let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+        // Columns, not characters. A label written in Japanese is half as
+        // many characters as it is columns wide, and a budget that believed
+        // the character count would hand the summary room the row does not
+        // have — which the terminal then takes back by clipping the end of
+        // the line off at the border.
+        let used: usize = spans.iter().map(|s| s.width()).sum();
         let mut room = width.saturating_sub(used);
 
         // A spinner, so a running node reads as moving rather than stuck. A run
@@ -2994,8 +2999,8 @@ fn draw_tree(f: &mut Frame, app: &App, area: Rect) {
             (false, None) => None,
         };
         if let Some((glyph, colour)) = mark {
-            if room >= glyph.chars().count() {
-                room -= glyph.chars().count();
+            if room >= columns(&glyph) {
+                room -= columns(&glyph);
                 spans.push(Span::styled(glyph, fg(colour)));
             }
         }
@@ -3007,8 +3012,8 @@ fn draw_tree(f: &mut Frame, app: &App, area: Rect) {
             } else {
                 format!(" [{} cards]", node.cards)
             };
-            if room >= badge.chars().count() {
-                room -= badge.chars().count();
+            if room >= columns(&badge) {
+                room -= columns(&badge);
                 spans.push(Span::styled(
                     badge,
                     if node.blocked > 0 { bold(BAD) } else { fg(MUTED) },
@@ -4876,15 +4881,40 @@ fn clock(at_ms: i64) -> String {
     }
 }
 
+/// How many terminal columns a string paints.
+///
+/// A `char` is not a column. A CJK ideograph or an emoji paints two of them,
+/// and a combining accent paints none, so counting characters answers a
+/// different question from the one a box's width asks. Ratatui already knows
+/// the answer — this is the same measure it uses when it lays a line into the
+/// buffer — so asking it keeps the budget and the paint in agreement, and
+/// costs no dependency the renderer does not already have.
+fn columns(s: &str) -> usize {
+    Span::raw(s).width()
+}
+
 /// Truncate to `width` columns, saying so.
 fn cut(s: &str, width: usize) -> String {
-    if s.chars().count() <= width {
+    if columns(s) <= width {
         return s.to_string();
     }
-    format!(
-        "{}…",
-        s.chars().take(width.saturating_sub(1)).collect::<String>()
-    )
+    // The ellipsis wants a column of its own, so the text keeps whatever
+    // still fits beside it. A character that would straddle the last column
+    // is dropped rather than half-drawn, which is why this walks the string
+    // instead of slicing it.
+    let budget = width.saturating_sub(1);
+    let mut kept = String::new();
+    let mut used = 0;
+    let mut one = [0u8; 4];
+    for c in s.chars() {
+        let cost = columns(c.encode_utf8(&mut one));
+        if used + cost > budget {
+            break;
+        }
+        kept.push(c);
+        used += cost;
+    }
+    format!("{kept}…")
 }
 
 /// A harness as a two- or three-letter code, so the column costs four cells
@@ -8765,6 +8795,45 @@ mod tests {
         assert_eq!(cut("a-very-long-name", 8), "a-very-…");
     }
 
+    /// `cut` is asked for a number of terminal columns, and a column is not a
+    /// character.
+    ///
+    /// Two different mistakes hide behind counting characters. Wide text —
+    /// Japanese, Chinese, most emoji — paints two columns per character, so
+    /// counting characters let twice as much text through as the caller asked
+    /// for and the extra ran off the end of whatever box it was in. Combining
+    /// accents are the other way round: two characters paint one column, so
+    /// the old count trimmed text that would have fitted. Both are fixed by
+    /// asking how wide the text is instead of how long it is.
+    #[test]
+    fn cutting_counts_columns_not_characters() {
+        for (text, width) in [
+            ("とても長い日本語の要約がここにあります", 20),
+            ("超long mixed タイトル here", 12),
+            ("🚀🚀🚀🚀🚀🚀🚀🚀", 7),
+            ("a very long english summary", 10),
+        ] {
+            let out = cut(text, width);
+            assert!(
+                columns(&out) <= width,
+                "`{out}` paints {} columns and only {width} were free",
+                columns(&out),
+            );
+        }
+
+        // Four accented letters, written as a letter and a separate accent
+        // each: eight characters, four columns. All four fit in four columns
+        // and none of them should be dropped.
+        let accented = "e\u{301}e\u{301}e\u{301}e\u{301}";
+        assert_eq!(accented.chars().count(), 8);
+        assert_eq!(columns(accented), 4);
+        assert_eq!(
+            cut(accented, 4),
+            accented,
+            "an accent paints no column of its own, so nothing had to go",
+        );
+    }
+
     /// A background shell is invisible by construction, so the two places it
     /// can be seen are the panel and the always-on status row. Both, or
     /// backgrounding an update means losing track of it.
@@ -9616,6 +9685,130 @@ mod tests {
             frame.contains("hello-agent"),
             "and it is named, not just numbered:\n{frame}"
         );
+    }
+
+    /// A row written in Japanese has to stop at the same border an English
+    /// one stops at.
+    ///
+    /// The tree budgets each row in columns, and a column is not a character:
+    /// a CJK ideograph paints two of them. When the budget counted characters
+    /// instead, a Japanese summary was handed twice the room the row actually
+    /// had, the line ran past the pane's right border, and the terminal
+    /// silently chopped the end off — taking the ellipsis with it, so nothing
+    /// on the screen said the text had been cut.
+    ///
+    /// Read off the cells rather than off a string length, because the length
+    /// of the string is the very thing that was wrong. A wide character owns
+    /// two cells, so the test walks the row a cell at a time and asks what the
+    /// last one holding anything is. If the row was trimmed to fit, that cell
+    /// is the ellipsis. If the row overran and the border cut it short, it is
+    /// whatever character happened to land there.
+    ///
+    /// An English row is seeded beside it, so the fix cannot pass by
+    /// truncating every row harder than it needs to.
+    #[test]
+    fn a_japanese_row_stops_where_an_english_one_stops() {
+        use jod_core::works::Origin;
+
+        let store = RealStore::in_memory().expect("an in-memory store");
+        for (title, summary) in [
+            ("日本語の作業", "とても長い日本語の要約がここにあります"),
+            (
+                "ascii work",
+                "a very long english summary that will not fit in the box at all",
+            ),
+        ] {
+            let work = store.create_work(title).expect("a work");
+            store.set_work_title(&work.id, title).expect("a title");
+            store
+                .set_work_summary(&work.id, summary)
+                .expect("a summary");
+            let lead = store
+                .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
+                .expect("a conversation")
+                .id;
+            store
+                .attach_conversation(&lead, &work.id, None, Origin::Agent)
+                .expect("a session under the work");
+        }
+
+        let mut a = app();
+        a.forest = store.forest().expect("a forest");
+        a.go(Workspace::Fleet);
+        a.reconcile();
+
+        let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+        terminal
+            .draw(|f| {
+                draw(f, &a);
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let cells = |y: u16| -> Vec<String> {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol().to_string())
+                .collect()
+        };
+        // A wide character's symbol sits in the first of its two cells and the
+        // second is left blank, so reading a row back as text means stepping
+        // over those blanks.
+        let text = |row: &[String]| -> String {
+            let mut out = String::new();
+            let mut skip = false;
+            for cell in row {
+                if skip {
+                    skip = false;
+                    continue;
+                }
+                skip = columns(cell) == 2;
+                out.push_str(cell);
+            }
+            out
+        };
+        let screen = (0..buffer.area.height)
+            .map(|y| text(&cells(y)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        // Only the fleet pane, which is the box these rows have to fit in. The
+        // detail pane to its right shows the same titles, so a search across
+        // the whole screen would measure the wrong box. Its borders are read
+        // off the row rather than assumed, so the box is whatever the layout
+        // made it.
+        let fleet = |y: u16| -> Option<Vec<String>> {
+            let row = cells(y);
+            let sides: Vec<usize> = (0..row.len()).filter(|x| row[*x] == "│").collect();
+            match sides.as_slice() {
+                [left, right, ..] => Some(row[left + 1..*right].to_vec()),
+                _ => None,
+            }
+        };
+
+        for (label, kept) in [
+            ("日本語の作業", "とても長い日本語"),
+            ("ascii work", "a very long english"),
+        ] {
+            let inside = (0..buffer.area.height)
+                .filter_map(fleet)
+                .find(|row| text(row).contains(label))
+                .unwrap_or_else(|| panic!("no fleet row for {label}:\n{screen}"));
+
+            let last = inside
+                .iter()
+                .rposition(|cell| !cell.trim().is_empty())
+                .unwrap_or_else(|| panic!("the {label} row is empty:\n{screen}"));
+            assert_eq!(
+                inside[last], "…",
+                "the {label} row runs to column {last} of {} and ends on `{}`, \
+                 so the border cut it short instead of `cut` trimming it:\n{screen}",
+                inside.len(),
+                inside[last],
+            );
+            assert!(
+                text(&inside).contains(kept),
+                "the {label} row should still show `{kept}`, not be trimmed to \
+                 nothing to make room:\n{screen}",
+            );
+        }
     }
 
     /// How a run ended has to be on the screen, not only in whatever the agent
