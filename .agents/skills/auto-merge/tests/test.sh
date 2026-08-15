@@ -103,6 +103,10 @@ assert_fails "$MERGE" 12 --method octopus
 assert_fails "$MERGE" 12 --method merge
 assert_ok bash -c "'$MERGE' --help | grep -q 'squash|rebase'"
 ok "'$MERGE' --help | grep -q 'behind'" "help states the not-behind rule"
+# The help text is a line range out of the header, so it drifts silently when
+# the header grows. Pin the two rules a caller most needs from it.
+ok "'$MERGE' --help | grep -q 'whether the pull request merged'" \
+   "help states what the exit code tracks"
 ok "'$MERGE' --help | grep -q -- '--ready'" "help documents --ready"
 # Un-drafting is opt-in: without --ready a draft is still refused.
 ok "grep -q 'pass --ready' '$MERGE'" "a draft refusal names the opt-in flag"
@@ -459,5 +463,187 @@ git add -A >/dev/null 2>&1; git commit -qm change >/dev/null 2>&1
 "$TRIAGE" HEAD~1...HEAD > report.md 2>/dev/null
 assert_grep "Why a human is needed" report.md "explains the refusal"
 assert_grep "must not merge it" report.md "tells an agent what not to do"
+
+# ============================================================================
+section "10. the exit code says whether the merge happened"
+# ============================================================================
+# `gh pr merge --delete-branch` merges through the API first, then deletes the
+# local branch, then the remote one. The local step runs `git checkout <base>`,
+# which fails whenever the script runs inside a git worktree, because the base
+# branch is checked out in the primary checkout. gh exits non-zero, but the PR
+# is already merged.
+#
+# That matters here more than in most scripts, because the charter tells every
+# agent to run this gate and obey its exit code. A refusal exits 1 and a merged
+# PR used to exit 1 too, so the caller could not tell "fix your branch" from
+# "I already merged". The property under test is that the exit code now answers
+# only one question — did the merge happen — and that it answers it from the
+# PR's own state, never from where the error appeared or how it was worded.
+#
+# gh is stubbed because the real one needs a real PR, and merging a real PR to
+# test a merge script is not a test anyone can re-run.
+
+# merge_env <name> <behaviour> [draft] [mergeStateStatus] — a repo with a real
+# origin, a docs-only branch on top of main, and a `gh` stub on PATH.
+# Behaviours: ok, worktree-fail, refused, unreachable. Sets ENVD; cwd lands in
+# the work tree. See the stub below for what each behaviour does.
+merge_env() {
+  local name="$1" behaviour="$2" draft="${3:-false}" mss="${4:-CLEAN}"
+  ENVD="$WORK/merge-$name"
+  mkdir -p "$ENVD/bin" || return 1
+  git init -q --bare "$ENVD/origin.git"
+  git clone -q "$ENVD/origin.git" "$ENVD/work" 2>/dev/null
+  cd "$ENVD/work" || return 1
+  git config user.email t@example.com
+  git config user.name T
+  git config commit.gpgsign false
+  mkdir -p docs
+  printf '# Guide\n' > docs/guide.md
+  git add -A && git commit -qm base >/dev/null
+  git branch -M main
+  git push -q origin main
+  git checkout -q -b feature
+  printf '# Guide\n\nA new paragraph.\n' > docs/guide.md
+  git add -A && git commit -qm 'docs: add a paragraph' >/dev/null
+  git push -q origin feature
+
+  git rev-parse HEAD > "$ENVD/head_sha"
+  printf 'OPEN\n'      > "$ENVD/state"
+  printf '%s\n' "$behaviour" > "$ENVD/behaviour"
+  printf '%s\n' "$draft"     > "$ENVD/is_draft"
+  printf '%s\n' "$mss"       > "$ENVD/merge_state"
+
+  # The stub reads its own directory, so everything it needs travels with it
+  # and the heredoc can stay fully quoted.
+  cat > "$ENVD/bin/gh" <<'STUB'
+#!/usr/bin/env bash
+set -u
+E="$(cd -- "$(dirname -- "$0")/.." && pwd)"
+behaviour="$(cat "$E/behaviour")"
+sub="${1:-} ${2:-}"
+case "$sub" in
+  "pr view")
+    # The verification query comes after the merge attempt. `unreachable` is
+    # the case where the PR did merge but the state cannot be read back — the
+    # gate must stay loud there rather than guess.
+    if [ "$behaviour" = unreachable ] && [ -f "$E/merge_attempted" ]; then
+      echo "could not reach the API" >&2; exit 1
+    fi
+    printf '{"number":42,"title":"docs: add a paragraph","state":"%s","isDraft":%s,"mergeable":"MERGEABLE","mergeStateStatus":"%s","reviewDecision":null,"baseRefName":"main","headRefOid":"%s","headRefName":"feature","url":"https://example.invalid/pull/42","statusCheckRollup":[{"__typename":"CheckRun","name":"tests","status":"COMPLETED","conclusion":"SUCCESS"}]}\n' \
+      "$(cat "$E/state")" "$(cat "$E/is_draft")" "$(cat "$E/merge_state")" "$(cat "$E/head_sha")"
+    ;;
+  "pr ready")
+    touch "$E/ready_called"; printf 'false\n' > "$E/is_draft" ;;
+  "pr merge")
+    touch "$E/merge_attempted"
+    case "$behaviour" in
+      ok)
+        printf 'MERGED\n' > "$E/state"
+        git -C "$E/work" push -q origin --delete feature 2>/dev/null
+        ;;
+      refused)
+        # The merge itself did not happen: the PR is still open.
+        echo "failed to merge: base branch was modified" >&2; exit 1 ;;
+      *)
+        # The worktree case. The merge landed; the cleanup after it did not,
+        # so gh never reaches the remote delete either.
+        printf 'MERGED\n' > "$E/state"
+        echo "failed to delete local branch feature: failed to run git: fatal: 'main' is already used by worktree at '/repo'" >&2
+        exit 1 ;;
+    esac
+    ;;
+esac
+STUB
+  chmod +x "$ENVD/bin/gh"
+}
+
+# run_merge <args...> — the gate, with the stub ahead of the real gh.
+run_merge() { PATH="$ENVD/bin:$PATH" "$MERGE" "$@"; }
+
+# A merge that landed reports success, even though gh exited 1 afterwards.
+merge_env worktree_ok worktree-fail >/dev/null 2>&1
+out="$(run_merge 42 2>&1)"; rc=$?
+assert_eq "$rc" "0" "gh fails cleaning up after a real merge -> exit 0"
+case "$out" in
+  *"Merged PR #42 (squash)."*) pass "the run says the PR was merged" ;;
+  *) fail "the run never says the PR was merged: $out" ;;
+esac
+# The last line matters on its own. A long run is read from the tail, and four
+# sessions in a row called a merged PR blocked because the final line on screen
+# was a bare git error. Whatever else is printed, the run must end by saying
+# what happened to the PR.
+last="$(printf '%s\n' "$out" | tail -n 1)"
+case "$last" in
+  "Merged PR #42 (squash)."*) pass "the last line reports the merge" ;;
+  *) fail "the run ends on something other than the outcome: $last" ;;
+esac
+case "$last" in
+  *"delete them by hand"*) pass "the last line also flags the leftover branches" ;;
+  *) fail "the last line hides the leftover branches: $last" ;;
+esac
+
+# The branches gh abandoned are named, not silently dropped.
+merge_env worktree_left worktree-fail >/dev/null 2>&1
+out="$(run_merge 42 2>&1)"
+case "$out" in
+  *"git branch -D feature"*) pass "names the local branch left behind" ;;
+  *) fail "never names the leftover local branch" ;;
+esac
+case "$out" in
+  *"git push origin --delete feature"*) pass "names the remote branch left behind" ;;
+  *) fail "never names the leftover remote branch" ;;
+esac
+
+# Same story when the PR had to be published first, which is how PR #125 ran.
+merge_env worktree_draft worktree-fail true >/dev/null 2>&1
+out="$(run_merge 42 --ready 2>&1)"; rc=$?
+assert_eq "$rc" "0" "--ready plus a failed cleanup -> exit 0"
+assert_file "$ENVD/ready_called" "the draft was published before merging"
+
+# A merge that did not happen still fails, and must not claim otherwise.
+merge_env not_merged refused >/dev/null 2>&1
+out="$(run_merge 42 2>&1)"; rc=$?
+ok "[ '$rc' -ne 0 ]" "gh fails and the PR is still open -> non-zero exit"
+case "$out" in
+  *"Merged PR #42"*) fail "claims a merge that never happened" ;;
+  *) pass "does not claim a merge that never happened" ;;
+esac
+
+# If the state cannot be read back, the gate does not get to assume the best.
+merge_env unknown_state unreachable >/dev/null 2>&1
+out="$(run_merge 42 2>&1)"; rc=$?
+ok "[ '$rc' -ne 0 ]" "the PR state cannot be read back -> non-zero exit"
+case "$out" in
+  *"Merged PR #42"*) fail "claims a merge it could not confirm" ;;
+  *) pass "does not claim a merge it could not confirm" ;;
+esac
+# ...and it says why, rather than dying at the state read and leaving the
+# caller with the same bare exit code this section exists to fix.
+case "$out" in
+  *"is not merged (state: unknown)"*) pass "says the state could not be read" ;;
+  *) fail "fails silently when the state cannot be read: $out" ;;
+esac
+
+# The ordinary path is untouched: gh succeeds, the gate succeeds, and it says
+# nothing about leftover branches because there are none.
+merge_env clean_merge ok >/dev/null 2>&1
+out="$(run_merge 42 2>&1)"; rc=$?
+assert_eq "$rc" "0" "gh succeeds -> exit 0"
+case "$out" in
+  *"Left behind"*) fail "reports leftovers on a clean merge" ;;
+  *) pass "a clean merge reports no leftovers" ;;
+esac
+
+# The case this must never swallow: a real refusal above the merge step. A
+# branch behind base has to keep failing, and `gh pr merge` must not be reached
+# at all — that is what makes the forgiveness above narrow rather than general.
+merge_env behind_base ok false BEHIND >/dev/null 2>&1
+out="$(run_merge 42 2>&1)"; rc=$?
+ok "[ '$rc' -ne 0 ]" "a branch behind base is still refused"
+case "$out" in
+  *"REFUSED to merge PR #42"*) pass "the refusal is still printed in full" ;;
+  *) fail "the refusal is no longer printed: $out" ;;
+esac
+assert_missing "$ENVD/merge_attempted" "a refused PR never reaches gh pr merge"
 
 assert_summary
