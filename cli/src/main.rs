@@ -1271,7 +1271,14 @@ enum ScheduleCommand {
 
 #[derive(Subcommand)]
 enum GoalCommand {
+    /// Every goal, with how far it has got and what it has spent.
+    ///
+    /// The iteration count and the spend are what a tick has settled, not what
+    /// has been billed. An iteration that is still working — or that finished
+    /// while the goal was paused — is added only once a tick picks it up, so a
+    /// goal can read `iter 0 · $0.00` while a run of its own is going.
     Ls {
+        /// Print the stored goal rows as JSON instead of the table.
         #[arg(long)]
         json: bool,
     },
@@ -1304,11 +1311,41 @@ enum GoalCommand {
         #[arg(long, default_value_t = 6)]
         stall_after: i64,
     },
-    Pause { name: String },
-    Resume { name: String },
+    /// Stop starting new iterations of this goal.
+    ///
+    /// It does not stop the iteration already in flight. That run carries on
+    /// working unattended, and carries on being billed, until it finishes by
+    /// itself — if you paused the goal to stop it spending, stop the run too
+    /// with `jod kill <RUN>`. What the run cost is not added to the goal until
+    /// the goal is resumed and a tick settles it.
+    Pause {
+        /// The goal to pause, as `jod goal ls` names it.
+        name: String,
+    },
+    /// Put this goal back on its schedule.
+    ///
+    /// The first tick after this settles the iteration that was left running
+    /// when the goal was paused — recording what it did and what it cost — and
+    /// then starts the next one. Resuming also clears the no-progress counter,
+    /// so a goal that was close to being called stalled gets a full allowance
+    /// again.
+    Resume {
+        /// The goal to resume, as `jod goal ls` names it.
+        name: String,
+    },
     /// Run one iteration now.
     Run { name: String },
-    Rm { name: String },
+    /// Forget a goal, so that nothing starts another iteration of it.
+    ///
+    /// It does not stop the iteration already in flight, for the same reason
+    /// pausing does not: that run keeps working and keeps being billed until
+    /// it finishes. What the goal learned is not deleted either. Its facts stay
+    /// in memory and `jod recall` still finds them, so removing a goal is not a
+    /// way to clear what it knows.
+    Rm {
+        /// The goal to remove, as `jod goal ls` names it.
+        name: String,
+    },
     /// What this goal has done, out of its own memory.
     ///
     /// A goal's progress lives in the fact store rather than in its columns,
