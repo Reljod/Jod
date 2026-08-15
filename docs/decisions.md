@@ -2505,3 +2505,28 @@ to it, so every gap in the matching is a gap in the real boundary. Hence: every
 part of a compound command must match separately, and command or process
 substitution is never auto-allowed however broad the grant, because no amount of
 matching the visible text bounds a command hidden inside it.
+
+## A summary the reader has to decode is not a summary
+
+A research task came back written in the register agents drift into when they
+are trying to sound careful: *seam*, *substrate*, *capability*, *compose*,
+*authoritative*, and sentences with four clauses each. Every word was defensible
+and the findings were correct. Reljod still had to stop and ask what it meant,
+which cost more time than plain wording would have taken to write.
+
+The failure is not style, it is delivery. A report exists to move what the agent
+learned into the reader's head. Dense wording moves the cost instead of the
+information: the agent saves a few seconds by not choosing the ordinary word,
+and the reader pays for it with a round trip. On a long unattended run that
+round trip may not happen at all, and the summary is simply skipped.
+
+Two habits cause most of it. The first is abstract nouns standing in for things
+that have plain names — "the capability seam" for "the code that connects to
+each tool". The second is compression: dropping verbs and articles until the
+prose reads like commit-message shorthand. Shorthand is fine in a commit
+subject, which is one line with a known shape. It is not fine in a paragraph,
+where the reader has to reassemble the sentence before they can judge the claim.
+
+So the charter asks for complete sentences and ordinary words in everything a
+human reads. Real names stay: a file path, a type, a protocol. What goes is
+abstract vocabulary chosen for tone rather than for meaning.
