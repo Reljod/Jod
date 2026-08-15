@@ -46,13 +46,28 @@ pub struct Grant {
     /// OpenCode implicitly, AGY because `agy.rs` passes it explicitly for
     /// exactly this reason.
     pub dirs: Vec<PathBuf>,
-    /// Whether the harness is checking `dirs` at all.
-    ///
-    /// False for a run launched in a mode that skips the directory rules
-    /// wholesale. Such a run can write anywhere the filesystem allows, so a
-    /// path outside `dirs` is not a problem for it and must not be reported as
-    /// one. Crying wolf on every claim would be as useless as never crying.
-    pub enforced: bool,
+    /// What `dirs` actually means for this run.
+    pub confinement: Confinement,
+}
+
+/// How a launched run's writes are bounded, as its command line says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Confinement {
+    /// Nothing is checked. The run was launched in a mode that skips the
+    /// directory rules wholesale and can write anywhere the filesystem allows,
+    /// so a path outside the grant is not a problem for it and must not be
+    /// reported as one. Crying wolf on every claim would be as useless as
+    /// never crying.
+    Unbounded,
+    /// The ordinary case: writes land inside the granted directories and are
+    /// refused outside them.
+    ToDirectories,
+    /// Every write is refused wherever it is aimed, because the run is in plan
+    /// mode. Tracked separately rather than folded into "outside the grant",
+    /// because it would otherwise produce a confident "yes" for a session that
+    /// cannot write to the worktree, or to anything else. It is also not a
+    /// fault: it is the mode the run was given.
+    Refused,
 }
 
 impl Grant {
@@ -76,6 +91,13 @@ impl Grant {
 /// `--add-dir` is Claude Code's and AGY's; `--dir` is OpenCode's only one.
 const DIR_FLAGS: [&str; 2] = ["--add-dir", "--dir"];
 
+/// The mode flags, by the two spellings the adapters emit.
+///
+/// Claude Code takes `--permission-mode`, AGY `--mode`. Only one value matters
+/// here — `plan`, which refuses every write path rather than bounding it, as
+/// `claude.rs` records having measured directly.
+const MODE_FLAGS: [&str; 2] = ["--permission-mode", "--mode"];
+
 /// The flag that turns the whole directory question off.
 ///
 /// Claude Code's `Bypass` arm. A run carrying this is not confined by `--add-dir`
@@ -96,7 +118,7 @@ const UNCONFINED_FLAG: &str = "--dangerously-skip-permissions";
 /// cannot write somewhere it can. So every following non-flag word is taken.
 pub fn granted_at_launch(args: &[String], cwd: &Path) -> Grant {
     let mut dirs = vec![roots::normalise(cwd)];
-    let mut enforced = true;
+    let mut confinement = Confinement::ToDirectories;
     // Peekable, not a plain iterator. The inner loop has to look at the word
     // that ends a run of directories *without* eating it: the flag that follows
     // a `--add-dir` is a flag the outer loop still has to see. Consuming it cost
@@ -106,7 +128,13 @@ pub fn granted_at_launch(args: &[String], cwd: &Path) -> Grant {
     let mut rest = args.iter().peekable();
     while let Some(arg) = rest.next() {
         if arg == UNCONFINED_FLAG {
-            enforced = false;
+            confinement = Confinement::Unbounded;
+            continue;
+        }
+        if MODE_FLAGS.contains(&arg.as_str()) {
+            if rest.peek().is_some_and(|mode| mode.as_str() == "plan") {
+                confinement = Confinement::Refused;
+            }
             continue;
         }
         if !DIR_FLAGS.contains(&arg.as_str()) {
@@ -127,7 +155,7 @@ pub fn granted_at_launch(args: &[String], cwd: &Path) -> Grant {
             rest.next();
         }
     }
-    Grant { dirs, enforced }
+    Grant { dirs, confinement }
 }
 
 #[cfg(test)]
@@ -172,7 +200,12 @@ mod tests {
         ] {
             let args = flat(&harness.args(&request), "do the thing");
             let grant = granted_at_launch(&args, &request.cwd);
-            assert!(grant.enforced, "{:?} under acceptEdits", harness.kind());
+            assert_eq!(
+                grant.confinement,
+                Confinement::ToDirectories,
+                "{:?} under acceptEdits",
+                harness.kind()
+            );
             for root in &request.roots {
                 assert!(
                     grant.covers(root),
@@ -185,13 +218,43 @@ mod tests {
         }
     }
 
-    /// The whole point of `enforced`. A bypass run writes wherever it likes, so
-    /// a path outside its grant is not a finding about that run.
+    /// A bypass run writes wherever it likes, so a path outside its grant is
+    /// not a finding about that run. Without this, the warning would fire on
+    /// every claim and be worth nothing on the claim that matters.
     #[test]
     fn a_bypass_run_is_not_confined_by_the_directories_it_was_given() {
         let request = req(&["/repo"], PermissionPolicy::Bypass);
         let args = flat(&ClaudeCode::default().args(&request), "do the thing");
-        assert!(!granted_at_launch(&args, &request.cwd).enforced, "{args:?}");
+        assert_eq!(
+            granted_at_launch(&args, &request.cwd).confinement,
+            Confinement::Unbounded,
+            "{args:?}"
+        );
+    }
+
+    /// The opposite end, and the reason plan mode is tracked apart from the
+    /// directory question. A plan-mode run is refused every write wherever it
+    /// aims it, so reporting that its grant covers the worktree would be a
+    /// confident "yes" to a session that cannot write at all.
+    #[test]
+    fn a_plan_mode_run_is_refused_every_write_however_wide_its_grant() {
+        for harness in [
+            Box::new(ClaudeCode::default()) as Box<dyn Harness>,
+            Box::new(Agy::default()) as Box<dyn Harness>,
+        ] {
+            let request = req(&["/repo"], PermissionPolicy::Plan);
+            let args = flat(&harness.args(&request), "do the thing");
+            let grant = granted_at_launch(&args, &request.cwd);
+            assert_eq!(
+                grant.confinement,
+                Confinement::Refused,
+                "{:?}: {args:?}",
+                harness.kind()
+            );
+            // The grant still reads back. It is simply not the thing that
+            // decides the answer for this run.
+            assert!(grant.covers(Path::new("/repo")), "{:?}", grant.dirs);
+        }
     }
 
     /// The shape of the run that prompted all of this: the checkout is granted,

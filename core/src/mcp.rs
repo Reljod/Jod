@@ -2634,6 +2634,10 @@ enum CanWrite {
     Yes,
     /// The run's command line is known and does not reach this path.
     No { granted: Vec<std::path::PathBuf> },
+    /// The run is in plan mode, which refuses every write wherever it is aimed.
+    /// Not the same failure, and it needs a different sentence: this one is the
+    /// mode working, not Jod's bug.
+    NoWritesAtAll,
     /// Jod could not read what the run was launched with.
     Unverified { why: String },
 }
@@ -2644,18 +2648,18 @@ impl CanWrite {
     fn verdict(&self) -> &'static str {
         match self {
             CanWrite::Yes => "yes",
-            CanWrite::No { .. } => "no",
+            CanWrite::No { .. } | CanWrite::NoWritesAtAll => "no",
             CanWrite::Unverified { .. } => "unverified",
         }
     }
 
     /// What to tell the session, when there is something to tell it.
     ///
-    /// Every sentence here is doing a job that a shorter message did badly on a
-    /// real run. It names the worktree, because a session holding several paths
-    /// cannot act on "somewhere is not writable". It says the session cannot
-    /// write, rather than that a write failed, because the session has not
-    /// tried yet and should not have to. And it says whose bug this is: two
+    /// Longer than it looks like it needs to be, and each part is load-bearing.
+    /// It names the worktree, because a session holding several paths cannot
+    /// act on "somewhere is not writable". It says the session cannot write,
+    /// rather than that a write failed, because the session has not tried yet
+    /// and should not have to. And it says whose bug this is: two
     /// messages elsewhere in this codebase sent readers to hunt for a broken
     /// harness binary and a repository that was not a git repository, and both
     /// were wrong about where the problem lived. A session told only "cannot
@@ -2680,6 +2684,13 @@ impl CanWrite {
                     granted.join(", ")
                 ))
             }
+            CanWrite::NoWritesAtAll => Some(format!(
+                "you cannot write to {worktree}, or anywhere else. This session was started in \
+                 plan mode, which refuses every write however it is attempted. That is the mode \
+                 it was given rather than a fault in Jod or in this repository. Say what you \
+                 would change and why, and leave the changing to a session that is allowed to \
+                 make it."
+            )),
             CanWrite::Unverified { why } => Some(format!(
                 "Jod has not confirmed that you can write to {worktree}. It could not read the \
                  record of what this session was launched with ({why}), and a session's writable \
@@ -2733,11 +2744,14 @@ fn can_write(run_id: &str, worktree: &std::path::Path) -> CanWrite {
         }
     };
     let grant = crate::harness::grants::granted_at_launch(&plan.args, &plan.cwd);
-    if !grant.enforced || grant.covers(worktree) {
-        return CanWrite::Yes;
-    }
-    CanWrite::No {
-        granted: grant.dirs,
+    use crate::harness::grants::Confinement;
+    match grant.confinement {
+        Confinement::Unbounded => CanWrite::Yes,
+        Confinement::Refused => CanWrite::NoWritesAtAll,
+        Confinement::ToDirectories if grant.covers(worktree) => CanWrite::Yes,
+        Confinement::ToDirectories => CanWrite::No {
+            granted: grant.dirs,
+        },
     }
 }
 
