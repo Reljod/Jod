@@ -23,7 +23,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::error::Result;
-use crate::harness::ToolAccess;
+use crate::harness::{PermissionPolicy, ToolAccess};
 
 /// Where the server reads the run it belongs to.
 ///
@@ -89,7 +89,12 @@ pub fn config_with(
     let path = dir.join(format!("{level}.json"));
     // No run identity at all — a session somebody started by hand, and
     // `jod mcp install`. Use [`config_for_run`] wherever the run is known.
-    write_config(&path, access, jod_home, browser, None, None)
+    //
+    // No permission either, and that is the honest answer rather than a
+    // shortcut: there is no run whose policy this could be. The server keeps
+    // its own conservative default, which is the right thing for a session Jod
+    // did not launch and cannot vouch for.
+    write_config(&path, access, jod_home, browser, None, None, None)
 }
 
 /// The MCP config for one *run*, written beside that run's own files.
@@ -123,11 +128,18 @@ pub fn config_with(
 /// [`config_for`] does: a run granted none of Jod's verbs may still browse, and
 /// a run offered neither gets no `--mcp-config` flag rather than a document
 /// declaring no servers.
+///
+/// `permission` is the run's *own* policy, and it becomes the ceiling of the
+/// server this document starts. Passed rather than left to default, because the
+/// default is `accept_edits` and a ceiling that quietly disagrees with the run
+/// it belongs to is how a session in `auto` opened background work in
+/// `accept_edits` — see [`server_args`].
 pub fn config_for_run(
     access: Option<ToolAccess>,
     jod_home: &Path,
     run_id: &str,
     conversation_id: Option<&str>,
+    permission: PermissionPolicy,
 ) -> Result<Option<PathBuf>> {
     config_for_run_with(
         access,
@@ -136,6 +148,7 @@ pub fn config_for_run(
         conversation_id,
         crate::paths::browser_mcp_script()
             .map(|script| (crate::paths::browser_python(), script)),
+        permission,
     )
 }
 
@@ -147,6 +160,7 @@ pub fn config_for_run_with(
     run_id: &str,
     conversation_id: Option<&str>,
     browser: Option<(PathBuf, PathBuf)>,
+    permission: PermissionPolicy,
 ) -> Result<Option<PathBuf>> {
     if access.is_none() && browser.is_none() {
         return Ok(None);
@@ -161,6 +175,7 @@ pub fn config_for_run_with(
         browser,
         Some(run_id),
         conversation_id,
+        Some(permission),
     )
 }
 
@@ -171,6 +186,7 @@ fn write_config(
     browser: Option<(PathBuf, PathBuf)>,
     run_id: Option<&str>,
     conversation_id: Option<&str>,
+    permission: Option<PermissionPolicy>,
 ) -> Result<Option<PathBuf>> {
     // The running executable, not a name looked up on PATH. A daemon started
     // from a build directory must point agents at *that* binary, or they get
@@ -217,7 +233,7 @@ fn write_config(
     if let Some(access) = access {
         servers["jod"] = serde_json::json!({
             "command": exe.to_string_lossy(),
-            "args": ["mcp", "--access", access.as_str()],
+            "args": server_args(access, permission),
             "env": env,
         });
     }
@@ -249,6 +265,33 @@ fn write_config(
     let doc = serde_json::json!({ "mcpServers": servers });
     std::fs::write(path, serde_json::to_vec_pretty(&doc)?)?;
     Ok(Some(path.to_path_buf()))
+}
+
+/// The argv for the `jod mcp` server this document starts.
+///
+/// `--max-permission` is the half that used to be missing, and its absence was
+/// not cosmetic. The flag's own default is `accept_edits`, so every per-run
+/// server silently held that ceiling however the run itself was launched — and
+/// [`crate::mcp`]'s `open_work` caps what it opens against exactly that value.
+/// A main chat running in `auto` therefore opened its background work in
+/// `accept_edits`, where headless Claude Code has nobody to ask and dead-ends on
+/// `git init`. The mode on the status bar was right; the mode on the child was
+/// not, and nothing in between said so.
+///
+/// Only emitted when the run's policy is actually known. A shared config serves
+/// sessions Jod did not launch, and inventing a ceiling for one of those would
+/// be a guess dressed as identity.
+fn server_args(access: ToolAccess, permission: Option<PermissionPolicy>) -> Vec<String> {
+    let mut args = vec![
+        "mcp".to_string(),
+        "--access".to_string(),
+        access.as_str().to_string(),
+    ];
+    if let Some(permission) = permission {
+        args.push("--max-permission".to_string());
+        args.push(permission.as_str().to_string());
+    }
+    args
 }
 
 /// Whether this machine can offer the browser at all.
@@ -414,6 +457,7 @@ mod tests {
             "run-42",
             Some("conv-7"),
             None,
+            PermissionPolicy::Bypass,
         )
         .unwrap()
         .unwrap();
@@ -423,16 +467,78 @@ mod tests {
         assert_eq!(env[RUN_ID_ENV].as_str().unwrap(), "run-42");
         assert_eq!(env[CONVERSATION_ID_ENV].as_str().unwrap(), "conv-7");
         // The level still travels in the argv, unchanged: identity says who you
-        // are, never what you may do.
+        // are, never what you may do. The ceiling travels beside it, because a
+        // server that cannot name the run's policy caps everything it opens at
+        // the flag's own default instead.
         let args: Vec<&str> = doc["mcpServers"]["jod"]["args"]
             .as_array()
             .unwrap()
             .iter()
             .map(|a| a.as_str().unwrap())
             .collect();
-        assert_eq!(args, vec!["mcp", "--access", "delegate"]);
+        assert_eq!(
+            args,
+            vec!["mcp", "--access", "delegate", "--max-permission", "bypass"]
+        );
         let _ = std::fs::remove_dir_all(&home);
         let _ = std::fs::remove_dir_all(crate::paths::run_dir("run-42"));
+    }
+
+    /// **Regression: a run in `auto` opened background work in `accept_edits`.**
+    ///
+    /// The server's ceiling was never passed, so it took `--max-permission`'s
+    /// own default — `accept_edits` — whatever the run holding it was launched
+    /// with. `open_work` caps against that ceiling, so a main chat the operator
+    /// had put in `auto` spawned children one level down, where headless Claude
+    /// Code has nobody to ask and refuses `git init` outright. The status bar
+    /// said `auto` and was telling the truth about the wrong process.
+    ///
+    /// Asserted across every policy rather than at `Bypass` alone: the failure
+    /// was a default silently standing in for a real value, and a test pinning
+    /// one value would keep passing if the others were dropped on the floor.
+    #[test]
+    fn a_runs_server_holds_that_runs_own_ceiling_and_never_the_flags_default() {
+        let home = scratch("ceiling");
+        for policy in PermissionPolicy::ALL {
+            let run = format!("run-ceiling-{}", policy.as_str());
+            let path = config_for_run_with(
+                Some(ToolAccess::Orchestrate),
+                &home,
+                &run,
+                None,
+                None,
+                policy,
+            )
+            .unwrap()
+            .unwrap();
+            let doc: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            let args: Vec<String> = doc["mcpServers"]["jod"]["args"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|a| a.as_str().unwrap().to_string())
+                .collect();
+            let at = args
+                .iter()
+                .position(|a| a == "--max-permission")
+                .unwrap_or_else(|| panic!("{policy:?} wrote no ceiling at all: {args:?}"));
+            assert_eq!(
+                args.get(at + 1).map(String::as_str),
+                Some(policy.as_str()),
+                "{policy:?} did not reach its own server: {args:?}"
+            );
+            // The spelling has to be one the CLI actually parses back, or the
+            // server dies on startup and the run silently loses every Jod tool.
+            assert_eq!(
+                crate::mcp::parse_permission(policy.as_str()),
+                Some(policy),
+                "`{}` does not round-trip through the argument parser",
+                policy.as_str()
+            );
+            let _ = std::fs::remove_dir_all(crate::paths::run_dir(&run));
+        }
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     /// A grant left on disk by a killed run is exactly what the shared
@@ -440,9 +546,16 @@ mod tests {
     #[test]
     fn a_runs_config_lives_with_that_runs_own_files() {
         let home = scratch("run-dir");
-        let path = config_for_run_with(Some(ToolAccess::ReadOnly), &home, "run-43", None, None)
-            .unwrap()
-            .unwrap();
+        let path = config_for_run_with(
+            Some(ToolAccess::ReadOnly),
+            &home,
+            "run-43",
+            None,
+            None,
+            PermissionPolicy::AcceptEdits,
+        )
+        .unwrap()
+        .unwrap();
         assert!(
             path.starts_with(crate::paths::run_dir("run-43")),
             "{path:?} is not in the run's own directory"

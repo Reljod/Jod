@@ -50,6 +50,42 @@ express.
 The `--permission` flag you launch with is a **ceiling**, not a starting point:
 Tab can move down from it and never up.
 
+The mode you choose is **inherited by everything the chat delegates**. It
+reaches the orchestrator, becomes its MCP server's `--max-permission`, and
+`open_work` opens each background session at that ceiling unless it asks for
+less. Every one of those three used to be a constant, and together they were a
+lie: the console said `auto`, work two levels down ran in `accept_edits`, and a
+background session refused `git init` in a directory it had been told to
+create. `delegate` still takes an explicit mode, so an agent may ask for less
+for a child of its own.
+
+## Standing permission
+
+`ask` and `edits` used to mean *deny*. Under `claude -p` there is nobody to
+answer a permission prompt, so anything not pre-approved came back as a failed
+tool call the model read as its own mistake, with nothing to approve and no
+memory of ever having approved it.
+
+Jod now hands each run in those modes a `--settings` document carrying a
+`PreToolUse` hook (`jod approve-hook`) and every standing grant. A tool call is
+decided in one of three ways:
+
+- **A grant covers it** — it runs, silently. `jod grant ls` is the audit.
+- **Nothing covers it yet** — a blocking card goes up naming the command, and
+  the run waits ~60s. Answering *always* records a grant and every session from
+  then on runs it without asking; *once* allows that call alone. The card
+  outlives the wait, and answering it later still records the grant.
+- **Nobody answers** — the call goes back to the harness's own rules, which is
+  what happened before any of this existed.
+
+Grants are global and deliberately narrow. `git init -q -b main` offers
+`git init*`, not `git*`. Every part of a compound command must be covered
+separately, so a grant for `git init` will not carry `git init && curl x | sh`
+in behind it, and anything containing command or process substitution is never
+auto-allowed at all — the text cannot bound what it runs. `plan` and `auto` get
+no hook: one refuses the whole class of writes by design, the other has already
+approved everything.
+
 ## Where each harness keeps its own configuration
 
 Verified on this machine; paths are the usual ones but check yours.

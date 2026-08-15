@@ -335,6 +335,11 @@ pub async fn send_to_main(
     //
     // The run is named `api` so `jod ls` says where an instruction came from,
     // the way the bridge names its runs after the chat.
+    //
+    // The daemon's own ceiling is the mode, because a remote caller has no
+    // console to have chosen one and this is the value an operator set
+    // deliberately when they started the daemon. It bounds the chat and
+    // everything the chat delegates, which is what a ceiling is for.
     let handed = jod_core::orchestrator::hand_to_orchestrator(
         &state.jod,
         &instruction,
@@ -342,6 +347,7 @@ pub async fn send_to_main(
         cwd,
         None,
         "api",
+        state.config.max_permission,
     )
     .await
     .map_err(|e| {

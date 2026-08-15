@@ -425,6 +425,7 @@ mod tests {
             updated_at_ms: 0,
             answered_at_ms: None,
             delivered_at_ms: None,
+            dedupe_key: None,
         }
     }
 

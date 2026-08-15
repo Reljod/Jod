@@ -599,6 +599,12 @@ pub fn catalogue() -> Vec<Tool> {
                     ),
                     "harness": one_of("Which harness runs the first session. Default claude_code.", &HARNESS_IDS),
                     "model": text("Model override, in the harness's own spelling."),
+                    "permission": one_of(
+                        "How much the first session may do unattended. Capped at this server's \
+                         ceiling. Defaults to that ceiling — the mode the operator chose here — \
+                         so leaving it out is the right answer almost always.",
+                        &PERMISSION_IDS,
+                    ),
                     "tools": one_of(
                         "How much of Jod the first session may reach. Capped at your own. \
                          Default delegate, so it can talk to its siblings and start its own.",
@@ -1186,11 +1192,31 @@ impl Server {
     }
 
     /// The permission `delegate` may use, refusing anything above the ceiling.
+    ///
+    /// `delegate` starts an agent on a bare prompt with no board behind it, so
+    /// it defaults to the most cautious thing that still runs. `open_work`
+    /// defaults differently — see [`Server::permission_arg`] — because a work
+    /// is the operator's own instruction being carried out, not an errand an
+    /// agent invented.
     fn requested_permission(&self, args: &Value) -> Result<PermissionPolicy, ToolError> {
+        self.permission_arg(args, PermissionPolicy::Ask)
+    }
+
+    /// A `permission` argument, capped at the ceiling, falling back to
+    /// `fallback` when the caller said nothing.
+    ///
+    /// One function rather than two copies of the cap, because the two callers
+    /// disagree only about the fallback and a second copy of a *ceiling* check
+    /// is the copy that eventually forgets to check.
+    fn permission_arg(
+        &self,
+        args: &Value,
+        fallback: PermissionPolicy,
+    ) -> Result<PermissionPolicy, ToolError> {
         let requested = match opt_str(args, "permission") {
             Some(p) => parse_permission(&p)
                 .ok_or_else(|| ToolError::BadParams(format!("unknown permission `{p}`")))?,
-            None => PermissionPolicy::Ask,
+            None => fallback,
         };
         if !permits(self.max_permission, requested) {
             return Err(ToolError::Refused(format!(
@@ -2136,15 +2162,21 @@ impl Server {
             ));
         }
 
-        // Capped rather than refused. The session's default is `accept_edits`
-        // — it is here to change code — but a server started with a lower
-        // ceiling means what it says, and refusing outright would make this
-        // tool unusable rather than safer.
-        let permission = if permits(self.max_permission, PermissionPolicy::AcceptEdits) {
-            PermissionPolicy::AcceptEdits
-        } else {
-            self.max_permission
-        };
+        // Inherited, not chosen here. This used to ask for `accept_edits`
+        // outright and cap it, which reads as a safe default and is not one: a
+        // main chat the operator had put in `auto` opened all of its background
+        // work one level down, in a mode where headless Claude Code has nobody
+        // to ask and refuses `git init`, `pnpm -v` and every other mutation.
+        // The mode on the status bar never reached the process doing the work,
+        // and the run reported the refusals as its own failures.
+        //
+        // The ceiling *is* the operator's answer. It arrives from the run that
+        // owns this server — see [`crate::mcp_config::server_args`] — so
+        // inheriting it carries `auto` down to the child and still stops a
+        // server started deliberately low from handing out more than it holds.
+        // An explicit argument overrides it, capped the same way `delegate`'s
+        // is, so a caller may ask for *less* without asking anybody.
+        let permission = self.permission_arg(args, self.max_permission)?;
         let mut opening = crate::orchestrator::Opening::new(instruction, checkout)
             .on(harness)
             .with_permission(permission)
@@ -3443,6 +3475,53 @@ mod tests {
             !said(&answer).contains("ceiling"),
             "a permission at the ceiling was refused: {}",
             said(&answer)
+        );
+    }
+
+    /// **Regression: `open_work` opened everything in `accept_edits`.**
+    ///
+    /// It asked for `accept_edits` outright and capped that, so the operator's
+    /// own mode never reached the work. In `auto` that cost the whole feature:
+    /// headless Claude Code in `accept_edits` has nobody to answer a permission
+    /// prompt, so a background session refused `git init`, `pnpm -v` and every
+    /// other mutation while the console still said `auto`.
+    ///
+    /// Asserted on the choice rather than through a spawn, because the spawn
+    /// needs a supervisor this test has no business requiring.
+    #[tokio::test]
+    async fn open_work_inherits_the_operators_mode_rather_than_pinning_accept_edits() {
+        for ceiling in PermissionPolicy::ALL {
+            let server = Server::new(Jod::with_store(Arc::new(Store::in_memory().unwrap())))
+                .with_access(ToolAccess::Orchestrate)
+                .with_max_permission(ceiling);
+            assert_eq!(
+                server.permission_arg(&json!({}), ceiling).unwrap(),
+                ceiling,
+                "a work opened under a {ceiling:?} console did not inherit it"
+            );
+        }
+    }
+
+    /// Inheriting must not become a way to climb: the argument is still capped,
+    /// and asking for *less* than the console holds is nobody's business but
+    /// the caller's.
+    #[tokio::test]
+    async fn an_opened_work_may_ask_for_less_than_the_console_holds_but_never_more() {
+        let server = Server::new(Jod::with_store(Arc::new(Store::in_memory().unwrap())))
+            .with_access(ToolAccess::Orchestrate)
+            .with_max_permission(PermissionPolicy::AcceptEdits);
+        assert_eq!(
+            server
+                .permission_arg(&json!({ "permission": "plan" }), PermissionPolicy::AcceptEdits)
+                .unwrap(),
+            PermissionPolicy::Plan,
+            "asking for less was refused"
+        );
+        assert!(
+            server
+                .permission_arg(&json!({ "permission": "bypass" }), PermissionPolicy::AcceptEdits)
+                .is_err(),
+            "a work climbed above the console's ceiling"
         );
     }
 

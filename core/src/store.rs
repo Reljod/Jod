@@ -1306,6 +1306,34 @@ const MIGRATIONS: &[(&str, &str)] = &[
       ON project_resolutions(conversation_id, decided_at_ms DESC);
     "#,
     ),
+    (
+    "0017_approvals",
+    r#"
+    -- Standing permission: what an agent may run without stopping to ask.
+    --
+    -- **Global, not per conversation or per run, and that is the point.** The
+    -- whole value of answering "always" is that the next session does not ask;
+    -- a grant scoped to the session that earned it would put the same question
+    -- back in front of Reljod every time a run started. See
+    -- `crate::approvals` for what a pattern may say and why the matching
+    -- refuses to be clever.
+    CREATE TABLE IF NOT EXISTS grants (
+      id            INTEGER PRIMARY KEY,
+      -- The harness's own tool name — `Bash`, `WebFetch`. Compared exactly.
+      tool          TEXT NOT NULL,
+      -- Exact text, or a prefix when it ends in `*`. Stored with its
+      -- whitespace already collapsed, so the uniqueness below is uniqueness of
+      -- meaning rather than of spelling.
+      pattern       TEXT NOT NULL,
+      -- Why this exists, in the granter's own words. Never parsed.
+      note          TEXT NOT NULL DEFAULT '',
+      created_at_ms INTEGER NOT NULL,
+      -- Two sessions can hit the same wall at once, and both will try to
+      -- record the answer. The second is not a failure.
+      UNIQUE(tool, pattern)
+    );
+    "#,
+    ),
 ];
 
 /// Who asserted a fact. Kept out of the fact's text so that content Jod

@@ -1096,6 +1096,10 @@ async fn orchestrate(
         opts.cwd.clone(),
         carried,
         "main",
+        // The mode on the status bar, and the whole point of it being there.
+        // It used to stop at this call: the chat showed `auto`, the
+        // orchestrator ran in `accept_edits`, and so did everything it opened.
+        bounded(opts.ceiling(), app.mode),
     )
     .await
     {
@@ -11136,6 +11140,7 @@ mod tests {
             updated_at_ms: 0,
             answered_at_ms: None,
             delivered_at_ms: None,
+            dedupe_key: None,
         }
     }
 
