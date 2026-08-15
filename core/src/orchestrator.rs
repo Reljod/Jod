@@ -362,8 +362,64 @@ pub fn router_prompt(instruction: &str, running: &[Candidate], recent: &[String]
 /// posture. The earlier design asked for a JSON decision and parsed it; that
 /// allowed exactly one decision per turn and could not ask a follow-up question
 /// before choosing. With tools, adding a capability is adding a tool.
+///
+/// ## The branch that used to be missing
+///
+/// This opened with "you do not do the work" and then offered nothing but ways
+/// to hand something over, so every instruction bought an agent. The failure
+/// that made the case: a console on a fresh store was asked "what does the
+/// acronym A2A stand for in this project? answer in one line", spawned a child
+/// called `a2a-acronym-lookup`, polled `list_agents` waiting for it, and after
+/// 42 seconds and 39 cents said "Still working — the lookup agent is
+/// mid-search." Reljod never got the answer. It needed no repository, and the
+/// chat knew it.
+///
+/// The old rule was written against a real failure — a main chat that starts
+/// reading a checkout stops being a main chat — and it over-reached into
+/// questions that touch no checkout at all. So the size of the task picks the
+/// branch, and answering is the first one considered. Everything past it is
+/// unchanged: the moment an instruction needs a checkout, a tool beyond recall,
+/// or anything still running when the turn ends, the routing below is exactly
+/// what it always was.
+///
+/// This is the shape `docs/spec-ceo-and-managers` settles on for main — "it
+/// routes and it answers", and "main may route and may run repo-less one-shots"
+/// — brought forward on its own, without the manager tier that spec adds around
+/// it.
+///
+/// It fixes instructions that never needed a child. It does **not** fix the
+/// separate hole the same live run exposed: main delegating and then wanting
+/// the result back, with no way for a child to report and no instruction about
+/// what to do meanwhile, so the model reaches for a `sleep` loop against the
+/// "Non-blocking, which is the whole point" rule at the top of this file. That
+/// one is still open.
 pub fn orchestrator_preamble() -> &'static str {
-    "You are Jod's main chat: Reljod's orchestrator.\n\n\
+    "You are Jod's main chat: Reljod's orchestrator. You route, and you \
+     answer.\n\n\
+     **Decide by the task.** A quick question you can answer in one turn, you \
+     answer. Something that will still be running when this turn ends, you \
+     hand to an agent, and the agent reports back. Something that is really a \
+     project, you open a work for. Take those in that order, because the \
+     first is the cheapest and it is the one this chat used to skip.\n\n\
+     **Answer directly** when the instruction needs no repository, no work \
+     that outlasts this turn, and nothing you would have to go away and \
+     research. One trivial call you finish inside this turn — reading the \
+     clock, checking `recall` — is still answering; opening a checkout is \
+     not. \"What time is it in Manila\" and \"what does A2A stand for\" are \
+     answers, not agents. \
+     Spawning one costs a process, a conversation row and a round-trip, and \
+     it buys nothing when you already knew the answer — worse, the reply that \
+     comes back on the turn is \"still working\", which is not an answer at \
+     all. Say the answer in the chat and stop there. Do not hand it over as \
+     well, and do not explain that you could have.\n\n\
+     Naming the project does not by itself make it repository work. \"In this \
+     project, what does A2A stand for?\" is a definition you know; the words \
+     are context, not an errand. What sends an instruction onward is needing \
+     to *look* — at files, at a build, at anything you would have to open. If \
+     you are not sure you know, that is not this branch: hand it over rather \
+     than guess, because a confident wrong answer is worse than a slow right \
+     one.\n\n\
+     For everything else the rule is the old one. \
      **You do not do the work.** You decide who does, hand it over, and come \
      straight back. If you catch yourself reading a file to answer a question \
      about a repository, you have taken someone else's job.\n\n\
@@ -1992,6 +2048,76 @@ mod tests {
             said.contains("Reading a file to understand what you are being asked is fine"),
             "reading has to stay allowed, or the chat cannot see what it is routing"
         );
+    }
+
+    /// The preamble offered no branch for answering at all, so a question the
+    /// chat already knew the answer to still bought a spawned agent. The branch
+    /// has to be stated, and it has to be stated *before* the handing-over
+    /// verbs — after them it reads as an exception to the rule rather than as
+    /// the first thing to check.
+    #[test]
+    fn the_orchestrator_is_told_it_may_answer_a_quick_question_itself() {
+        let said = orchestrator_preamble();
+        assert!(said.contains("**Answer directly**"), "{said}");
+        assert!(said.contains("What time is it in Manila"), "{said}");
+        assert!(said.contains("what does A2A stand for"), "{said}");
+
+        let answers = said.find("**Answer directly**").expect("checked above");
+        let hands_over = said.find("**You do not do the work.**").expect("still there");
+        assert!(
+            answers < hands_over,
+            "the handing-over rule comes before the answer branch, so answering \
+             reads as an exception rather than as the first thing to check"
+        );
+    }
+
+    /// The three sizes, in Reljod's own terms. Drop any one and the branch is a
+    /// two-way choice again.
+    #[test]
+    fn the_orchestrator_is_told_the_task_decides_which_branch_it_takes() {
+        let said = orchestrator_preamble();
+        assert!(said.contains("**Decide by the task.**"), "{said}");
+        assert!(said.contains("answer in one turn"), "{said}");
+        assert!(said.contains("still be running when this turn ends"), "{said}");
+        assert!(said.contains("really a project, you open a work for"), "{said}");
+    }
+
+    /// Answering is bounded by three things, and the bound is the whole reason
+    /// this is not a licence to do the work. Losing any of them lets the chat
+    /// start reading a checkout, which is the failure the old rule was written
+    /// against and which this change must not reintroduce.
+    #[test]
+    fn the_answer_branch_is_bounded_rather_than_open_ended() {
+        let said = orchestrator_preamble();
+        assert!(said.contains("needs no repository"), "{said}");
+        assert!(said.contains("no work that outlasts this turn"), "{said}");
+        assert!(said.contains("nothing you would have to go away and research"), "{said}");
+        assert!(
+            said.contains("opening a checkout is not"),
+            "a trivial in-turn call is still answering, and a checkout is still not: {said}"
+        );
+        assert!(
+            said.contains("hand it over rather than guess"),
+            "an unsure orchestrator has to delegate, not answer: {said}"
+        );
+        assert!(
+            said.contains("**You do not do the work.**"),
+            "the old rule still governs everything past the answer branch: {said}"
+        );
+    }
+
+    /// The observed failure named the project — "what does the acronym A2A
+    /// stand for **in this project**" — and the chat read those three words as
+    /// an errand into a checkout. It is a definition, and the preamble has to
+    /// say so or the same phrasing routes the same way again.
+    #[test]
+    fn naming_the_project_does_not_by_itself_make_it_repository_work() {
+        let said = orchestrator_preamble();
+        assert!(
+            said.contains("Naming the project does not by itself make it repository work"),
+            "{said}"
+        );
+        assert!(said.contains("needing to *look*"), "{said}");
     }
 
     // ---- what the orchestrator is told about projects ----
