@@ -2043,11 +2043,18 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     // The panel holds the context bar, but the panel is shut most of the time
     // and advice nobody can see is not advice — so the recommendation itself
     // rides the one row that is always on screen.
+    //
+    // It says "(estimate)" because the panel's hedging does not come with it.
+    // `CONTEXT_WINDOW` is one assumed figure for every model, so on a model with
+    // a larger window this badge lights up long before the conversation is
+    // really full. A bare `⚠ compact` reads as a fact about this chat and gets
+    // people to throw away context they still had room for; the word is what
+    // `CONTEXT_WINDOW`'s own doc comment promises the screen would say.
     if app.should_compact() {
         if !badge.is_empty() {
             badge.push_str(" · ");
         }
-        badge.push_str("⚠ compact");
+        badge.push_str("⚠ compact (estimate)");
     }
     // Endings that arrive while you are away have to survive until you look.
     if app.unread() > 0 {
@@ -6920,6 +6927,29 @@ mod tests {
         assert!(
             screen.lines().last().unwrap().contains("⚠ compact"),
             "{screen}"
+        );
+    }
+
+    /// The status bar's badge has to say it is guessing, because none of the
+    /// panel's hedging travels with it.
+    ///
+    /// `CONTEXT_WINDOW` is 200,000 for every model, so on a model with a
+    /// million-token window this badge lights up at about 15% of the real
+    /// capacity. Someone who reads a bare `⚠ compact` as a fact compacts a
+    /// conversation with five sixths of its room left and loses context they
+    /// never had to lose. Calling it an estimate is the condition
+    /// `CONTEXT_WINDOW`'s own doc comment sets for keeping one fixed number.
+    #[test]
+    fn the_status_bar_calls_the_compaction_advice_an_estimate() {
+        use super::super::app::CONTEXT_WINDOW;
+        let mut a = app();
+        a.context_tokens = CONTEXT_WINDOW;
+        let screen = rendered(&a, 140, 24);
+        let status = screen.lines().last().unwrap().to_string();
+        assert!(status.contains("compact"), "{screen}");
+        assert!(
+            status.contains("estimate"),
+            "a bare `⚠ compact` reads as a fact about this chat:\n{screen}"
         );
     }
 
