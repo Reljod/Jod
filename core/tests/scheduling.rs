@@ -11,7 +11,7 @@
 use jod_core::schedule::{
     Fire, FireOutcome, Goal, GoalState, Misfire, Overlap, Schedule, ScheduleState,
 };
-use jod_core::store::Store;
+use jod_core::store::{Store, StoredRun};
 
 /// A private directory for one test, removed on the way out.
 struct Scratch(std::path::PathBuf);
@@ -187,6 +187,110 @@ fn a_broken_schedule_stays_broken_across_a_restart() {
         store.claim_due_schedules("anyone", now(), 60_000).unwrap().is_empty(),
         "a broken schedule must not fire again on its own"
     );
+}
+
+/// A run as the supervisor first writes it: started, and not finished yet.
+fn started_run(id: &str) -> StoredRun {
+    StoredRun {
+        id: id.into(),
+        name: "doomed".into(),
+        harness: "claude_code".into(),
+        status: "running".into(),
+        cwd: "/tmp/gone".into(),
+        session_id: None,
+        pid: None,
+        pgid: None,
+        created_at_ms: now(),
+        summary: serde_json::json!({"id": id}),
+    }
+}
+
+/// One tick that fires the schedule: a run is started, the fire is written
+/// down, and the schedule is let go with no spawn error — because there was
+/// none. The process started perfectly well.
+fn fire_a_run(store: &Store, run_id: &str, at: i64) {
+    store.save_run(&started_run(run_id)).unwrap();
+    store
+        .record_fire(&Fire {
+            id: 0,
+            schedule_id: "id-doomed".into(),
+            due_at_ms: at,
+            fired_at_ms: at,
+            run_id: Some(run_id.into()),
+            outcome: FireOutcome::Ran,
+            detail: None,
+        })
+        .unwrap();
+    store.release_schedule("id-doomed", at, false).unwrap();
+}
+
+/// The way a schedule actually breaks, and the one the breaker used to miss
+/// entirely: every run starts fine and the harness inside it dies a moment
+/// later — a working directory somebody deleted, a crashing agent, a model that
+/// cannot be reached. The spawn never fails, so nothing was counted, and a
+/// schedule in that state fired and failed every minute for ever.
+#[test]
+fn runs_that_start_and_then_fail_eventually_break_the_schedule() {
+    let scratch = Scratch::new("started-then-failed");
+    let failures_seen = {
+        let store = scratch.open();
+        store.add_schedule(&schedule("doomed", "* * * * *")).unwrap();
+        let mut seen = Vec::new();
+        let mut at = now();
+        // One more tick than the threshold, because a run's outcome is not
+        // known until after the tick that started it: each tick counts the
+        // previous run.
+        for i in 0..=jod_core::schedule::BREAK_AFTER_FAILURES {
+            fire_a_run(&store, &format!("run-{i}"), at);
+            seen.push(store.schedule_named("doomed").unwrap().unwrap().consecutive_failures);
+            // And a moment later the harness dies, which is the supervisor's
+            // news to write, long after the tick has moved on.
+            store.set_run_status(&format!("run-{i}"), "failed").unwrap();
+            at += 60_000;
+        }
+        seen
+    };
+
+    assert_eq!(
+        failures_seen,
+        vec![0, 1, 2, 3, 4, 5],
+        "each tick must count the run the tick before it started"
+    );
+
+    let store = scratch.open();
+    let broken = store.schedule_named("doomed").unwrap().unwrap();
+    assert_eq!(broken.consecutive_failures, jod_core::schedule::BREAK_AFTER_FAILURES);
+    assert_eq!(broken.state, ScheduleState::Broken);
+    let backed_off = broken.last_fire_at_ms.unwrap()
+        + jod_core::schedule::backoff_ms(jod_core::schedule::BREAK_AFTER_FAILURES);
+    assert!(
+        broken.next_fire_at_ms.unwrap() >= backed_off,
+        "a failing schedule must wait longer each time, not keep its cadence"
+    );
+}
+
+/// The other half of counting real outcomes: a run that has not finished is not
+/// a failure. A schedule whose runs take longer than its own period would
+/// otherwise break for being slow, which is a worse bug than the one this
+/// counting fixes.
+#[test]
+fn a_run_that_is_still_going_never_breaks_the_schedule() {
+    let scratch = Scratch::new("still-going");
+    {
+        let store = scratch.open();
+        store.add_schedule(&schedule("doomed", "* * * * *")).unwrap();
+        let at = now();
+        fire_a_run(&store, "slow", at);
+        // Every tick after it finds the same run still working and holds.
+        for i in 1..=jod_core::schedule::BREAK_AFTER_FAILURES + 2 {
+            store.release_schedule("id-doomed", at + i * 60_000, false).unwrap();
+        }
+    }
+
+    let store = scratch.open();
+    let s = store.schedule_named("doomed").unwrap().unwrap();
+    assert_eq!(s.consecutive_failures, 0, "waiting is not failing");
+    assert_eq!(s.state, ScheduleState::Armed);
 }
 
 /// Deleting a schedule must take its history with it. A row pointing at a

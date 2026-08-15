@@ -413,6 +413,10 @@ impl Ticker {
                 .find(|d| spawns(d))
                 .map(|d| d.due_at_ms())
                 .unwrap_or(now_ms);
+            // Only ever "this tick could not start a process". Whether a run
+            // that *did* start then failed is not known yet — the harness is
+            // still alive at this point — so that half of failure is counted by
+            // `release_schedule` on a later tick, out of the run's own status.
             let mut failed = false;
             let mut ran = false;
 

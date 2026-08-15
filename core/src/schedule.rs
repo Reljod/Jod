@@ -326,6 +326,82 @@ pub fn backoff_ms(consecutive_failures: i64) -> i64 {
     doubled.min(CAP)
 }
 
+/// What [`settle`] worked out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Settlement {
+    /// The schedule's consecutive-failure count after this tick.
+    pub failures: i64,
+    /// How many of the runs it was given, counting from the oldest, are now
+    /// accounted for. The rest had not finished and belong to a later tick.
+    pub settled: usize,
+}
+
+/// A schedule's failure count, once the runs it started have ended.
+///
+/// This exists because the failure that matters is not known at the moment the
+/// tick lets the schedule go. Starting the harness process nearly always
+/// succeeds; what fails is the harness itself a second later — a working
+/// directory that has been deleted, an agent that crashes, a model that cannot
+/// be reached — and the supervisor writes that into the run's own status long
+/// after the tick has moved on. While only the synchronous spawn error was
+/// counted, the breaker never tripped for the ordinary way a schedule breaks: a
+/// schedule pointed at a deleted directory failed every run and sat at zero
+/// failures, still `armed`, for ever.
+///
+/// `ended` is `runs.status` for each run this schedule started and has not yet
+/// been judged on, oldest first. `spawn_failed` is the old signal, unchanged:
+/// this tick could not start a run at all.
+///
+/// Two rules here matter more than the arithmetic:
+///
+/// - **A run that has not finished is not a failure.** The walk stops at the
+///   first `running` row rather than guessing, so a long run that is going to
+///   succeed cannot trip the breaker, and runs started after it are judged on a
+///   later tick instead of out of order.
+/// - **A tick that learned nothing resets the count to zero**, which is what
+///   every release without a spawn error did before this function existed. The
+///   one exception is a tick still waiting on a run it started: that leaves the
+///   count where it was, so failures are not forgotten every time a slow run is
+///   in flight.
+pub fn settle(previous: i64, ended: &[&str], spawn_failed: bool) -> Settlement {
+    let mut failures = previous;
+    let mut settled = 0;
+    let mut judged = false;
+    let mut waiting = false;
+
+    for status in ended {
+        match *status {
+            "running" => {
+                waiting = true;
+                break;
+            }
+            "failed" => {
+                failures += 1;
+                judged = true;
+            }
+            "completed" => {
+                failures = 0;
+                judged = true;
+            }
+            // `killed` — a run stopped by hand or displaced by the overlap
+            // policy — and any status this build does not recognise say nothing
+            // about whether the schedule works. Accounted for so the same row
+            // is not read again, but not counted either way.
+            _ => {}
+        }
+        settled += 1;
+    }
+
+    if spawn_failed {
+        failures += 1;
+        judged = true;
+    }
+    if !judged && !waiting {
+        failures = 0;
+    }
+    Settlement { failures, settled }
+}
+
 // ---- goals --------------------------------------------------------------
 
 /// Where a goal has got to.
@@ -586,6 +662,79 @@ mod tests {
         assert!(backoff_ms(1) < backoff_ms(3));
         assert_eq!(backoff_ms(50), 3_600_000, "capped at an hour");
         assert_eq!(backoff_ms(-1), 0, "a negative count is not a delay");
+    }
+
+    /// The failure this whole breaker exists for, and the one it used to miss:
+    /// the process started, and the harness inside it died a moment later.
+    #[test]
+    fn a_run_that_started_and_then_failed_counts_as_a_failure() {
+        assert_eq!(settle(0, &["failed"], false).failures, 1);
+        assert_eq!(settle(4, &["failed"], false).failures, 5);
+    }
+
+    #[test]
+    fn a_run_that_finished_clears_the_count() {
+        assert_eq!(settle(4, &["completed"], false).failures, 0);
+    }
+
+    /// A schedule whose runs take longer than its own period must not break
+    /// simply for being slow.
+    #[test]
+    fn a_run_that_has_not_finished_is_not_a_failure() {
+        let s = settle(0, &["running"], false);
+        assert_eq!(s.failures, 0);
+        assert_eq!(s.settled, 0, "and it is judged again on a later tick");
+    }
+
+    /// Waiting on a run is not evidence that the last one worked. Forgetting
+    /// the count here would leave a schedule that fails slowly stuck at zero for
+    /// ever, which is the bug this function was written for.
+    #[test]
+    fn waiting_on_a_run_keeps_the_failures_already_counted() {
+        assert_eq!(settle(3, &["running"], false).failures, 3);
+    }
+
+    /// Nothing to go on means nothing held against the schedule — the old
+    /// behaviour of every release that reported no spawn error.
+    #[test]
+    fn a_tick_that_learned_nothing_resets_the_count() {
+        assert_eq!(settle(3, &[], false).failures, 0);
+    }
+
+    /// Runs are judged in the order they happened, so the newest outcome is the
+    /// one the schedule ends up wearing.
+    #[test]
+    fn a_run_of_failures_ending_in_a_success_leaves_nothing_behind() {
+        assert_eq!(settle(0, &["failed", "failed", "completed"], false).failures, 0);
+        assert_eq!(settle(0, &["completed", "failed", "failed"], false).failures, 2);
+    }
+
+    /// The walk stops at the first unfinished run rather than reading past it,
+    /// because "run 3 failed" says nothing while run 2 is still going.
+    #[test]
+    fn nothing_after_an_unfinished_run_is_read() {
+        let s = settle(0, &["failed", "running", "failed"], false);
+        assert_eq!(s.failures, 1);
+        assert_eq!(s.settled, 1);
+    }
+
+    /// A run somebody stopped, and a status from a newer build, are neither a
+    /// failure nor a success. They are accounted for so they are not read
+    /// twice.
+    #[test]
+    fn a_stopped_run_is_accounted_for_without_being_judged() {
+        for status in ["killed", "something_new"] {
+            let s = settle(2, &[status], false);
+            assert_eq!(s.failures, 0, "{status} says nothing either way");
+            assert_eq!(s.settled, 1);
+        }
+    }
+
+    /// The failure that was always counted still is, and exactly once.
+    #[test]
+    fn a_spawn_that_failed_still_counts_on_its_own_tick() {
+        assert_eq!(settle(1, &[], true).failures, 2);
+        assert_eq!(settle(1, &["failed"], true).failures, 3);
     }
 
     #[test]
