@@ -111,7 +111,7 @@ pub fn draw(f: &mut Frame, app: &App) -> usize {
     let height = if app.workspace == Workspace::Chat {
         let column = measure(body);
         if fresh(app) {
-            let (height, box_) = draw_splash(f, app, column, body);
+            let (height, box_) = draw_splash(f, app, column);
             input = box_;
             height
         } else {
@@ -122,9 +122,9 @@ pub fn draw(f: &mut Frame, app: &App) -> usize {
             let column = draw_header(f, app, column);
             let parts = Layout::default()
                 .direction(Direction::Vertical)
-                .constraints([Constraint::Min(3), Constraint::Length(3)])
+                .constraints([Constraint::Min(3), Constraint::Length(composer(app, column))])
                 .split(column);
-            input = composer(parts[1], body);
+            input = parts[1];
             let height = draw_transcript(f, app, parts[0]);
             draw_input(f, app, input);
             height
@@ -185,24 +185,57 @@ fn measure(area: Rect) -> Rect {
     }
 }
 
-/// The composer's rect: the chat column's rows, at the body's full width.
+/// The tallest the composer gets: rows of text, before its two borders.
 ///
-/// `MEASURE` is a cap on *reading*, and the reason it exists — the eye loses
-/// its place coming back to the left edge — is a fact about prose you read
-/// back, not about the one line you are composing. Applied to the input box it
-/// does the opposite of helping: the field scrolls horizontally, so every
-/// column withheld is a column of your own prompt you cannot see. On a
-/// 260-column terminal the box was 72 wide and a 200-character delegation
-/// prompt showed about 68 characters of itself.
+/// It grows instead of scrolling sideways, so the cap is only there to stop a
+/// pasted essay from taking the whole screen and leaving nowhere to read the
+/// reply. Six rows is around five hundred characters at the measure — longer
+/// than any prompt anyone types by hand — and past it the box scrolls a line at
+/// a time to keep the caret in view.
+const COMPOSER_ROWS: u16 = 6;
+
+/// The columns a composer `width` wide has left for text, once its borders and
+/// its caret have been paid for.
+fn composer_field(width: u16) -> usize {
+    let inner = width.saturating_sub(2).max(1) as usize;
+    let gutter = if inner >= CARET.chars().count() + 8 {
+        CARET.chars().count()
+    } else {
+        0
+    };
+    inner.saturating_sub(gutter).max(1)
+}
+
+/// How many rows of text it takes to show `chars` characters with the caret at
+/// `col`, wrapped into a field `field` columns wide.
 ///
-/// It stays concentric with the transcript — both are centred in `body` — so a
-/// wide composer under a centred column still reads as one screen.
-fn composer(rows: Rect, body: Rect) -> Rect {
-    Rect {
-        x: body.x,
-        width: body.width,
-        ..rows
-    }
+/// The caret has its own term because it sits one past the last character: type
+/// exactly to the end of a row and the caret belongs on the next one, which has
+/// to exist before it can be drawn there.
+fn composer_lines(chars: usize, col: usize, field: usize) -> usize {
+    chars.div_ceil(field).max(1).max(col / field + 1)
+}
+
+/// How tall the composer's box is, borders included.
+///
+/// The box is the same span as the transcript above it — `MEASURE` caps
+/// *reading*, and a `you` box wider than the `jod` box reads as a rendering
+/// slip rather than a choice — so the room a long prompt needs is found
+/// downwards rather than sideways. That is what keeps BUG-12 fixed: the field
+/// no longer scrolls out from under what you typed, it wraps, so the whole of a
+/// 200-character delegation prompt is on screen before Ctrl-B spends money on
+/// it.
+///
+/// Never so tall that the conversation is squeezed out: the transcript keeps
+/// its borders and three lines whatever is being typed.
+fn composer(app: &App, column: Rect) -> u16 {
+    let lines = composer_lines(
+        app.input.chars().count(),
+        app.cursor_column(),
+        composer_field(column.width),
+    );
+    let room = column.height.saturating_sub(5).max(3);
+    (lines as u16 + 2).clamp(3, COMPOSER_ROWS + 2).min(room)
 }
 
 /// Splits the panel off the right of the body, or says it will not fit.
@@ -774,8 +807,11 @@ fn draw_mention(f: &mut Frame, app: &App, input: Rect) {
         .min(input.y.saturating_sub(1))
         .max(3);
     // Anchored on the `@` itself, then pulled back inside the box: a popup that
-    // hangs off the right edge of the terminal is drawn over nothing.
-    let col = app.input[..popup.at.min(app.input.len())].chars().count() as u16;
+    // hangs off the right edge of the terminal is drawn over nothing. The
+    // column is the one the `@` is drawn in, not how far into the prompt it is
+    // — those part company as soon as the line wraps onto a second row.
+    let col = (app.input[..popup.at.min(app.input.len())].chars().count()
+        % composer_field(input.width)) as u16;
     let x = (input.x + 1 + CARET.chars().count() as u16 + col).min(
         input
             .x
@@ -1261,13 +1297,12 @@ fn fresh(app: &App) -> bool {
 
 /// The new-session screen: the wordmark, large and centred, with the input box
 /// under it. Returns the viewport height and where the input box ended up.
-fn draw_splash(f: &mut Frame, app: &App, area: Rect, body: Rect) -> (usize, Rect) {
+fn draw_splash(f: &mut Frame, app: &App, area: Rect) -> (usize, Rect) {
     // Too short for a wordmark and a box both: the input wins, because a screen
     // with no way to type into it is not a screen.
     if area.height < 6 {
-        let box_ = composer(area, body);
-        draw_input(f, app, box_);
-        return (1, box_);
+        draw_input(f, app, area);
+        return (1, area);
     }
 
     // The completion popup grows *upwards* out of the input box and the command
@@ -1328,20 +1363,23 @@ fn draw_splash(f: &mut Frame, app: &App, area: Rect, body: Rect) -> (usize, Rect
 
     let head_height = head.len() as u16;
 
+    // The box is the same shape here as it is under a conversation: the column's
+    // width, and as many rows as what has been typed needs.
+    let tall = composer(app, area);
     let (top, box_) = if anchored {
         let parts = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Min(1), Constraint::Length(3)])
+            .constraints([Constraint::Min(1), Constraint::Length(tall)])
             .split(area);
         (parts[0], parts[1])
     } else {
-        let block = (head_height + 1 + 3).min(area.height);
+        let block = (head_height + 1 + tall).min(area.height);
         let parts = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Min(1),
                 Constraint::Length(1), // air between the wordmark and the box
-                Constraint::Length(3),
+                Constraint::Length(tall),
             ])
             .split(Rect {
                 y: area.y + area.height.saturating_sub(block) / 2,
@@ -1360,12 +1398,6 @@ fn draw_splash(f: &mut Frame, app: &App, area: Rect, body: Rect) -> (usize, Rect
     };
     f.render_widget(Paragraph::new(head).alignment(Alignment::Center), top);
 
-    // Centred on the wordmark's axis, so the two read as one screen — but at
-    // the body's width rather than a fixed 72 columns. This is the screen a
-    // fresh session starts on and therefore the one the first delegation
-    // prompt is typed into, and 72 columns is where the report found a
-    // 200-character prompt showing 68 characters of itself.
-    let box_ = composer(box_, body);
     draw_input(f, app, box_);
     (top.height.max(1) as usize, box_)
 }
@@ -5090,38 +5122,54 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
         .title(title);
 
     let inner_width = area.width.saturating_sub(2).max(1) as usize;
-    // The caret costs two columns, which a box this narrow does not have to
-    // spare: on it the text wins and the caret goes.
-    let caret = if inner_width >= CARET.chars().count() + 8 {
-        CARET
-    } else {
-        ""
-    };
-    let gutter = caret.chars().count();
-    let field = inner_width.saturating_sub(gutter).max(1);
+    // Both read off the one function, so the height the box was given and the
+    // text drawn into it can never disagree about where the line breaks. The
+    // caret costs two columns, which a box this narrow does not have to spare:
+    // on it the text wins and the caret goes.
+    let field = composer_field(area.width);
+    let gutter = inner_width - field;
+    let caret = if gutter > 0 { CARET } else { "" };
 
-    // Keep the cursor on screen by scrolling the field horizontally once the
-    // line outgrows the box.
     let col = app.cursor_column();
-    let shift = col.saturating_sub(field.saturating_sub(1));
-    let visible: String = app.input.chars().skip(shift).take(field).collect();
+    let typed: Vec<char> = app.input.chars().collect();
+    let wrapped = composer_lines(typed.len(), col, field);
+    // The box has already grown for what was typed, so this only bites past the
+    // cap: then the rows scroll to keep the caret in view, the same rule the
+    // field used to apply sideways.
+    let rows = area.height.saturating_sub(2).max(1) as usize;
+    let first = window_start(col / field, rows, wrapped);
 
     // Muted while the field is empty so the caret and the hint read as one
     // piece of furniture; live the moment there is something to send.
-    let line = if app.input.is_empty() {
-        Line::from(vec![
+    let lines: Vec<Line> = if app.input.is_empty() {
+        vec![Line::from(vec![
             Span::styled(caret, fg(MUTED)),
             Span::styled(placeholder(field), fg(MUTED)),
-        ])
+        ])]
     } else {
-        Line::from(vec![
-            Span::styled(caret, fg(if app.busy { WARN } else { USER })),
-            Span::raw(visible),
-        ])
+        let style = fg(if app.busy { WARN } else { USER });
+        (first..wrapped.min(first + rows))
+            .map(|row| {
+                // The caret marks where the line starts, so it goes on the first
+                // row only; the rest are indented to it, and the wrapped text
+                // keeps one left edge instead of two.
+                let lead = if row == 0 {
+                    Span::styled(caret, style)
+                } else {
+                    Span::raw(" ".repeat(gutter))
+                };
+                let text: String = typed.iter().skip(row * field).take(field).collect();
+                Line::from(vec![lead, Span::raw(text)])
+            })
+            .collect()
     };
 
-    f.render_widget(Paragraph::new(line).block(block), area);
-    f.set_cursor_position((area.x + 1 + (gutter + col - shift) as u16, area.y + 1));
+    f.render_widget(Paragraph::new(lines).block(block), area);
+    let row = (col / field).saturating_sub(first).min(rows - 1);
+    f.set_cursor_position((
+        area.x + 1 + (gutter + col % field) as u16,
+        area.y + 1 + row as u16,
+    ));
 }
 
 fn status_colour(status: &str) -> Color {
@@ -5719,33 +5767,32 @@ mod tests {
         );
     }
 
+    /// The two boxes are the whole screen, so a `you` box that runs wider than
+    /// the `jod` box above it reads as a rendering slip. They line up.
+    ///
+    /// Measured off the boxes' own borders rather than by looking for text on
+    /// the screen: the `you` title also appears in the keybar, and a
+    /// screen-wide `contains` would pass on a box of any width at all.
+    #[test]
+    fn the_composer_is_the_same_span_as_the_transcript() {
+        let mut a = app();
+        a.push(Entry::Agent("here is the summary".into()));
+        let screen = rendered(&a, 260, 30);
+        assert_eq!(
+            box_span(&screen, "┌ jod "),
+            box_span(&screen, "┌ you "),
+            "the two boxes must line up:\n{screen}"
+        );
+    }
+
     /// BUG-12: on a 260-column terminal the composer was 72 columns wide, so a
     /// 200-character delegation prompt was about 68 characters visible and the
     /// rest scrolled off. Ctrl-B spends money and runs unattended; not being
     /// able to read your own prompt before sending it is a poor trade.
     ///
-    /// Measured off the composer's own borders rather than by looking for text
-    /// on the screen: the `you` title also appears in the keybar, and a
-    /// screen-wide `contains` would pass on a box that is still 72 wide.
-    #[test]
-    fn the_composer_uses_the_width_the_terminal_actually_has() {
-        let screen = rendered(&app(), 260, 30);
-        let top = screen
-            .lines()
-            .find(|line| line.contains("┌ you "))
-            .unwrap_or_else(|| panic!("expected the composer's top border:\n{screen}"));
-        let columns: Vec<char> = top.chars().collect();
-        let left = columns.iter().position(|c| *c == '┌').unwrap();
-        let right = columns.iter().position(|c| *c == '┐').unwrap();
-        let width = right - left + 1;
-        assert!(
-            width >= 200,
-            "the composer is {width} columns of a 260-column terminal:\n{screen}"
-        );
-    }
-
-    /// And the point of the width: the whole of what you are about to send is
-    /// on screen before you send it.
+    /// The box is the measure wide, not the terminal, so the room comes from
+    /// wrapping onto a second row instead: the assertion is that every
+    /// character survives somewhere in the box, not that they share one line.
     #[test]
     fn a_long_delegation_prompt_is_readable_before_it_is_sent() {
         let mut a = app();
@@ -5755,11 +5802,80 @@ mod tests {
             .into();
         a.cursor = a.input.len();
         assert!(a.input.chars().count() >= 160, "a realistic prompt");
-        let screen = rendered(&a, 260, 30);
-        assert!(
-            screen.contains(&a.input),
-            "the whole prompt must be readable:\n{screen}"
+        for (w, h) in [(260, 30), (100, 24), (80, 24)] {
+            let screen = rendered(&a, w, h);
+            assert_eq!(
+                composer_text(&screen),
+                a.input,
+                "the whole prompt must be readable at {w}×{h}:\n{screen}"
+            );
+        }
+    }
+
+    /// The box grows to hold it, rather than the transcript being squeezed out
+    /// or the prompt being cut off at three rows.
+    #[test]
+    fn the_composer_grows_a_row_at_a_time_and_stops() {
+        let mut a = app();
+        a.push(Entry::Agent("here is the summary".into()));
+        let one = composer_height(&rendered(&a, 200, 30));
+        a.input = "x".repeat(400);
+        a.cursor = a.input.len();
+        let many = composer_height(&rendered(&a, 200, 30));
+        assert_eq!(one, 3, "one line of prompt, one row of box");
+        assert!(many > one, "it grew: {many}");
+        a.input = "x".repeat(10_000);
+        a.cursor = a.input.len();
+        assert_eq!(
+            composer_height(&rendered(&a, 200, 30)),
+            COMPOSER_ROWS as usize + 2,
+            "and stopped at the cap"
         );
+    }
+
+    /// The columns a box titled `title` spans, as `(left, right)`.
+    fn box_span(screen: &str, title: &str) -> (usize, usize) {
+        let top = screen
+            .lines()
+            .find(|line| line.contains(title))
+            .unwrap_or_else(|| panic!("expected a box titled {title:?}:\n{screen}"));
+        let columns: Vec<char> = top.chars().collect();
+        (
+            columns.iter().position(|c| *c == '┌').unwrap(),
+            columns.iter().position(|c| *c == '┐').unwrap(),
+        )
+    }
+
+    /// The composer's rows, borders and caret gutter stripped, joined back into
+    /// the one line they were wrapped from.
+    fn composer_text(screen: &str) -> String {
+        let (left, right) = box_span(screen, "┌ you ");
+        let rows: Vec<&str> = screen.lines().collect();
+        let top = rows.iter().position(|r| r.contains("┌ you ")).unwrap();
+        rows.iter()
+            .skip(top + 1)
+            .take_while(|row| !row.chars().nth(left).is_some_and(|c| c == '└'))
+            .map(|row| {
+                row.chars()
+                    .skip(left + 1 + CARET.chars().count())
+                    .take(right - left - 1 - CARET.chars().count())
+                    .collect::<String>()
+            })
+            .collect::<String>()
+            .trim_end()
+            .to_string()
+    }
+
+    /// The composer's height in rows, borders included.
+    fn composer_height(screen: &str) -> usize {
+        let (left, _) = box_span(screen, "┌ you ");
+        let rows: Vec<&str> = screen.lines().collect();
+        let top = rows.iter().position(|r| r.contains("┌ you ")).unwrap();
+        rows.iter()
+            .skip(top)
+            .position(|row| row.chars().nth(left).is_some_and(|c| c == '└'))
+            .expect("the composer's bottom border")
+            + 1
     }
 
     /// Half a sentence reads as a rendering bug, not a hint.
