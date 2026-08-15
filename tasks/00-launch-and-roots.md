@@ -62,7 +62,29 @@ Check: on a box whose console started in `$HOME`, opening work about a
 repository must not land in `$HOME`.
 
 ## L2. New work defaults to the oldest root, which is the wrong one for ever
-Status: open · Owner: — · Severity: high
+Status: **blocked on L1's decision** · Severity: high
+
+**Do not start this yet, and do not treat it as merely unclaimed.** It reads
+like an independent fix and it is not. Two of L1's three options *are* this
+fix:
+
+- L1 option 2 — a `/cd` that adds a root **and makes it the one new work
+  defaults to** — defines the default-picking mechanism, and L2 is then
+  implemented by it.
+- L1 option 3 — a console adopts its directory as the default rather than
+  merely adding it — likewise. L1 already says of this option "related to L2
+  and probably the same change".
+- Only L1 option 1 — setting `WorkingDirectory=` on the service — leaves L2
+  standing alone and still needing one of its own three options below.
+
+So in two of three branches, implementing L2 now produces work that is
+discarded or has to be unpicked. The right order is: Reljod decides L1, then L2
+is either already done or becomes a small, well-specified change.
+
+What is *not* blocked is the observation itself, which is settled and needs no
+decision: `roots.first()` against an append-only order means the oldest answer
+wins for ever, and it fails silently because an existing directory is a valid
+answer.
 
 `open_work` with no explicit `checkout` takes the **first** root
 (`core/src/mcp.rs:2149`, `roots.first()`), and roots are ordered by `position`,
@@ -236,8 +258,22 @@ failed to run git: fatal: 'main' is already used by worktree at '/home/reljod/re
 That is `gh pr merge --delete-branch` failing its local cleanup step, after the
 merge has already landed. The remote branch has to be deleted by hand.
 
-Seen three times across two sessions, so it reproduces rather than being a
-one-off. It happens whenever the primary checkout holds `main` and the merge is
+Seen four times across two sessions, so it reproduces rather than being a
+one-off. The fourth was #124, this very task list, and the full output is worth
+having because it shows how convincing the failure looks:
+
+```
+  base     main is 0 commit(s) ahead of this branch
+  triage   auto-merge (categories: docs)
+✓ Pull request Reljod/Jod#124 is marked as "ready for review"
+Marked PR #124 ready for review.
+failed to run git: fatal: 'main' is already used by worktree at '/home/reljod/repo/Jod'
+```
+
+The merge had already succeeded — main is `0289cbb` — and the error is the last
+line on screen, immediately after a line saying the pull request was marked
+ready. An agent reading only the tail would conclude the merge failed at the
+final step. It happens whenever the primary checkout holds `main` and the merge is
 run from a worktree, which is how every agent on this box works.
 
 Why it matters more than a cosmetic error: the charter tells agents to run
@@ -245,9 +281,27 @@ Why it matters more than a cosmetic error: the charter tells agents to run
 refusal will either retry a merge that already happened or report a finished
 task as blocked. Both are worse than the original problem.
 
+**Awareness cannot fix this, so the script must.** The fourth occurrence was
+the pull request for the document describing the trap — a session that had read
+the write-up, and had itself filed the task, still merged through it and had to
+check the PR's real state to be sure. Four for four across two sessions. Any
+fix of the form "tell agents to check the state afterwards" has now failed its
+own test.
+
 Fix: the cleanup step should not fail the script when the merge succeeded, and
 should not try to check out `main` from a worktree in the first place. Deleting
 the remote branch does not need a local checkout.
+
+**And the fix cannot be only about the exit code.** If the last thing printed
+is a bare `git` error, the output still reads as failure to anyone scanning the
+tail — which is what a person does, and what an agent summarising a long
+command does. The final line must say what actually happened: the merge
+succeeded, and the local branch may need deleting by hand.
+
+Do not weaken the script generally to achieve this. It deliberately makes
+`gh pr merge` unreachable so a model cannot merge by going around the gate, and
+a script that swallowed errors broadly would trade a reporting bug for a hole
+in the enforcement machinery.
 
 Check: run it from a worktree against a mergeable pull request and assert exit 0.
 
