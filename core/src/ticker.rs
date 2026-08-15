@@ -84,6 +84,41 @@ fn one_line(text: &str) -> String {
     format!("{}…", flat.chars().take(160).collect::<String>())
 }
 
+/// How a goal's ending should read to the person who finds it in
+/// `jod goal log`.
+///
+/// The state word on its own is not enough. "exhausted" on a goal that ran
+/// twenty times means it did the work and used up what it was given.
+/// "exhausted" on a goal that never started means it was created with a limit
+/// it was already past, so nothing it was asked to do was ever attempted —
+/// that is a mistake in how the goal was written down, not a result. The two
+/// need to read differently, and the reason names the limit and the number it
+/// was compared against so the person does not have to go looking.
+fn ending_note(goal: &Goal, stop: schedule::GoalState) -> String {
+    let reason = match stop {
+        schedule::GoalState::Exhausted => match goal.max_iterations {
+            Some(max) if goal.iteration >= max => format!(
+                "it is allowed {max} iterations and has run {}",
+                goal.iteration
+            ),
+            _ => format!(
+                "it is allowed ${:.2} and has spent ${:.2}",
+                goal.budget_usd.unwrap_or(0.0),
+                goal.spent_usd
+            ),
+        },
+        _ => format!(
+            "{} iterations in a row changed nothing, and {} is the limit",
+            goal.no_progress, goal.stall_after
+        ),
+    };
+    if goal.iteration == 0 {
+        format!("{} before its first iteration: {reason}", stop.as_str())
+    } else {
+        format!("{}: {reason}", stop.as_str())
+    }
+}
+
 /// How often the scheduler looks for work.
 pub const TICK: std::time::Duration = std::time::Duration::from_secs(60);
 
@@ -1034,7 +1069,29 @@ impl Ticker {
             let Some(goal) = store.goal_named(&goal.name)? else {
                 continue;
             };
-            if !goal.state.is_live() || goal.should_stop().is_some() {
+            if !goal.state.is_live() {
+                store.release_goal(&goal.id)?;
+                continue;
+            }
+            // A goal can already be past its own stop condition before it has
+            // ever started an iteration: `--max-iterations 0`, a budget of
+            // zero, and a negative budget are all accepted at creation today.
+            // This branch used to release such a goal and move on without
+            // recording anything, so its state column still said `running` and
+            // the next tick claimed it, found exactly the same thing, and
+            // released it again — for ever, at `iter 0`, looking in
+            // `jod goal ls` exactly like a goal doing work. So record the
+            // ending here the way the post-iteration path records it. The
+            // state goes first, because that is the half that stops the goal
+            // being claimed again; the fact then says why, so the reason
+            // outlives the process that found it.
+            if let Some(stop) = goal.should_stop() {
+                store.set_goal_state(&goal.name, stop)?;
+                store.remember(
+                    NewFact::new(subject.clone(), "ended", ending_note(&goal, stop))
+                        .in_scope(&scope)
+                        .from(Origin::System),
+                )?;
                 store.release_goal(&goal.id)?;
                 continue;
             }
@@ -2357,6 +2414,106 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(report.claimed, 0, "a stopped goal is not even claimable");
+    }
+
+    /// A goal can be past its own stop condition before it has ever run —
+    /// `--max-iterations 0` is accepted today, and so is a budget of zero.
+    /// Such a goal used to be claimed, found already stopped, released with its
+    /// state column still saying `running`, and then claimed again by the very
+    /// next tick, for ever, sitting at `iter 0` while `jod goal ls` reported it
+    /// as working. The ending has to be recorded the first time the tick sees
+    /// it, or nothing ever stops asking.
+    #[tokio::test]
+    async fn a_goal_that_can_never_run_is_ended_the_first_time_it_is_ticked() {
+        let store = std::sync::Arc::new(crate::store::Store::in_memory().unwrap());
+        let mut g = a_goal("zero-iter");
+        g.max_iterations = Some(0);
+        store.add_goal(&g).unwrap();
+        store.run_goal_now("zero-iter", 1).unwrap();
+
+        let ticker = Ticker::new(Jod::with_store(store.clone())).as_owner("t");
+        let now = chrono::Utc::now().timestamp_millis();
+        let first = ticker.tick_goals(now).await.unwrap();
+        assert_eq!(first.claimed, 1, "the first tick reaches it");
+        assert_eq!(first.started, 0, "and must not start an iteration");
+
+        let after = store.goal_named("zero-iter").unwrap().unwrap();
+        assert_eq!(
+            after.state,
+            crate::schedule::GoalState::Exhausted,
+            "the state column has to say it stopped, or it is claimed for ever"
+        );
+
+        // The loop is the failure, so prove the loop is over: a second tick
+        // with nothing else changed must not find the goal at all.
+        let second = ticker.tick_goals(now).await.unwrap();
+        assert_eq!(
+            second.claimed, 0,
+            "a goal that can never run must not be claimed a second time"
+        );
+
+        // And a person has to be able to see what happened. "exhausted" on a
+        // goal at iteration zero means it was never allowed to start, which is
+        // not the same as running out, so the log says which.
+        let endings: Vec<_> = store
+            .facts_about("goal/zero-iter")
+            .unwrap()
+            .into_iter()
+            .filter(|f| f.predicate == "ended")
+            .collect();
+        assert_eq!(endings.len(), 1, "one ending, written once");
+        assert!(
+            endings[0].object.starts_with("exhausted"),
+            "the ending names the state: {}",
+            endings[0].object
+        );
+        assert!(
+            endings[0].object.contains("before its first iteration"),
+            "the ending says it never started: {}",
+            endings[0].object
+        );
+        assert!(
+            endings[0].object.contains('0'),
+            "the ending names the limit that stopped it: {}",
+            endings[0].object
+        );
+    }
+
+    /// The same hole, reached through the budget rather than the iteration
+    /// count. A negative budget is accepted at creation today, and `should_stop`
+    /// is true for it from the start.
+    #[tokio::test]
+    async fn a_goal_with_a_budget_it_cannot_spend_under_is_ended_too() {
+        let store = std::sync::Arc::new(crate::store::Store::in_memory().unwrap());
+        let mut g = a_goal("neg-budget");
+        g.budget_usd = Some(-5.0);
+        store.add_goal(&g).unwrap();
+        store.run_goal_now("neg-budget", 1).unwrap();
+
+        let ticker = Ticker::new(Jod::with_store(store.clone())).as_owner("t");
+        let now = chrono::Utc::now().timestamp_millis();
+        ticker.tick_goals(now).await.unwrap();
+
+        assert_eq!(
+            store.goal_named("neg-budget").unwrap().unwrap().state,
+            crate::schedule::GoalState::Exhausted
+        );
+        assert_eq!(
+            ticker.tick_goals(now).await.unwrap().claimed,
+            0,
+            "and it is not claimed again"
+        );
+        let ending = store
+            .facts_about("goal/neg-budget")
+            .unwrap()
+            .into_iter()
+            .find(|f| f.predicate == "ended")
+            .expect("the goal recorded an ending");
+        assert!(
+            ending.object.contains("$-5.00"),
+            "the ending names the budget it was given: {}",
+            ending.object
+        );
     }
 
     /// The whole point of a goal being memory-backed: the brief it is pursuing
