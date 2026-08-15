@@ -206,14 +206,72 @@ fn composer_field(width: u16) -> usize {
     inner.saturating_sub(gutter).max(1)
 }
 
-/// How many rows of text it takes to show `chars` characters with the caret at
-/// `col`, wrapped into a field `field` columns wide.
+/// How the composer breaks what was typed into rows, and where the caret lands
+/// once it has.
+struct Wrapped {
+    /// The character index each row begins at. Never empty: there is always a
+    /// first row, even when nothing has been typed into it.
+    starts: Vec<usize>,
+    /// The row the caret sits on, and how many columns into that row it is.
+    caret: (usize, usize),
+}
+
+impl Wrapped {
+    /// The character range row `row` covers, empty when there is no such row.
+    fn row(&self, row: usize, len: usize) -> std::ops::Range<usize> {
+        let from = self.starts.get(row).copied().unwrap_or(len);
+        let to = self.starts.get(row + 1).copied().unwrap_or(len);
+        from..to.max(from)
+    }
+}
+
+/// Breaks `typed` into rows that fit a field `field` columns wide, with the
+/// caret sitting before character `cursor`.
 ///
-/// The caret has its own term because it sits one past the last character: type
-/// exactly to the end of a row and the caret belongs on the next one, which has
-/// to exist before it can be drawn there.
-fn composer_lines(chars: usize, col: usize, field: usize) -> usize {
-    chars.div_ceil(field).max(1).max(col / field + 1)
+/// Rows are filled by column, not by character. A Japanese ideograph or an
+/// emoji paints two columns, so a row of thirty-two characters can paint
+/// thirty-six columns; the box is only as wide as it is, and the paragraph
+/// clips whatever runs past its border. That clipping is silent, which is how
+/// a line ending in `FFFF` came back reading `F` at forty columns. Counting
+/// the columns each character costs puts the break where the terminal is
+/// going to put it anyway.
+///
+/// A character whose second cell would land past the edge starts the next row
+/// rather than being half drawn. A combining accent costs no column of its
+/// own, so it never starts a row and stays with the letter it belongs to.
+///
+/// The caret has its own term because it sits one past the last character:
+/// type exactly to the end of a row and the caret belongs on the next one,
+/// which has to exist before it can be drawn there.
+fn wrap_composer(typed: &[char], field: usize, cursor: usize) -> Wrapped {
+    let mut starts = vec![0usize];
+    let mut caret = (0usize, 0usize);
+    let mut used = 0usize;
+    let mut one = [0u8; 4];
+    for (at, c) in typed.iter().enumerate() {
+        let cost = columns(c.encode_utf8(&mut one));
+        // The second condition matters on a field one column wide. A wide
+        // character does not fit there at all, and without it the break would
+        // open an empty row for a character that the next row cannot hold
+        // either, and then another, forever. It stays where it is instead.
+        if used + cost > field && at > *starts.last().expect("a first row") {
+            starts.push(at);
+            used = 0;
+        }
+        if at == cursor {
+            caret = (starts.len() - 1, used);
+        }
+        used += cost;
+    }
+    if cursor >= typed.len() {
+        if used >= field && !typed.is_empty() {
+            starts.push(typed.len());
+            caret = (starts.len() - 1, 0);
+        } else {
+            caret = (starts.len() - 1, used);
+        }
+    }
+    Wrapped { starts, caret }
 }
 
 /// How tall the composer's box is, borders included.
@@ -229,11 +287,9 @@ fn composer_lines(chars: usize, col: usize, field: usize) -> usize {
 /// Never so tall that the conversation is squeezed out: the transcript keeps
 /// its borders and three lines whatever is being typed.
 fn composer(app: &App, column: Rect) -> u16 {
-    let lines = composer_lines(
-        app.input.chars().count(),
-        app.cursor_column(),
-        composer_field(column.width),
-    );
+    let field = composer_field(column.width);
+    let typed: Vec<char> = app.input.chars().collect();
+    let lines = wrap_composer(&typed, field, app.cursor_column()).starts.len();
     let room = column.height.saturating_sub(5).max(3);
     (lines as u16 + 2).clamp(3, COMPOSER_ROWS + 2).min(room)
 }
@@ -809,9 +865,12 @@ fn draw_mention(f: &mut Frame, app: &App, input: Rect) {
     // Anchored on the `@` itself, then pulled back inside the box: a popup that
     // hangs off the right edge of the terminal is drawn over nothing. The
     // column is the one the `@` is drawn in, not how far into the prompt it is
-    // — those part company as soon as the line wraps onto a second row.
-    let col = (app.input[..popup.at.min(app.input.len())].chars().count()
-        % composer_field(input.width)) as u16;
+    // — those part company as soon as the line wraps onto a second row. It
+    // comes off the same wrapper the box is drawn with, so the popup and the
+    // `@` cannot disagree about which column that is.
+    let typed: Vec<char> = app.input.chars().collect();
+    let at = app.input[..popup.at.min(app.input.len())].chars().count();
+    let col = wrap_composer(&typed, composer_field(input.width), at).caret.1 as u16;
     let x = (input.x + 1 + CARET.chars().count() as u16 + col).min(
         input
             .x
@@ -5276,12 +5335,14 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
 
     let col = app.cursor_column();
     let typed: Vec<char> = app.input.chars().collect();
-    let wrapped = composer_lines(typed.len(), col, field);
+    let wrapped = wrap_composer(&typed, field, col);
+    let lines_total = wrapped.starts.len();
+    let (caret_row, caret_col) = wrapped.caret;
     // The box has already grown for what was typed, so this only bites past the
     // cap: then the rows scroll to keep the caret in view, the same rule the
     // field used to apply sideways.
     let rows = area.height.saturating_sub(2).max(1) as usize;
-    let first = window_start(col / field, rows, wrapped);
+    let first = window_start(caret_row, rows, lines_total);
 
     // Muted while the field is empty so the caret and the hint read as one
     // piece of furniture; live the moment there is something to send.
@@ -5292,7 +5353,7 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
         ])]
     } else {
         let style = fg(if app.busy { WARN } else { USER });
-        (first..wrapped.min(first + rows))
+        (first..lines_total.min(first + rows))
             .map(|row| {
                 // The caret marks where the line starts, so it goes on the first
                 // row only; the rest are indented to it, and the wrapped text
@@ -5302,16 +5363,16 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
                 } else {
                     Span::raw(" ".repeat(gutter))
                 };
-                let text: String = typed.iter().skip(row * field).take(field).collect();
+                let text: String = typed[wrapped.row(row, typed.len())].iter().collect();
                 Line::from(vec![lead, Span::raw(text)])
             })
             .collect()
     };
 
     f.render_widget(Paragraph::new(lines).block(block), area);
-    let row = (col / field).saturating_sub(first).min(rows - 1);
+    let row = caret_row.saturating_sub(first).min(rows - 1);
     f.set_cursor_position((
-        area.x + 1 + (gutter + col % field) as u16,
+        area.x + 1 + (gutter + caret_col) as u16,
         area.y + 1 + row as u16,
     ));
 }
@@ -5975,6 +6036,131 @@ mod tests {
             COMPOSER_ROWS as usize + 2,
             "and stopped at the cap"
         );
+    }
+
+    /// T1: a line with a double-width character in it lost text at the wrap.
+    ///
+    /// The composer used to fill each row with a fixed number of characters
+    /// and assume that number of columns had been used. A Japanese ideograph
+    /// or an emoji paints two columns, so a row of thirty-two characters could
+    /// paint thirty-six columns into a field thirty-two wide. The paragraph
+    /// clipped the overflow at the border and the characters that fell off
+    /// were simply gone: at forty columns `FFFF` came back as `F`.
+    ///
+    /// Read off the painted cells rather than off any length the code
+    /// computes, because a computed length is the thing that was wrong.
+    ///
+    /// Five cases. The first is the straddling one, the worst version, where
+    /// the wide character's second cell falls past the edge and the character
+    /// vanishes whole. The next two are the lines from the report. The last
+    /// two are the twins that already wrapped correctly — the emoji line and
+    /// the plain ASCII line — and they are here so that a fix cannot pass by
+    /// breaking every line earlier than it needs to.
+    ///
+    /// Each case is checked twice over. Every character has to survive
+    /// somewhere in the box, which is what the bug broke; and the box has to
+    /// use the number of rows the text actually needs, which is what stops a
+    /// fix wrapping harder to be safe. Spaces are dropped from the first
+    /// comparison because a row is padded out to the right border with blanks,
+    /// and a blank there cannot be told apart from a space someone typed.
+    #[test]
+    fn a_wide_character_at_the_wrap_keeps_every_character() {
+        // At forty columns the field is thirty-two, so each of these needs two
+        // rows: thirty-nine, thirty-six, thirty-eight, thirty-seven and
+        // thirty-nine columns of text respectively.
+        let straddle = format!("{}日{}", "A".repeat(31), "B".repeat(6));
+        for (text, rows_wanted) in [
+            (straddle.as_str(), 2),
+            ("AAAA BBBB CCCC 日本語 DDDD EEEE FFFF", 2),
+            ("tanong: anong ginagawa? 日本語 🚀 café", 2),
+            ("AAAA BBBB CCCC 🚀 DDDD EEEE FFFF GGGG", 2),
+            ("AAAA BBBB CCCC DDDD EEEE FFFF GGGG HHHH", 2),
+        ] {
+            let mut a = app();
+            a.input = text.to_string();
+            a.cursor = a.input.len();
+            let rows = painted_composer(&a, 40, 20);
+            assert_eq!(
+                rows.concat().replace(' ', ""),
+                text.replace(' ', ""),
+                "at forty columns {text:?} was painted as {rows:?}",
+            );
+            assert_eq!(
+                rows.len(),
+                rows_wanted,
+                "{text:?} needs {rows_wanted} rows, not {}: {rows:?}",
+                rows.len(),
+            );
+        }
+    }
+
+    /// The composer's own check, as the task states it: the wrapped rows
+    /// rejoin to exactly what was typed, for a mix of ASCII, CJK and emoji, at
+    /// every terminal width from twenty to a hundred and twenty.
+    ///
+    /// The string has no spaces in it, so the rejoin can be exact. A row is
+    /// padded out to the right of the box with blanks, and a blank at the end
+    /// of a row is indistinguishable from a space someone typed there, so a
+    /// string with spaces could only be compared loosely.
+    #[test]
+    fn the_wrapped_rows_rejoin_to_what_was_typed_at_every_width() {
+        let typed = "AAAA日本語BBBB🚀CCCCcaféDDDD漢字EEEEFFFF🌟GGGG中文HHHH";
+        let mut a = app();
+        a.input = typed.to_string();
+        a.cursor = a.input.len();
+        for width in 20..=120u16 {
+            let rows = painted_composer(&a, width, 24);
+            assert_eq!(
+                rows.concat(),
+                typed,
+                "at {width} columns the rows were {rows:?}",
+            );
+        }
+    }
+
+    /// The composer's rows as the terminal paints them, one cell at a time.
+    ///
+    /// A wide character owns two cells and leaves the second one blank, so
+    /// reading the cells as if each held one character would count that blank
+    /// as a space. This walks by columns instead: it takes the symbol sitting
+    /// in a cell, then steps over as many cells as that symbol paints. The
+    /// blanks a row is padded out with on the right are dropped, since they
+    /// are the box's fill rather than anything that was typed.
+    fn painted_composer(a: &App, w: u16, h: u16) -> Vec<String> {
+        let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+        terminal
+            .draw(|f| {
+                draw(f, a);
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let at = |x: u16, y: u16| buffer[(x, y)].symbol().to_string();
+        let (top, left, right) = (0..buffer.area.height)
+            .find_map(|y| {
+                let row: String = (0..buffer.area.width).map(|x| at(x, y)).collect();
+                if !row.contains("┌ you ") {
+                    return None;
+                }
+                let start = (0..buffer.area.width).find(|x| at(*x, y) == "┌")?;
+                let end = (start..buffer.area.width).find(|x| at(*x, y) == "┐")?;
+                Some((y, start, end))
+            })
+            .expect("a composer box");
+
+        let mut rows = Vec::new();
+        let mut y = top + 1;
+        while y < buffer.area.height && at(left, y) != "└" {
+            let mut line = String::new();
+            let mut x = left + 1 + CARET.chars().count() as u16;
+            while x < right {
+                let symbol = at(x, y);
+                x += columns(&symbol).max(1) as u16;
+                line.push_str(&symbol);
+            }
+            rows.push(line.trim_end().to_string());
+            y += 1;
+        }
+        rows
     }
 
     /// The columns a box titled `title` spans, as `(left, right)`.
