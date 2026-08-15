@@ -406,15 +406,15 @@ fn hidden_rows(shown: usize, total: usize) -> Option<usize> {
     total.checked_sub(shown).filter(|n| *n > 0)
 }
 
-/// One line of `jod team list`: the team's name, annotated when it has no
+/// One line of `jod team ls`: the team's name, annotated when it has no
 /// members.
 ///
-/// `jod team task` opens a board before anyone joins it, so `jod team list`
+/// `jod team task` opens a board before anyone joins it, so `jod team ls`
 /// now names teams that only have a task. Left as a bare name, such a team
 /// would print identically to a staffed one — this is what keeps an
 /// empty-but-active board visibly distinct rather than silently the same.
 ///
-/// Not yet called from `TeamCommand::List` — that arm lives in a region of
+/// Not yet called from `TeamCommand::Ls` — that arm lives in a region of
 /// `main.rs` owned by a parallel change to `jod team task`/`jod team done`,
 /// so wiring it in is left to whoever next touches that match arm.
 #[allow(dead_code)]

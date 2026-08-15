@@ -1379,7 +1379,7 @@ enum TeamCommand {
     },
     /// Put a task on the team's board.
     Task {
-        /// Whose board this goes on, as `jod team list` names it.
+        /// Whose board this goes on, as `jod team ls` names it.
         team: String,
         /// The short slug that names this task from here on.
         ///
@@ -1490,11 +1490,17 @@ enum TeamCommand {
     },
     /// Who is on the team, and what is on its board.
     Show {
-        /// Which team to describe, as `jod team list` names it.
+        /// Which team to describe, as `jod team ls` names it.
         team: String,
     },
     /// Every team that has a member.
-    List,
+    ///
+    /// Spelled `ls`, like every other listing in this CLI. It used to be
+    /// spelled `list` and still answers to that word, so anything already
+    /// written down keeps working — but `ls` is the name, and the one the
+    /// rest of the help refers to.
+    #[command(alias = "list")]
+    Ls,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, ValueEnum)]
@@ -2305,7 +2311,7 @@ async fn main() -> Result<()> {
                 TeamCommand::Show { team } => {
                     render::team(&store.team_members(&team)?, &store.team_tasks(&team)?);
                 }
-                TeamCommand::List => {
+                TeamCommand::Ls => {
                     let teams = store.teams()?;
                     if teams.is_empty() {
                         println!("no teams yet");
