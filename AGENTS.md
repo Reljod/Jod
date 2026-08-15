@@ -94,6 +94,14 @@ A check that can't pass makes faking it the cheapest path.
 - **PRs:** draft by default.
 - **History:** linear. Squash or rebase, never a merge commit, and never
   merge a branch that is behind its base.
+- **Writing for people:** anything a human will read — a summary, a PR
+  description, a report, a `BLOCKED.md`, a chat reply — is written in plain
+  standard English, in complete sentences. Use ordinary words. Say the concrete
+  thing first, then what it means. Technical terms are fine when they are the
+  real name of a thing (a file path, `HarnessKind`, ACP); the problem is
+  abstract vocabulary used as style. No telegraphic notes, no sentence
+  fragments, and no stacking three clauses where two sentences would do.
+  → [why](docs/decisions.md#a-summary-the-reader-has-to-decode-is-not-a-summary)
 - **Subagents:** an agent definition sets no `model:` — it describes a role, and
   the caller's session picks the model.
   → [why](docs/decisions.md#an-agent-definition-that-pins-a-model-overrides-the-session-that-spawned-it)
