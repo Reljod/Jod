@@ -281,9 +281,27 @@ Why it matters more than a cosmetic error: the charter tells agents to run
 refusal will either retry a merge that already happened or report a finished
 task as blocked. Both are worse than the original problem.
 
+**Awareness cannot fix this, so the script must.** The fourth occurrence was
+the pull request for the document describing the trap — a session that had read
+the write-up, and had itself filed the task, still merged through it and had to
+check the PR's real state to be sure. Four for four across two sessions. Any
+fix of the form "tell agents to check the state afterwards" has now failed its
+own test.
+
 Fix: the cleanup step should not fail the script when the merge succeeded, and
 should not try to check out `main` from a worktree in the first place. Deleting
 the remote branch does not need a local checkout.
+
+**And the fix cannot be only about the exit code.** If the last thing printed
+is a bare `git` error, the output still reads as failure to anyone scanning the
+tail — which is what a person does, and what an agent summarising a long
+command does. The final line must say what actually happened: the merge
+succeeded, and the local branch may need deleting by hand.
+
+Do not weaken the script generally to achieve this. It deliberately makes
+`gh pr merge` unreachable so a model cannot merge by going around the gate, and
+a script that swallowed errors broadly would trade a reporting bug for a hole
+in the enforcement machinery.
 
 Check: run it from a worktree against a mergeable pull request and assert exit 0.
 
