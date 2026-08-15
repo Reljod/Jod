@@ -209,7 +209,7 @@ Check: fresh `JOD_HOME`, `jod main` in a repository, one instruction that
 should open work, assert it opens rather than refuses.
 
 ## L5. `jod project current` does not exist, though the MCP tool does
-Status: open · Owner: — · Severity: low
+Status: **fixed — merged as #165** · Severity was: low
 
 Observed: `jod project current` exits 2 with "unrecognized subcommand". The MCP
 tool `project_current` exists and the orchestrator's preamble tells the model to

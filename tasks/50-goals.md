@@ -68,7 +68,7 @@ old one's `current-run`.
 ---
 
 ## G2. The iteration that satisfies a goal is never recorded
-Status: open · Owner: — · Severity: medium
+Status: **fixed — merged as #147** · Severity was: medium
 
 In `tick_goals` the satisfied branch (`core/src/ticker.rs:936`) writes the
 `ended` fact, sets the state, and `continue`s. The `iteration` fact and the
@@ -280,7 +280,7 @@ assert this is refused at `add` time instead once the fix lands.
 ---
 
 ## G6. A goal's first iteration is never checked against its own done-when before it is spawned
-Status: open · Owner: — · Severity: medium
+Status: **fixed — merged as #166** · Severity was: medium
 
 `check_done` (`core/src/ticker.rs:1688`) is only ever called inside the block
 that settles a *previous* run (`core/src/ticker.rs:912`, `if let Some(run) =
@@ -486,7 +486,10 @@ Check: `jod goal ls --help`, `jod goal pause --help`, `jod goal resume --help`,
 ---
 
 ## G11. `jod goal add ""` creates a goal with an empty name
-Status: open · Owner: — · Severity: low
+Status: **fixed — merged as #168** · Severity was: low
+
+Fixed with S6 at the store level, so the MCP tools are covered too — a CLI-only
+fix would have looked complete and passed a CLI check.
 
 ```
 $ jod goal add "" "empty name test"

@@ -311,7 +311,9 @@ catch the constraint violation in `add_schedule` and return
 ---
 
 ## S6. Empty and unicode schedule names both work, but empty ones can't be told apart in a list
-Status: open · Owner: — · Severity: low
+Status: **fixed — merged as #168** · Severity was: low
+
+Fixed with G11 at the store level: one defect on two surfaces.
 
 ```
 $ jod schedule add --cron "0 3 * * *" "" "empty name test"

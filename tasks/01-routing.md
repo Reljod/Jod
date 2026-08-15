@@ -247,7 +247,7 @@ malformed instructions, schedule-shaped and goal-shaped instructions — is in
 ---
 
 ## R7. The old JSON router is dead code with a passing test suite around it
-Status: open · Owner: — · Severity: medium
+Status: **fixed — merged as #162**, by deleting it · Severity was: medium
 
 `parse_decision` (`core/src/orchestrator.rs:229`) and `router_prompt` (`:300`)
 have **no production caller anywhere**. Verified with `git grep`: zero

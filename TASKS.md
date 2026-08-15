@@ -55,6 +55,35 @@ one is not evidence the code is broken. **When a check fails, suspect the check
 first** — it was written at diagnosis time by someone who did not yet know what
 the fix would look like. Always confirm the named test appears in the output.
 
+## Merged does not mean recorded, and that has two causes
+
+The statuses in these files drift, and twice now a sweep has found a batch of
+tasks reading `open` whose fixes had merged. Both causes are structural rather
+than anybody forgetting, which is why writing them down is worth more than
+flipping the lines again.
+
+**One: the person who knows is not the person who can act.** Agents fixing these
+tasks are told not to edit files under `tasks/`, because several sessions read
+them and one owner per path is the rule. They obey, and reference their task id
+in the pull request body instead. So the flips accumulate on one side and nobody
+else can make them. That is the right trade — a conflict in a shared file costs
+more than a stale line — but the stale line is its price, and it should be a
+known cost rather than a surprise.
+
+**Two: branching from `origin/main` orphans unmerged work.** Five verifications
+I had recorded — L4, G4, O3, F3, F4 — were missing from main, because I started
+each new sweep with `git checkout -B <new> origin/main` while the previous
+branch's pull request had not yet merged. The commits survived and were
+recovered by cherry-pick, but for a while the file said `open` about tasks I had
+personally verified, which is the worst version of this: a record contradicted
+by its own author's work.
+
+**If you are maintaining these statuses:** every merged pull request names its
+task id in its body, so `gh pr list --state merged --json number,body` is the
+authority, not this file. Deriving the statuses from that would stop the drift
+recurring. Nobody has built it, and until somebody does, the manual sweep is a
+known cost — not an oversight to blame anyone for.
+
 ## A merge closes a pull request. The `Check:` line closes the task.
 
 Learned the hard way, twice in one afternoon, and worth more than any single
