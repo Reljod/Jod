@@ -189,13 +189,17 @@ echo "scratch repository: $SCRATCH"
 
 # Stop everything a row started, so the next row begins with nothing running and
 # no child of this suite outlives it.
+#
+# Empty input is a legitimate state and is handled by name: a home whose store
+# holds no runs prints nothing. Anything else that is not JSON is a real fault
+# and is left to raise, rather than being caught into an empty list — a reaper
+# that silently decides there is nothing to stop would leave this suite's
+# children running and say it had cleaned up.
 reap() {
   JOD_HOME="$1" jod ls --json 2>/dev/null | python3 -c '
 import json, sys
-try:
-    runs = json.load(sys.stdin)
-except Exception:
-    runs = []
+raw = sys.stdin.read().strip()
+runs = json.loads(raw) if raw else []
 for r in runs:
     if r.get("status") in ("running", "starting", "queued"):
         print(r["id"])
