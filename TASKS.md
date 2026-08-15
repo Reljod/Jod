@@ -26,6 +26,11 @@ it is what stops the same ground being covered twice.
 
 ## Running a check is itself something to check
 
+**On one of them I was one keystroke from filing a regression against working
+code.** That is the cost worth naming: not a wasted check, but a wasted fix, and
+a correct implementation changed to satisfy a wrong test — worse than the bug
+the check was written for.
+
 Verifying the tasks below produced four near-misses **in the verification**,
 two in each direction:
 

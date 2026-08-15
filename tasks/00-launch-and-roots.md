@@ -305,6 +305,23 @@ Why it matters more than a cosmetic error: the charter tells agents to run
 refusal will either retry a merge that already happened or report a finished
 task as blocked. Both are worse than the original problem.
 
+**A second signal from the same gate cannot be taken at face value either.**
+It refused a pull request with "a destructive or privilege-escalating command is
+introduced (1 added line)". The matching line was a **doc comment in a test** —
+``/// Deleting a goal was a bare `DELETE FROM goals`, so an iteration already``
+— English prose describing the *old* implementation, caught by the pattern
+`DELETE[[:space:]]+FROM`. The real SQL was unchanged from main and is not what
+fired.
+
+The agent **did not reword the comment to get past it**, and that restraint is
+the behaviour to copy: rewording prose to satisfy a pattern is working around a
+check, not passing it. It left the pull request open and named the reason.
+
+On substance the gate's refusals have been right every time. This one was right
+in form and wrong in fact, which is a different failure from the cleanup-exit
+bug below but the same subject — a gate whose signals need reading rather than
+obeying.
+
 **A security classifier has now made the same mistake, which is the strongest
 statement of the cost.** An automated security review flagged an agent for
 merging without review. It had not: it ran the gate, the gate categorised the
