@@ -157,19 +157,35 @@ question for `docs/harness-support.md`.
 
 Check: assert a main-chat turn's tool calls are all `mcp__jod__*` plus reading.
 
-## R6. The chat warns it is due for compaction after a single exchange
-Status: open · Owner: — · Severity: low · needs confirming
+## R6. The compaction warning measures against a window the model does not have
+Status: open · Owner: — · Severity: low — **diagnosed**
 
 The status bar showed `⚠ compact` after exactly one question and one answer, on
-a database created seconds earlier. `COMPACT_CHARS` is 24,000 and
-`COMPACT_FLOOR_CHARS` is 4,000 (`core/src/orchestrator.rs:65`), and one short
-exchange is nowhere near either.
+a database created seconds earlier.
 
-Either `live_window` is counting something bigger than the visible transcript —
-the system preamble and the project catalog are both large and both go out with
-every turn — or the warning is wired to the wrong measure. If the preamble does
-count, the floor will be tripped on turn one for ever, and a warning that is
-always on is a warning nobody reads.
+It is not the character thresholds in `core/src/orchestrator.rs:65`; those are
+what `jod main` uses, and `live_window` (`core/src/conversation.rs:988`) counts
+only active transcript messages, so one exchange is nowhere near the 24,000
+character mark.
 
-Not yet diagnosed; whoever picks it up should print what `live_window` returns
-at that moment before changing anything.
+The TUI uses a different measure entirely. `App::should_compact`
+(`cli/src/tui/app.rs:1245`) is `context_tokens / CONTEXT_WINDOW >= 0.75`, and
+`CONTEXT_WINDOW` is a fixed `200_000` (`cli/src/tui/app.rs:676`). The run in
+question was on `claude-opus-5[1m]`, a model with a one-million-token window.
+So the bar filled to three quarters of a window five times smaller than the one
+actually in use, and warned at roughly 15% of real capacity.
+
+The constant's own doc comment already anticipates this and defends it: Jod
+cannot know the real limit, the harness does not report it, and a per-model
+table would be wrong the week a model ships. That reasoning is sound, and the
+comment adds the condition that makes it honest — "as long as the screen calls
+it an estimate". The screen does not. It says `⚠ compact`, which reads as a
+fact about this conversation.
+
+Fix, smallest first: say "estimate" on the badge, which is what the constant's
+own comment already promises. Better, if the harness reports the model's window
+anywhere, use it and keep 200,000 as the fallback. Do not build a per-model
+table — the comment is right about that.
+
+Check: a session on a 1M-token model must not show a compaction warning after
+one short exchange.
