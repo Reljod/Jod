@@ -21,7 +21,7 @@ sweep around them.
 ---
 
 ## E1. `jod run` starts in `$HOME` too, not just `jod main`
-Status: open · Owner: — · Severity: medium · **folded into
+Status: **still open — L3 is only partially fixed** · Severity: medium · **folded into
 [`00-launch-and-roots.md`](00-launch-and-roots.md) L3**
 
 Filed here because this is where it was found. Running
@@ -34,6 +34,14 @@ exactly one caller in the whole CLI, and it is the TUI. See L3 for the full list
 of the seven sites and the fix.
 
 Do not fix this separately; it is the same change.
+
+**Still reproduces on main.** #122 fixed `main_chat` only, so `jod run --detach`
+from a scratch repository still produces a conversation rooted at `/home/reljod`
+— exactly as recorded above. This entry was briefly reading as covered by a fix
+that had not happened, because it points at L3 and L3 was wrongly marked done.
+Two entries agreeing with each other and both wrong is worse than either alone,
+which is why this note says where it is load-bearing rather than only where it
+points.
 
 ---
 
