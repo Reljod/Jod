@@ -142,6 +142,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/goals/{name}", get(workspaces::get_goal))
         .route("/v1/hooks", get(workspaces::list_hooks))
         .route("/v1/tasks", get(workspaces::list_tasks))
+        .route("/v1/fleet", get(workspaces::fleet))
         .route("/v1/activity", get(workspaces::list_activity))
         // Conversations, and the pinned main chat. The `main` routes are
         // static, so they win over `{id}` on axum's static-first matching —

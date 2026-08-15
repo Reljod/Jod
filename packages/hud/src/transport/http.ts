@@ -1,6 +1,7 @@
 import type {
   AgentEnvelope,
   AgentSummary,
+  FleetNode,
   HarnessInfo,
   Report,
   SpawnRequest,
@@ -145,6 +146,22 @@ export class HttpTransport implements Transport {
 
   async harnesses(): Promise<HarnessInfo[]> {
     return this.json<HarnessInfo[]>("/v1/harnesses");
+  }
+
+  /**
+   * The fleet tree, straight from `Store::forest_of` — the same flatten the
+   * TUI renders, with no second implementation on either side of the wire.
+   *
+   * A failure is an empty fleet rather than a thrown error. This panel sits
+   * beside the live stream and must not be able to take the HUD down with it;
+   * an older daemon without the route is exactly the case that would.
+   */
+  async fleet(): Promise<FleetNode[]> {
+    try {
+      return await this.json<FleetNode[]>("/v1/fleet");
+    } catch {
+      return [];
+    }
   }
 
   /** Not in the v1 contract yet; the store exists in core, so ask and shrug. */

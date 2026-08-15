@@ -236,3 +236,48 @@ export function taskIsDone(task: TeamTask): boolean {
 export function taskIsClaimed(task: TeamTask): boolean {
   return task.owner !== null && task.owner !== undefined;
 }
+
+// ─── the fleet tree ──────────────────────────────────────────────────────────
+
+/** Mirrors `tree::NodeKind` in `core/src/tree.rs`. */
+export type FleetNodeKind = "work" | "session" | "run";
+
+/**
+ * Mirrors `tree::NodeId` — a row's identity, stable across a rebuild.
+ *
+ * Two rows can share an `id` string across kinds, so the pair is the key. The
+ * Rust side spells the discriminant `kind_tag` because `kind` was taken.
+ */
+export interface FleetNodeId {
+  kind_tag: string;
+  id: string;
+}
+
+/**
+ * One already-flattened row of the fleet tree. Mirrors `tree::Node`.
+ *
+ * This is the *same forest the TUI draws* — `Store::forest_of` in `jod-core`
+ * flattens it once and both surfaces render that. `depth` is what makes it a
+ * tree: rows arrive in document order, each one directly below its parent.
+ */
+export interface FleetNode {
+  id: FleetNodeId;
+  parent: FleetNodeId | null;
+  kind: FleetNodeKind;
+  depth: number;
+  label: string;
+  /** Newest message or tool call. Already one line. */
+  summary: string;
+  running: boolean;
+  /** Open cards anywhere in this row's subtree. */
+  cards: number;
+  /** Of those, the ones blocking. */
+  blocked: number;
+  colour: string;
+  has_children: boolean;
+}
+
+/** The same key `NodeId` is, as something usable in a `Map` or a `key=`. */
+export function fleetKey(id: FleetNodeId): string {
+  return `${id.kind_tag}:${id.id}`;
+}

@@ -151,6 +151,7 @@ All JSON, all under `/v1`. Errors are
 | `GET` | `/v1/hooks` | `read` | Webhook rules with their deliveries, `?limit=`. |
 | `GET` | `/v1/tasks` | `read` | A team's board, `?team=`. |
 | `GET` | `/v1/activity` | `read` | Fires and goal iterations, `?limit=&needs_you=`. |
+| `GET` | `/v1/fleet` | `read` | The fleet tree, flattened, `?filter=live\|closed\|all`. |
 | `GET` | `/v1/conversations` | `read` | Every conversation, `?limit=`. |
 | `GET` | `/v1/conversations/main` | `read` | The pinned main chat and its thread. |
 | `POST` | `/v1/conversations/main/messages` | `write` | Give the main chat an instruction. |
@@ -473,6 +474,23 @@ discover_secs = 2               # JOD_API_DISCOVER_SECS — 0 turns it off
 An empty `allowed_cwd` means **deny every spawn**, not "allow everything".
 Failing closed on an unset security control is the only safe default; the
 opposite turns a forgotten config line into an open shell.
+
+### `/v1/fleet` — the tree, not the roster
+
+`/v1/agents` is a flat list built from the answering process's memory.
+`/v1/fleet` is the **work → session → run tree**, built by `Store::forest_of`
+in `jod-core` — the same function `jod tui`'s fleet screen renders, serialised
+and handed over unchanged. There is no second flatten on the API side and none
+in the browser; `depth` arrives with the rows and the client only indents.
+
+Two consequences worth stating, because they are the reason the route exists:
+
+- **It is a query against the database**, so it answers the same way whichever
+  process asks and whoever started the runs. A run spawned from `jod tui`
+  appears here immediately, with no discovery interval involved.
+- **A client that draws it is drawing the TUI's screen**, so the two cannot
+  drift. That was the whole gap: the fleet was terminal-only not because a
+  browser could not draw a tree, but because the tree was never on the wire.
 
 ### Runs this daemon did not launch
 

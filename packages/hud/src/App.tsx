@@ -5,6 +5,7 @@ import { TopBar, type ViewMode } from "./components/TopBar";
 import { TimelineView } from "./components/TimelineView";
 import { Roster } from "./components/Roster";
 import { Dossier } from "./components/Dossier";
+import { Fleet } from "./components/Fleet";
 import { SigintFeed } from "./components/SigintFeed";
 import { CommandPalette } from "./components/CommandPalette";
 import { AuthGate } from "./components/AuthGate";
@@ -100,13 +101,23 @@ export default function App({ makeTransport }: HudProps = {}) {
           <TimelineView store={jod.store} selectedId={selectedId} onSelect={setSelectedId} />
         )}
 
-        <Dossier
-          world={world}
-          selectedId={selectedId}
-          onKill={(id) => void jod.kill(id)}
-          onResume={onResume}
-          canWrite={canWrite}
-        />
+        {/*
+          The right-hand column is the fleet, as it is in `jod tui`. The dossier
+          is stacked beneath it rather than replaced: the fleet answers "what is
+          going on", the dossier "what is this one doing", and the fleet is the
+          one you look at first — it is also the only panel here that shows work
+          this daemon did not start.
+        */}
+        <div className="right-rail">
+          <Fleet nodes={jod.fleet} selectedId={selectedId} onSelect={setSelectedId} />
+          <Dossier
+            world={world}
+            selectedId={selectedId}
+            onKill={(id) => void jod.kill(id)}
+            onResume={onResume}
+            canWrite={canWrite}
+          />
+        </div>
       </main>
 
       <SigintFeed world={world} selectedId={selectedId} onSelect={setSelectedId} />

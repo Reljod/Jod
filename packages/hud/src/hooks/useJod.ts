@@ -2,10 +2,21 @@ import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore
 import { WorldStore } from "../state/world";
 import type { Transport, TransportFactory } from "../transport";
 import { createTransport, modeFromLocation } from "../transport/factory";
-import type { AgentSummary, HarnessInfo, SpawnRequest } from "../types";
+import type { AgentSummary, FleetNode, HarnessInfo, SpawnRequest } from "../types";
 
 /** How often the DOM panels re-render. The canvas is independent, at 60fps. */
 const PANEL_HZ = 10;
+
+/**
+ * How often the fleet tree is re-queried.
+ *
+ * The fleet is a *query*, not a stream: it is built from the database, so it
+ * reflects works and sessions created by any process, and no event on this
+ * HUD's stream announces "a work was created elsewhere". The event stream still
+ * drives it — see `useFleet` — this is the floor beneath that, for the changes
+ * no envelope describes.
+ */
+const FLEET_POLL_MS = 4000;
 
 export interface JodApi {
   store: WorldStore;
@@ -13,6 +24,8 @@ export interface JodApi {
   revision: number;
   transportLabel: string;
   harnesses: HarnessInfo[];
+  /** The fleet tree — works, sessions, runs. Empty until the first query. */
+  fleet: FleetNode[];
   spawn(request: SpawnRequest): Promise<AgentSummary | null>;
   kill(agentId: string): Promise<void>;
   /** Exchange a bearer token for a session cookie. Throws on rejection. */
@@ -35,6 +48,7 @@ export function useJod(makeTransport?: TransportFactory): JodApi {
   const transportRef = useRef<Transport | null>(null);
   const [transportLabel, setTransportLabel] = useState("…");
   const [harnesses, setHarnesses] = useState<HarnessInfo[]>([]);
+  const [fleet, setFleet] = useState<FleetNode[]>([]);
   const [lastError, setLastError] = useState<string | null>(null);
 
   // Pinned on first render. A shell that passes an inline arrow would otherwise
@@ -81,6 +95,35 @@ export function useJod(makeTransport?: TransportFactory): JodApi {
     return () => clearInterval(timer);
   }, [store]);
 
+  // Keep the fleet tree current.
+  //
+  // Deliberately a poll and not a stream. The forest is assembled from works,
+  // conversations and runs in the database, so it changes for reasons this
+  // HUD's event stream never mentions — a work created from `jod tui`, a
+  // session attached by an agent, a run started by another process entirely.
+  // Subscribing to envelopes would keep the tree in step with only the subset
+  // of changes that happen to pass through here, which is the same mistake
+  // that left the fleet invisible in the first place.
+  useEffect(() => {
+    let disposed = false;
+
+    const pull = async () => {
+      try {
+        const nodes = await transportRef.current?.fleet();
+        if (!disposed && nodes) setFleet(nodes);
+      } catch {
+        /* the tree keeps its last good shape; the next tick retries */
+      }
+    };
+
+    void pull();
+    const timer = setInterval(() => void pull(), FLEET_POLL_MS);
+    return () => {
+      disposed = true;
+      clearInterval(timer);
+    };
+  }, []);
+
   const revision = useSyncExternalStore(
     useCallback((fn: () => void) => store.subscribe(fn), [store]),
     () => store.world.revision,
@@ -125,6 +168,7 @@ export function useJod(makeTransport?: TransportFactory): JodApi {
     revision,
     transportLabel,
     harnesses,
+    fleet,
     spawn,
     kill,
     authenticate,

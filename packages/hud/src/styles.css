@@ -498,7 +498,56 @@ button { cursor: pointer; background: none; border: none; }
 
 /* ── dossier ────────────────────────────────────────────────────────────── */
 
-.dossier { border-left: 1px solid var(--line); overflow-y: auto; }
+/* The right-hand column: the fleet over the dossier.
+   The fleet takes the top half and the dossier the rest, both scrolling
+   independently — a forty-run fleet must not push the dossier off-screen, and
+   a long transcript must not push the fleet off it. */
+.right-rail {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
+  min-height: 0;
+  border-left: 1px solid var(--line);
+}
+
+.fleet { overflow-y: auto; border-bottom: 1px solid var(--line); }
+.fleet h2 .badge { font-size: 8px; padding: 2px 6px; border: 1px solid currentColor; letter-spacing: 0.1em; }
+.fleet h2 .badge.st-running { margin-left: auto; }
+
+.fleet-tree { list-style: none; margin: 0; padding: 4px 0; }
+
+.fleet-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-right: 10px;
+  height: 22px;
+  font-size: 11px;
+  color: var(--text-dim);
+  cursor: pointer;
+  border-left: 2px solid transparent;
+}
+.fleet-row:hover { background: var(--bg-hover, rgba(255, 255, 255, 0.04)); }
+.fleet-row.selected { border-left-color: var(--cyan); color: var(--text); }
+.fleet-row.live { color: var(--text); }
+
+/* A work is the heading of its subtree, so it reads heavier than its rows. */
+.fleet-row.k-work { color: var(--text); letter-spacing: 0.04em; }
+.fleet-row.k-session { font-style: italic; }
+
+.fleet-row .twisty { width: 9px; color: var(--steel); flex: none; font-size: 9px; }
+
+.fleet-row .dot { width: 6px; height: 6px; flex: none; background: var(--steel); }
+.fleet-row .dot.k-work { background: var(--cyan); }
+.fleet-row .dot.k-session { background: var(--mint); border-radius: 50%; }
+.fleet-row.live .dot { background: var(--cyan); box-shadow: 0 0 6px var(--cyan); }
+
+.fleet-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.fleet-row .badge { margin-left: auto; flex: none; font-size: 8px; letter-spacing: 0.08em; }
+.badge.st-blocked { color: var(--red); }
+.badge.st-cards { color: var(--text-dim); }
+
+.dossier { overflow-y: auto; }
 .dossier h2 .badge {
   margin-left: auto;
   font-size: 8px;
