@@ -458,6 +458,18 @@ impl Store {
     /// Editing a catalog entry is not working in the repository, and letting
     /// an edit fake recency would corrupt the tiebreak that inference depends
     /// on.
+    ///
+    /// The path has to be a directory that is actually there, and a path that
+    /// is not one is refused rather than written. A project is somewhere a
+    /// session gets started, so a file or a typo can never become one, and
+    /// everything downstream finds that out far too late to say anything
+    /// useful about it. A run opened on such a path is launched, recorded, and
+    /// then dies in the supervisor with `could not start ".../claude": Not a
+    /// directory (os error 20)` — a message about the harness binary that
+    /// names neither the project nor the path. `claim_worktree` fares no
+    /// better: it decides the path "is not inside a git repository", which is
+    /// plainly untrue when the file sits in one. This is the last point where
+    /// the mistake is still cheap to explain, so it is explained here.
     pub fn add_project(&self, new: NewProject) -> Result<Project> {
         let name: String = new.name.trim().chars().take(MAX_NAME_CHARS).collect();
         if name.is_empty() {
@@ -468,6 +480,45 @@ impl Store {
             ));
         }
         let path = normalise(&new.path);
+        // Each refusal names the path and says what to do about it, because
+        // the two mistakes have different answers: a file wants the directory
+        // holding it, and a path that is not there wants either a correction
+        // or the checkout to be made first.
+        match std::fs::metadata(&path) {
+            Ok(meta) if meta.is_dir() => {}
+            Ok(_) => {
+                let parent = path
+                    .parent()
+                    .map(|p| format!("`{}`", p.display()))
+                    .unwrap_or_else(|| "the directory holding it".to_string());
+                return Err(JodError::Invalid(format!(
+                    "`{}` is a file, not a directory. A project is a checkout a session gets \
+                     started in, so catalogue {parent} instead — or, if that is not the \
+                     repository you meant, the checkout that is.",
+                    path.display()
+                )));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(JodError::Invalid(format!(
+                    "there is nothing at `{}`. A project is a directory a session gets started \
+                     in, so check the path for a typo, or make the checkout first and add it \
+                     once it is there.",
+                    path.display()
+                )));
+            }
+            // Something is at that path and this process cannot look at it —
+            // an unreadable parent directory, usually. Refused for the same
+            // reason as the two above rather than assumed to be fine: a
+            // catalog entry nobody can read is one every session will trip
+            // over, and the error says which one it is.
+            Err(e) => {
+                return Err(JodError::Invalid(format!(
+                    "`{}` could not be read: {e}. A project has to be a directory this machine \
+                     can reach, so fix that and add it again.",
+                    path.display()
+                )));
+            }
+        }
         let text = path.to_string_lossy().to_string();
         let notes: String = new.notes.trim().chars().take(MAX_NOTE_CHARS).collect();
 
@@ -999,13 +1050,31 @@ mod tests {
     #[test]
     fn adding_the_same_path_twice_updates_rather_than_duplicates() {
         let store = Store::in_memory().unwrap();
-        store.add_project(NewProject::at("/tmp/alpha")).unwrap();
+        store.add_project(NewProject::at(checkout("alpha"))).unwrap();
         store
-            .add_project(NewProject::at("/tmp/alpha").named("Alpha Prime"))
+            .add_project(NewProject::at(checkout("alpha")).named("Alpha Prime"))
             .unwrap();
         let all = store.projects(false).unwrap();
         assert_eq!(all.len(), 1, "the same checkout became two rows");
         assert_eq!(all[0].name, "Alpha Prime");
+    }
+
+    /// A real directory to catalogue, made on demand.
+    ///
+    /// These used to be string literals like `/tmp/alpha`, which were never
+    /// there. `add_project` refuses a path that is not a directory now, so a
+    /// test that wants a project has to have somewhere for it to live. The
+    /// last segment of the name is still the project's name and its spoken
+    /// form, so the tests below read exactly as they did.
+    ///
+    /// It does not delete what it finds, unlike [`scratch`]: tests run in
+    /// parallel in one process and several of them ask for the same directory.
+    fn checkout(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir()
+            .join(format!("jod-projects-{}", std::process::id()))
+            .join(name);
+        std::fs::create_dir_all(&dir).expect("a scratch checkout");
+        normalise(&dir)
     }
 
     /// A real directory to hang a symlink off, because `normalise`
@@ -1026,7 +1095,7 @@ mod tests {
         let store = Store::in_memory().unwrap();
         store
             .add_project(
-                NewProject::at("/tmp/alpha")
+                NewProject::at(checkout("alpha"))
                     .named("alpha")
                     .with_aliases(vec!["the game".into()])
                     .with_notes("test project alpha"),
@@ -1034,7 +1103,7 @@ mod tests {
             .unwrap();
 
         let again = store
-            .add_project(NewProject::at("/tmp/alpha").named("Alpha Prime"))
+            .add_project(NewProject::at(checkout("alpha")).named("Alpha Prime"))
             .unwrap();
 
         assert_eq!(again.name, "Alpha Prime", "the rename did not take");
@@ -1103,7 +1172,7 @@ mod tests {
         let store = Store::in_memory().unwrap();
         store
             .add_project(
-                NewProject::at("/tmp/alpha")
+                NewProject::at(checkout("alpha"))
                     .named("alpha")
                     .with_aliases(vec!["the game".into()])
                     .with_notes("first note"),
@@ -1112,7 +1181,7 @@ mod tests {
 
         let again = store
             .add_project(
-                NewProject::at("/tmp/alpha")
+                NewProject::at(checkout("alpha"))
                     .named("alpha")
                     .with_aliases(vec!["the second alias".into()])
                     .with_notes("second note"),
@@ -1128,9 +1197,9 @@ mod tests {
     #[test]
     fn editing_a_project_does_not_count_as_working_in_it() {
         let store = Store::in_memory().unwrap();
-        let first = store.add_project(NewProject::at("/tmp/alpha")).unwrap();
+        let first = store.add_project(NewProject::at(checkout("alpha"))).unwrap();
         let again = store
-            .add_project(NewProject::at("/tmp/alpha").with_notes("renamed"))
+            .add_project(NewProject::at(checkout("alpha")).with_notes("renamed"))
             .unwrap();
         assert_eq!(
             first.last_touched_ms, again.last_touched_ms,
@@ -1157,8 +1226,8 @@ mod tests {
     #[test]
     fn the_catalog_is_ordered_by_where_work_last_happened() {
         let store = Store::in_memory().unwrap();
-        let alpha = store.add_project(NewProject::at("/tmp/alpha")).unwrap();
-        let beta = store.add_project(NewProject::at("/tmp/beta")).unwrap();
+        let alpha = store.add_project(NewProject::at(checkout("alpha"))).unwrap();
+        let beta = store.add_project(NewProject::at(checkout("beta"))).unwrap();
         touched_at(&store, &alpha.id, 1_000);
         touched_at(&store, &beta.id, 2_000);
 
@@ -1173,7 +1242,7 @@ mod tests {
     #[test]
     fn an_archived_project_leaves_the_default_listing_but_not_the_table() {
         let store = Store::in_memory().unwrap();
-        let p = store.add_project(NewProject::at("/tmp/alpha")).unwrap();
+        let p = store.add_project(NewProject::at(checkout("alpha"))).unwrap();
         store.set_project_state(&p.id, State::Archived).unwrap();
         assert!(store.projects(false).unwrap().is_empty());
         assert_eq!(store.projects(true).unwrap().len(), 1);
@@ -1183,9 +1252,9 @@ mod tests {
     #[test]
     fn a_path_inside_a_checkout_finds_the_checkout() {
         let store = Store::in_memory().unwrap();
-        store.add_project(NewProject::at("/tmp/alpha")).unwrap();
+        store.add_project(NewProject::at(checkout("alpha"))).unwrap();
         let found = store
-            .project_for_path(Path::new("/tmp/alpha/core/src"))
+            .project_for_path(&checkout("alpha").join("core/src"))
             .unwrap();
         assert_eq!(found.map(|p| p.name), Some("alpha".into()));
     }
@@ -1193,10 +1262,10 @@ mod tests {
     #[test]
     fn a_nested_project_wins_over_the_one_containing_it() {
         let store = Store::in_memory().unwrap();
-        store.add_project(NewProject::at("/tmp/alpha")).unwrap();
-        store.add_project(NewProject::at("/tmp/alpha/apps/ios")).unwrap();
+        store.add_project(NewProject::at(checkout("alpha"))).unwrap();
+        store.add_project(NewProject::at(checkout("alpha/apps/ios"))).unwrap();
         let found = store
-            .project_for_path(Path::new("/tmp/alpha/apps/ios/src"))
+            .project_for_path(&checkout("alpha/apps/ios").join("src"))
             .unwrap();
         assert_eq!(found.map(|p| p.name), Some("ios".into()));
     }
@@ -1205,7 +1274,7 @@ mod tests {
     #[test]
     fn an_archived_project_can_still_be_named_explicitly() {
         let store = Store::in_memory().unwrap();
-        let p = store.add_project(NewProject::at("/tmp/alpha")).unwrap();
+        let p = store.add_project(NewProject::at(checkout("alpha"))).unwrap();
         store.set_project_state(&p.id, State::Archived).unwrap();
         assert_eq!(store.projects_by_name("alpha").unwrap().len(), 1);
     }
@@ -1219,10 +1288,10 @@ mod tests {
     fn a_name_two_projects_answer_to_returns_both_rather_than_the_first() {
         let store = Store::in_memory().unwrap();
         store
-            .add_project(NewProject::at("/tmp/collide/proj").named("collide-proj"))
+            .add_project(NewProject::at(checkout("collide/proj")).named("collide-proj"))
             .unwrap();
         store
-            .add_project(NewProject::at("/tmp/other/proj").named("other-proj"))
+            .add_project(NewProject::at(checkout("other/proj")).named("other-proj"))
             .unwrap();
 
         let found = store.projects_by_name("proj").unwrap();
@@ -1249,12 +1318,12 @@ mod tests {
     #[test]
     fn a_shared_name_settles_nothing_and_leaves_the_current_project_alone() {
         let (store, chat) = store_with_chat();
-        store.add_project(NewProject::at("/tmp/tetris")).unwrap();
+        store.add_project(NewProject::at(checkout("tetris"))).unwrap();
         store
-            .add_project(NewProject::at("/tmp/collide/proj").named("collide-proj"))
+            .add_project(NewProject::at(checkout("collide/proj")).named("collide-proj"))
             .unwrap();
         store
-            .add_project(NewProject::at("/tmp/other/proj").named("other-proj"))
+            .add_project(NewProject::at(checkout("other/proj")).named("other-proj"))
             .unwrap();
         store.settle_project(&chat, "let's fix tetris").unwrap();
 
@@ -1281,8 +1350,71 @@ mod tests {
     fn a_project_needs_a_name() {
         let store = Store::in_memory().unwrap();
         assert!(store
-            .add_project(NewProject::at("/tmp/alpha").named("   "))
+            .add_project(NewProject::at(checkout("alpha")).named("   "))
             .is_err());
+    }
+
+    /// A project is a directory a session gets started in, so a file cannot be
+    /// one. This used to be accepted in silence, and the row it wrote looked
+    /// exactly like a healthy repository in `jod project ls`.
+    ///
+    /// What made it worth refusing here is what happens afterwards. A session
+    /// started on that path never runs: the supervisor asks the operating
+    /// system to change into it and is told `Not a directory (os error 20)`,
+    /// which is reported against the harness binary and never mentions the
+    /// project or the path. `claim_worktree` is no better — it decides the
+    /// path "is not inside a git repository" even when the file sits in one.
+    /// The catalog is the last place the mistake is still cheap to explain.
+    #[test]
+    fn a_file_is_refused_rather_than_catalogued_as_a_repository() {
+        let dir = scratch("a-file-not-a-dir");
+        let file = dir.join("afile.txt");
+        std::fs::write(&file, "hello\n").unwrap();
+
+        let store = Store::in_memory().unwrap();
+        let refused = store
+            .add_project(NewProject::at(&file).named("a-file-not-a-dir"))
+            .expect_err("a plain file was catalogued as a repository");
+
+        let said = refused.to_string();
+        assert!(
+            said.contains(&file.display().to_string()),
+            "the refusal does not say which path was wrong: {said}"
+        );
+        assert!(
+            said.contains(&dir.display().to_string()),
+            "the refusal does not offer the directory holding the file: {said}"
+        );
+        assert!(
+            store.projects(true).unwrap().is_empty(),
+            "the refusal still wrote a row"
+        );
+    }
+
+    /// The commoner way into the same broken row: a path with a typo in it.
+    ///
+    /// `normalise` canonicalises, and canonicalising something that is not
+    /// there fails — but it deliberately falls back to the path as given
+    /// rather than refusing, so nothing was validating this either. Downstream
+    /// the failure is the same one a file produces, arriving just as late.
+    #[test]
+    fn a_path_that_is_not_there_is_refused_rather_than_catalogued() {
+        let missing = scratch("no-such-checkout").join("nope");
+
+        let store = Store::in_memory().unwrap();
+        let refused = store
+            .add_project(NewProject::at(&missing).named("a-path-that-is-not-there"))
+            .expect_err("a path that does not exist was catalogued");
+
+        let said = refused.to_string();
+        assert!(
+            said.contains(&missing.display().to_string()),
+            "the refusal does not say which path was wrong: {said}"
+        );
+        assert!(
+            store.projects(true).unwrap().is_empty(),
+            "the refusal still wrote a row"
+        );
     }
 
     // ---- sticky resolution ----------------------------------------------
@@ -1290,7 +1422,7 @@ mod tests {
     #[test]
     fn naming_a_project_switches_the_conversation_to_it() {
         let (store, chat) = store_with_chat();
-        store.add_project(NewProject::at("/tmp/tetris")).unwrap();
+        store.add_project(NewProject::at(checkout("tetris"))).unwrap();
         let r = store.settle_project(&chat, "let's fix tetris").unwrap();
         assert_eq!(r.map(|r| r.how), Some(How::Inferred));
         assert_eq!(
@@ -1303,7 +1435,7 @@ mod tests {
     #[test]
     fn a_bare_instruction_carries_the_project_already_in_play() {
         let (store, chat) = store_with_chat();
-        store.add_project(NewProject::at("/tmp/tetris")).unwrap();
+        store.add_project(NewProject::at(checkout("tetris"))).unwrap();
         store.settle_project(&chat, "let's fix tetris").unwrap();
 
         let r = store
@@ -1321,8 +1453,8 @@ mod tests {
     #[test]
     fn naming_another_project_overrides_the_sticky_one() {
         let (store, chat) = store_with_chat();
-        store.add_project(NewProject::at("/tmp/tetris")).unwrap();
-        store.add_project(NewProject::at("/tmp/jod")).unwrap();
+        store.add_project(NewProject::at(checkout("tetris"))).unwrap();
+        store.add_project(NewProject::at(checkout("jod"))).unwrap();
         store.settle_project(&chat, "fix tetris").unwrap();
         store.settle_project(&chat, "now deploy jod").unwrap();
         assert_eq!(
@@ -1336,7 +1468,7 @@ mod tests {
     #[test]
     fn a_bare_instruction_with_no_project_in_play_settles_nothing() {
         let (store, chat) = store_with_chat();
-        store.add_project(NewProject::at("/tmp/tetris")).unwrap();
+        store.add_project(NewProject::at(checkout("tetris"))).unwrap();
         assert!(store.settle_project(&chat, "let's fix this").unwrap().is_none());
         assert!(store.current_project(&chat).unwrap().is_none());
     }
@@ -1346,8 +1478,8 @@ mod tests {
     #[test]
     fn an_ambiguous_instruction_is_left_for_the_orchestrator() {
         let (store, chat) = store_with_chat();
-        store.add_project(NewProject::at("/tmp/tetris")).unwrap();
-        store.add_project(NewProject::at("/tmp/jod")).unwrap();
+        store.add_project(NewProject::at(checkout("tetris"))).unwrap();
+        store.add_project(NewProject::at(checkout("jod"))).unwrap();
         assert!(store
             .settle_project(&chat, "port tetris to jod")
             .unwrap()
@@ -1358,7 +1490,7 @@ mod tests {
     #[test]
     fn a_switch_is_recorded_with_the_words_that_caused_it() {
         let (store, chat) = store_with_chat();
-        store.add_project(NewProject::at("/tmp/tetris")).unwrap();
+        store.add_project(NewProject::at(checkout("tetris"))).unwrap();
         store.settle_project(&chat, "let's fix tetris").unwrap();
         let log = store.project_resolutions(&chat, 10).unwrap();
         assert_eq!(log.len(), 1);
@@ -1370,7 +1502,7 @@ mod tests {
     #[test]
     fn repeating_the_same_project_does_not_add_a_resolution() {
         let (store, chat) = store_with_chat();
-        store.add_project(NewProject::at("/tmp/tetris")).unwrap();
+        store.add_project(NewProject::at(checkout("tetris"))).unwrap();
         store.settle_project(&chat, "fix tetris").unwrap();
         store.settle_project(&chat, "tetris again").unwrap();
         assert_eq!(store.project_resolutions(&chat, 10).unwrap().len(), 1);
@@ -1379,7 +1511,7 @@ mod tests {
     #[test]
     fn an_override_marks_the_guess_it_took_back() {
         let (store, chat) = store_with_chat();
-        let t = store.add_project(NewProject::at("/tmp/tetris")).unwrap();
+        let t = store.add_project(NewProject::at(checkout("tetris"))).unwrap();
         store.settle_project(&chat, "fix tetris").unwrap();
         store.mark_resolution_corrected(&chat).unwrap();
         let log = store.project_resolutions(&chat, 10).unwrap();
@@ -1391,7 +1523,7 @@ mod tests {
     #[test]
     fn deleting_a_project_does_not_delete_the_chat_about_it() {
         let (store, chat) = store_with_chat();
-        let p = store.add_project(NewProject::at("/tmp/tetris")).unwrap();
+        let p = store.add_project(NewProject::at(checkout("tetris"))).unwrap();
         store.settle_project(&chat, "fix tetris").unwrap();
         store.write(|tx| {
             tx.execute("DELETE FROM projects WHERE id = ?1", params![p.id])?;
