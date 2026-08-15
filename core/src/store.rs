@@ -2994,9 +2994,26 @@ impl Store {
         })
     }
 
+    /// Remove a goal, and the memory it wrote along with it.
+    ///
+    /// The row and the facts go together because they are one thing. A goal's
+    /// progress lives in the fact store rather than in its columns, so
+    /// deleting the row alone leaves the whole episodic record behind with no
+    /// goal left to explain it — rows nothing will ever read again, and, until
+    /// the reads were scoped, rows the next goal of that name read as its own.
+    ///
+    /// The scope belongs to this goal and to nothing else, so the delete can
+    /// take all of it. `relations` cascades on `fact_id`, which is what keeps
+    /// the graph from outliving the facts it was built from.
     pub fn delete_goal(&self, name: &str) -> Result<bool> {
+        let scope = self.goal_named(name)?.map(|g| g.memory_scope());
         self.write(|tx| {
             let gone = tx.execute("DELETE FROM goals WHERE name = ?1", params![name])?;
+            if gone > 0 {
+                if let Some(scope) = &scope {
+                    tx.execute("DELETE FROM facts WHERE scope = ?1", params![scope])?;
+                }
+            }
             Ok(gone > 0)
         })
     }
@@ -6065,6 +6082,29 @@ mod tests {
         // The scope-blind read is still there, and still sees both — which is
         // what made this a bug rather than a difference of opinion.
         assert_eq!(s.facts_about("goal/nightly-tidy").unwrap().len(), 2);
+    }
+
+    /// A goal's progress is memory rather than columns, so removing the goal
+    /// has to remove the memory too. Deleting the row alone left the whole
+    /// episodic record in the database with nothing left to explain it.
+    #[test]
+    fn removing_a_goal_takes_its_memory_with_it() {
+        let s = store();
+        let g = a_goal("nightly-tidy");
+        s.add_goal(&g).unwrap();
+        s.remember(
+            NewFact::new("goal/nightly-tidy", "ended", "satisfied")
+                .in_scope(&g.memory_scope())
+                .from(Origin::System),
+        )
+        .unwrap();
+
+        assert!(s.delete_goal("nightly-tidy").unwrap());
+
+        assert!(
+            s.facts_about("goal/nightly-tidy").unwrap().is_empty(),
+            "the removed goal left its record behind"
+        );
     }
 
     #[test]
