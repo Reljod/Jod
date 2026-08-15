@@ -539,7 +539,9 @@ pub fn catalogue() -> Vec<Tool> {
                  still beside it so you can diff against what he is editing. A sibling already \
                  working on this repository is offered its worktree rather than a second branch \
                  being cut. Call it once, when you first need to write; not at the start out of \
-                 habit.",
+                 habit. Read the `writable` field in the answer before you write: it says \
+                 whether this session can really write in the worktree, and `no` or \
+                 `unverified` means stop and say so rather than trying anyway.",
             // **D5's explicit step, and the reason it has to be a tool.**
             // "Detect the first write" has no harness-agnostic implementation —
             // every harness spells its pre-write hook differently and two of
