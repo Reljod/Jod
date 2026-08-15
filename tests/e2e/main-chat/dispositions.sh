@@ -162,6 +162,23 @@ export JOD_ROUTING="$ROUTING_TOOLS"
 # scratch repository on a fresh store — and it means a row that *is* supposed
 # to delegate spawns its child somewhere harmless instead of into a working
 # tree several agents share.
+# Which permission mode the turns run under, stated rather than inherited.
+#
+# `jod main` defaults to `edits`, and below `bypass` Jod writes its own
+# `PreToolUse` approval hook into the run's settings — `jod approve-hook --run
+# <id> --wait 60` on matcher `*`. Every tool call then waits a full minute for an
+# approval from a person who is not here before the tool runs, so a turn making
+# seven calls cannot finish inside the cap however well it routed. Measured, not
+# guessed: hooked runs on this box show a median call-to-result gap of 60.394s,
+# unhooked ones 0.033s.
+#
+# The default here stays `edits` so the suite exercises the mode a scripted
+# caller gets. Reljod's console runs at `bypass`, where the hook is absent and
+# the same table finishes in a fraction of the time. Set DISPOSITION_PERMISSION
+# to compare them.
+MODE="${DISPOSITION_PERMISSION:-edits}"
+echo "permission mode: $MODE"
+
 SCRATCH="$JOD_HOME/scratch-repo"
 rm -rf "$SCRATCH"; mkdir -p "$SCRATCH"
 git -C "$SCRATCH" init -q
@@ -205,7 +222,8 @@ fixture() {
   echo "expected: $expected"
   echo "asked   : $instruction"
   JOD_HOME="$home" timeout "${DISPOSITION_TURN_TIMEOUT:-420}" \
-    jod main --wait --cwd "$SCRATCH" "$instruction" >"$home/turn.log" 2>&1
+    jod main --wait --permission "$MODE" --cwd "$SCRATCH" "$instruction" \
+    >"$home/turn.log" 2>&1
   local rc=$?
   [ "$rc" -eq 0 ] || echo "  (jod main exited $rc — see $home/turn.log)"
 
@@ -267,7 +285,7 @@ CONT_DB="$CONT/jod.db"
 
 echo "asked (1): Count how many files are tracked in this repository and tell me."
 JOD_HOME="$CONT" timeout "${DISPOSITION_TURN_TIMEOUT:-420}" \
-  jod main --wait --cwd "$SCRATCH" \
+  jod main --wait --permission "$MODE" --cwd "$SCRATCH" \
   "Count how many files are tracked in this repository and tell me." \
   >"$CONT/turn1.log" 2>&1
 MARK="$(high_water "$CONT_DB")"
@@ -275,7 +293,7 @@ echo "first turn routed to: $(routed_since "$CONT_DB" 0 | tail -1)"
 
 echo "asked (2): Follow up on that file count — also break it down by extension."
 JOD_HOME="$CONT" timeout "${DISPOSITION_TURN_TIMEOUT:-420}" \
-  jod main --wait --cwd "$SCRATCH" \
+  jod main --wait --permission "$MODE" --cwd "$SCRATCH" \
   "Follow up on that file count — also break it down by extension." \
   >"$CONT/turn2.log" 2>&1
 SECOND="$(routed_since "$CONT_DB" "$MARK" | tail -1)"
