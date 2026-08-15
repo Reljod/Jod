@@ -2805,6 +2805,57 @@ impl Store {
         })
     }
 
+    /// Every goal a person has paused.
+    ///
+    /// Pausing a goal stops new iterations, and until this existed it also
+    /// stopped Jod looking at the goal at all. [`Store::claim_due_goals`]
+    /// selects on `state = 'running'`, and that claim is the only route by
+    /// which a finished run is ever settled, so a goal paused in the middle of
+    /// an iteration went on reading `iter 0 · $0.00` beside a run that had
+    /// finished and been billed for.
+    ///
+    /// This is deliberately a separate question rather than a wider claim. A
+    /// paused goal has no next iteration, so it is never *due*, and folding it
+    /// into the due-goal query would hand it back on every tick for the rest of
+    /// its life. The caller reads this list, works out which of these goals
+    /// actually have a run in flight, and claims only those.
+    pub fn paused_goals(&self) -> Result<Vec<Goal>> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        let mut stmt =
+            conn.prepare(&format!("{GOAL_COLUMNS} WHERE state = 'paused' ORDER BY name"))?;
+        let rows = stmt.query_map([], row_to_goal)?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// Take one paused goal, so the iteration it left in flight can be settled.
+    ///
+    /// The same compare-and-swap as [`Store::claim_due_goals`], for the same
+    /// reason: two processes settling one run would count its cost twice. It
+    /// asks by id and without the due-date test, which a paused goal has no way
+    /// of meeting, and it refuses anything that is not paused so a goal that
+    /// was resumed a moment ago is settled by the ordinary claim instead.
+    pub fn claim_paused_goal(
+        &self,
+        id: &str,
+        owner: &str,
+        now_ms_at: i64,
+        lease_ms: i64,
+    ) -> Result<Option<Goal>> {
+        self.write(|tx| {
+            let won = tx.execute(
+                "UPDATE goals SET claimed_by = ?2, lease_until_ms = ?3
+                  WHERE id = ?1 AND state = 'paused'
+                    AND (claimed_by IS NULL OR lease_until_ms < ?4)",
+                params![id, owner, now_ms_at + lease_ms, now_ms_at],
+            )?;
+            if won != 1 {
+                return Ok(None);
+            }
+            let mut stmt = tx.prepare(&format!("{GOAL_COLUMNS} WHERE id = ?1"))?;
+            Ok(Some(stmt.query_row(params![id], row_to_goal)?))
+        })
+    }
+
     /// Record what one iteration cost and whether it moved.
     ///
     /// `progressed` is the whole safety story. A goal that keeps completing

@@ -1274,9 +1274,10 @@ enum GoalCommand {
     /// Every goal, with how far it has got and what it has spent.
     ///
     /// The iteration count and the spend are what a tick has settled, not what
-    /// has been billed. An iteration that is still working — or that finished
-    /// while the goal was paused — is added only once a tick picks it up, so a
-    /// goal can read `iter 0 · $0.00` while a run of its own is going.
+    /// has been billed. An iteration that is still working is added only once a
+    /// tick settles it, so a goal can read `iter 0 · $0.00` while a run of its
+    /// own is going. Pausing the goal makes no difference to that: a run that
+    /// finishes while the goal is paused is settled by the next tick.
     Ls {
         /// Print the stored goal rows as JSON instead of the table.
         #[arg(long)]
@@ -1316,17 +1317,19 @@ enum GoalCommand {
     /// It does not stop the iteration already in flight. That run carries on
     /// working unattended, and carries on being billed, until it finishes by
     /// itself — if you paused the goal to stop it spending, stop the run too
-    /// with `jod kill <RUN>`. What the run cost is not added to the goal until
-    /// the goal is resumed and a tick settles it.
+    /// with `jod kill <RUN>`. What that run costs is still added to the goal:
+    /// the next tick after it finishes records the iteration and its cost,
+    /// without waiting for the goal to be resumed.
     Pause {
         /// The goal to pause, as `jod goal ls` names it.
         name: String,
     },
     /// Put this goal back on its schedule.
     ///
-    /// The first tick after this settles the iteration that was left running
-    /// when the goal was paused — recording what it did and what it cost — and
-    /// then starts the next one. Resuming also clears the no-progress counter,
+    /// The first tick after this starts the next iteration. An iteration that
+    /// was left running when the goal was paused has already been settled by
+    /// then, so nothing about it is waiting on the resume. Resuming also clears
+    /// the no-progress counter,
     /// so a goal that was close to being called stalled gets a full allowance
     /// again.
     Resume {
