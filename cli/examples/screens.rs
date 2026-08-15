@@ -20,7 +20,7 @@
 //! is compiled in by path instead, which is why the crate root below has to
 //! supply the one function that module reaches for.
 
-// The whole TUI is compiled in, and this example calls the six loaders and the
+// The whole TUI is compiled in, and this example calls its loaders and its
 // renderer. Everything else in it — the event loop, the key handling, the
 // terminal setup — is unreachable from here by design, and warning about that
 // would bury the one warning that would matter.
@@ -107,38 +107,20 @@ async fn main() -> anyhow::Result<()> {
     let filter = std::env::args().nth(2);
 
     let jod = Jod::with_store(Arc::new(Store::open(&path)?));
-    let mut app = App::new(HarnessKind::ClaudeCode, None, Resume::Fresh);
-    app.now_ms = chrono::Utc::now().timestamp_millis();
-    app.list_mut(Workspace::Memory).filter = filter.clone();
-
-    // The same calls `tui::refresh_workspaces` makes on the tick.
-    app.memory = tui::data::memory(&jod);
-    app.graph_size = tui::data::graph_size(&jod);
-    app.schedules = tui::data::schedules(&jod);
-    app.goals = tui::data::goals(&jod);
-    app.hooks = tui::data::hooks(&jod);
-    app.activity = tui::data::activity(&jod);
-    app.board = tui::data::tasks(&jod, None);
-    if let Some(store) = jod.store() {
-        app.team = store.teams().unwrap_or_default().first().cloned();
-        if let Some(team) = &app.team {
-            app.members = store.team_members(team).unwrap_or_default();
-            app.tasks = store.team_tasks(team).unwrap_or_default();
-        }
-    }
-    // Puts a cursor on the first row of every list, which is what makes the
-    // detail panes render something rather than "nothing selected".
-    app.reconcile();
+    let mut app = load(&jod, filter).await?;
 
     println!("{}", path.display());
     println!(
-        "{} memory nodes · {} schedules · {} goals · {} hooks · {} activity · {} tasks",
+        "{} memory nodes · {} schedules · {} goals · {} hooks · {} activity · {} tasks · \
+         {} runs · {} tree nodes",
         app.memory.len(),
         app.schedules.len(),
         app.goals.len(),
         app.hooks.len(),
         app.activity.len(),
-        app.board.len()
+        app.board.len(),
+        app.agents.len(),
+        app.forest.len()
     );
 
     for workspace in Workspace::MENU {
@@ -207,6 +189,65 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Every screen's state, read off one database the way the console reads it.
+///
+/// A function rather than a block inside `main`, because the claim this whole
+/// example makes — that a screen shows what is in the store — is only worth
+/// anything if something can check it, and nothing can call a block inside
+/// `main`. The test at the bottom of this file calls this.
+///
+/// The fleet needs three things nothing else here needs, which is why it was
+/// the one screen that rendered empty whatever database it was pointed at:
+///
+///  * `rehydrate` loads the `runs` table into the process. `Jod::agents` reads
+///    memory, not SQLite, so a freshly built `Jod` knows about no run at all —
+///    `jod tui` calls this before it opens the console, and this has to too.
+///  * `App::agents` is filled by `tui::list_agents`, which is a separate call
+///    from `refresh_workspaces` in the real program and so was easy to miss
+///    when the loaders here were copied from it.
+///  * `App::forest` is the tree, and `App::closed_works` says which of its
+///    works are archives.
+async fn load(jod: &Arc<Jod>, filter: Option<String>) -> anyhow::Result<App> {
+    let mut app = App::new(HarnessKind::ClaudeCode, None, Resume::Fresh);
+    app.now_ms = chrono::Utc::now().timestamp_millis();
+    app.list_mut(Workspace::Memory).filter = filter;
+
+    // What `jod tui` does before it draws its first frame. Without it the
+    // fleet's flat list is empty on a database full of runs, because a run
+    // reaches `Jod::agents` only by being read back out of the store here.
+    // The limit is the console's own.
+    jod.rehydrate(200).await?;
+    app.agents = tui::list_agents(jod).await;
+
+    // The same calls `tui::refresh_workspaces` makes on the tick.
+    app.memory = tui::data::memory(jod);
+    app.graph_size = tui::data::graph_size(jod);
+    app.schedules = tui::data::schedules(jod);
+    app.goals = tui::data::goals(jod);
+    app.hooks = tui::data::hooks(jod);
+    app.activity = tui::data::activity(jod);
+    app.board = tui::data::tasks(jod, None);
+    let (forest, closed) = tui::data::forest(jod, app.tree.show_closed);
+    app.forest = forest;
+    app.closed_works = closed;
+    // The tree's cursor is an id, so it has to be put back on a row that
+    // exists before anything is drawn — the same two lines, in the same order,
+    // that `refresh_workspaces` runs.
+    let rows = app.tree_rows();
+    app.tree.reconcile(&rows);
+    if let Some(store) = jod.store() {
+        app.team = store.teams().unwrap_or_default().first().cloned();
+        if let Some(team) = &app.team {
+            app.members = store.team_members(team).unwrap_or_default();
+            app.tasks = store.team_tasks(team).unwrap_or_default();
+        }
+    }
+    // Puts a cursor on the first row of every list, which is what makes the
+    // detail panes render something rather than "nothing selected".
+    app.reconcile();
+    Ok(app)
+}
+
 /// One screen, as the characters that would have reached the terminal.
 fn render(app: &App) -> String {
     let mut terminal = Terminal::new(TestBackend::new(WIDTH, HEIGHT)).expect("test backend");
@@ -226,4 +267,151 @@ fn render(app: &App) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Does this example render the database it was handed, or a picture of nothing?
+///
+/// The one claim it makes is in its first line — every workspace, off a real
+/// database — and until this test there was nothing holding it to that. The
+/// fleet screen quietly failed it: `load` above never filled `App::agents` or
+/// `App::forest`, so the screen came out empty on every database, including
+/// ones with a work and a run in them. An empty screen is the same thing this
+/// example prints when the database really is empty, so the failure looked
+/// exactly like an answer, and someone reading it would have concluded there
+/// was no fleet rather than that the example had not looked.
+///
+/// So the assertion is not "the fleet screen renders". It is that the fleet
+/// screen off a seeded database is *different* from the fleet screen off an
+/// empty one, and that the difference is the rows that were seeded.
+///
+/// Run with `cargo test -p jod-cli --example screens`, which works because
+/// `cli/Cargo.toml` sets `test = true` on this example — cargo does not run
+/// tests inside an example otherwise.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use jod_core::conversation::{NewMessage, Role};
+    use jod_core::service::watch_command;
+    use jod_core::store::StoredRun;
+    use jod_core::works::Origin;
+    use jod_core::{AgentStatus, AgentSummary, PermissionPolicy, Usage};
+
+    const WORK: &str = "port the parser";
+    const SESSION: &str = "port the lexer";
+    const RUN: &str = "hello-agent";
+    const RUN_ID: &str = "de1e6a7e";
+
+    /// A database holding the three rows the fleet screen is a picture of: a
+    /// work, a session under it, and a run that wrote into that session.
+    ///
+    /// Seeded through the real store API and read back through the real
+    /// loaders, like the fleet test in `cli/src/tui/ui.rs` — a hand-made
+    /// `App::forest` would prove the renderer works and say nothing about
+    /// whether this example ever asks the database anything.
+    fn seeded() -> Arc<Jod> {
+        let store = Store::in_memory().expect("an in-memory store");
+        let work = store.create_work(WORK).expect("a work");
+        let session = store
+            .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
+            .expect("a conversation")
+            .id;
+        store
+            .set_conversation_title(&session, SESSION)
+            .expect("a session title");
+        store
+            .attach_conversation(&session, &work.id, None, Origin::Agent)
+            .expect("a session under the work");
+
+        // Written whole rather than as `{}`. `rehydrate` rebuilds each row into
+        // an `AgentSummary` and skips any run whose summary will not
+        // deserialise, so a stub here would leave the fleet empty for a reason
+        // that has nothing to do with what is being tested.
+        let summary = AgentSummary {
+            id: RUN_ID.into(),
+            name: RUN.into(),
+            harness: HarnessKind::ClaudeCode,
+            harness_label: "Claude Code".into(),
+            status: AgentStatus::Completed,
+            cwd: "/tmp".into(),
+            model: None,
+            permission: PermissionPolicy::Ask,
+            // A finished run, so nothing probes a process group and the screen
+            // is the same on every box.
+            pid: None,
+            pgid: None,
+            process_alive: false,
+            watch_command: watch_command(RUN_ID),
+            created_at_ms: 1,
+            session_id: None,
+            usage: Usage::default(),
+            event_count: 0,
+            last_message: None,
+        };
+        store
+            .save_run(&StoredRun {
+                id: summary.id.clone(),
+                name: summary.name.clone(),
+                harness: summary.harness.id().to_string(),
+                status: "completed".into(),
+                cwd: summary.cwd.clone(),
+                session_id: None,
+                pid: None,
+                pgid: None,
+                created_at_ms: summary.created_at_ms,
+                summary: serde_json::to_value(&summary).expect("a serialisable summary"),
+            })
+            .expect("a run");
+        // `messages.run_id` is the only join between a run and the session it
+        // belongs to, so the tree has no node for a run that never wrote
+        // anything.
+        store
+            .append_message(
+                &session,
+                NewMessage::new(Role::Assistant, "the lexer builds").from_run(RUN_ID),
+            )
+            .expect("a message");
+        Jod::with_store(Arc::new(store))
+    }
+
+    /// The fleet screen, built exactly as `main` builds it.
+    async fn fleet_screen(jod: &Arc<Jod>) -> String {
+        let mut app = load(jod, None).await.expect("the example's own loader");
+        app.go(Workspace::Fleet);
+        render(&app)
+    }
+
+    #[tokio::test]
+    async fn the_fleet_screen_shows_the_work_and_the_run_in_the_database() {
+        let screen = fleet_screen(&seeded()).await;
+        assert!(
+            screen.contains(WORK),
+            "the work is the root of the tree this screen exists to draw:\n{screen}"
+        );
+        assert!(
+            screen.contains(RUN),
+            "the run is in the database and has a node, so it belongs on screen:\n{screen}"
+        );
+    }
+
+    /// The other half, and the half that makes the first one mean something.
+    ///
+    /// A screen that says the same thing about a full database and an empty one
+    /// is not reporting on the database at all.
+    #[tokio::test]
+    async fn the_fleet_screen_is_not_the_same_on_an_empty_database() {
+        let populated = fleet_screen(&seeded()).await;
+        let empty = Jod::with_store(Arc::new(Store::in_memory().expect("an in-memory store")));
+        let blank = fleet_screen(&empty).await;
+
+        assert!(
+            !blank.contains(WORK),
+            "nothing was seeded here, so nothing should be named:\n{blank}"
+        );
+        assert_ne!(
+            populated, blank,
+            "the fleet screen renders the same thing whatever the database holds, \
+             which is what this example was doing before it loaded the fleet at all"
+        );
+    }
 }
