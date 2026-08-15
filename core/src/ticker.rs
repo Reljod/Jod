@@ -94,6 +94,13 @@ fn one_line(text: &str) -> String {
 /// that is a mistake in how the goal was written down, not a result. The two
 /// need to read differently, and the reason names the limit and the number it
 /// was compared against so the person does not have to go looking.
+///
+/// "satisfied" has the same two readings and needs the same treatment. A goal
+/// satisfied after twenty iterations was met by work it did and paid for. A
+/// goal satisfied at iteration zero was already met when it was written down,
+/// and the only reason anyone knows is that the done-when check was run once,
+/// which costs nothing. That is the only way this is called with
+/// [`schedule::GoalState::Satisfied`], so the reason may say so outright.
 fn ending_note(goal: &Goal, stop: schedule::GoalState) -> String {
     let reason = match stop {
         schedule::GoalState::Exhausted => match goal.max_iterations {
@@ -107,6 +114,10 @@ fn ending_note(goal: &Goal, stop: schedule::GoalState) -> String {
                 goal.spent_usd
             ),
         },
+        schedule::GoalState::Satisfied => format!(
+            "`{}` already passed, so no iteration was started and nothing was spent",
+            goal.done_when.as_deref().unwrap_or("the done-when check")
+        ),
         _ => format!(
             "{} iterations in a row changed nothing, and {} is the limit",
             goal.no_progress, goal.stall_after
@@ -1059,8 +1070,11 @@ impl Ticker {
 
             // Settle the previous iteration before starting another, so a goal
             // never has two runs in flight and its spend is counted once.
-            if let Some(run) = self.current_run(&store, &subject)? {
-                match self.jod.agent(&run).await {
+            // Whether there was one is also what tells the code below that this
+            // goal has never run at all, so it is read once and kept.
+            let in_flight = self.current_run(&store, &subject)?;
+            if let Some(run) = &in_flight {
+                match self.jod.agent(run).await {
                     Ok(agent) if agent.status == AgentStatus::Running => {
                         // Still working: no second iteration on top of the
                         // first. The claim is let go all the same — what is in
@@ -1181,6 +1195,42 @@ impl Ticker {
                 continue;
             };
             if !goal.state.is_live() {
+                store.release_goal(&goal.id)?;
+                continue;
+            }
+            // A goal's objective can already be true the moment it is written
+            // down, and until now nothing ever asked before paying to find
+            // out. The done-when check only ever ran in the block above, which
+            // settles a previous run, so a goal on its very first tick had no
+            // run to settle, skipped that block, and went straight to spawning
+            // an agent. The second tick then settled that agent, found the
+            // check passing, and stopped — one real iteration and one real
+            // bill for an objective that was met before the goal existed.
+            //
+            // So ask first, on a goal that has never had a run in flight. That
+            // is the only case: after one iteration there is always a
+            // `current-run` fact, and the block above has already asked.
+            //
+            // Nothing is recorded that would look like work. There is no
+            // `iteration` fact and no `advance_goal` call, because both would
+            // claim an iteration that never ran and a cost nobody was charged
+            // — the mirror of the bug where a goal denied the iteration that
+            // did satisfy it. The ending itself says which of the two happened.
+            //
+            // This runs before the exhausted check below, so a goal that is
+            // both already met and already past its limit ends satisfied. The
+            // limit only says how much work the goal was allowed; it has no
+            // bearing on an objective that needed none. Whichever branch is
+            // taken ends the goal and moves on, so exactly one ending is ever
+            // written.
+            if in_flight.is_none() && self.check_done(&goal).await.is_some_and(|v| v.satisfied) {
+                let state = crate::schedule::GoalState::Satisfied;
+                store.set_goal_state(&goal.name, state)?;
+                store.remember(
+                    NewFact::new(subject.clone(), "ended", ending_note(&goal, state))
+                        .in_scope(&scope)
+                        .from(Origin::System),
+                )?;
                 store.release_goal(&goal.id)?;
                 continue;
             }
@@ -2624,6 +2674,112 @@ mod tests {
             ending.object.contains("$-5.00"),
             "the ending names the budget it was given: {}",
             ending.object
+        );
+    }
+
+    /// The objective can already be true the moment the goal is created. The
+    /// check for that used to live only in the block that settles a previous
+    /// run, so a brand new goal had no run to settle, skipped the block, and
+    /// went straight to spawning an agent. The first tick paid for an iteration
+    /// and the second one noticed there had never been anything to do. Nothing
+    /// may be spawned here, and nothing may be recorded that claims work was
+    /// done.
+    #[tokio::test]
+    async fn a_goal_whose_objective_is_already_met_never_pays_for_an_iteration() {
+        let store = std::sync::Arc::new(crate::store::Store::in_memory().unwrap());
+        let mut g = a_goal("already-met");
+        g.done_when = Some("true".into());
+        store.add_goal(&g).unwrap();
+        store.run_goal_now("already-met", 1).unwrap();
+
+        let ticker = Ticker::new(Jod::with_store(store.clone())).as_owner("t");
+        let now = chrono::Utc::now().timestamp_millis();
+        let first = ticker.tick_goals(now).await.unwrap();
+        assert_eq!(first.claimed, 1, "the first tick reaches it");
+        assert_eq!(
+            first.started + first.failed,
+            0,
+            "the money is spent at the spawn, so the spawn must not be attempted"
+        );
+
+        let facts = store.facts_about("goal/already-met").unwrap();
+        assert!(
+            !facts.iter().any(|f| f.predicate == "current-run"),
+            "no run was started, so the goal has none in flight"
+        );
+
+        let after = store.goal_named("already-met").unwrap().unwrap();
+        assert_eq!(
+            after.state,
+            crate::schedule::GoalState::Satisfied,
+            "the objective was met, so the goal is finished"
+        );
+        // The mirror of the bug that made the satisfying iteration invisible: a
+        // goal that never ran must not claim an iteration or a cost it never
+        // incurred.
+        assert_eq!(after.iteration, 0, "no iteration ran");
+        assert_eq!(after.spent_usd, 0.0, "and nothing was spent");
+        assert!(
+            !facts.iter().any(|f| f.predicate == "iteration"),
+            "an iteration line here would describe work that never happened"
+        );
+
+        // The ending has to read differently from a goal satisfied by its own
+        // work, or the log cannot tell a free check from a paid one.
+        let endings: Vec<_> = facts.iter().filter(|f| f.predicate == "ended").collect();
+        assert_eq!(endings.len(), 1, "one ending, written once");
+        assert!(
+            endings[0].object.starts_with("satisfied"),
+            "the ending names the state: {}",
+            endings[0].object
+        );
+        assert!(
+            endings[0].object.contains("before its first iteration"),
+            "the ending says it never ran: {}",
+            endings[0].object
+        );
+
+        assert_eq!(
+            ticker.tick_goals(now).await.unwrap().claimed,
+            0,
+            "a finished goal is not claimed again"
+        );
+    }
+
+    /// Both endings are available at once: the objective is already true and
+    /// the goal was also created with a limit it is already past. Satisfied
+    /// wins, because what the goal was asked to achieve has been achieved and
+    /// the limit it never reached says nothing about that. Exactly one ending
+    /// is recorded either way.
+    #[tokio::test]
+    async fn a_goal_both_already_met_and_already_out_of_iterations_ends_satisfied() {
+        let store = std::sync::Arc::new(crate::store::Store::in_memory().unwrap());
+        let mut g = a_goal("met-and-capped");
+        g.done_when = Some("true".into());
+        g.max_iterations = Some(0);
+        store.add_goal(&g).unwrap();
+        store.run_goal_now("met-and-capped", 1).unwrap();
+
+        let ticker = Ticker::new(Jod::with_store(store.clone())).as_owner("t");
+        let now = chrono::Utc::now().timestamp_millis();
+        ticker.tick_goals(now).await.unwrap();
+
+        assert_eq!(
+            store.goal_named("met-and-capped").unwrap().unwrap().state,
+            crate::schedule::GoalState::Satisfied,
+            "the objective is met, whatever the unused limit says"
+        );
+        let endings: Vec<_> = store
+            .facts_about("goal/met-and-capped")
+            .unwrap()
+            .into_iter()
+            .filter(|f| f.predicate == "ended")
+            .collect();
+        assert_eq!(endings.len(), 1, "one ending, not one of each");
+        assert!(
+            endings[0].object.starts_with("satisfied"),
+            "and it is the satisfied one: {}",
+            endings[0].object
         );
     }
 
