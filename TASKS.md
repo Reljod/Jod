@@ -57,6 +57,14 @@ produce one symptom.
 Buried in the area files otherwise, and several of these are worse than the bug
 that prompted the sweep.
 
+**The `State` column is a snapshot and it will rot.** This list came out of one
+afternoon's testing; it is not a live tracker, and nothing updates it when a
+pull request merges. It went stale twice while its own correcting pull request
+was open. So treat the column as "true when written" and check the pull request
+before concluding a task is still yours to do — `gh pr list --state all` costs
+one command and is the only authority. A status that says `open` about finished
+work is the same failure this list keeps documenting.
+
 | | What | Where | State |
 |---|---|---|---|
 | **critical** | A work session cannot write anything — `claim_worktree` cuts a worktree the running process may not touch | `10-orchestration.md` O1 | **needs Reljod** |
