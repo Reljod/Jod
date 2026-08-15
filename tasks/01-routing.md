@@ -36,6 +36,25 @@ rather than changing one.
 
 Check: see R2 — without it this cannot be shown to work or to stay working.
 
+### Observed, not argued
+
+A console was opened in a scratch repository on a fresh `JOD_HOME` and asked
+one trivial question:
+
+> what does the acronym A2A stand for in this project? answer in one line
+
+What it did: spawned a sub-agent called `a2a-acronym-lookup`, then polled
+`list_agents` in a loop waiting for it. What Reljod got back, after 42 seconds
+and **$0.39**, was:
+
+> Still working — the lookup agent is mid-search. I'll report as soon as it
+> lands.
+
+He never got the answer. The question was one line, needed no repository, and
+the orchestrator already had the answer available to it in `SPECS-a2a.md`. This
+is the whole of R1 in one exchange: not a slow answer, no answer, for the price
+of a spawned agent.
+
 ---
 
 ## R2. Nothing tests that a routing decision is correct
@@ -79,3 +98,78 @@ delegated agent and try to message main from inside it.
 Fix: unknown until confirmed. If the gap is real, the likely shape is that the
 main chat appears in the roster under a fixed name and that mail for it starts
 a turn, the way `core/src/delivery.rs` already starts one for a teammate.
+
+---
+
+## R4. The orchestrator blocks itself busy-waiting on the run it just delegated
+Status: open · Owner: — · Severity: high
+
+Observed in the same exchange as R1. Having spawned the sub-agent, the
+orchestrator did this, in its own turn:
+
+```
+Bash · until [ "$(jod agents --json | grep -c a2e4f620)" = "0" ]; do sleep 5; done
+Bash · sleep 45; echo waited
+mcp__jod__list_agents · {"limit":2}      (repeatedly)
+```
+
+It sat in a shell loop waiting for its own child. That is the exact thing the
+design says it must never do — `core/src/orchestrator.rs:25` is a section
+headed "Non-blocking, which is the whole point", explaining that a main chat
+which blocks on a task is a chat you cannot use while anything is happening.
+
+The behaviour is worse than slow. The turn burned 42 seconds and $0.39 mostly
+on sleeping, and it still ended without the answer, because the poll loop
+outlived the model's willingness to keep waiting rather than the run finishing.
+
+Cause: the preamble tells the orchestrator to hand work over and come straight
+back, but nothing tells it what to do when it *wants* the result. Given a
+question whose answer it is supposed to relay, and no mechanism for the child
+to report back (see R3), a shell loop is the only tool it has left. R3 and R4
+are the same hole seen from two sides: with no return path, the orchestrator
+invents a blocking one.
+
+Fix: give the child a way to report back, then tell the orchestrator plainly
+that it never waits — it hands over and returns, and the answer arrives as its
+own event later. Consider refusing `sleep`-shaped Bash calls from a run holding
+`ToolAccess::Orchestrate`; a rule the model can talk its way past is not a rule,
+and this one is measurable.
+
+Check: delegate something from the main chat and assert the turn returns
+without a `sleep` or a poll loop in its tool calls.
+
+## R5. The orchestrator reaches for tools outside Jod's set
+Status: open · Owner: — · Severity: medium
+
+In the same turn it called `ToolSearch · select:Monitor`, looking for a
+generic monitoring tool rather than using Jod's own verbs. `ToolAccess::Orchestrate`
+is meant to be the boundary of what the main chat can do, and the harness's own
+tool-discovery mechanism reaches straight past it.
+
+Worth confirming how far this goes: if the orchestrator can load arbitrary
+harness tools, then `ToolAccess` bounds Jod's verbs but not the session, and
+the confinement described in `core/src/orchestrator.rs:14` is narrower than it
+reads.
+
+Fix: unknown until scoped. At minimum the preamble should say the Jod tools are
+the whole toolbox. Whether the harness can be told to withhold the rest is a
+question for `docs/harness-support.md`.
+
+Check: assert a main-chat turn's tool calls are all `mcp__jod__*` plus reading.
+
+## R6. The chat warns it is due for compaction after a single exchange
+Status: open · Owner: — · Severity: low · needs confirming
+
+The status bar showed `⚠ compact` after exactly one question and one answer, on
+a database created seconds earlier. `COMPACT_CHARS` is 24,000 and
+`COMPACT_FLOOR_CHARS` is 4,000 (`core/src/orchestrator.rs:65`), and one short
+exchange is nowhere near either.
+
+Either `live_window` is counting something bigger than the visible transcript —
+the system preamble and the project catalog are both large and both go out with
+every turn — or the warning is wired to the wrong measure. If the preamble does
+count, the floor will be tripped on turn one for ever, and a warning that is
+always on is a warning nobody reads.
+
+Not yet diagnosed; whoever picks it up should print what `live_window` returns
+at that moment before changing anything.
