@@ -63,7 +63,7 @@ use crossterm::terminal::{
 use futures::StreamExt;
 use jod_core::harness::ToolAccess;
 use jod_core::schedule::{GoalState, ScheduleState};
-use jod_core::service::RunConversation;
+use jod_core::service::{AgentStatus, RunConversation};
 use jod_core::store::Store;
 use jod_core::{AgentEvent, HarnessKind, Jod, Model, PermissionPolicy, Resume, SpawnRequest};
 use ratatui::backend::CrosstermBackend;
@@ -3764,6 +3764,45 @@ fn is_run_verb(code: KeyCode) -> bool {
     )
 }
 
+/// Why the run under the cursor cannot be carried on, when it cannot.
+///
+/// The question `continue_agent` asks in `core/src/mcp.rs`, asked again here
+/// because `r` is a second way into the same act: it points the next turn at a
+/// run's stored session. A session belonging to a run that was killed or failed
+/// breaks off wherever the process happened to stop, and the model picks that
+/// half-finished state up as though it were its own last turn. Nothing on
+/// screen says so — the chat simply opens and looks ready — which is what makes
+/// this worth a refusal rather than a warning.
+///
+/// The answer is a keypress in a terminal rather than a tool's reply, so it is
+/// one sentence shorter than the tool's and it names a key instead of a tool.
+/// That key is `d`, which starts a fresh agent on the same prompt and exists
+/// only on this screen — so the refusal has to leave the cursor here.
+///
+/// Every status is written out rather than caught by a wildcard, so a fifth one
+/// added later has to be decided on here instead of quietly inheriting whichever
+/// answer the wildcard gave. A fleet row carries its status as a string, and
+/// [`AgentStatus::parse`] is what turns that back into something the compiler
+/// can count.
+fn refusal_to_continue(name: &str, status: &str) -> Option<String> {
+    match AgentStatus::parse(status) {
+        // The ordinary target of a follow-up, and the run a second instruction
+        // reaches mid-task. Both have a session that means what it says.
+        Some(AgentStatus::Completed | AgentStatus::Running) => None,
+        Some(AgentStatus::Killed | AgentStatus::Failed) => Some(format!(
+            "{name} did not finish cleanly — it is {status}. Continuing it would pick up a \
+             turn that broke off part-way, so press d to start a fresh agent instead"
+        )),
+        // A word this build cannot read, which `list_agents` cannot produce:
+        // every row's status is written out of an `AgentStatus` a few lines
+        // before it gets here. Let it through rather than refuse on it. A key
+        // that stops working because of a status nobody can name is a worse
+        // failure than the one this gate exists to prevent, and the run it
+        // would be refusing is not known to be dead.
+        None => None,
+    }
+}
+
 fn on_fleet_key(app: &mut App, key: KeyEvent) -> Option<Action> {
     // With works on the board the fleet is a tree, and the arrows mean the
     // tree's things — but that half runs in `on_workspace_key`, *above* the
@@ -3860,6 +3899,16 @@ fn on_fleet_key(app: &mut App, key: KeyEvent) -> Option<Action> {
         // is how an unattended run gets picked up and corrected.
         KeyCode::Char('r') => {
             let agent = app.selected_agent()?.clone();
+            // Asked before the screen moves and before the session id, for two
+            // reasons. How a run ended is a fact about the run, while a missing
+            // session id is a fact about the mechanism for resuming one, so a
+            // killed run that also lost its session id is better told it was
+            // killed. And the way out of this refusal is `d`, which is a fleet
+            // key: answering here leaves the cursor on the row it is about.
+            if let Some(refusal) = refusal_to_continue(&agent.name, &agent.status) {
+                app.push(Entry::Notice(refusal));
+                return None;
+            }
             app.go(Workspace::Chat);
             match agent.session {
                 Some(session) => {
@@ -7648,6 +7697,84 @@ mod tests {
         press(&mut app, KeyCode::Char('r'));
         assert_eq!(app.resume, Resume::Fresh);
         assert!(format!("{:?}", app.transcript.last().unwrap()).contains("never reported"));
+    }
+
+    /// A run that finished is the ordinary target of `r`, and the half of this
+    /// gate that matters more: a screen that refuses the case the key exists
+    /// for is worse than one that never checked.
+    ///
+    /// Pressed on the second row, which `panel_with_agents` leaves `completed`.
+    #[test]
+    fn r_still_continues_a_run_that_finished_cleanly() {
+        let mut app = panel_with_agents();
+        press(&mut app, KeyCode::Down);
+        assert_eq!(
+            press(&mut app, KeyCode::Char('r')),
+            Some(Action::NewThread)
+        );
+        assert_eq!(app.resume, Resume::Session("sess-bbb22222".into()));
+    }
+
+    /// The asymmetry this fixes: `s` four lines above looks at how the run
+    /// ended, and `r` did not. Someone stops a run that is going wrong, the
+    /// cursor is still on it, and `r` is the obvious next key — which pointed
+    /// the next turn at the session that stop had just cut in half.
+    #[test]
+    fn r_on_a_killed_agent_refuses_rather_than_resuming_a_cut_off_session() {
+        let mut app = panel_with_agents();
+        app.agents[0].status = "killed".into();
+
+        assert_eq!(press(&mut app, KeyCode::Char('r')), None);
+        assert_eq!(app.resume, Resume::Fresh, "the dead session was bound");
+        let said = format!("{:?}", app.transcript.last().unwrap());
+        assert!(said.contains("killed"), "the refusal is silent about why: {said}");
+        assert!(
+            said.contains("press d"),
+            "the refusal does not say what to press instead: {said}"
+        );
+        assert_eq!(
+            app.workspace,
+            Workspace::Fleet,
+            "refused, then left on a screen where `d` does not exist"
+        );
+    }
+
+    /// The commoner half of the same fault. `rehydrate` marks any run `failed`
+    /// whose process group has gone, so most dead sessions reach this screen as
+    /// `failed` rather than as `killed`.
+    #[test]
+    fn r_on_a_failed_agent_refuses_rather_than_resuming_a_cut_off_session() {
+        let mut app = panel_with_agents();
+        app.agents[0].status = "failed".into();
+
+        assert_eq!(press(&mut app, KeyCode::Char('r')), None);
+        assert_eq!(app.resume, Resume::Fresh, "the dead session was bound");
+        assert!(format!("{:?}", app.transcript.last().unwrap()).contains("failed"));
+    }
+
+    /// The decision on its own, over all four statuses at once, so that the two
+    /// that go through are asserted as deliberately as the two that do not.
+    #[test]
+    fn only_a_killed_or_failed_run_is_turned_away_by_the_fleet_status_gate() {
+        for dead in ["killed", "failed"] {
+            let refusal = refusal_to_continue("port the parser", dead)
+                .unwrap_or_else(|| panic!("`{dead}` was let through"));
+            assert!(
+                refusal.contains(dead),
+                "a refusal that does not name the status: {refusal}"
+            );
+            assert!(
+                refusal.contains("press d"),
+                "a refusal that does not say what to do instead: {refusal}"
+            );
+        }
+        for alive in ["running", "completed"] {
+            assert_eq!(
+                refusal_to_continue("port the parser", alive),
+                None,
+                "`{alive}` is a run a follow-up should reach"
+            );
+        }
     }
 
     /// The panel is modal, so its letters are commands. Typing must not leak
