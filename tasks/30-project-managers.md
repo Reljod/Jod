@@ -49,7 +49,32 @@ turns out to matter for this file too — see the note at the end of Part 1.
 ## Part 1 — bugs in the project catalog that exists today
 
 ### P1. Re-cataloguing a path silently wipes its aliases and notes
-Status: open · Owner: — · Severity: high
+Status: **fixed — merged as #123** · Severity was: high
+
+Kept here because the fix carries a correction worth reading before anyone
+touches a similar upsert.
+
+**Two readers told the fixing agent to copy the `COALESCE` that protects
+`remote`. That advice was wrong, and only running it caught why.** `COALESCE`
+returns the first non-NULL argument, and `aliases` and `notes` default to an
+empty *list* and an empty *string*, never NULL. So a `COALESCE` would never
+fire and the wipe would have continued — with a fix in place, tests written,
+and everyone satisfied. The agent found it and used `CASE` instead.
+
+The shape of the advice was right and the mechanism was wrong. The general form
+of the trap: **`COALESCE` only protects columns whose "absent" value is NULL.**
+For anything defaulting to an empty string, empty list, or `0`, it is a no-op
+that looks like a guard. See L7 in
+[`00-launch-and-roots.md`](00-launch-and-roots.md), which is the same class of
+bug on a boolean column and where `COALESCE` would fail the same way.
+
+The symlink route was confirmed rather than argued: adding a project through a
+symlink that resolves to an already-catalogued directory produced **two** rows,
+not three — the link landed on the real directory's row and emptied it.
+
+The doc comment was corrected too. It claimed re-adding "extends" an alias set;
+it now says it replaces when you supply one and keeps when you do not, and
+notes that the path is canonicalised so a symlink updates what it resolves to.
 
 `Store::add_project`'s doc comment says re-adding a path "is also how you
 rename a project or extend its alias set" — but the SQL does not extend

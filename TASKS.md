@@ -67,7 +67,7 @@ that prompted the sweep.
 | high | The orchestrator will not answer, or will — it is a coin flip nothing decides | `01-routing.md` R1 |
 | high | It busy-waits on its own child with `sleep`, which the design forbids | `01-routing.md` R4 |
 | high | It reaches outside Jod's tool set on *every* run | `01-routing.md` R5 |
-| high | Re-cataloguing a project wipes its aliases and notes | `30-project-managers.md` P1 |
+| high | Re-cataloguing a project wipes its aliases and notes | `30-project-managers.md` P1 — **fixed, #123** |
 | high | Two projects sharing a name resolve non-deterministically, with no warning — `jod project archive` picked one at random | `30-project-managers.md` P3 |
 | high | The schedule circuit breaker never trips for the ordinary failure. Seven real failures, `consecutive_failures` stuck at 0 | `40-scheduling.md` S1 |
 | high | A cron expression that can never fire is armed anyway | `40-scheduling.md` S2 |

@@ -208,6 +208,18 @@ Fix: never let a re-add downgrade `writable`. Either protect the column the way
 `position` is protected, or make widening explicit and separate from adding.
 `set_root_writable` already exists as the sanctioned way to change it.
 
+**Do not reach for `COALESCE` here.** It is the obvious move, because
+`COALESCE` is what protects `remote` in the neighbouring `add_project` upsert —
+and it would not work. `COALESCE` returns the first non-NULL argument, and
+`writable` is a boolean that is `0` or `1` and never NULL, so the guard would
+never fire while looking exactly like a guard that had. Two readers gave that
+advice on P1 in [`30-project-managers.md`](30-project-managers.md), where the
+columns default to an empty list and an empty string; it was wrong there for
+the same reason, and only running it caught it. `CASE` was the answer there.
+
+Fixing this one deserves a test that is red before the change, not just green
+after — that is what would have caught the P1 near-miss.
+
 Check: add a root as a lease, add the same path again as reading, assert it is
 still writable.
 
@@ -238,6 +250,28 @@ should not try to check out `main` from a worktree in the first place. Deleting
 the remote branch does not need a local checkout.
 
 Check: run it from a worktree against a mergeable pull request and assert exit 0.
+
+## L9. Local `cargo fmt` disagrees with CI's across roughly the whole tree
+Status: open · Owner: — · Severity: medium
+
+`cargo fmt --check` on this box reports differences across most of the
+codebase, while CI's formatting check passes. The rustfmt on this machine is a
+different version from the one CI runs.
+
+The hazard is not the disagreement, it is what an agent does with it. Any agent
+that helpfully runs `cargo fmt` and commits the result produces an enormous
+diff touching files it never meant to change, burying its actual work and
+making the change unreviewable. It will look like it did something reasonable.
+
+Two agents have now had to be told explicitly to leave the pre-existing
+differences alone and to confirm none of them fell in the lines they touched.
+That should not depend on somebody remembering to say it.
+
+Fix: pin the rustfmt version — a `rust-toolchain.toml`, or naming the component
+version CI uses — so local and CI agree. Until then, say it in the charter
+where agents will read it before they run anything.
+
+Check: `cargo fmt --check` is clean on a fresh checkout on this box.
 
 ## L6. `jod team list` where every other noun uses `ls`
 Status: open · Owner: — · Severity: low
