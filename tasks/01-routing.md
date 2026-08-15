@@ -193,3 +193,25 @@ table — the comment is right about that.
 
 Check: a session on a 1M-token model must not show a compaction warning after
 one short exchange.
+
+---
+
+## Scenarios run
+
+These are the routing scenarios run from this file's own testing. The wider
+sweep — continuation versus fresh spawn, several agents running, ambiguous and
+malformed instructions, schedule-shaped and goal-shaped instructions — is in
+[`10-orchestration.md`](10-orchestration.md), and this table does not repeat it.
+
+| # | Scenario | Expected | Actual | |
+|---|---|---|---|---|
+| 1 | A one-line factual question needing no repository | answered directly | spawned an agent, returned no answer, $0.39 | **fail — R1** |
+| 2 | The same turn's tool calls | hand over and return | `sleep 45` and a shell poll loop | **fail — R4** |
+| 3 | The same turn's tool set | Jod's verbs only | also called `ToolSearch select:Monitor` | **fail — R5** |
+| 4 | Compaction warning on a fresh chat | quiet | `⚠ compact` after one exchange | **fail — R6** |
+| 5 | `jod main` with no instruction | shows the chat | "the main chat is empty — …" | pass |
+| 6 | A delegated run appears in `list_agents` | visible with status | visible, `running`, with cost and session id | pass |
+| 7 | The delegated run belongs to no work | no work row | `works` empty, correct for `delegate` | pass |
+| 8 | The instruction is recorded on the main chat | one user turn | recorded, with the delegation row beside it | pass |
+| 9 | Cost and token accounting | reported | `1957 out · $0.3864 · 42s` | pass |
+| 10 | A child session can reach the orchestrator | a return path exists | not established — see R3 | **needs confirming** |
