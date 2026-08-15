@@ -776,6 +776,22 @@ pub fn project_context(
     out
 }
 
+/// The mode, but never one that cannot act.
+///
+/// A chat that only delegates still has to be able to call the tools that
+/// delegate. Below `AcceptEdits` it cannot, and the failure is the bad kind —
+/// it reads and reasons and describes, so it looks like it is working right up
+/// until nothing was started. Named rather than inlined so the floor is one
+/// decision with one reason attached to it.
+fn at_least_acting(mode: PermissionPolicy) -> PermissionPolicy {
+    if crate::mcp::permits(mode, PermissionPolicy::AcceptEdits) {
+        // `mode` is at or above `accept_edits`, so it is safe to honour.
+        mode
+    } else {
+        PermissionPolicy::AcceptEdits
+    }
+}
+
 /// What [`hand_to_orchestrator`] did, for a caller that has its own way of
 /// saying so. The CLI prints; the TUI pushes a notice; the Telegram bridge
 /// edits a progress bubble.
@@ -818,6 +834,15 @@ pub struct Handed {
 /// a run answers to in `jod ls`. The console passes `main`; the bridge passes the
 /// chat's [`crate::telegram::session_key`] so a listing says which phone chat
 /// started a run. Everything load-bearing is fixed here.
+///
+/// `permission` is the operator's chosen mode, and it used to be a constant.
+/// **That constant was the top of the chain that made `auto` a lie.** The
+/// console showed `auto`, this function span the orchestrator up in
+/// `accept_edits` anyway, its MCP server took the same ceiling, and `open_work`
+/// capped every background session against it — so work delegated from a chat
+/// the operator had put in `auto` ran two levels down in a mode where headless
+/// Claude Code has nobody to ask, and refused `git init`. Three hard-coded
+/// values in series, each defensible alone.
 pub async fn hand_to_orchestrator(
     jod: &Jod,
     instruction: &str,
@@ -825,6 +850,7 @@ pub async fn hand_to_orchestrator(
     cwd: PathBuf,
     carried: Option<String>,
     run_name: &str,
+    permission: PermissionPolicy,
 ) -> Result<Handed> {
     let store = jod.store().ok_or(JodError::StoreRequired)?;
     let id = store.main_conversation(kind, &cwd.display().to_string())?;
@@ -885,20 +911,25 @@ pub async fn hand_to_orchestrator(
                 }),
                 cwd,
                 model: None,
-                // Not `Ask`. `Ask` is plan mode, and plan mode refuses every
-                // mutation — including the MCP tool calls that *are* this run's
-                // entire job. Caught by running it: the orchestrator dutifully
-                // called `schedule_list`, `list_agents` and `recall`, then reached
-                // for `ExitPlanMode`, could not find it, and wrote a plan file
-                // instead of arming the schedule it had been asked for.
+                // The operator's mode, floored at `AcceptEdits`.
                 //
-                // Its confinement is `ToolAccess`, not the permission mode. The
-                // mutations that matter here are Jod's own verbs, and those are
-                // already scoped by the access level; the permission axis bounds
-                // what it may do to the *machine*, which for a chat that only
-                // delegates should be little — but it cannot be nothing, or it
-                // cannot delegate at all.
-                permission: PermissionPolicy::AcceptEdits,
+                // **The floor, not the value, is the part with a bug behind
+                // it.** Plan mode refuses every mutation — including the MCP
+                // tool calls that *are* this run's entire job. Caught by
+                // running it: the orchestrator dutifully called
+                // `schedule_list`, `list_agents` and `recall`, then reached for
+                // `ExitPlanMode`, could not find it, and wrote a plan file
+                // instead of arming the schedule it had been asked for. So a
+                // mode below `AcceptEdits` would not make the chat cautious, it
+                // would make it inert while still appearing to work.
+                //
+                // Above the floor it passes straight through, which is the fix:
+                // a console in `auto` now hands its work to sessions in `auto`.
+                // Its confinement is `ToolAccess` either way — the mutations
+                // that matter here are Jod's own verbs, already scoped by the
+                // access level, and the permission axis bounds what it may do
+                // to the *machine*.
+                permission: at_least_acting(permission),
                 // Asked against `kind` — the harness this spawn actually
                 // launches — and not bare, because the pinned conversation is
                 // resolved by `main_conversation` without reference to it. An
@@ -1400,6 +1431,41 @@ mod tests {
     use super::*;
 
     const DAY: i64 = 24 * 60 * 60 * 1000;
+
+    // ---- what the chat may do ----
+
+    /// **Regression: the console said `auto` and the work ran in `edits`.**
+    ///
+    /// Three constants in series threw the operator's mode away — this floor
+    /// when it was `PermissionPolicy::AcceptEdits` outright, the per-run MCP
+    /// server that never received `--max-permission`, and `open_work` capping
+    /// against the ceiling that produced. The visible symptom was two levels
+    /// down: a background session refusing `git init` in a directory it had
+    /// been told to create, while the status bar said everything was
+    /// auto-approved.
+    ///
+    /// Both halves are asserted. Passing the mode through is the fix; keeping
+    /// the floor is what stops the fix turning a cautious mode into an inert
+    /// chat that reads and reasons and never starts anything.
+    #[test]
+    fn the_chat_takes_the_operators_mode_but_never_one_that_cannot_delegate() {
+        assert_eq!(
+            at_least_acting(PermissionPolicy::Bypass),
+            PermissionPolicy::Bypass,
+            "a console in auto still handed its work to accept_edits"
+        );
+        assert_eq!(
+            at_least_acting(PermissionPolicy::AcceptEdits),
+            PermissionPolicy::AcceptEdits
+        );
+        for inert in [PermissionPolicy::Plan, PermissionPolicy::Ask] {
+            assert_eq!(
+                at_least_acting(inert),
+                PermissionPolicy::AcceptEdits,
+                "{inert:?} would leave the chat unable to call the tools that are its whole job"
+            );
+        }
+    }
 
     // ---- when to compact ----
 

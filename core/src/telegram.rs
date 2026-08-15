@@ -1889,6 +1889,12 @@ impl<B: BotApi + 'static> Bridge<B> {
             // The chat key as the run's name, so `jod ls` says which chat
             // started a run. Cosmetic, and the only thing this call site varies.
             &msg.session,
+            // Unchanged from when this was a constant inside the callee. A
+            // phone message arrives with no mode attached to it — there is no
+            // status bar on this path to have chosen one — so it takes the
+            // cautious mode that can still delegate rather than inheriting a
+            // console setting this process cannot see.
+            crate::harness::PermissionPolicy::AcceptEdits,
         )
         .await
         {

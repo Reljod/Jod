@@ -244,6 +244,12 @@ pub struct Card {
     pub updated_at_ms: i64,
     pub answered_at_ms: Option<i64>,
     pub delivered_at_ms: Option<i64>,
+    /// What this card is *about*, structurally, for the emitters that need to
+    /// act on an answer rather than merely deliver it — see
+    /// [`crate::approvals::CARD_KEY`]. De-duplication was its first job and is
+    /// no longer its only one, which is why it is readable here and not just
+    /// write-only on [`NewCard`].
+    pub dedupe_key: Option<String>,
 }
 
 impl Card {
@@ -582,6 +588,17 @@ impl Store {
                 params![id, chosen, answer, at],
             )?;
             let answered = require_card(tx, id)?;
+            // An approval answered "always" becomes a standing grant *here*,
+            // in the same transaction as the answer.
+            //
+            // It used to be written by the hook that raised the card, while
+            // that hook sat waiting for it — which meant the grant only
+            // persisted if somebody answered within the wait. Answer it a
+            // minute later, from the rail or a phone, and the hook had already
+            // gone: the card said "every session from now on runs it without
+            // asking" and no grant existed. The promise on the card is kept by
+            // whoever answers it, so it belongs to the answer.
+            crate::approvals::grant_from_answer(tx, &answered, at)?;
             delivery::insert_pending(
                 tx,
                 &answered.conversation_id,
@@ -651,7 +668,7 @@ impl Store {
 const CARD_COLUMNS: &str = "c.id, c.conversation_id, c.work_id, c.run_id, c.kind, c.importance,
      c.blocking, c.status, c.delivery, c.title, c.body, c.options, c.chosen, c.answer,
      c.secret_name, c.secret_scope, c.source, c.created_at_ms, c.updated_at_ms,
-     c.answered_at_ms, c.delivered_at_ms";
+     c.answered_at_ms, c.delivered_at_ms, c.dedupe_key";
 
 /// Importance in the order a human means it, which is not the order SQLite
 /// sorts the text in — alphabetically `high` sorts before `low` before
@@ -729,6 +746,7 @@ fn row_to_card(r: &rusqlite::Row) -> rusqlite::Result<Card> {
         updated_at_ms: r.get(18)?,
         answered_at_ms: r.get(19)?,
         delivered_at_ms: r.get(20)?,
+        dedupe_key: r.get(21)?,
     })
 }
 

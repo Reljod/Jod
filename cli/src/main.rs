@@ -4,6 +4,7 @@
 //! OpenCode, AGY), runs that harness inside its own tmux session, and turns the
 //! harness's output into one event stream that every command here renders.
 
+mod approve;
 mod mcp_cmd;
 mod render;
 mod render_time;
@@ -288,6 +289,15 @@ enum Command {
         harness: HarnessArg,
         #[arg(long)]
         cwd: Option<PathBuf>,
+        /// How much the chat and everything it delegates may do unattended.
+        ///
+        /// Inherited by the sessions it opens, which is the reason it is a flag
+        /// and not a constant. Defaults to `edits` rather than to `auto`:
+        /// there is no status bar on this path to have chosen a mode, and a
+        /// command that silently ran everything unattended would be a
+        /// surprising thing for a bare `jod main` to do.
+        #[arg(short = 'p', long, value_parser = parse_permission_arg, default_value = "edits")]
+        permission: PermissionPolicy,
         /// How many exchanges to show when reading the chat.
         #[arg(short, long, default_value_t = 20)]
         limit: usize,
@@ -300,6 +310,33 @@ enum Command {
     Card {
         #[command(subcommand)]
         what: CardCommand,
+    },
+    /// Standing permission: what agents may run without stopping to ask.
+    ///
+    /// A grant is global and outlives the session that earned it — that is the
+    /// whole point of answering "always" to an approval card. `jod grant ls`
+    /// is the audit: everything Jod will do unattended, on one screen.
+    Grant {
+        #[command(subcommand)]
+        what: GrantCommand,
+    },
+    /// Answer a harness's permission question. **Run by the harness, not by you.**
+    ///
+    /// Claude Code's `PreToolUse` hook: the tool call arrives on stdin and the
+    /// decision leaves on stdout. Jod wires this into every run it launches; it
+    /// is documented here rather than hidden because a hook nobody can find is
+    /// a hook nobody can debug.
+    #[command(hide = true)]
+    ApproveHook {
+        /// Which run is asking. Baked into the hook's command line by the
+        /// launcher, because a hook process inherits nothing that says so.
+        #[arg(long)]
+        run: Option<String>,
+        /// How long to hold the tool call open waiting for an answer, in
+        /// seconds. Past it the call goes back to the harness's own rules,
+        /// which is what happened before this existed.
+        #[arg(long, default_value_t = 60)]
+        wait: u64,
     },
     /// The directories a conversation may work in.
     ///
@@ -570,6 +607,31 @@ enum McpCommand {
         #[arg(long)]
         dry_run: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum GrantCommand {
+    /// Everything agents may run here without asking. The audit.
+    Ls {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Allow a tool, or a pattern of one, from now on and in every session.
+    ///
+    /// The pattern is exact text, or a prefix when it ends in `*`. A prefix
+    /// stops at a word boundary, so `git init*` covers `git init -b main` and
+    /// `git*` does not cover `gitleaks`.
+    Add {
+        /// The harness's own tool name — `Bash`, `WebFetch`.
+        tool: String,
+        /// What it may do. Quote it: `jod grant add Bash 'git init*'`.
+        pattern: String,
+        /// Why, for whoever reads `jod grant ls` in six months.
+        #[arg(short, long, default_value = "")]
+        note: String,
+    },
+    /// Withdraw one. `jod grant ls` has the ids.
+    Rm { id: i64 },
 }
 
 #[derive(Subcommand)]
@@ -1854,11 +1916,23 @@ async fn main() -> Result<()> {
             wait,
             harness,
             cwd,
+            permission,
             limit,
         } => {
-            main_chat(&jod, instruction.join(" "), wait, harness, cwd, limit).await?;
+            main_chat(
+                &jod,
+                instruction.join(" "),
+                wait,
+                harness,
+                cwd,
+                permission,
+                limit,
+            )
+            .await?;
         }
         Command::Card { what } => card_command(&jod, what)?,
+        Command::Grant { what } => grant_command(&jod, what)?,
+        Command::ApproveHook { run, wait } => approve::hook(jod, run, wait).await?,
         Command::Root { what } => root_command(&jod, what)?,
         Command::Secret { what } => secret_command(&jod, what)?,
         Command::Commands { what } => commands_command(&jod, what)?,
@@ -2242,12 +2316,14 @@ async fn main() -> Result<()> {
 /// optimisation: a main chat that waited for the work would be unusable
 /// exactly when you most want it. It returns as soon as the orchestrator has
 /// been *handed* the instruction.
+#[allow(clippy::too_many_arguments)]
 async fn main_chat(
     jod: &Jod,
     instruction: String,
     wait: bool,
     harness: HarnessArg,
     cwd: Option<PathBuf>,
+    permission: PermissionPolicy,
     limit: usize,
 ) -> Result<()> {
     let store = jod.store().context("this command needs the database")?;
@@ -2262,7 +2338,8 @@ async fn main_chat(
 
     // `None`: nothing to carry. A harness switch happens in the TUI, which
     // holds the summary on its thread and passes it on the next turn.
-    let handed = hand_to_orchestrator(jod, &instruction, kind, cwd, None, "main").await?;
+    let handed =
+        hand_to_orchestrator(jod, &instruction, kind, cwd, None, "main", permission).await?;
     if let Some((reason, chars)) = handed.compaction_due {
         println!("· the chat is due for compaction ({reason}) — {chars} chars in the live window");
         println!("  `jod conv compact {}` summarises it", &id[..8.min(id.len())]);
@@ -2482,6 +2559,55 @@ fn conv_command(jod: &Jod, what: ConvCommand) -> Result<()> {
 /// screen at home, sorted the same way. A second query builder here would drift
 /// within a week — that is the whole reason the store takes a filter rather
 /// than offering a function per caller.
+/// Standing permission, listed and edited by hand.
+///
+/// The listing is the audit — the one screen that answers "what will Jod do
+/// here without asking me?" — so it prints every grant rather than paging, and
+/// says plainly when there are none.
+fn grant_command(jod: &Jod, what: GrantCommand) -> Result<()> {
+    let store = jod.store().context("this command needs the database")?;
+    match what {
+        GrantCommand::Ls { json } => {
+            let grants = store.grants()?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&grants)?);
+                return Ok(());
+            }
+            if grants.is_empty() {
+                println!(
+                    "no standing grants — every tool call that needs one raises a card, and \
+                     answering it \"always\" records it here"
+                );
+                return Ok(());
+            }
+            for g in &grants {
+                let note = if g.note.is_empty() {
+                    String::new()
+                } else {
+                    format!("  · {}", g.note)
+                };
+                println!("{:>4}  {}({}){}", g.id, g.tool, g.pattern, note);
+            }
+        }
+        GrantCommand::Add {
+            tool,
+            pattern,
+            note,
+        } => {
+            let g = store.add_grant(&tool, &pattern, &note)?;
+            println!("granted {}({}) — id {}", g.tool, g.pattern, g.id);
+        }
+        GrantCommand::Rm { id } => {
+            if store.revoke_grant(id)? {
+                println!("withdrew grant {id}");
+            } else {
+                println!("no grant {id} — `jod grant ls` has the ids");
+            }
+        }
+    }
+    Ok(())
+}
+
 fn card_command(jod: &Jod, what: CardCommand) -> Result<()> {
     use jod_core::cards::{Query, Sort};
     let store = jod.store().context("this command needs the database")?;

@@ -200,13 +200,39 @@ impl Harness for ClaudeCode {
         // somebody started by hand, or `jod mcp install`.
         let home = crate::paths::jod_home();
         let config = match &req.run_id {
-            Some(run_id) => crate::mcp_config::config_for_run(req.tools, &home, run_id, None),
+            Some(run_id) => crate::mcp_config::config_for_run(
+                req.tools,
+                &home,
+                run_id,
+                None,
+                req.permission,
+            ),
             None => crate::mcp_config::config_for(req.tools, &home),
         };
         if let Ok(Some(path)) = config {
             args.push(ArgPart::lit("--mcp-config"));
             args.push(ArgPart::lit(path.to_string_lossy()));
             args.push(ArgPart::lit("--strict-mcp-config"));
+        }
+        // Standing permission, and the channel that can ask for more.
+        //
+        // Only for a policy that actually stops to ask. `Bypass` approves
+        // everything before a hook could contribute anything, so installing one
+        // there would spawn a process per tool call to answer a question nobody
+        // asked. `Plan` refuses the whole class of writes by design, and a
+        // grant must not be a way around a mode whose entire job is that
+        // nothing changes.
+        if let (Some(run_id), true) = (
+            &req.run_id,
+            matches!(
+                req.permission,
+                PermissionPolicy::Ask | PermissionPolicy::AcceptEdits
+            ),
+        ) {
+            if let Ok(Some(path)) = write_settings(run_id) {
+                args.push(ArgPart::lit("--settings"));
+                args.push(ArgPart::lit(path.to_string_lossy()));
+            }
         }
         // A failure to write the config is deliberately not fatal. The run
         // still does its work with no Jod tools, which is worse than
@@ -446,6 +472,97 @@ impl ClaudeCode {
             });
         }
         out
+    }
+}
+
+/// How long a tool call may hang waiting for somebody to approve it, in seconds.
+///
+/// Short on purpose. Every second here is a second an *unattended* run spends
+/// stopped at a question nobody is going to answer, and the cost is paid once
+/// per distinct question rather than once per retry — see the dedupe in
+/// `jod approve-hook`. Long enough to catch a person at the console; short
+/// enough that a run left alone overnight still gets on with what it can.
+const APPROVAL_WAIT_SECS: u64 = 60;
+
+/// Write this run's `--settings` document: standing grants, and the hook.
+///
+/// **This is the channel that makes `ask` and `edits` mean what they say.**
+/// Under `-p` Claude Code has nobody to put a permission prompt to, so those
+/// modes denied silently and the refusal reached the model as a failed tool
+/// call it read as its own mistake. A `PreToolUse` hook is the only way into
+/// that decision on this build — there is no `--permission-prompt-tool` — so
+/// the document carries two things:
+///
+/// * **`permissions.allow`**, the standing grants in Claude Code's own rule
+///   syntax, so the harness answers what it can without spawning anything.
+/// * **the hook**, which catches the rest and is the only path that can reach a
+///   person.
+///
+/// Best-effort by construction. A run whose settings could not be written is a
+/// run that behaves exactly as it did before this existed, which is the right
+/// failure: the alternative is refusing to start over a convenience.
+fn write_settings(run_id: &str) -> crate::error::Result<Option<std::path::PathBuf>> {
+    // The running executable, not a name on PATH — the same argument
+    // `mcp_config` makes: a daemon started from a build directory must point
+    // its children at *that* binary.
+    let exe = std::env::current_exe()?;
+    // Its own connection, opened for one read. `args()` has no store — it is
+    // handed a request, not a process — and threading one through every caller
+    // to save a read on a path taken once per spawn would be the more invasive
+    // change, not the cheaper one.
+    //
+    // A *snapshot*, and only an optimisation: these rules let the harness
+    // answer without spawning a hook, while the hook itself reads the live
+    // table every call. A grant made mid-run therefore takes effect at once
+    // rather than at the next spawn.
+    let grants = crate::store::Store::open(&crate::paths::db_path())
+        .and_then(|store| store.grants())
+        .unwrap_or_default();
+    let doc = settings_doc(&grants, &exe.to_string_lossy(), run_id, APPROVAL_WAIT_SECS);
+    let dir = crate::paths::run_dir(run_id);
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join("settings.json");
+    std::fs::write(&path, serde_json::to_vec_pretty(&doc)?)?;
+    Ok(Some(path))
+}
+
+/// The settings document, built from values rather than read from anywhere, so
+/// the shape can be asserted without a database or a filesystem.
+fn settings_doc(
+    grants: &[crate::approvals::Grant],
+    exe: &str,
+    run_id: &str,
+    wait: u64,
+) -> Value {
+    let allow: Vec<String> = grants.iter().map(rule_for).collect();
+    serde_json::json!({
+        "permissions": { "allow": allow },
+        "hooks": {
+            "PreToolUse": [{
+                // Every tool, not just `Bash`. A matcher naming one tool leaves
+                // the rest on the old silent-denial path.
+                "matcher": "*",
+                "hooks": [{
+                    "type": "command",
+                    "command": format!("{exe} approve-hook --run {run_id} --wait {wait}"),
+                    // Above Jod's own wait, so the decision that lands is Jod's
+                    // rather than the harness killing the hook mid-question.
+                    "timeout": wait + 20,
+                }],
+            }],
+        },
+    })
+}
+
+/// One grant in Claude Code's own rule syntax.
+///
+/// It spells a rule `Bash(git init:*)` where Jod stores `git init*`. Getting
+/// this wrong is silent — a malformed rule simply never matches, and every
+/// grant stops working with nothing to say so — which is why it has a test.
+fn rule_for(g: &crate::approvals::Grant) -> String {
+    match g.pattern.strip_suffix('*') {
+        Some(prefix) => format!("{}({}:*)", g.tool, prefix.trim_end()),
+        None => format!("{}({})", g.tool, g.pattern),
     }
 }
 
@@ -850,6 +967,84 @@ mod tests {
     /// Each policy maps to its own flags, and no two share one.
     ///
     /// The property under test — distinct policies produce distinct argv — is
+    fn grant(tool: &str, pattern: &str) -> crate::approvals::Grant {
+        crate::approvals::Grant {
+            id: 1,
+            tool: tool.into(),
+            pattern: pattern.into(),
+            note: String::new(),
+            created_at_ms: 0,
+        }
+    }
+
+    /// The rule syntax is Claude Code's, not Jod's, and getting it wrong fails
+    /// silently: a malformed rule never matches, so every grant quietly stops
+    /// working and the only symptom is being asked again for something already
+    /// approved.
+    #[test]
+    fn a_grant_reaches_the_harness_in_its_own_rule_syntax() {
+        let doc = settings_doc(
+            &[grant("Bash", "git init*"), grant("Bash", "pnpm -v")],
+            "/usr/local/bin/jod",
+            "run-1",
+            60,
+        );
+        let allow: Vec<&str> = doc["permissions"]["allow"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(allow, vec!["Bash(git init:*)", "Bash(pnpm -v)"]);
+    }
+
+    /// The harness's own timeout has to outlast Jod's wait, or it kills the
+    /// hook while somebody is still deciding and the answer lands nowhere.
+    #[test]
+    fn the_harness_waits_longer_than_the_question_it_is_holding_open() {
+        let doc = settings_doc(&[], "/usr/local/bin/jod", "run-7", 60);
+        let hook = &doc["hooks"]["PreToolUse"][0]["hooks"][0];
+        assert!(
+            hook["timeout"].as_u64().unwrap() > 60,
+            "the harness would kill the hook before Jod stopped waiting"
+        );
+        assert!(hook["command"]
+            .as_str()
+            .unwrap()
+            .contains("approve-hook --run run-7"));
+        // Every tool. A matcher naming one leaves the rest silently denied,
+        // which is the whole bug.
+        assert_eq!(doc["hooks"]["PreToolUse"][0]["matcher"], "*");
+    }
+
+    /// **The hook belongs to the modes that stop to ask, and to no others.**
+    ///
+    /// `Bypass` has already approved everything before a hook could contribute,
+    /// so installing one there buys a process per tool call and no decision.
+    /// `Plan` refuses the whole class of writes on purpose, and a standing
+    /// grant must never become the way around a mode whose entire job is that
+    /// nothing changes.
+    #[test]
+    fn only_the_modes_that_ask_carry_the_approval_hook() {
+        for policy in [PermissionPolicy::Ask, PermissionPolicy::AcceptEdits] {
+            let mut r = req(policy, None);
+            r.run_id = Some("run-settings".into());
+            assert!(
+                flat(&r).contains(&"--settings".to_string()),
+                "{policy:?} cannot ask anybody anything"
+            );
+        }
+        for policy in [PermissionPolicy::Plan, PermissionPolicy::Bypass] {
+            let mut r = req(policy, None);
+            r.run_id = Some("run-settings".into());
+            assert!(
+                !flat(&r).contains(&"--settings".to_string()),
+                "{policy:?} was given an approval hook it has no use for"
+            );
+        }
+        let _ = std::fs::remove_dir_all(crate::paths::run_dir("run-settings"));
+    }
+
     /// the same one this test has always had; it now covers four modes rather
     /// than three. The `Ask` case is the interesting one: it used to assert
     /// `plan`, which is precisely the conflation that made every Jod run a

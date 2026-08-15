@@ -2442,3 +2442,66 @@ could walk into and not back out of except by `Ctrl-G`. It is a sentinel
 `NodeId` with a `kind_tag` core never mints, held outside the `/` filter — a
 filter narrows the fleet, and the row that is not part of the fleet is the one
 you most need when a filter has emptied the screen.
+
+## Three defensible constants in series made the mode on the screen a lie
+
+The console said `auto`. The background session it started refused `git init`,
+then `git init -b main`, then `pnpm -v`, each with *"this command requires
+approval"*, and gave up on the repository it had been told to create. Nothing
+was broken in the sense of a crash: every layer did what it said.
+
+The mode reached the orchestrator and stopped. `hand_to_orchestrator` pinned
+`accept_edits` — correctly, once, for a real reason: `plan` refuses the MCP
+calls that *are* the chat's job, so a chat below `accept_edits` is inert while
+still appearing to work. The per-run MCP config never passed
+`--max-permission`, so the server took that flag's own default —
+`accept_edits`, agreeing with the run by coincidence rather than by wiring.
+`open_work` then asked for `accept_edits` outright and capped it against that
+ceiling. Three values, each with a comment explaining why it was right, and no
+line anywhere that was wrong on its own.
+
+What made it invisible is that the two ends agreed. The status bar read the
+console's mode and told the truth about the console; the failing run was two
+levels down. **A default that happens to match the value it stands in for is
+indistinguishable from wiring until the value changes** — and the only thing
+that ever changed it was somebody pressing Tab.
+
+So the mode is now a parameter at all three, and the floor that motivated the
+first constant survives as a floor rather than as a value: `at_least_acting`
+raises `plan` and `ask` to `accept_edits` for the chat itself, and passes `auto`
+straight through. The test asserts both halves, because a fix that removed the
+floor would trade a chat that runs too much for a chat that silently runs
+nothing.
+
+## `ask` meant deny, and a mode nobody can answer is not a mode
+
+Under `claude -p` there is no one to put a permission prompt to. `ask` and
+`edits` therefore denied silently, and the denial arrived as a failed tool call
+— which the model reads as its own mistake, so it retries a variation, fails
+again, and reports the task as impossible. The mode was not too strict; it had
+no channel.
+
+This build has no `--permission-prompt-tool`, so the only way into that decision
+is a `PreToolUse` hook via `--settings`. Jod now writes one per run. It answers
+from a standing grant, or raises a blocking card and waits, or — and this is the
+part that makes it safe to install in front of every tool call — prints nothing
+and lets the harness decide exactly as before. A hook that crashes, or finds a
+locked database, or is handed a payload it cannot parse, degrades to the old
+behaviour rather than wedging the run.
+
+Two things were only found by running it. The grant was first written by the
+hook while it waited, which meant answering the card a minute later — from the
+rail, from a phone, the ordinary case — recorded nothing at all, while the card
+had promised "every session from now on". The grant belongs to the *answer*, in
+the same transaction, so whoever answers keeps the promise. And the first
+boundary rule was "a prefix must end at a space", which is right for `git*` and
+`gitleaks` and wrong for every URL: it made `https://docs.rs*` unable to cover a
+page on that host. The boundary is any character that cannot continue a name,
+which refuses `docs.rsevil.com` and `docs.rs.evil.com` for the same reason it
+refuses `gitleaks`.
+
+A hook answering `allow` **replaces** the harness's own check rather than adding
+to it, so every gap in the matching is a gap in the real boundary. Hence: every
+part of a compound command must match separately, and command or process
+substitution is never auto-allowed however broad the grant, because no amount of
+matching the visible text bounds a command hidden inside it.

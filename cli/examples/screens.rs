@@ -88,6 +88,7 @@ async fn hand_to_orchestrator(
     _cwd: PathBuf,
     _carried: Option<String>,
     _run_name: &str,
+    _permission: jod_core::PermissionPolicy,
 ) -> anyhow::Result<jod_core::orchestrator::Handed> {
     anyhow::bail!("the screens example does not run agents")
 }
