@@ -935,6 +935,18 @@ enum ProjectCommand {
         #[arg(long)]
         notes: Option<String>,
     },
+    /// What a conversation is about right now, and how it got there.
+    ///
+    /// The terminal twin of the `project_current` tool the orchestrator calls,
+    /// and it answers the same question the same way. Every instruction is put
+    /// through `settle_project` before the model ever sees it, so by the time
+    /// anything looks wrong the routing decision has already been made and
+    /// written down; this is how you read it back.
+    Current {
+        /// Which chat. Defaults to the main chat.
+        #[arg(short, long)]
+        conversation: Option<String>,
+    },
     /// Stop a project being inferred, without forgetting it.
     ///
     /// A paused or archived project can still be named explicitly; it just
@@ -3181,6 +3193,13 @@ fn project_command(jod: &Jod, what: ProjectCommand) -> Result<()> {
                 project.spoken_forms().join(", ")
             );
         }
+        ProjectCommand::Current { conversation } => {
+            let id = which_conversation(store, conversation)?;
+            let now = chrono::Utc::now().timestamp_millis();
+            for line in current_project_report(store, &id, now)? {
+                println!("{line}");
+            }
+        }
         ProjectCommand::Archive { name } => {
             let project = find(&name)?;
             store.set_project_state(&project.id, State::Archived)?;
@@ -3196,6 +3215,81 @@ fn project_command(jod: &Jod, what: ProjectCommand) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// The lines `jod project current` prints for one conversation.
+///
+/// Built as strings and returned rather than printed where they are made, so
+/// the check can read the answer instead of trusting that something was
+/// written to a terminal.
+///
+/// The vocabulary is the `project_current` tool's, deliberately: `how` and
+/// `reason` mean here exactly what they mean there, because a CLI and a tool
+/// that disagree about what "current" is would send two people debugging the
+/// same routing decision to two different answers.
+///
+/// The line that earns this command its place is `settled by`. Project
+/// resolution is not a label the conversation carries around — `settle_project`
+/// runs on every instruction *before* the model turn and decides which project
+/// the instruction lands on. Only an utterance naming exactly one catalogued
+/// project writes a row; one that names two writes nothing at all and leaves
+/// the conversation where it was. So the instruction shown here is the one that
+/// put this chat on this project, which is not always the last thing that was
+/// typed, and its timestamp is how you tell the difference.
+fn current_project_report(store: &Store, conversation_id: &str, now_ms: i64) -> Result<Vec<String>> {
+    // Named rather than left as an eight-character id. "Current" is per
+    // conversation, so an answer that does not say whose project it is showing
+    // is an answer the reader has to guess at.
+    let whose = match store.pinned_conversation()? {
+        Some(main) if main == conversation_id => " · the main chat".to_string(),
+        _ => String::new(),
+    };
+    let chat = format!("  chat: {}{whose}", short_id(conversation_id));
+
+    let Some(project) = store.current_project(conversation_id)? else {
+        // Not an error and not a warning. A conversation is about nothing until
+        // something names a project, which is the honest starting state, so
+        // this says what would settle one instead of reading as a fault.
+        return Ok(vec![
+            "this conversation is not about any project yet — the next instruction that \
+             names one settles it, and `jod project ls` shows what there is to name"
+                .to_string(),
+            chat,
+        ]);
+    };
+
+    let mut lines = vec![project.summary_line()];
+    match store.project_resolutions(conversation_id, 1)?.first() {
+        Some(last) => {
+            let mut how = format!("  how: {}", last.how.as_str());
+            if !last.reason.is_empty() {
+                how.push_str(&format!(" — {}", last.reason));
+            }
+            lines.push(how);
+            if !last.utterance.is_empty() {
+                lines.push(format!(
+                    "  settled by: \"{}\" · {}",
+                    last.utterance,
+                    render_time::when(last.decided_at_ms, now_ms)
+                ));
+            }
+            // The flag exists so a guess that had to be taken back stops being
+            // invisible, which only works if something shows it.
+            if last.corrected {
+                lines.push(
+                    "  and it was overridden afterwards, so this chat has been \
+                     routed wrongly at least once"
+                        .to_string(),
+                );
+            }
+        }
+        // What the tool answers in the same case, for the same reason: a
+        // project with no resolution behind it was put there directly rather
+        // than worked out from anything said.
+        None => lines.push("  how: human — nothing is recorded about how it got here".to_string()),
+    }
+    lines.push(chat);
+    Ok(lines)
 }
 
 fn work_command(jod: &Jod, what: WorkCommand) -> Result<()> {
@@ -5165,6 +5259,75 @@ mod tests {
         let store = Store::in_memory().unwrap();
         let refused = which_conversation(&store, None).unwrap_err().to_string();
         assert!(refused.contains("--conversation"), "{refused}");
+    }
+
+    /// L5's check. The person this command serves is debugging why an
+    /// instruction landed on the wrong project, so the answer has to carry how
+    /// the project was resolved and not only which one it is. Both states are
+    /// asserted, because a command that only answers when there is an answer is
+    /// half a command.
+    #[test]
+    fn asking_which_project_a_chat_is_on_answers_whether_or_not_one_is_settled() {
+        use clap::Parser;
+        use jod_core::projects::NewProject;
+
+        // A real subcommand, not only a function reachable from inside the
+        // crate. Before this change clap exited 2 with "unrecognized
+        // subcommand 'current'".
+        let parsed = Cli::try_parse_from(["jod", "project", "current"]).expect("parses");
+        assert!(
+            matches!(
+                parsed.command,
+                Command::Project {
+                    what: ProjectCommand::Current { conversation: None }
+                }
+            ),
+            "`jod project current` did not parse as the current subcommand"
+        );
+
+        let store = Store::in_memory().unwrap();
+        let now = chrono::Utc::now().timestamp_millis();
+        let chat = store
+            .main_conversation(HarnessKind::ClaudeCode, "/tmp/repo")
+            .unwrap();
+
+        // Nothing settled yet. That is an ordinary state for a fresh chat, so
+        // the answer says what would settle one rather than reading as a fault.
+        let unsettled = current_project_report(&store, &chat, now).unwrap().join("\n");
+        assert!(unsettled.contains("not about any project yet"), "{unsettled}");
+        assert!(unsettled.contains("jod project ls"), "{unsettled}");
+        assert!(unsettled.contains(&short_id(&chat)), "{unsettled}");
+
+        // One instruction that names a catalogued project settles it. This is
+        // the path `settle_project` takes before every model turn, so the row
+        // the report reads is the row the router actually wrote.
+        // A real directory, because a project has to be somewhere a session
+        // could actually be started.
+        let checkout = std::env::temp_dir().join(format!("jod-tetris-{}", std::process::id()));
+        std::fs::create_dir_all(&checkout).unwrap();
+        store
+            .add_project(NewProject::at(&checkout).named("tetris"))
+            .unwrap();
+        store
+            .settle_project(&chat, "let's get tetris building again")
+            .unwrap();
+
+        let settled = current_project_report(&store, &chat, now).unwrap().join("\n");
+        assert!(settled.contains("tetris"), "the project is missing: {settled}");
+        assert!(
+            settled.contains("inferred"),
+            "how it was resolved is missing: {settled}"
+        );
+        assert!(
+            settled.contains("let's get tetris building again"),
+            "what was said is missing: {settled}"
+        );
+        assert!(
+            settled.contains(&short_id(&chat)),
+            "whose project this is is missing: {settled}"
+        );
+
+        std::fs::remove_dir_all(&checkout).ok();
     }
 
     /// A secret card whose scope has nothing to attach to must not quietly
