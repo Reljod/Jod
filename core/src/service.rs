@@ -379,6 +379,19 @@ pub fn prefer_conversation_settings(req: &mut SpawnRequest, conversation: &Conve
 /// second writer of the same event appends nothing. That is what makes it safe
 /// for the transcript to survive the process that started it.
 ///
+/// **This is no longer the writer that matters.** A binding lasts exactly as
+/// long as the process holding it, and the processes that launch runs routinely
+/// exit while the run is still talking — `jod main` without `--wait` returns as
+/// soon as the instruction is handed over, and a session opened through
+/// `open_work` is launched by the MCP server, which exits with its harness.
+/// Everything said after that was never written down, silently, while `events`
+/// stayed complete because the supervisor writes that one. So the supervisor
+/// now projects the transcript as well, and it is the writer that cannot miss
+/// an event — see `EventWriter::record_in_conversation` in `supervisor`. This
+/// one still runs, because it is the same write and the same idempotence key,
+/// and because a live client watching a run should not have to wait on another
+/// process's turn to see the row appear.
+///
 /// Nothing here returns an error. A conversation is a *side effect* of a run,
 /// and the Hermes audit is unambiguous about what happens when a memory side
 /// effect is allowed to fail the work it was watching: a looping write

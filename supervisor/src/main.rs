@@ -537,6 +537,13 @@ struct EventWriter {
     run_id: String,
     store: Arc<Store>,
     seq: u64,
+    /// The conversation this run's turns are projected into, once it is known.
+    ///
+    /// Cached only on success, so a run whose conversation could not be read
+    /// asks again on its next turn instead of going quiet for the rest of its
+    /// life. A run with no conversation at all — a summariser, a probe — pays
+    /// one indexed lookup per turn, which is a handful of queries per run.
+    conversation: Option<String>,
 }
 
 impl EventWriter {
@@ -545,6 +552,7 @@ impl EventWriter {
             run_id,
             store,
             seq: 0,
+            conversation: None,
         }
     }
 
@@ -560,6 +568,65 @@ impl EventWriter {
         // bad; killing a working agent because a row would not insert is worse.
         if let Err(e) = self.store.append_event(&envelope) {
             eprintln!("jod-run: could not persist event {}: {e}", envelope.seq);
+        }
+        // After the event log, never before it, and for the reason
+        // `Jod`'s own consumer orders them the same way: `events` is the record
+        // of what happened and `messages` is a projection of it.
+        self.record_in_conversation(&envelope);
+    }
+
+    /// Fold one event into the transcript of the conversation this run belongs
+    /// to — the table `jod main` prints.
+    ///
+    /// **Here because this is the process that cannot miss it**, the same
+    /// argument as [`set_session`](EventWriter::set_session) and the same bug
+    /// underneath. Until now the only writer of `messages` was
+    /// `core::service::record_in_conversation`, running inside whatever process
+    /// launched the run. That process is routinely gone long before the run is:
+    /// `jod main` without `--wait` returns as soon as the instruction is handed
+    /// over, and a session opened through `open_work` is launched by Jod's own
+    /// MCP server, which exits when its harness closes stdin.
+    ///
+    /// The loss was silent and total in the worst case. Nothing was marked
+    /// failed, the run really did the work, and the reply really was paid for —
+    /// it was simply never written down. `jod watch` kept showing the whole turn
+    /// because it reads `events`, which this process has always written, so the
+    /// two views of one run disagreed with no error anywhere to explain it.
+    ///
+    /// Writing it from here does not make Jod's own consumer wrong or
+    /// redundant: a launcher that is still attached appends the same envelope,
+    /// and `append_envelopes` is idempotent on `(run_id, seq)`, so the second
+    /// writer of an event writes nothing. That guard is the reason two writers
+    /// are safe, and it is deliberately in the write rather than in anyone's
+    /// discipline.
+    ///
+    /// Nothing here fails the run. A transcript is a side effect of a run, and
+    /// a run whose work is already durably recorded must not be taken down
+    /// because a projection of it would not insert.
+    fn record_in_conversation(&mut self, envelope: &AgentEnvelope) {
+        // The cheap pure predicate first, exactly as `record_in_conversation`
+        // does: `Delta`, `Progress` and `Raw` are as frequent as the harness is
+        // chatty, and none of them is a turn. Asking here costs one match;
+        // asking the store would cost a lookup on every line of every run.
+        if jod_core::conversation::NewMessage::from_event(&envelope.event).is_none() {
+            return;
+        }
+        if self.conversation.is_none() {
+            // The spawn writes the prompt row before the harness starts, so the
+            // conversation exists by the time any turn arrives.
+            match self.store.conversation_for_run(&self.run_id) {
+                Ok(found) => self.conversation = found,
+                Err(e) => eprintln!("jod-run: could not find the run's conversation: {e}"),
+            }
+        }
+        let Some(conversation) = &self.conversation else {
+            return;
+        };
+        if let Err(e) = self
+            .store
+            .append_envelopes(conversation, std::slice::from_ref(envelope))
+        {
+            eprintln!("jod-run: could not record a turn on {conversation}: {e}");
         }
     }
 
