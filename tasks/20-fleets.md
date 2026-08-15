@@ -344,6 +344,39 @@ the fleet does not yet say once that the daemon is missing.
 
 ---
 
+## F9. `screens.rs` shows an empty fleet whatever the database holds
+Status: **claimed, in progress** · Severity: medium
+
+`cli/examples/screens.rs` is the one tool that lets someone render a TUI screen
+without a terminal, and it renders every workspace off a real database — except
+the fleet. It populates `app.memory`, `app.graph_size`, `app.schedules`,
+`app.goals`, `app.hooks`, `app.activity`, `app.board`, `app.team`,
+`app.members` and `app.tasks` (`cli/examples/screens.rs:115-127`), and **never
+loads `app.agents` or `app.forest`**. Verified by grep: neither field is
+assigned anywhere in the file.
+
+So its fleet screen is empty no matter what it is pointed at.
+
+**The harm is that it answers "nothing here" when it means "I did not look".**
+That is worse than erroring, because the answer is plausible and a reader takes
+it. The fleet discovery agent for this file reached for exactly this example,
+could not use it, and re-derived `forest_of` in Python instead — which is why
+several findings here rest on a re-derivation rather than compiled code. And
+all the while a genuine high-severity bug, F1, lived in precisely the code the
+example claims to render.
+
+This finding is the joint product of that difficulty and F1's fix (#121), which
+left behind the pattern the example should follow: seed a real `Store`, read
+back through the compiled `Store::forest()`, render through the real `draw()`,
+assert against the buffer.
+
+Fix: load the agents and the forest the way every other workspace is loaded.
+Scope it to the example — `cli/src/tui/ui.rs` and `core/src/tree.rs` are being
+worked on separately.
+
+Check: point the example at a database holding one work, one session and one
+loose delegated run, and assert the fleet screen is not empty.
+
 ## Scenarios run
 
 | # | Scenario | Method | Expected | Actual | Result |
