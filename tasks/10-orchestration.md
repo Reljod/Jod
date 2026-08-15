@@ -110,7 +110,32 @@ a commit exists on the leased worktree's branch afterwards.
 ---
 
 ## O2. The pinned main chat's own transcript can permanently lose the answer
-Status: **fixed — merged as #133** · Severity was: high
+Status: **verified fixed — check run against main, passes** · Severity was: high
+
+The check was executed in full, not inferred from the merge.
+
+*Uncontended*: one instruction through `jod main --wait`. The run emitted one
+`message` event; the conversation holds one assistant message.
+
+*Contended*: a second instruction sent while the first was still running — the
+case the task says reproduced independently. Three runs, one `message` event
+each; the conversation holds three assistant messages. Nothing lost.
+
+*Tool calls and results*, which the first two runs could not exercise because
+they were told to use no tools. Checked against a separate live run that did:
+
+```
+run 010711fe  message 1 · tool_call 7 · tool_result 7
+run 59b8f982  message 1 · tool_call 7 · tool_result 7
+conv 12882652 assistant 1 · tool_call 7 · tool_result 7
+conv 96106c1d assistant 1 · tool_call 7 · tool_result 7
+```
+
+Every event kind the check names reaches the transcript, in both contention
+states. Recorded in this detail because the first pass of this verification was
+itself incomplete — instructing the model to use no tools left the
+`ToolCall`/`ToolResult` half of the check unexercised while looking like a
+pass, which is the same failure this list keeps finding.
 
 ### What "fixed" means here, and the trap on the way
 
