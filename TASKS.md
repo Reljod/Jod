@@ -24,6 +24,37 @@ Every file ends with a "Scenarios run" table listing what was tried, what was
 expected, and what happened — passes included. A clean pass is worth recording;
 it is what stops the same ground being covered twice.
 
+## Running a check is itself something to check
+
+**On one of them I was one keystroke from filing a regression against working
+code.** That is the cost worth naming: not a wasted check, but a wasted fix, and
+a correct implementation changed to satisfy a wrong test — worse than the bug
+the check was written for.
+
+Verifying the tasks below produced four near-misses **in the verification**,
+two in each direction:
+
+- **`cargo test -- a b c` silently ran only one filter.** It reported "ok. 43
+  passed; 0 failed" while two of the three checks never executed. Caught only by
+  grepping the output for the named tests instead of reading the summary line.
+- **An O2 run told the model to use no tools**, leaving the
+  `ToolCall`/`ToolResult` half of that check unexercised while the result looked
+  like a pass.
+- **An unfaithful fixture produced a false failure.** F6's check says "seed a
+  work with one session and one completed run". Seeded exactly that, the delete
+  reported no runs kept while the run row survived — which looks precisely like
+  the bug. It was not: the code counts runs through the `messages` table, and a
+  run with no transcript has nothing to lose.
+- **A check was arithmetically wrong.** S1's said "tick five times, assert five
+  failures". At five ticks the count is four, because a tick starts a run and
+  only the *next* tick sees it fail — the asynchrony the bug was about. It would
+  have condemned a working fix.
+
+So: a green summary is not evidence the thing you meant to run ran, and a red
+one is not evidence the code is broken. **When a check fails, suspect the check
+first** — it was written at diagnosis time by someone who did not yet know what
+the fix would look like. Always confirm the named test appears in the output.
+
 ## A merge closes a pull request. The `Check:` line closes the task.
 
 Learned the hard way, twice in one afternoon, and worth more than any single

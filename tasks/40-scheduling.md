@@ -111,7 +111,14 @@ it five times, assert `consecutive_failures >= 5` and `state == "broken"`.
 ---
 
 ## S2. A cron expression that can never fire is armed anyway
-Status: **in flight** · Severity: high
+Status: **verified fixed — merged as #141, check run against main, passes** · Severity was: high
+
+```
+test schedule::tests::an_expression_that_names_a_date_that_never_comes_is_refused ... ok
+```
+
+The test covers `0 0 31 2 *` and three more impossible dates, which is wider
+than this check asked for.
 
 The module's own comment on `validate` says the reason it exists: "a schedule
 that can never fire is refused when it is written rather than discovered as

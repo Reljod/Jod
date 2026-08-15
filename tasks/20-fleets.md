@@ -314,7 +314,32 @@ behaviour) — or, if the fix is to cascade, assert the child is also stopped.
 ---
 
 ## F6. Deleting a work's last conversation leaves its runs as permanent, contextless ghosts
-Status: **fixed — merged as #137** · Severity was: medium
+Status: **verified fixed — merged as #137, check run against main, passes** · Severity was: medium
+
+```
+deleted the parser — 1 session(s), 1 transcript(s), 0 unanswered card(s)
+1 run(s) kept, with the transcripts that explained them now gone —
+`jod history` still lists them by id
+```
+
+The check asked for either the run row gone or the summary mentioning it. The
+summary mentions it and names where to find it.
+
+**This check failed the first time I ran it, and the fault was mine.** My seed
+inserted a work, a conversation and a run — exactly what the check's wording
+says — and the delete reported no runs kept while the run row survived. That
+looks precisely like the bug. It was not.
+
+`runs_losing_their_last_transcript` (`core/src/works.rs:1569`) counts runs
+through the **`messages`** table: a run is orphaned when the last transcript
+explaining it disappears. My seeded run had no messages, so there was nothing
+for it to lose, and zero was the right answer.
+
+The check's wording is what allowed it: "seed a work with one session and one
+completed run" never says the run must have a transcript, and the fix's whole
+subject is transcripts. **Corrected check:** seed the run *with at least one
+message*, then delete. Without that clause this check produces a false failure
+against working code.
 
 **A second reason not to cascade, found while fixing it.** `events.run_id` has
 no foreign key to `runs`, so deleting the run row would strand its events and

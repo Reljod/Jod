@@ -407,10 +407,42 @@ be built into an `AgentSummary` for a hand-inserted row missing whatever a real
 supervised run always has. That branch calls `advance_goal` with `progressed:
 false` but — unlike the `Ok(agent)` branch — never writes an `iteration` fact,
 so `jod goal log` for this goal shows no iteration line despite the counter
-having advanced. Whether a *real* run can ever land in this `Err` branch (as
-opposed to only ever reaching it via hand-inserted rows like this test's) was
-not established either way; flagging it because the code path is real and
-exercised, and the missing-history-line failure mode is the same shape as G2.
+having advanced. Whether a *real* run can ever land in this `Err` branch was left open here.
+**It is now answered — yes — and filed as G13 below.**
+
+---
+
+## G13. A real run reaches `tick_goals`'s `Err(_)` branch, and the iteration is lost
+Status: open · Owner: — · Severity: medium
+
+Answered while fixing G8, and recorded here because it lived only in a merged
+pull request body. A finding that exists in a diff description and nowhere else
+has to be established a second time by whoever needs it next — the same waste
+the negative results in this file were written down to avoid. It is also easy to
+lose: it was found while doing something else, it is not what that pull request
+fixed, and G8's own note called it unresolved.
+
+**Two demonstrated routes for a real run to reach the branch:**
+
+1. It falls outside the daemon's **200-run rehydrate window**.
+2. `rehydrate` silently skips it because its stored summary was written by a
+   build with a different `AgentSummary` shape.
+
+**What the branch then does:** the goal's counter advances, no `iteration` fact
+is written, the iteration's cost never reaches `spent_usd` because the branch
+passes `0.0`, and `progressed: false` pushes the goal toward a false stall.
+
+So a goal can burn a real, paid-for iteration, record nothing about it, and be
+marked as making no progress — the same shape as G2, which is fixed.
+
+**Cross-reference: that 200-run window is the same constant F4 found capping
+`list_agents`** (`REHYDRATE`, in `tasks/20-fleets.md`). The two entries describe
+it independently and a reader of either would not know the other exists. Anyone
+changing it should read both — it bounds what the router can see *and* what the
+goal loop can settle.
+
+Check: drive a goal iteration whose run is outside the rehydrate window; assert
+an `iteration` fact is written and `spent_usd` includes its cost.
 
 ---
 

@@ -123,7 +123,17 @@ Check: add a project with an alias and a note, re-add the same path with only
 ---
 
 ### P2. Cataloguing a file, not a directory, is accepted with no complaint
-Status: **fixed — merged as #136** · Severity was: medium
+Status: **verified fixed — merged as #136, check run against main, passes** · Severity was: medium
+
+```
+$ jod project add /tmp/jod-plainfile-657189.txt
+Error: `/tmp/jod-plainfile-657189.txt` is a file, not a directory. A project is
+a checkout a session gets started in, so catalogue `/tmp` instead — or, if that
+is not the repository you meant, the checkout that is.
+```
+
+Refused rather than flagged, and the message names both the likely intent and
+the alternative.
 
 **What fixing it turned up, which was worse than the finding.** A catalogued
 path pointing at a *file* is not a politeness problem. `open_work` succeeds and
@@ -167,7 +177,20 @@ row is flagged in a way `project_list` surfaces.
 ---
 
 ### P3. Two projects that share a spoken form are never reported as ambiguous — one is silently picked
-Status: **fixed — merged as #131** · Severity was: high
+Status: **verified fixed — merged as #131, check run against main, passes** · Severity was: high
+
+Two projects seeded with the same basename, then archived by that name:
+
+```
+$ jod project archive shared
+Error: `shared` is the name of 2 projects — shared (/tmp/jod-b-657189/shared),
+shared (/tmp/jod-a-657189/shared). Name the one you mean exactly.
+```
+
+Refuses and names both candidates with their paths, rather than picking one.
+That is the interactive half of the check. The `settle_project` half — what
+happens with no user to ask — is the part this task warned was easy to leave
+undone, and is worth confirming separately.
 
 Note for whoever reviews it: there are two halves and only one is easy.
 Reporting `Match::Ambiguous` from an interactive command like
