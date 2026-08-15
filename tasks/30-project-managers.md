@@ -1,0 +1,439 @@
+# Project managers — the catalog that exists, and the manager that doesn't
+
+> **How this file sits next to pull request #120.** It sits *under* it, not over
+> it. #120 ("docs: review the project-manager spec against main") is the
+> authority on whether the `docs/spec-ceo-and-managers` spec is executable; its
+> answer is yes, with four corrections. Nothing here overrides that.
+>
+> Part 1 below is new material #120 does not have: bugs in the project catalog
+> that exists today, found by running it. Part 2 breaks the spec's Change 3 into
+> claimable tasks, and where the two disagree, **#120 wins** — it was checked
+> claim by claim against `origin/main`.
+>
+> Two things from #120 that anyone working here needs, and that Part 2 predates:
+>
+> - **A manager must not use `pinned = 1`.** `Store::pinned_conversation`
+>   (`core/src/orchestrator.rs:1312`) is a `query_row` with no `LIMIT` and no
+>   ordering, so a second pinned row makes "which conversation is main" depend
+>   on SQLite's row order, and Reljod's instructions would start landing in a
+>   manager's transcript.
+> - **Routing to a manager is already deterministic.** `settle_project` runs on
+>   the raw instruction before the model turn (`core/src/orchestrator.rs:875`),
+>   so `ask_manager` is wiring, not reasoning. Any task here that treats picking
+>   the manager as a judgement call is overbuilt.
+
+Tested by running the built binary (`target/debug/jod`) against two throwaway
+`JOD_HOME`s (`/home/reljod/.claude/jobs/cd76af0f/tmp/jodhome-pm` and
+`…/jodhome-pm2`), driving `jod project …` from the CLI, one live `jod main`
+round trip against a real harness to observe `settle_project` fire for real,
+and reading `~/.jod`'s data model was never touched — only my own throwaway
+databases. Scratch repos live under
+`/home/reljod/.claude/jobs/cd76af0f/tmp/pm-scratch/`. Everything below is
+observed, not guessed, except where marked `needs confirming`.
+
+Confirmed first, so nobody re-derives it: `grep -rin "project manager"` over
+the whole repo returns nothing but this task file itself and one mention in
+`tasks/01-routing.md`. Nothing implements a manager today. The catalog
+(`core/src/projects.rs`, table `projects`, MCP tools `project_add`,
+`project_list`, `project_switch`, `project_current`) is real and mostly
+works, and that's what Part 1 is about.
+
+Already filed, not re-filed here: `jod project current` is missing from the
+CLI (`tasks/00-launch-and-roots.md`, L5); `jod team ls` is spelled `list`
+(L6); the main chat is a single database-wide row with `pinned = 1` and no
+harness/channel key, so it is frozen at its first `cwd` (L1–L3). That last one
+turns out to matter for this file too — see the note at the end of Part 1.
+
+---
+
+## Part 1 — bugs in the project catalog that exists today
+
+### P1. Re-cataloguing a path silently wipes its aliases and notes
+Status: **fixed — merged as #123** · Severity was: high
+
+Kept here because the fix carries a correction worth reading before anyone
+touches a similar upsert.
+
+**Two readers told the fixing agent to copy the `COALESCE` that protects
+`remote`. That advice was wrong, and only running it caught why.** `COALESCE`
+returns the first non-NULL argument, and `aliases` and `notes` default to an
+empty *list* and an empty *string*, never NULL. So a `COALESCE` would never
+fire and the wipe would have continued — with a fix in place, tests written,
+and everyone satisfied. The agent found it and used `CASE` instead.
+
+The shape of the advice was right and the mechanism was wrong. The general form
+of the trap: **`COALESCE` only protects columns whose "absent" value is NULL.**
+For anything defaulting to an empty string, empty list, or `0`, it is a no-op
+that looks like a guard. See L7 in
+[`00-launch-and-roots.md`](00-launch-and-roots.md), which is the same class of
+bug on a boolean column and where `COALESCE` would fail the same way.
+
+The symlink route was confirmed rather than argued: adding a project through a
+symlink that resolves to an already-catalogued directory produced **two** rows,
+not three — the link landed on the real directory's row and emptied it.
+
+The doc comment was corrected too. It claimed re-adding "extends" an alias set;
+it now says it replaces when you supply one and keeps when you do not, and
+notes that the path is canonicalised so a symlink updates what it resolves to.
+
+`Store::add_project`'s doc comment says re-adding a path "is also how you
+rename a project or extend its alias set" — but the SQL does not extend
+anything.
+
+Cause: `core/src/projects.rs:463-472`
+
+```sql
+ON CONFLICT(path) DO UPDATE SET
+  name    = excluded.name,
+  remote  = COALESCE(excluded.remote, projects.remote),
+  aliases = excluded.aliases,
+  notes   = excluded.notes
+```
+
+`remote` is protected with `COALESCE` so a second `add` that doesn't mention
+it keeps the old value. `aliases` and `notes` get no such protection — they
+are overwritten unconditionally, even when the second call left them at their
+empty defaults.
+
+Observed:
+
+```
+$ jod project add .../alpha --alias "the game" --notes "test project alpha"
+alpha · .../alpha · also called: the game · test project alpha
+
+$ jod project add .../alpha --name "Alpha Prime" --alias "the second alias"
+Alpha Prime · .../alpha · also called: the second alias
+# "the game" alias is gone, and notes are now "" — neither was mentioned
+# in the second call, and the doc comment says extend, not replace.
+```
+
+Same wipe happens through a completely different path: adding a **symlink**
+that resolves to an already-catalogued directory hits the same
+`ON CONFLICT(path)` branch (see P-note under the symlink scenario below) and
+wipes the same way.
+
+Fix: give `aliases` and `notes` the same `COALESCE`-style treatment as
+`remote` — an empty aliases list / empty notes string on the incoming call
+should mean "not mentioned," not "clear it." If wiping outright is ever
+wanted, that should be an explicit action, not the side effect of renaming.
+
+Check: add a project with an alias and a note, re-add the same path with only
+`--name` changed, assert the alias and note both survive.
+
+---
+
+### P2. Cataloguing a file, not a directory, is accepted with no complaint
+Status: open · Owner: — · Severity: medium
+
+`add_project` never checks that the path exists or is a directory.
+
+Observed:
+
+```
+$ jod project add .../filetarget/afile.txt --name a-file-not-a-dir
+a-file-not-a-dir · .../filetarget/afile.txt
+  matched by: a-file-not-a-dir, afile.txt
+```
+
+This is now a catalogued "repository" whose path is a plain file. Nothing
+downstream (`open_work`, `claim_worktree`, a future `ask_manager`) has been
+checked here for what happens when it is handed this path as a `cwd` or a
+`repo` to branch — but the catalog itself offers zero resistance to creating
+it.
+
+Cause: `core/src/projects.rs:436` (`add_project`) — no `metadata()`/`is_dir()`
+check anywhere in the function; `normalise` (`core/src/projects.rs:376`)
+canonicalizes but does not validate shape.
+
+Fix: refuse (or at least warn loudly) when the path is not a directory.
+
+Check: `jod project add <path-to-a-plain-file>` is rejected, or the returned
+row is flagged in a way `project_list` surfaces.
+
+---
+
+### P3. Two projects that share a spoken form are never reported as ambiguous — one is silently picked
+Status: **claimed, in progress** · Severity: high
+
+Note for whoever reviews it: there are two halves and only one is easy.
+Reporting `Match::Ambiguous` from an interactive command like
+`jod project archive` is straightforward — refuse and name the candidates. But
+`settle_project` runs before every model turn with **no user to ask**, so it
+cannot refuse the same way. A fix that does the interactive half and quietly
+leaves the automatic one would look complete and would not be.
+
+Leaving the project unset is probably better than picking wrong, but that is a
+judgement the fix has to argue rather than assume.
+
+The catalog explicitly designed for this case — `Match::Ambiguous` exists
+because "two genuinely different projects named in one breath is not
+something a string matcher may pick between" (the module's own comment,
+`core/src/projects.rs:274`). It does not fire when the ambiguity is a
+**shared** spoken form rather than **two different** ones — which is exactly
+what a basename collision produces.
+
+Observed, explicit lookup (`project_by_name`, used by `jod project
+archive/restore` and by the MCP tool `project_switch`):
+
+```
+$ jod project add .../collide/proj --name collide-proj
+$ jod project add .../other/proj   --name other-proj
+$ jod project archive proj
+other-proj archived — it can still be named, but will not be inferred
+```
+
+Two real, distinct projects both have `proj` as a spoken form (their shared
+basename). Naming it archived **exactly one of them**, chosen only by
+whichever sorts first in `last_touched_ms DESC, name` order — silently, with
+no error and no list of candidates.
+
+Cause, traced (not yet reproduced against `resolve()` directly — see below):
+`Store::project_by_name` (`core/src/projects.rs:528`) does
+`.find(|p| p.spoken_forms().iter().any(|f| f == &wanted))` — first match
+wins, no ambiguity check at all.
+
+The inference path (`resolve()`, `core/src/projects.rs:290`, what
+`settle_project` runs on every main-chat instruction) has the *same* failure
+for a different reason. It builds a `claimed` list of byte spans already
+matched, specifically so a shorter name inside a longer one (`jod` inside
+`jod-cloud`) doesn't double-count. But when two *different* projects have the
+*identical* spoken form, the second one's span exactly equals the first's
+already-`claimed` span:
+
+```rust
+if claimed.iter().any(|(s, e)| span.0 >= *s && span.1 <= *e) {
+    continue;   // core/src/projects.rs:312
+}
+```
+
+`span.0 >= s && span.1 <= e` is true when the spans are equal, so the second
+project is silently dropped rather than pushed into `hits` — `resolve()`
+returns `Match::One`, never `Match::Ambiguous`, and the resolution gets
+written with `How::Inferred` and a reason that looks fully confident
+(`"the instruction said \"proj\""`) when it was actually a coin flip.
+
+This was traced rather than unit-tested live (no way to call `resolve()`
+directly without a rebuild), but the code path is deterministic and the
+`project_by_name` half is directly reproduced above by the identical
+underlying cause (first-match, no ambiguity check).
+
+Fix: track *which projects*, not just *which byte spans*, have claimed a
+form. Two different projects claiming the same span is exactly
+`Match::Ambiguous`; only one project claiming an overlapping *shorter* span
+inside its own longer form should be suppressed. `project_by_name` needs the
+equivalent: report when a name matches more than one project rather than
+returning the first.
+
+Check: two projects with the same basename (or the same alias, however that
+happens); an utterance naming just the basename resolves to `Ambiguous`, not
+`One`; `jod project archive <shared name>` refuses or asks which one, rather
+than picking.
+
+---
+
+### P4. `State::Paused` exists but is unreachable
+Status: open · Owner: — · Severity: low
+
+`projects::State` documents three states — `Active`, `Paused` ("real but
+dormant"), `Archived`. `jod project` only exposes `archive` and `restore`,
+which move a project to `Archived`/`Active`. Nothing anywhere — not the CLI,
+not any MCP tool — ever constructs `State::Paused`.
+
+Confirmed by grep: every other `Paused` in the repo belongs to
+`ScheduleState`, `GoalState` or `ThreadState`; `projects::State::Paused` has
+no caller of `set_project_state(_, State::Paused)` outside its own tests.
+
+Fix: either add `jod project pause` (and the matching MCP path) or drop the
+variant and its "dormant" carve-out from the doc comment — a state nothing
+can reach is dead weight in the mental model.
+
+Check: `jod project pause <name>` exists and the project stops being
+inferred while still being explicitly nameable, matching what `Archived`
+already does but distinct from it.
+
+---
+
+### P5. A stale catalog entry (moved or deleted directory) is invisible until something tries to use it
+Status: open · Owner: — · Severity: low
+
+Observed: deleting a catalogued directory, or renaming it, leaves the row
+exactly as it was — `jod project ls` shows it identically to a healthy entry,
+with no "path no longer exists" marker.
+
+```
+$ jod project add .../ephemeral --name ephemeral-proj
+$ rm -rf .../ephemeral
+$ jod project ls --all --json   # still lists ephemeral-proj at the old path
+```
+
+This is plausibly intentional given the module's stated philosophy
+(`Archived` over deletion, "a deleted row answers nothing" — the doc comment
+on `State`), and P2's missing validation only runs at `add` time regardless.
+But paired with P2, there is currently no signal anywhere — not `project_list`
+for the model, not `jod project ls` for a human — that a catalogued path has
+gone stale. `resolve()` will happily keep matching it and hand a nonexistent
+`cwd` onward.
+
+Fix: at minimum, have `project_list`/`jod project ls` note when
+`fs::metadata` fails on a project's path, so a stale entry is visible instead
+of silently offered as a resolution target.
+
+Check: catalogue a directory, delete it, `jod project ls` (or `project_list`)
+flags that path as missing.
+
+---
+
+### Note: project stickiness is one global value, not one per conversation
+
+Not a new root cause — this is `tasks/00-launch-and-roots.md`'s L1–L3 (the
+main chat is a single `pinned = 1` row, keyed by nothing) viewed through the
+project catalog specifically, and worth recording here because whoever fixes
+L3 needs to know it also fixes this.
+
+Traced: `Store::pinned_conversation` (`core/src/orchestrator.rs:1312`) is
+`SELECT id FROM conversations WHERE pinned = 1` — no filter by harness kind
+despite `main_conversation` taking one as an argument. Every caller of
+`hand_to_orchestrator` — `jod main` (CLI), the TUI chat box, the Telegram
+bridge, the HTTP API — funnels into this one row. Since `current_project_id`
+lives on the conversation row (`core/src/store.rs:1277`), there is exactly
+**one** sticky project for the entire installation, shared across every
+channel. A bare "let's fix this" typed in the TUI can resolve against a
+project that was only ever named in a Telegram message five minutes earlier
+from an entirely different train of thought. This is the direct answer to
+the "two conversations on different projects at once" scenario below: today
+that isn't two conversations, it's one, so there's nothing to keep separate —
+they collide.
+
+Once L3 gives main more than one pinned conversation, this resolves itself
+for free: `current_project_id` is already a per-conversation-row column.
+
+---
+
+## Part 2 — the manager work, as claimable tasks
+
+Source for everything below:
+`git show docs/spec-ceo-and-managers:SPEC.md`, **Change 3 — a manager per
+project**. Nothing in this part exists yet; confirmed by
+`grep -rn "manager_conversation\|ask_manager\|NodeKind::Manager"` returning
+nothing anywhere in the tree.
+
+### T1. `manager_conversation_id` column + migration
+Spec section: 3a, "Migrations" (migration 3).
+Files: `core/src/store.rs`.
+What exists today: nothing. `projects` has no such column; confirmed by
+reading its `CREATE TABLE`/migration block.
+Proves: check 10 (get-or-create is idempotent per project, distinct across
+projects) needs this column to exist before it can even compile against.
+
+### T2. `Store::manager_conversation(project_id, harness)`
+Spec section: 3a.
+Files: `core/src/store.rs` (or `core/src/orchestrator.rs`, next to
+`main_conversation` which it explicitly mirrors — `main_conversation` is at
+`core/src/orchestrator.rs:1292`, and depends on T1).
+What exists today: nothing; `main_conversation`'s get-or-create pattern is the
+template to copy, including — importantly — **not** copying its bug: `main_conversation`'s `pinned_conversation()` lookup ignores the `harness`
+argument entirely (see the note above). A manager conversation must be keyed
+by `project_id` (and presumably harness), not by a single global flag, or
+every project's manager collapses into the same row the way every main chat
+already does.
+Proves: check 10, check 11 (first `ask_manager` call creates and says so, the
+second resumes and reports the same conversation id).
+
+### T3. New MCP tool `ask_manager`
+Spec section: 3b.
+Files: `core/src/mcp.rs` (alongside the other project tools at
+`core/src/mcp.rs:459-522`, `ToolAccess::Delegate` like `project_switch` and
+`project_add` at `core/src/mcp.rs:3301-3302`).
+What exists today: nothing. Resolution should reuse `projects::resolve`
+(`core/src/projects.rs:290`) — and whoever builds this should fix P3 first or
+inherit its ambiguity bug in a brand-new tool.
+Proves: check 11, check 12 (unknown project refuses and names what's known —
+this is the same pattern `project_switch` already uses at
+`core/src/mcp.rs:1865-1883`, worth copying verbatim rather than re-inventing).
+
+### T4. Refuse `open_work` from main at the tool boundary
+Spec section: 3c.
+Files: `core/src/mcp.rs`, near `open_work`'s existing refusal for "no roots to
+inherit a checkout from" (`core/src/mcp.rs:2149`, per
+`tasks/00-launch-and-roots.md` L4).
+What exists today: nothing — `open_work` has no caller-identity check at all
+right now, only the roots check. The MCP server already resolves the calling
+run's pgid against `runs.pgid` for other purposes per the spec; confirm that
+lookup is reachable from `open_work`'s call site before assuming it's a
+one-line add.
+Proves: check 13 (main's run refused, names `ask_manager`), check 14 (a
+manager's run still succeeds — needs T2/T5 to exist first so there's a
+manager conversation to call from).
+
+### T5. Two preambles instead of one
+Spec section: 3d.
+Files: `core/src/orchestrator.rs`, splitting `orchestrator_preamble()`
+(`core/src/orchestrator.rs:353`) into main's version and a new manager
+version.
+What exists today: one preamble, used for every run regardless of role
+(worker, orchestrator, whatever spawned it) — confirmed by grep, there is
+exactly one call to `orchestrator_preamble()` and it isn't role-conditional.
+This also overlaps `tasks/01-routing.md`'s R1 (the preamble currently
+forbids the orchestrator from ever answering directly at all) — that's the
+same file, same function, arguably the same PR.
+Proves: nothing on the numbered list directly, but every one of Change 3's
+checks assumes the tool sets in the spec's table are actually wired to the
+right role, and nothing currently enforces that split.
+
+### T6. Project and manager nodes in the fleet tree
+Spec section: 3e.
+Files: `core/src/tree.rs` (new `NodeKind::Project`, `NodeKind::Manager`),
+`cli/src/tui/mod.rs` (entering a manager row — the shape to copy is
+`enter_main`, `cli/src/tui/mod.rs:951`, named directly in the spec).
+What exists today: `NodeKind` has no project-shaped variant; not checked in
+depth here since `tasks/20-fleets.md` (not yet written by whichever teammate
+owns fleets) is the more natural owner of tree-shape work — flagging the
+dependency rather than duplicating that investigation.
+Proves: check 15, check 16.
+
+### T7. `works.project_id` (Change 2, but Change 3 depends on it)
+Spec section: Change 2, "Add `project_id` to the `works` table" — listed
+under Change 2 in the spec but load-bearing for T6's "that project's works
+under it," so noting it here too.
+Files: `core/src/store.rs` (migration 2), `core/src/works.rs`.
+What exists today: confirmed above (Part 1) — `works` has no `project_id`
+column at all.
+Proves: check 9.
+
+---
+
+## Scenarios run
+
+| # | Scenario | Expected | Actual | Pass/fail |
+|---|---|---|---|---|
+| 1 | Catalogue a project | Row created, matched by name+basename | `alpha` catalogued, `matched by: alpha, the game` | pass |
+| 2 | Catalogue the same path twice | Update in place, no duplicate row; per doc comment, aliases/notes *extend* | Updated in place (no dupe) but aliases/notes were **replaced**, losing the first call's alias and note | fail — see P1 |
+| 3 | Project named by an alias | Alias resolves like a name | `--alias "the game"` matched `alpha` | pass (unit-tested in code too) |
+| 4 | Project named by a path | N/A directly — paths aren't spoken forms, basenames are | see #5 | n/a |
+| 5 | Project named by bare directory name | Basename alone resolves without registering it | `"let's work on alpha"` resolved to the project whose dir is `alpha`, live, via `jod main` | pass |
+| 6 | Instruction naming no project at all | `settle_project` returns `None`, nothing written, nothing crashes | `jod main "let's fix tetris"` (no such project) — `current_project_id` stayed `NULL`, no `project_resolutions` row | pass |
+| 7 | Switching current project mid-conversation | Naming a different project overrides the sticky one | Confirmed live: bare "alpha" instruction set current project; unit-tested for the tetris→jod case in `core/src/projects.rs` | pass |
+| 8 | Two conversations on different projects at once | Independent stickiness per conversation | There is only **one** pinned conversation database-wide (`pinned = 1`, no harness/channel key) — this scenario cannot actually occur today; see the note after P5 | fail — root cause is L3, not new |
+| 9 | Project whose directory has been deleted or renamed | Some signal that the path is gone | Catalog entry unchanged, no marker, `jod project ls` shows it as healthy | fail — see P5 |
+| 10 | Two projects whose directory basenames collide | `Match::Ambiguous`, and explicit lookup refuses/lists candidates | Both silently collapse to one project, chosen by iteration order, no error either way | fail — see P3 |
+| 11 | Resolving a project from a worktree path rather than the checkout | `project_for_path` should find the owning project from a cwd/worktree path | `project_for_path` (`core/src/projects.rs:544`) is never called from anywhere outside its own tests — dead code, no path-based resolution exists in the live system at all | fail — this is the concrete shape of spec Gap 3 |
+| 12 | Deleting a project that has works or conversations attached | Some defined behaviour | There is no delete path at all — CLI has only `ls/add/archive/restore`, MCP has only `list/current/switch/add`. Deleting is only possible by raw SQL (as the test at `core/src/projects.rs:1105-1116` does), which does correctly leave the conversation/chat intact (`current_project_id` reads back `NULL`, conversation itself is untouched) | pass, but only reachable off the documented surface — "deleting" isn't a real user-facing action today |
+| 13 | What `list_agents` tells the router about project | Spec says: nothing | Confirmed — `AgentView` (`core/src/mcp.rs`, struct definition) has no `project` field, and the tool schema has no `project` filter argument | pass (spec accurate) |
+| 14 | Edge case: empty name | Refused | `Error: a project needs a name...` | pass |
+| 15 | Edge case: unicode name + alias (Japanese + emoji) | Works | Catalogued and listed correctly, `matched by` includes the unicode alias and ASCII basename | pass |
+| 16 | Edge case: very long name (200 chars) | Truncated to `MAX_NAME_CHARS` (60) | Truncated to exactly 60 chars | pass |
+| 17 | Edge case: relative path | Canonicalized correctly | `./gamma/nested` from `$SCRATCH` resolved to the correct absolute path | pass |
+| 18 | Edge case: path that is a file, not a directory | Refused or flagged | Silently accepted as a project | fail — see P2 |
+| 19 | Edge case: symlinked path | Canonicalizes to the real path, dedupes against the existing entry for that real path | Correctly deduped onto the existing `alpha` row (good) — but doing so re-triggered P1's alias/notes wipe (bad) | mixed — dedup logic is correct, wipe bug (P1) reproduces through it |
+
+Nothing above needed a real, sustained model conversation beyond the two
+short `jod main` round trips used to observe `settle_project` fire live — the
+rest is either pure Rust (`resolve`, `project_by_name`, `add_project`) or CLI
+output, all directly exercised.
+
+`needs confirming`: whether `open_work`/`claim_worktree` actually break (vs.
+just misbehave) when handed a project whose path is a file (P2) or has gone
+missing (P5) — not run, since both `open_work` and `claim_worktree` need a
+work/session context this task didn't set up, and the MCP tools weren't
+driven directly (would need a live agent holding an MCP connection, which is
+a bigger live-model cost than the two round trips already spent above).
