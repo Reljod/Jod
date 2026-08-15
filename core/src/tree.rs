@@ -238,19 +238,35 @@ impl Store {
             // A run belongs to the conversation it wrote into. There is no
             // column saying so — `messages.run_id` is the join, and it is the
             // same one `conversation_for_run` uses.
+            //
+            // The summary comes from the newest message the run itself wrote,
+            // through the same `summarise` the sessions above use, and *not*
+            // from `runs.summary`. That column holds a serialised
+            // `AgentSummary`, so printing it put `{"created_at_ms":1…` on a
+            // screen where every other row was showing prose. Keyed on
+            // `messages.run_id` rather than on the conversation, because one
+            // session usually holds several runs and a conversation-wide
+            // summary would give every one of them the same line.
             let mut stmt = conn.prepare(
-                "SELECT m.conversation_id, r.id, r.name, r.status, r.summary
+                "SELECT m.conversation_id, r.id, r.name, r.status,
+                        last.text, last.tool_name
                    FROM runs r
                    JOIN (SELECT DISTINCT conversation_id, run_id FROM messages
                           WHERE run_id IS NOT NULL) m ON m.run_id = r.id
+                   JOIN (SELECT run_id, MAX(id) AS id FROM messages
+                          WHERE run_id IS NOT NULL GROUP BY run_id)
+                        tail ON tail.run_id = r.id
+                   JOIN messages last ON last.id = tail.id
                   ORDER BY r.created_at_ms, r.id",
             )?;
             let rows = stmt.query_map([], |r| {
+                let text: String = r.get(4)?;
+                let tool: Option<String> = r.get(5)?;
                 Ok(RawRun {
                     conversation_id: r.get(0)?,
                     id: r.get(1)?,
                     label: r.get(2)?,
-                    summary: r.get(4)?,
+                    summary: summarise(&text, tool.as_deref()),
                     status: r.get(3)?,
                 })
             })?;
@@ -575,6 +591,80 @@ mod tests {
         );
         assert_eq!(nodes[0].status, None, "a work has no run status");
         assert_eq!(nodes[1].status, None, "nor does a session");
+    }
+
+    /// A run is summarised by what it said, exactly as a session is.
+    ///
+    /// It used to be summarised by `runs.summary`, which holds a serialised
+    /// `AgentSummary`, so the row read as JSON. Two runs share one session
+    /// here because that is the case a conversation-wide summary gets wrong:
+    /// it would hand both of them the newest line in the thread, and the
+    /// second run's row would claim the first run's work.
+    #[test]
+    fn a_run_is_summarised_by_what_it_said_and_not_by_its_stored_json() {
+        let s = store();
+        let work = s.create_work("port the parser").unwrap();
+        let lead = session(&s, &work.id, None, "lead");
+        for (id, said) in [("run-1", "wrote the lexer"), ("run-2", "ran the suite")] {
+            s.save_run(&StoredRun {
+                id: id.into(),
+                name: format!("run {id}"),
+                harness: "claude-code".into(),
+                status: "completed".into(),
+                cwd: "/tmp".into(),
+                session_id: None,
+                pid: None,
+                pgid: None,
+                created_at_ms: 1,
+                summary: serde_json::json!({"id": id, "created_at_ms": 1}),
+            })
+            .unwrap();
+            s.append_message(
+                &lead,
+                NewMessage::new(Role::Assistant, said).from_run(id),
+            )
+            .unwrap();
+        }
+
+        let nodes = s.forest().unwrap();
+        let runs: Vec<(&str, &str)> = nodes
+            .iter()
+            .filter(|n| n.kind == NodeKind::Run)
+            .map(|n| (n.id.id.as_str(), n.summary.as_str()))
+            .collect();
+        assert_eq!(
+            runs,
+            [("run-1", "wrote the lexer"), ("run-2", "ran the suite")],
+            "each run says its own last line",
+        );
+        // And the session still says the newest thing in the whole thread.
+        assert_eq!(nodes[1].summary, "ran the suite");
+    }
+
+    /// A run whose last turn was a tool call names the tool, the way a session
+    /// in the same state already does.
+    #[test]
+    fn a_run_that_last_called_a_tool_names_it() {
+        let s = store();
+        let work = s.create_work("port the parser").unwrap();
+        let lead = session(&s, &work.id, None, "lead");
+        run_for(&s, &lead, "run-1", "running");
+        s.append_message(
+            &lead,
+            NewMessage {
+                role: Role::ToolCall,
+                text: "cargo test".into(),
+                tool_name: Some("Bash".into()),
+                tool_input: None,
+                run_id: Some("run-1".into()),
+                run_seq: None,
+            },
+        )
+        .unwrap();
+
+        let nodes = s.forest().unwrap();
+        let run = nodes.iter().find(|n| n.kind == NodeKind::Run).unwrap();
+        assert_eq!(run.summary, "Bash…");
     }
 
     #[test]
