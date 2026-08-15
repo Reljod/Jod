@@ -8,6 +8,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc, RwLock, Semaphore};
@@ -627,11 +628,20 @@ impl Jod {
         }
     }
 
-    /// Load prior runs from the database back into memory. Returns how many.
+    /// Load runs from the database into memory. Returns how many were new.
     ///
     /// A daemon that restarts has no idea what it launched before; without this
     /// every earlier agent vanishes from `agents()` even though its supervisor
-    /// may still be running. Call it once at boot.
+    /// may still be running.
+    ///
+    /// Calling it *again* is how a process learns about runs it did not launch.
+    /// Nothing crosses a process boundary here but the database: a run spawned
+    /// by `jod tui` publishes to that process's broadcast channel and nowhere
+    /// else, so a resident `jod-api` that only rehydrated at boot can never
+    /// list it and never stream it. Repeating the scan is what closes that gap —
+    /// see [`adopt_new_runs`](Self::adopt_new_runs), which is this on a timer.
+    /// Repeating is cheap on purpose: a run already held is skipped before its
+    /// events are read, so the steady state costs one indexed query.
     ///
     /// Each run's summary is rebuilt by replaying its stored events, because a
     /// summary is only as fresh as the last process that serialised one.
@@ -667,6 +677,14 @@ impl Jod {
         // Oldest first, so `order` ends up in the same sequence a live process
         // would have produced.
         for run in stored.into_iter().rev() {
+            // Before anything expensive. The write-lock check further down is
+            // the one that closes the race, but it comes after a full event
+            // replay — fine once at boot, ruinous on a two-second timer, where
+            // almost every row is one this process already owns.
+            if self.state.read().await.agents.contains_key(&run.id) {
+                continue;
+            }
+
             let Ok(summary) = serde_json::from_value::<AgentSummary>(run.summary.clone()) else {
                 // A summary written by an older, incompatible build. Skipping it
                 // loses one row; failing here would lose the whole history.
@@ -748,6 +766,49 @@ impl Jod {
             }
         }
         Ok(loaded)
+    }
+
+    /// Adopt runs other processes spawn, for as long as the caller lives.
+    ///
+    /// Jod is not one process. `jod tui`, `jod run` and `jod-api` each build
+    /// their own [`Jod`] over the same SQLite file, and a run's events reach
+    /// only the broadcast channel of the process that launched it. So a
+    /// resident API that rehydrated once at boot is frozen: a run started from
+    /// the TUI a minute later is absent from `/v1/agents` and silent on
+    /// `/v1/events`, and the web HUD shows an idle fleet while a harness is
+    /// working. Nothing was dropped — the API was never told.
+    ///
+    /// This is the telling. Each pass is a [`rehydrate`](Self::rehydrate), which
+    /// skips what is already held and attaches a [`runner::follow`] to anything
+    /// new that is still alive; the follower polls the shared store, so it works
+    /// perfectly well for a run this process holds no handle to, and two
+    /// processes following one run is expected rather than a conflict.
+    ///
+    /// Polling, because SQLite has no way to say "a row appeared". `every`
+    /// therefore sets how late the fleet can be, and it is worth an interval
+    /// well under a human's patience: the follower already polls at 120 ms once
+    /// attached, so the discovery interval is the whole of the delay a person
+    /// sees between starting a run and watching it move.
+    ///
+    /// A failing pass is reported and the loop continues. The database being
+    /// briefly unreadable must not permanently stop the process from noticing
+    /// new work — that failure mode is exactly the one this method exists to
+    /// remove.
+    ///
+    /// Never returns. Spawn it, and drop the handle to stop.
+    pub async fn adopt_new_runs(self: Arc<Self>, limit: usize, every: Duration) {
+        // No store means no other process to share one with.
+        if self.store.is_none() {
+            return;
+        }
+        loop {
+            tokio::time::sleep(every).await;
+            match self.rehydrate(limit).await {
+                Ok(0) => {}
+                Ok(n) => eprintln!("[jod] picked up {n} run(s) started elsewhere"),
+                Err(e) => eprintln!("[jod] could not scan for new runs: {e}"),
+            }
+        }
     }
 
     /// Events after `after` for one agent, oldest first. `None` means "I have
@@ -1941,6 +2002,164 @@ mod tests {
     #[tokio::test]
     async fn rehydrating_without_a_store_is_a_no_op_not_an_error() {
         assert_eq!(Jod::new().rehydrate(100).await.unwrap(), 0);
+    }
+
+    /// Write the row another process's `spawn_agent` would have written.
+    ///
+    /// The pgid is this test process, so `rehydrate`'s liveness probe finds a
+    /// real group and treats the run as still going — which is the only case
+    /// that attaches a follower, and the whole point of the tests below.
+    fn spawned_elsewhere(store: &Store, id: &str) {
+        let mut summary = record().summary;
+        summary.id = id.into();
+        summary.status = AgentStatus::Running;
+        summary.pid = Some(std::process::id());
+        summary.pgid = Some(std::process::id());
+        store.save_run(&stored_run(&summary)).unwrap();
+    }
+
+    /// The reported bug, at its root: a run started in `jod tui` never showed
+    /// up in the web HUD, live or otherwise.
+    ///
+    /// `jod-api` rehydrated once at boot and then only ever heard its own
+    /// broadcast channel, so a run another process launched a minute later was
+    /// absent from `/v1/agents` and silent on `/v1/events`. Nothing was lost —
+    /// the API was never told. Rescanning is the telling.
+    #[tokio::test]
+    async fn a_second_process_never_learns_of_a_new_run_without_rescanning() {
+        let store = std::sync::Arc::new(Store::in_memory().unwrap());
+        let api = Jod::with_store(store.clone());
+        api.rehydrate(100).await.unwrap(); // boot: the store is empty
+
+        spawned_elsewhere(&store, "from-the-tui");
+
+        assert!(
+            api.agents().await.is_empty(),
+            "the boot-time scan cannot see a run that did not exist yet"
+        );
+        assert_eq!(api.rehydrate(100).await.unwrap(), 1, "the rescan sees it");
+        assert_eq!(api.agents().await[0].id, "from-the-tui");
+    }
+
+    /// Listing it is half the fix; the HUD's animation is driven by envelopes.
+    ///
+    /// Adopting an *alive* run attaches a [`runner::follow`], which polls the
+    /// shared store — so events written by a process this one holds no handle
+    /// to still reach this process's subscribers.
+    #[tokio::test]
+    async fn an_adopted_run_streams_its_events_to_this_process() {
+        let store = std::sync::Arc::new(Store::in_memory().unwrap());
+        let api = Jod::with_store(store.clone());
+        let mut watching = api.subscribe();
+
+        spawned_elsewhere(&store, "from-the-tui");
+        api.rehydrate(100).await.unwrap();
+
+        // Written after adoption, by "the other process".
+        store
+            .append_event(&envelope(
+                "from-the-tui",
+                0,
+                AgentEvent::Message {
+                    text: "working on the Tetris game".into(),
+                },
+            ))
+            .unwrap();
+
+        let seen = tokio::time::timeout(Duration::from_secs(5), watching.recv())
+            .await
+            .expect("the follower never forwarded the event")
+            .expect("the broadcast channel closed");
+        assert_eq!(seen.agent_id, "from-the-tui");
+        assert!(matches!(seen.event, AgentEvent::Message { .. }));
+    }
+
+    /// Running the scan on a timer means running it over runs already held,
+    /// over and over. That has to be inert — and the part a client would see if
+    /// it were not is a **second follower** on a live run, doubling every
+    /// envelope on the stream.
+    ///
+    /// The cost side of the same change — skipping a held run *before* replaying
+    /// its events rather than after — is not asserted here. It is not
+    /// observable through this API, only in how much work a pass does.
+    #[tokio::test]
+    async fn rescanning_is_inert_on_a_run_it_already_holds() {
+        let store = std::sync::Arc::new(Store::in_memory().unwrap());
+        let jod = Jod::with_store(store.clone());
+        spawned_elsewhere(&store, "held");
+
+        jod.rehydrate(100).await.unwrap();
+        let events_before = jod.agent("held").await.unwrap().event_count;
+        let mut watching = jod.subscribe();
+        assert_eq!(jod.rehydrate(100).await.unwrap(), 0, "nothing new");
+        assert_eq!(jod.agents().await.len(), 1, "the run was listed twice");
+        assert_eq!(
+            jod.agent("held").await.unwrap().event_count,
+            events_before,
+            "the rescan re-applied a run it already held"
+        );
+
+        store
+            .append_event(&envelope(
+                "held",
+                0,
+                AgentEvent::Message {
+                    text: "once, please".into(),
+                },
+            ))
+            .unwrap();
+
+        let first = tokio::time::timeout(Duration::from_secs(5), watching.recv())
+            .await
+            .expect("the follower never forwarded the event")
+            .expect("the broadcast channel closed");
+        assert_eq!(first.seq, 0);
+        // The follower polls every 120 ms, so a duplicate would already be here.
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), watching.recv())
+                .await
+                .is_err(),
+            "the event arrived twice — the rescan attached a second follower"
+        );
+    }
+
+    #[tokio::test]
+    async fn adopting_without_a_store_returns_rather_than_polling_forever() {
+        // No store is no shared database, so there is no second process to
+        // learn from and nothing to poll. Looping anyway would burn a task for
+        // the life of every in-memory `Jod`, tests included.
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            Jod::new().adopt_new_runs(100, Duration::from_secs(1)),
+        )
+        .await
+        .expect("adopt_new_runs polled a service that has no store");
+    }
+
+    /// The loop's own promise: it keeps scanning, so a run started at any point
+    /// after boot is adopted rather than only one started before the first tick.
+    #[tokio::test]
+    async fn the_adoption_loop_keeps_scanning_after_its_first_pass() {
+        let store = std::sync::Arc::new(Store::in_memory().unwrap());
+        let api = Jod::with_store(store.clone());
+        let task = tokio::spawn(
+            api.clone()
+                .adopt_new_runs(100, Duration::from_millis(50)),
+        );
+
+        // Deliberately after the loop is running and has already found nothing.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        spawned_elsewhere(&store, "much-later");
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while api.agent("much-later").await.is_err() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the loop stopped scanning after its first pass"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        task.abort();
     }
 
     #[tokio::test]

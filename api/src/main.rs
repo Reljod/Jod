@@ -200,6 +200,20 @@ async fn serve(
         eprintln!("jod-api: `jod-run` was not found — spawning will fail until it is installed.");
     }
 
+    // Boot is not the only moment a run appears. `jod tui` and `jod run` build
+    // their own `Jod` over the same database, and a run they launch reaches
+    // only their broadcast channel — so without this scan the roster and the
+    // event stream are frozen to whatever existed when this process started,
+    // and a client watches an idle fleet while a harness works.
+    match config.discover_interval() {
+        Some(every) => {
+            tokio::spawn(jod.clone().adopt_new_runs(rehydrate, every));
+        }
+        None => eprintln!(
+            "jod-api: discovery is off — runs started by another process will not appear."
+        ),
+    }
+
     let audit = AuditLog::new(AuditLog::default_path());
     let state = AppState::new(jod, config, tokens, audit);
     let app = jod_api::router(state);

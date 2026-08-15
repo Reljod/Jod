@@ -21,6 +21,17 @@ pub const DEFAULT_MAX_AGENTS: usize = 8;
 pub const DEFAULT_MAX_BODY_BYTES: usize = 256 * 1024;
 pub const DEFAULT_SESSION_TTL_HOURS: u64 = 24 * 7;
 
+/// How often the daemon rescans the store for runs another process started.
+///
+/// This is the delay a person sees between starting a run in `jod tui` and it
+/// appearing in the web HUD, so it is set by patience rather than by load: two
+/// seconds reads as "immediately" and costs one indexed query, because a run
+/// already known is skipped before its events are read.
+pub const DEFAULT_DISCOVER_SECS: u64 = 2;
+
+/// Below this, the scan is a busy loop against SQLite rather than a poll.
+const MIN_DISCOVER_SECS: u64 = 1;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -38,6 +49,11 @@ pub struct Config {
     /// How long a browser cookie session lives. Shorter than a typical web
     /// app's, because this credential spawns processes on a server.
     pub session_ttl_hours: u64,
+    /// Seconds between rescans for runs started by another process.
+    ///
+    /// `0` turns discovery off, which leaves the daemon seeing only the runs it
+    /// launched itself and those that existed at boot.
+    pub discover_secs: u64,
 }
 
 impl Default for Config {
@@ -49,6 +65,7 @@ impl Default for Config {
             allowed_cwd: Vec::new(),
             max_body_bytes: DEFAULT_MAX_BODY_BYTES,
             session_ttl_hours: DEFAULT_SESSION_TTL_HOURS,
+            discover_secs: DEFAULT_DISCOVER_SECS,
         }
     }
 }
@@ -94,6 +111,11 @@ impl Config {
                 self.session_ttl_hours = n;
             }
         }
+        if let Ok(v) = std::env::var("JOD_API_DISCOVER_SECS") {
+            if let Ok(n) = v.parse() {
+                self.discover_secs = n;
+            }
+        }
         if let Ok(v) = std::env::var("JOD_API_ALLOWED_CWD") {
             self.allowed_cwd = v
                 .split(':')
@@ -109,6 +131,18 @@ impl Config {
 
     pub fn session_ttl_ms(&self) -> i64 {
         (self.session_ttl_hours as i64).saturating_mul(60 * 60 * 1000)
+    }
+
+    /// How often to rescan for runs another process started, or `None` to not.
+    ///
+    /// Returning an `Option` rather than a `Duration` is what keeps `0` from
+    /// meaning "scan as fast as the CPU allows" — the one value where the
+    /// obvious reading of the number and the safe behaviour disagree.
+    pub fn discover_interval(&self) -> Option<std::time::Duration> {
+        match self.discover_secs {
+            0 => None,
+            n => Some(std::time::Duration::from_secs(n.max(MIN_DISCOVER_SECS))),
+        }
     }
 
     /// Is `requested` within the configured ceiling?
@@ -277,6 +311,37 @@ mod tests {
         );
         assert_eq!(parse_permission("bypass"), Some(PermissionPolicy::Bypass));
         assert_eq!(parse_permission("yolo"), None);
+    }
+
+    /// Discovery is what makes a run started in `jod tui` appear in the web
+    /// HUD. Defaulting it off would mean the daemon only ever shows its own
+    /// work, which is the bug this knob exists to fix.
+    #[test]
+    fn discovery_is_on_by_default() {
+        assert_eq!(
+            Config::default().discover_interval(),
+            Some(std::time::Duration::from_secs(DEFAULT_DISCOVER_SECS))
+        );
+    }
+
+    #[test]
+    fn a_zero_interval_turns_discovery_off_rather_than_spinning() {
+        // The one value where the obvious reading of the number — "no delay" —
+        // and the safe behaviour disagree.
+        let c = Config {
+            discover_secs: 0,
+            ..Default::default()
+        };
+        assert_eq!(c.discover_interval(), None);
+    }
+
+    #[test]
+    fn a_sub_second_interval_is_raised_to_the_floor() {
+        let c = Config {
+            discover_secs: 1,
+            ..Default::default()
+        };
+        assert!(c.discover_interval().unwrap() >= std::time::Duration::from_secs(1));
     }
 
     #[test]
