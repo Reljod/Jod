@@ -2112,19 +2112,44 @@ impl Server {
             claim @ (crate::leases::Claim::Cut(_) | crate::leases::Claim::Reused(_)) => {
                 let reused = matches!(claim, crate::leases::Claim::Reused(_));
                 let lease = claim.lease().expect("cut and reused both carry a lease");
+                // Handing back a path and calling it writable is the claim that
+                // cost a whole run. Checked before it is made.
+                let can_write = can_write(&raiser.run_id, &lease.worktree_path);
+                let warning = can_write.warning(&lease.worktree_path);
+                let standing = if reused {
+                    // Kept whatever the writability answer is. Sharing is a
+                    // fact about a sibling, not about this session's sandbox,
+                    // and a session that overwrites a colleague's branch does
+                    // equal damage either way.
+                    "this worktree was already claimed for this repository in this work, so \
+                     you are sharing it. Somebody else is working here: read what is there \
+                     before you change it, and say on the bus what you are taking."
+                } else if warning.is_none() {
+                    "cut for you. This is now your only writable root; the checkout is still \
+                     beside it, read-only, so you can diff against what Reljod is editing."
+                } else {
+                    // The same sentence with the one clause this tool has just
+                    // failed to establish taken out. That the checkout sits
+                    // beside it, read-only, is still true and still useful;
+                    // "this is now your only writable root" is exactly the
+                    // claim that let a dead run look finished.
+                    "cut for you, on a branch of your own. The checkout is still beside it, \
+                     read-only, so you can diff against what Reljod is editing."
+                };
                 as_json(&json!({
                     "lease_id": lease.id,
                     "worktree": lease.worktree_path.to_string_lossy(),
                     "branch": lease.branch,
                     "base": lease.base_ref,
                     "reused": reused,
-                    "note": if reused {
-                        "this worktree was already claimed for this repository in this work, so \
-                         you are sharing it. Somebody else is working here: read what is there \
-                         before you change it, and say on the bus what you are taking."
-                    } else {
-                        "cut for you. This is now your only writable root; the checkout is still \
-                         beside it, read-only, so you can diff against what Reljod is editing."
+                    "writable": can_write.verdict(),
+                    // The warning goes first when there is one. A session that
+                    // reads only the opening clause of this field should read
+                    // the thing that stops it wasting a run, not the thing that
+                    // reassures it.
+                    "note": match &warning {
+                        Some(warning) => format!("{warning} {standing}"),
+                        None => standing.to_string(),
                     },
                 }))
             }
@@ -2590,6 +2615,127 @@ impl Server {
             }
             Sent::Undeliverable { detail, .. } => Err(ToolError::Refused(detail)),
         }
+    }
+}
+
+// ---- whether a claimed worktree can actually be written in ----------------
+
+/// What Jod is able to say about the caller's ability to write in a worktree.
+///
+/// Three answers rather than two, because "Jod could not find out" is a real
+/// state and reporting it as either of the others is how this went wrong in the
+/// first place. The tool used to imply the first answer unconditionally.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CanWrite {
+    /// The run's own command line reaches this path, or the run is not confined
+    /// by its command line at all.
+    Yes,
+    /// The run's command line is known and does not reach this path.
+    No { granted: Vec<std::path::PathBuf> },
+    /// Jod could not read what the run was launched with.
+    Unverified { why: String },
+}
+
+impl CanWrite {
+    /// The machine-readable half, for a caller that wants to branch on it
+    /// rather than read the prose.
+    fn verdict(&self) -> &'static str {
+        match self {
+            CanWrite::Yes => "yes",
+            CanWrite::No { .. } => "no",
+            CanWrite::Unverified { .. } => "unverified",
+        }
+    }
+
+    /// What to tell the session, when there is something to tell it.
+    ///
+    /// Every sentence here is doing a job that a shorter message did badly on a
+    /// real run. It names the worktree, because a session holding several paths
+    /// cannot act on "somewhere is not writable". It says the session cannot
+    /// write, rather than that a write failed, because the session has not
+    /// tried yet and should not have to. And it says whose bug this is: two
+    /// messages elsewhere in this codebase sent readers to hunt for a broken
+    /// harness binary and a repository that was not a git repository, and both
+    /// were wrong about where the problem lived. A session told only "cannot
+    /// write" would reasonably start checking file modes in Reljod's own
+    /// checkout and find nothing, because there is nothing there to find.
+    fn warning(&self, worktree: &std::path::Path) -> Option<String> {
+        let worktree = worktree.display();
+        match self {
+            CanWrite::Yes => None,
+            CanWrite::No { granted } => {
+                let granted: Vec<String> =
+                    granted.iter().map(|d| d.display().to_string()).collect();
+                Some(format!(
+                    "you cannot write to {worktree}. This session was started with its writable \
+                     directories fixed to {}, nothing can widen them while it is running, and the \
+                     worktree above is outside them. This is a known limitation in Jod itself — \
+                     finding O1 in `tasks/10-orchestration.md`, still open and waiting on a \
+                     decision about how to close it — and it is not a permissions problem in this \
+                     repository or on this machine, so do not go looking for one there. Do not \
+                     route around it either. Say plainly that the work could not be written, and \
+                     stop.",
+                    granted.join(", ")
+                ))
+            }
+            CanWrite::Unverified { why } => Some(format!(
+                "Jod has not confirmed that you can write to {worktree}. It could not read the \
+                 record of what this session was launched with ({why}), and a session's writable \
+                 directories are fixed when it starts, so that path may be outside them. Try the \
+                 write. If it is refused, that is finding O1 in `tasks/10-orchestration.md` — a \
+                 known limitation in Jod itself, still open and waiting on a decision — and not a \
+                 permissions problem in this repository or on this machine. Say so and stop \
+                 rather than routing around it."
+            )),
+        }
+    }
+}
+
+/// Whether the session calling `claim_worktree` can write in the worktree it
+/// has just been handed.
+///
+/// **Not a probe, deliberately.** Writing a file into the worktree and removing
+/// it again is the obvious implementation and it is worse than nothing here:
+/// Jod created that directory itself, moments earlier, from this very process,
+/// so the probe answers "can Jod write here" — which was never in doubt — and
+/// answers it "yes" in precisely the case where the session cannot. Measured on
+/// the run that prompted this: the harness was refused the worktree, and a probe
+/// from a Jod-shaped process on the same directory succeeded immediately. A
+/// check that cannot fail is worse than no check, because it is quoted as
+/// evidence.
+///
+/// What it reads instead is `runs/<id>/spawn.json`, the record of the argument
+/// list and working directory the process was actually launched with. That file
+/// is written before the supervisor starts anything and is never edited, so it
+/// says what the harness got rather than what Jod's tables say it should have
+/// got — and the gap between those two is the whole of the bug being reported.
+fn can_write(run_id: &str, worktree: &std::path::Path) -> CanWrite {
+    let path = crate::paths::spawn_path(run_id);
+    let plan: crate::runner::SpawnPlan = match std::fs::read(&path) {
+        Ok(bytes) => match serde_json::from_slice(&bytes) {
+            Ok(plan) => plan,
+            Err(e) => {
+                return CanWrite::Unverified {
+                    why: format!("{} could not be read as a spawn plan: {e}", path.display()),
+                }
+            }
+        },
+        // The ordinary reason is a session Jod did not launch — someone ran the
+        // harness by hand against Jod's MCP server. Such a session has no plan
+        // and never will, and telling it "you cannot write" would be a
+        // fabrication about a process Jod knows nothing about.
+        Err(e) => {
+            return CanWrite::Unverified {
+                why: format!("{} could not be opened: {e}", path.display()),
+            }
+        }
+    };
+    let grant = crate::harness::grants::granted_at_launch(&plan.args, &plan.cwd);
+    if !grant.enforced || grant.covers(worktree) {
+        return CanWrite::Yes;
+    }
+    CanWrite::No {
+        granted: grant.dirs,
     }
 }
 
@@ -4816,6 +4962,128 @@ mod tests {
             repo,
             conversation: conversation.id,
         })
+    }
+
+    /// Write the record of what a run was launched with, the way the runner
+    /// does before the supervisor starts anything.
+    ///
+    /// `granted` is what reaches `--add-dir`. The interesting value is the
+    /// checkout on its own, because that is what `prepare_work` really hands a
+    /// work session — no worktree exists yet at that point, so none can be
+    /// granted.
+    fn spawn_plan_granting(run_id: &str, cwd: &std::path::Path, granted: &[&std::path::Path]) {
+        let mut args = vec![
+            "-p".to_string(),
+            "do the thing".to_string(),
+            "--permission-mode".to_string(),
+            "acceptEdits".to_string(),
+        ];
+        for dir in granted {
+            args.push("--add-dir".to_string());
+            args.push(dir.to_string_lossy().to_string());
+        }
+        let plan = crate::runner::SpawnPlan {
+            run_id: run_id.to_string(),
+            harness: HarnessKind::ClaudeCode,
+            db_path: PathBuf::from("/dev/null"),
+            program: PathBuf::from("claude"),
+            args,
+            cwd: cwd.to_path_buf(),
+            env: Vec::new(),
+            secrets: Vec::new(),
+        };
+        let dir = crate::paths::run_dir(run_id);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            crate::paths::spawn_path(run_id),
+            serde_json::to_vec_pretty(&plan).unwrap(),
+        )
+        .unwrap();
+    }
+
+    /// **The check for this change.** A session that cannot write to the
+    /// worktree it just claimed is told so, by name, in the answer it acts on.
+    ///
+    /// This is not a test that writing works — whether a work session can ever
+    /// write to a claimed worktree is finding O1, it is still open, and closing
+    /// it is a decision rather than a patch. This is a test that the failure is
+    /// *visible*. The run that prompted it claimed a worktree, wrote nothing,
+    /// committed nothing and finished `done` with no error recorded anywhere;
+    /// the only way anyone found out was by opening the worktree afterwards and
+    /// seeing one `README.md` and one `init` commit.
+    ///
+    /// The arrangement below is the real one, not one built to fail: the
+    /// session is launched with the checkout granted and nothing else, which is
+    /// exactly what `prepare_work` does, and the worktree is then cut somewhere
+    /// else entirely under `JOD_HOME`.
+    #[test]
+    fn a_session_that_cannot_write_to_its_claimed_worktree_is_told_so() {
+        let Some(on) = on_a_repo("mcp-unwritable") else {
+            return;
+        };
+        // What the work session really gets: its checkout, read-only, and no
+        // worktree because none has been cut yet.
+        spawn_plan_granting("run-1", &on.repo, &[&on.repo]);
+
+        let answer = on.call("claim_worktree", json!({}));
+        assert!(!is_error_result(&answer), "{}", said(&answer));
+        let claimed: Value = serde_json::from_str(&said(&answer)).unwrap();
+        let worktree = claimed["worktree"].as_str().unwrap().to_string();
+
+        assert_eq!(
+            claimed["writable"], "no",
+            "the tool handed back a worktree outside everything this run was launched with, and \
+             reported nothing about it: {claimed}"
+        );
+        let note = claimed["note"].as_str().unwrap_or_default();
+        assert!(
+            note.contains(&worktree),
+            "the warning must name the worktree, or a session holding several paths cannot act \
+             on it: {note}"
+        );
+        assert!(
+            note.contains("cannot write"),
+            "the warning must say the session cannot write, not merely that something is odd: \
+             {note}"
+        );
+        // The part that stops the reader debugging the wrong machine. Two other
+        // messages in this codebase sent people hunting for a broken harness
+        // binary and a repository that was not a git repository, and both were
+        // pointing at the wrong thing.
+        assert!(
+            note.contains("O1") && note.contains("tasks/10-orchestration.md"),
+            "the warning must name the open finding, so the reader can see this is known: {note}"
+        );
+        assert!(
+            note.contains("not a permissions problem"),
+            "the warning must say this is not the reader's own repository or machine at fault: \
+             {note}"
+        );
+    }
+
+    /// The other half, and the one that stops this from being a check that
+    /// always fires. A session whose grant does reach the worktree is told
+    /// nothing alarming — otherwise the warning becomes noise and gets ignored
+    /// exactly when it is true.
+    #[test]
+    fn a_session_whose_grant_reaches_the_worktree_is_not_warned() {
+        let Some(on) = on_a_repo("mcp-writable") else {
+            return;
+        };
+        // The directory worktrees are cut under, granted up front. This is the
+        // shape one of the two candidate fixes for O1 would produce, and it is
+        // the only arrangement in which the tool may honestly say "writable".
+        let worktrees = crate::leases::worktrees_dir();
+        std::fs::create_dir_all(&worktrees).unwrap();
+        spawn_plan_granting("run-1", &on.repo, &[&on.repo, &worktrees]);
+
+        let claimed: Value =
+            serde_json::from_str(&said(&on.call("claim_worktree", json!({})))).unwrap();
+        assert_eq!(claimed["writable"], "yes", "{claimed}");
+        assert!(
+            claimed["note"].as_str().unwrap().contains("cut for you"),
+            "{claimed}"
+        );
     }
 
     /// **The test the lead asked for, and the one that matters.** `claim_lease`
