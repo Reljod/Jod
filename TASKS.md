@@ -13,7 +13,8 @@ you start. Add findings to the area file, never to this index.
 | Launch, roots and the console's directory | [`tasks/00-launch-and-roots.md`](tasks/00-launch-and-roots.md) | L1–L6 | — |
 | Routing: answer it yourself or hand it over | [`tasks/01-routing.md`](tasks/01-routing.md) | R1–R6 | — |
 | The TUI itself | [`tasks/02-tui.md`](tasks/02-tui.md) | T1 | — |
-| Orchestration scenarios | [`tasks/10-orchestration.md`](tasks/10-orchestration.md) | O-series | — |
+| Orchestration scenarios | [`tasks/10-orchestration.md`](tasks/10-orchestration.md) | O-series (pending) | — |
+| Orchestration edge cases and bad input | [`tasks/11-orchestration-edge-cases.md`](tasks/11-orchestration-edge-cases.md) | E1 + 14 scenarios | — |
 | Fleets and the tree | [`tasks/20-fleets.md`](tasks/20-fleets.md) | F1–F8 | — |
 | Project managers | [`tasks/30-project-managers.md`](tasks/30-project-managers.md) | P-series + spec tasks | — |
 | Scheduling | [`tasks/40-scheduling.md`](tasks/40-scheduling.md) | S1–S6 | — |
