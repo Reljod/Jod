@@ -60,7 +60,7 @@ that prompted the sweep.
 | | What | Where |
 |---|---|---|
 | **critical** | A work session cannot write anything — `claim_worktree` cuts a worktree the running process may not touch | `10-orchestration.md` O1 |
-| high | The main chat can permanently lose a run's reply, even when the run succeeded and its effects happened. Reproduced twice, once with no concurrency at all | `10-orchestration.md` O2 |
+| high | The main chat can permanently lose a run's reply, even when the run succeeded and its effects happened. Reproduced twice, once with no concurrency at all | `10-orchestration.md` O2 — *claimed* |
 | high | The console is rooted at `$HOME`, which is not a repository | `00-launch-and-roots.md` L1 |
 | high | New work defaults to the oldest root for ever | `00-launch-and-roots.md` L2 |
 | high | Re-adding a root you already hold silently revokes write access | `00-launch-and-roots.md` L7 |

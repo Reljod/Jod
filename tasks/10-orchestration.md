@@ -110,7 +110,42 @@ a commit exists on the leased worktree's branch afterwards.
 ---
 
 ## O2. The pinned main chat's own transcript can permanently lose the answer
-Status: open · Owner: — · Severity: high
+Status: **claimed, in progress** · Severity: high
+
+### What "fixed" means here, and the trap on the way
+
+**This is a recording bug, not an execution bug.** The run's effects really
+happened — a schedule was genuinely armed and `jod schedule ls` proves it — so
+any fix that makes the reply reappear by re-running, retrying, replaying or
+reconstructing the turn is the wrong shape. In the observed case, re-running
+would arm the schedule twice. Fixed means: the event the harness actually
+emitted is recorded exactly once.
+
+**The trap is `Finished.text`, and it is subtler than "do not use it".**
+`Conversation::from_event` (`core/src/conversation.rs:209`) deliberately
+excludes it, and the stated reason is exact:
+
+> `Finished.text` is always a repeat: every harness adapter fills it from the
+> last `Message` it already emitted (`Accumulator::note_text`), so appending it
+> would double the final assistant turn.
+
+That reasoning is correct for the healthy path. But read it against this bug and
+it cuts both ways: because the adapter fills `Finished.text` from the last
+`Message` it emitted, **the lost text is very likely still sitting in
+`Finished.text` in exactly the failing case.** So a fallback would appear to fix
+it — while duplicating every normal reply, and while being a recovery path
+rather than a repair.
+
+That makes it a diagnostic rather than a fix. If the adapter still holds the
+text, the `Message` event existed at the adapter and was lost after it, which
+narrows the drop point to between the adapter and `record_in_conversation`
+rather than to the harness. Worth checking first: it is cheap and it discriminates.
+
+Do not change the exclusion as a side effect of fixing this. If the diagnosis
+genuinely leads there, argue for it explicitly.
+
+A precise drop point with instrumented evidence is a better outcome than a
+guessed fix, and delivering the diagnosis alone is an acceptable result.
 
 **Observed, twice, independently — once under concurrency, once without.**
 `jod main` (the CLI command that prints the pinned conversation) reads the
