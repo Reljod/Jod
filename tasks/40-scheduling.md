@@ -256,7 +256,9 @@ contract today.
 ---
 
 ## S5. Duplicate-name error leaks a raw SQL message
-Status: open · Owner: — · Severity: low
+Status: **fixed — merged as #159** · Severity was: low
+
+Fixed together with G12 in one pull request: one defect on two surfaces.
 
 ```
 $ jod schedule add --cron "0 3 * * *" nightly-triage "dup test"

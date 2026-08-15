@@ -460,7 +460,17 @@ succeeding.
 ---
 
 ## G12. A duplicate goal name surfaces a raw SQLite error
-Status: open · Owner: — · Severity: low
+Status: **fixed — merged as #159** · Severity was: low
+
+Fixed together with S5 in one pull request: one defect on two surfaces.
+
+**A negative result from the same work, worth keeping.** All seventeen `UNIQUE`
+constraints in the schema were traced to their inserts and to whether an
+ordinary mistake can reach them. Only the two filed here could leak a raw
+message. Three candidates suggested for checking turned out not to exist at all
+— `works` has no unique title, `projects.name` is not unique, and
+`team_members` upserts. So there is no follow-up, and nobody should audit the
+seventeen a second time.
 
 ```
 $ jod goal add zero-budget "duplicate objective text" --budget 5
