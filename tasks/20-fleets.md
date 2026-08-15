@@ -182,7 +182,10 @@ terminal width; assert the row's rendered width does not exceed the box.
 ---
 
 ## F4. `list_agents` silently truncates at 20 with no signal there is more
-Status: **in flight** · Severity: high — this is what lets the router miss a wedged agent
+Status: **fixed — merged as #143** · Severity was: high
+
+> **This finding was wrong in both directions, and the fix says so.** Read the
+> correction below before the original text, which is kept for the record.
 
 `list_agents`'s own description (`core/src/mcp.rs:164-168`) says:
 
@@ -202,13 +205,47 @@ router-picks-a-stuck-agent failure mode depends on the router being able to
 see every candidate agent for a project before deciding to spawn a new one.
 Past 20 agents on the box — not a large number after a few busy days — an
 older, wedged agent silently falls off the page with no hint to the caller
-that it should ask again with a higher `limit`. SPEC Change 2 widens
+that it should ask again with a higher `limit`. **That sentence is wrong; see
+the correction.** SPEC Change 2 widens
 `AgentView` with project/work/stalled/busy fields and adds a `project` filter,
 which would shrink typical result sets, but it does not add a total/truncated
 signal, and neither exists today.
 
 Fix: mirror what `jod ls` already does — return (or otherwise signal) how
 many agents exist versus how many were returned.
+
+### The correction, measured by the agent that fixed it
+
+The trigger was wrong in both directions, and neither of the two people who
+read this task caught the second half.
+
+**Smaller than filed.** "Past 20 agents on the box" does not lose a running
+agent. The sort puts every running agent ahead of every finished one, so the
+cut always lands in the finished tier first. Seeded with 100 agents whose three
+*oldest* were the running ones, all three still led the page. A running agent
+is only lost to the 20-cap when **more than twenty are running at once**,
+confirmed at 21.
+
+**Bigger than filed, and this is the case that actually loses a wedged agent.**
+Before paging, `list_agents` reads runs out of SQLite with a fixed cap of 200
+(`REHYDRATE`), newest first. An agent older than the newest 200 runs never
+enters memory at all. With 205 agents seeded, the three oldest running:
+
+```
+default            -> 20 rows, no live-* at all
+limit: 1000        -> 200 rows, contains live-000: FALSE
+running_only: true -> []      # while three agents were running
+```
+
+`running_only: true` returning an empty array while three agents are running is
+the real bug. **No value of `limit` reached it** — so the remedy this task
+assumed existed did not exist, and signalling the cut while leaving the escape
+hatch broken would have been the worse half of a fix. The fix is
+`rehydrate(REHYDRATE.max(limit))`, the line `jod ls` already had.
+
+So the router can miss a wedged agent, just not for the reason written down
+here. The lesson is the same one this file keeps learning: a trigger reasoned
+from the code reads as precise and can be wrong in both directions at once.
 
 Check: seed more than `limit` agents, call `list_agents` with the default
 limit, assert the response says how many were omitted.

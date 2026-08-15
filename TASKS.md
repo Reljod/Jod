@@ -77,9 +77,9 @@ work is the same failure this list keeps documenting.
 | high | A goal with no cap and a non-deterministic check has no ceiling at all | `50-goals.md` G5 | open |
 | high | It busy-waits on its own child with `sleep`, which the design forbids | `01-routing.md` R4 | open, now small |
 | high | The orchestrator will not answer, or will — it is a coin flip nothing decides | `01-routing.md` R1 | in flight |
-| high | `list_agents` truncates at 20 with no signal there is more | `20-fleets.md` F4 | in flight |
 | high | "Stop an agent and everything it started" does not stop what it started | `20-fleets.md` F5 | in flight |
 | high | A cron expression that can never fire is armed anyway | `40-scheduling.md` S2 | in flight |
+| high | `list_agents` hid running agents entirely past 200 runs — `running_only` returned nothing while three ran | `20-fleets.md` F4 | **fixed, #143** |
 | high | It reaches outside Jod's tool set on *every* run | `01-routing.md` R5 | **fixed, #127** |
 | high | The main chat can permanently lose a run's reply | `10-orchestration.md` O2 | **fixed, #133** |
 | high | The schedule circuit breaker never trips for the ordinary failure | `40-scheduling.md` S1 | **fixed, #135** |
