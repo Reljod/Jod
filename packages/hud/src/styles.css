@@ -334,7 +334,30 @@ button { cursor: pointer; background: none; border: none; }
 /* ── tactical canvas ────────────────────────────────────────────────────── */
 
 .tactical { position: relative; min-width: 0; background: #04070d; }
-.tactical canvas { display: block; width: 100%; height: 100%; }
+/* `touch-action: none` keeps a trackpad or touch gesture on the camera instead
+   of scrolling the page out from under it. */
+.tactical canvas { display: block; width: 100%; height: 100%; touch-action: none; outline: none; }
+
+.tactical-zoom {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.tactical-zoom button {
+  width: 24px;
+  height: 24px;
+  font-size: 12px;
+  line-height: 1;
+  color: var(--text-dim);
+  background: rgba(4, 10, 18, 0.78);
+  border: 1px solid var(--line-soft);
+  transition: all 0.15s;
+}
+.tactical-zoom button:hover:not(:disabled) { color: var(--cyan); border-color: var(--cyan); }
+.tactical-zoom button:disabled { opacity: 0.35; }
 
 .tactical-truncation,
 .tactical-legend {

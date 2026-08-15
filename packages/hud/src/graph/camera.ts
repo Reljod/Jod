@@ -18,6 +18,16 @@ const MIN_ZOOM = 0.3;
 const MAX_ZOOM = 1.15;
 
 /**
+ * How far the operator may zoom by hand.
+ *
+ * Wider than the auto-fit range on both ends on purpose: auto-fit picks a zoom
+ * that frames everything, and the reason to touch the camera at all is to go
+ * past that — in to read one node's label, out to see how far the fleet spreads.
+ */
+export const ZOOM_MIN = 0.15;
+export const ZOOM_MAX = 4;
+
+/**
  * Where the camera should sit so the whole fleet is on screen.
  *
  * The layout is force-directed, so the graph's extent changes as agents spawn,
@@ -51,6 +61,37 @@ export function fitCamera(bodies: Body[], view: Viewport, nodeRadius = 56): Came
   const zoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, Math.min(view.w / width, view.h / height)));
 
   return { x: (minX + maxX) / 2, y: (minY + maxY) / 2, zoom };
+}
+
+/**
+ * Scale the camera about a fixed screen point, in place.
+ *
+ * The world point under `anchor` stays under `anchor` afterwards, so zooming
+ * with the pointer over a node magnifies that node instead of whatever happens
+ * to be at the centre of the viewport. Pass the viewport centre as the anchor
+ * for a keyboard or button zoom.
+ *
+ * Returns the factor actually applied, which is smaller than `factor` when the
+ * zoom clamps — the anchor still holds at the bounds.
+ */
+export function zoomAt(
+  cam: CameraTarget,
+  factor: number,
+  anchor: { x: number; y: number },
+  view: Viewport,
+): number {
+  const next = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, cam.zoom * factor));
+  const applied = next / cam.zoom;
+  if (applied === 1) return 1;
+
+  // The world point under the anchor, held fixed across the scale change.
+  const wx = (anchor.x - view.w / 2) / cam.zoom + cam.x;
+  const wy = (anchor.y - view.h / 2) / cam.zoom + cam.y;
+
+  cam.zoom = next;
+  cam.x = wx - (anchor.x - view.w / 2) / next;
+  cam.y = wy - (anchor.y - view.h / 2) / next;
+  return applied;
 }
 
 /** Ease a camera toward a target. `k` is the per-frame fraction closed. */
