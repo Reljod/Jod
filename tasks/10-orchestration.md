@@ -247,7 +247,21 @@ running, since both reproduced independently.
 ---
 
 ## O3. `continue_agent` never checks whether the run it is continuing is dead
-Status: open · Owner: — · Severity: medium · needs confirming
+Status: **verified fixed — merged as #152, check run against main, passes** · Severity was: medium
+
+```
+test mcp::tests::continuing_a_killed_run_is_refused_and_the_refusal_names_the_status ... ok
+test mcp::tests::continuing_a_failed_run_is_refused_and_the_refusal_names_the_status ... ok
+test mcp::tests::continuing_a_run_nobody_has_heard_of_is_refused_by_name ... ok
+```
+
+The check has two clauses — refused, **and** the refusal names the status — and
+the test asserts both. It also asserts the refusal does *not* contain
+"ceiling", which matters: this finding was originally marked `needs confirming`
+precisely because the attempt to exercise it hit an unrelated permission-ceiling
+refusal first. A test asserting only "a refusal happened" would have passed for
+that wrong reason. That guard was not in my check; whoever wrote the test added
+it.
 
 Read off the code, not fully observed: `continue_agent`
 (`core/src/mcp.rs:1110-1179`) refuses only on a missing `session_id` or a

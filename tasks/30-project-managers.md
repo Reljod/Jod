@@ -346,6 +346,18 @@ Check (now): `cargo test -p jod-core --lib projects::` passes, including
 `pausing_and_archiving_are_not_the_same_thing`, which is what holds the
 finding above true while the decision is open.
 
+**Run against main: passes.** 43 project tests green, including
+`pausing_and_archiving_are_not_the_same_thing`.
+
+**This task is not a verification case and should not be counted as one.** There
+is no fix to verify — its agent established what distinguishes the two states
+and handed the decision back rather than picking a branch. The handling is the
+right pattern for that situation and worth copying: mark the original check
+unrunnable *with the reason*, and write a replacement that guards the **finding**
+rather than one that claims the task is done. The test above would still need to
+hold whichever way Reljod decides. A replacement check that only passed under one
+branch would be quietly assuming his answer.
+
 ---
 
 ### P5. A stale catalog entry (moved or deleted directory) is invisible until something tries to use it
