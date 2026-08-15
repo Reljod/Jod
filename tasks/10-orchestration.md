@@ -21,6 +21,12 @@ repeats L1–L6 or R1–R6; several findings corroborate them instead, and say s
 
 ## O1. A work session can never actually write anything — the read-only-root-then-claim-a-worktree design is unreachable
 Status: **open — needs Reljod's decision, deliberately unclaimed** · Severity: critical
+**Still reproduces on main `730e63b`** — a third independent reproduction,
+found incidentally while running L4's check rather than by looking for it. The
+work opened, the session claimed a worktree
+(`worktrees/add-contributing-md-with-prs-wel-1a6da747/`), and the worktree
+contains only `README.md` with its git log still reading `init`. Nothing was
+written and nothing committed, after every fix merged today.
 Verified independently by two further readers. Nobody needs to check it a
 third time — spend the effort on the decision instead.
 
