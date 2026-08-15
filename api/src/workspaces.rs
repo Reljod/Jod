@@ -48,6 +48,7 @@ use jod_core::schedule::{Fire, FireOutcome, Goal, Schedule};
 use jod_core::store::{Edge, MemoryNode, Store};
 use jod_core::team::TeamTask;
 use jod_core::webhook::{Delivery, Rule};
+use jod_core::works::Filter;
 use serde::{Deserialize, Serialize};
 
 use crate::auth::Scope;
@@ -598,6 +599,51 @@ fn fire_needs_you(outcome: FireOutcome) -> bool {
 /// First line, trimmed — a feed row is one line by construction.
 fn one_line(s: &str) -> String {
     s.lines().next().unwrap_or("").trim().to_string()
+}
+
+// ─── fleet ───────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct FleetQuery {
+    /// `live` (the default), `closed` or `all`. Anything else is `live` rather
+    /// than a 400: a filter is a view preference, and refusing to draw the
+    /// screen because a query string was misspelled is the wrong trade.
+    pub filter: Option<String>,
+}
+
+/// The fleet tree: every work, its sessions and their runs, already flattened.
+///
+/// **The same forest the TUI draws.** `Store::forest_of` is one function in
+/// `jod-core`, and this route hands its output over HTTP unchanged — no second
+/// flatten, no API-side notion of what a work is. That is the whole point: the
+/// fleet screen was terminal-only not because a browser could not draw a tree,
+/// but because the tree was never on the wire.
+///
+/// It is a **query against the store**, so it says the same thing whichever
+/// process asks and whoever started the runs. Unlike `/v1/agents` — which is
+/// served from the answering process's own memory — nothing here depends on
+/// this daemon having launched anything.
+pub async fn fleet(
+    State(state): State<AppState>,
+    Extension(identity): Extension<Identity>,
+    Query(q): Query<FleetQuery>,
+) -> ApiResult<impl IntoResponse> {
+    identity.require(Scope::Read)?;
+    let Some(store) = store_of(&state) else {
+        return Ok(Json(Vec::new()));
+    };
+    store.forest_of(filter_of(q.filter.as_deref())).map(Json).map_err(internal)
+}
+
+/// Read a filter off the query string, defaulting rather than refusing.
+///
+/// Split out so the defaulting is pinned by a test without going through HTTP.
+fn filter_of(requested: Option<&str>) -> Filter {
+    match requested {
+        Some("all") => Filter::All,
+        Some("closed") => Filter::Closed,
+        _ => Filter::Live,
+    }
 }
 
 #[cfg(test)]

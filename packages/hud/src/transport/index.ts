@@ -1,6 +1,7 @@
 import type {
   AgentEnvelope,
   AgentSummary,
+  FleetNode,
   HarnessInfo,
   Report,
   SpawnRequest,
@@ -51,6 +52,17 @@ export interface Transport {
   authenticate(token: string): Promise<Scope>;
   harnesses(): Promise<HarnessInfo[]>;
   history(limit: number): Promise<StoredRun[]>;
+  /**
+   * The fleet tree — works, their sessions, and the runs under those.
+   *
+   * A **query**, not a subscription, and deliberately so: the server builds it
+   * from the database rather than from the answering process's memory, which is
+   * why it shows runs this daemon never launched. `/v1/agents` cannot say that.
+   *
+   * Returns `[]` rather than throwing when a driver has no fleet to offer, so a
+   * panel renders "no work yet" instead of an error.
+   */
+  fleet(): Promise<FleetNode[]>;
 }
 
 /**

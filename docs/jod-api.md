@@ -151,6 +151,7 @@ All JSON, all under `/v1`. Errors are
 | `GET` | `/v1/hooks` | `read` | Webhook rules with their deliveries, `?limit=`. |
 | `GET` | `/v1/tasks` | `read` | A team's board, `?team=`. |
 | `GET` | `/v1/activity` | `read` | Fires and goal iterations, `?limit=&needs_you=`. |
+| `GET` | `/v1/fleet` | `read` | The fleet tree, flattened, `?filter=live\|closed\|all`. |
 | `GET` | `/v1/conversations` | `read` | Every conversation, `?limit=`. |
 | `GET` | `/v1/conversations/main` | `read` | The pinned main chat and its thread. |
 | `POST` | `/v1/conversations/main/messages` | `write` | Give the main chat an instruction. |
@@ -467,11 +468,50 @@ max_concurrent_agents = 8       # JOD_API_MAX_AGENTS
 allowed_cwd = ["/home/jod/work"] # JOD_API_ALLOWED_CWD (colon-separated)
 max_body_bytes = 262144         # JOD_API_MAX_BODY
 session_ttl_hours = 168         # JOD_API_SESSION_TTL_HOURS
+discover_secs = 2               # JOD_API_DISCOVER_SECS — 0 turns it off
 ```
 
 An empty `allowed_cwd` means **deny every spawn**, not "allow everything".
 Failing closed on an unset security control is the only safe default; the
 opposite turns a forgotten config line into an open shell.
+
+### `/v1/fleet` — the tree, not the roster
+
+`/v1/agents` is a flat list built from the answering process's memory.
+`/v1/fleet` is the **work → session → run tree**, built by `Store::forest_of`
+in `jod-core` — the same function `jod tui`'s fleet screen renders, serialised
+and handed over unchanged. There is no second flatten on the API side and none
+in the browser; `depth` arrives with the rows and the client only indents.
+
+Two consequences worth stating, because they are the reason the route exists:
+
+- **It is a query against the database**, so it answers the same way whichever
+  process asks and whoever started the runs. A run spawned from `jod tui`
+  appears here immediately, with no discovery interval involved.
+- **A client that draws it is drawing the TUI's screen**, so the two cannot
+  drift. That was the whole gap: the fleet was terminal-only not because a
+  browser could not draw a tree, but because the tree was never on the wire.
+
+### Runs this daemon did not launch
+
+Jod is not one process. `jod tui`, `jod run` and this daemon each build their
+own `service::Jod` over the same `jod.db`, and a run's events go only to the
+broadcast channel of the process that launched it. So a daemon that read the
+store once at boot is frozen: a run started from the TUI a minute later is
+absent from `/v1/agents` and silent on `/v1/events`, and a client renders an
+idle fleet while a harness works. Nothing is dropped — the daemon is never told.
+
+`discover_secs` is the telling. Every interval the daemon rescans the store,
+adopts any run it does not already hold, and attaches a follower to the ones
+still alive; the follower polls the shared database, so it works for a run this
+process holds no handle to. A run already held is skipped before its events are
+read, so the steady-state cost is one indexed query.
+
+It is therefore the delay a person sees between starting a run and watching it
+move, and is set by patience rather than by load. `0` turns discovery off, which
+leaves the daemon showing only the runs it launched itself and those that
+existed at boot — the old behaviour, and worth keeping only if something else
+guarantees this process is the only one spawning.
 
 ### Embedding the router in another process
 

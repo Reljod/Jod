@@ -51,7 +51,12 @@ impl NodeId {
 }
 
 /// One row, already flattened for rendering.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Serialize` so the HTTP API can hand the *same* forest to a browser that the
+/// TUI draws in a terminal. Not `Deserialize`: nothing reads a forest back in,
+/// and a client that could would be tempted to hold one as state it owns — a
+/// forest is a query result, stale the moment it is kept.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Node {
     pub id: NodeId,
     pub parent: Option<NodeId>,

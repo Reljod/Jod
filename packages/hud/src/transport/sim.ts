@@ -3,6 +3,8 @@ import type {
   AgentEvent,
   AgentStatus,
   AgentSummary,
+  FleetNode,
+  FleetNodeId,
   HarnessInfo,
   HarnessKind,
   Report,
@@ -454,6 +456,59 @@ export class SimTransport implements Transport {
       { id: "open_code", label: "OpenCode", available: true, path: "/usr/local/bin/opencode" },
       { id: "agy", label: "AGY", available: true, path: "/usr/local/bin/agy" },
     ];
+  }
+
+  /**
+   * A fleet tree over the simulated agents.
+   *
+   * The real forest groups runs under the *work* and the *conversation* that
+   * own them; the simulation has neither, so it groups by working directory —
+   * which is the one grouping its blueprints actually express, and it exercises
+   * the same nesting the panel has to draw. It is not pretending to be the real
+   * shape, only to be a shape with more than one level in it.
+   */
+  async fleet(): Promise<FleetNode[]> {
+    const byCwd = new Map<string, AgentSummary[]>();
+    for (const a of this.agents.values()) {
+      const bucket = byCwd.get(a.cwd);
+      if (bucket) bucket.push(a);
+      else byCwd.set(a.cwd, [a]);
+    }
+
+    const nodes: FleetNode[] = [];
+    for (const [cwd, agents] of byCwd) {
+      const work: FleetNodeId = { kind_tag: "work", id: cwd };
+      const running = agents.filter((a) => a.status === "running").length;
+      nodes.push({
+        id: work,
+        parent: null,
+        kind: "work",
+        depth: 0,
+        label: cwd.split("/").filter(Boolean).pop() ?? cwd,
+        summary: `${agents.length} run(s)`,
+        running: running > 0,
+        cards: 0,
+        blocked: 0,
+        colour: "cyan",
+        has_children: true,
+      });
+      for (const a of agents) {
+        nodes.push({
+          id: { kind_tag: "run", id: a.id },
+          parent: work,
+          kind: "run",
+          depth: 1,
+          label: a.name,
+          summary: a.last_message ?? "",
+          running: a.status === "running",
+          cards: 0,
+          blocked: 0,
+          colour: "cyan",
+          has_children: false,
+        });
+      }
+    }
+    return nodes;
   }
 
   async history(limit: number): Promise<StoredRun[]> {

@@ -444,8 +444,112 @@ async fn every_workspace_route_is_satisfied_by_a_read_token() {
         "/v1/hooks",
         "/v1/tasks",
         "/v1/activity",
+        "/v1/fleet",
     ] {
         let (status, _) = get_json(&h, path).await;
         assert_eq!(status, StatusCode::OK, "{path} refused a read token");
+    }
+}
+
+// ─── fleet ───────────────────────────────────────────────────────────────────
+
+/// Seed the shape the fleet screen exists to draw: a work, a session under it,
+/// and a run under that.
+fn seed_fleet(store: &Store) {
+    let work = store.create_work("port the parser").unwrap();
+    store.set_work_title(&work.id, "the parser").unwrap();
+    let c = store
+        .new_conversation(jod_core::HarnessKind::ClaudeCode, "/tmp", None)
+        .unwrap();
+    store.set_conversation_title(&c.id, "lead").unwrap();
+    store
+        .attach_conversation(&c.id, &work.id, None, jod_core::works::Origin::Agent)
+        .unwrap();
+    store
+        .save_run(&jod_core::store::StoredRun {
+            id: "run-1".into(),
+            name: "run 1".into(),
+            harness: "claude_code".into(),
+            status: "running".into(),
+            cwd: "/tmp".into(),
+            session_id: None,
+            pid: None,
+            pgid: None,
+            created_at_ms: 1,
+            summary: serde_json::json!({}),
+        })
+        .unwrap();
+    store
+        .append_message(
+            &c.id,
+            jod_core::conversation::NewMessage::new(
+                jod_core::conversation::Role::Assistant,
+                "on it",
+            )
+            .from_run("run-1"),
+        )
+        .unwrap();
+}
+
+/// The tree the TUI draws, over HTTP. Depth and order are the whole payload —
+/// a flat list of the same rows would render as a list, not a fleet.
+#[tokio::test]
+async fn the_fleet_route_returns_the_work_session_run_tree() {
+    let h = harness_with(seed_fleet);
+    let (status, body) = get_json(&h, "/v1/fleet").await;
+    assert_eq!(status, StatusCode::OK);
+
+    let rows = body.as_array().unwrap();
+    assert_eq!(rows.len(), 3, "work, session and run");
+    assert_eq!(rows[0]["kind"], "work");
+    assert_eq!(rows[0]["depth"], 0);
+    assert_eq!(rows[1]["kind"], "session");
+    assert_eq!(rows[1]["depth"], 1);
+    assert_eq!(rows[2]["kind"], "run");
+    assert_eq!(rows[2]["depth"], 2);
+}
+
+/// Every field the browser panel draws has to survive the wire. If one is
+/// dropped from `tree::Node`'s `Serialize`, the web fleet loses a column and
+/// nothing else in the suite notices.
+#[tokio::test]
+async fn a_fleet_row_carries_what_a_client_needs_to_draw_it() {
+    let h = harness_with(seed_fleet);
+    let (_, body) = get_json(&h, "/v1/fleet").await;
+    let work = &body.as_array().unwrap()[0];
+
+    for field in [
+        "id", "parent", "kind", "depth", "label", "summary", "running", "cards", "blocked",
+        "colour", "has_children",
+    ] {
+        assert!(!work[field].is_null() || field == "parent", "{field} was missing");
+    }
+    assert_eq!(work["id"]["kind_tag"], "work");
+    assert!(work["label"].as_str().unwrap().contains("parser"));
+}
+
+/// An empty store draws "no work yet", not an error banner — the rule the rest
+/// of this module already follows.
+#[tokio::test]
+async fn an_empty_fleet_is_an_empty_list_rather_than_an_error() {
+    let h = harness_with(|_| {});
+    let (status, body) = get_json(&h, "/v1/fleet").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body.as_array().unwrap().len(), 0);
+}
+
+/// A misspelled filter draws the default screen rather than refusing to draw
+/// one. `?filter=all` is the spelling that also returns closed work.
+#[tokio::test]
+async fn an_unknown_filter_falls_back_to_the_live_view() {
+    let h = harness_with(seed_fleet);
+    for query in ["", "?filter=live", "?filter=nonsense", "?filter=all"] {
+        let (status, body) = get_json(&h, &format!("/v1/fleet{query}")).await;
+        assert_eq!(status, StatusCode::OK, "/v1/fleet{query}");
+        assert_eq!(
+            body.as_array().unwrap().len(),
+            3,
+            "/v1/fleet{query} did not draw the open work"
+        );
     }
 }
