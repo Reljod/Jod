@@ -162,6 +162,12 @@ impl Store {
     /// the behaviour every caller wants: the picker cannot know whether you
     /// have added this directory before, and E4 flips an existing read-only
     /// root to writable by adding it again as a lease.
+    ///
+    /// A re-add can widen what a root allows and never narrows it. Adding a
+    /// directory again as a lease makes it writable, and adding one again as
+    /// reading leaves a write it already had alone. Taking a write back is
+    /// [`Store::set_root_writable`]'s job, where it is the thing the caller
+    /// asked for rather than a side effect of an add that reported success.
     pub fn add_root(&self, conversation_id: &str, new: NewRoot) -> Result<Root> {
         let path = normalise(&new.path);
         let text = path.to_string_lossy().to_string();
@@ -181,8 +187,35 @@ impl Store {
                    (conversation_id, path, writable, position, origin, added_at_ms)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)
                  ON CONFLICT(conversation_id, path) DO UPDATE SET
-                   writable = excluded.writable,
-                   origin   = excluded.origin",
+                   -- Asymmetric on purpose, and the asymmetry is the whole
+                   -- point. Re-adding as a lease is how a read-only root
+                   -- becomes writable, so an incoming write has to win. A
+                   -- read-only re-add comes from callers that cannot know what
+                   -- the conversation already holds — the picker, `jod root
+                   -- add`, a command granting the directory it was run in — so
+                   -- it must not win: it would take a claimed worktree's write
+                   -- away and report success. Keeping whichever of the two is
+                   -- writable is both rules at once.
+                   --
+                   -- Not COALESCE, which is what guards `remote` in the
+                   -- neighbouring `add_project` upsert. That works there
+                   -- because `remote` can be NULL. `writable` is 0 or 1 and
+                   -- never NULL, so COALESCE would take the incoming value
+                   -- every time while reading exactly like a guard that had
+                   -- stopped it.
+                   writable = CASE WHEN conversation_roots.writable = 1
+                                   THEN 1
+                                   ELSE excluded.writable END,
+                   -- The origin is how the UI explains a root nobody remembers
+                   -- adding, so it follows the write rather than outliving it.
+                   -- A row that kept a lease's write and started calling itself
+                   -- `human` would describe a hand-added directory that is
+                   -- somehow writable, which is the one thing `Origin` says
+                   -- cannot happen.
+                   origin   = CASE WHEN conversation_roots.writable = 1
+                                        AND excluded.writable = 0
+                                   THEN conversation_roots.origin
+                                   ELSE excluded.origin END",
                 params![
                     conversation_id,
                     text,
@@ -422,6 +455,37 @@ mod tests {
             again.position, 0,
             "re-adding must not move a root to the end of the user's order"
         );
+    }
+
+    /// The other direction of the same re-add, and the one nobody meant. A
+    /// session that has claimed a worktree holds it as a writable lease, and
+    /// every caller that adds a root without first checking what is there
+    /// adds it as reading — the picker, `jod root add`, `jod main` granting
+    /// the directory it was run in. If that re-add took the write away, the
+    /// session would lose the one place it may write and be told the add
+    /// succeeded.
+    #[test]
+    fn adding_a_leased_root_again_as_reading_keeps_its_write() {
+        let s = store();
+        let c = conversation(&s, "/tmp");
+        s.add_root(&c, NewRoot::lease("/tmp/wt")).unwrap();
+
+        let again = s.add_root(&c, NewRoot::reading("/tmp/wt")).unwrap();
+
+        assert!(
+            again.writable,
+            "adding a leased worktree again as reading revoked its write, and \
+             said the add had succeeded"
+        );
+        assert_eq!(
+            again.origin,
+            Origin::Lease,
+            "the root kept its write but stopped saying where the write came \
+             from"
+        );
+        let stored = &s.roots(&c).unwrap()[0];
+        assert!(stored.writable, "the stored row lost the write");
+        assert_eq!(stored.origin, Origin::Lease);
     }
 
     #[test]

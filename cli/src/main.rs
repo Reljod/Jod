@@ -4389,13 +4389,18 @@ fn console_cwd(given: Option<PathBuf>) -> PathBuf {
 /// **Skipped when the directory is already a root, which is the one place this
 /// differs from the console's version.** The console grants once per process
 /// and holds a set to remember it; a `jod main` is one command, so every
-/// invocation is a launch and there is nothing to remember. Left unguarded,
-/// running it twice inside a worktree the chat had claimed would re-add that
-/// directory as reading and quietly take the write back —
-/// [`jod_core::store::Store::add_root`] updates `writable` and `origin` in
-/// place. Removal still behaves as it does in the console: `jod root remove`
-/// takes the directory away, and the next launch — here, the next command —
-/// grants it again.
+/// invocation is a launch and there is nothing to remember.
+///
+/// This guard is no longer what protects a claimed worktree's write.
+/// [`jod_core::store::Store::add_root`] now keeps a write that a re-add did not
+/// ask for, so running `jod main` twice inside a worktree the chat had claimed
+/// would be harmless even without the check here. It stays because the two
+/// still differ on one thing: a re-add relabels a read-only root's `origin` as
+/// `human`, and a directory that arrived as the conversation's own `cwd` should
+/// go on saying so. Skipping the write entirely is the cheapest way to leave a
+/// row that is already right exactly as it is. Removal still behaves as it does
+/// in the console: `jod root remove` takes the directory away, and the next
+/// launch — here, the next command — grants it again.
 fn grant_launch_root(store: &Store, conversation: &str, cwd: &std::path::Path) {
     // Nowhere to grant. `console_cwd` only returns this if `$HOME` is unset and
     // the working directory is gone, and an empty path reads as `/` to anything

@@ -200,7 +200,7 @@ Fix: add the subcommand, printing the conversation's current project and how it
 was resolved. `project_resolutions` already records the how.
 
 ## L7. Re-adding a root you already hold silently takes write access away
-Status: open · Owner: — · Severity: high
+Status: **fix open as #155** · Owner: — · Severity: high
 
 `Store::add_root` (`core/src/roots.rs:179`) upserts:
 
