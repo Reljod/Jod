@@ -1334,6 +1334,27 @@ const MIGRATIONS: &[(&str, &str)] = &[
     );
     "#,
     ),
+    (
+    "0018_schedules_settle_their_runs",
+    r#"
+    -- How far a schedule's failure count has read its own history.
+    --
+    -- A scheduled run fails *after* the tick that started it has let the
+    -- schedule go — the process starts fine and the harness inside it dies a
+    -- second later — so the count has to be brought up to date by a later
+    -- tick. This is what stops the same failed run being counted again on
+    -- every tick after it: it holds the id of the last `schedule_fires` row
+    -- already accounted for. See `Store::release_schedule`.
+    ALTER TABLE schedules ADD COLUMN settled_fire_id INTEGER NOT NULL DEFAULT 0;
+
+    -- Existing schedules start from where they are rather than from the
+    -- beginning. Reading a year of history on the first tick after an upgrade
+    -- would judge a schedule on runs whose failures nobody is going to act on
+    -- now, and could break it before it had a chance to fail again.
+    UPDATE schedules SET settled_fire_id = COALESCE(
+      (SELECT MAX(id) FROM schedule_fires WHERE schedule_id = schedules.id), 0);
+    "#,
+    ),
 ];
 
 /// Who asserted a fact. Kept out of the fact's text so that content Jod
@@ -2499,16 +2520,64 @@ impl Store {
     /// count drives a backoff and, past [`BREAK_AFTER_FAILURES`], stops the
     /// schedule outright. Broken is its own state rather than paused, because
     /// it says why it stopped and resuming it is a different decision.
-    pub fn release_schedule(&self, id: &str, at_ms: i64, failed: bool) -> Result<()> {
-        let (cron, timezone, failures) = {
+    ///
+    /// **`spawn_failed` is only half of what failure means, which is why this
+    /// also reads the runs.** It says the tick could not start a process at
+    /// all — a missing harness binary, a write that would not go through — and
+    /// that is the rarer half. The common half is a run that started perfectly
+    /// well and whose harness then died, which the supervisor writes into the
+    /// run's own status a moment after the tick has already let the schedule
+    /// go. So each release settles the runs started since the last one, using
+    /// [`crate::schedule::settle`], and `settled_fire_id` remembers how far it
+    /// got so no failure is counted twice. It costs one tick of lag: the run
+    /// this tick starts is judged by the next.
+    pub fn release_schedule(&self, id: &str, at_ms: i64, spawn_failed: bool) -> Result<()> {
+        let (cron, timezone, failures, settled_fire_id) = {
             let conn = self.conn.lock().expect("store lock poisoned");
             conn.query_row(
-                "SELECT cron, timezone, consecutive_failures FROM schedules WHERE id = ?1",
+                "SELECT cron, timezone, consecutive_failures, settled_fire_id
+                   FROM schedules WHERE id = ?1",
                 params![id],
-                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?)),
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, i64>(2)?,
+                        r.get::<_, i64>(3)?,
+                    ))
+                },
             )?
         };
-        let failures = if failed { failures + 1 } else { 0 };
+
+        // Every run this schedule has started and not yet been judged on,
+        // oldest first, with how it ended. A left join because a run row can be
+        // deleted from under its fire, and a fire whose run is gone must not
+        // stop the accounting for ever.
+        let started: Vec<(i64, String)> = {
+            let conn = self.conn.lock().expect("store lock poisoned");
+            let mut stmt = conn.prepare(
+                "SELECT f.id, COALESCE(r.status, '')
+                   FROM schedule_fires f LEFT JOIN runs r ON r.id = f.run_id
+                  WHERE f.schedule_id = ?1 AND f.run_id IS NOT NULL AND f.id > ?2
+                  ORDER BY f.id",
+            )?;
+            let rows = stmt.query_map(params![id, settled_fire_id], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+            })?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()?
+        };
+
+        let ended: Vec<&str> = started.iter().map(|(_, status)| status.as_str()).collect();
+        let settlement = crate::schedule::settle(failures, &ended, spawn_failed);
+        let failures = settlement.failures;
+        // The last fire this release could judge. Runs after it had not
+        // finished, so they wait for a later tick.
+        let read_up_to = settlement
+            .settled
+            .checked_sub(1)
+            .and_then(|last| started.get(last))
+            .map(|(fire_id, _)| *fire_id)
+            .unwrap_or(settled_fire_id);
         let broken = failures >= crate::schedule::BREAK_AFTER_FAILURES;
         // A failing schedule waits longer each time before trying again,
         // rather than retrying at its ordinary cadence for ever.
@@ -2521,9 +2590,10 @@ impl Store {
                     SET claimed_by = NULL, lease_until_ms = NULL,
                         last_fire_at_ms = ?2, next_fire_at_ms = ?3,
                         consecutive_failures = ?4,
+                        settled_fire_id = ?6,
                         state = CASE WHEN ?5 THEN 'broken' ELSE state END
                   WHERE id = ?1",
-                params![id, at_ms, next, failures, broken],
+                params![id, at_ms, next, failures, broken, read_up_to],
             )?;
             Ok(())
         })
