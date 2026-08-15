@@ -163,14 +163,20 @@ pub fn catalogue() -> Vec<Tool> {
         Tool {
             name: "list_agents",
             description:
-                "Every agent Jod knows about, running or finished, each with its last message. \
-                 Check this before delegating: continuing a warm agent that already has the \
-                 context beats starting a cold one that has to rediscover it.",
+                "One page of the agents Jod knows about, running or finished, each with its \
+                 last message. Running ones come first, then the newest. The reply says how \
+                 many exist in `total` and how many the page left out in `hidden`; if `hidden` \
+                 is above zero, ask again with a bigger `limit` to see the rest. Check this \
+                 before delegating: continuing a warm agent that already has the context beats \
+                 starting a cold one that has to rediscover it.",
             needs: ToolAccess::ReadOnly,
             schema: obj(
                 json!({
                     "running_only": { "type": "boolean", "description": "Only agents still working." },
-                    "limit": int("How many to return. Default 20.")
+                    "limit": int(
+                        "How many agents to return. Default 20. Running agents are listed \
+                         first, so a small limit drops finished ones before running ones."
+                    )
                 }),
                 &[],
             ),
@@ -965,13 +971,20 @@ impl Server {
     // ---- agents ---------------------------------------------------------
 
     async fn list_agents(&self, args: &Value) -> Result<String, ToolError> {
-        // A fresh process knows nothing until it reads the database back.
-        self.jod
-            .rehydrate(REHYDRATE)
-            .await
-            .map_err(|e| ToolError::Refused(format!("could not read the runs: {e}")))?;
         let running_only = opt_bool(args, "running_only").unwrap_or(false);
         let limit = opt_usize(args, "limit")?.unwrap_or(20);
+
+        // A fresh process knows nothing until it reads the database back, and
+        // it has to read back at least as far as it has been asked to return —
+        // the sum `jod ls` does at `cli/src/main.rs`. Reading a fixed few
+        // hundred rows while the caller asked for a thousand is what made
+        // "call again with a bigger limit" useless: an agent started before the
+        // newest few hundred runs never entered memory, so no limit could
+        // reach it.
+        self.jod
+            .rehydrate(REHYDRATE.max(limit))
+            .await
+            .map_err(|e| ToolError::Refused(format!("could not read the runs: {e}")))?;
 
         let mut agents = self.jod.agents().await;
         // Running first, then newest — the order the "can I reuse one" question
@@ -982,6 +995,10 @@ impl Server {
                 .cmp(&live(a.status))
                 .then(b.created_at_ms.cmp(&a.created_at_ms))
         });
+        let matching = agents
+            .iter()
+            .filter(|a| !running_only || a.status == AgentStatus::Running)
+            .count();
         let views: Vec<AgentView> = agents
             .iter()
             .filter(|a| !running_only || a.status == AgentStatus::Running)
@@ -999,7 +1016,31 @@ impl Server {
                 last_message: a.last_message.as_deref(),
             })
             .collect();
-        as_json(&views)
+
+        // How many there were to choose from. The database is the authority on
+        // that — this process only ever reads back the newest few hundred runs,
+        // so counting what it holds would understate a busy box — but it can
+        // only count rows, not the ones a filter kept. So a filtered call
+        // reports what it matched, and an unfiltered one takes whichever of the
+        // two numbers is larger. The same reasoning `jod ls` uses at
+        // `cli/src/main.rs`, where it is `run_count()?.max(known)`.
+        let total = match running_only {
+            true => matching,
+            false => self.jod.run_count().unwrap_or(matching).max(matching),
+        };
+        let hidden = total.saturating_sub(views.len());
+        as_json(&AgentPage {
+            returned: views.len(),
+            agents: views,
+            total,
+            hidden,
+            // Spelled out as well as counted. The caller is a model deciding
+            // whether it has seen every agent it might reuse, and a bare number
+            // does not say what to do about it.
+            note: (hidden > 0).then(|| {
+                format!("{hidden} older hidden — call list_agents again with a bigger `limit`")
+            }),
+        })
     }
 
     async fn delegate(&self, args: &Value) -> Result<String, ToolError> {
@@ -2798,6 +2839,29 @@ fn refusal_text(e: &ToolError) -> String {
     }
 }
 
+/// One page of `list_agents`, with the arithmetic that makes it readable as a
+/// page rather than as the whole truth.
+///
+/// A bare array cannot say that it was cut, and the caller here is a model
+/// deciding whether to reuse an agent or start a new one. Told twenty agents
+/// and nothing else, it has no way to tell a quiet box from a busy one, and no
+/// reason to ask again. `jod ls` has always printed the same thing for a person
+/// — "{hidden} older hidden" — so this is that line, in fields.
+#[derive(Serialize)]
+struct AgentPage<'a> {
+    agents: Vec<AgentView<'a>>,
+    /// How many are on this page.
+    returned: usize,
+    /// How many there were to page through.
+    total: usize,
+    /// How many `limit` left out. Zero when the page is everything.
+    hidden: usize,
+    /// What to do about `hidden`, when there is anything to do. Absent
+    /// otherwise, so its presence alone is the signal.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    note: Option<String>,
+}
+
 /// One agent, trimmed to what the decision needs.
 ///
 /// Not [`crate::AgentSummary`] itself: that carries pids, a process-alive probe
@@ -3703,10 +3767,155 @@ mod tests {
         assert_eq!(error_code(&answer), INVALID_PARAMS);
     }
 
+    /// A server over a store already holding runs, so a listing can be asked
+    /// about a box with a history rather than one that has launched nothing.
+    ///
+    /// Each entry of `spec` is a name prefix, how many runs to write under it,
+    /// and the status they carry. Runs are written oldest first, in the order
+    /// given. A running run is given this test process's own group id, because
+    /// `rehydrate` demotes a run that claims to be running while its process
+    /// group is gone — without a live group every seeded agent would come back
+    /// `failed` and the ordering under test would never be exercised.
+    fn server_with_runs(spec: &[(&str, usize, &str)]) -> Server {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let alive_group = std::process::id();
+        let mut created_at_ms = 0i64;
+        for (prefix, count, status) in spec {
+            for n in 0..*count {
+                let id = format!("{prefix}-{n:03}");
+                let summary = crate::service::AgentSummary {
+                    id: id.clone(),
+                    name: id.clone(),
+                    harness: HarnessKind::ClaudeCode,
+                    harness_label: "Claude Code".into(),
+                    status: AgentStatus::parse(status).expect("a status the test spelled right"),
+                    cwd: "/tmp".into(),
+                    model: None,
+                    permission: PermissionPolicy::default(),
+                    pid: None,
+                    pgid: None,
+                    process_alive: false,
+                    watch_command: String::new(),
+                    created_at_ms,
+                    session_id: None,
+                    usage: Default::default(),
+                    event_count: 0,
+                    last_message: None,
+                };
+                store
+                    .save_run(&crate::store::StoredRun {
+                        id: id.clone(),
+                        name: id,
+                        harness: "claude_code".into(),
+                        status: (*status).to_string(),
+                        cwd: "/tmp".into(),
+                        session_id: None,
+                        pid: Some(alive_group),
+                        pgid: Some(alive_group),
+                        created_at_ms,
+                        summary: serde_json::to_value(&summary).unwrap(),
+                    })
+                    .unwrap();
+                created_at_ms += 1;
+            }
+        }
+        Server::new(Jod::with_store(store)).with_access(ToolAccess::ReadOnly)
+    }
+
+    /// The parsed reply of one `list_agents` call.
+    async fn listing(server: &Server, args: Value) -> Value {
+        serde_json::from_str(&said(&call(server, "list_agents", args).await))
+            .expect("list_agents answers with JSON")
+    }
+
+    /// The run ids in a listing, in the order they were returned.
+    fn listed_ids(page: &Value) -> Vec<String> {
+        page["agents"]
+            .as_array()
+            .expect("a listing carries an `agents` array")
+            .iter()
+            .map(|a| a["run_id"].as_str().unwrap().to_string())
+            .collect()
+    }
+
     #[tokio::test]
-    async fn listing_agents_on_a_jod_that_has_launched_nothing_is_an_empty_list() {
-        let said = said(&call(&server(ToolAccess::ReadOnly), "list_agents", json!({})).await);
-        assert_eq!(said.trim(), "[]");
+    async fn listing_agents_on_a_jod_that_has_launched_nothing_returns_no_agents() {
+        let page = listing(&server(ToolAccess::ReadOnly), json!({})).await;
+        assert_eq!(page["agents"], json!([]));
+        assert_eq!(page["total"], 0);
+        assert_eq!(page["hidden"], 0);
+        assert!(
+            page["note"].is_null(),
+            "nothing was left out, so nothing should be said about it: {page}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_listing_says_how_many_agents_the_limit_left_out() {
+        let server = server_with_runs(&[("done", 25, "completed")]);
+        let page = listing(&server, json!({})).await;
+        assert_eq!(page["returned"], 20, "the default limit still caps the page");
+        assert_eq!(page["total"], 25, "every run on the box is counted");
+        assert_eq!(page["hidden"], 5, "five runs did not fit and must be owned up to");
+        let note = page["note"].as_str().unwrap_or_default();
+        assert!(
+            note.contains('5'),
+            "a caller that only reads the note must still learn five were hidden: {note:?}"
+        );
+        assert!(
+            note.contains("limit"),
+            "the note has to name the way out, which is a bigger `limit`: {note:?}"
+        );
+    }
+
+    /// The truncation does not bite where it looks like it should. Running
+    /// agents sort ahead of finished ones, so the three oldest runs on a busy
+    /// box still lead the page as long as they are the only ones running. What
+    /// the cap actually drops is the oldest *finished* agents.
+    #[tokio::test]
+    async fn running_agents_keep_their_place_on_the_page_however_old_they_are() {
+        let server = server_with_runs(&[("live", 3, "running"), ("done", 97, "completed")]);
+        let page = listing(&server, json!({})).await;
+        assert_eq!(
+            listed_ids(&page)[..3],
+            ["live-002", "live-001", "live-000"].map(String::from)[..3],
+            "the oldest three runs are the running ones and must lead, newest of them first: \
+             {page}"
+        );
+        assert_eq!(page["hidden"], 80, "the eighty oldest finished runs were dropped");
+    }
+
+    /// The case the cap genuinely hides a running agent in: more agents running
+    /// at once than the limit returns.
+    #[tokio::test]
+    async fn a_running_agent_is_only_dropped_when_more_are_running_than_fit() {
+        let server = server_with_runs(&[("live", 21, "running")]);
+        let page = listing(&server, json!({})).await;
+        let ids = listed_ids(&page);
+        assert_eq!(ids.len(), 20);
+        assert!(
+            !ids.iter().any(|id| id == "live-000"),
+            "the oldest of twenty-one running agents is the one that falls off: {ids:?}"
+        );
+        assert_eq!(page["hidden"], 1);
+    }
+
+    /// A bigger `limit` has to actually reach further back. The listing reads
+    /// runs out of the database before it pages them, and reading back a fixed
+    /// few hundred while the caller asked for more meant an older agent stayed
+    /// invisible at every limit — the note would have pointed at a way out that
+    /// did not work.
+    #[tokio::test]
+    async fn a_bigger_limit_reaches_agents_older_than_the_default_read_back() {
+        let server = server_with_runs(&[("live", 3, "running"), ("done", 202, "completed")]);
+        let page = listing(&server, json!({ "limit": 1000 })).await;
+        let ids = listed_ids(&page);
+        assert_eq!(ids.len(), 205, "asking for everything must return everything");
+        assert!(
+            ids.iter().any(|id| id == "live-000"),
+            "the oldest running agent is exactly the one worth finding"
+        );
+        assert_eq!(page["hidden"], 0, "nothing was left out, so nothing is claimed to be");
     }
 
     #[tokio::test]
