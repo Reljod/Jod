@@ -425,9 +425,19 @@ impl Store {
     /// Put a repository in the catalog, or update the entry already there.
     ///
     /// Adding a path twice is not an error and does not duplicate it — the
-    /// same call is how you rename a project or extend its alias set, which is
-    /// what every caller wants: the picker cannot know whether this directory
-    /// has been added before, and neither can a voice instruction.
+    /// same call is how you rename a project or give it a new alias set, which
+    /// is what every caller wants: the picker cannot know whether this
+    /// directory has been added before, and neither can a voice instruction.
+    /// The path is canonicalised first, so a symlink into a directory already
+    /// in the catalog updates that entry rather than adding a second one.
+    ///
+    /// A field the second call leaves empty is left alone rather than emptied.
+    /// Passing aliases replaces the alias set and passing notes replaces the
+    /// notes, but passing neither keeps both, because renaming a project must
+    /// not quietly delete what somebody typed. An empty value carries no way
+    /// to tell "I did not mention this" apart from "I want this gone", and of
+    /// the two readings only one is safe. Clearing an alias set or a note is
+    /// therefore a thing to ask for through its own flag.
     ///
     /// `last_touched_ms` is deliberately *not* refreshed on a repeat add.
     /// Editing a catalog entry is not working in the repository, and letting
@@ -468,8 +478,23 @@ impl Store {
                  ON CONFLICT(path) DO UPDATE SET
                    name    = excluded.name,
                    remote  = COALESCE(excluded.remote, projects.remote),
-                   aliases = excluded.aliases,
-                   notes   = excluded.notes",
+                   -- An empty incoming value means the caller did not mention
+                   -- this field, not that they want it cleared. The COALESCE
+                   -- on remote one line up is the same rule for a column that
+                   -- can be NULL. These two default to an empty list and an
+                   -- empty string instead, so the comparison has to be spelled
+                   -- out. Without it, adding a path a second time just to
+                   -- rename it deletes the aliases and the notes somebody
+                   -- typed, silently and with no way to get them back.
+                   -- Clearing either one is something to ask for on purpose
+                   -- through its own flag, never a side effect of a rename, so
+                   -- please do not simplify these back into plain assignments.
+                   aliases = CASE WHEN excluded.aliases IN ('[]', '')
+                                  THEN projects.aliases
+                                  ELSE excluded.aliases END,
+                   notes   = CASE WHEN excluded.notes = ''
+                                  THEN projects.notes
+                                  ELSE excluded.notes END",
                 params![
                     uuid::Uuid::new_v4().to_string(),
                     name,
@@ -901,6 +926,121 @@ mod tests {
         let all = store.projects(false).unwrap();
         assert_eq!(all.len(), 1, "the same checkout became two rows");
         assert_eq!(all[0].name, "Alpha Prime");
+    }
+
+    /// A real directory to hang a symlink off, because `normalise`
+    /// canonicalises and a link that points nowhere resolves to itself.
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("jod-projects-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        normalise(&dir)
+    }
+
+    /// Renaming a project is the ordinary reason to add its path a second
+    /// time, and the second call has no idea what the first one recorded. If
+    /// an unmentioned field counted as an instruction to empty it, every
+    /// rename would quietly destroy an alias set and a note somebody typed.
+    #[test]
+    fn re_adding_a_path_to_rename_it_keeps_its_aliases_and_notes() {
+        let store = Store::in_memory().unwrap();
+        store
+            .add_project(
+                NewProject::at("/tmp/alpha")
+                    .named("alpha")
+                    .with_aliases(vec!["the game".into()])
+                    .with_notes("test project alpha"),
+            )
+            .unwrap();
+
+        let again = store
+            .add_project(NewProject::at("/tmp/alpha").named("Alpha Prime"))
+            .unwrap();
+
+        assert_eq!(again.name, "Alpha Prime", "the rename did not take");
+        assert_eq!(
+            again.aliases,
+            vec!["the game".to_string()],
+            "a rename wiped an alias set the second call never mentioned"
+        );
+        assert_eq!(
+            again.notes, "test project alpha",
+            "a rename wiped notes the second call never mentioned"
+        );
+    }
+
+    /// The second route into the same wipe. `normalise` canonicalises before
+    /// the insert, so adding a symlink to a directory already in the catalog
+    /// lands on the very same `ON CONFLICT(path)` branch as adding the real
+    /// directory again. Fixing only the direct route would leave this one
+    /// destroying data exactly as before.
+    #[cfg(unix)]
+    #[test]
+    fn adding_a_symlink_to_a_catalogued_directory_keeps_its_aliases_and_notes() {
+        let dir = scratch("symlink-add");
+        let real = dir.join("beta");
+        let link = dir.join("beta-link");
+        std::fs::create_dir_all(&real).unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        let store = Store::in_memory().unwrap();
+        store
+            .add_project(
+                NewProject::at(&real)
+                    .named("beta")
+                    .with_aliases(vec!["the sequel".into()])
+                    .with_notes("test project beta"),
+            )
+            .unwrap();
+
+        let again = store
+            .add_project(NewProject::at(&link).named("Beta Via Link"))
+            .unwrap();
+
+        assert_eq!(
+            store.projects(false).unwrap().len(),
+            1,
+            "the symlink became a second row, so this was never the same entry"
+        );
+        assert_eq!(again.path, real, "the symlink was stored unresolved");
+        assert_eq!(again.name, "Beta Via Link", "the rename did not take");
+        assert_eq!(
+            again.aliases,
+            vec!["the sequel".to_string()],
+            "adding a symlink wiped the alias set of the directory it points at"
+        );
+        assert_eq!(
+            again.notes, "test project beta",
+            "adding a symlink wiped the notes of the directory it points at"
+        );
+    }
+
+    /// The other half of the rule: an empty value is ignored, but a value that
+    /// is actually there still replaces what was recorded before. Otherwise
+    /// correcting a typo in a note would be impossible.
+    #[test]
+    fn re_adding_a_path_with_new_aliases_and_notes_replaces_the_old_ones() {
+        let store = Store::in_memory().unwrap();
+        store
+            .add_project(
+                NewProject::at("/tmp/alpha")
+                    .named("alpha")
+                    .with_aliases(vec!["the game".into()])
+                    .with_notes("first note"),
+            )
+            .unwrap();
+
+        let again = store
+            .add_project(
+                NewProject::at("/tmp/alpha")
+                    .named("alpha")
+                    .with_aliases(vec!["the second alias".into()])
+                    .with_notes("second note"),
+            )
+            .unwrap();
+
+        assert_eq!(again.aliases, vec!["the second alias".to_string()]);
+        assert_eq!(again.notes, "second note");
     }
 
     /// `last_touched_ms` is the tiebreak inference leans on, so editing a row
