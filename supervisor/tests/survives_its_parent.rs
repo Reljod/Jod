@@ -182,6 +182,97 @@ fn the_session_id_reaches_the_conversation_even_though_the_launcher_is_gone() {
     );
 }
 
+/// What the run said has to reach the transcript, written by the supervisor,
+/// for exactly the same reason the session id does: there may be nobody left.
+///
+/// The bug: `messages` is the table `jod main` prints, and the only thing that
+/// ever wrote a run's turns into it was `record_in_conversation`, a task inside
+/// whatever process launched the run. `jod main` without `--wait` returns as
+/// soon as the instruction is handed over, and a run opened through `open_work`
+/// is launched by Jod's own MCP server, which exits with its harness. Both
+/// leave the run talking to nobody. The `events` table stays complete, because
+/// the supervisor writes that one — so `jod watch` replays the whole turn while
+/// `jod main` shows it stopping in the middle, and the answer that was said and
+/// paid for is simply not there.
+///
+/// The load-bearing clause is the fixture again: the launcher is **already
+/// gone**, and the harness below sleeps before it says anything, so every word
+/// it speaks is spoken after the only previous writer has exited.
+///
+/// It is a whole turn rather than a final reply on purpose. The loss was never
+/// specific to how a turn ends — a tool call in the middle of one went missing
+/// just as readily, and a transcript that skips the tool call but keeps the
+/// answer is its own kind of wrong.
+#[test]
+fn what_the_run_said_reaches_the_transcript_even_though_the_launcher_is_gone() {
+    let fixture = Fixture::new("transcript", A_WHOLE_TURN_HARNESS, 0);
+
+    // What `spawn_agent_in` arranges before a harness starts: a conversation,
+    // and the question this run was launched to answer recorded against it.
+    // `conversation_for_run` finds the conversation through that row.
+    let store = Store::open(&fixture.db).unwrap();
+    let conversation = store
+        .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
+        .unwrap()
+        .id;
+    store
+        .append_prompt(
+            &conversation,
+            &fixture.run_id,
+            "every day at 9am, remind me to check the open issues",
+        )
+        .unwrap()
+        .expect("the prompt must be recorded, or this proves nothing");
+    drop(store);
+
+    fixture.launch_from_a_process_that_exits();
+
+    // A fresh handle, in a process that never held a pipe to anything — the
+    // same view `jod main` gets when it prints the chat.
+    let store = Store::open(&fixture.db).unwrap();
+    let events = fixture.wait_for_finish(&store);
+    let thread = store.thread(&conversation).unwrap();
+
+    let roles: Vec<jod_core::conversation::Role> = thread.iter().map(|m| m.role).collect();
+    use jod_core::conversation::Role;
+    assert_eq!(
+        roles,
+        vec![
+            Role::User,
+            Role::ToolCall,
+            Role::ToolResult,
+            Role::Assistant
+        ],
+        "the transcript lost part of the turn. Every event is in the database, \
+         so `jod watch` replays the whole thing, but `jod main` reads \
+         `messages` and shows the turn stopping partway through: {thread:?}"
+    );
+    assert_eq!(
+        thread.last().unwrap().text,
+        "Armed as scratch-issues-daily, 9am daily.",
+        "the reply the run was paid for is not in the transcript"
+    );
+
+    // Said once, not twice. The supervisor and any still-live launcher both
+    // append, and `(run_id, run_seq)` is what keeps that from doubling a reply.
+    //
+    // Counted against the events rather than against a literal, so this stays
+    // true if the fixture harness ever grows another line: every event
+    // `NewMessage::from_event` is defined to project must appear exactly once.
+    let projected = events
+        .iter()
+        .filter(|e| jod_core::conversation::NewMessage::from_event(&e.event).is_some())
+        .count();
+    assert_eq!(
+        thread
+            .iter()
+            .filter(|m| m.run_id.as_deref() == Some(fixture.run_id.as_str()))
+            .count(),
+        projected + 1, // the run's own turns, plus the prompt nothing emits
+        "every projected event must be recorded exactly once: {thread:?}"
+    );
+}
+
 /// A session the harness has lost must stop being resumed — durably, and by
 /// the supervisor, because there may be nobody else left to notice.
 ///
@@ -392,6 +483,21 @@ echo '{"type":"assistant","message":{"content":[{"type":"text","text":"two"}]}}'
 sleep 0.2
 echo '{"type":"assistant","message":{"content":[{"type":"text","text":"three"}]}}'
 echo '{"type":"result","result":"all done","is_error":false}'
+exit $JOD_TEST_EXIT
+"#;
+
+/// A whole ordinary turn: a tool call, its result, and the reply that follows.
+///
+/// The sleep in front is the point. Everything below it is said after the
+/// process that launched the run has exited, which is the state every `jod
+/// main` without `--wait` and every `open_work` session is in.
+const A_WHOLE_TURN_HARNESS: &str = r#"
+echo '{"type":"system","subtype":"init","session_id":"sess-abc","model":"test-model"}'
+sleep 0.4
+echo '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tu_1","name":"ToolSearch","input":{"query":"select:schedule_create"}}]}}'
+echo '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tu_1","content":"found it","is_error":false}]}}'
+echo '{"type":"assistant","message":{"content":[{"type":"text","text":"Armed as scratch-issues-daily, 9am daily."}]}}'
+echo '{"type":"result","result":"Armed as scratch-issues-daily, 9am daily.","is_error":false}'
 exit $JOD_TEST_EXIT
 "#;
 
