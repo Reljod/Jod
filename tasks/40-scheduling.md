@@ -192,7 +192,25 @@ origin `inherited`.
 ---
 
 ## S4. `fire_once` (the default misfire policy) leaves no trace of what it dropped
-Status: open · Owner: — · Severity: low
+Status: **fixed in #160** · Severity was: low
+
+Fixed as one summary row rather than one row per instant, and the difference
+is the fact being recorded. Under `skip` each missed instant got nothing, so
+each is its own outcome and each keeps its own row. Under `fire_once` they
+were folded into the single run that stands in for all of them, which is one
+event — and twenty-three rows shaped like `skip`'s would say nothing ran for
+those instants when something did. The row names the count and the window it
+spans. What runs is untouched: `decide` still answers a `fire_once` outage
+with exactly one `Decision::Run`.
+
+Check, since this scenario had none of its own: after a `fire_once` outage
+spanning N instants, assert exactly one run was attempted and that
+`schedule_fires` also holds one `skipped_misfire` row naming the other N-1 and
+the window they spanned —
+`cargo test -p jod-core --lib
+ticker::tests::an_outage_under_the_default_policy_runs_once_and_says_what_it_dropped`.
+
+The original report follows.
 
 Compare two live runs, both after 3-6 hours of simulated downtime **(synthetic:
 `last_fire_at_ms` set into the past)**:
