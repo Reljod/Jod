@@ -158,7 +158,11 @@ question for `docs/harness-support.md`.
 Check: assert a main-chat turn's tool calls are all `mcp__jod__*` plus reading.
 
 ## R6. The compaction warning measures against a window the model does not have
-Status: open · Owner: — · Severity: low — **diagnosed**
+Status: open · Owner: — · Severity: medium — **diagnosed**
+
+(Ranked low at first because the fix is one word. That was the wrong axis: the
+consequence is that somebody compacts a conversation with five sixths of its
+room left, acting on information the screen presented as fact.)
 
 The status bar showed `⚠ compact` after exactly one question and one answer, on
 a database created seconds earlier.
