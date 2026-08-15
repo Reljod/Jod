@@ -31,6 +31,20 @@ pub enum Workspace {
 use Workspace::*;
 
 impl Workspace {
+    /// The screen an activity row points at.
+    ///
+    /// Core names a jump target without knowing this enum exists, which is the
+    /// seam: it decides *where a row belongs*, and this decides *what that is
+    /// called here*. Exhaustive on purpose — a new target must be routed rather
+    /// than quietly landing on chat.
+    pub fn of(to: jod_core::activity::Jump) -> Workspace {
+        match to {
+            jod_core::activity::Jump::Schedules => Schedules,
+            jod_core::activity::Jump::Goals => Goals,
+            jod_core::activity::Jump::Hooks => Hooks,
+        }
+    }
+
     /// Every workspace, including the ones with no digit of their own.
     pub const ALL: [Workspace; 11] = [
         Chat,

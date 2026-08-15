@@ -20,6 +20,7 @@ use jod_api::config::Config;
 use jod_api::AppState;
 use jod_core::schedule::{Goal, GoalState, Misfire, Overlap, Schedule, ScheduleState};
 use jod_core::store::{NewFact, Store};
+use jod_core::webhook::{Conditions, Delivery, DeliveryStatus, Rule};
 use tower::ServiceExt;
 
 struct Harness {
@@ -111,6 +112,35 @@ fn goal(name: &str) -> Goal {
         next_fire_at_ms: None,
         created_at_ms: 0,
     }
+}
+
+fn webhook_rule(name: &str) -> Rule {
+    Rule {
+        id: format!("wr-{name}"),
+        name: name.into(),
+        source: "github".into(),
+        repo: "Reljod/Jod".into(),
+        event: "pull_request".into(),
+        action: None,
+        conditions: Conditions::default(),
+        prompt: "Look at {{title}}".into(),
+        harness: "claude_code".into(),
+        cwd: "/tmp".into(),
+        model: None,
+        enabled: true,
+        created_at_ms: 0,
+    }
+}
+
+/// A delivery against [`webhook_rule`], with the fields the feed reads set.
+fn delivery(id: &str, status: DeliveryStatus, at_ms: i64) -> Delivery {
+    let mut d = Delivery::new(id, "pull_request");
+    d.action = Some("opened".into());
+    d.repo = Some("Reljod/Jod".into());
+    d.rule_id = Some("wr-nightly".into());
+    d.status = status;
+    d.received_at_ms = at_ms;
+    d
 }
 
 // ─── memory ──────────────────────────────────────────────────────────────────
@@ -412,6 +442,93 @@ async fn the_needs_you_filter_keeps_only_what_wants_a_human() {
     for row in kept {
         assert_eq!(row["needs_you"], true);
     }
+}
+
+/// The regression that moving this projection into core was for.
+///
+/// This route used to compose the feed from schedules and goals only, while
+/// `cli/src/tui/data.rs` composed it from three sources. A rejected delivery —
+/// a webhook secret that stopped verifying — was therefore visible to whoever
+/// happened to be sitting at the terminal and to nobody on a phone or a browser,
+/// which is the exact silence `needs_you` exists to break.
+#[tokio::test]
+async fn a_rejected_delivery_reaches_the_feed_and_asks_for_a_human() {
+    let h = harness_with(|store| {
+        store.add_webhook_rule(&webhook_rule("nightly")).unwrap();
+        store.record_delivery(&delivery("gh-1", DeliveryStatus::Rejected, 1))
+            .unwrap();
+    });
+
+    let (status, body) = get_json(&h, "/v1/activity").await;
+    assert_eq!(status, StatusCode::OK);
+
+    let rows = body.as_array().unwrap();
+    let hook = rows
+        .iter()
+        .find(|r| r["source"] == "hook")
+        .unwrap_or_else(|| panic!("no webhook row in the feed: {body}"));
+
+    assert_eq!(hook["needs_you"], true);
+    // It must actually navigate: the delivery stores a rule *id*, and the hooks
+    // screen is keyed by name, so an untranslated jump reaches the screen and
+    // selects nothing.
+    assert_eq!(hook["jump_to"][0], "hooks");
+    assert_eq!(hook["jump_to"][1], "nightly");
+    assert!(
+        hook["text"]
+            .as_str()
+            .unwrap()
+            .contains("pull_request.opened on Reljod/Jod"),
+        "the row does not say what arrived: {hook}"
+    );
+}
+
+/// An accepted delivery is the hook working, and must not wake anyone.
+#[tokio::test]
+async fn an_accepted_delivery_is_reported_without_asking_for_a_human() {
+    let h = harness_with(|store| {
+        store.add_webhook_rule(&webhook_rule("nightly")).unwrap();
+        store.record_delivery(&delivery("gh-2", DeliveryStatus::Accepted, 1))
+            .unwrap();
+    });
+
+    let (_, body) = get_json(&h, "/v1/activity").await;
+    let rows = body.as_array().unwrap();
+    let hook = rows
+        .iter()
+        .find(|r| r["source"] == "hook")
+        .unwrap_or_else(|| panic!("no webhook row in the feed: {body}"));
+    assert_eq!(hook["needs_you"], false);
+}
+
+/// `?needs_you=` filters *before* the page is cut, not after.
+///
+/// With a limit of one and newer ordinary traffic in front of it, filtering
+/// afterwards returns an empty page while an escalation sits one row behind —
+/// "show me what needs me" answering "nothing" because a routine delivery was
+/// more recent. Pinned because the obvious way to write the passthrough gets
+/// this backwards.
+#[tokio::test]
+async fn a_narrow_page_of_escalations_is_not_crowded_out_by_newer_noise() {
+    let h = harness_with(|store| {
+        store.add_webhook_rule(&webhook_rule("nightly")).unwrap();
+        // The escalation is the older of the two.
+        store.record_delivery(&delivery("gh-old", DeliveryStatus::Rejected, 1))
+            .unwrap();
+        store.record_delivery(&delivery("gh-new", DeliveryStatus::Accepted, 99))
+            .unwrap();
+    });
+
+    let (status, body) = get_json(&h, "/v1/activity?needs_you=true&limit=1").await;
+    assert_eq!(status, StatusCode::OK);
+
+    let rows = body.as_array().unwrap();
+    assert_eq!(
+        rows.len(),
+        1,
+        "the escalation was cut before the filter ran: {body}"
+    );
+    assert_eq!(rows[0]["needs_you"], true);
 }
 
 // ─── limits ──────────────────────────────────────────────────────────────────

@@ -22,9 +22,16 @@
 //! `next_fire_at_ms`, and each client writes its own gloss.
 //!
 //! The rule this follows is the crate's own: *this crate adds no orchestration
-//! logic of its own*. Where a screen needs two tables joined, the join happens
-//! here only because it is one screen and two round trips would tear — the same
-//! argument [`crate::routes::TeamView`] already makes.
+//! logic of its own*. Where a screen needs two tables joined, the join belongs
+//! in core and this module calls it — [`fleet`] hands back `Store::forest_of`
+//! unchanged, and [`list_activity`] is a passthrough to `jod_core::activity`.
+//! The activity feed is why that rule is worth stating twice: it used to be
+//! composed here, in parallel with the terminal's copy, and the two had already
+//! drifted far enough that this route was missing an entire source.
+//!
+//! What is still assembled here is only the shaping a single response needs —
+//! [`crate::routes::TeamView`]'s argument, that one screen should not cost two
+//! round trips that can tear against each other.
 //!
 //! ## Everything is `Scope::Read`
 //!
@@ -44,7 +51,7 @@
 use axum::extract::{Extension, Path, Query, State};
 use axum::response::IntoResponse;
 use axum::Json;
-use jod_core::schedule::{Fire, FireOutcome, Goal, Schedule};
+use jod_core::schedule::{Fire, Goal, Schedule};
 use jod_core::store::{Edge, MemoryNode, Store};
 use jod_core::team::TeamTask;
 use jod_core::webhook::{Delivery, Rule};
@@ -484,30 +491,13 @@ pub async fn list_tasks(
 
 // ─── activity ────────────────────────────────────────────────────────────────
 
-/// Where one activity line came from.
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum ActivitySource {
-    Cron,
-    Goal,
-}
-
-/// One line in the activity feed.
+/// The activity feed's types, which are core's.
 ///
-/// `needs_you` is the field this screen exists for. A schedule Jod could not
-/// start, or one whose claimant died, is silence — nothing else in the product
-/// reports it, so it has to surface here or not at all.
-#[derive(Debug, Serialize)]
-pub struct ActivityItem {
-    /// Stable across refetches, so a client can diff rather than redraw.
-    pub id: String,
-    pub at_ms: i64,
-    pub source: ActivitySource,
-    pub text: String,
-    pub needs_you: bool,
-    /// The workspace and row a client should jump to, as `("schedules", name)`.
-    pub jump_to: Option<(String, String)>,
-}
+/// Re-exported under their old names so this module's public surface is
+/// unchanged, but they are no longer defined here: the projection moved to
+/// [`jod_core::activity`] so that the terminal and this route cannot disagree
+/// about what activity is. `needs_you` is still the field the screen exists for.
+pub use jod_core::activity::{Item as ActivityItem, Jump, Source as ActivitySource};
 
 #[derive(Debug, Deserialize)]
 pub struct ActivityQuery {
@@ -516,21 +506,21 @@ pub struct ActivityQuery {
     pub needs_you: Option<bool>,
 }
 
-/// The activity feed: schedule fires and goal iterations, newest first.
+/// The activity feed: schedule fires, goal iterations and webhook deliveries,
+/// newest first.
 ///
-/// This is the one route here that *composes* rather than reads, and it is worth
-/// being explicit about the debt. `cli/src/tui/data.rs::activity` builds the
-/// same projection for the terminal, so the rule for what counts as activity now
-/// exists in two places and can drift. It is duplicated rather than shared
-/// because `data.rs` lives in a binary crate the API cannot import, and moving
-/// the projection into core is another lane's file. The test below pins the part
-/// that matters — which outcomes set `needs_you` — so a drift fails rather than
-/// ships quietly. If core later grows this projection, this handler should
-/// become a passthrough.
+/// A passthrough to [`jod_core::activity::feed`]. It used to compose the feed
+/// itself, in parallel with `cli/src/tui/data.rs::activity`, and the drift that
+/// arrangement invited had already happened: this route had no webhook source at
+/// all, so a rejected signature or a rule that could not start its run was
+/// visible only to whoever was sitting at the terminal. Those are precisely the
+/// silences `needs_you` exists to surface. The rule now lives in one place and
+/// every client gets the same three sources.
 ///
-/// Unread state is deliberately absent. The TUI tracks read/unread in its own
-/// process memory, and inventing a server-side notion of "read" would make two
-/// clients disagree about it. A client that wants unread tracks it locally.
+/// Unread state is still deliberately absent. Read state is a fact about a
+/// person, not about an event, and there is nowhere to put it yet; inventing a
+/// server-side notion of "read" would only make two clients disagree about it.
+/// A client that wants unread tracks it locally.
 pub async fn list_activity(
     State(state): State<AppState>,
     Extension(identity): Extension<Identity>,
@@ -541,64 +531,15 @@ pub async fn list_activity(
         return Ok(Json(Vec::<ActivityItem>::new()));
     };
 
-    let limit = limit_of(q.limit);
-    let mut items = Vec::new();
+    let query = jod_core::activity::Query::with_limit(limit_of(q.limit))
+        .needing_you(q.needs_you.unwrap_or(false));
 
-    for s in store.schedules().map_err(internal)? {
-        for f in store.fires(&s.id, limit).map_err(internal)? {
-            items.push(ActivityItem {
-                id: format!("fire/{}", f.id),
-                at_ms: f.fired_at_ms,
-                source: ActivitySource::Cron,
-                text: format!("{} · {}", s.name, f.outcome.as_str().replace('_', " ")),
-                needs_you: fire_needs_you(f.outcome),
-                jump_to: Some(("schedules".to_string(), s.name.clone())),
-            });
-        }
-    }
-
-    for g in store.goals().map_err(internal)? {
-        for f in store
-            .facts_about(&format!("goal/{}", g.name))
-            .map_err(internal)?
-        {
-            let ended = f.predicate == "ended";
-            if !ended && f.predicate != "iteration" {
-                continue;
-            }
-            items.push(ActivityItem {
-                id: format!("goal/{}/{}", g.name, f.id),
-                at_ms: f.recorded_at_ms,
-                source: ActivitySource::Goal,
-                text: format!("{} · {}", g.name, one_line(&f.object)),
-                // A goal ending is the one goal event a person has to see.
-                needs_you: ended,
-                jump_to: Some(("goals".to_string(), g.name.clone())),
-            });
-        }
-    }
-
-    // Newest first, so `truncate` below keeps the most recent rather than the
-    // oldest — the order and the limit are one decision, not two.
-    items.sort_by_key(|i| std::cmp::Reverse(i.at_ms));
-    if q.needs_you.unwrap_or(false) {
-        items.retain(|i| i.needs_you);
-    }
-    items.truncate(limit);
-
-    Ok(Json(items))
-}
-
-/// Which fire outcomes are silence that nothing else will report.
-///
-/// Split out so the test can pin it without going through HTTP.
-fn fire_needs_you(outcome: FireOutcome) -> bool {
-    matches!(outcome, FireOutcome::SpawnFailed | FireOutcome::Abandoned)
-}
-
-/// First line, trimmed — a feed row is one line by construction.
-fn one_line(s: &str) -> String {
-    s.lines().next().unwrap_or("").trim().to_string()
+    // Propagated rather than swallowed: a 200 carrying a short list reads as
+    // "nothing happened", and a client cannot tell that from a store that would
+    // not answer. The terminal makes the opposite call for its own good reasons.
+    jod_core::activity::feed(store, query)
+        .map(Json)
+        .map_err(internal)
 }
 
 // ─── fleet ───────────────────────────────────────────────────────────────────
@@ -649,6 +590,7 @@ fn filter_of(requested: Option<&str>) -> Filter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use jod_core::schedule::FireOutcome;
 
     #[test]
     fn a_limit_defaults_when_absent_and_is_capped_when_absurd() {
@@ -663,11 +605,13 @@ mod tests {
         assert_eq!(limit_of(Some(0)), 0);
     }
 
-    /// The reason the activity screen exists. If this drifts from
-    /// `cli/src/tui/data.rs`, the terminal and the browser disagree about what
-    /// is worth waking someone for.
+    /// The reason the activity screen exists. The predicate itself is pinned in
+    /// `jod_core::activity`, which is now the only place it is written down —
+    /// this asserts the route's re-export still reaches it, so a rename cannot
+    /// quietly leave the API pointing at a second copy.
     #[test]
     fn only_silent_failures_ask_for_a_human() {
+        use jod_core::activity::fire_needs_you;
         assert!(fire_needs_you(FireOutcome::SpawnFailed));
         assert!(fire_needs_you(FireOutcome::Abandoned));
         assert!(!fire_needs_you(FireOutcome::Ran));
@@ -675,10 +619,31 @@ mod tests {
         assert!(!fire_needs_you(FireOutcome::Replaced));
     }
 
+    /// The wire vocabulary a client matches on. `hook` is the variant this
+    /// route gained when the projection moved to core, and the one an older
+    /// client will not have seen.
     #[test]
-    fn a_feed_row_is_one_line_however_many_the_fact_had() {
-        assert_eq!(one_line("first\nsecond"), "first");
-        assert_eq!(one_line("  padded  "), "padded");
-        assert_eq!(one_line(""), "");
+    fn the_feed_can_name_all_three_of_its_sources() {
+        assert_eq!(
+            serde_json::to_string(&ActivitySource::Cron).unwrap(),
+            "\"cron\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ActivitySource::Goal).unwrap(),
+            "\"goal\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ActivitySource::Hook).unwrap(),
+            "\"hook\""
+        );
+    }
+
+    /// `jump_to` is a two-element array on the wire, and the first element is
+    /// the screen name a client routes on. Moving it behind an enum must not
+    /// have changed either.
+    #[test]
+    fn a_jump_still_serialises_as_screen_then_row() {
+        let json = serde_json::to_string(&Some((Jump::Hooks, "nightly".to_string()))).unwrap();
+        assert_eq!(json, "[\"hooks\",\"nightly\"]");
     }
 }
