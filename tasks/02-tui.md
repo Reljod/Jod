@@ -13,7 +13,24 @@ are small; none of them is the bug Reljod reported. That bug is in
 ---
 
 ## T1. Text is lost when a double-width character sits near the wrap column
-Status: open · Owner: — · Severity: low · **needs confirming**
+Status: **fixed — merged as #158** · Severity was: low
+
+> **My hypothesis in this task was wrong, and the fix's measurement says how.**
+> I wrote that it "looks like a miscount only when the wide character's cells
+> straddle the boundary", making it an off-by-one rather than a missing
+> wide-character case — and I reasoned that from the emoji twin passing.
+>
+> Measured: **every row containing a wide character overflows**, not only a
+> straddling one. The twin that "passed" passed because the single clipped
+> column happened to hold a space, so nothing visible was lost. I had taken an
+> invisible failure as a passing case and built a theory on the difference
+> between them.
+>
+> The lesson is narrower than "reasoning is unreliable" and worth stating
+> exactly: **a passing case that differs from a failing one by a space is not a
+> contrast, it is the same failure with nothing in the gap.** Where a test's
+> pass depends on which character landed in a clipped column, the character has
+> to be part of what is asserted.
 
 At 40 columns, a line containing Japanese characters lost three characters at
 the wrap:

@@ -305,6 +305,23 @@ Why it matters more than a cosmetic error: the charter tells agents to run
 refusal will either retry a merge that already happened or report a finished
 task as blocked. Both are worse than the original problem.
 
+**A security classifier has now made the same mistake, which is the strongest
+statement of the cost.** An automated security review flagged an agent for
+merging without review. It had not: it ran the gate, the gate categorised the
+pull request `merge:auto` and merged it, and the script *then* exited 1 on the
+local branch cleanup. The classifier read that exit code as a refusal that had
+been bypassed.
+
+That is a third distinct victim of one exit code meaning both "I refused, fix
+your branch" and "I already merged, ignore me" — after agents reporting finished
+work as blocked, and a session falling into it while merging the document
+describing it. It is the first time the ambiguity has produced a **false
+accusation against correct behaviour** rather than merely confusing someone.
+
+The decisive evidence is the label, not the exit code: a real refusal leaves the
+pull request open and labelled `merge:human`, which is what happened to #144,
+#154 and #142. Anything diagnosing this should read the label.
+
 **Awareness cannot fix this, so the script must.** The fourth occurrence was
 the pull request for the document describing the trap — a session that had read
 the write-up, and had itself filed the task, still merged through it and had to
