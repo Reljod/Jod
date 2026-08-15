@@ -30,7 +30,7 @@ use jod_core::commands::Discovered;
 use jod_core::projects::{How, Project};
 use jod_core::roots::Root;
 use jod_core::secrets::Scope;
-use jod_core::tree::{Node, NodeId};
+use jod_core::tree::{Node, NodeId, NodeKind};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -1777,7 +1777,24 @@ impl App {
             .is_some_and(|e| self.traffic.held.contains(&e.message.id))
     }
 
+    /// The run every fleet verb acts on — read off whichever cursor the screen
+    /// is actually drawing.
+    ///
+    /// On a tree that is `TreeState`, not this list. Taking the list's row
+    /// there was the other half of the two-cursor fault: `s` stopped a run the
+    /// highlight was nowhere near, which is worse than a key that does nothing
+    /// because it looks like it worked. A run node's id *is* the run id, which
+    /// is what these verbs take; a work is a heading and a session is a
+    /// conversation, and neither is a process, so both answer `None` and let
+    /// the caller say so.
     pub fn selected_agent(&self) -> Option<&AgentLine> {
+        if self.has_tree() {
+            let node = self.selected_node()?;
+            if node.kind != NodeKind::Run {
+                return None;
+            }
+            return self.agents.iter().find(|a| a.id == node.id.id);
+        }
         let id = self.list(Workspace::Fleet).selected.as_deref()?;
         self.agents.iter().find(|a| a.id == id)
     }

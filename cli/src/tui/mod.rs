@@ -3215,6 +3215,22 @@ fn on_workspace_key(app: &mut App, key: KeyEvent, viewport: usize) -> Option<Act
         return None;
     }
 
+    // Before the spine, and only for the one screen that draws somebody else's
+    // cursor: a fleet holding works highlights the row `TreeState` points at,
+    // not the one this list does. Left below the spine, `↑`/`↓` were answered
+    // here first and stepped a flat list nobody was looking at — the highlight
+    // stayed put, which reads as a dead key rather than as two cursors.
+    //
+    // The tree takes the cursor keys and the tree's own verbs; everything else
+    // — `/`, `S`, `?`, a digit — falls through to the spine as before, which is
+    // what keeps the fleet's filter line the one the tree reads its needle
+    // from.
+    if ws == Workspace::Fleet && app.has_tree() {
+        if let Some(action) = on_tree_key(app, key, viewport) {
+            return action;
+        }
+    }
+
     let ids = app.row_ids(ws);
     let page = viewport.max(1) as isize;
     match key.code {
@@ -3357,9 +3373,10 @@ fn on_traffic_key(app: &mut App, key: KeyEvent) -> Option<Action> {
 /// layer says whether it was handled at all, so a key the tree does not know
 /// falls through to the fleet's row verbs rather than being swallowed. `s`
 /// still stops a run, `d` still delegates.
-fn on_tree_key(app: &mut App, key: KeyEvent) -> Option<Option<Action>> {
+fn on_tree_key(app: &mut App, key: KeyEvent, viewport: usize) -> Option<Option<Action>> {
     let handled = |a: Option<Action>| Some(a);
     let rows = app.tree_rows();
+    let page = viewport.max(1) as isize;
     match key.code {
         KeyCode::Up | KeyCode::Char('k') => {
             app.tree.step(-1, &rows);
@@ -3367,6 +3384,22 @@ fn on_tree_key(app: &mut App, key: KeyEvent) -> Option<Option<Action>> {
         }
         KeyCode::Down | KeyCode::Char('j') => {
             app.tree.step(1, &rows);
+            handled(None)
+        }
+        KeyCode::PageUp => {
+            app.tree.step(-page, &rows);
+            handled(None)
+        }
+        KeyCode::PageDown => {
+            app.tree.step(page, &rows);
+            handled(None)
+        }
+        KeyCode::Home => {
+            app.tree.first(&rows);
+            handled(None)
+        }
+        KeyCode::End => {
+            app.tree.last(&rows);
             handled(None)
         }
         KeyCode::Right => {
@@ -3634,14 +3667,43 @@ fn accept_prompt(
     })
 }
 
+/// The fleet verbs that act on a *run* rather than on the screen.
+///
+/// Listed once, here, because the two rows that hold no run — a tree's work and
+/// session headings, and the pinned chat — both have to answer them, and a list
+/// kept in two places is one that drifts the next time a verb is added.
+fn is_run_verb(code: KeyCode) -> bool {
+    matches!(
+        code,
+        KeyCode::Char(
+            's' | 'a' | 'r' | 'd' | 'b' | 'u' | 'U' | 'g' | 'f' | 'm' | 't'
+        )
+    )
+}
+
 fn on_fleet_key(app: &mut App, key: KeyEvent) -> Option<Action> {
     // With works on the board the fleet is a tree, and the arrows mean the
-    // tree's things. Without any, there is no tree to walk and the older flat
-    // list is what the screen shows — a session that belongs to no work has no
-    // node in the forest, which is every session started before works existed.
-    if app.has_tree() {
-        if let Some(action) = on_tree_key(app, key) {
-            return action;
+    // tree's things — but that half runs in `on_workspace_key`, *above* the
+    // list spine, because the spine owns `↑`/`↓` and would answer them first.
+    // What is left here are the row verbs, which the tree does not know: `s`
+    // still stops a run, `d` still delegates, on a tree row as on a flat one.
+    //
+    // A tree row that is not a run is the same case as the pinned row below,
+    // and answered for the same reason: these verbs are all
+    // `selected_agent()?`, which on a work heading is a printed key that does
+    // nothing and says nothing. `⏎` is named because it is what the row *does*
+    // answer — a work toggles, a session opens.
+    if let Some(node) = app.selected_node().filter(|_| app.has_tree()) {
+        if node.kind != jod_core::tree::NodeKind::Run && is_run_verb(key.code) {
+            let what = match node.kind {
+                jod_core::tree::NodeKind::Work => "a work",
+                _ => "a session",
+            };
+            app.push(Entry::Notice(format!(
+                "that row is {what}, not a run — there is no process on it to act on. \
+                 Move onto a run under it, or press ⏎ to open what this row does hold"
+            )));
+            return None;
         }
     }
     // The pinned row is a conversation, not a run, so the verbs that act on a
@@ -9576,6 +9638,107 @@ mod tests {
         app.go(Workspace::Fleet);
         app.tree.selected = Some(selected);
         app
+    }
+
+    /// The cursor drawn on a fleet holding a tree is the *tree's*, so the keys
+    /// that move a cursor have to move that one. Pressed through the router,
+    /// because the bug this pins was entirely in the routing: the list spine
+    /// answered `↑`/`↓` first and stepped the flat list nobody was looking at,
+    /// leaving the highlight where it was — a key that looks dead.
+    #[test]
+    fn the_cursor_keys_move_the_tree_on_a_fleet_that_has_one() {
+        use jod_core::tree::NodeId;
+        for (down, up) in [
+            (KeyCode::Down, KeyCode::Up),
+            (KeyCode::Char('j'), KeyCode::Char('k')),
+        ] {
+            let mut app = on_the_tree(NodeId::work("w1"));
+            press(&mut app, down);
+            assert_eq!(
+                app.tree.selected,
+                Some(NodeId::session("s1")),
+                "{down:?} did not move the tree cursor"
+            );
+            press(&mut app, down);
+            assert_eq!(app.tree.selected, Some(NodeId::run("r1")));
+            press(&mut app, up);
+            assert_eq!(
+                app.tree.selected,
+                Some(NodeId::session("s1")),
+                "{up:?} did not move the tree cursor"
+            );
+        }
+    }
+
+    /// The rest of the cursor set, which the same routing swallowed: a tree
+    /// deep enough to need `End` is exactly the one where walking it row by row
+    /// is not an answer.
+    #[test]
+    fn home_end_and_the_page_keys_move_the_tree_too() {
+        use jod_core::tree::NodeId;
+        let mut app = on_the_tree(NodeId::work("w1"));
+        press(&mut app, KeyCode::End);
+        assert_eq!(app.tree.selected, Some(NodeId::run("r1")));
+        press(&mut app, KeyCode::Home);
+        assert_eq!(app.tree.selected, Some(NodeId::work("w1")));
+        press(&mut app, KeyCode::PageDown);
+        assert_eq!(app.tree.selected, Some(NodeId::run("r1")), "a page past the end clamps");
+        press(&mut app, KeyCode::PageUp);
+        assert_eq!(app.tree.selected, Some(NodeId::work("w1")));
+    }
+
+    /// The other half of the same fault: a moving cursor is no use if the verbs
+    /// act on a different row. `s` stops the run the highlight is on, which on
+    /// a tree is the tree's row and not the flat list's.
+    #[test]
+    fn the_run_verbs_act_on_the_row_the_tree_cursor_is_on() {
+        use jod_core::tree::NodeId;
+        let mut app = on_the_tree(NodeId::work("w1"));
+        app.agents = vec![running("r1", "run one"), running("other", "not this one")];
+        // The flat list points somewhere else entirely, which is exactly the
+        // state that used to decide what `s` stopped.
+        app.list_mut(Workspace::Fleet).selected = Some("other".into());
+
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Down);
+        assert_eq!(app.tree.selected, Some(NodeId::run("r1")), "on the run row");
+        assert_eq!(
+            press(&mut app, KeyCode::Char('s')),
+            Some(Action::Stop("r1".into())),
+            "it stopped whatever the invisible list cursor was on"
+        );
+        assert_eq!(
+            press(&mut app, KeyCode::Char('a')),
+            Some(Action::Attach("r1".into()))
+        );
+    }
+
+    /// A work is a heading and a session is a conversation; neither is a
+    /// process. The verbs say so rather than going quiet, the way the pinned
+    /// chat's do.
+    #[test]
+    fn a_run_verb_on_a_row_that_holds_no_run_says_why() {
+        use jod_core::tree::NodeId;
+        for (row, word) in [
+            (NodeId::work("w1"), "a work"),
+            (NodeId::session("s1"), "a session"),
+        ] {
+            let mut app = on_the_tree(row.clone());
+            app.agents = vec![running("r1", "run one")];
+            assert_eq!(press(&mut app, KeyCode::Char('s')), None, "from {row:?}");
+            let said = format!("{:?}", app.transcript.last().unwrap());
+            assert!(said.contains(word), "from {row:?}: {said}");
+            assert!(said.contains("not a run"), "from {row:?}: {said}");
+        }
+    }
+
+    /// The tree takes the cursor keys and nothing else: `/` still opens the
+    /// fleet's filter line, which is the one the tree reads its needle from.
+    #[test]
+    fn the_tree_does_not_swallow_the_spines_own_keys() {
+        let mut app = on_the_tree(jod_core::tree::NodeId::work("w1"));
+        press(&mut app, KeyCode::Char('/'));
+        assert!(app.here().editing_filter, "the filter line never opened");
     }
 
     /// **G5.S2.** The screen is opened from the tree, through the router — not

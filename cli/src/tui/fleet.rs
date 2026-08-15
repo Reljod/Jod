@@ -186,6 +186,14 @@ impl TreeState {
         self.selected = Some(rows[landed].clone());
     }
 
+    pub fn first(&mut self, rows: &[NodeId]) {
+        self.selected = rows.first().cloned();
+    }
+
+    pub fn last(&mut self, rows: &[NodeId]) {
+        self.selected = rows.last().cloned();
+    }
+
     /// Space: expand what is collapsed, collapse what is not.
     pub fn toggle(&mut self, closed: &HashSet<NodeId>) {
         let Some(id) = self.selected.clone() else {
