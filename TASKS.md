@@ -52,6 +52,33 @@ produce one symptom.
    spawned an agent, sat in a shell loop waiting for it, and after 42 seconds
    and $0.39 returned no answer at all.
 
+## Everything rated high or critical, in one place
+
+Buried in the area files otherwise, and several of these are worse than the bug
+that prompted the sweep.
+
+| | What | Where |
+|---|---|---|
+| **critical** | A work session cannot write anything — `claim_worktree` cuts a worktree the running process may not touch | `10-orchestration.md` O1 |
+| high | The main chat can permanently lose a run's reply, even when the run succeeded and its effects happened. Reproduced twice, once with no concurrency at all | `10-orchestration.md` O2 |
+| high | The console is rooted at `$HOME`, which is not a repository | `00-launch-and-roots.md` L1 |
+| high | New work defaults to the oldest root for ever | `00-launch-and-roots.md` L2 |
+| high | Re-adding a root you already hold silently revokes write access | `00-launch-and-roots.md` L7 |
+| high | The orchestrator will not answer, or will — it is a coin flip nothing decides | `01-routing.md` R1 |
+| high | It busy-waits on its own child with `sleep`, which the design forbids | `01-routing.md` R4 |
+| high | It reaches outside Jod's tool set on *every* run | `01-routing.md` R5 |
+| high | Re-cataloguing a project wipes its aliases and notes | `30-project-managers.md` P1 |
+| high | Two projects sharing a name resolve non-deterministically, with no warning — `jod project archive` picked one at random | `30-project-managers.md` P3 |
+| high | The schedule circuit breaker never trips for the ordinary failure. Seven real failures, `consecutive_failures` stuck at 0 | `40-scheduling.md` S1 |
+| high | A cron expression that can never fire is armed anyway | `40-scheduling.md` S2 |
+| high | A goal whose stop condition is already true never stops — claimed and released every tick, for ever | `50-goals.md` G4 |
+| high | A goal with no cap and a non-deterministic check has no ceiling at all | `50-goals.md` G5 |
+| high | A goal's memory is name-keyed, so a new goal inherits a dead one's record | `50-goals.md` G1 |
+| high | Once any work exists, every loose run vanishes from the fleet screen | `20-fleets.md` F1 — **fixed, #121** |
+| high | A run's tree node cannot say finished, failed or killed | `20-fleets.md` F2 |
+| high | `list_agents` truncates at 20 with no signal there is more | `20-fleets.md` F4 |
+| high | "Stop an agent and everything it started" does not stop what it started | `20-fleets.md` F5 |
+
 ## What this sweep corrected
 
 An earlier version of this list claimed `jod tui` does not add the directory you

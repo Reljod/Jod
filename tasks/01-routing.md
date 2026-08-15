@@ -84,12 +84,16 @@ are tested for *shape* — that a decision parses — and nothing anywhere asser
 that a given instruction reaches the right verb. So R1 can be fixed and
 silently regress on the next preamble edit.
 
-Note before starting: the spec's "Out of scope" section says `Decision`,
-`parse_decision` and `router_prompt` are the **earlier** design, superseded by
-the tool-using orchestrator, and should be left alone. So this test probably
-belongs against the tool-using path — which instruction causes which MCP tool
-call — not against the JSON router. Confirm which one is live before writing
-it.
+**Now settled — see R7.** `parse_decision` and `router_prompt` are not merely
+"probably superseded"; they have no production caller at all. The live path is
+the tool-using orchestrator, so this test belongs against which MCP tool an
+instruction causes, never against the JSON router.
+
+**Status update: R2 is satisfied by R1's work**, which ships a
+`tests/e2e/main-chat/dispositions.sh` table asserting both directions — three
+rows that must be answered with nothing handed over, five that must be routed.
+Do not open this as a separate task; a second agent would write a table that
+already exists.
 
 Fix: a fixture table of instruction → expected disposition (`answer`,
 `continue_agent`, `open_work`/`ask_manager`, `delegate`, `schedule_create`,
@@ -158,7 +162,12 @@ Check: delegate something from the main chat and assert the turn returns
 without a `sleep` or a poll loop in its tool calls.
 
 ## R5. The orchestrator reaches for tools outside Jod's set
-Status: open · Owner: — · Severity: medium
+Status: open · Owner: — · Severity: high
+
+(Raised from medium. The orchestration sweep found this on **every one** of its
+roughly ten live runs, and my own run too. It is universal, not occasional —
+every main-chat turn pays one or two `ToolSearch` calls before it touches a
+single Jod tool.)
 
 In the same turn it called `ToolSearch · select:Monitor`, looking for a
 generic monitoring tool rather than using Jod's own verbs. `ToolAccess::Orchestrate`
@@ -234,3 +243,37 @@ malformed instructions, schedule-shaped and goal-shaped instructions — is in
 | 8 | The instruction is recorded on the main chat | one user turn | recorded, with the delegation row beside it | pass |
 | 9 | Cost and token accounting | reported | `1957 out · $0.3864 · 42s` | pass |
 | 10 | A child session can reach the orchestrator | a return path exists | not established — see R3 | **needs confirming** |
+
+---
+
+## R7. The old JSON router is dead code with a passing test suite around it
+Status: open · Owner: — · Severity: medium
+
+`parse_decision` (`core/src/orchestrator.rs:229`) and `router_prompt` (`:300`)
+have **no production caller anywhere**. Verified with `git grep`: zero
+references outside `core/src/orchestrator.rs`, and every reference inside it is
+in the `#[cfg(test)]` module from line 1515 down. The live path is the
+tool-using orchestrator, which routes by calling MCP tools.
+
+Why this is worth a task rather than a shrug: the tests pass, so the code looks
+maintained. Anyone searching for "how does routing work" finds these first —
+they are the only things in the file that *look* like a router, they have a
+clean JSON contract, and they have a thorough test suite vouching for them.
+
+It nearly caused a wrong fix. An agent briefed to add the "answer directly"
+disposition was told to extend this plumbing if it was missing. It would have
+carefully extended code that never runs, with green tests proving it worked. It
+checked callers first, found `Decision::Reply` already *is* that disposition,
+backed out its edits, and shipped a change touching only the preamble.
+
+A test suite around dead code is worse than dead weight. Dead weight is
+ignored; this actively vouches for a trap.
+
+Fix: delete them, or if they are being kept deliberately, say so in a comment
+at the top of each — that they are the earlier design, that nothing calls them,
+and where the live path is. The spec's "Out of scope" section says to leave
+them alone, which is a reason not to delete them *as part of another task*, not
+a reason to leave them unlabelled.
+
+Check: `git grep` for either name returns no non-test caller, and whatever
+remains says plainly that it is not live.
