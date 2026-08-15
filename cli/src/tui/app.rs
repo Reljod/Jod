@@ -17,7 +17,7 @@ use super::data::{
 use super::delivery::Verdict;
 use super::graph::GraphView;
 use super::diff;
-use super::fleet::TreeState;
+use super::fleet::{main_id, TreeState};
 use super::todo;
 use super::mention::Mention;
 use super::picker::Picker;
@@ -1027,9 +1027,33 @@ impl App {
     /// screen, with its own `Esc` and its own line under the box — a private
     /// copy would have been a filter the key never reached, which is exactly
     /// what it was until a render test caught it.
+    ///
+    /// The pinned chat comes first, always, exactly as [`App::row_ids`] puts it
+    /// first in the flat list — and *outside* that filter rather than inside it,
+    /// because `/` narrows the fleet, and the one row that is not part of the
+    /// fleet is also the row you most need when a filter has emptied the screen.
+    ///
+    /// Empty when there is no tree, so the cursor is not parked on a row of a
+    /// screen that is not being drawn.
     pub fn tree_rows(&self) -> Vec<NodeId> {
-        self.tree
-            .row_ids(&self.forest, &self.closed_works, self.tree_filter())
+        if !self.has_tree() {
+            return Vec::new();
+        }
+        std::iter::once(main_id())
+            .chain(
+                self.tree
+                    .row_ids(&self.forest, &self.closed_works, self.tree_filter()),
+            )
+            .collect()
+    }
+
+    /// Whether the tree's cursor is on the pinned chat rather than on a node.
+    ///
+    /// Distinct from [`App::main_selected`], which reads the *flat* list's
+    /// cursor: the two screens keep separate selections, and the fleet draws
+    /// only one of them at a time.
+    pub fn tree_main_selected(&self) -> bool {
+        self.has_tree() && self.tree.selected.as_ref() == Some(&main_id())
     }
 
     /// What the fleet's `/` line currently holds.
@@ -1562,7 +1586,12 @@ impl App {
         // visible, and a cursor left on a filtered-out node would put the
         // detail pane on something the list no longer shows.
         let rows = self.tree_rows();
-        self.tree.reconcile(&rows);
+        // Row 0 is the pinned chat, so the cursor's home is row 1 — the first
+        // node of the forest. See `TreeState::reconcile_to`, and the flat list's
+        // `first_agent` two blocks up, which is the same rule on the same
+        // screen.
+        let first_node = rows.get(1).cloned();
+        self.tree.reconcile_to(&rows, first_node);
     }
 
     fn keep(&self, ws: Workspace, text: &str) -> bool {

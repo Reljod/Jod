@@ -2896,68 +2896,94 @@ fn draw_tree(f: &mut Frame, app: &App, area: Rect) {
     // and it is the same one the rest of the renderer already honours.
     let ascii = *COLOURLESS;
 
-    let (start, height) = window(area, selected, rows.len());
-    let items: Vec<ListItem> = rows
-        .iter()
-        .enumerate()
-        .skip(start)
-        .take(height)
-        .map(|(at, node)| {
-            let here = at == selected;
-            let expanded = app.tree.is_expanded(&node.id, &app.closed_works);
-            let mut spans = vec![
-                Span::styled(
-                    if here { "▸ " } else { "  " }.to_string(),
-                    bold(USER),
-                ),
-                Span::styled(fleet::guides(&rows, at, ascii), fg(MUTED)),
-                Span::styled(fleet::marker(node, expanded).to_string(), fg(MUTED)),
-                Span::styled(
-                    format!("{} ", fleet::kind_glyph(node.kind)),
-                    fg(work_colour(&node.colour)),
-                ),
-                Span::styled(
-                    node.label.clone(),
-                    if here { bold(AGENT) } else { fg(AGENT) },
-                ),
-            ];
-            let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
-            let mut room = width.saturating_sub(used);
+    // The pinned chat's own columns drop in the flat list's declared order, at
+    // the flat list's thresholds, because it is the same row drawn by the same
+    // function — two sets of numbers for one line would drift apart.
+    let show_id = width >= 35;
+    let show_harness = width >= 31;
 
-            // A spinner, so a running node reads as moving rather than stuck.
-            if node.running {
-                let glyph = format!(" {}", app.spinner());
-                if room >= glyph.chars().count() {
-                    room -= glyph.chars().count();
-                    spans.push(Span::styled(glyph, fg(WARN)));
-                }
+    // One longer than the forest: position 0 is the pinned chat and everything
+    // below it reads its node at `at - 1`. This ordering and `tree_rows`' have
+    // to agree, or the cursor lands one row off its own highlight — the same
+    // trap the flat list documents, and the same reason it is said twice.
+    let (start, height) = window(area, selected, rows.len() + 1);
+    let mut items: Vec<ListItem> = Vec::new();
+    for at in start..(start + height).min(rows.len() + 1) {
+        let here = at == selected;
+        if at == 0 {
+            items.push(ListItem::new(Line::from(main_line(
+                app,
+                here,
+                width,
+                show_id,
+                show_harness,
+            ))));
+            continue;
+        }
+        let node = rows[at - 1];
+        let expanded = app.tree.is_expanded(&node.id, &app.closed_works);
+        let mut spans = vec![
+            Span::styled(if here { "▸ " } else { "  " }.to_string(), bold(USER)),
+            // The guides describe the forest, so they are indexed into it —
+            // the pinned row sits above the tree rather than in it, and an
+            // elbow measured past it would point one row off.
+            Span::styled(fleet::guides(&rows, at - 1, ascii), fg(MUTED)),
+            Span::styled(fleet::marker(node, expanded).to_string(), fg(MUTED)),
+            Span::styled(
+                format!("{} ", fleet::kind_glyph(node.kind)),
+                fg(work_colour(&node.colour)),
+            ),
+            Span::styled(
+                node.label.clone(),
+                if here { bold(AGENT) } else { fg(AGENT) },
+            ),
+        ];
+        let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+        let mut room = width.saturating_sub(used);
+
+        // A spinner, so a running node reads as moving rather than stuck.
+        if node.running {
+            let glyph = format!(" {}", app.spinner());
+            if room >= glyph.chars().count() {
+                room -= glyph.chars().count();
+                spans.push(Span::styled(glyph, fg(WARN)));
             }
-            // The card count says *where the questions are* without expanding
-            // anything, which is most of why the tree is worth looking at.
-            if node.cards > 0 {
-                let badge = if node.blocked > 0 {
-                    format!(" [{} {}]", node.blocked, rail::BLOCKED)
-                } else {
-                    format!(" [{} cards]", node.cards)
-                };
-                if room >= badge.chars().count() {
-                    room -= badge.chars().count();
-                    spans.push(Span::styled(
-                        badge,
-                        if node.blocked > 0 { bold(BAD) } else { fg(MUTED) },
-                    ));
-                }
-            }
-            // Last on, first off.
-            if !node.summary.is_empty() && room > LEAST_TEXT {
+        }
+        // The card count says *where the questions are* without expanding
+        // anything, which is most of why the tree is worth looking at.
+        if node.cards > 0 {
+            let badge = if node.blocked > 0 {
+                format!(" [{} {}]", node.blocked, rail::BLOCKED)
+            } else {
+                format!(" [{} cards]", node.cards)
+            };
+            if room >= badge.chars().count() {
+                room -= badge.chars().count();
                 spans.push(Span::styled(
-                    format!("  {}", cut(&node.summary, room.saturating_sub(2))),
-                    fg(MUTED),
+                    badge,
+                    if node.blocked > 0 { bold(BAD) } else { fg(MUTED) },
                 ));
             }
-            ListItem::new(Line::from(spans))
-        })
-        .collect();
+        }
+        // Last on, first off.
+        if !node.summary.is_empty() && room > LEAST_TEXT {
+            spans.push(Span::styled(
+                format!("  {}", cut(&node.summary, room.saturating_sub(2))),
+                fg(MUTED),
+            ));
+        }
+        items.push(ListItem::new(Line::from(spans)));
+    }
+    // Said under the pinned row rather than instead of the tree, because the
+    // tree is no longer empty — the chat is always its first row, and "no works
+    // yet" as the only line would now be a claim the row above it contradicts.
+    if rows.is_empty() {
+        items.extend(empty(if app.here().filtering() {
+            "  nothing matches"
+        } else {
+            "  no works yet"
+        }));
+    }
 
     let blocked: usize = rows
         .iter()
@@ -2970,16 +2996,7 @@ fn draw_tree(f: &mut Frame, app: &App, area: Rect) {
         " fleet ".to_string()
     };
     f.render_widget(
-        List::new(if items.is_empty() {
-            empty(if app.here().filtering() {
-                "  nothing matches"
-            } else {
-                "  no works yet"
-            })
-        } else {
-            items
-        })
-        .block(
+        List::new(items).block(
             Block::default()
                 .borders(Borders::ALL)
                 .border_style(fg(USER))
@@ -2995,6 +3012,23 @@ fn draw_tree(f: &mut Frame, app: &App, area: Rect) {
 
 /// What the selected node is, in full.
 fn draw_tree_detail(f: &mut Frame, app: &App, area: Rect) {
+    // The pinned chat gets the pane the flat list gives it, title and all:
+    // none of `kind`, `id` or `state` means anything to a conversation, and
+    // `selected_node` answers `None` for it — which would draw "nothing
+    // selected" beside a row that is plainly selected.
+    if app.tree_main_selected() {
+        f.render_widget(
+            Paragraph::new(main_detail(app, area.width)).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(fg(USER))
+                    .title(" the chat ")
+                    .title_bottom(fit_verbs(" ⏎ enter · /new leaves ", area.width)),
+            ),
+            area,
+        );
+        return;
+    }
     let mut lines: Vec<Line> = Vec::new();
     match app.selected_node() {
         Some(node) => {
@@ -9132,6 +9166,32 @@ mod tests {
         );
         // Guides, so the shape reads as a tree rather than as an indented list.
         assert!(frame.contains('├') || frame.contains('└'), "{frame}");
+    }
+
+    /// The pinned chat is the tree's first row, as it is the flat list's.
+    ///
+    /// The tree replaces that list whole, so losing the row with it left a fleet
+    /// that had grown a single work with no way back into the chat at all. The
+    /// star is what identifies it: `main_line` is the only thing that draws one.
+    #[test]
+    fn the_fleet_tree_pins_the_chat_above_the_works() {
+        let mut a = two_works();
+        a.tree.selected = Some(crate::tui::fleet::main_id());
+        let frame = rendered(&a, 150, 30);
+
+        let row = |needle: &str| {
+            frame
+                .lines()
+                .position(|line| line.contains(needle))
+                .unwrap_or_else(|| panic!("{needle} is not on screen:\n{frame}"))
+        };
+        assert!(
+            row("★") < row("the parser"),
+            "the pinned chat is not above the works:\n{frame}"
+        );
+        // And its own detail pane: none of `kind`, `id` or `state` means
+        // anything to a conversation.
+        assert!(frame.contains("the chat"), "{frame}");
     }
 
     /// Collapsing a work takes its sessions off the screen and leaves the other
