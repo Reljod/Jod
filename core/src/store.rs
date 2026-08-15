@@ -2603,6 +2603,10 @@ impl Store {
     ///
     /// Arming also clears the failure count, because a person turning a broken
     /// schedule back on is saying they believe it will work now.
+    ///
+    /// Arming goes through the same check as creation. A schedule stored before
+    /// that check existed is still in the file, and re-arming it was the one
+    /// remaining way to put a schedule that can never fire back into `armed`.
     pub fn set_schedule_state(&self, name: &str, state: ScheduleState) -> Result<bool> {
         let next = if state == ScheduleState::Armed {
             let conn = self.conn.lock().expect("store lock poisoned");
@@ -2615,7 +2619,15 @@ impl Store {
                 .optional()?;
             drop(conn);
             match found {
-                Some((cron, tz)) => crate::schedule::next_fire(&cron, &tz, now_ms())?,
+                Some((cron, tz)) => {
+                    crate::schedule::validate(&cron, &tz).map_err(|e| {
+                        JodError::Invalid(format!(
+                            "{e} A stored expression cannot be edited, so remove \
+                             {name} with `jod schedule rm {name}` and add it again."
+                        ))
+                    })?;
+                    crate::schedule::next_fire(&cron, &tz, now_ms())?
+                }
                 None => return Ok(false),
             }
         } else {
@@ -2846,6 +2858,8 @@ impl Store {
         })
     }
 
+    /// Starting a goal again goes through the same check as creation, for the
+    /// reason given on `set_schedule_state`.
     pub fn set_goal_state(&self, name: &str, state: GoalState) -> Result<bool> {
         let next = if state == GoalState::Running {
             let conn = self.conn.lock().expect("store lock poisoned");
@@ -2858,7 +2872,15 @@ impl Store {
                 .optional()?;
             drop(conn);
             match found {
-                Some((cron, tz)) => crate::schedule::next_fire(&cron, &tz, now_ms())?,
+                Some((cron, tz)) => {
+                    crate::schedule::validate(&cron, &tz).map_err(|e| {
+                        JodError::Invalid(format!(
+                            "{e} A stored expression cannot be edited, so remove \
+                             {name} with `jod goal rm {name}` and add it again."
+                        ))
+                    })?;
+                    crate::schedule::next_fire(&cron, &tz, now_ms())?
+                }
                 None => return Ok(false),
             }
         } else {
@@ -5446,6 +5468,59 @@ mod tests {
         assert!(back.next_fire_at_ms.unwrap() > now_ms());
     }
 
+    /// Creation refuses a cron expression that never comes round. Arming was a
+    /// second way into the same state. A schedule written before that check
+    /// existed, or simply one paused and resumed, could be brought back to
+    /// armed on an expression that never arrives, and it would then sit there
+    /// looking healthy and firing nothing.
+    ///
+    /// The healthy schedule is asserted alongside on purpose. A refusal that
+    /// turned every resume away would pass the first half of this test on its
+    /// own, and it would be a worse bug than the one being fixed.
+    #[test]
+    fn a_schedule_that_could_never_fire_is_refused_when_it_is_armed_again() {
+        let s = store();
+        s.add_schedule(&a_schedule("feb31", "0 2 * * *")).unwrap();
+        s.add_schedule(&a_schedule("nightly", "0 2 * * *")).unwrap();
+        // Written into the row directly, because creation refuses this
+        // expression now. This is the schedule that was armed before it did.
+        s.write(|tx| {
+            tx.execute(
+                "UPDATE schedules SET cron = '0 0 31 2 *' WHERE name = 'feb31'",
+                [],
+            )
+            .unwrap();
+            Ok(())
+        })
+        .unwrap();
+        s.set_schedule_state("feb31", ScheduleState::Paused).unwrap();
+        s.set_schedule_state("nightly", ScheduleState::Paused).unwrap();
+
+        let refused = s.set_schedule_state("feb31", ScheduleState::Armed);
+        let message = match refused {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("a schedule that can never fire was armed again"),
+        };
+        assert!(
+            message.contains("February has no 31st"),
+            "the refusal should say what is wrong: {message}"
+        );
+        assert!(
+            message.contains("feb31"),
+            "the refusal should name the schedule to remove: {message}"
+        );
+        assert_eq!(
+            s.schedule_named("feb31").unwrap().unwrap().state,
+            ScheduleState::Paused,
+            "a refused resume should leave the schedule where it was"
+        );
+
+        assert!(s.set_schedule_state("nightly", ScheduleState::Armed).unwrap());
+        let back = s.schedule_named("nightly").unwrap().unwrap();
+        assert_eq!(back.state, ScheduleState::Armed);
+        assert!(back.next_fire_at_ms.unwrap() > now_ms());
+    }
+
     /// "It never fired" and "it fired and was skipped" are different bugs with
     /// the same symptom. Without a row there is no way to tell them apart.
     #[test]
@@ -5653,6 +5728,55 @@ mod tests {
         let back = s.goal_named("revived").unwrap().unwrap();
         assert_eq!(back.state, GoalState::Running);
         assert_eq!(back.no_progress, 0);
+        assert!(back.next_fire_at_ms.unwrap() > now_ms());
+    }
+
+    /// A goal is started again by the same kind of call that arms a schedule,
+    /// and it had the same hole. Creation checks the cadence, restarting did
+    /// not, so a paused goal on an impossible cadence came back to running and
+    /// then never iterated.
+    ///
+    /// The healthy goal is asserted alongside for the same reason as in the
+    /// schedule case: refusing everything must not read as a pass.
+    #[test]
+    fn a_goal_that_could_never_fire_is_refused_when_it_is_started_again() {
+        let s = store();
+        s.add_goal(&a_goal("feb31")).unwrap();
+        s.add_goal(&a_goal("inbox")).unwrap();
+        s.write(|tx| {
+            tx.execute(
+                "UPDATE goals SET cron = '0 0 31 2 *' WHERE name = 'feb31'",
+                [],
+            )
+            .unwrap();
+            Ok(())
+        })
+        .unwrap();
+        s.set_goal_state("feb31", GoalState::Paused).unwrap();
+        s.set_goal_state("inbox", GoalState::Paused).unwrap();
+
+        let refused = s.set_goal_state("feb31", GoalState::Running);
+        let message = match refused {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("a goal that can never fire was started again"),
+        };
+        assert!(
+            message.contains("February has no 31st"),
+            "the refusal should say what is wrong: {message}"
+        );
+        assert!(
+            message.contains("feb31"),
+            "the refusal should name the goal to remove: {message}"
+        );
+        assert_eq!(
+            s.goal_named("feb31").unwrap().unwrap().state,
+            GoalState::Paused,
+            "a refused resume should leave the goal where it was"
+        );
+
+        assert!(s.set_goal_state("inbox", GoalState::Running).unwrap());
+        let back = s.goal_named("inbox").unwrap().unwrap();
+        assert_eq!(back.state, GoalState::Running);
         assert!(back.next_fire_at_ms.unwrap() > now_ms());
     }
 
