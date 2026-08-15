@@ -2564,3 +2564,69 @@ rather than a line of configuration. Until that lands, what stands between the
 main chat and a shell is the paragraph in `orchestrator_preamble` telling it not
 to, and `tests/e2e/jod/35-orchestrator-toolbox.sh` is how anyone finds out
 whether that paragraph is still holding.
+
+## The approval wait is paid per tool call, and buys nothing unattended
+
+`ask` and `edits` put a `PreToolUse` hook in front of every tool call. When no
+standing grant covers the call, the hook raises a card and waits 60 seconds —
+`APPROVAL_WAIT_SECS` in `core/src/harness/claude.rs`, polled every 400 ms in
+`cli/src/approve.rs`. The note beside the constant says the cost is "paid once
+per distinct question rather than once per retry". Measured, it is paid once per
+tool call.
+
+Every Jod database on the development box, split by whether the run's directory
+holds the `settings.json` that carries the hook:
+
+| | runs | call-to-result pairs | median gap |
+|---|---|---|---|
+| hook installed (`ask`, `edits`) | 28 | 97 | 60.394 s |
+| no hook (`auto`, `plan`) | 23 | 129 | 0.033 s |
+
+Seventy percent of the hooked gaps land between 60.205 s and 61.388 s, a
+standard deviation of 231 ms around a full minute. Nine more land between 119 s
+and 122 s, which is two waits in series. Not one of the 129 unhooked gaps comes
+near a minute, and several of those pairs are in the same database file as
+hooked ones.
+
+The dedupe meant to bound the cost keys on the exact subject, so `Read a.txt`
+and `Read b.txt` are two different questions. A run that opens four one-word
+files one at a time takes four minutes. Measured end to end: 60.483 s, 60.438 s,
+60.369 s and 60.442 s between one read and the next, four minutes fourteen
+seconds of wall clock for four words. That is what puts a ceiling on a single
+turn. Seven sequential tool calls is seven minutes, so a suite that stops a turn
+at 420 seconds cuts the run off in the middle of ordinary work.
+
+None of the minute is Jod's event pipeline and none of it is the tool. Claude
+Code's own transcript records the same gap to within four milliseconds — its
+`tool_use` at +2.331 s and `tool_result` at +62.701 s against Jod's +2.227 s and
++62.601 s for the same call. The tool has not started yet. The harness is
+waiting for Jod's hook, and Jod's hook is waiting for a person.
+
+When nobody answers, the hook prints nothing and the harness decides, which is
+the decision it would have made a minute earlier. Jod passes
+`--permission-mode manual` for `ask` and `acceptEdits` for `edits`, so a plain
+`Read`, and under `edits` a plain `Write`, are both allowed by the harness on
+its own. Both were measured stalling for the full minute first: four reads of
+one-word files came back at 60.339 s to 60.381 s with all four cards still open,
+and under `edits` — the mode whose whole promise is that file edits go through —
+two `Write` calls came back at 60.547 s and 120.923 s.
+
+So the constant does what it says and the hook is as safe as it claims. The cost
+is the part nobody had measured. An unattended run pays a minute per distinct
+tool call for an answer that is not coming, and then gets for free the answer
+the harness was always going to give.
+
+The fix has to settle something not written down anywhere yet, which is why this
+is an entry and not a patch. Either Jod learns whether a person is actually at
+the rail — approval cards go to the rail and nowhere else today, not to Telegram
+— and skips the wait when nobody is there, or it stops asking about calls the
+harness would allow by itself, which means Jod keeping its own list of which
+tools are sensitive. The first is the smaller change to the boundary. The second
+re-opens the argument `plan` already settled, that a list of tool names is not a
+boundary. Skipping the wait is not itself a loosening: the hook's silent
+fall-through after 60 seconds is the same code path, only later.
+
+Nothing hit this from the console. All 341 run directories under `~/.jod` were
+launched in `auto` and none of them has a settings document, so the console has
+never paid the wait once. It bites the suites that exercise `ask` and `edits`,
+which is where it was found.

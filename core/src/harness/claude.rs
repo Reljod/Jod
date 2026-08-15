@@ -482,6 +482,16 @@ impl ClaudeCode {
 /// per distinct question rather than once per retry — see the dedupe in
 /// `jod approve-hook`. Long enough to catch a person at the console; short
 /// enough that a run left alone overnight still gets on with what it can.
+///
+/// **Measured, "once per distinct question" is once per tool call**, because
+/// the dedupe keys on the exact subject and two files are two subjects. An
+/// unattended run therefore pays a full minute per call and the waits add up:
+/// four one-word files read one at a time took four minutes fourteen seconds,
+/// against seven seconds for the same prompt under `auto`. Do not shorten this
+/// constant to paper over that — the wait is only useful when somebody can
+/// answer, and deciding how Jod knows that is the open question. See
+/// `docs/decisions.md`, "The approval wait is paid per tool call, and buys
+/// nothing unattended".
 const APPROVAL_WAIT_SECS: u64 = 60;
 
 /// Write this run's `--settings` document: standing grants, and the hook.

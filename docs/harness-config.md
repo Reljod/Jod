@@ -86,6 +86,18 @@ auto-allowed at all — the text cannot bound what it runs. `plan` and `auto` ge
 no hook: one refuses the whole class of writes by design, the other has already
 approved everything.
 
+**Know what the wait costs before you launch a long run in these modes.** It is
+paid once per *distinct* question, and the questions are keyed on the exact
+subject, so reading two different files is two questions rather than one. A run
+with nobody at the rail therefore waits about a minute per tool call and the
+waits add up: four one-word files read one at a time took four minutes fourteen
+seconds, against seven seconds for the same prompt under `auto`. Reads and, in
+`edits` mode, file writes pay it too, even though the harness allows both on its
+own once the wait expires. Until that is fixed —
+[why](decisions.md#the-approval-wait-is-paid-per-tool-call-and-buys-nothing-unattended)
+— use `auto` with grants for unattended work, and keep `ask` and `edits` for
+runs somebody is actually watching.
+
 ## Where each harness keeps its own configuration
 
 Verified on this machine; paths are the usual ones but check yours.
