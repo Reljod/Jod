@@ -282,8 +282,19 @@ pub fn next_fire(cron: &str, timezone: &str, after_ms: i64) -> Result<Option<i64
 ///
 /// Used at creation time so a schedule that can never fire is refused when it
 /// is written rather than discovered as silence weeks later.
+/// An expression with no next occurrence is refused here rather than stored.
+/// `next_fire` answers `Ok(None)` for a well formed expression that names a
+/// date which never arrives, such as the 31st of February, so accepting every
+/// `Ok` would arm a schedule that waits for ever and looks healthy doing it.
 pub fn validate(cron: &str, timezone: &str) -> Result<()> {
-    next_fire(cron, timezone, chrono::Utc::now().timestamp_millis()).map(|_| ())
+    match next_fire(cron, timezone, chrono::Utc::now().timestamp_millis())? {
+        Some(_) => Ok(()),
+        None => Err(JodError::Invalid(format!(
+            "{cron} never comes round in {timezone}, so a schedule on it would \
+             sit armed and never fire. Check the day of the month against the \
+             month — February has no 31st — and pick a date that exists."
+        ))),
+    }
 }
 
 /// Every instant a schedule should have fired in `(after_ms, until_ms]`.
@@ -619,6 +630,31 @@ mod tests {
         assert!(validate("not a cron", "UTC").is_err());
         assert!(validate("0 2 * * *", "Mars/Olympus").is_err());
         assert!(validate("0 2 * * *", "Asia/Manila").is_ok());
+    }
+
+    /// A cron expression can be perfectly well formed and still name a date
+    /// that never arrives. February has no 31st and April has no 31st either,
+    /// so a schedule on one of those expressions sits armed for ever. This is
+    /// the case `validate` exists to catch, and catching it means looking at
+    /// whether an occurrence was actually found rather than only at whether
+    /// the search came back without an error.
+    #[test]
+    fn an_expression_that_names_a_date_that_never_comes_is_refused() {
+        for impossible in ["0 0 31 2 *", "0 0 30 2 *", "0 0 31 4 *", "0 0 31 11 *"] {
+            assert!(
+                validate(impossible, "UTC").is_err(),
+                "{impossible} names a date that never comes and should have been refused"
+            );
+        }
+        // Asserted alongside, so the refusal cannot pass by turning everything
+        // away. February 29th is the interesting one: it is rare, not
+        // impossible, and it has to keep working.
+        for real in ["0 9 * * *", "0 0 29 2 *", "0 0 31 1 *", "@daily"] {
+            assert!(
+                validate(real, "UTC").is_ok(),
+                "{real} does come round and should have been accepted"
+            );
+        }
     }
 
     #[test]
