@@ -24,6 +24,28 @@ Every file ends with a "Scenarios run" table listing what was tried, what was
 expected, and what happened — passes included. A clean pass is worth recording;
 it is what stops the same ground being covered twice.
 
+## A merge closes a pull request. The `Check:` line closes the task.
+
+Learned the hard way, twice in one afternoon, and worth more than any single
+finding here.
+
+Every task below carries a `Check:` line — the runnable thing that proves it is
+done. We closed tasks on *merge* instead, and a merge only says a pull request
+finished. Those are different claims:
+
+- **L3** was marked fixed when one of its seven sites had been fixed. The pull
+  request was honest and did exactly what its brief asked; the brief had
+  narrowed silently from the task. L3's check says assert `jod main` **and**
+  `jod run` both root themselves — it would have failed on `jod run` in
+  seconds, and nobody ran it.
+- **F4** was marked done against a trigger that measurement showed was wrong in
+  both directions at once.
+
+So: a pull request merging is not a task changing status. Run the task's own
+check, and if the check has two halves, both halves must pass. If you
+deliberately fix only part of a task, say so and leave it open — a partly-fixed
+task marked done is worse than an open one, because nobody looks at it again.
+
 ## Start here
 
 **Read `10-orchestration.md` O1 first. It is the most serious thing in this
