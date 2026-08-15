@@ -2328,8 +2328,16 @@ async fn main_chat(
 ) -> Result<()> {
     let store = jod.store().context("this command needs the database")?;
     let kind: HarnessKind = harness.into();
-    let cwd = cwd.unwrap_or_else(jod_core::service::default_cwd);
+    // The directory this command was typed in, not `$HOME`. `jod main` is the
+    // console's one-shot twin — you `cd` into a repository and ask for
+    // something about it — so it resolves its directory the same way `jod tui`
+    // does. It used to call `jod_core::service::default_cwd`, and the two
+    // halves of that compounded: the orchestrator's harness process started in
+    // the home directory, and the root granted below would have been the whole
+    // home directory rather than the repository.
+    let cwd = console_cwd(cwd);
     let id = store.main_conversation(kind, &cwd.display().to_string())?;
+    grant_launch_root(store, &id, &cwd);
     let now = chrono::Utc::now().timestamp_millis();
 
     if instruction.trim().is_empty() {
@@ -4310,14 +4318,64 @@ fn grants_for_run(
 /// directory at all — a working directory that has been deleted out from under
 /// the process, which is where `current_dir` fails.
 ///
-/// This is the console only. `jod run` is a one-shot that may be fired from
-/// anywhere by anything, and a batch job silently inheriting whatever directory
-/// its caller happened to be in is the opposite of what a resumed run wants —
-/// see [`session_cwd`], which looks the answer up rather than assuming it.
+/// This is the console and `jod main`, which is the console's one-shot twin.
+/// `jod run` is a one-shot that may be fired from anywhere by anything, and a
+/// batch job silently inheriting whatever directory its caller happened to be
+/// in is the opposite of what a resumed run wants — see [`session_cwd`], which
+/// looks the answer up rather than assuming it.
 fn console_cwd(given: Option<PathBuf>) -> PathBuf {
     given
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_else(jod_core::service::default_cwd)
+}
+
+/// Give the main chat the directory `jod main` was run in, to read.
+///
+/// The same grant [`crate::tui::ensure_launch_root`] makes when a console
+/// opens, and made here for the same reason: an orchestrator that cannot read
+/// the repository you are standing in has to be told the path you have just
+/// `cd`-ed to. `jod main` made no grant at all, so an instruction typed in a
+/// checkout reached a chat with an empty root set.
+///
+/// Read-only, like every root Jod adds itself; a worktree is what makes one
+/// writable.
+///
+/// **Skipped when the directory is already a root, which is the one place this
+/// differs from the console's version.** The console grants once per process
+/// and holds a set to remember it; a `jod main` is one command, so every
+/// invocation is a launch and there is nothing to remember. Left unguarded,
+/// running it twice inside a worktree the chat had claimed would re-add that
+/// directory as reading and quietly take the write back —
+/// [`jod_core::store::Store::add_root`] updates `writable` and `origin` in
+/// place. Removal still behaves as it does in the console: `jod root remove`
+/// takes the directory away, and the next launch — here, the next command —
+/// grants it again.
+fn grant_launch_root(store: &Store, conversation: &str, cwd: &std::path::Path) {
+    // Nowhere to grant. `console_cwd` only returns this if `$HOME` is unset and
+    // the working directory is gone, and an empty path reads as `/` to anything
+    // that joins onto it.
+    if cwd.as_os_str().is_empty() {
+        return;
+    }
+    // Compared against the normalised form, because that is the spelling
+    // `add_root` stores and the one every later match is made against.
+    let here = jod_core::roots::normalise(cwd);
+    match store.roots(conversation) {
+        Ok(roots) if roots.iter().any(|r| r.path == here) => return,
+        Ok(_) => {}
+        // Worth one line and not worth stopping for: the instruction is still
+        // the thing the caller asked for.
+        Err(e) => {
+            eprintln!("· could not read this chat's roots: {e}");
+            return;
+        }
+    }
+    if let Err(e) = store.add_root(conversation, jod_core::roots::NewRoot::reading(cwd)) {
+        eprintln!(
+            "· {} is where this command was run, but it could not be added as a root: {e}",
+            cwd.display()
+        );
+    }
 }
 
 /// The directory a resumed session belongs to, when Jod knows it.
