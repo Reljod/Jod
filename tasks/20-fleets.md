@@ -161,7 +161,23 @@ render the tree (or its detail pane) and assert each renders a different
 ---
 
 ## F3. `cut()` truncates by Unicode scalar count, not terminal width — unicode rows can overflow their box
-Status: open · Owner: — · Severity: medium · needs confirming (no terminal to render into)
+Status: **verified fixed — merged as #149, check run against main, passes** · Severity was: medium
+
+Its status read `open · needs confirming` until now — the fix had landed and
+nobody flipped it, which is the state this whole verification pass exists to
+catch.
+
+`cut()` (`cli/src/tui/ui.rs`) now measures in columns via `Span::raw(s).width()`
+and walks the string, dropping a character that would straddle the last column
+rather than slicing by scalar count. Two tests cover the check:
+
+```
+test tui::ui::tests::cutting_counts_columns_not_characters ... ok
+test tui::ui::tests::a_japanese_row_stops_where_an_english_one_stops ... ok
+```
+
+The second is the check as this task states it — a wide-char-heavy label
+rendered at a fixed width, asserted to stop where an English one does.
 
 `fn cut` (`cli/src/tui/ui.rs:4766-4774`) truncates with `s.chars().count()`.
 Every "how much room is left" computation in `draw_tree` builds on the same
@@ -198,7 +214,11 @@ terminal width; assert the row's rendered width does not exceed the box.
 ---
 
 ## F4. `list_agents` silently truncates at 20 with no signal there is more
-Status: **fixed — merged as #143** · Severity was: high
+Status: **verified fixed — merged as #143, check run against main, passes** · Severity was: high
+
+```
+test mcp::tests::a_listing_says_how_many_agents_the_limit_left_out ... ok
+```
 
 > **This finding was wrong in both directions, and the fix says so.** Read the
 > correction below before the original text, which is kept for the record.

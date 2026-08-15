@@ -111,7 +111,7 @@ Check: a conversation with roots `[$HOME, some-repo]` must default new work to
 `some-repo`.
 
 ## L3. Every entry point except the TUI starts in `$HOME`, wherever you ran it
-Status: **partially fixed — one of seven sites** · Severity: medium ·
+Status: **partially fixed — one of seven sites · check run and it fails** · Severity: medium ·
 #122 fixed `main_chat` (`jod main`) only. **Six sites still answer `$HOME`:**
 `cli/src/main.rs` lines 1701, 1702, 2147, 2233, 3815 and 4474 — `jod run`
 among them. A fix is in progress.
@@ -167,8 +167,28 @@ Check: fresh `JOD_HOME`; run `jod main "hi"` and `jod run` from a scratch
 directory; assert `conversations.cwd` is that directory in both cases and that
 `jod root ls` lists it.
 
+**Check run against main `730e63b`. It fails, on the half that was never
+fixed.**
+
+```
+half 1, jod main:  cwd = /tmp/jod-verify-repo-439006   root listed   PASS
+half 2, jod run:   cwd = /home/reljod                  roots = []    FAIL
+```
+
+`jod root ls` after `jod run` answers "no conversation given and there is no
+main chat yet". So the status above is correct and is now verified rather than
+inferred.
+
 ## L4. A console with no root cannot open work at all
-Status: **probably resolved by #122 — verify before starting** · Severity was: medium
+Status: **verified fixed — check run against main, passes** · Severity was: medium
+
+Not inferred from #122. The stated check was run against main `730e63b`: a
+fresh `JOD_HOME`, `jod main` inside a scratch repository, one instruction that
+should open work. A work opened — `6437fd76`, "add CONTRIBUTING.md with 'PRs
+welcome.' and commit" — its session conversation carries a `work_id`, and every
+run completed. `open_work` succeeded rather than refusing, because `jod main`
+now seeds a root (`/tmp/jod-l4-repo-448730`, confirmed present before the
+instruction went out).
 
 `open_work` with no `checkout` and no roots refuses (`core/src/mcp.rs:2149`):
 
@@ -189,7 +209,7 @@ Check: fresh `JOD_HOME`, `jod main` in a repository, one instruction that
 should open work, assert it opens rather than refuses.
 
 ## L5. `jod project current` does not exist, though the MCP tool does
-Status: open · Owner: — · Severity: low
+Status: **fixed — merged as #165** · Severity was: low
 
 Observed: `jod project current` exits 2 with "unrecognized subcommand". The MCP
 tool `project_current` exists and the orchestrator's preamble tells the model to

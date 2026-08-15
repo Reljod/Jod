@@ -68,7 +68,7 @@ old one's `current-run`.
 ---
 
 ## G2. The iteration that satisfies a goal is never recorded
-Status: open · Owner: — · Severity: medium
+Status: **fixed — merged as #147** · Severity was: medium
 
 In `tick_goals` the satisfied branch (`core/src/ticker.rs:936`) writes the
 `ended` fact, sets the state, and `continue`s. The `iteration` fact and the
@@ -134,7 +134,26 @@ create `DONE` until the third iteration should not stall before it gets there.
 ---
 
 ## G4. A goal that is already exhausted at creation loops forever claiming and releasing itself, still reporting "running"
-Status: open · Owner: — · Severity: high
+Status: **verified fixed — merged as #153, check run against main, passes** · Severity was: high
+
+Both clauses of the check were executed:
+
+```
+jod goal add x "do nothing" --max-iterations 0
+jod goal run x
+jod daemon --once   -> claimed 1 · started 0   state: exhausted
+jod daemon --once   -> claimed 0 · started 0   state: exhausted
+```
+
+State is `exhausted` rather than `running`, the second tick does not claim it
+again, and no run was ever spawned.
+
+**One residual the check does not cover, and it is not a failure.** The goal
+still reports `running` between creation and the first tick — `jod goal add`
+answers "x is running" and the row reads `running` until a tick flips it. In
+practice a tick follows quickly and nothing is spawned meanwhile, so the harm
+is cosmetic. Noted rather than filed: the check as written asks for the state
+after the tick, and after the tick it is right.
 
 `Goal::should_stop` (`core/src/schedule.rs:436`) is checked in two different
 places in `tick_goals`, and only one of them acts on what it finds.
@@ -261,7 +280,7 @@ assert this is refused at `add` time instead once the fix lands.
 ---
 
 ## G6. A goal's first iteration is never checked against its own done-when before it is spawned
-Status: open · Owner: — · Severity: medium
+Status: **fixed — merged as #166** · Severity was: medium
 
 `check_done` (`core/src/ticker.rs:1688`) is only ever called inside the block
 that settles a *previous* run (`core/src/ticker.rs:912`, `if let Some(run) =
@@ -467,7 +486,10 @@ Check: `jod goal ls --help`, `jod goal pause --help`, `jod goal resume --help`,
 ---
 
 ## G11. `jod goal add ""` creates a goal with an empty name
-Status: open · Owner: — · Severity: low
+Status: **fixed — merged as #168** · Severity was: low
+
+Fixed with S6 at the store level, so the MCP tools are covered too — a CLI-only
+fix would have looked complete and passed a CLI check.
 
 ```
 $ jod goal add "" "empty name test"
