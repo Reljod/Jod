@@ -60,6 +60,7 @@ that prompted the sweep.
 | | What | Where | State |
 |---|---|---|---|
 | **critical** | A work session cannot write anything — `claim_worktree` cuts a worktree the running process may not touch | `10-orchestration.md` O1 | **needs Reljod** |
+| high | Every tool call waits 60s for an approval hook with nobody there. Four file reads take 4m14s under `ask`, 7s under `auto` | filed separately as #138 | **needs Reljod** |
 | high | The console is rooted at `$HOME`, which is not a repository | `00-launch-and-roots.md` L1 | **needs Reljod** |
 | high | A goal's memory is name-keyed, so a new goal inherits a dead one's record | `50-goals.md` G1 | fix open, #126 |
 | high | New work defaults to the oldest root for ever | `00-launch-and-roots.md` L2 | blocked on L1 |
@@ -68,10 +69,10 @@ that prompted the sweep.
 | high | A goal with no cap and a non-deterministic check has no ceiling at all | `50-goals.md` G5 | open |
 | high | It busy-waits on its own child with `sleep`, which the design forbids | `01-routing.md` R4 | open, now small |
 | high | The orchestrator will not answer, or will — it is a coin flip nothing decides | `01-routing.md` R1 | in flight |
-| high | It reaches outside Jod's tool set on *every* run | `01-routing.md` R5 | fix open, #127 |
 | high | `list_agents` truncates at 20 with no signal there is more | `20-fleets.md` F4 | in flight |
 | high | "Stop an agent and everything it started" does not stop what it started | `20-fleets.md` F5 | in flight |
 | high | A cron expression that can never fire is armed anyway | `40-scheduling.md` S2 | in flight |
+| high | It reaches outside Jod's tool set on *every* run | `01-routing.md` R5 | **fixed, #127** |
 | high | The main chat can permanently lose a run's reply | `10-orchestration.md` O2 | **fixed, #133** |
 | high | The schedule circuit breaker never trips for the ordinary failure | `40-scheduling.md` S1 | **fixed, #135** |
 | high | Two projects sharing a name resolve non-deterministically | `30-project-managers.md` P3 | **fixed, #131** |

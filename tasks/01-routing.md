@@ -162,7 +162,7 @@ Check: delegate something from the main chat and assert the turn returns
 without a `sleep` or a poll loop in its tool calls.
 
 ## R5. The orchestrator reaches for tools outside Jod's set
-Status: **fix open as #127** · Severity: high
+Status: **fixed — merged as #127** · Severity was: high
 
 (Raised from medium. The orchestration sweep found this on **every one** of its
 roughly ten live runs, and my own run too. It is universal, not occasional —
