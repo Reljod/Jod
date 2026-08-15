@@ -447,3 +447,69 @@ fn two_processes_over_one_file_never_both_take_a_schedule() {
     assert_eq!(taken.len(), distinct.len(), "claimed twice: {taken:?}");
     assert_eq!(distinct.len(), 6, "and every one was claimed exactly once");
 }
+
+// ---- reusing a name ----
+
+/// Reusing a name is an ordinary mistake, and the database is what notices it.
+/// The reader must be told the name is taken, in a sentence, and must not be
+/// shown the table and constraint that noticed. Asserting only what the message
+/// says would still pass for a message that pasted the raw error underneath a
+/// friendly opening, so the absence of the SQL wording is asserted too.
+fn assert_reads_as_english(message: &str, expected: &str) {
+    assert!(
+        message.contains(expected),
+        "the message should say `{expected}`, and said: {message}"
+    );
+    let lowered = message.to_lowercase();
+    for leaked in ["unique", "constraint", "sqlite", "error code"] {
+        assert!(
+            !lowered.contains(leaked),
+            "the message should not mention `{leaked}`, and said: {message}"
+        );
+    }
+}
+
+#[test]
+fn a_second_schedule_with_a_taken_name_is_refused_in_plain_words() {
+    let scratch = Scratch::new("dup-schedule");
+    let store = scratch.open();
+    store.add_schedule(&schedule("nightly-triage", "0 3 * * *")).unwrap();
+
+    // A different id, because the collision under test is the name. An id
+    // collision is a different fault and would prove nothing about this one.
+    let mut second = schedule("nightly-triage", "0 4 * * *");
+    second.id = "id-second".into();
+    let err = store
+        .add_schedule(&second)
+        .expect_err("a name already in use must be refused");
+
+    assert_reads_as_english(
+        &err.to_string(),
+        "a schedule named `nightly-triage` already exists",
+    );
+
+    // The refusal must also leave the first schedule alone.
+    let kept = store.schedule_named("nightly-triage").unwrap().unwrap();
+    assert_eq!(kept.id, "id-nightly-triage");
+    assert_eq!(kept.cron, "0 3 * * *");
+}
+
+#[test]
+fn a_second_goal_with_a_taken_name_is_refused_in_plain_words() {
+    let scratch = Scratch::new("dup-goal");
+    let store = scratch.open();
+    store.add_goal(&goal("zero-budget")).unwrap();
+
+    let mut second = goal("zero-budget");
+    second.id = "g-second".into();
+    second.objective = "a different objective".into();
+    let err = store
+        .add_goal(&second)
+        .expect_err("a name already in use must be refused");
+
+    assert_reads_as_english(&err.to_string(), "a goal named `zero-budget` already exists");
+
+    let kept = store.goal_named("zero-budget").unwrap().unwrap();
+    assert_eq!(kept.id, "g-zero-budget");
+    assert_eq!(kept.objective, "keep the inbox at zero");
+}
