@@ -68,7 +68,7 @@ that prompted the sweep.
 | high | It busy-waits on its own child with `sleep`, which the design forbids | `01-routing.md` R4 |
 | high | It reaches outside Jod's tool set on *every* run | `01-routing.md` R5 |
 | high | Re-cataloguing a project wipes its aliases and notes | `30-project-managers.md` P1 — **fixed, #123** |
-| high | Two projects sharing a name resolve non-deterministically, with no warning — `jod project archive` picked one at random | `30-project-managers.md` P3 |
+| high | Two projects sharing a name resolve non-deterministically, with no warning — `jod project archive` picked one at random | `30-project-managers.md` P3 — *claimed* |
 | high | The schedule circuit breaker never trips for the ordinary failure. Seven real failures, `consecutive_failures` stuck at 0 | `40-scheduling.md` S1 |
 | high | A cron expression that can never fire is armed anyway | `40-scheduling.md` S2 |
 | high | A goal whose stop condition is already true never stops — claimed and released every tick, for ever | `50-goals.md` G4 |
@@ -78,6 +78,36 @@ that prompted the sweep.
 | high | A run's tree node cannot say finished, failed or killed | `20-fleets.md` F2 |
 | high | `list_agents` truncates at 20 with no signal there is more | `20-fleets.md` F4 |
 | high | "Stop an agent and everything it started" does not stop what it started | `20-fleets.md` F5 |
+
+## A proposed charter change — Reljod's call, deliberately not made
+
+**Not applied. Nobody should apply it without Reljod.** Two agent sessions
+independently think it is right, which is not the same as authority to edit the
+charter, and a charter that agents amend among themselves is not a charter.
+
+The charter says "Every task needs one runnable check. Without one, 'looks
+done' is the only stop signal and you are the loop." That justifies the check
+by whether the work is *finished*. This sweep hit two failures that wording
+does not cover, and they are different from each other:
+
+1. **A bug that was not real.** The first finding in this list was filed from
+   code plus the live database and was wrong — the behaviour had already been
+   fixed and the old rows were recording old behaviour. The defence is
+   *reproduce before you fix*.
+2. **A fix whose mechanism was wrong.** Two readers told the P1 agent to guard
+   the columns with `COALESCE`, copying a correct pattern one line away in the
+   same file. It cannot work there, and it would have shipped with tests
+   passing. The defence is *see the test red before the fix, not merely green
+   after*.
+
+The second is the uncomfortable one. Reasoning from a correct neighbouring
+pattern is what a careful reviewer would also do, so review would not have
+caught it. Only running it would.
+
+Proposed: extend that charter line so the check is justified by whether the work
+is *correct*, not only whether it is done — and say that a fix's check must be
+observed failing first. Both practices are already in use by both sessions; the
+question is only whether they belong in the charter.
 
 ## What this sweep corrected
 

@@ -153,7 +153,17 @@ row is flagged in a way `project_list` surfaces.
 ---
 
 ### P3. Two projects that share a spoken form are never reported as ambiguous — one is silently picked
-Status: open · Owner: — · Severity: high
+Status: **claimed, in progress** · Severity: high
+
+Note for whoever reviews it: there are two halves and only one is easy.
+Reporting `Match::Ambiguous` from an interactive command like
+`jod project archive` is straightforward — refuse and name the candidates. But
+`settle_project` runs before every model turn with **no user to ask**, so it
+cannot refuse the same way. A fix that does the interactive half and quietly
+leaves the automatic one would look complete and would not be.
+
+Leaving the project unset is probably better than picking wrong, but that is a
+judgement the fix has to argue rather than assume.
 
 The catalog explicitly designed for this case — `Match::Ambiguous` exists
 because "two genuinely different projects named in one breath is not
