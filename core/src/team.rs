@@ -1125,6 +1125,11 @@ impl Store {
         role: &str,
         conversation_id: Option<&str>,
     ) -> Result<()> {
+        // The same guard `join_team` has, for the same reason: the team and
+        // the member together are the key that mail is addressed to, and a
+        // blank half is a key nothing can be looked up by.
+        crate::store::require_a_name("team", team)?;
+        crate::store::require_a_name("team member", name)?;
         // The person's name is not available to anything that launches a
         // process. An agent joined under it would send messages that no reader
         // could tell from the human's own — and the whole of sender identity
@@ -3029,6 +3034,55 @@ mod tests {
             s.thread_state(Scope::Work, &work.id, &thread_id).unwrap(),
             "the screen and the send path must not disagree about a bound"
         );
+    }
+
+    /// The scope-aware sibling of `join_team` needs the same guard, or the
+    /// blank name simply moves one function along. The team and the member
+    /// together are the key that mail is addressed to and that `member_in`
+    /// looks up, so neither half can be blank.
+    #[test]
+    fn joining_a_scope_with_a_blank_team_or_member_is_refused() {
+        let s = Store::in_memory().unwrap();
+        for (blank, fault) in [("", "empty"), ("   ", "only whitespace")] {
+            for (team, member, thing) in
+                [(blank, "scout", "team"), ("crew", blank, "team member")]
+            {
+                let said = s
+                    .join_scope(Scope::Team, team, member, HarnessKind::ClaudeCode, "", None)
+                    .expect_err("a blank name must be refused")
+                    .to_string();
+                let expected = format!("a {thing} needs a name, and this one is {fault}");
+                assert!(
+                    said.contains(&expected),
+                    "the message should say `{expected}`, and said: {said}"
+                );
+                assert!(
+                    said.contains("Give it a name"),
+                    "the message should say what to do, and said: {said}"
+                );
+            }
+        }
+        assert!(
+            s.team_members("crew").unwrap().is_empty(),
+            "a refusal must not have written the member anyway"
+        );
+    }
+
+    /// The passing case: a name outside ASCII joins a scope and is found again
+    /// by the name it was given.
+    #[test]
+    fn a_scope_member_named_in_another_script_is_still_accepted() {
+        let s = Store::in_memory().unwrap();
+        s.join_scope(
+            Scope::Team,
+            "夜間チーム",
+            "偵察🌙",
+            HarnessKind::Agy,
+            "research",
+            None,
+        )
+        .unwrap();
+        assert_eq!(s.team_members("夜間チーム").unwrap()[0].name, "偵察🌙");
     }
 
     #[test]

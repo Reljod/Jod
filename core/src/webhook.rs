@@ -493,7 +493,14 @@ const DELIVERY_COLUMNS: &str = "SELECT id, delivery_id, source, event, action, r
                                   FROM webhook_deliveries";
 
 impl Store {
+    /// Write a rule, refusing one with no name.
+    ///
+    /// The name is the only handle the rule ever has: [`Store::webhook_rule`],
+    /// [`Store::set_webhook_rule_enabled`] and [`Store::delete_webhook_rule`]
+    /// all key on it. A blank one lists as an empty column and cannot be
+    /// enabled, disabled or removed afterwards.
     pub fn add_webhook_rule(&self, rule: &Rule) -> Result<()> {
+        crate::store::require_a_name("webhook rule", &rule.name)?;
         let conditions = serde_json::to_string(&rule.conditions)?;
         self.write(|tx| {
             tx.execute(
@@ -1118,6 +1125,50 @@ mod tests {
         let mut other = rule("prs");
         other.id = "wr-other".into();
         assert!(s.add_webhook_rule(&other).is_err());
+    }
+
+    /// A rule is addressed by its name for the rest of its life:
+    /// [`Store::webhook_rule`], [`Store::set_webhook_rule_enabled`] and
+    /// [`Store::delete_webhook_rule`] all look one up by name. A blank name
+    /// still satisfies the `UNIQUE` index, so `jod webhook ls` prints an empty
+    /// column that reads as padding rather than as a rule, and there is no way
+    /// left to enable, disable or remove it.
+    ///
+    /// Three spaces are checked separately because they render exactly like
+    /// nothing at all, and `is_empty()` alone would let them through.
+    #[test]
+    fn a_webhook_rule_with_a_blank_name_is_refused() {
+        let s = store();
+        for (name, fault) in [("", "empty"), ("   ", "only whitespace")] {
+            let err = s
+                .add_webhook_rule(&rule(name))
+                .expect_err("a rule with a blank name must be refused");
+            let said = err.to_string();
+            assert!(
+                said.contains(&format!("a webhook rule needs a name, and this one is {fault}")),
+                "the message should name the fault, and said: {said}"
+            );
+            assert!(
+                said.contains("Give it a name"),
+                "the message should say what to do, and said: {said}"
+            );
+        }
+        assert!(
+            s.webhook_rules().unwrap().is_empty(),
+            "a refusal must not have written the rule anyway"
+        );
+    }
+
+    /// The passing case, written down so a later tightening cannot quietly
+    /// take it away. `str::trim` cuts Unicode whitespace and leaves every other
+    /// script alone, so a name outside ASCII is stored and found again exactly
+    /// as it was.
+    #[test]
+    fn a_rule_named_in_another_script_is_still_accepted() {
+        let s = store();
+        let name = "夜間トリアージ🌙";
+        s.add_webhook_rule(&rule(name)).unwrap();
+        assert_eq!(s.webhook_rule(name).unwrap().expect("stored").name, name);
     }
 
     #[test]

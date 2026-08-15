@@ -1944,6 +1944,10 @@ impl Store {
     // ---- teams ----------------------------------------------------------
 
     /// Add a member, or update the role and harness of one already there.
+    ///
+    /// The team and the member together are the key. Mail is addressed to that
+    /// pair, `member_in` looks a member up by it, and a run is named
+    /// `<team>-<member>`, so neither half can be blank.
     pub fn join_team(
         &self,
         team: &str,
@@ -1951,6 +1955,8 @@ impl Store {
         harness: HarnessKind,
         role: &str,
     ) -> Result<()> {
+        require_a_name("team", team)?;
+        require_a_name("team member", name)?;
         self.write(|tx| {
             tx.execute(
                 "INSERT INTO team_members (team, name, harness, role, status, joined_at_ms)
@@ -2146,7 +2152,14 @@ impl Store {
     /// silently and let the caller print success over a write that never
     /// happened; this refuses it instead, naming the board that actually
     /// owns the id.
+    ///
+    /// A blank id is refused for the same reason a duplicate one is: `claim`,
+    /// `done` and `hand over` all key on it, and a blank id names nothing. The
+    /// board's name is refused too, because a task has to land somewhere a
+    /// later `jod team show` can name.
     pub fn add_team_task(&self, team: &str, id: &str, title: &str) -> Result<()> {
+        require_a_name("team", team)?;
+        require_a_name("task", id)?;
         self.write(|tx| {
             tx.execute(
                 "INSERT INTO tasks (id, status, team, title) VALUES (?1, 'open', ?2, ?3)
@@ -3356,12 +3369,14 @@ const MAX_NEIGHBOURS: i64 = 500;
 
 /// Refuse a name that is blank, before anything is written.
 ///
-/// A goal or a schedule is addressed by its name for the rest of its life:
-/// `pause`, `resume` and `rm` all take one, and so do the `goal_create` and
-/// `schedule_create` tools. A blank name still satisfies the `UNIQUE` index, so
-/// the database happily stores it, and every listing then prints an empty
-/// column that reads as terminal padding rather than as a row. Two of them
-/// would make `pause`, `resume` and `rm` ambiguous, with no way to say which
+/// A goal, a schedule, a webhook rule, a team, a team member and a task on a
+/// board are all addressed by the name they were given, for the rest of their
+/// lives. `pause`, `resume`, `rm`, `enable`, `disable`, `claim` and `done` all
+/// take one, and so do the `goal_create` and `schedule_create` tools and every
+/// piece of mail sent on a team's bus. A blank name still satisfies the
+/// `UNIQUE` index, so the database happily stores it, and every listing then
+/// prints an empty column that reads as terminal padding rather than as a row.
+/// Two of them make all of those commands ambiguous, with no way to say which
 /// one was meant.
 ///
 /// This lives in the store rather than in the argument parser because the
@@ -3370,20 +3385,26 @@ const MAX_NEIGHBOURS: i64 = 500;
 /// `cli/src/main.rs` would still let a model create a nameless goal — and would
 /// pass a command-line test while doing it.
 ///
+/// It is `pub(crate)` rather than private because two of the surfaces it guards
+/// live in sibling modules: [`Store::add_webhook_rule`] in `webhook.rs` and
+/// `Store::join_scope` in `team.rs`. Widening it was the alternative to writing
+/// the same three lines a third and a fourth time, which is how the coverage
+/// became uneven in the first place.
+///
 /// The test is `trim`, not `is_empty`. A name of three spaces looks exactly
 /// like no name at all in a listing, so it is the same defect and has to be
 /// refused the same way. `str::trim` cuts Unicode whitespace, which means an
 /// ideographic space is caught too; it leaves every other script alone, so a
 /// name like `夜間トリアージ🌙` passes here exactly as it did before.
-fn require_a_name(thing: &str, name: &str) -> Result<()> {
+pub(crate) fn require_a_name(thing: &str, name: &str) -> Result<()> {
     if !name.trim().is_empty() {
         return Ok(());
     }
     let fault = if name.is_empty() { "empty" } else { "only whitespace" };
     Err(JodError::Invalid(format!(
-        "a {thing} needs a name, and this one is {fault}. The name is how you \
-         pause, resume and remove it, and a blank one shows up in a listing as \
-         an empty column. Give it a name and try again."
+        "a {thing} needs a name, and this one is {fault}. The name is the \
+         handle every later command takes, and a blank one shows up in a \
+         listing as an empty column. Give it a name and try again."
     )))
 }
 
@@ -3933,6 +3954,90 @@ mod tests {
         s.add_team_task("zeta", "t1", "park this").unwrap();
 
         assert_eq!(s.teams().unwrap(), vec!["alpha", "zeta"]);
+    }
+
+    /// A refusal has to name the fault and say what to do about it. Every
+    /// blank-name message on a team surface is checked for both.
+    fn assert_says_what_to_do(said: &str, thing: &str, fault: &str) {
+        let expected = format!("a {thing} needs a name, and this one is {fault}");
+        assert!(
+            said.contains(&expected),
+            "the message should say `{expected}`, and said: {said}"
+        );
+        assert!(
+            said.contains("Give it a name"),
+            "the message should say what to do, and said: {said}"
+        );
+    }
+
+    /// `jod team join "" ""` is accepted today and prints ` joined `. The team
+    /// and the member together are the key: mail is addressed to that pair,
+    /// `member_in` looks a member up by it, and a run is named
+    /// `<team>-<member>`. Neither half can be blank.
+    ///
+    /// The agent-generated path is already safe, because `team::member_name`
+    /// falls back to `"session"` when a title yields nothing. Only a person
+    /// typing the command, or a caller reaching the store directly, can get a
+    /// blank in here.
+    #[test]
+    fn joining_a_team_with_a_blank_team_or_member_is_refused() {
+        let s = store();
+        for (blank, fault) in [("", "empty"), ("   ", "only whitespace")] {
+            let err = s
+                .join_team(blank, "scout", HarnessKind::ClaudeCode, "r")
+                .expect_err("a blank team name must be refused");
+            assert_says_what_to_do(&err.to_string(), "team", fault);
+
+            let err = s
+                .join_team("crew", blank, HarnessKind::ClaudeCode, "r")
+                .expect_err("a blank member name must be refused");
+            assert_says_what_to_do(&err.to_string(), "team member", fault);
+        }
+        assert!(
+            s.teams().unwrap().is_empty(),
+            "a refusal must not have created the team anyway"
+        );
+    }
+
+    /// `jod team task "" ""` is accepted today and prints ` on 's board`. The
+    /// id is the handle `claim_task`, `complete_task` and `hand_over_task` all
+    /// take, and the team is the board it lands on.
+    #[test]
+    fn a_team_task_with_a_blank_team_or_id_is_refused() {
+        let s = store();
+        for (blank, fault) in [("", "empty"), (" ", "only whitespace")] {
+            let err = s
+                .add_team_task(blank, "t1", "do the thing")
+                .expect_err("a blank team name must be refused");
+            assert_says_what_to_do(&err.to_string(), "team", fault);
+
+            let err = s
+                .add_team_task("crew", blank, "do the thing")
+                .expect_err("a blank task id must be refused");
+            assert_says_what_to_do(&err.to_string(), "task", fault);
+        }
+        assert!(
+            s.team_tasks("crew").unwrap().is_empty(),
+            "a refusal must not have put the task on the board anyway"
+        );
+    }
+
+    /// The passing case. A team, a member and a task named outside ASCII work
+    /// end to end — stored, listed, and found again by the name they were
+    /// given. `str::trim` cuts Unicode whitespace and leaves every other script
+    /// alone, so the blank-name refusal must not catch these.
+    #[test]
+    fn team_names_in_another_script_are_still_accepted() {
+        let s = store();
+        let team = "夜間チーム";
+        let member = "偵察🌙";
+        s.join_team(team, member, HarnessKind::Agy, "research")
+            .unwrap();
+        s.add_team_task(team, "課題-1", "調べる").unwrap();
+
+        assert_eq!(s.team_members(team).unwrap()[0].name, member);
+        assert_eq!(s.team_tasks(team).unwrap()[0].id, "課題-1");
+        assert_eq!(s.team_owning_task("課題-1").unwrap().as_deref(), Some(team));
     }
 
     #[test]
