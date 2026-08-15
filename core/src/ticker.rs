@@ -84,6 +84,65 @@ fn one_line(text: &str) -> String {
     format!("{}…", flat.chars().take(160).collect::<String>())
 }
 
+/// What can honestly be said about a settled iteration whose run cannot be read
+/// back, as a recovered cost and a line for `jod goal log`.
+///
+/// A real, paid-for run reaches this by two routes that have both been seen.
+/// It can fall outside the daemon's 200-run rehydrate window, so nothing ever
+/// loaded it into memory; or `rehydrate` can skip it because the summary on
+/// disk was written by a build whose `AgentSummary` had a different shape.
+/// Neither route destroys anything. The `runs` row and the run's events are
+/// both still there — the only thing that has failed is turning them back into
+/// a struct this build understands.
+///
+/// So the cost is recovered rather than assumed, and only when both places have
+/// been asked and neither answered does the line say the cost is unknown. That
+/// distinction is the point: an unknown cost written down as unknown can be
+/// chased later, while an unknown cost written down as `$0.00` looks like a
+/// settled fact and nobody ever asks again.
+fn unreadable_iteration(store: &Store, run_id: &str) -> (Option<f64>, String) {
+    let recovered = recorded_cost(store, run_id);
+    let outcome = match recovered {
+        Some(spent) => format!(
+            "the run {run_id} could not be read back; its recorded cost was ${spent:.4}"
+        ),
+        None => format!("the run {run_id} could not be read back, and its cost is unknown"),
+    };
+    (recovered, outcome)
+}
+
+/// The bill for a run the service cannot hand back, read straight out of the
+/// store.
+///
+/// Two places are asked, because the two ways a run becomes unreadable damage
+/// different things. A run outside the rehydrate window has a perfectly good
+/// summary that nobody loaded, so the row answers. A summary written by an
+/// incompatible build cannot become an `AgentSummary`, but it is still JSON and
+/// the usage it recorded is still in it, so the row usually answers that case
+/// too. The `Finished` event is the fallback for a row whose summary really has
+/// lost its usage: it is the harness's own report of what the turn cost, stored
+/// separately and never rewritten.
+fn recorded_cost(store: &Store, run_id: &str) -> Option<f64> {
+    if let Ok(Some(row)) = store.run(run_id) {
+        if let Some(spent) = row
+            .summary
+            .pointer("/usage/cost_usd")
+            .and_then(serde_json::Value::as_f64)
+        {
+            return Some(spent);
+        }
+    }
+    store
+        .events(run_id)
+        .ok()?
+        .iter()
+        .rev()
+        .find_map(|envelope| match &envelope.event {
+            crate::event::AgentEvent::Finished { usage, .. } => usage.cost_usd,
+            _ => None,
+        })
+}
+
 /// How a goal's ending should read to the person who finds it in
 /// `jod goal log`.
 ///
@@ -1085,10 +1144,25 @@ impl Ticker {
                         report.held += 1;
                         continue;
                     }
-                    Ok(agent) => {
+                    // A settled iteration, whether or not the run behind it can
+                    // still be read. Both cases take the same path from here,
+                    // because the goal paid for the turn either way, and the
+                    // only honest difference between them is how much can be
+                    // said about what the turn cost and what it did.
+                    //
+                    // A run that cannot be read used to have its own short arm
+                    // that advanced the counter and recorded nothing else. That
+                    // arm claimed the iteration was free, said nothing about it
+                    // in `goal log`, and counted it against the stall counter —
+                    // three claims, all of them false, about work Jod had
+                    // simply lost track of.
+                    settled => {
                         // What the done-when check says, run by Jod rather than
                         // described to the agent. Both of the goal's own
-                        // guarantees hang off this.
+                        // guarantees hang off this. It shells out to the check
+                        // command and never touches the run, which is why it is
+                        // still the right answer for an iteration whose run has
+                        // gone missing.
                         let verdict = self.check_done(&goal).await;
 
                         // What this iteration cost and what it said, recorded
@@ -1099,11 +1173,20 @@ impl Ticker {
                         // the goal keeps going left the last iteration of every
                         // successful goal missing from `goal log`, missing from
                         // the iteration count, and missing from `spent_usd`.
-                        let cost = agent.usage.cost_usd.unwrap_or(0.0);
-                        let outcome = agent
-                            .last_message
-                            .clone()
-                            .unwrap_or_else(|| format!("{:?}", agent.status).to_lowercase());
+                        let (billed, outcome) = match settled {
+                            Ok(agent) => (
+                                agent.usage.cost_usd,
+                                agent.last_message.clone().unwrap_or_else(|| {
+                                    format!("{:?}", agent.status).to_lowercase()
+                                }),
+                            ),
+                            Err(_) => unreadable_iteration(&store, run),
+                        };
+                        // A cost nobody can recover is added as nothing, since
+                        // there is no other number to add — but the line above
+                        // says so in words, so `goal log` reads "cost unknown"
+                        // rather than implying the turn was free.
+                        let cost = billed.unwrap_or(0.0);
                         store.remember(
                             NewFact::new(
                                 subject.clone(),
@@ -1181,11 +1264,6 @@ impl Ticker {
                             store.release_goal(&goal.id)?;
                             continue;
                         }
-                    }
-                    // The run is gone from the store entirely. Treat it as a
-                    // failed iteration rather than waiting on it for ever.
-                    Err(_) => {
-                        store.advance_goal(&goal.id, now_ms, 0.0, false)?;
                     }
                 }
             }
@@ -2462,6 +2540,227 @@ mod tests {
             (after.spent_usd - 0.5).abs() < 1e-9,
             "the turn is billed once: {}",
             after.spent_usd
+        );
+    }
+
+    /// A real run row, copied out of a live `jod.db`, with one non-defaulted
+    /// field — `harness_label` — taken out of its summary. That single edit
+    /// stands in for a summary written by a build whose `AgentSummary` had a
+    /// different shape, which is one of the two ways a real run stops being
+    /// readable. Everything else, the cost included, is exactly as the run
+    /// recorded it.
+    const REAL_RUN_ID: &str = "3fc37418-0319-4745-a582-3ce7698429ea";
+    const REAL_RUN_COST: f64 = 0.2248795;
+    const REAL_RUN_SUMMARY_FROM_AN_OLDER_BUILD: &str = r#"{
+        "created_at_ms": 1786732217935, "cwd": "/home/reljod", "event_count": 14,
+        "harness": "claude_code", "id": "3fc37418-0319-4745-a582-3ce7698429ea",
+        "last_message": "Run `e442de9a` is live and building",
+        "model": "claude-opus-5", "name": "main", "permission": "accept_edits",
+        "pgid": 3685911, "pid": 3685911, "process_alive": false,
+        "session_id": "2d844cee-13f4-418c-9e92-f5d5c764e885", "status": "completed",
+        "usage": {"cache_read_tokens": 49179, "cache_write_tokens": 19527,
+                  "cost_usd": 0.2248795, "input_tokens": 4, "output_tokens": 200},
+        "watch_command": "jod watch 3fc37418-0319-4745-a582-3ce7698429ea"
+    }"#;
+
+    /// A settled run under a goal, stored with whatever summary is given.
+    fn a_run_with_summary(store: &Store, id: &str, summary: serde_json::Value) {
+        store
+            .save_run(&crate::store::StoredRun {
+                id: id.into(),
+                name: "the goal's iteration".into(),
+                harness: "claude_code".into(),
+                status: "completed".into(),
+                cwd: "/tmp".into(),
+                session_id: None,
+                pid: Some(4_000_000),
+                pgid: Some(4_000_000),
+                created_at_ms: 0,
+                summary,
+            })
+            .unwrap();
+    }
+
+    /// Point a goal at a finished run and give it a reading of its check from
+    /// the iteration before, so the tick has something to compare against.
+    fn goal_waiting_on(store: &Store, goal: &Goal, run_id: &str, previous_reading: &str) {
+        for (predicate, object) in [("current-run", run_id), ("done-when", previous_reading)] {
+            store
+                .remember(
+                    NewFact::new(format!("goal/{}", goal.name), predicate, object)
+                        .in_scope(goal.memory_scope())
+                        .from(Origin::System),
+                )
+                .unwrap();
+        }
+        store.run_goal_now(&goal.name, 1).unwrap();
+    }
+
+    /// G13. A run that cannot be read back is still an iteration the goal ran
+    /// and was billed for, and the old code said none of that: it advanced the
+    /// counter, wrote no line into `jod goal log`, added `0.0` to `spent_usd`,
+    /// and counted the iteration against the stall counter.
+    ///
+    /// This is the route that needs no substitution at all. The run is a plain
+    /// finished run with a real cost; the process simply never loaded it,
+    /// exactly as happens to any run that falls outside the daemon's 200-run
+    /// rehydrate window.
+    #[tokio::test]
+    async fn an_iteration_whose_run_cannot_be_read_is_still_recorded_in_full() {
+        let store = std::sync::Arc::new(crate::store::Store::in_memory().unwrap());
+        let mut g = a_goal("unreadable");
+        // A check that keeps failing, so the goal is not satisfied here and the
+        // ordinary settling path is the one under test.
+        g.done_when = Some("false".into());
+        store.add_goal(&g).unwrap();
+        // One earlier iteration that changed nothing, so the stall counter
+        // starts at 1 and a reset is visible rather than indistinguishable
+        // from never having moved.
+        store.advance_goal(&g.id, 1, 0.0, false).unwrap();
+        assert_eq!(store.goal_named("unreadable").unwrap().unwrap().no_progress, 1);
+
+        a_finished_run(&store, "run-unreadable", REAL_RUN_COST, "did the work");
+        goal_waiting_on(&store, &g, "run-unreadable", "what the check said last time");
+
+        let jod = Jod::with_store(store.clone());
+        // No rehydrate: this is a run the process never loaded.
+        assert!(
+            jod.agent("run-unreadable").await.is_err(),
+            "the run has to be unreadable, or this tests the ordinary path"
+        );
+        Ticker::new(jod)
+            .as_owner("t")
+            .tick_goals(chrono::Utc::now().timestamp_millis())
+            .await
+            .unwrap();
+
+        let facts = store.facts_about("goal/unreadable").unwrap();
+        let history: Vec<_> = facts.iter().filter(|f| f.predicate == "iteration").collect();
+        assert_eq!(
+            history.len(),
+            1,
+            "the iteration has to appear in `jod goal log`, once"
+        );
+        assert!(
+            history[0].object.starts_with("2: "),
+            "it is the goal's second iteration: {}",
+            history[0].object
+        );
+        assert!(
+            history[0].object.contains("could not be read back"),
+            "the line says plainly that the run could not be read: {}",
+            history[0].object
+        );
+        assert!(
+            history[0].object.contains("$0.2249"),
+            "and it names the cost it recovered: {}",
+            history[0].object
+        );
+
+        let after = store.goal_named("unreadable").unwrap().unwrap();
+        assert_eq!(after.iteration, 2, "the counter still advances");
+        assert!(
+            (after.spent_usd - REAL_RUN_COST).abs() < 1e-9,
+            "the run's real cost has to reach spent_usd, not 0.0: {}",
+            after.spent_usd
+        );
+        assert_eq!(
+            after.no_progress, 0,
+            "the check moved, so the goal made progress — an unreadable run is \
+             not evidence against it"
+        );
+    }
+
+    /// The second demonstrated route, and the one that needed a substitution:
+    /// the summary on disk cannot be turned into an `AgentSummary` by this
+    /// build, so `rehydrate` skips the row. The cost is still in that summary,
+    /// as JSON, and recovering it is better than writing a zero.
+    #[tokio::test]
+    async fn a_summary_an_older_build_wrote_still_gives_up_its_cost() {
+        let store = std::sync::Arc::new(crate::store::Store::in_memory().unwrap());
+        let mut g = a_goal("older-build");
+        g.done_when = Some("false".into());
+        store.add_goal(&g).unwrap();
+
+        a_run_with_summary(
+            &store,
+            REAL_RUN_ID,
+            serde_json::from_str(REAL_RUN_SUMMARY_FROM_AN_OLDER_BUILD).unwrap(),
+        );
+        goal_waiting_on(&store, &g, REAL_RUN_ID, "what the check said last time");
+
+        let jod = Jod::with_store(store.clone());
+        assert_eq!(
+            jod.rehydrate(200).await.unwrap(),
+            0,
+            "a summary this build cannot parse is skipped, which is what puts \
+             the run out of reach"
+        );
+        Ticker::new(jod)
+            .as_owner("t")
+            .tick_goals(chrono::Utc::now().timestamp_millis())
+            .await
+            .unwrap();
+
+        let after = store.goal_named("older-build").unwrap().unwrap();
+        assert!(
+            (after.spent_usd - REAL_RUN_COST).abs() < 1e-9,
+            "the cost is still in the stored summary and has to be recovered \
+             from it: {}",
+            after.spent_usd
+        );
+        let line = store
+            .facts_about("goal/older-build")
+            .unwrap()
+            .into_iter()
+            .find(|f| f.predicate == "iteration")
+            .expect("the iteration is in the log");
+        assert!(line.object.contains("$0.2249"), "{}", line.object);
+    }
+
+    /// And when the cost genuinely cannot be recovered from anywhere, the log
+    /// says the cost is unknown. Writing `$0.00` there would be a claim that
+    /// the iteration was free, which is a different and false statement.
+    #[tokio::test]
+    async fn a_cost_that_cannot_be_recovered_is_recorded_as_unknown_not_zero() {
+        let store = std::sync::Arc::new(crate::store::Store::in_memory().unwrap());
+        let mut g = a_goal("no-bill");
+        g.done_when = Some("false".into());
+        store.add_goal(&g).unwrap();
+
+        // A row with no usage in its summary and no events behind it: nothing
+        // anywhere records what this run cost.
+        a_run_with_summary(&store, "run-no-bill", serde_json::json!({"id": "run-no-bill"}));
+        goal_waiting_on(&store, &g, "run-no-bill", "what the check said last time");
+
+        let jod = Jod::with_store(store.clone());
+        Ticker::new(jod)
+            .as_owner("t")
+            .tick_goals(chrono::Utc::now().timestamp_millis())
+            .await
+            .unwrap();
+
+        let line = store
+            .facts_about("goal/no-bill")
+            .unwrap()
+            .into_iter()
+            .find(|f| f.predicate == "iteration")
+            .expect("the iteration is in the log even when nothing is known about it");
+        assert!(
+            line.object.contains("its cost is unknown"),
+            "an unknown cost has to read as unknown: {}",
+            line.object
+        );
+        assert!(
+            !line.object.contains('$'),
+            "and it must not name a figure it does not have: {}",
+            line.object
+        );
+        let after = store.goal_named("no-bill").unwrap().unwrap();
+        assert_eq!(after.iteration, 1, "the iteration still happened");
+        assert_eq!(
+            after.spent_usd, 0.0,
+            "there is no number to add, so the total is unchanged"
         );
     }
 
