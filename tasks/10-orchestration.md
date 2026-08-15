@@ -21,6 +21,24 @@ repeats L1–L6 or R1–R6; several findings corroborate them instead, and say s
 
 ## O1. A work session can never actually write anything — the read-only-root-then-claim-a-worktree design is unreachable
 Status: open · Owner: — · Severity: critical
+Verified independently by two further readers. Nobody needs to check it a
+third time — spend the effort on the decision instead.
+
+- The `--add-dir` push is at `core/src/harness/claude.rs:75`, inside the same
+  function that assembles the rest of the command line, so it is fixed at
+  process launch.
+- `claim_worktree` (`core/src/mcp.rs:1952`) returns a `String` and nothing else.
+- A grep of all of `core/` for any other path touching `add_dir` found only
+  comments and tests. **There is no later channel**, so this is exhaustive
+  rather than a sample.
+
+**This needs Reljod's decision, not an implementation.** Two shapes were named,
+and they are materially different rather than variants of one fix: cut the
+worktree before launch and grant it up front, which changes when a worktree is
+created for every work; or restart the session with the wider grant after a
+claim, which makes a claim a process boundary and breaks the assumption that a
+work session is one continuous transcript. Do not hand this to an agent to just
+implement.
 
 **Observed, twice, end to end.** `jod main --wait "In the scratch project,
 add a one-line CONTRIBUTING.md that says 'PRs welcome.' and commit it."`
