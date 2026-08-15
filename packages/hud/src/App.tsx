@@ -3,6 +3,7 @@ import { useJod } from "./hooks/useJod";
 import { TacticalView } from "./components/TacticalView";
 import { TopBar, type ViewMode } from "./components/TopBar";
 import { TimelineView } from "./components/TimelineView";
+import { TrajectoryView } from "./components/TrajectoryView";
 import { Roster } from "./components/Roster";
 import { Dossier } from "./components/Dossier";
 import { Fleet } from "./components/Fleet";
@@ -97,8 +98,14 @@ export default function App({ makeTransport }: HudProps = {}) {
             onSelect={setSelectedId}
             recentreNonce={recentreNonce}
           />
-        ) : (
+        ) : view === "timeline" ? (
           <TimelineView store={jod.store} selectedId={selectedId} onSelect={setSelectedId} />
+        ) : (
+          <TrajectoryView
+            store={jod.store}
+            transport={jod.transport}
+            selectedId={selectedId}
+          />
         )}
 
         {/*
@@ -115,6 +122,10 @@ export default function App({ makeTransport }: HudProps = {}) {
             selectedId={selectedId}
             onKill={(id) => void jod.kill(id)}
             onResume={onResume}
+            onRead={(id) => {
+              setSelectedId(id);
+              setView("trajectory");
+            }}
             canWrite={canWrite}
           />
         </div>

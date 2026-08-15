@@ -3,7 +3,7 @@ import type { World } from "../state/world";
 import type { HarnessInfo } from "../types";
 import { Mascot } from "./Mascot";
 
-export type ViewMode = "tactical" | "timeline";
+export type ViewMode = "tactical" | "timeline" | "trajectory";
 
 interface Props {
   world: World;
@@ -97,6 +97,13 @@ export function TopBar({
         </button>
         <button className={view === "timeline" ? "on" : ""} onClick={() => onView("timeline")}>
           TIMELINE
+        </button>
+        <button
+          className={view === "trajectory" ? "on" : ""}
+          title="Read the selected session end to end"
+          onClick={() => onView("trajectory")}
+        >
+          TRAJECTORY
         </button>
       </div>
 

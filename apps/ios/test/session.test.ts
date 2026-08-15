@@ -165,6 +165,57 @@ describe("folding events into the transcript", () => {
     expect(s.transcript).toEqual([{ kind: "agent", text: "done" }]);
   });
 
+  /**
+   * The load-bearing property of this fold: it must survive every kind core can
+   * put on the wire. `switch` has no default and the return type excludes
+   * `undefined`, so an unhandled kind does not degrade — it returns `undefined`
+   * and the next fold reads state off nothing. `progress`, `delta` and
+   * `session_lost` were exactly that: on the wire, absent from the union that
+   * `contract.ts` re-exports, and therefore never compiled against.
+   */
+  it("returns a session for every kind core can emit", () => {
+    const every: AgentEvent[] = [
+      { kind: "started", session_id: "s", model: "m" },
+      { kind: "thinking", text: "hmm" },
+      { kind: "progress", thinking_tokens: 1408 },
+      { kind: "delta", text: "part" },
+      { kind: "message", text: "hi" },
+      { kind: "tool_call", name: "Bash" },
+      { kind: "tool_result", name: "Bash", is_error: false },
+      { kind: "finished", is_error: false, usage: {} },
+      { kind: "raw", line: "{}" },
+      { kind: "session_lost", session_id: "gone" },
+      { kind: "error", message: "boom" },
+    ];
+
+    let s = session();
+    for (const event of every) {
+      s = applyEvent(s, event);
+      expect(s, `applyEvent returned nothing for ${event.kind}`).toBeDefined();
+      expect(Array.isArray(s.transcript)).toBe(true);
+    }
+  });
+
+  /**
+   * A tick carries no text and a fragment is repeated in full by the block that
+   * closes it, so neither is a transcript line. Showing them would print every
+   * long turn twice — once stuttering, once whole.
+   */
+  it("writes nothing to the transcript for a tick or a fragment", () => {
+    const ticked = applyEvent(session(), { kind: "progress", thinking_tokens: 900 });
+    expect(ticked.transcript).toEqual([]);
+
+    const fragment = applyEvent(session(), { kind: "delta", text: "half a sen" });
+    expect(fragment.transcript).toEqual([]);
+  });
+
+  it("says out loud that the harness lost the session it was asked to resume", () => {
+    const s = applyEvent(session(), { kind: "session_lost", session_id: "sess-gone" });
+    expect(s.transcript).toEqual([
+      { kind: "notice", text: "the harness no longer holds session sess-gone" },
+    ]);
+  });
+
   it("shows a tool call, with no detail when the harness sent no arguments", () => {
     const s = applyEvent(session(), { kind: "tool_call", name: "Bash" });
     expect(s.transcript).toEqual([

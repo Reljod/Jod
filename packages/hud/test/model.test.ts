@@ -39,6 +39,8 @@ function node(
     recentEventTimes: [],
     thought: null,
     errorCount: 0,
+    events: [],
+    eventsComplete: false,
     ...over,
   };
 }

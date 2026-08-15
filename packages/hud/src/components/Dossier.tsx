@@ -10,11 +10,13 @@ interface Props {
   selectedId: string | null;
   onKill(id: string): void;
   onResume(node: AgentNode): void;
+  /** Open this run in the trajectory view. */
+  onRead(id: string): void;
   canWrite: boolean;
 }
 
 /** Everything known about one agent, including how to reach into its session. */
-export function Dossier({ world, selectedId, onKill, onResume, canWrite }: Props) {
+export function Dossier({ world, selectedId, onKill, onResume, onRead, canWrite }: Props) {
   const node = selectedId ? world.agents.get(selectedId) : undefined;
   const [copied, setCopied] = useState<string | null>(null);
 
@@ -106,7 +108,13 @@ export function Dossier({ world, selectedId, onKill, onResume, canWrite }: Props
       {/* Offered whatever the run's state: `jod watch` replays a finished run
           from the store as readily as it follows a live one. There is no longer
           a second command for "from inside tmux", because there is no tmux. */}
+      {/* Two ways to read the same run. `jod watch` replays it in a terminal;
+          the trajectory reads it here, which is the only one available to
+          someone holding a phone. */}
       <div className="dz-attach">
+        <button onClick={() => onRead(s.id)} title="Read this session end to end">
+          READ SESSION
+        </button>
         <button onClick={() => copy(s.watch_command, "watch")}>
           {copied === "watch" ? "COPIED" : "COPY WATCH"}
         </button>

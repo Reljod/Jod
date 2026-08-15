@@ -538,6 +538,23 @@ export function applyEvent(
     case "error":
       return push(state, { kind: "notice", text: event.message });
 
+    // A mid-turn liveness tick and a fragment of a block still being written.
+    // Neither belongs in a transcript: `progress` carries no text at all, and a
+    // `delta` is duplicated in full by the `message` or `tool_call` that closes
+    // its block, so pushing it would show every long turn twice — once
+    // stuttering and once whole. The busy indicator is what they are for.
+    case "progress":
+    case "delta":
+      return state;
+
+    // The one harness failure Jod can repair, so it is said out loud rather
+    // than left as a run that did nothing for no stated reason.
+    case "session_lost":
+      return push(state, {
+        kind: "notice",
+        text: `the harness no longer holds session ${event.session_id}`,
+      });
+
     case "raw":
       return event.line.trim() === ""
         ? state

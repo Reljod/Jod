@@ -50,6 +50,23 @@ export interface AgentNode {
   /** Latest thinking text — the "inner voice" line in the dossier. */
   thought: string | null;
   errorCount: number;
+  /**
+   * This agent's own events, in `seq` order — what the trajectory view reads.
+   *
+   * Kept per agent rather than taken from `feed`, which is a global ring of the
+   * last few hundred *lines* across the whole fleet: it holds no structured
+   * input, and one chatty agent evicts another's history. Retaining here is
+   * also what makes the trajectory tail live without polling, since every
+   * envelope already passes through `ingest`.
+   */
+  events: AgentEnvelope[];
+  /**
+   * Whether everything from seq 0 is present. False until a backfill lands, so
+   * the view can tell "this run started before the page did" from "this run has
+   * done nothing yet" — the difference between fetching history and showing an
+   * empty timeline that looks like a bug.
+   */
+  eventsComplete: boolean;
 }
 
 export interface FeedItem {
@@ -88,6 +105,19 @@ const FEED_CAP = 300;
 const TOOL_CAP = 24;
 const PULSE_CAP = 400;
 const IDLE_AFTER_MS = 6000;
+/**
+ * Per-agent retained history.
+ *
+ * Set from a measurement rather than a guess: across a real 36-run fleet the
+ * *whole* history was 605 kB and the longest single run was 260 events / 298 kB
+ * — about 1.1 kB an event, since a `tool_call` carries its arguments whole.
+ * This is ~6× the longest run seen, so it does not bite in practice, and it
+ * bounds the case that would: a run streaming `delta` frames emits them by the
+ * thousand, and a tab left open on a busy fleet must not grow without limit.
+ * When it does bite, the trajectory counts what it dropped rather than quietly
+ * starting mid-run.
+ */
+const EVENT_CAP = 1500;
 
 export function emptyWorld(): World {
   return {
@@ -112,6 +142,11 @@ function newNode(summary: AgentSummary): AgentNode {
     recentEventTimes: [],
     thought: null,
     errorCount: 0,
+    events: [],
+    // A run this client watched from its first event needs no backfill. Only
+    // one already in flight when the roster arrived does, and `ingest` decides
+    // which this is from the seq it first sees.
+    eventsComplete: false,
   };
 }
 
@@ -121,6 +156,12 @@ export function describe(env: AgentEnvelope): string {
     case "started":
       return `session ${env.session_id ?? "?"} · ${env.model ?? "default model"}`;
     case "thinking":
+      return env.text;
+    case "progress":
+      return env.thinking_tokens != null
+        ? `thinking… ${env.thinking_tokens} tokens`
+        : "thinking…";
+    case "delta":
       return env.text;
     case "message":
       return env.text;
@@ -132,6 +173,8 @@ export function describe(env: AgentEnvelope): string {
       return env.text ?? (env.is_error ? "failed" : "completed");
     case "raw":
       return env.line;
+    case "session_lost":
+      return `session ${env.session_id} is gone — the harness refused to resume it`;
     case "error":
       return env.message;
   }
@@ -218,6 +261,12 @@ export class WorldStore {
     const node = w.agents.get(env.agent_id);
     if (!node) return; // roster snapshot has not arrived yet; it will backfill
 
+    // Retain before folding, and bail on a duplicate: the transport dedupes its
+    // own stream, but a trajectory backfill is fetched outside it and legally
+    // overlaps. Folding the same event twice would double-count the heat, the
+    // event rate and the fault tally.
+    if (!retain(node, env)) return;
+
     const now = env.at_ms;
     node.lastEventAt = now;
     node.heat = Math.min(1, node.heat + heatFor(env.kind));
@@ -234,6 +283,19 @@ export class WorldStore {
       case "thinking":
         node.phase = "thinking";
         node.thought = env.text;
+        break;
+      case "progress":
+        // A tick carrying no content. It says one thing — the turn is still
+        // reasoning — and the common path above has already refreshed
+        // `lastEventAt`, which is what stops `tick` calling a nine-minute
+        // think idle.
+        node.phase = "thinking";
+        break;
+      case "delta":
+        // A fragment of a block still being written. Deliberately does not
+        // touch `last_message` or `thought`: the complete text arrives in the
+        // `message`/`tool_call` that follows, and rendering the running
+        // fragment as the finished turn would show a truncated one.
         break;
       case "message":
         node.phase = "speaking";
@@ -284,6 +346,7 @@ export class WorldStore {
         node.inFlight = null;
         if (env.text) node.summary.last_message = env.text;
         break;
+      case "session_lost":
       case "error":
         node.errorCount += 1;
         node.phase = node.summary.status === "running" ? "thinking" : node.phase;
@@ -308,6 +371,25 @@ export class WorldStore {
     });
     if (w.feed.length > FEED_CAP) w.feed.splice(0, w.feed.length - FEED_CAP);
 
+    this.dirty = true;
+  }
+
+  /**
+   * Fold a fetched history into an agent, oldest first.
+   *
+   * Routed through `ingest` rather than assigned, so backfilled events build
+   * the same tool traces, tallies and phase the live ones do — the alternative
+   * is a run whose derived state depends on whether you were watching when it
+   * happened. `retain` drops the overlap.
+   */
+  backfill(agentId: string, envelopes: AgentEnvelope[]): void {
+    const node = this.world.agents.get(agentId);
+    if (!node) return;
+    for (const env of [...envelopes].sort((a, b) => a.seq - b.seq)) this.ingest(env);
+    // Set after the fold, and unconditionally: a run that has emitted nothing
+    // yet backfills to an empty list, and that is a complete history of
+    // nothing rather than a fetch to retry forever.
+    node.eventsComplete = true;
     this.dirty = true;
   }
 
@@ -345,10 +427,50 @@ export class WorldStore {
   }
 }
 
+/**
+ * Keep one envelope in the agent's transcript, in `seq` order.
+ *
+ * Returns false if it was already there, which is the caller's signal to fold
+ * nothing. Live events append — the fast path, and the only one that runs at
+ * event rate — while a backfill splices in behind them.
+ */
+function retain(node: AgentNode, env: AgentEnvelope): boolean {
+  const log = node.events;
+  const last = log.length > 0 ? log[log.length - 1] : null;
+
+  if (last === null || env.seq > last.seq) {
+    log.push(env);
+  } else {
+    let lo = 0;
+    let hi = log.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (log[mid].seq < env.seq) lo = mid + 1;
+      else hi = mid;
+    }
+    if (lo < log.length && log[lo].seq === env.seq) return false;
+    log.splice(lo, 0, env);
+  }
+
+  // Witnessing seq 0 is as good as fetching it: seq starts at 0, so an agent
+  // whose first event is 0 has been watched from its birth.
+  if (env.seq === 0) node.eventsComplete = true;
+  // Trim the oldest, never the newest: the tail is what a live view is showing.
+  if (log.length > EVENT_CAP) log.splice(0, log.length - EVENT_CAP);
+  return true;
+}
+
 function terminalPhase(status: AgentStatus): Phase {
   return status === "completed" ? "done" : "failed";
 }
 
+/**
+ * Exhaustive over every kind core can emit, and it has to stay that way: a
+ * missing arm returns `undefined`, `heat + undefined` is `NaN`, and a node with
+ * `NaN` heat renders at a `NaN` radius — it vanishes. That is what a
+ * `progress` or `delta` frame did to this function before the union carried
+ * them, which made a *healthy* streaming run the one that disappeared.
+ */
 function heatFor(kind: AgentEventKind): number {
   switch (kind) {
     case "tool_call":
@@ -359,7 +481,15 @@ function heatFor(kind: AgentEventKind): number {
       return 0.3;
     case "thinking":
       return 0.18;
+    // Both are mid-turn liveness rather than content, so they keep an agent
+    // warm without ever making it look as busy as one that produced something.
+    case "progress":
+      return 0.06;
+    case "delta":
+      return 0.08;
     case "error":
+      return 0.5;
+    case "session_lost":
       return 0.5;
     case "started":
       return 0.6;
