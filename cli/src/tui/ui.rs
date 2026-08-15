@@ -2980,12 +2980,23 @@ fn draw_tree(f: &mut Frame, app: &App, area: Rect) {
         let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
         let mut room = width.saturating_sub(used);
 
-        // A spinner, so a running node reads as moving rather than stuck.
-        if node.running {
-            let glyph = format!(" {}", app.spinner());
+        // A spinner, so a running node reads as moving rather than stuck. A run
+        // that has stopped gets the glyph the flat list already gives that
+        // status instead, because "not spinning" is the same picture for a run
+        // that finished, one that failed and one that was killed — and a person
+        // scanning the fleet needs to see the failure. Works and sessions have
+        // no status of their own and keep the spinner-or-nothing they had.
+        let mark = match (node.running, node.status.as_deref()) {
+            (true, _) => Some((format!(" {}", app.spinner()), WARN)),
+            (false, Some(status)) => {
+                Some((format!(" {}", run_glyph(status)), status_colour(status)))
+            }
+            (false, None) => None,
+        };
+        if let Some((glyph, colour)) = mark {
             if room >= glyph.chars().count() {
                 room -= glyph.chars().count();
-                spans.push(Span::styled(glyph, fg(WARN)));
+                spans.push(Span::styled(glyph, fg(colour)));
             }
         }
         // The card count says *where the questions are* without expanding
@@ -3088,10 +3099,18 @@ fn draw_tree_detail(f: &mut Frame, app: &App, area: Rect) {
                 },
             ));
             lines.push(detail("id", &short(&node.id.id)));
-            lines.push(detail(
-                "state",
-                if node.running { "running" } else { "idle" },
-            ));
+            // A run says which of the four things it is. `running` or `idle`
+            // was two words for four statuses, so a failed run and a clean
+            // finish both read as "idle" — the pane that is supposed to explain
+            // the row was hiding the one thing worth knowing about it. A work
+            // and a session have no status of their own, so they keep the pair.
+            match node.status.as_deref() {
+                Some(status) => lines.push(detail_in("state", status, status_colour(status))),
+                None => lines.push(detail(
+                    "state",
+                    if node.running { "running" } else { "idle" },
+                )),
+            }
             if node.cards > 0 {
                 lines.push(detail(
                     "cards",
@@ -4808,9 +4827,15 @@ fn fit_verbs(text: &str, width: u16) -> String {
 }
 
 fn detail(name: &str, value: &str) -> Line<'static> {
+    detail_in(name, value, AGENT)
+}
+
+/// The same row, with the value in a colour the caller picks — a run's state
+/// is the one that carries meaning, and red is most of how a failure is seen.
+fn detail_in(name: &str, value: &str, colour: Color) -> Line<'static> {
     Line::from(vec![
         Span::styled(format!("  {name:<10}"), fg(MUTED)),
-        Span::styled(value.to_string(), fg(AGENT)),
+        Span::styled(value.to_string(), fg(colour)),
     ])
 }
 
@@ -9294,6 +9319,7 @@ mod tests {
             label: label.into(),
             summary: String::new(),
             running: false,
+            status: None,
             cards: 0,
             blocked: 0,
             colour: "cyan".into(),
@@ -9589,6 +9615,110 @@ mod tests {
         assert!(
             frame.contains("hello-agent"),
             "and it is named, not just numbered:\n{frame}"
+        );
+    }
+
+    /// How a run ended has to be on the screen, not only in whatever the agent
+    /// happened to say last.
+    ///
+    /// Three runs under one session, one that finished, one that failed and one
+    /// that was killed. Built off a real store and read back through the real
+    /// `Store::forest`, because the claim is about what survives the query as
+    /// much as about what is drawn: the tree used to carry a single
+    /// `running: bool`, so all three of these rows were the same row.
+    #[test]
+    fn a_finished_a_failed_and_a_killed_run_each_read_differently() {
+        use jod_core::tree::NodeId;
+        use jod_core::works::Origin;
+
+        let store = RealStore::in_memory().expect("an in-memory store");
+        let work = store.create_work("port the parser").expect("a work");
+        store
+            .set_work_title(&work.id, "the parser")
+            .expect("a work title");
+        let lead = store
+            .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
+            .expect("a conversation")
+            .id;
+        store
+            .set_conversation_title(&lead, "port the lexer")
+            .expect("a session title");
+        store
+            .attach_conversation(&lead, &work.id, None, Origin::Agent)
+            .expect("a session under the work");
+
+        let runs = [
+            ("run-fin0", "wrote-the-tests", "completed"),
+            ("run-fail", "built-the-parser", "failed"),
+            ("run-kill", "ran-the-suite", "killed"),
+        ];
+        for (id, name, status) in runs {
+            store
+                .save_run(&jod_core::store::StoredRun {
+                    id: id.into(),
+                    name: name.into(),
+                    harness: "claude-code".into(),
+                    status: status.into(),
+                    cwd: "/tmp".into(),
+                    session_id: None,
+                    pid: None,
+                    pgid: None,
+                    created_at_ms: 1,
+                    summary: serde_json::json!({}),
+                })
+                .expect("a run");
+            store
+                .append_message(
+                    &lead,
+                    jod_core::conversation::NewMessage::new(
+                        jod_core::conversation::Role::Assistant,
+                        "done here",
+                    )
+                    .from_run(id),
+                )
+                .expect("a message");
+        }
+
+        let mut a = app();
+        a.forest = store.forest().expect("a forest");
+        a.go(Workspace::Fleet);
+        a.reconcile();
+
+        // The rows themselves. Each run wears the glyph the flat list already
+        // uses for that status, so the two halves of the fleet screen agree.
+        let frame = rendered(&a, 150, 30);
+        for ((_, name, status), glyph) in runs.iter().zip(["✓", "✗", "■"]) {
+            let row = frame
+                .lines()
+                .find(|line| line.contains(name))
+                .unwrap_or_else(|| panic!("no row for {name}:\n{frame}"));
+            assert!(
+                row.contains(glyph),
+                "a {status} run should wear {glyph}, and this row is `{row}`:\n{frame}",
+            );
+        }
+
+        // And the detail pane, which used to have two words for four statuses.
+        let mut states: Vec<String> = Vec::new();
+        for (id, name, _) in runs {
+            a.tree.selected = Some(NodeId::run(id));
+            let frame = rendered(&a, 150, 30);
+            let line = frame
+                .lines()
+                .find(|line| line.contains("state"))
+                .unwrap_or_else(|| panic!("no state line beside {name}:\n{frame}"))
+                .trim()
+                .to_string();
+            states.push(line);
+        }
+        for (state, word) in states.iter().zip(["completed", "failed", "killed"]) {
+            assert!(state.contains(word), "the pane said `{state}`, not {word}");
+        }
+        let distinct: std::collections::HashSet<&String> = states.iter().collect();
+        assert_eq!(
+            distinct.len(),
+            3,
+            "three statuses have to read as three things, not as {states:?}",
         );
     }
 
