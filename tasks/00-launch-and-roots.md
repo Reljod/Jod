@@ -111,7 +111,20 @@ Check: a conversation with roots `[$HOME, some-repo]` must default new work to
 `some-repo`.
 
 ## L3. Every entry point except the TUI starts in `$HOME`, wherever you ran it
-Status: **fixed — merged as #122** · Severity was: medium
+Status: **partially fixed — one of seven sites** · Severity: medium ·
+#122 fixed `main_chat` (`jod main`) only. **Six sites still answer `$HOME`:**
+`cli/src/main.rs` lines 1701, 1702, 2147, 2233, 3815 and 4474 — `jod run`
+among them. A fix is in progress.
+
+> Marked "fixed" here for a while, and it was not. #122 did exactly what its
+> own brief asked and its pull request was honest about its scope; the
+> narrowing happened silently between this task and that brief, and the merge
+> then marked the whole task done. Verified against main before correcting:
+> `console_cwd` has two callers, `:2006` (the TUI) and `:2338` (from #122).
+>
+> The countermeasure, worth more than this entry: when a task names N sites,
+> the brief says N — and if it is deliberately scoped smaller, the status must
+> not read fixed when it merges.
 
 Observed twice on a fresh `JOD_HOME`, both times from inside a scratch
 repository:
