@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { easeCamera, fitCamera } from "../src/graph/camera";
+import { ZOOM_MAX, ZOOM_MIN, easeCamera, fitCamera, zoomAt } from "../src/graph/camera";
 import type { Body } from "../src/graph/physics";
 
 function body(id: string, x: number, y: number): Body {
@@ -74,6 +74,88 @@ describe("fitCamera", () => {
   it("survives a zero-sized viewport without dividing by zero", () => {
     const cam = fitCamera([body("a", 10, 10)], { w: 0, h: 0 });
     expect(Number.isFinite(cam.zoom)).toBe(true);
+  });
+});
+
+describe("zoomAt", () => {
+  /** Where a world point lands on screen under a camera. */
+  const project = (p: { x: number; y: number }, cam: { x: number; y: number; zoom: number }) => ({
+    x: (p.x - cam.x) * cam.zoom + VIEW.w / 2,
+    y: (p.y - cam.y) * cam.zoom + VIEW.h / 2,
+  });
+
+  it("holds the world point under the anchor still", () => {
+    const cam = { x: 40, y: -30, zoom: 0.8 };
+    const anchor = { x: 300, y: 620 };
+    const before = { x: (anchor.x - VIEW.w / 2) / cam.zoom + cam.x, y: (anchor.y - VIEW.h / 2) / cam.zoom + cam.y };
+
+    zoomAt(cam, 1.6, anchor, VIEW);
+
+    const after = project(before, cam);
+    expect(after.x).toBeCloseTo(anchor.x, 6);
+    expect(after.y).toBeCloseTo(anchor.y, 6);
+  });
+
+  it("leaves the centre fixed when the anchor is the centre", () => {
+    const cam = { x: 40, y: -30, zoom: 0.8 };
+    zoomAt(cam, 1.6, { x: VIEW.w / 2, y: VIEW.h / 2 }, VIEW);
+    expect(cam.x).toBeCloseTo(40, 6);
+    expect(cam.y).toBeCloseTo(-30, 6);
+    expect(cam.zoom).toBeCloseTo(1.28, 6);
+  });
+
+  it("pulls the anchored point toward the centre when zooming in", () => {
+    // Zooming in on a node in the corner has to move the camera toward it.
+    const cam = { x: 0, y: 0, zoom: 1 };
+    zoomAt(cam, 2, { x: VIEW.w, y: VIEW.h }, VIEW);
+    expect(cam.x).toBeGreaterThan(0);
+    expect(cam.y).toBeGreaterThan(0);
+  });
+
+  it("clamps at both bounds", () => {
+    const cam = { x: 0, y: 0, zoom: 1 };
+    const anchor = { x: 10, y: 10 };
+    for (let i = 0; i < 60; i++) zoomAt(cam, 1.3, anchor, VIEW);
+    expect(cam.zoom).toBeCloseTo(ZOOM_MAX, 6);
+    for (let i = 0; i < 200; i++) zoomAt(cam, 1 / 1.3, anchor, VIEW);
+    expect(cam.zoom).toBeCloseTo(ZOOM_MIN, 6);
+  });
+
+  it("keeps the anchor fixed even when the zoom clamps mid-step", () => {
+    const cam = { x: 0, y: 0, zoom: ZOOM_MAX / 1.1 };
+    const anchor = { x: 200, y: 100 };
+    const before = { x: (anchor.x - VIEW.w / 2) / cam.zoom + cam.x, y: (anchor.y - VIEW.h / 2) / cam.zoom + cam.y };
+
+    zoomAt(cam, 10, anchor, VIEW); // asks for far more than the bound allows
+
+    expect(cam.zoom).toBeCloseTo(ZOOM_MAX, 6);
+    const after = project(before, cam);
+    expect(after.x).toBeCloseTo(anchor.x, 6);
+    expect(after.y).toBeCloseTo(anchor.y, 6);
+  });
+
+  it("is a no-op once already at the bound", () => {
+    const cam = { x: 12, y: -8, zoom: ZOOM_MAX };
+    expect(zoomAt(cam, 2, { x: 0, y: 0 }, VIEW)).toBe(1);
+    expect(cam).toEqual({ x: 12, y: -8, zoom: ZOOM_MAX });
+  });
+
+  it("round-trips: zoom in then out by the same factor restores the camera", () => {
+    const cam = { x: 25, y: 60, zoom: 0.9 };
+    const anchor = { x: 880, y: 210 };
+    zoomAt(cam, 1.45, anchor, VIEW);
+    zoomAt(cam, 1 / 1.45, anchor, VIEW);
+    expect(cam.x).toBeCloseTo(25, 6);
+    expect(cam.y).toBeCloseTo(60, 6);
+    expect(cam.zoom).toBeCloseTo(0.9, 6);
+  });
+
+  it("can zoom past what auto-fit would choose", () => {
+    // The point of a manual camera: go closer than the framed-everything zoom.
+    const fitted = fitCamera([body("a", -1400, 0), body("b", 1400, 0)], VIEW);
+    const cam = { ...fitted };
+    for (let i = 0; i < 12; i++) zoomAt(cam, 1.3, { x: VIEW.w / 2, y: VIEW.h / 2 }, VIEW);
+    expect(cam.zoom).toBeGreaterThan(1.15);
   });
 });
 

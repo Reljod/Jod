@@ -2,13 +2,23 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { Body, Link } from "../graph/physics";
 import { DEFAULT_PARAMS, step } from "../graph/physics";
 import { contentionLinks, rankForDisplay, syncBodies } from "../graph/model";
-import { easeCamera, fitCamera } from "../graph/camera";
+import { easeCamera, fitCamera, zoomAt } from "../graph/camera";
 import type { Camera } from "../render/renderer";
 import { TacticalRenderer } from "../render/renderer";
 import type { WorldStore } from "../state/world";
 
 const NODE_BUDGET = 48;
 const PULSE_LIFETIME = 1000;
+
+/** Per notch of a mouse wheel or point of trackpad scroll. */
+const WHEEL_SENSITIVITY = 0.0014;
+/**
+ * A pinch arrives as a ctrl-modified wheel with much smaller deltas than a
+ * scroll, so it needs its own multiplier to travel the same distance.
+ */
+const PINCH_SENSITIVITY = 0.01;
+/** One press of the zoom buttons, or of `+` / `-`. */
+const STEP_FACTOR = 1.3;
 
 interface Props {
   store: WorldStore;
@@ -208,13 +218,62 @@ export function TacticalView({ store, selectedId, onSelect, recentreNonce }: Pro
     setCursor("grab");
   }, []);
 
-  const onWheel = useCallback((e: React.WheelEvent<HTMLCanvasElement>) => {
-    const cam = cameraRef.current;
-    const factor = Math.exp(-e.deltaY * 0.0014);
-    cam.zoom = Math.min(3, Math.max(0.28, cam.zoom * factor));
+  // ─── zoom ────────────────────────────────────────────────────────────────
+
+  /** Zoom about a screen point, or about the viewport centre when given none. */
+  const zoom = useCallback((factor: number, anchor?: { x: number; y: number }) => {
+    const renderer = rendererRef.current;
+    if (!renderer) return;
+    const view = renderer.size;
+    zoomAt(cameraRef.current, factor, anchor ?? { x: view.w / 2, y: view.h / 2 }, view);
     manualRef.current = true;
     setAutoFit(false);
   }, []);
+
+  const resumeAutoFit = useCallback(() => {
+    manualRef.current = false;
+    setAutoFit(true);
+  }, []);
+
+  /**
+   * Wheel and pinch, as a native listener rather than React's `onWheel`.
+   *
+   * React registers `wheel` passively at the root, so a handler passed as a
+   * prop cannot call `preventDefault`. Without it the browser acts on the same
+   * gesture: a trackpad pinch zooms the whole page, and a two-finger scroll
+   * scrolls the document or triggers a back-navigation — all while the canvas
+   * zooms underneath. Only a listener attached with `{ passive: false }` can
+   * claim the gesture.
+   */
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      // `ctrlKey` on a wheel event means a pinch, on every platform — the
+      // browser synthesises it for the gesture, no key is held.
+      const pinch = e.ctrlKey || e.metaKey;
+      const sensitivity = pinch ? PINCH_SENSITIVITY : WHEEL_SENSITIVITY;
+      const rect = canvas.getBoundingClientRect();
+      zoom(Math.exp(-e.deltaY * sensitivity), {
+        x: e.clientX - rect.left,
+        y: e.clientY - rect.top,
+      });
+    };
+
+    canvas.addEventListener("wheel", onWheel, { passive: false });
+    return () => canvas.removeEventListener("wheel", onWheel);
+  }, [zoom]);
+
+  /** Keyboard zoom, scoped to the canvas so it never eats a keystroke meant for a prompt. */
+  const onKeyDown = useCallback((e: React.KeyboardEvent<HTMLCanvasElement>) => {
+    if (e.key === "+" || e.key === "=") zoom(STEP_FACTOR);
+    else if (e.key === "-" || e.key === "_") zoom(1 / STEP_FACTOR);
+    else if (e.key === "0") resumeAutoFit();
+    else return;
+    e.preventDefault();
+  }, [zoom, resumeAutoFit]);
 
   const onDoubleClick = useCallback(() => onSelect(null), [onSelect]);
 
@@ -222,22 +281,29 @@ export function TacticalView({ store, selectedId, onSelect, recentreNonce }: Pro
     <div className="tactical">
       <canvas
         ref={canvasRef}
+        tabIndex={0}
         style={{ cursor }}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={endDrag}
         onPointerCancel={endDrag}
-        onWheel={onWheel}
+        onKeyDown={onKeyDown}
         onDoubleClick={onDoubleClick}
       />
-      {!autoFit && (
+      <div className="tactical-zoom">
+        <button onClick={() => zoom(STEP_FACTOR)} title="Zoom in (+)" aria-label="Zoom in">+</button>
+        <button onClick={() => zoom(1 / STEP_FACTOR)} title="Zoom out (−)" aria-label="Zoom out">−</button>
         <button
-          className="tactical-autofit"
-          onClick={() => {
-            manualRef.current = false;
-            setAutoFit(true);
-          }}
+          onClick={resumeAutoFit}
+          title="Fit the whole fleet (0)"
+          aria-label="Fit the whole fleet"
+          disabled={autoFit}
         >
+          ⤢
+        </button>
+      </div>
+      {!autoFit && (
+        <button className="tactical-autofit" onClick={resumeAutoFit}>
           MANUAL CAMERA — RESUME AUTO-FIT
         </button>
       )}
