@@ -598,6 +598,19 @@ async fn event_loop(
     ensure_launch_root(&jod, &mut app, &mut granted);
     refresh_workspaces(&jod, &mut app);
     app.reconcile();
+    // Open *in* the main chat rather than beside it. The binding used to start
+    // derived — "the conversation the run on screen wrote" — which on a cold
+    // start means the last run this machine happened to make, so the first
+    // sentence typed after launch went to whichever agent finished most
+    // recently. Being in the main chat is what makes typing an instruction to
+    // Jod, and that is what this program is for; anything else is a place you
+    // choose to go.
+    //
+    // Not when `--resume` named a conversation to continue. That flag is an
+    // explicit choice of where to be, and this would overrule it.
+    if matches!(opts.resume, Resume::Fresh) {
+        enter_main(&jod, &mut app, &opts, &mut thread, true).await;
+    }
     app.push(startup_hint());
 
     let mut keys = EventStream::new();
@@ -928,9 +941,27 @@ fn announce(app: &mut App, id: &str) {
 /// what a turn does and right for a move: you are going somewhere else, and
 /// leaving the last conversation's lines above the new one's would read as one
 /// thread that changed its mind.
-async fn enter_main(jod: &Arc<Jod>, app: &mut App, opts: &Options, thread: &mut Thread) {
+///
+/// `at_launch` is the one difference between the move and the starting
+/// position: on a cold start there is nothing to move *from*, so a chat nobody
+/// has said anything to must leave the transcript untouched. [`fresh`] shows
+/// the splash only while the transcript holds nothing but hints, and
+/// [`replay`]'s empty-state line would replace the wordmark with a sentence
+/// saying the screen is blank — on every launch, forever.
+async fn enter_main(
+    jod: &Arc<Jod>,
+    app: &mut App,
+    opts: &Options,
+    thread: &mut Thread,
+    at_launch: bool,
+) {
     let Some(store) = jod.store() else {
-        app.push(Entry::Notice(format!("{NO_STORE} — there is no main chat")));
+        // Silent at launch: `jod tui` with no store says so in its own words
+        // already, and a second line about the main chat in particular is one
+        // consequence of a fault whose cause is elsewhere.
+        if !at_launch {
+            app.push(Entry::Notice(format!("{NO_STORE} — there is no main chat")));
+        }
         return;
     };
     let id = match store.main_conversation(app.harness, &opts.cwd.display().to_string()) {
@@ -940,7 +971,17 @@ async fn enter_main(jod: &Arc<Jod>, app: &mut App, opts: &Options, thread: &mut 
             return;
         }
     };
-    if thread.conversation.as_deref() == Some(id.as_str()) {
+    // "Already there" is bound *and* looking at it, not merely bound. The chat
+    // box stays bound to the main conversation while you walk the fleet or
+    // watch somebody's run — and since the console now launches in the main
+    // chat, bound is the ordinary state rather than the rare one. Tested on the
+    // binding alone, `⏎` on the fleet's pinned row would answer "already in the
+    // main chat" from a screen that is plainly not it, which is the dead key
+    // that row exists to stop being.
+    if thread.conversation.as_deref() == Some(id.as_str())
+        && app.workspace == Workspace::Chat
+        && app.watching.is_none()
+    {
         app.push(Entry::Notice("already in the main chat".into()));
         return;
     }
@@ -949,6 +990,10 @@ async fn enter_main(jod: &Arc<Jod>, app: &mut App, opts: &Options, thread: &mut 
     // this thread, and it belongs to the conversation being *left* — sending it
     // into the main chat would paste another conversation's history here.
     thread.carried = None;
+    // Stop following whatever run was on screen. The transcript is about to be
+    // replaced with this conversation's, and a run still being watched would
+    // append its next event into the middle of somebody else's thread.
+    app.watching = None;
     app.go(Workspace::Chat);
     app.transcript.clear();
 
@@ -956,6 +1001,7 @@ async fn enter_main(jod: &Arc<Jod>, app: &mut App, opts: &Options, thread: &mut 
     // spans many runs, one per instruction, and any single one of them holds
     // only a slice.
     match store.live_window(&id) {
+        Ok(live) if at_launch && live.is_empty() => {}
         Ok(live) => {
             for entry in replay(&live, app.show_thinking) {
                 app.push(entry);
@@ -1115,7 +1161,7 @@ async fn perform(
             send_turn(jod, app, opts, thread, prompt, command).await
         }
         Action::Orchestrate(instruction) => orchestrate(jod, app, opts, thread, instruction).await,
-        Action::EnterMain => enter_main(jod, app, opts, thread).await,
+        Action::EnterMain => enter_main(jod, app, opts, thread, false).await,
         Action::Delegate(prompt) => {
             // Fresh, always: a background job that silently continued the
             // conversation on screen would inherit context nobody asked it to,
@@ -3036,6 +3082,32 @@ fn on_overlay_key(app: &mut App, key: KeyEvent) -> Option<Action> {
     }
 }
 
+/// Stop looking at what is on screen and go back to the fleet.
+///
+/// Nothing is stopped, and nothing needs to be: a Jod run is a detached process
+/// group that reports through the database, so the TUI was only ever a viewer
+/// of it. "Background" here means this window stops looking, which is why it
+/// can be done without asking the supervisor anything.
+///
+/// And why it is not asked about either. This used to raise a confirmation, and
+/// the question had no answer worth giving: backgrounding is what a Jod run
+/// already *is*, so the prompt was asking whether to leave a thing already left,
+/// once per trip out of a session. The notice below is the whole of what the
+/// question was for — it says the run is still going and which two keys reopen
+/// it — and it says so without costing a keystroke.
+fn background(app: &mut App) {
+    let what = app
+        .watching
+        .as_deref()
+        .map(short)
+        .unwrap_or_else(|| "this turn".to_string());
+    app.watching = None;
+    app.go(Workspace::Fleet);
+    app.push(Entry::Notice(format!(
+        "{what} keeps running — ⏎ or → opens it again"
+    )));
+}
+
 /// What `y` on a confirmation actually does.
 ///
 /// Read off the screen the question was asked on rather than carried inside
@@ -3045,22 +3117,6 @@ fn on_overlay_key(app: &mut App, key: KeyEvent) -> Option<Action> {
 /// without knowing that actions exist.
 fn confirmed(app: &mut App, verb: &str, what: &str) -> Option<Action> {
     let what = what.to_string();
-    // Dispatched on the verb, not the workspace, because backgrounding is not
-    // one screen's version of "delete the selected row" — it is the same act
-    // wherever it is asked for.
-    //
-    // Nothing is stopped, and nothing needs to be: a Jod run is a detached
-    // process group that reports through the database, so the TUI was only ever
-    // a viewer of it. "Background" here means this window stops looking, which
-    // is why it can be done without asking the supervisor anything.
-    if verb == "background" {
-        app.watching = None;
-        app.go(Workspace::Fleet);
-        app.push(Entry::Notice(format!(
-            "{what} keeps running — ⏎ or → opens it again"
-        )));
-        return None;
-    }
     match app.workspace {
         Workspace::Schedules => Some(Action::DeleteSchedule(what)),
         Workspace::Goals => Some(Action::DeleteGoal(what)),
@@ -3377,6 +3433,29 @@ fn on_tree_key(app: &mut App, key: KeyEvent, viewport: usize) -> Option<Option<A
     let handled = |a: Option<Action>| Some(a);
     let rows = app.tree_rows();
     let page = viewport.max(1) as isize;
+    // The pinned chat, answered before the forest's own keys. Everything below
+    // looks the cursor up in `forest` and finds nothing on this row — which on
+    // the top row of the screen is four keys that quietly do nothing.
+    //
+    // `↑`/`↓` are deliberately not here: they step `rows`, which already holds
+    // this row first, so the cursor walks off it the same way it walks off any
+    // other. Nor are `E`/`C`/`z`/`/`, which are about the tree rather than
+    // about the row under the cursor.
+    if app.tree_main_selected() {
+        match key.code {
+            // Not "watch it", which is what `⏎` does to a run, but go *into*
+            // it: the chat box binds to the main conversation and its
+            // transcript is replayed. `→` as well, so the pair reads as one
+            // movement — `←` backs out of a conversation, `→` goes into the one
+            // under the cursor.
+            KeyCode::Enter | KeyCode::Right => return handled(Some(Action::EnterMain)),
+            // Nothing to fold and no parent to climb to. Answered rather than
+            // passed down, where `collapse_or_parent` would act on whichever
+            // node it found instead — which is not the row that is highlighted.
+            KeyCode::Left | KeyCode::Char(' ') => return handled(None),
+            _ => {}
+        }
+    }
     match key.code {
         KeyCode::Up | KeyCode::Char('k') => {
             app.tree.step(-1, &rows);
@@ -3688,11 +3767,25 @@ fn on_fleet_key(app: &mut App, key: KeyEvent) -> Option<Action> {
     // What is left here are the row verbs, which the tree does not know: `s`
     // still stops a run, `d` still delegates, on a tree row as on a flat one.
     //
-    // A tree row that is not a run is the same case as the pinned row below,
-    // and answered for the same reason: these verbs are all
-    // `selected_agent()?`, which on a work heading is a printed key that does
-    // nothing and says nothing. `⏎` is named because it is what the row *does*
-    // answer — a work toggles, a session opens.
+    // The tree's pinned chat is the same case as the flat list's pinned row
+    // further down, and it comes first because `selected_node` cannot answer
+    // for it: it is a sentinel, not a node in the forest. Left out, these verbs
+    // fall through to `selected_agent`, which reads the *flat* list's cursor —
+    // so `s` on the main row would stop whichever agent that other, unseen
+    // cursor happened to be on.
+    if app.tree_main_selected() && is_run_verb(key.code) {
+        app.push(Entry::Notice(
+            "that is the main chat, not an agent — it has no process to stop or attach to, \
+             and ⏎ goes into it"
+                .into(),
+        ));
+        return None;
+    }
+    // A tree row that is not a run is the same case again, and answered for the
+    // same reason: these verbs are all `selected_agent()?`, which on a work
+    // heading is a printed key that does nothing and says nothing. `⏎` is named
+    // because it is what the row *does* answer — a work toggles, a session
+    // opens.
     if let Some(node) = app.selected_node().filter(|_| app.has_tree()) {
         if node.kind != jod_core::tree::NodeKind::Run && is_run_verb(key.code) {
             let what = match node.kind {
@@ -4391,23 +4484,16 @@ fn on_chat_key(
         KeyCode::Backspace => app.backspace(),
         KeyCode::Delete => app.delete_forward(),
         // `←` on an *empty* input backs out of the run into the agents list,
-        // and asks first. With anything typed it is the cursor, as it must be:
-        // the same rule `?` follows two arms down, for the same reason —
-        // stealing a key people use to edit text is not worth any shortcut.
+        // and does it on the one press. With anything typed it is the cursor, as
+        // it must be: the same rule `?` follows two arms down, for the same
+        // reason — stealing a key people use to edit text is not worth any
+        // shortcut.
         //
-        // Only offered when there is something to leave. Backgrounding an idle
-        // session means nothing, and a confirmation for it would be a question
-        // with no answer worth giving.
+        // Only when there is something to leave: `←` on an idle main chat is a
+        // dead key rather than a trip to the fleet, because there is no run to
+        // stop looking at. See [`background`] for why nothing is asked.
         KeyCode::Left if app.input.is_empty() && (app.busy || app.watching.is_some()) => {
-            let what = app
-                .watching
-                .as_deref()
-                .map(short)
-                .unwrap_or_else(|| "this turn".to_string());
-            app.overlay = Overlay::Confirm {
-                verb: "background".to_string(),
-                what,
-            };
+            background(app);
         }
         KeyCode::Left => app.left(),
         KeyCode::Right => app.right(),
@@ -7220,17 +7306,17 @@ mod tests {
         assert_eq!(app.input, "queued thought");
     }
 
-    /// `←` backs out of a run, and asks before it does.
+    /// `←` backs out of a run on the one press. The confirmation this replaces
+    /// asked whether to leave a run that was already detached, which is a
+    /// question with no answer worth giving.
     #[test]
-    fn left_on_an_empty_line_offers_to_background_the_run() {
+    fn left_on_an_empty_line_backgrounds_the_run_without_asking() {
         let mut app = app_on(HarnessKind::ClaudeCode);
         app.watching = Some("abc12345".into());
         press(&mut app, KeyCode::Left);
-        assert!(
-            matches!(&app.overlay, Overlay::Confirm { verb, .. } if verb == "background"),
-            "expected a confirmation, got {:?}",
-            app.overlay
-        );
+        assert_eq!(app.overlay, Overlay::None, "nothing to answer");
+        assert_eq!(app.watching, None, "the view detached on the one press");
+        assert_eq!(app.workspace, Workspace::Fleet);
     }
 
     /// The rule that keeps the shortcut from costing anything: with text in the
@@ -7258,27 +7344,44 @@ mod tests {
     }
 
     /// Backgrounding detaches the view and lands on the agents list. The run
-    /// itself is a detached process group and is deliberately left alone.
+    /// itself is a detached process group and is deliberately left alone — and
+    /// the notice is what tells you so, now that no question does.
     #[test]
-    fn confirming_background_stops_watching_and_shows_the_agents() {
+    fn backgrounding_stops_watching_and_says_the_run_survives() {
         let mut app = app_on(HarnessKind::ClaudeCode);
         app.watching = Some("abc12345".into());
-        press(&mut app, KeyCode::Left);
-        assert_eq!(press(&mut app, KeyCode::Char('y')), None);
+        assert_eq!(press(&mut app, KeyCode::Left), None);
         assert_eq!(app.watching, None, "the view detached");
         assert_eq!(app.workspace, Workspace::Fleet);
         assert_eq!(app.overlay, Overlay::None);
+        assert!(
+            app.transcript.iter().any(|entry| matches!(
+                entry,
+                Entry::Notice(said) if said.contains("keeps running")
+            )),
+            "the run's survival is said, not asked about: {:?}",
+            app.transcript
+        );
     }
 
-    /// Anything that is not a yes leaves the run attached.
+    /// The promise the notice makes, kept — and what the confirmation this
+    /// replaces was really protecting. Backgrounding stops *this window*
+    /// looking; the run is a detached process group and is still on the fleet,
+    /// under the two keys the notice names.
     #[test]
-    fn declining_background_keeps_watching() {
+    fn a_backgrounded_run_is_still_there_to_reopen() {
         let mut app = app_on(HarnessKind::ClaudeCode);
+        app.agents = vec![running("abc12345", "the one on screen")];
         app.watching = Some("abc12345".into());
         press(&mut app, KeyCode::Left);
-        press(&mut app, KeyCode::Esc);
-        assert_eq!(app.watching.as_deref(), Some("abc12345"));
-        assert_eq!(app.workspace, Workspace::Chat);
+        assert_eq!(app.workspace, Workspace::Fleet);
+
+        app.list_mut(Workspace::Fleet).selected = Some("abc12345".into());
+        assert_eq!(
+            press(&mut app, KeyCode::Enter),
+            Some(Action::Watch("abc12345".into())),
+            "⏎ on the row did not reopen what ← left"
+        );
     }
 
     #[test]
@@ -9405,6 +9508,61 @@ mod tests {
         assert_eq!(next_turn(&s, &id).model.as_deref(), Some("sonnet"));
     }
 
+    /// The console opens *in* the main chat rather than beside it.
+    ///
+    /// The binding used to start derived — "the conversation the run on screen
+    /// wrote" — so on a cold start the first sentence typed went to whichever
+    /// agent this machine had most recently finished.
+    #[tokio::test]
+    async fn the_launch_position_is_the_main_chat() {
+        let jod = jod_with(store());
+        let opts = options();
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        let mut thread = Thread::default();
+
+        enter_main(&jod, &mut app, &opts, &mut thread, true).await;
+
+        let main = jod
+            .store()
+            .unwrap()
+            .main_conversation(app.harness, &opts.cwd.display().to_string())
+            .unwrap();
+        assert_eq!(thread.conversation.as_deref(), Some(main.as_str()));
+        assert_eq!(app.workspace, Workspace::Chat);
+        // And nothing written to the screen, so the splash keeps the column:
+        // `fresh` shows it only while the transcript holds nothing but hints,
+        // and the empty-state line would replace the wordmark on every launch.
+        assert!(app.transcript.is_empty(), "{:?}", app.transcript);
+    }
+
+    /// Bound is not the same as *looking at* it. The chat box stays bound to
+    /// the main conversation while you walk the fleet, so `⏎` on the tree's
+    /// pinned row has to move even though the binding does not change — and
+    /// tested on the binding alone it answered "already in the main chat" from
+    /// a screen that is plainly not it.
+    #[tokio::test]
+    async fn entering_main_from_another_screen_moves_even_when_already_bound() {
+        let jod = jod_with(store());
+        let opts = options();
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        let mut thread = Thread::default();
+        enter_main(&jod, &mut app, &opts, &mut thread, true).await;
+
+        app.go(Workspace::Fleet);
+        enter_main(&jod, &mut app, &opts, &mut thread, false).await;
+        assert_eq!(
+            app.workspace,
+            Workspace::Chat,
+            "the fleet's pinned row is a dead key"
+        );
+
+        // Pressed again from the chat itself it says so, rather than clearing
+        // the transcript to replay the same lines back into it.
+        enter_main(&jod, &mut app, &opts, &mut thread, false).await;
+        let said = format!("{:?}", app.transcript.last().unwrap());
+        assert!(said.contains("already in the main chat"), "{said}");
+    }
+
     /// Same for the mode, which before this was fixed once at `jod tui` launch
     /// and could not be changed at all — then could be changed and not kept.
     #[tokio::test]
@@ -9673,18 +9831,22 @@ mod tests {
     /// The rest of the cursor set, which the same routing swallowed: a tree
     /// deep enough to need `End` is exactly the one where walking it row by row
     /// is not an answer.
+    ///
+    /// `Home` lands on the pinned chat rather than on the first work, because
+    /// the pinned chat *is* the top row — see [`crate::tui::fleet::main_id`].
     #[test]
     fn home_end_and_the_page_keys_move_the_tree_too() {
         use jod_core::tree::NodeId;
+        let main = crate::tui::fleet::main_id();
         let mut app = on_the_tree(NodeId::work("w1"));
         press(&mut app, KeyCode::End);
         assert_eq!(app.tree.selected, Some(NodeId::run("r1")));
         press(&mut app, KeyCode::Home);
-        assert_eq!(app.tree.selected, Some(NodeId::work("w1")));
+        assert_eq!(app.tree.selected, Some(main.clone()));
         press(&mut app, KeyCode::PageDown);
         assert_eq!(app.tree.selected, Some(NodeId::run("r1")), "a page past the end clamps");
         press(&mut app, KeyCode::PageUp);
-        assert_eq!(app.tree.selected, Some(NodeId::work("w1")));
+        assert_eq!(app.tree.selected, Some(main));
     }
 
     /// The other half of the same fault: a moving cursor is no use if the verbs
@@ -9730,6 +9892,76 @@ mod tests {
             assert!(said.contains(word), "from {row:?}: {said}");
             assert!(said.contains("not a run"), "from {row:?}: {said}");
         }
+    }
+
+    /// The way back into the main chat from a fleet that has grown a tree.
+    ///
+    /// The forest is works and what hangs off them, so the main chat has no node
+    /// in it — and the tree replaces the flat list whole, taking the pinned row
+    /// with it. Without this the fleet was a screen you could walk into and not
+    /// back out of except by `Ctrl-G`.
+    #[test]
+    fn enter_on_the_trees_pinned_row_goes_into_the_main_chat() {
+        for key in [KeyCode::Enter, KeyCode::Right] {
+            let mut app = on_the_tree(crate::tui::fleet::main_id());
+            assert_eq!(press(&mut app, key), Some(Action::EnterMain), "{key:?}");
+        }
+    }
+
+    /// It is the first row, and `↑` from the top work arrives on it — which is
+    /// what makes it findable without being told it is there.
+    #[test]
+    fn the_pinned_chat_is_the_trees_first_row() {
+        let main = crate::tui::fleet::main_id();
+        let app = on_the_tree(main.clone());
+        assert_eq!(app.tree_rows().first(), Some(&main));
+
+        let mut app = on_the_tree(jod_core::tree::NodeId::work("w1"));
+        press(&mut app, KeyCode::Up);
+        assert_eq!(app.tree.selected, Some(main));
+    }
+
+    /// Drawn first, but not where the cursor starts. The chat is the anchor;
+    /// the cursor belongs on the work, because managing the work is what
+    /// opening this screen means — the same rule the flat list follows for the
+    /// same pinned row, and the reason `reconcile_to` takes a fallback.
+    #[test]
+    fn the_trees_cursor_starts_on_the_first_work_not_the_pinned_chat() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.forest = forest_of_one_work();
+        app.go(Workspace::Fleet);
+        assert_eq!(
+            app.tree.selected,
+            Some(jod_core::tree::NodeId::work("w1")),
+            "opening the fleet parked the cursor on the pinned chat"
+        );
+    }
+
+    /// A conversation has no process, so the run verbs answer rather than
+    /// reaching for one. Left to fall through they found the *flat* list's
+    /// cursor — an agent nobody could see, stopped by a key pressed on a row
+    /// that is not it.
+    #[test]
+    fn a_run_verb_on_the_trees_pinned_row_says_it_is_the_chat() {
+        let mut app = on_the_tree(crate::tui::fleet::main_id());
+        app.agents = vec![running("r1", "run one")];
+        app.list_mut(Workspace::Fleet).selected = Some("r1".into());
+
+        assert_eq!(press(&mut app, KeyCode::Char('s')), None);
+        let said = format!("{:?}", app.transcript.last().unwrap());
+        assert!(said.contains("the main chat"), "{said}");
+    }
+
+    /// Nothing to fold and no parent to climb to. Answered on the row rather
+    /// than passed to `collapse_or_parent`, which would act on whichever node
+    /// it found — not the one that is highlighted.
+    #[test]
+    fn left_on_the_trees_pinned_row_stays_put() {
+        let main = crate::tui::fleet::main_id();
+        let mut app = on_the_tree(main.clone());
+        assert_eq!(press(&mut app, KeyCode::Left), None);
+        assert_eq!(app.tree.selected, Some(main));
+        assert_eq!(app.workspace, Workspace::Fleet);
     }
 
     /// The tree takes the cursor keys and nothing else: `/` still opens the

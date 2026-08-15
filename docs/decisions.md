@@ -2405,3 +2405,40 @@ the 112 `thinking` rows in the store was the empty string, drawn faithfully as a
 blank line between the tool calls. The adapter now drops an empty block — the
 guard the `text` arm has always had. So on a Claude 5 model the tick *is* the
 whole signal, and no display setting can produce sentences that were never sent.
+
+## The main chat is where the console starts and where every key comes back to
+
+Three separate things made the TUI a place you could get lost in, and they were
+one bug wearing three faces: the main chat was reachable but never the default,
+and each screen had its own idea of how to leave.
+
+**It is where a launch lands.** The chat box's conversation used to start
+*derived* — "the one the run on screen wrote". On a cold start that resolves to
+whichever agent this machine most recently finished, so the first sentence typed
+after `jod tui` went to a stranger. Being in the main chat is what makes typing
+an instruction to Jod rather than a turn to somebody's agent, and that is the
+program's whole premise, so it is the starting position and anywhere else is
+somewhere you choose to go. `--resume` still wins: naming a conversation is an
+explicit choice this must not overrule. A chat nobody has said anything to
+leaves the transcript untouched, because `ui::fresh` shows the splash only while
+the transcript holds nothing but hints — the empty-state line would otherwise
+replace the wordmark on every launch, forever.
+
+**`←` out of a run no longer asks.** The confirmation said *this keeps running
+in the background — sure?*, and the honest answer was that it already was: a Jod
+run is a detached process group reporting through the database, and the TUI was
+only ever a viewer. So the question proposed leaving a thing already left, once
+per trip out of a session. What it was actually *for* was the sentence it
+printed afterwards — the run survives, `⏎` or `→` reopens it — and that is a
+notice, not a question. Keystrokes spent confirming a no-op are how a console
+teaches people to stop reading its prompts.
+
+**The fleet tree pins the chat as its first row.** The tree does not extend the
+flat agents list, it replaces it — and the flat list is where the pinned chat
+lived. Core's forest is works and what hangs off them (`WHERE c.work_id IS NOT
+NULL`) and the main chat belongs to no work, so the moment a single work existed
+the chat had no row anywhere on the screen and the fleet became somewhere you
+could walk into and not back out of except by `Ctrl-G`. It is a sentinel
+`NodeId` with a `kind_tag` core never mints, held outside the `/` filter — a
+filter narrows the fleet, and the row that is not part of the fleet is the one
+you most need when a filter has emptied the screen.

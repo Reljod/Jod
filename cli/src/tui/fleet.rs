@@ -27,6 +27,24 @@ use std::collections::HashSet;
 
 use jod_core::tree::{Node, NodeId, NodeKind};
 
+/// The pinned main chat, as a row the tree's cursor can sit on.
+///
+/// A sentinel rather than a node, because there is no node to be had: the
+/// forest is works and what hangs off them — core's query is
+/// `WHERE c.work_id IS NOT NULL` — and the main chat belongs to no work. The
+/// flat list has pinned it above the agents since it existed; without the same
+/// row here, the fleet becomes a screen you can walk into and not back out of
+/// the moment a single work exists, because the tree replaces the list whole.
+///
+/// Its own `kind_tag`, so it can collide with nothing: [`NodeId`] compares on
+/// the tag as well as the id, and `main` is not a kind core mints.
+pub fn main_id() -> NodeId {
+    NodeId {
+        kind_tag: "main",
+        id: super::app::MAIN_ROW.to_string(),
+    }
+}
+
 /// Everything the fleet tree remembers between frames.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TreeState {
@@ -161,6 +179,19 @@ impl TreeState {
 
     /// Keep the cursor on a row that still exists.
     pub fn reconcile(&mut self, rows: &[NodeId]) {
+        self.reconcile_to(rows, None);
+    }
+
+    /// [`TreeState::reconcile`], but landing somewhere other than the top row
+    /// when the cursor has nowhere to go.
+    ///
+    /// The same rule the flat list follows and for the same reason — see
+    /// `ListState::reconcile_to`. The tree's first row is [`main_id`], and a
+    /// cursor that defaulted there would put every verb this screen has — stop,
+    /// attach, watch, toggle — one keystroke away from the thing they are for.
+    /// The chat is *drawn* first because it is the anchor; the cursor starts on
+    /// the work, because managing the work is what opening this screen means.
+    pub fn reconcile_to(&mut self, rows: &[NodeId], fallback: Option<NodeId>) {
         if rows.is_empty() {
             self.selected = None;
             return;
@@ -170,7 +201,9 @@ impl TreeState {
             .as_ref()
             .is_some_and(|id| rows.iter().any(|row| row == id))
         {
-            self.selected = rows.first().cloned();
+            self.selected = fallback
+                .filter(|id| rows.contains(id))
+                .or_else(|| rows.first().cloned());
         }
     }
 
