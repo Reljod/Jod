@@ -282,6 +282,94 @@ fn spawns(d: &Decision) -> bool {
     matches!(d, Decision::Run { .. } | Decision::Replace { .. })
 }
 
+/// What a `fire_once` catch-up passed over.
+///
+/// [`decide`] answers a long outage under the default policy with a single
+/// [`Decision::Run`] and nothing else, and that is right: the question after an
+/// outage is whether the inbox got triaged, not whether it got triaged eleven
+/// times. But the instants it passed over still happened, and [`FireOutcome`]
+/// states the rule they fall foul of — every outcome is written down, because a
+/// skip nobody recorded is a silent failure. Before this existed, a six-hour
+/// outage on a fifteen-minute schedule left one ordinary-looking `ran` row and
+/// no trace at all of the twenty-three instants that were dropped to produce
+/// it.
+///
+/// **One row, not one row per instant, and the difference is the fact being
+/// recorded.** Under `skip`, each missed instant got nothing whatsoever, so
+/// each one is its own outcome and each one earns its own row. Under
+/// `fire_once` they were not discarded one by one — they were folded into the
+/// single run that stands in for all of them, which is one thing that happened
+/// once. Twenty-three rows identical to `skip`'s would tell a person that
+/// nothing ran for those instants, when something did, and would push the run
+/// itself off the ten lines `jod schedule log` shows by default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CaughtUp {
+    /// How many instants the catch-up passed over. Never zero.
+    pub passed_over: usize,
+    /// The oldest instant passed over.
+    pub from_ms: i64,
+    /// The newest instant passed over. The one after it is the instant that
+    /// got the run.
+    pub to_ms: i64,
+}
+
+impl CaughtUp {
+    /// The line a person reads in `jod schedule log`.
+    ///
+    /// It says how many and over what window, because "some instants went
+    /// missing" answers none of the questions somebody reading an outage has.
+    /// The window is in the schedule's own zone, which is the zone its cron
+    /// expression is written in.
+    ///
+    /// It describes what the policy did rather than what the run then did. The
+    /// run's own row, written straight after this one, is where whether it
+    /// actually started belongs — and it may say `spawn_failed`.
+    pub fn detail(&self, timezone: &str) -> String {
+        format!(
+            "{} instants missed while Jod was not running, {} to {}; \
+             fire_once kept only the most recent",
+            self.passed_over,
+            in_zone(self.from_ms, timezone),
+            in_zone(self.to_ms, timezone),
+        )
+    }
+}
+
+/// A timestamp as the schedule's own zone would write it.
+///
+/// An unreadable zone falls back to UTC rather than failing. This text is a
+/// record of something that already happened, and refusing to write it down
+/// over a bad zone name would lose the very thing being recorded.
+fn in_zone(at_ms: i64, timezone: &str) -> String {
+    let zone: chrono_tz::Tz = timezone.parse().unwrap_or(chrono_tz::UTC);
+    chrono::DateTime::from_timestamp_millis(at_ms)
+        .map(|t| t.with_timezone(&zone).format("%Y-%m-%d %H:%M %Z").to_string())
+        .unwrap_or_else(|| at_ms.to_string())
+}
+
+/// The instants a tick's catch-up passed over, if it passed over any.
+///
+/// `steps` is the plan as it will actually be carried out — after [`plan`] has
+/// had its say — because a tick that is going to start nothing has caught
+/// nothing up and must not claim it did. A monitor that suppressed the run, or
+/// an overlap hold because the previous run is still going, each write their
+/// own row saying what really happened to this tick.
+///
+/// Only `fire_once` needs this. `skip` already records every instant it
+/// dropped, one row each, and `fire_all` drops nothing it was not bounded out
+/// of.
+pub fn caught_up(s: &Schedule, missed: &[i64], steps: &[Decision]) -> Option<CaughtUp> {
+    if s.misfire != Misfire::FireOnce || missed.len() < 2 || !steps.iter().any(spawns) {
+        return None;
+    }
+    let passed = &missed[..missed.len() - 1];
+    Some(CaughtUp {
+        passed_over: passed.len(),
+        from_ms: passed[0],
+        to_ms: passed[passed.len() - 1],
+    })
+}
+
 /// Fold what a schedule's monitor saw into what the schedule alone decided.
 ///
 /// This is where monitor suppression actually happens, and it is a pure
@@ -455,7 +543,30 @@ impl Ticker {
             let mut failed = false;
             let mut ran = false;
 
-            for decision in plan(planned, watch) {
+            let steps = plan(planned, watch);
+            // What the default policy dropped to produce the run below.
+            //
+            // Written *before* the run and not as one of the decisions, and
+            // both of those are deliberate. Before, so the run keeps the newest
+            // row and `jod schedule log` still opens on it. Not a decision,
+            // because `decide` answering a long outage with exactly one
+            // `Decision::Run` is the behaviour a person wants and is pinned by
+            // a test — this records what that answer cost without changing the
+            // answer.
+            if let Some(caught) = caught_up(&s, &missed, &steps) {
+                store.record_fire(&Fire {
+                    id: 0,
+                    schedule_id: s.id.clone(),
+                    due_at_ms: caught.from_ms,
+                    fired_at_ms: now_ms,
+                    run_id: None,
+                    outcome: FireOutcome::SkippedMisfire,
+                    detail: Some(caught.detail(&s.timezone)),
+                })?;
+                report.held += 1;
+            }
+
+            for decision in steps {
                 match self.carry_out(&s, &decision, now_ms, watch).await {
                     Ok(true) => {
                         report.started += 1;
@@ -2590,6 +2701,179 @@ mod tests {
 
         assert_eq!(first.claimed, 1);
         assert_eq!(second.claimed, 0, "the second ticker must find nothing due");
+    }
+
+    // ---- what a `fire_once` catch-up passed over ----
+
+    /// Twenty-four instants came due, one of them gets the run, and the other
+    /// twenty-three are what the catch-up passed over.
+    #[test]
+    fn a_catch_up_accounts_for_every_instant_but_the_one_it_ran() {
+        let s = sched(Misfire::FireOnce, Overlap::Skip);
+        let missed: Vec<i64> = (1..=24).map(|i| i * 900_000).collect();
+        let steps = decide(&s, &missed, None);
+        assert_eq!(steps.len(), 1, "still exactly one decision");
+        assert_eq!(
+            caught_up(&s, &missed, &steps),
+            Some(CaughtUp {
+                passed_over: 23,
+                from_ms: 900_000,
+                to_ms: 23 * 900_000,
+            })
+        );
+    }
+
+    /// An ordinary tick is not an outage and must not start narrating one.
+    #[test]
+    fn one_instant_due_passed_nothing_over() {
+        let s = sched(Misfire::FireOnce, Overlap::Skip);
+        let steps = decide(&s, &[5_000], None);
+        assert_eq!(caught_up(&s, &[5_000], &steps), None);
+    }
+
+    /// `skip` writes a row per instant already. A summary on top of those would
+    /// count the same drops twice.
+    #[test]
+    fn skip_gets_no_summary_because_it_already_wrote_every_row() {
+        let s = sched(Misfire::Skip, Overlap::Skip);
+        let missed = vec![1_000, 2_000, 3_000];
+        let steps = decide(&s, &missed, None);
+        assert_eq!(caught_up(&s, &missed, &steps), None);
+    }
+
+    /// Nothing was caught up by a tick that is going to start nothing. The
+    /// decision that stopped it writes its own row saying so.
+    #[test]
+    fn a_tick_that_starts_nothing_claims_no_catch_up() {
+        let s = sched(Misfire::FireOnce, Overlap::Skip);
+        let missed: Vec<i64> = (1..=24).map(|i| i * 900_000).collect();
+
+        let suppressed = plan(decide(&s, &missed, None), Some(&monitor::Decision::Suppress));
+        assert_eq!(caught_up(&s, &missed, &suppressed), None);
+
+        let held_by_overlap = decide(&s, &missed, Some("run-1"));
+        assert_eq!(caught_up(&s, &missed, &held_by_overlap), None);
+    }
+
+    /// The line has to answer the questions a person actually has after an
+    /// outage: how many, and over what stretch of time.
+    #[test]
+    fn the_line_names_how_many_and_over_what_window() {
+        let caught = CaughtUp {
+            passed_over: 23,
+            from_ms: at_ms("2026-01-15T08:15:00Z"),
+            to_ms: at_ms("2026-01-15T13:45:00Z"),
+        };
+        let detail = caught.detail("Asia/Manila");
+        assert!(detail.starts_with("23 instants missed"), "{detail}");
+        assert!(
+            detail.contains("2026-01-15 16:15 PST") && detail.contains("2026-01-15 21:45 PST"),
+            "the window is written in the schedule's own zone: {detail}"
+        );
+    }
+
+    fn at_ms(text: &str) -> i64 {
+        chrono::DateTime::parse_from_rfc3339(text)
+            .unwrap()
+            .timestamp_millis()
+    }
+
+    /// One armed `fire_once` schedule on a fifteen-minute cron that last fired
+    /// six hours ago, so twenty-four instants have come due with nothing
+    /// running to take them.
+    fn six_hours_down() -> Arc<Store> {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let mut s = sched(Misfire::FireOnce, Overlap::Skip);
+        s.cron = "*/15 * * * *".into();
+        store.add_schedule(&s).unwrap();
+        // `add_schedule` arms from the real clock, so the fixture's own instants
+        // are written over the top of it. `next_fire_at_ms` is deliberately one
+        // of the missed instants: an instant outside the series would be added
+        // to the list by `missed_for` and make the count depend on the fixture
+        // rather than on the outage.
+        let last = at_ms("2026-01-15T08:00:00Z");
+        let next = at_ms("2026-01-15T14:00:00Z");
+        store
+            .write(|tx| {
+                tx.execute(
+                    &format!(
+                        "UPDATE schedules
+                            SET last_fire_at_ms = {last}, next_fire_at_ms = {next}"
+                    ),
+                    [],
+                )
+                .unwrap();
+                Ok(())
+            })
+            .unwrap();
+        store
+    }
+
+    /// **The check for S4.** Both halves have to hold at once: a fix that wrote
+    /// down what it dropped but also fired more than once would be worse than
+    /// the silence it replaced.
+    ///
+    /// Six hours down on a fifteen-minute cron is twenty-four instants. One of
+    /// them gets a run and the other twenty-three do not, and the tick is
+    /// expected to say so — `FireOutcome`'s own rule is that every outcome is
+    /// written down, because a skip nobody recorded is a silent failure.
+    ///
+    /// The run is asserted as `started + failed` because a spawn in a test has
+    /// no supervisor to talk to. Either way it is one attempt and one row, and
+    /// one is the whole point.
+    #[tokio::test]
+    async fn an_outage_under_the_default_policy_runs_once_and_says_what_it_dropped() {
+        let store = six_hours_down();
+        let now = at_ms("2026-01-15T14:00:00Z");
+
+        let report = Ticker::new(Jod::with_store(store.clone()))
+            .as_owner("t")
+            .tick(now)
+            .await
+            .unwrap();
+
+        assert_eq!(report.claimed, 1);
+        assert_eq!(
+            report.started + report.failed,
+            1,
+            "an outage still buys exactly one run, whatever else is recorded"
+        );
+
+        let fires = store.fires("s1", 100).unwrap();
+        assert_eq!(
+            fires.len(),
+            2,
+            "the run, and one line accounting for what it passed over: {fires:?}"
+        );
+        // Newest first, so the run leads and `jod schedule log` still opens on
+        // the thing that happened rather than on the outage behind it.
+        assert!(
+            matches!(
+                fires[0].outcome,
+                FireOutcome::Ran | FireOutcome::SpawnFailed
+            ),
+            "{:?}",
+            fires[0]
+        );
+
+        let passed_over = &fires[1];
+        assert_eq!(passed_over.outcome, FireOutcome::SkippedMisfire);
+        assert!(
+            passed_over.run_id.is_none(),
+            "nothing ran for the instants it names"
+        );
+        assert_eq!(
+            passed_over.due_at_ms,
+            at_ms("2026-01-15T08:15:00Z"),
+            "dated to the oldest instant it accounts for"
+        );
+        let detail = passed_over.detail.clone().unwrap_or_default();
+        for expected in ["23", "08:15", "13:45"] {
+            assert!(
+                detail.contains(expected),
+                "the line has to name how many and over what window, not just that some went missing: {detail}"
+            );
+        }
     }
 
     // ---- a monitor decides whether the tick spends anything ----
