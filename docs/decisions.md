@@ -2530,3 +2530,37 @@ where the reader has to reassemble the sentence before they can judge the claim.
 So the charter asks for complete sentences and ordinary words in everything a
 human reads. Real names stay: a file path, a type, a protocol. What goes is
 abstract vocabulary chosen for tone rather than for meaning.
+
+## `ToolAccess` bounds Jod's verbs, not the session
+
+`ToolAccess::Orchestrate` reads like the boundary of what the main chat can do,
+and the module comment at the top of `core/src/orchestrator.rs` describes the
+orchestrator as confined by it. It is narrower than that. What the level does is
+choose which `mcp__jod__*` tools the MCP server offers — `mcp::allows` filters
+the catalogue, `mcp_config::config_for` writes the matching document — and that
+is the whole of it. The harness keeps its own tools regardless.
+
+Measured, with the flags Jod builds for the main chat: the session comes up
+holding 58 tools. Thirty-two are Jod's. The other twenty-six are the harness's,
+including a shell, file editors and its own way of starting sub-agents, and Jod
+asked for none of them. `--allowedTools` grants without denying, so naming only
+`mcp__jod` there changes nothing about the rest; asked to write a file, the same
+run wrote one and reported no permission denial at all. The main chat's default
+mode is `bypass`, where nothing is refused, which is how a turn that was
+supposed to route a question instead sat in a shell loop waiting for its own
+child.
+
+The lesson is the same one `docs/harness-support.md` already draws about roots.
+Granting is not confining. A flag that hands something over says nothing about
+what was withheld, and Jod must not describe either axis as a wall it does not
+have.
+
+There is one real deny channel and Jod already writes it: the `PreToolUse` hook
+on matcher `*` that calls `jod approve-hook`. A hook that answers `deny` is
+obeyed — measured, and the model tried seven ways around it before falling back
+to `delegate`, which is exactly the behaviour wanted. It is installed only for
+the modes below `bypass`, so making it the orchestrator's boundary is real work
+rather than a line of configuration. Until that lands, what stands between the
+main chat and a shell is the paragraph in `orchestrator_preamble` telling it not
+to, and `tests/e2e/jod/35-orchestrator-toolbox.sh` is how anyone finds out
+whether that paragraph is still holding.
