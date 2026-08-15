@@ -286,7 +286,7 @@ pub enum Match {
 ///
 /// Paused and archived projects are skipped: a repository untouched for months
 /// should not be able to win an offhand mention against the one being worked
-/// on. Naming one explicitly still works — that goes through [`Store::project_by_name`].
+/// on. Naming one explicitly still works — that goes through [`Store::projects_by_name`].
 pub fn resolve(utterance: &str, catalog: &[Project]) -> Match {
     let haystack = utterance.to_lowercase();
 
@@ -302,17 +302,32 @@ pub fn resolve(utterance: &str, catalog: &[Project]) -> Match {
     forms.sort_by_key(|f| std::cmp::Reverse(f.0));
 
     let mut hits: Vec<(String, String)> = Vec::new();
-    let mut claimed: Vec<(usize, usize)> = Vec::new();
+    // Each claimed span carries the project that claimed it. The owner is the
+    // half that makes a shared name visible — without it, "these words are
+    // already spoken for" and "these words name a second project" look
+    // identical here, and the second project is dropped.
+    let mut claimed: Vec<(usize, usize, String)> = Vec::new();
     for (_, form, project) in forms {
         let Some(span) = word_span(&haystack, &form) else {
             continue;
         };
-        // A longer form already covering this span has spoken for it: `jod`
+        // A *longer* form already covering this span has spoken for it: `jod`
         // inside `jod-cloud` is not a second project being mentioned.
-        if claimed.iter().any(|(s, e)| span.0 >= *s && span.1 <= *e) {
+        //
+        // A form covering exactly the same span is not a longer form. If it
+        // belongs to a different project — two checkouts with the same
+        // basename, or one alias typed on two projects — then one phrase has
+        // named both of them, which is precisely the ambiguity this function
+        // exists to report. Dropping it here is how a shared name came back as
+        // `Match::One`, and `settle_project` then filed the instruction
+        // against whichever project the catalog happened to list first.
+        let spoken_for = claimed.iter().any(|(s, e, owner)| {
+            span.0 >= *s && span.1 <= *e && (span != (*s, *e) || owner == &project.id)
+        });
+        if spoken_for {
             continue;
         }
-        claimed.push(span);
+        claimed.push((span.0, span.1, project.id.clone()));
         if !hits.iter().any(|(id, _)| id == &project.id) {
             hits.push((project.id.clone(), form));
         }
@@ -545,20 +560,31 @@ impl Store {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
-    /// Look a project up by anything it might be called.
+    /// Every project that answers to a name, in catalog order.
     ///
     /// Unlike [`resolve`], this searches archived entries too: naming one
     /// explicitly is an instruction, not a guess, and refusing to find a
     /// project he just named because it is archived would be obtuse.
-    pub fn project_by_name(&self, name: &str) -> Result<Option<Project>> {
+    ///
+    /// It hands back a list rather than the first match because a spoken form
+    /// can belong to more than one project: two checkouts called `proj` under
+    /// different parents both answer to `proj`. Taking the first one meant
+    /// `jod project archive proj` archived whichever row the catalog ordering
+    /// put on top and said nothing about the other, and `project_switch` moved
+    /// the conversation the same way. Deciding what to do about more than one
+    /// belongs to the caller, who is the only one that knows whether there is
+    /// a person there to ask — so please do not add a convenience wrapper that
+    /// returns element zero.
+    pub fn projects_by_name(&self, name: &str) -> Result<Vec<Project>> {
         let wanted = name.trim().to_lowercase();
         if wanted.is_empty() {
-            return Ok(None);
+            return Ok(Vec::new());
         }
         Ok(self
             .projects(true)?
             .into_iter()
-            .find(|p| p.spoken_forms().iter().any(|f| f == &wanted)))
+            .filter(|p| p.spoken_forms().iter().any(|f| f == &wanted))
+            .collect())
     }
 
     /// The catalog entry covering a directory, if one does.
@@ -727,6 +753,20 @@ impl Store {
     ///    settled here. Returning `None` is the honest answer: the case that
     ///    needs judgement is handed to the orchestrator rather than guessed at
     ///    by a string matcher.
+    ///
+    /// Rule 3 covers a shared spoken form as well as two different names, and
+    /// what it does about it is nothing at all — no write to
+    /// `conversations.current_project_id`, no `touch_project`. That is
+    /// deliberate, and it is not the same as clearing the current project.
+    /// This function runs before every model turn with nobody to ask, so its
+    /// only two honest options are to leave the conversation where it already
+    /// was or to empty it. Leaving it wins: the project already in play was
+    /// settled by an earlier instruction that was not ambiguous, and throwing
+    /// it away would destroy a correct answer because a later sentence
+    /// happened to be unclear. Not writing is the part that matters — an
+    /// ambiguous instruction can no longer move the conversation to a project
+    /// Reljod never confirmed, and it can no longer push that project to the
+    /// top of the catalog, where it would bias the next inference too.
     pub fn settle_project(
         &self,
         conversation_id: &str,
@@ -884,6 +924,46 @@ mod tests {
         match resolve("port tetris to jod", &catalog) {
             Match::Ambiguous { project_ids } => assert_eq!(project_ids.len(), 2),
             other => panic!("two projects were resolved to one: {other:?}"),
+        }
+    }
+
+    /// The same ambiguity, arriving as one word instead of two. Two checkouts
+    /// called `proj` under different parents both answer to `proj`, so the
+    /// phrase names both of them. The second one matches the exact byte span
+    /// the first has already claimed, and suppressing it there is what used to
+    /// turn this into a confident `Match::One` pointing at whichever project
+    /// the catalog happened to list first.
+    #[test]
+    fn a_form_two_projects_share_is_ambiguous_rather_than_a_coin_flip() {
+        let mut first = project("collide-proj", &[]);
+        first.path = PathBuf::from("/home/reljod/repo/collide/proj");
+        let mut second = project("other-proj", &[]);
+        second.path = PathBuf::from("/home/reljod/repo/other/proj");
+
+        match resolve("fix the login bug in proj", &[first, second]) {
+            Match::Ambiguous { project_ids } => {
+                assert!(
+                    project_ids.contains(&"collide-proj".to_string())
+                        && project_ids.contains(&"other-proj".to_string()),
+                    "both projects answer to `proj`, but only {project_ids:?} was reported"
+                );
+            }
+            other => panic!("a shared spoken form resolved to one project: {other:?}"),
+        }
+    }
+
+    /// The other route to a shared form: the same alias typed on two projects.
+    /// The basename case above collides by accident, this one by hand, and the
+    /// matcher has to treat them the same way.
+    #[test]
+    fn an_alias_two_projects_share_is_ambiguous_rather_than_a_coin_flip() {
+        let catalog = vec![
+            project("tetris", &["the game"]),
+            project("jod", &["the game"]),
+        ];
+        match resolve("let's get back to the game", &catalog) {
+            Match::Ambiguous { project_ids } => assert_eq!(project_ids.len(), 2),
+            other => panic!("a shared alias resolved to one project: {other:?}"),
         }
     }
 
@@ -1127,7 +1207,74 @@ mod tests {
         let store = Store::in_memory().unwrap();
         let p = store.add_project(NewProject::at("/tmp/alpha")).unwrap();
         store.set_project_state(&p.id, State::Archived).unwrap();
-        assert!(store.project_by_name("alpha").unwrap().is_some());
+        assert_eq!(store.projects_by_name("alpha").unwrap().len(), 1);
+    }
+
+    /// The explicit half of the shared-name problem. `jod project archive`,
+    /// `jod project restore` and the `project_switch` tool all reach a project
+    /// through this lookup, and it used to return the first row that answered
+    /// to the name. With two checkouts called `proj`, `jod project archive
+    /// proj` archived one of them and said nothing about the other.
+    #[test]
+    fn a_name_two_projects_answer_to_returns_both_rather_than_the_first() {
+        let store = Store::in_memory().unwrap();
+        store
+            .add_project(NewProject::at("/tmp/collide/proj").named("collide-proj"))
+            .unwrap();
+        store
+            .add_project(NewProject::at("/tmp/other/proj").named("other-proj"))
+            .unwrap();
+
+        let found = store.projects_by_name("proj").unwrap();
+        let names: Vec<&str> = found.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(
+            found.len(),
+            2,
+            "both checkouts are called `proj`, but the lookup reported {names:?}"
+        );
+        assert!(names.contains(&"collide-proj") && names.contains(&"other-proj"));
+
+        // Naming one of them exactly is still unambiguous, which is what makes
+        // "name one of them exactly" a usable answer to the refusal.
+        assert_eq!(store.projects_by_name("other-proj").unwrap().len(), 1);
+    }
+
+    /// The consequence that makes this severe rather than untidy.
+    /// `settle_project` runs on every instruction before the model turn, so a
+    /// shared name silently picked here is an instruction filed against a
+    /// project Reljod never named. Nothing must be written, and the project
+    /// already in play must survive: it was settled by an earlier instruction
+    /// that was not ambiguous, and a later unclear sentence is no reason to
+    /// throw a correct answer away.
+    #[test]
+    fn a_shared_name_settles_nothing_and_leaves_the_current_project_alone() {
+        let (store, chat) = store_with_chat();
+        store.add_project(NewProject::at("/tmp/tetris")).unwrap();
+        store
+            .add_project(NewProject::at("/tmp/collide/proj").named("collide-proj"))
+            .unwrap();
+        store
+            .add_project(NewProject::at("/tmp/other/proj").named("other-proj"))
+            .unwrap();
+        store.settle_project(&chat, "let's fix tetris").unwrap();
+
+        let settled = store
+            .settle_project(&chat, "fix the login bug in proj")
+            .unwrap();
+        assert!(
+            settled.is_none(),
+            "a shared name settled a project: {settled:?}"
+        );
+        assert_eq!(
+            store.current_project(&chat).unwrap().map(|p| p.name),
+            Some("tetris".into()),
+            "an ambiguous instruction moved the conversation"
+        );
+        assert_eq!(
+            store.project_resolutions(&chat, 10).unwrap().len(),
+            1,
+            "an ambiguous instruction was recorded as a decision"
+        );
     }
 
     #[test]

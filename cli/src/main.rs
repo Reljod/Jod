@@ -3089,10 +3089,31 @@ fn project_command(jod: &Jod, what: ProjectCommand) -> Result<()> {
     // Resolving by anything it is called, rather than by an id, for the same
     // reason the MCP tool does: these are things said out loud, and an id
     // would mean listing the catalog first just to translate a word you have.
+    //
+    // A name can belong to two projects — two checkouts called `proj` under
+    // different parents both answer to `proj` — and archiving or restoring is
+    // a change to the catalog, so this refuses and lists the candidates rather
+    // than acting on one of them. There is a person at the other end of this
+    // command who can say which, which is exactly why refusing is the right
+    // answer here and the wrong one inside `settle_project`.
     let find = |name: &str| -> Result<jod_core::projects::Project> {
-        store
-            .project_by_name(name)?
-            .with_context(|| format!("no project called `{name}` — `jod project ls` lists them"))
+        let found = store.projects_by_name(name)?;
+        match found.as_slice() {
+            [] => bail!("no project called `{name}` — `jod project ls` lists them"),
+            [only] => Ok(only.clone()),
+            several => {
+                let candidates = several
+                    .iter()
+                    .map(|p| format!("{} ({})", p.name, p.path.display()))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                bail!(
+                    "`{name}` is the name of {} projects — {candidates}. \
+                     Name the one you mean exactly.",
+                    several.len()
+                )
+            }
+        }
     };
 
     match what {
