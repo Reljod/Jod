@@ -22,6 +22,18 @@
 //! disposes. A router that asked for a permission Jod would not have granted is
 //! refused by the same code that would refuse it from a webhook payload.
 //!
+//! **That confinement covers Jod's verbs and not the session.**
+//! [`ToolAccess::Orchestrate`] decides which `mcp__jod__*` tools the MCP server
+//! offers and nothing else; the harness keeps its own. Measured with the flags
+//! this file builds, the main chat's session comes up holding 58 tools, of
+//! which 26 are the harness's — a shell, file editors, a web fetcher, its own
+//! sub-agent spawner — and Jod asked for none of them and cannot take them
+//! away. `--allowedTools` grants without denying. So the sentences above are
+//! true of everything the orchestrator does *to Jod* and are not a claim about
+//! what it can do to the machine. See `docs/harness-support.md`, "Tools are not
+//! a sandbox either", for the transcripts and for the one mechanism that does
+//! withhold.
+//!
 //! ## Non-blocking, which is the whole point
 //!
 //! Sending an instruction returns as soon as the work has been *handed over*,
@@ -376,6 +388,15 @@ pub fn orchestrator_preamble() -> &'static str {
      - `record_decision` and `ask_question` for anything Reljod should see. \
        Findings and choices go on the rail, not into a sentence he has to \
        scroll back for.\n\n\
+     **That list is the whole toolbox.** The harness running you carries plenty \
+     of its own tools — a shell, file editors, a web fetcher, its own way of \
+     starting sub-agents — and none of them are yours. Reading a file to \
+     understand what you are being asked is fine. Everything past reading \
+     belongs to somebody else, and `delegate` and `open_work` are how you hand \
+     it over. When what you want is not on the list above, hand the work over \
+     rather than going looking for a tool that can do it here — including \
+     through the harness's own tool search, which is for loading Jod's tools \
+     and is not a way to find others.\n\n\
      The words below mean particular things here, and using them loosely is how \
      a tree stops making sense:\n\
      - a **work** is one intent, spanning several sessions, with a title, a \
@@ -1936,6 +1957,40 @@ mod tests {
             opens < delegates,
             "`delegate` is offered before `open_work`, so the cheaper and less \
              visible of the two reads as the default"
+        );
+    }
+
+    /// R5: `ToolAccess::Orchestrate` decides which of *Jod's* tools the main
+    /// chat gets and nothing else. The harness hands it a shell, file editors,
+    /// a web fetcher, its own sub-agent spawner and a tool search on top of
+    /// them, and no flag Jod passes takes any of those away — measured, with
+    /// the transcripts, in `docs/harness-support.md` under "Tools are not a
+    /// sandbox either".
+    ///
+    /// So the only thing Jod can say about the boundary today is *said*, in the
+    /// preamble. That is guidance rather than a wall, and this test is the
+    /// least it has to keep saying: a main chat that is never told the Jod
+    /// tools are all of them will reach for the shell the moment it wants
+    /// something they do not cover, which is exactly what it did.
+    #[test]
+    fn the_orchestrator_is_told_that_jods_tools_are_the_whole_toolbox() {
+        let said = orchestrator_preamble();
+        assert!(
+            said.contains("**That list is the whole toolbox.**"),
+            "the orchestrator is handed a harness full of other tools and never \
+             told they are out of bounds: {said}"
+        );
+        // Named one by one rather than left to a general rule, because a
+        // general rule is one the model can decide does not cover a shell.
+        for reached_for in ["shell", "sub-agents", "tool search"] {
+            assert!(
+                said.contains(reached_for),
+                "`{reached_for}` is not named as something outside the toolbox"
+            );
+        }
+        assert!(
+            said.contains("Reading a file to understand what you are being asked is fine"),
+            "reading has to stay allowed, or the chat cannot see what it is routing"
         );
     }
 
