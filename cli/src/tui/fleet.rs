@@ -396,6 +396,7 @@ mod tests {
             label: label.into(),
             summary: String::new(),
             running: false,
+            status: None,
             cards: 0,
             blocked: 0,
             colour: "cyan".into(),

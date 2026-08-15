@@ -68,6 +68,16 @@ pub struct Node {
     /// existing tick and off the render path.
     pub summary: String,
     pub running: bool,
+    /// How a run ended, straight from `runs.status` — `completed`, `failed`,
+    /// `killed`, or `running` while it is still going.
+    ///
+    /// `running` alone cannot say this. It is false for a run that finished
+    /// cleanly, for one that failed and for one that was killed, so a screen
+    /// with only that bool draws all three the same way and a person cannot
+    /// see that something broke. Null on a work and on a session, which have
+    /// no status of their own: a work's state lives in `works.state` and a
+    /// session is a conversation, not a process.
+    pub status: Option<String>,
     /// Open cards anywhere in this node's subtree, so the tree says where the
     /// questions are without being expanded.
     pub cards: usize,
@@ -129,7 +139,8 @@ struct RawRun {
     conversation_id: String,
     label: String,
     summary: String,
-    running: bool,
+    /// The whole of `runs.status`, not just whether it equals `running`.
+    status: String,
 }
 
 impl Store {
@@ -235,13 +246,12 @@ impl Store {
                   ORDER BY r.created_at_ms, r.id",
             )?;
             let rows = stmt.query_map([], |r| {
-                let status: String = r.get(3)?;
                 Ok(RawRun {
                     conversation_id: r.get(0)?,
                     id: r.get(1)?,
                     label: r.get(2)?,
                     summary: r.get(4)?,
-                    running: status == "running",
+                    status: r.get(3)?,
                 })
             })?;
             for row in rows {
@@ -281,6 +291,7 @@ impl Store {
                 },
                 summary: work.summary.clone(),
                 running: false,
+                status: None,
                 cards: 0,
                 blocked: 0,
                 colour: work.colour.clone(),
@@ -331,6 +342,7 @@ impl Store {
                     },
                     summary: session.summary.clone(),
                     running: session.running,
+                    status: None,
                     cards: session.cards,
                     blocked: session.blocked,
                     colour: work.colour.clone(),
@@ -345,7 +357,8 @@ impl Store {
                         depth: depth + 1,
                         label: run.label,
                         summary: run.summary,
-                        running: run.running,
+                        running: run.status == "running",
+                        status: Some(run.status),
                         cards: 0,
                         blocked: 0,
                         colour: work.colour.clone(),
@@ -526,6 +539,44 @@ mod tests {
         assert!(s.forest_of(crate::works::Filter::Live).unwrap().is_empty());
     }
 
+    /// A run node keeps its own status, not just whether it was running.
+    ///
+    /// `running: bool` is false for a run that finished cleanly, one that
+    /// failed and one that was killed, so a tree carrying only that bool hands
+    /// the renderer three rows it cannot tell apart.
+    #[test]
+    fn a_run_node_says_whether_it_finished_failed_or_was_killed() {
+        let s = store();
+        let work = s.create_work("port the parser").unwrap();
+        let lead = session(&s, &work.id, None, "lead");
+        for (id, status) in [
+            ("run-1", "completed"),
+            ("run-2", "failed"),
+            ("run-3", "killed"),
+            ("run-4", "running"),
+        ] {
+            run_for(&s, &lead, id, status);
+        }
+
+        let nodes = s.forest().unwrap();
+        let states: Vec<(&str, Option<&str>, bool)> = nodes
+            .iter()
+            .filter(|n| n.kind == NodeKind::Run)
+            .map(|n| (n.id.id.as_str(), n.status.as_deref(), n.running))
+            .collect();
+        assert_eq!(
+            states,
+            [
+                ("run-1", Some("completed"), false),
+                ("run-2", Some("failed"), false),
+                ("run-3", Some("killed"), false),
+                ("run-4", Some("running"), true),
+            ]
+        );
+        assert_eq!(nodes[0].status, None, "a work has no run status");
+        assert_eq!(nodes[1].status, None, "nor does a session");
+    }
+
     #[test]
     fn rendering_indents_by_depth_and_marks_what_needs_attention() {
         let nodes = vec![
@@ -537,6 +588,7 @@ mod tests {
                 label: "the parser".into(),
                 summary: String::new(),
                 running: false,
+                status: None,
                 cards: 2,
                 blocked: 1,
                 colour: "cyan".into(),
@@ -551,6 +603,7 @@ mod tests {
                 label: "lead".into(),
                 summary: String::new(),
                 running: true,
+                status: None,
                 cards: 0,
                 blocked: 0,
                 colour: "cyan".into(),
