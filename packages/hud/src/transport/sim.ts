@@ -3,10 +3,12 @@ import type {
   AgentEvent,
   AgentStatus,
   AgentSummary,
+  ConversationSummary,
   FleetNode,
   FleetNodeId,
   HarnessInfo,
   HarnessKind,
+  Message,
   Report,
   SpawnRequest,
   StoredRun,
@@ -60,6 +62,26 @@ const result = (name: string, summary: string, after = 900, is_error = false): B
   after,
   event: { kind: "tool_result", name, summary, is_error },
 });
+/**
+ * A turn that reasons for a long time and says nothing while it does.
+ *
+ * Real Claude Code emits these and nothing else through a long think, so a
+ * simulation without them never exercises the one case the trajectory's
+ * collapsed WORKING row exists for — and never catches a consumer that treats
+ * an unknown event kind as `undefined`.
+ */
+const tick = (thinking_tokens: number, after = 800): Beat => ({
+  after,
+  event: { kind: "progress", thinking_tokens },
+});
+/** A fragment of a block still being written — a long `Write`, not a long think. */
+const fragment = (text: string, after = 400): Beat => ({
+  after,
+  event: { kind: "delta", text },
+});
+
+const conversationIdFor = (agentId: string) => `conv-${agentId}`;
+const runIdFor = (conversationId: string) => conversationId.replace(/^conv-/, "");
 
 const usage = (i: number, o: number, cr: number, cost: number): Usage => ({
   input_tokens: i,
@@ -86,7 +108,12 @@ const BLUEPRINTS: Blueprint[] = [
       call("Read", { file_path: "/etc/ssh/sshd_config" }),
       result("Read", "122 lines — PasswordAuthentication yes"),
       think("Password auth is on. That is the finding."),
+      tick(1408),
+      tick(2960),
+      tick(4104),
       call("Edit", { file_path: "/etc/ssh/sshd_config" }),
+      fragment('{"file_path":"/etc/ssh/sshd'),
+      fragment('_config","new_string":"Password'),
       result("Edit", "PasswordAuthentication no"),
       call("Bash", { command: "sshd -t && systemctl reload sshd" }, 1400),
       result("Bash", "config ok; reloaded"),
@@ -257,6 +284,8 @@ export class SimTransport implements Transport {
   private handlers: TransportHandlers | null = null;
   private agents = new Map<string, AgentSummary>();
   private streams = new Map<string, AgentEnvelope[]>();
+  /** What each run was asked to do, keyed by run id — the transcript's user turn. */
+  private prompts = new Map<string, string>();
   private timers = new Set<ReturnType<typeof setTimeout>>();
   private seq = new Map<string, number>();
   private rng: () => number;
@@ -306,6 +335,10 @@ export class SimTransport implements Transport {
     this.agents.set(id, agent);
     this.streams.set(id, []);
     this.seq.set(id, -1);
+    // The ask is recorded where the real one is — in the transcript, not in the
+    // event stream. A simulation that put it on the wire would let a client
+    // that reads it from there look correct and then find nothing live.
+    this.prompts.set(id, bp.prompt);
 
     this.emit(id, {
       kind: "started",
@@ -443,6 +476,50 @@ export class SimTransport implements Transport {
   /** No auth in simulation — nothing real can happen, so it is always writable. */
   async authenticate(): Promise<"write"> {
     return "write";
+  }
+
+  /**
+   * One conversation per run, joined the way the real store joins: on
+   * `session_id`. Deliberately *not* keyed by run id in a way a client could
+   * shortcut, so anything reading this has to walk the same path — match the
+   * session, then confirm on `run_id` — that it must walk against `jod-api`.
+   */
+  async conversations(limit: number): Promise<ConversationSummary[]> {
+    return [...this.agents.values()]
+      .slice(0, limit)
+      .map((a) => ({
+        id: conversationIdFor(a.id),
+        title: (this.prompts.get(a.id) ?? a.name).slice(0, 60),
+        harness: a.harness,
+        model: a.model,
+        session_id: a.session_id,
+        head_id: null,
+        forked_from: null,
+        message_count: 1,
+        updated_at_ms: a.created_at_ms,
+      }));
+  }
+
+  async messages(conversationId: string): Promise<Message[]> {
+    const agentId = runIdFor(conversationId);
+    const prompt = this.prompts.get(agentId);
+    const agent = this.agents.get(agentId);
+    if (!prompt || !agent) return [];
+    return [
+      {
+        id: 1,
+        conversation_id: conversationId,
+        parent_id: null,
+        role: "user",
+        text: prompt,
+        tool_name: null,
+        tool_input: null,
+        run_id: agentId,
+        run_seq: 0,
+        at_ms: agent.created_at_ms,
+        active: true,
+      },
+    ];
   }
 
   async harnesses(): Promise<HarnessInfo[]> {

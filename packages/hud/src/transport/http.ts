@@ -1,13 +1,18 @@
 import type {
   AgentEnvelope,
   AgentSummary,
+  ConversationSummary,
   FleetNode,
   HarnessInfo,
+  Message,
   Report,
   SpawnRequest,
   StoredRun,
 } from "../types";
 import type { Scope, Transport, TransportHandlers } from "./index";
+
+/** How many events one backfill request asks for. The route caps its own page. */
+export const EVENT_PAGE = 500;
 
 /**
  * Talks to `jod-api` over REST + SSE.
@@ -177,11 +182,36 @@ export class HttpTransport implements Transport {
    * `after_seq` is an *exclusive* cursor over a sequence that starts at 0, so
    * `?after_seq=0` means "everything after event 0" and skips `started`.
    * Omitting the parameter entirely is what returns seq 0 onward.
+   *
+   * The route answers with an `EventsPage` — `{events, last_seq}` — not a bare
+   * array. Unwrapped here, and both shapes accepted, because reading it as an
+   * array does not fail loudly: `for…of` on the page object throws inside the
+   * per-agent `catch` that exists so one bad agent cannot abort a backfill, so
+   * the whole lag-recovery path went quiet instead of visibly breaking.
    */
   async events(agentId: string, sinceSeq?: number): Promise<AgentEnvelope[]> {
     const path = `/v1/agents/${encodeURIComponent(agentId)}/events`;
-    const query = sinceSeq === undefined ? "?limit=500" : `?after_seq=${sinceSeq}&limit=500`;
-    return this.json<AgentEnvelope[]>(path + query);
+    const query =
+      sinceSeq === undefined
+        ? `?limit=${EVENT_PAGE}`
+        : `?after_seq=${sinceSeq}&limit=${EVENT_PAGE}`;
+    const page = await this.json<AgentEnvelope[] | { events?: AgentEnvelope[] }>(path + query);
+    if (Array.isArray(page)) return page;
+    return page?.events ?? [];
+  }
+
+  /**
+   * Recent conversations. Absent on a daemon with no store, which is a state to
+   * render as "no transcript" rather than an error to raise.
+   */
+  async conversations(limit: number): Promise<ConversationSummary[]> {
+    return this.json<ConversationSummary[]>(`/v1/conversations?limit=${limit}`);
+  }
+
+  async messages(conversationId: string): Promise<Message[]> {
+    return this.json<Message[]>(
+      `/v1/conversations/${encodeURIComponent(conversationId)}/messages`,
+    );
   }
 
   /**

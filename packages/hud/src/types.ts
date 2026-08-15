@@ -45,10 +45,31 @@ export interface Usage {
   cost_usd?: number;
 }
 
-/** `AgentEvent` is an internally-tagged enum; `kind` discriminates it. */
+/**
+ * `AgentEvent` is an internally-tagged enum; `kind` discriminates it.
+ *
+ * All eleven variants, not the eight that are renderable. `progress`, `delta`
+ * and `session_lost` were on the wire long before they were on this union, and
+ * an event kind TypeScript does not know about is not merely undrawn: every
+ * exhaustive `switch` over `kind` silently returns `undefined` for it, which is
+ * how `heatFor` came to make an agent's heat `NaN` the first time a real Claude
+ * Code run streamed a partial message.
+ */
 export type AgentEvent =
   | { kind: "started"; session_id: string | null; model: string | null }
   | { kind: "thinking"; text: string }
+  /**
+   * A tick, not content: the harness is mid-turn with nothing renderable yet.
+   * The only thing on the wire while a turn reasons for nine minutes, so it is
+   * the only thing that can distinguish "still working" from "died".
+   */
+  | { kind: "progress"; thinking_tokens?: number }
+  /**
+   * A fragment of a content block still being emitted. Duplicates text that
+   * arrives complete in the following `message`/`tool_call`, so a consumer
+   * that only wants finished forms ignores it.
+   */
+  | { kind: "delta"; text: string }
   | { kind: "message"; text: string }
   | { kind: "tool_call"; name: string; input?: unknown }
   | { kind: "tool_result"; name: string; summary?: string; is_error: boolean }
@@ -60,6 +81,8 @@ export type AgentEvent =
       usage: Usage;
     }
   | { kind: "raw"; line: string }
+  /** The harness was asked to resume a conversation it no longer holds. */
+  | { kind: "session_lost"; session_id: string }
   | { kind: "error"; message: string };
 
 export type AgentEventKind = AgentEvent["kind"];
@@ -160,6 +183,54 @@ export interface TeamView {
   team: string;
   members: Member[];
   tasks: TeamTask[];
+}
+
+// ─── core/src/conversation.rs ───────────────────────────────────────────────
+
+/** What kind of turn a message is. Mirrors the `role` column's vocabulary. */
+export type Role = "user" | "assistant" | "thinking" | "tool_call" | "tool_result" | "system";
+
+/**
+ * One node of the transcript DAG.
+ *
+ * The event stream and this are two records of the same run, kept for different
+ * reasons: the stream is what a UI watches, this is what a replay reads. Only
+ * one of them carries the turn that *opened* the run — a run's prompt is
+ * appended here as a `user` message and never appears as an event — which is
+ * why the trajectory joins across.
+ */
+export interface Message {
+  id: number;
+  /** The conversation that *minted* this message, not a visibility filter. */
+  conversation_id: string;
+  parent_id: number | null;
+  role: Role;
+  text: string;
+  tool_name: string | null;
+  /** The structured payload, kept whole rather than summarised. */
+  tool_input: unknown;
+  /** The run that produced this message, when a run did. */
+  run_id: string | null;
+  /** Where this sat in its run's event stream. `null` for a typed message. */
+  run_seq: number | null;
+  at_ms: number;
+  /** `false` once a compaction has summarised this out of the live window. */
+  active: boolean;
+}
+
+/** A conversation as a list renders it. */
+export interface ConversationSummary {
+  id: string;
+  /** The stored title, or the opening user message, truncated. */
+  title: string;
+  harness: string;
+  model: string | null;
+  /** The harness-side session, which is the join back to a run. */
+  session_id: string | null;
+  head_id: number | null;
+  forked_from: string | null;
+  message_count: number;
+  updated_at_ms: number;
 }
 
 // ─── core/src/store.rs ──────────────────────────────────────────────────────

@@ -1,8 +1,10 @@
 import type {
   AgentEnvelope,
   AgentSummary,
+  ConversationSummary,
   FleetNode,
   HarnessInfo,
+  Message,
   Report,
   SpawnRequest,
   StoredRun,
@@ -63,6 +65,17 @@ export interface Transport {
    * panel renders "no work yet" instead of an error.
    */
   fleet(): Promise<FleetNode[]>;
+  /**
+   * Recent conversations, newest first.
+   *
+   * Wanted here for one thing the event stream does not carry: the turn that
+   * *opened* a run. A prompt is appended to the transcript as a `user` message
+   * and never emitted as an event, so a trajectory built from events alone
+   * cannot say what the session was asked to do.
+   */
+  conversations(limit: number): Promise<ConversationSummary[]>;
+  /** One conversation's thread, oldest first. */
+  messages(conversationId: string): Promise<Message[]>;
 }
 
 /**

@@ -26,6 +26,14 @@ export interface JodApi {
   harnesses: HarnessInfo[];
   /** The fleet tree — works, sessions, runs. Empty until the first query. */
   fleet: FleetNode[];
+  /**
+   * The live driver, or null until it has been chosen.
+   *
+   * Exposed for the reads that are not part of the world — a run's history and
+   * its opening prompt, both fetched on demand for one selected agent rather
+   * than streamed for all of them.
+   */
+  transport: Transport | null;
   spawn(request: SpawnRequest): Promise<AgentSummary | null>;
   kill(agentId: string): Promise<void>;
   /** Exchange a bearer token for a session cookie. Throws on rejection. */
@@ -46,6 +54,9 @@ export interface JodApi {
 export function useJod(makeTransport?: TransportFactory): JodApi {
   const store = useMemo(() => new WorldStore(), []);
   const transportRef = useRef<Transport | null>(null);
+  // Mirrored into state as well as the ref: a ref does not re-render, and a
+  // panel that fetches through the transport has to be told when one exists.
+  const [transport, setTransport] = useState<Transport | null>(null);
   const [transportLabel, setTransportLabel] = useState("…");
   const [harnesses, setHarnesses] = useState<HarnessInfo[]>([]);
   const [fleet, setFleet] = useState<FleetNode[]>([]);
@@ -66,6 +77,7 @@ export function useJod(makeTransport?: TransportFactory): JodApi {
       if (disposed) return;
       active = transport;
       transportRef.current = transport;
+      setTransport(transport);
       setTransportLabel(transport.label);
 
       transport.start({
@@ -86,6 +98,7 @@ export function useJod(makeTransport?: TransportFactory): JodApi {
       disposed = true;
       active?.stop();
       transportRef.current = null;
+      setTransport(null);
     };
   }, [store]);
 
@@ -166,6 +179,7 @@ export function useJod(makeTransport?: TransportFactory): JodApi {
   return {
     store,
     revision,
+    transport,
     transportLabel,
     harnesses,
     fleet,

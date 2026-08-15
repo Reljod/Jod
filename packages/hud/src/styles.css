@@ -456,6 +456,167 @@ button { cursor: pointer; background: none; border: none; }
 .tl-mark.tl-finished { fill: var(--mint); }
 .tl-mark.tl-started { fill: var(--cyan); }
 
+/* ── trajectory ─────────────────────────────────────────────────────────── */
+
+/* One session read end to end. Colour carries the same meanings it does
+   everywhere else here: violet is the model's own work, amber is a tool, red is
+   a fault, steel is inert. The badge column is fixed-width on purpose — a
+   transcript is scanned down its left edge, and a ragged one cannot be. */
+
+.trajectory { display: flex; flex-direction: column; min-width: 0; background: #04070d; }
+
+.tj-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--line);
+  flex: none;
+}
+.tj-title { font-size: 10px; letter-spacing: 0.18em; color: var(--cyan); }
+.tj-name { font-size: 11px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tj-stat { font-size: 8px; letter-spacing: 0.12em; padding: 1px 5px; border: 1px solid currentColor; color: var(--steel); }
+.tj-stat.st-running { color: var(--cyan); }
+.tj-stat.st-completed { color: var(--mint); }
+.tj-stat.st-failed { color: var(--red); }
+.tj-stat.st-killed { color: var(--steel); }
+.tj-metrics { font-size: 10px; color: var(--text-dim); margin-left: 4px; white-space: nowrap; flex: none; }
+.tj-metrics b { color: var(--text); font-weight: 700; }
+
+.tj-scales { display: flex; gap: 1px; margin-left: auto; }
+.tj-scales button {
+  font-size: 8.5px;
+  letter-spacing: 0.12em;
+  padding: 3px 7px;
+  border: 1px solid var(--line);
+  color: var(--text-dim);
+}
+.tj-scales button.on { color: var(--cyan); border-color: rgba(53, 224, 255, 0.36); background: rgba(53, 224, 255, 0.07); }
+
+.tj-search {
+  width: 190px;
+  padding: 3px 8px;
+  background: var(--bg-raise);
+  border: 1px solid var(--line);
+  color: var(--text);
+  font-size: 11px;
+  outline: none;
+}
+.tj-search:focus { border-color: var(--cyan); }
+.tj-search::placeholder { color: rgba(127, 155, 179, 0.6); }
+
+/* the band */
+
+.tj-band { padding: 7px 10px 5px; border-bottom: 1px solid var(--line-soft); flex: none; }
+.tj-bandlane { display: flex; align-items: center; gap: 7px; height: 13px; }
+.tj-lanelabel {
+  width: 42px;
+  flex: none;
+  font-size: 8px;
+  letter-spacing: 0.1em;
+  text-align: right;
+  color: var(--text-dim);
+}
+.tj-track { position: relative; flex: 1; height: 9px; background: rgba(53, 224, 255, 0.04); }
+.tj-block { position: absolute; top: 0; height: 9px; border-radius: 1px; }
+.tj-lane-input { background: rgba(122, 148, 173, 0.55); }
+.tj-lane-model { background: rgba(180, 124, 255, 0.6); }
+.tj-lane-tools { background: rgba(255, 181, 71, 0.6); }
+.tj-block.bad { background: var(--red); }
+
+.tj-notes { display: flex; gap: 12px; padding: 4px 10px; flex: none; min-height: 18px; }
+.tj-note { font-size: 9px; color: var(--text-dim); }
+.tj-note.warn { color: var(--amber); }
+.tj-note.bad { color: var(--red); }
+
+/* the transcript */
+
+.tj-rows { flex: 1; overflow-y: auto; padding-bottom: 20px; }
+
+/* The turn rule is the structure of an agentic loop made visible: everything
+   between two rules is one model invocation and the calls it fired. */
+.tj-turn { border-top: 1px solid var(--line-soft); }
+.tj-turnmark {
+  font-size: 8px;
+  letter-spacing: 0.14em;
+  color: rgba(127, 155, 179, 0.75);
+  padding: 4px 10px 2px;
+}
+
+.tj-row { border-bottom: 1px solid rgba(53, 224, 255, 0.05); }
+.tj-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+  padding: 5px 10px;
+}
+.tj-head:not(:disabled):hover { background: rgba(53, 224, 255, 0.05); }
+.tj-head:disabled { cursor: default; }
+
+.tj-badge {
+  flex: none;
+  width: 74px;
+  text-align: center;
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  padding: 2px 0;
+  color: var(--steel);
+  background: rgba(122, 148, 173, 0.14);
+}
+.tj-b-system { color: var(--steel); }
+.tj-b-user { color: var(--cyan); background: rgba(53, 224, 255, 0.14); }
+.tj-b-assistant { color: var(--violet); background: rgba(180, 124, 255, 0.16); }
+.tj-b-thinking { color: rgba(180, 124, 255, 0.85); background: rgba(180, 124, 255, 0.09); }
+.tj-b-stream { color: rgba(127, 155, 179, 0.9); background: rgba(122, 148, 173, 0.1); }
+.tj-b-tool { color: var(--amber); background: rgba(255, 181, 71, 0.14); }
+.tj-b-raw { color: var(--steel); background: rgba(122, 148, 173, 0.08); }
+.tj-b-error { color: var(--red); background: rgba(255, 77, 94, 0.16); }
+.tj-b-finish { color: var(--mint); background: rgba(77, 255, 195, 0.14); }
+
+.tj-summary {
+  flex: 1;
+  min-width: 0;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Reasoning and stream ticks are context, not the answer — dimmed so the
+   assistant's own words stay the thing your eye lands on. */
+.tj-k-thinking .tj-summary,
+.tj-k-stream .tj-summary,
+.tj-k-raw .tj-summary { color: var(--text-dim); font-style: italic; }
+.tj-k-system .tj-summary { color: var(--text-dim); }
+.tj-row.bad .tj-summary { color: var(--red); }
+
+.tj-meta { flex: none; font-size: 9px; color: var(--text-dim); display: flex; align-items: center; gap: 5px; }
+.tj-live {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--cyan);
+  box-shadow: 0 0 6px var(--cyan);
+  animation: blip 1.2s infinite;
+}
+
+.tj-detail {
+  margin: 0;
+  padding: 8px 10px 10px 92px;
+  font-size: 11px;
+  line-height: 1.55;
+  color: var(--text);
+  background: rgba(10, 22, 36, 0.55);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 420px;
+  overflow-y: auto;
+}
+
 /* ── roster ─────────────────────────────────────────────────────────────── */
 
 .roster { border-right: 1px solid var(--line); }

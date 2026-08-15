@@ -182,19 +182,24 @@ describe("WorldStore", () => {
   });
 });
 
+/** Every kind core can put on the wire, in one list, for the exhaustiveness tests. */
+const EVERY_KIND: AgentEnvelope[] = [
+  env({ kind: "started", session_id: "s1", model: "m" }),
+  env({ kind: "thinking", text: "hm" }),
+  env({ kind: "progress", thinking_tokens: 1408 }),
+  env({ kind: "delta", text: "partial" }),
+  env({ kind: "message", text: "hi" }),
+  env({ kind: "tool_call", name: "Bash", input: { command: "ls -la" } }),
+  env({ kind: "tool_result", name: "Bash", summary: "ok", is_error: false }),
+  env({ kind: "finished", is_error: false, usage: {} }),
+  env({ kind: "raw", line: "{unparsed}" }),
+  env({ kind: "session_lost", session_id: "s-gone" }),
+  env({ kind: "error", message: "nope" }),
+];
+
 describe("describe", () => {
-  it("renders every one of the eight event kinds", () => {
-    const kinds: AgentEnvelope[] = [
-      env({ kind: "started", session_id: "s1", model: "m" }),
-      env({ kind: "thinking", text: "hm" }),
-      env({ kind: "message", text: "hi" }),
-      env({ kind: "tool_call", name: "Bash", input: { command: "ls -la" } }),
-      env({ kind: "tool_result", name: "Bash", summary: "ok", is_error: false }),
-      env({ kind: "finished", is_error: false, usage: {} }),
-      env({ kind: "raw", line: "{unparsed}" }),
-      env({ kind: "error", message: "nope" }),
-    ];
-    for (const e of kinds) {
+  it("renders every one of the eleven event kinds", () => {
+    for (const e of EVERY_KIND) {
       const text = describeEvent(e);
       expect(typeof text).toBe("string");
       expect(text.length).toBeGreaterThan(0);
@@ -206,6 +211,101 @@ describe("describe", () => {
       .toContain("ls -la");
     expect(describeEvent(env({ kind: "tool_call", name: "Read", input: { file_path: "/x/y.rs" } })))
       .toContain("/x/y.rs");
+  });
+});
+
+describe("the retained transcript", () => {
+  /**
+   * The regression that motivated widening the union. `heatFor` was a `switch`
+   * with no default over eight kinds, so a `progress` or `delta` frame — which
+   * a *healthy* streaming run emits constantly — returned `undefined`, and
+   * `heat + undefined` is `NaN`. A node with `NaN` heat gets a `NaN` radius and
+   * disappears, so the busiest agents were the ones that vanished.
+   */
+  it("keeps heat finite for every kind core can emit", () => {
+    const store = new WorldStore();
+    store.setReport(report([agent()]));
+    const node = store.world.agents.get("a1")!;
+
+    for (const e of EVERY_KIND) {
+      store.ingest({ ...e, agent_id: "a1", seq: ++seq });
+      expect(Number.isFinite(node.heat), `heat went non-finite on ${e.kind}`).toBe(true);
+    }
+  });
+
+  it("retains an agent's own events in seq order", () => {
+    const store = new WorldStore();
+    store.setReport(report([agent()]));
+
+    store.ingest(env({ kind: "message", text: "one", seq: 0 }));
+    store.ingest(env({ kind: "message", text: "three", seq: 2 }));
+    // A backfilled event arriving after a live one has to splice in behind it.
+    store.ingest(env({ kind: "message", text: "two", seq: 1 }));
+
+    const node = store.world.agents.get("a1")!;
+    expect(node.events.map((e) => e.seq)).toEqual([0, 1, 2]);
+  });
+
+  /**
+   * A trajectory backfill is fetched outside the transport's own dedupe, so it
+   * legally overlaps the live stream. Folding the overlap twice would
+   * double-count the fault tally and the tool traces.
+   */
+  it("folds a duplicated event exactly once", () => {
+    const store = new WorldStore();
+    store.setReport(report([agent()]));
+
+    const duplicate = env({ kind: "error", message: "boom", seq: 7 });
+    store.ingest(duplicate);
+    store.ingest({ ...duplicate });
+
+    const node = store.world.agents.get("a1")!;
+    expect(node.events).toHaveLength(1);
+    expect(node.errorCount).toBe(1);
+    expect(store.world.feed).toHaveLength(1);
+  });
+
+  it("counts a run as complete once it has been watched from seq 0", () => {
+    const store = new WorldStore();
+    store.setReport(report([agent()]));
+    const node = store.world.agents.get("a1")!;
+
+    // Adopted mid-flight: the first event seen is not the first event there was.
+    store.ingest(env({ kind: "message", text: "mid-run", seq: 12 }));
+    expect(node.eventsComplete).toBe(false);
+
+    store.backfill("a1", [env({ kind: "started", session_id: "s", model: "m", seq: 0 })]);
+    expect(node.eventsComplete).toBe(true);
+    expect(node.events.map((e) => e.seq)).toEqual([0, 12]);
+  });
+
+  /** A run that has done nothing has a complete history of nothing. */
+  it("does not leave an empty backfill looking unfetched", () => {
+    const store = new WorldStore();
+    store.setReport(report([agent()]));
+
+    store.backfill("a1", []);
+    expect(store.world.agents.get("a1")!.eventsComplete).toBe(true);
+  });
+
+  it("builds the same derived state from a backfill as from the live stream", () => {
+    const live = new WorldStore();
+    live.setReport(report([agent()]));
+    const events = [
+      env({ kind: "tool_call", name: "Bash", input: { command: "ls" }, seq: 0 }),
+      env({ kind: "tool_result", name: "Bash", summary: "ok", is_error: true, seq: 1 }),
+    ];
+    for (const e of events) live.ingest(e);
+
+    const replayed = new WorldStore();
+    replayed.setReport(report([agent()]));
+    // Out of order on purpose: a fetched page is sorted before it is folded.
+    replayed.backfill("a1", [events[1], events[0]]);
+
+    const a = live.world.agents.get("a1")!;
+    const b = replayed.world.agents.get("a1")!;
+    expect(b.errorCount).toBe(a.errorCount);
+    expect(b.tools.map((t) => [t.name, t.isError])).toEqual(a.tools.map((t) => [t.name, t.isError]));
   });
 });
 
