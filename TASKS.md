@@ -55,6 +55,27 @@ one is not evidence the code is broken. **When a check fails, suspect the check
 first** — it was written at diagnosis time by someone who did not yet know what
 the fix would look like. Always confirm the named test appears in the output.
 
+## What a second reader is for
+
+Two sessions worked this list, and each reviewed the other's work only where it
+had no stake — the reviewer had neither filed the finding nor written the brief
+the agent reasoned from. That constraint mattered more than the reviewing did:
+the person who commissioned work cannot judge whether their own agent talked
+itself past a rule, because they wrote the rule it would be talking past.
+
+**The clearest case it caught would have failed no test.** A change made
+settling a goal execute its `done-when` command. Correct in an ordinary tick.
+But another task, four minutes into its own work, was about to route *paused*
+goals through that same path — which would have meant a paused goal shelling out
+to run a command, arriving as an unnamed side effect of a sensible-looking
+reuse. Nothing would have gone red either way. Flagged before both landed, the
+agent decided it deliberately and wrote down why; flagged after, it would have
+been a behaviour nobody chose.
+
+So the arrangement earns its keep on interactions rather than on defects: a
+diff shows what a change alters, and a reader who knows the neighbouring work
+sees what it *enables*.
+
 ## Merged does not mean recorded, and that has two causes
 
 The statuses in these files drift, and twice now a sweep has found a batch of

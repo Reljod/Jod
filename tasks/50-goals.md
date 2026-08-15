@@ -484,7 +484,28 @@ an `iteration` fact is written and `spent_usd` includes its cost.
 ---
 
 ## G14. A paused goal's counters know nothing about the iteration still running
-Status: open · Owner: — · Severity: medium
+Status: **fixed — merged as #178** · Severity was: medium
+
+Settling was separated from spawning: new `paused_goals` and
+`claim_paused_goal`, which claim a paused goal **only when it actually has a run
+in flight**, then settle through the one existing block. That placement is what
+makes the G4 claim-release loop unreachable rather than merely unlikely, and
+there is a test that fails on the tempting version — simply widening
+`claim_due_goals` — and passes on this one.
+
+**It runs the goal's `done-when` check when settling a paused goal**, which was
+an open question because #176 made settling execute that command. The argument
+for running it: the verdict is a measurement of the iteration that just
+finished, and cannot honestly be taken days later at resume. And not running it
+is not a neutral omission — `advance_goal` takes progress as a plain yes or no,
+so with no verdict, `false` punishes a goal for having been paused and `true`
+credits progress nobody measured. There is a test named for the decision.
+
+**Two follow-ons it found that nobody had named:**
+
+1. **The `current-run` pointer must be retired once its run is settled**, or the
+   next tick settles the same run again and **bills it twice**.
+2. **`ended: paused` is suppressed**, because a pause is not an ending.
 
 Observed: a goal paused mid-run, then three daemon ticks over two minutes.
 `jod goal ls` read `iter 0 · $0.00` and `jod goal log` said "no iteration has
