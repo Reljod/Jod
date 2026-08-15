@@ -21,7 +21,31 @@ This file only covers what's specific to scheduling.
 ---
 
 ## S1. The circuit breaker never trips for the ordinary way a schedule fails
-Status: **fixed — merged as #135** · Severity was: high
+Status: **verified fixed — merged as #135, check run against main, passes** · Severity was: high
+
+Run against main, a schedule pointed at a directory deleted before it fired:
+
+```
+tick 1   armed  failures 0     tick 5   armed   failures 4
+tick 2   armed  failures 1     tick 6   broken  failures 5
+tick 3   armed  failures 2     tick 7   claimed 0 — not re-claimed
+tick 4   armed  failures 3
+```
+
+The breaker trips at five consecutive failures and the schedule stops being
+claimed. The behaviour is correct.
+
+**The check as I wrote it was wrong, and would have failed a working fix.** It
+says "tick it five times, assert `consecutive_failures >= 5`". At five ticks the
+count is **4**. There is a one-tick lag by design: a tick *starts* a run, and the
+failure is only observable to the tick after it, because the run is settled
+asynchronously — which is the whole mechanism this bug was about. So N ticks
+produce N-1 counted failures, and the breaker trips on the sixth.
+
+Corrected check: **tick it six times**, assert `consecutive_failures >= 5` and
+`state == "broken"`, and assert a seventh tick reports `claimed 0`. The last
+clause matters more than the state does — "broken" is a label, "stops being
+claimed" is the behaviour that stops the 288 spawn attempts.
 
 `BREAK_AFTER_FAILURES = 5` and the backoff curve exist, by the module's own
 account, because a schedule whose every run fails made **288 spawn attempts in
