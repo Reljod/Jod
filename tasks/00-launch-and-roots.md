@@ -305,6 +305,23 @@ Why it matters more than a cosmetic error: the charter tells agents to run
 refusal will either retry a merge that already happened or report a finished
 task as blocked. Both are worse than the original problem.
 
+**A security classifier has now made the same mistake, which is the strongest
+statement of the cost.** An automated security review flagged an agent for
+merging without review. It had not: it ran the gate, the gate categorised the
+pull request `merge:auto` and merged it, and the script *then* exited 1 on the
+local branch cleanup. The classifier read that exit code as a refusal that had
+been bypassed.
+
+That is a third distinct victim of one exit code meaning both "I refused, fix
+your branch" and "I already merged, ignore me" — after agents reporting finished
+work as blocked, and a session falling into it while merging the document
+describing it. It is the first time the ambiguity has produced a **false
+accusation against correct behaviour** rather than merely confusing someone.
+
+The decisive evidence is the label, not the exit code: a real refusal leaves the
+pull request open and labelled `merge:human`, which is what happened to #144,
+#154 and #142. Anything diagnosing this should read the label.
+
 **Awareness cannot fix this, so the script must.** The fourth occurrence was
 the pull request for the document describing the trap — a session that had read
 the write-up, and had itself filed the task, still merged through it and had to
@@ -329,8 +346,19 @@ in the enforcement machinery.
 
 Check: run it from a worktree against a mergeable pull request and assert exit 0.
 
-## L9. Local `cargo fmt` disagrees with CI's across roughly the whole tree
-Status: open · Owner: — · Severity: medium
+## L9. The tree is not rustfmt-clean, and nothing anywhere checks
+Status: **open — needs Reljod's decision** · Severity: medium
+
+> **This task's original premise was wrong and I have rewritten it.** It said
+> local rustfmt "disagrees with CI's" and proposed pinning the version so the
+> two agree. **There is nothing to agree with: CI has no formatting check.**
+> Verified read-only against main — `.github/workflows/tests.yml` runs only the
+> shell suites (`*.test.sh` and `tests/test.sh`), and no workflow in
+> `.github/workflows/` mentions `cargo fmt` or `rustfmt` at all.
+>
+> Left uncorrected, this sends whoever picks it up to compare two rustfmt
+> versions and discover they cannot — an hour in the wrong place, and the same
+> shape as an error that names the harness binary for a bad project path.
 
 `cargo fmt --check` on this box reports differences across most of the
 codebase, while CI's formatting check passes. The rustfmt on this machine is a
@@ -345,11 +373,24 @@ Two agents have now had to be told explicitly to leave the pre-existing
 differences alone and to confirm none of them fell in the lines they touched.
 That should not depend on somebody remembering to say it.
 
-Fix: pin the rustfmt version — a `rust-toolchain.toml`, or naming the component
-version CI uses — so local and CI agree. Until then, say it in the charter
-where agents will read it before they run anything.
+The hazard is unchanged and still real: an agent that helpfully runs
+`cargo fmt` and commits produces an enormous diff burying its actual work, and
+enough agents have now had to be told by hand that it should not depend on
+somebody remembering.
 
-Check: `cargo fmt --check` is clean on a fresh checkout on this box.
+But the fix is not pinning a version. It is one of two shapes, and which one is
+Reljod's call:
+
+1. **Make the tree rustfmt-clean and add a gate.** Large, touches dozens of
+   pre-existing files, and buys a guarantee.
+2. **Say plainly that the tree is not formatted and nobody should run it.** A
+   note in the charter. Cheap, and honest about the state rather than changing
+   it.
+
+Check: depends on the shape chosen. Under (1), `cargo fmt --check` is clean and
+CI fails when it is not. Under (2), the charter says so and there is nothing to
+run — which would make this the second task whose honest check is a note rather
+than a command, after P4.
 
 ## L6. `jod team list` where every other noun uses `ls`
 Status: open · Owner: — · Severity: low

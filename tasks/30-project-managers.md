@@ -326,7 +326,22 @@ finding above true while the decision is open.
 ---
 
 ### P5. A stale catalog entry (moved or deleted directory) is invisible until something tries to use it
-Status: open · Owner: — · Severity: low
+Status: **verified fixed — merged as #145, check run against main, passes** · Severity was: low
+
+Catalogued a directory, deleted it, ran `jod project ls`:
+
+```
+jod-gone-596806 · /tmp/jod-gone-596806
+  cannot be worked in: there is nothing at `/tmp/jod-gone-596806` any more, so
+  no session can be started in it. The checkout was deleted or renamed —
+  catalogue it at the path it lives at now, or archive this entry if it is gone
+  for good.
+```
+
+The check asked only that the path be flagged as missing. What landed also says
+what to do about it, and names both remedies. Worth noting because it is the
+opposite of the failure this list keeps finding: a message that says more than
+the reader needs rather than less.
 
 Observed: deleting a catalogued directory, or renaming it, leaves the row
 exactly as it was — `jod project ls` shows it identically to a healthy entry,
