@@ -59,15 +59,33 @@ pub const MAX_NAME_CHARS: usize = 60;
 /// `Archived` is a state rather than a deletion because the catalog's whole
 /// job is to still answer "what was that repo called" months later, and a
 /// deleted row answers nothing.
+///
+/// Two things separate the three states, and it helps to keep them apart.
+/// *Inference* is whether an unqualified mention may land here, and only
+/// `Active` allows it — see [`State::inferrable`] and [`resolve`]. *Listing*
+/// is whether the project shows up when nobody asked for the whole catalog,
+/// and there `Paused` sides with `Active`: [`Store::projects`] filters on
+/// `state != 'archived'`, so pausing a project leaves it on every everyday
+/// surface while archiving takes it off them. Naming a project outright works
+/// in all three states, through [`Store::projects_by_name`].
+///
+/// **Nothing can reach `Paused` yet.** There is no `jod project pause` and no
+/// MCP tool that sets it, so today it is a state the code understands and no
+/// caller can produce. Whether to expose it is a product question about what
+/// "dormant" should mean, and it is open — see P4 in
+/// `tasks/30-project-managers.md`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum State {
     /// Worked on now. The only state [`resolve`] will match by default.
     Active,
-    /// Real but dormant. Kept out of inference so a repo untouched for months
-    /// cannot win a vague "let's fix this" against the one open on screen.
+    /// Real but dormant: still listed everywhere `Active` is, but kept out of
+    /// inference so a repo untouched for months cannot win a vague "let's fix
+    /// this" against the one open on screen. Not reachable from the CLI or any
+    /// tool yet.
     Paused,
-    /// Finished or abandoned. Listed only when explicitly asked for.
+    /// Finished or abandoned. Kept out of inference *and* off the default
+    /// listing, so it appears only when archived entries are asked for.
     Archived,
 }
 
@@ -1303,6 +1321,51 @@ mod tests {
         store.set_project_state(&p.id, State::Archived).unwrap();
         assert!(store.projects(false).unwrap().is_empty());
         assert_eq!(store.projects(true).unwrap().len(), 1);
+    }
+
+    /// The one thing `Paused` does that `Archived` does not.
+    ///
+    /// Nothing outside these tests can reach `State::Paused` today — there is
+    /// no `jod project pause` and no MCP tool that sets it — so this pins what
+    /// the state would mean if something could, and stops the answer drifting
+    /// while the question of whether to expose it is still open. See P4 in
+    /// `tasks/30-project-managers.md`.
+    ///
+    /// Both states are kept out of inference and both can still be named
+    /// outright. They part company in one place, [`Store::projects`]: the
+    /// default listing filters on `state != 'archived'` rather than on
+    /// `state = 'active'`, so a paused project stays on every everyday surface
+    /// — `jod project ls`, the `project_list` tool, the TUI panel, and the
+    /// catalog the orchestrator is given each turn — while an archived one
+    /// drops off all four until something asks for archived entries too.
+    #[test]
+    fn pausing_and_archiving_are_not_the_same_thing() {
+        let store = Store::in_memory().unwrap();
+        let dormant = store.add_project(NewProject::at(checkout("alpha"))).unwrap();
+        let finished = store.add_project(NewProject::at(checkout("beta"))).unwrap();
+        store.set_project_state(&dormant.id, State::Paused).unwrap();
+        store
+            .set_project_state(&finished.id, State::Archived)
+            .unwrap();
+
+        // Where they differ: the default listing keeps the paused project and
+        // drops the archived one.
+        let listed: Vec<String> = store
+            .projects(false)
+            .unwrap()
+            .into_iter()
+            .map(|p| p.name)
+            .collect();
+        assert_eq!(listed, vec!["alpha".to_string()]);
+        assert_eq!(store.projects(true).unwrap().len(), 2);
+
+        // Where they agree: neither is inferrable, and both answer to their
+        // own name when one is given outright.
+        let catalog = store.projects(true).unwrap();
+        assert_eq!(resolve("fix alpha", &catalog), Match::None);
+        assert_eq!(resolve("fix beta", &catalog), Match::None);
+        assert_eq!(store.projects_by_name("alpha").unwrap().len(), 1);
+        assert_eq!(store.projects_by_name("beta").unwrap().len(), 1);
     }
 
     /// A session working in a subdirectory is working on the project.

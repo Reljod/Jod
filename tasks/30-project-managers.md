@@ -246,7 +246,7 @@ than picking.
 ---
 
 ### P4. `State::Paused` exists but is unreachable
-Status: open · Owner: — · Severity: low
+Status: needs Reljod's decision · Owner: — · Severity: low
 
 `projects::State` documents three states — `Active`, `Paused` ("real but
 dormant"), `Archived`. `jod project` only exposes `archive` and `restore`,
@@ -261,9 +261,67 @@ Fix: either add `jod project pause` (and the matching MCP path) or drop the
 variant and its "dormant" carve-out from the doc comment — a state nothing
 can reach is dead weight in the mental model.
 
-Check: `jod project pause <name>` exists and the project stops being
+#### What was established
+
+The two options point in opposite directions, so the first question is
+whether `Paused` and `Archived` are actually different. They are, and the
+difference is in listing rather than in inference.
+
+Both states are kept out of inference. `State::inferrable` returns true only
+for `Active`, and `resolve` filters the catalog through it, so an offhand
+"let's fix this" can never land on either. Both can still be named outright,
+because `Store::projects_by_name` searches the whole table.
+
+They part company in `Store::projects`, which is the default listing. It
+filters on `state != 'archived'`, not on `state = 'active'`. So a paused
+project stays visible and an archived one disappears, on four surfaces that
+all call `projects(false)`:
+
+- `jod project ls` without `--all` (`cli/src/main.rs`)
+- the `project_list` MCP tool without `include_archived` (`core/src/mcp.rs`)
+- the TUI catalog panel and `/projects` (`cli/src/tui/data.rs`, `mod.rs`)
+- the catalog prepended to every main-chat turn (`core/src/orchestrator.rs`)
+
+That matches what the doc comments always claimed. `Archived` says "listed
+only when explicitly asked for"; `Paused` says only that it is kept out of
+inference, and says nothing about hiding it, because it does not hide it.
+
+So `Paused` is a real third behaviour with no way in, not a second spelling
+of `Archived`. Pinned by `pausing_and_archiving_are_not_the_same_thing` in
+`core/src/projects.rs`, which asserts both halves: the listing splits, the
+inference does not.
+
+Two things worth knowing before deciding:
+
+- The message `jod project archive` prints — "it can still be named, but will
+  not be inferred" — describes only half of what archiving does. The other
+  half is that the project drops off the default listing. Left alone here so
+  as not to widen this task, but it should be said in full.
+- `Project::summary_line` prints no state marker, so if a project could be
+  paused it would sit in the everyday listing looking exactly like an active
+  one, including in the catalog the orchestrator reads. Exposing `pause`
+  without a marker would make the catalog say something untrue.
+
+#### What `pause` would have to do
+
+`jod project pause <name>` would set `State::Paused`, and `jod project
+restore` already moves any state back to `Active`, so the reverse exists.
+Beyond that it needs a matching MCP tool, so the model can pause a project it
+is told to stop suggesting, and it needs `summary_line` to mark the state, or
+the visible half of the feature is invisible.
+
+The remaining question is not a code question: it is whether Reljod wants a
+"still on the list, will not be guessed at" state distinct from "off the
+list". That is a product call, so this stops here rather than inventing it.
+
+Check (was): `jod project pause <name>` exists and the project stops being
 inferred while still being explicitly nameable, matching what `Archived`
-already does but distinct from it.
+already does but distinct from it. **This check cannot run**, because the
+command it names is deliberately not being added.
+
+Check (now): `cargo test -p jod-core --lib projects::` passes, including
+`pausing_and_archiving_are_not_the_same_thing`, which is what holds the
+finding above true while the decision is open.
 
 ---
 
