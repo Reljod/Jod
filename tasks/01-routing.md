@@ -55,6 +55,25 @@ the orchestrator already had the answer available to it in `SPECS-a2a.md`. This
 is the whole of R1 in one exchange: not a slow answer, no answer, for the price
 of a spawned agent.
 
+### It is a coin flip, not a consistent failure — and that is worse
+
+A second run of very nearly the same question went the other way. O4 in
+[`10-orchestration.md`](10-orchestration.md) asked "What does A2A stand for, in
+one word or phrase?" and got back "Agent-to-Agent — Google's open protocol for
+interoperability between AI agents." directly, with **zero** agents spawned.
+
+Both results are real. The difference is probably that my wording said "in this
+project", which reads as a repository question, while the other did not. But
+nothing in Jod decides this. The preamble has no branch that says "answer
+directly", so whether it happens is the model's judgement on the day.
+
+That makes the fix more valuable rather than less. An orchestrator that always
+delegated would at least be predictable; one that sometimes answers and
+sometimes spawns an agent and then loses the reply is one you cannot learn to
+use. State R1's fix as a rule the model cannot talk its way past, and make R2's
+table assert both directions — a question that must be answered, and an
+instruction that must be handed over.
+
 ---
 
 ## R2. Nothing tests that a routing decision is correct

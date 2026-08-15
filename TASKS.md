@@ -13,7 +13,7 @@ you start. Add findings to the area file, never to this index.
 | Launch, roots and the console's directory | [`tasks/00-launch-and-roots.md`](tasks/00-launch-and-roots.md) | L1–L6 | — |
 | Routing: answer it yourself or hand it over | [`tasks/01-routing.md`](tasks/01-routing.md) | R1–R6 | — |
 | The TUI itself | [`tasks/02-tui.md`](tasks/02-tui.md) | T1 | — |
-| Orchestration scenarios | [`tasks/10-orchestration.md`](tasks/10-orchestration.md) | O-series (pending) | — |
+| Orchestration scenarios | [`tasks/10-orchestration.md`](tasks/10-orchestration.md) | O1–O10, **one critical** | — |
 | Orchestration edge cases and bad input | [`tasks/11-orchestration-edge-cases.md`](tasks/11-orchestration-edge-cases.md) | E1 + 14 scenarios | — |
 | Fleets and the tree | [`tasks/20-fleets.md`](tasks/20-fleets.md) | F1–F8 | — |
 | Project managers | [`tasks/30-project-managers.md`](tasks/30-project-managers.md) | P-series + spec tasks | — |
@@ -26,8 +26,20 @@ it is what stops the same ground being covered twice.
 
 ## Start here
 
-If you only read three things, read these. They are the reported bug, and they
-are three separate faults that happen to produce one symptom.
+**Read `10-orchestration.md` O1 first. It is the most serious thing in this
+list and it is not what Reljod reported.** A work session cannot write
+anything. `open_work` starts a session with the checkout read-only and expects
+it to call `claim_worktree` when it needs to write — but the harness turns
+roots into `--add-dir` flags once, at process launch
+(`core/src/harness/claude.rs:74`), and `claim_worktree` only returns a path
+string. Nothing widens a running process's sandbox, so the worktree it just
+claimed is outside what it may touch. Observed end to end, twice: the session
+claimed a worktree, tried to write, was refused, and reported the block
+honestly. Every `open_work` session that needs to write deadlocks the same way
+— which is the entire reason `open_work` exists rather than `delegate`.
+
+After that, the reported bug. It is three separate faults that happen to
+produce one symptom.
 
 1. **`00-launch-and-roots.md` L1** — the console Reljod uses starts at boot from
    `jod-tui.service`, which sets no `WorkingDirectory`, so it runs in `$HOME`.
