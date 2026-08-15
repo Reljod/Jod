@@ -2630,3 +2630,33 @@ Nothing hit this from the console. All 341 run directories under `~/.jod` were
 launched in `auto` and none of them has a settings document, so the console has
 never paid the wait once. It bites the suites that exercise `ask` and `edits`,
 which is where it was found.
+
+## A page that cannot say it is a page
+
+`list_agents` returned a bare JSON array of at most twenty agents. The tool
+description called that "every agent Jod knows about", and nothing in the reply
+contradicted it. The orchestrator calls this tool first on almost every turn to
+decide whether to reuse a warm agent or start a cold one, so a reply that reads
+as complete when it is not is a reply that argues for spawning.
+
+Working out when the cut actually bites was the useful half. The listing sorts
+running agents ahead of finished ones, so the twenty-row cap drops the oldest
+*finished* agents first. Three agents that have been running for days still lead
+the page on a box with a hundred runs on it. A running agent only falls off the
+default page when more than twenty are running at once. So "past twenty agents
+a wedged one silently disappears" was wrong.
+
+The real disappearance was one layer down. Before paging, the tool reads runs
+back out of the database with a fixed cap of two hundred, newest first. An agent
+that started before the newest two hundred runs never enters memory at all, so
+it is absent at *every* limit, and `running_only` positively answers that nothing
+is running while three agents are. That is worse than the reported bug, because
+the obvious remedy — ask again with a bigger number — does not work.
+
+The fix is both halves. The reply became an object carrying `returned`, `total`,
+`hidden` and a note, borrowing the words `jod ls` has always printed for a
+person; and the read-back now covers whatever limit was asked for, the same sum
+`jod ls` does, so the note points at a remedy that works.
+
+The general shape: a signal that a result was cut is worth nothing if the way
+out it names is capped somewhere the caller cannot see.
