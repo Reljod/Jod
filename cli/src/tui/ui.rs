@@ -9722,6 +9722,108 @@ mod tests {
         );
     }
 
+    /// A run's row says what the run said, in the same words a person would
+    /// read anywhere else on the screen.
+    ///
+    /// The row used to print `runs.summary` straight out of the column, and
+    /// that column holds a serialised `AgentSummary` — so a run appeared as
+    /// `{"created_at_ms":1…` under works and sessions that were showing prose.
+    /// Seeded with a real `AgentSummary` rather than a hand-written blob,
+    /// because the point is that whatever shape that struct has, none of it
+    /// belongs on the screen.
+    #[test]
+    fn a_runs_row_reads_as_prose_rather_than_as_the_json_it_was_stored_with() {
+        use jod_core::works::Origin;
+
+        let store = RealStore::in_memory().expect("an in-memory store");
+        let work = store.create_work("port the parser").expect("a work");
+        store
+            .set_work_title(&work.id, "the parser")
+            .expect("a work title");
+        let lead = store
+            .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
+            .expect("a conversation")
+            .id;
+        store
+            .set_conversation_title(&lead, "port the lexer")
+            .expect("a session title");
+        store
+            .attach_conversation(&lead, &work.id, None, Origin::Agent)
+            .expect("a session under the work");
+
+        // Exactly what `service::stored_run` writes into the column.
+        let recorded = jod_core::AgentSummary {
+            id: "de1e6a7e".into(),
+            name: "hello-agent".into(),
+            harness: HarnessKind::ClaudeCode,
+            harness_label: "Claude Code".into(),
+            status: jod_core::AgentStatus::Completed,
+            cwd: "/tmp".into(),
+            model: Some("claude-sonnet-4".into()),
+            permission: jod_core::PermissionPolicy::Bypass,
+            pid: Some(4242),
+            pgid: Some(4242),
+            process_alive: false,
+            watch_command: "jod watch de1e6a7e".into(),
+            created_at_ms: 1,
+            session_id: Some("sess-1".into()),
+            usage: Default::default(),
+            event_count: 3,
+            last_message: Some("rewrote the tokeniser to stream".into()),
+        };
+        store
+            .save_run(&jod_core::store::StoredRun {
+                id: "de1e6a7e".into(),
+                name: "hello-agent".into(),
+                harness: "claude-code".into(),
+                status: "completed".into(),
+                cwd: "/tmp".into(),
+                session_id: Some("sess-1".into()),
+                pid: Some(4242),
+                pgid: Some(4242),
+                created_at_ms: 1,
+                summary: serde_json::to_value(&recorded).expect("a serialised summary"),
+            })
+            .expect("a run");
+        store
+            .append_message(
+                &lead,
+                jod_core::conversation::NewMessage::new(
+                    jod_core::conversation::Role::Assistant,
+                    "rewrote the tokeniser to stream",
+                )
+                .from_run("de1e6a7e"),
+            )
+            .expect("a message");
+
+        let mut a = app();
+        a.forest = store.forest().expect("a forest");
+        a.go(Workspace::Fleet);
+        a.reconcile();
+
+        let frame = rendered(&a, 150, 30);
+        let row = frame
+            .lines()
+            .find(|line| line.contains("hello-agent"))
+            .unwrap_or_else(|| panic!("no row for the run:\n{frame}"))
+            .to_string();
+        assert!(
+            row.contains("rewrote the tokeniser to stream"),
+            "the run's row should say what it said, and it reads `{row}`:\n{frame}",
+        );
+        for shard in ["{\"", "created_at_ms", "watch_command", "harness_label"] {
+            assert!(
+                !row.contains(shard),
+                "`{shard}` is machine text and should never reach a row: `{row}`",
+            );
+        }
+        // #130's status glyph shares this row and must survive the change.
+        assert!(
+            row.contains('✓'),
+            "the completed run keeps its glyph: `{row}`",
+        );
+    }
+
     // ---- the secret card ----
 
     /// The moment to learn where a production token is going is before pasting
