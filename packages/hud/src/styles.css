@@ -338,10 +338,14 @@ button { cursor: pointer; background: none; border: none; }
    of scrolling the page out from under it. */
 .tactical canvas { display: block; width: 100%; height: 100%; touch-action: none; outline: none; }
 
+/* Centred on the right edge, not tucked into a corner: the top corners hold
+   the auto-fit and truncation chips, and at a short viewport the SIGINT feed
+   overlaps the bottom of this panel and would swallow the clicks. */
 .tactical-zoom {
   position: absolute;
   right: 10px;
-  bottom: 10px;
+  top: 50%;
+  transform: translateY(-50%);
   display: flex;
   flex-direction: column;
   gap: 4px;
