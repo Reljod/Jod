@@ -769,6 +769,38 @@ pub fn permits(ceiling: PermissionPolicy, requested: PermissionPolicy) -> bool {
     rank(requested) <= rank(ceiling)
 }
 
+/// Why a run cannot be given a follow-up, when it cannot.
+///
+/// A run's status is the only record of whether its session ended at the end of
+/// a sentence or in the middle of one. `killed` and `failed` both mean the
+/// harness stopped part-way through: the transcript being resumed breaks off
+/// wherever the process happened to be, and the model picks it up believing
+/// that half-finished state is its own last turn. Worse, it looks like success
+/// from outside — a new run appears, it is `running`, and nothing anywhere says
+/// the thing it is continuing was stopped on purpose.
+///
+/// Refused at the tool boundary for the same reason the permission ceiling is
+/// refused there: this is the last point at which the caller still has somewhere
+/// useful to go, and `delegate` and `open_work` are that somewhere.
+///
+/// Every status is written out rather than caught by a wildcard, so a fifth one
+/// added later has to be decided on here instead of quietly inheriting whichever
+/// answer the wildcard gave.
+fn refusal_to_continue(run_id: &str, status: AgentStatus) -> Option<String> {
+    match status {
+        // The ordinary target of a follow-up, and the run a second instruction
+        // reaches mid-task. Both have a session that means what it says.
+        AgentStatus::Completed | AgentStatus::Running => None,
+        AgentStatus::Killed | AgentStatus::Failed => Some(format!(
+            "run `{run_id}` did not finish cleanly: its status is `{}`. Continuing it \
+             would resume a session that broke off part-way through a turn nobody \
+             completed. Start a fresh agent with `delegate`, or with `open_work` if \
+             this belongs to a piece of work you are already tracking.",
+            status.as_str()
+        )),
+    }
+}
+
 pub fn parse_permission(s: &str) -> Option<PermissionPolicy> {
     match s.trim().to_ascii_lowercase().replace('-', "_").as_str() {
         // `plan` and `auto` are what the harnesses call these two, and what a
@@ -1169,6 +1201,13 @@ impl Server {
             .agent(&run_id)
             .await
             .map_err(|_| ToolError::Refused(format!("no run `{run_id}` — list_agents has them")))?;
+        // Asked before the session id, because how a run ended is a fact about
+        // the run itself, while a missing session id is a fact about the
+        // mechanism for resuming one. A killed run that also lost its session id
+        // is better told it was killed.
+        if let Some(refusal) = refusal_to_continue(&run_id, agent.status) {
+            return Err(ToolError::Refused(refusal));
+        }
         let Some(session) = agent.session_id.clone() else {
             return Err(ToolError::Refused(format!(
                 "run `{run_id}` never reported a session id, so there is no context to continue; \
@@ -3994,6 +4033,148 @@ mod tests {
         .await;
         assert!(is_error_result(&answer));
         assert!(said(&answer).contains("not-a-run"), "{}", said(&answer));
+    }
+
+    /// One stored run with everything `continue_agent` reads set by hand: how
+    /// it ended, whether it recorded a session id, and what permission it was
+    /// launched under. `server_with_runs` seeds no session id and leaves the
+    /// permission at `bypass`, which sits above the default ceiling — and
+    /// those are the two things that have to be held out of the way before the
+    /// status question is reached at all.
+    fn server_with_one_run(
+        status: AgentStatus,
+        session_id: Option<&str>,
+        permission: PermissionPolicy,
+    ) -> Server {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let summary = crate::service::AgentSummary {
+            id: "run-000".into(),
+            name: "run-000".into(),
+            harness: HarnessKind::ClaudeCode,
+            harness_label: "Claude Code".into(),
+            status,
+            cwd: "/tmp".into(),
+            model: None,
+            permission,
+            pid: None,
+            pgid: None,
+            process_alive: false,
+            watch_command: String::new(),
+            created_at_ms: 0,
+            session_id: session_id.map(str::to_string),
+            usage: Default::default(),
+            event_count: 0,
+            last_message: None,
+        };
+        store
+            .save_run(&crate::store::StoredRun {
+                id: "run-000".into(),
+                name: "run-000".into(),
+                harness: "claude_code".into(),
+                status: status.as_str().to_string(),
+                cwd: "/tmp".into(),
+                session_id: session_id.map(str::to_string),
+                pid: None,
+                pgid: None,
+                created_at_ms: 0,
+                summary: serde_json::to_value(&summary).unwrap(),
+            })
+            .unwrap();
+        Server::new(Jod::with_store(store)).with_access(ToolAccess::Orchestrate)
+    }
+
+    /// **The case O3 was filed on and could never reach.**
+    ///
+    /// The person who found this killed a run, confirmed its session id was
+    /// still recorded, and asked the main chat to continue it. It was refused,
+    /// but only because `jod run`'s default permission sat above that server's
+    /// ceiling — the permission check answered first and the status was never
+    /// consulted. This is the same case with the permission moved out of the
+    /// way, which was the only thing standing between a dead session and a
+    /// resume.
+    #[tokio::test]
+    async fn continuing_a_killed_run_is_refused_and_the_refusal_names_the_status() {
+        let server = server_with_one_run(
+            AgentStatus::Killed,
+            Some("sess-abc"),
+            // At the ceiling, not above it, so a refusal here can only be
+            // about the status.
+            PermissionPolicy::Ask,
+        );
+        let answer = call(
+            &server,
+            "continue_agent",
+            json!({ "run_id": "run-000", "prompt": "carry on" }),
+        )
+        .await;
+        assert!(is_error_result(&answer), "a killed run was resumed: {answer}");
+        let said = said(&answer);
+        assert!(
+            said.contains("killed"),
+            "the refusal does not say the run was killed: {said}"
+        );
+        assert!(
+            !said.contains("ceiling"),
+            "refused over the permission again, so the status is still unchecked: {said}"
+        );
+        assert!(
+            said.contains("delegate"),
+            "the refusal does not say how to start fresh instead: {said}"
+        );
+    }
+
+    /// A run whose harness exited badly is the same problem wearing a different
+    /// word, and it is the commoner one: `rehydrate` marks any run `failed`
+    /// whose process group has gone, so most dead sessions arrive here as
+    /// `failed` rather than as `killed`.
+    #[tokio::test]
+    async fn continuing_a_failed_run_is_refused_and_the_refusal_names_the_status() {
+        let server =
+            server_with_one_run(AgentStatus::Failed, Some("sess-abc"), PermissionPolicy::Ask);
+        let answer = call(
+            &server,
+            "continue_agent",
+            json!({ "run_id": "run-000", "prompt": "carry on" }),
+        )
+        .await;
+        assert!(is_error_result(&answer), "a failed run was resumed: {answer}");
+        assert!(
+            said(&answer).contains("failed"),
+            "the refusal does not say the run failed: {}",
+            said(&answer)
+        );
+    }
+
+    /// The other half, and the half that matters more: the gate must turn away
+    /// the two statuses it is for and nothing else. A run that finished is the
+    /// ordinary target of a follow-up, and a run still working is how a second
+    /// instruction reaches an agent mid-task; refusing either would break the
+    /// tool for the case it exists to serve.
+    ///
+    /// Asserted on the decision rather than through the tool, because letting a
+    /// continue through means spawning a supervisor, which a unit test has no
+    /// business doing.
+    #[test]
+    fn only_a_killed_or_failed_run_is_turned_away_by_the_status_gate() {
+        for dead in [AgentStatus::Killed, AgentStatus::Failed] {
+            let refusal = refusal_to_continue("run-000", dead)
+                .unwrap_or_else(|| panic!("{dead:?} was let through"));
+            assert!(
+                refusal.contains(dead.as_str()),
+                "a refusal that does not name the status: {refusal}"
+            );
+            assert!(
+                refusal.contains("delegate") && refusal.contains("open_work"),
+                "a refusal that does not say what to do instead: {refusal}"
+            );
+        }
+        for alive in [AgentStatus::Running, AgentStatus::Completed] {
+            assert_eq!(
+                refusal_to_continue("run-000", alive),
+                None,
+                "{alive:?} is a run a follow-up should reach"
+            );
+        }
     }
 
     #[tokio::test]
