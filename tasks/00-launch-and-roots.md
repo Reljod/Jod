@@ -88,29 +88,49 @@ wrong for a non-git project, so say so if you choose it.
 Check: a conversation with roots `[$HOME, some-repo]` must default new work to
 `some-repo`.
 
-## L3. `jod main` starts the chat in `$HOME`, whatever directory you run it in
+## L3. Every entry point except the TUI starts in `$HOME`, wherever you ran it
 Status: open · Owner: — · Severity: medium
 
-Observed on a fresh `JOD_HOME`, run from a scratch repository: the pinned
-conversation came back with `cwd = /home/reljod`, and `jod root ls` reported no
-roots at all.
+Observed twice on a fresh `JOD_HOME`, both times from inside a scratch
+repository:
 
-The two entry points disagree about what "here" means:
+```
+$ jod main "hi"            # run from …/orch-repo
+conversations.cwd = /home/reljod
+conversation_roots = (empty)
 
-- `Command::Tui` (`cli/src/main.rs:2006`) uses `console_cwd(cwd)`, which falls
-  back to `std::env::current_dir()`. Correct.
-- `main_chat` (`cli/src/main.rs:2331`) uses
-  `cwd.unwrap_or_else(jod_core::service::default_cwd)`, and `default_cwd`
-  (`core/src/service.rs:1359`) returns `$HOME`. Wrong.
+$ jod run --detach -n probe "hi"   # run from …/orch-repo
+conversations.cwd = /home/reljod
+conversation_roots = (empty)
+```
 
-There is also no `ensure_launch_root` equivalent on the `jod main` path, so
-unlike the TUI it adds no root either.
+`console_cwd` (`cli/src/main.rs:4317`) is the function that means "the
+directory you are standing in" — it falls back to `std::env::current_dir()`.
+Grepping its call sites, **it is used in exactly one place**: `Command::Tui`
+at `cli/src/main.rs:2006`.
 
-Fix: `main_chat` should use `console_cwd`, and should seed a root the way the
-TUI does. One helper called by both, so they cannot drift again.
+Every other entry point calls `jod_core::service::default_cwd` instead, which
+returns `$HOME` (`core/src/service.rs:1359`): `jod run`
+(`cli/src/main.rs:1701`, `:1702`), `main_chat` (`:2331`), and four more at
+`:2147`, `:2233`, `:3787` and `:4396`.
 
-Check: fresh `JOD_HOME`, `jod main "hi"` from a scratch directory, assert
-`conversations.cwd` is that directory and `jod root ls` lists it.
+The distinction was understood when it was written — the doc comment on
+`console_cwd` at `cli/src/main.rs:4301` opens "Not
+`jod_core::service::default_cwd`, which answers `$HOME`". It was simply only
+applied to the TUI.
+
+Neither is there an `ensure_launch_root` equivalent off the TUI path, so these
+entry points seed no root either, which is what makes L4 reachable.
+
+Fix: use `console_cwd` at every site where the answer should be "here", and
+seed the launch root from one helper both the TUI and the others call, so they
+cannot drift again. Check each of the seven sites individually — `$HOME` may
+genuinely be right for one or two of them, and this should not be a blind
+replace.
+
+Check: fresh `JOD_HOME`; run `jod main "hi"` and `jod run` from a scratch
+directory; assert `conversations.cwd` is that directory in both cases and that
+`jod root ls` lists it.
 
 ## L4. A console with no root cannot open work at all
 Status: open · Owner: — · Severity: medium — real, but rarer than it looked
