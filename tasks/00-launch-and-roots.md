@@ -430,7 +430,11 @@ run — which would make this the second task whose honest check is a note rathe
 than a command, after P4.
 
 ## L6. `jod team list` where every other noun uses `ls`
-Status: open · Owner: — · Severity: low
+Status: **fixed — merged as #174** · Severity was: low
+
+Aliased rather than renamed: `ls` is canonical, `list` is a hidden alias, so
+nothing already written stops working. `team` was confirmed the only noun out of
+step, by enumerating all fourteen listings.
 
 Observed: `jod ls`, `jod work ls`, `jod schedule ls`, `jod goal ls` and
 `jod project ls` all work. `jod team ls` exits 2 and suggests `list`.

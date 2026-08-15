@@ -87,9 +87,18 @@ quietly reverted.
 until the previous one has landed.** Anyone running several pull requests in
 sequence against the same file has this waiting for them.
 
-**If you are maintaining these statuses:** every merged pull request names its
-task id in its body, so `gh pr list --state merged --json number,body` is the
-authority, not this file. Deriving the statuses from that would stop the drift
+**The rate is roughly one stale line per merge**, and there have been about
+fifty merges. Three sweeps in one hour each found a fresh batch. That is not a
+series of oversights, it is the measured cost of the arrangement above, and it
+is worth knowing as a rate rather than rediscovering as an incident.
+
+**So treat the `Status:` lines as lagging merges by design.** They are corrected
+in batches, not continuously, and between batches they will name work that has
+landed.
+
+**The authority is not this file.** Every merged pull request names its task id
+in its body, so `gh pr list --state merged --json number,body` is what to check
+before concluding a task is still yours to do. Deriving the statuses from that would stop the drift
 recurring. Nobody has built it, and until somebody does, the manual sweep is a
 known cost — not an oversight to blame anyone for.
 

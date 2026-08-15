@@ -438,7 +438,19 @@ having advanced. Whether a *real* run can ever land in this `Err` branch was lef
 ---
 
 ## G13. A real run reaches `tick_goals`'s `Err(_)` branch, and the iteration is lost
-Status: open · Owner: — · Severity: medium
+Status: **fixed — merged as #176** · Severity was: medium
+
+The cost is now recovered rather than assumed zero — from the `runs` row's
+summary, or the `Finished` event — and the log distinguishes "cost unknown" from
+"cost zero". The hardcoded `progressed: false` is gone: progress was never read
+off the run, so the unreadable branch computes it the same way the readable one
+does.
+
+**One residual, stated in the pull request and repeated here so nobody refiles
+it as new:** when both sources are silent the cost is genuinely unknown and
+`0.0` still enters `spent_usd`, so the total can under-count. There is no other
+number to add; tracking spend as possibly-incomplete is a larger change than
+this task.
 
 Answered while fixing G8, and recorded here because it lived only in a merged
 pull request body. A finding that exists in a diff description and nowhere else
