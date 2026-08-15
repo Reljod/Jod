@@ -94,7 +94,8 @@ Four properties fall out, and they are the same four tmux used to provide:
   phone show the same run through the API.
 - **A kill switch that works** — the supervisor leads its own process group, so
   its pid *is* its pgid. `kill(-pgid, SIGTERM)` stops the agent and every
-  command it forked, from any process, whether or not Jod is running. It stops
+  process still in that group, from any process, whether or not Jod is
+  running. It stops
   that one run and no other: a run started by delegation leads a session of its
   own, so it is outside the group and keeps going until it is stopped by its own
   id. That is the same independence the next point describes, seen from the

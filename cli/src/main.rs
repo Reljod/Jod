@@ -144,7 +144,8 @@ enum Command {
     /// Stop an agent, together with the commands it ran itself.
     ///
     /// The signal goes to the agent's process group, so the harness and every
-    /// command it forked — a `Bash` call, a compiler, a test run — go with it.
+    /// process still in that group — a `Bash` call, a compiler, a test run —
+    /// go with it.
     ///
     /// An agent this one started by delegating to it is not in that group.
     /// Every run leads its own session, which is what lets a run outlive the
