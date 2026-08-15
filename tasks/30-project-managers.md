@@ -1,5 +1,27 @@
 # Project managers — the catalog that exists, and the manager that doesn't
 
+> **How this file sits next to pull request #120.** It sits *under* it, not over
+> it. #120 ("docs: review the project-manager spec against main") is the
+> authority on whether the `docs/spec-ceo-and-managers` spec is executable; its
+> answer is yes, with four corrections. Nothing here overrides that.
+>
+> Part 1 below is new material #120 does not have: bugs in the project catalog
+> that exists today, found by running it. Part 2 breaks the spec's Change 3 into
+> claimable tasks, and where the two disagree, **#120 wins** — it was checked
+> claim by claim against `origin/main`.
+>
+> Two things from #120 that anyone working here needs, and that Part 2 predates:
+>
+> - **A manager must not use `pinned = 1`.** `Store::pinned_conversation`
+>   (`core/src/orchestrator.rs:1312`) is a `query_row` with no `LIMIT` and no
+>   ordering, so a second pinned row makes "which conversation is main" depend
+>   on SQLite's row order, and Reljod's instructions would start landing in a
+>   manager's transcript.
+> - **Routing to a manager is already deterministic.** `settle_project` runs on
+>   the raw instruction before the model turn (`core/src/orchestrator.rs:875`),
+>   so `ask_manager` is wiring, not reasoning. Any task here that treats picking
+>   the manager as a judgement call is overbuilt.
+
 Tested by running the built binary (`target/debug/jod`) against two throwaway
 `JOD_HOME`s (`/home/reljod/.claude/jobs/cd76af0f/tmp/jodhome-pm` and
 `…/jodhome-pm2`), driving `jod project …` from the CLI, one live `jod main`
