@@ -193,6 +193,63 @@ impl Project {
         }
         line
     }
+
+    /// Why nothing can be started in this project's directory, when nothing
+    /// can be.
+    ///
+    /// [`Store::add_project`] looks at the path once, on the way in, and
+    /// nothing looks at it again. A checkout that is deleted, renamed, or
+    /// living on a disk that is no longer mounted leaves its row exactly as it
+    /// was, so the catalog carries on offering it as somewhere to start a
+    /// session and every reader sees a healthy entry.
+    ///
+    /// Nothing downstream catches it either, and both failures name something
+    /// other than the project. A run opened here is launched, recorded, and
+    /// reported as running, and then dies in the supervisor with `could not
+    /// start "/home/reljod/.local/bin/claude": No such file or directory (os
+    /// error 2)` — the operating system refusing the working directory, blamed
+    /// on the harness binary, which reads as Claude Code being missing from
+    /// the machine. `claim_worktree` fares no better: `toplevel` gives up on
+    /// anything that is not a directory, so the session gets a blocking card
+    /// saying the path "is not inside a git repository", which sends the
+    /// reader to `git init` a directory that is not there.
+    ///
+    /// This looks at the disk every time rather than storing a column, because
+    /// the answer changes without anybody touching the database. It returns a
+    /// sentence rather than a flag so each surface can print it as it stands.
+    ///
+    /// The row itself is deliberately left alone. Deleting or archiving a
+    /// project because its directory is absent would answer a question nobody
+    /// asked — an unmounted disk and a worktree part-way through being rebuilt
+    /// both look exactly like this, and both come back — and it would throw
+    /// away the name, aliases and notes that are the catalog's whole point.
+    /// So the catalog says what it sees and leaves the decision to whoever is
+    /// reading.
+    pub fn path_trouble(&self) -> Option<String> {
+        match std::fs::metadata(&self.path) {
+            Ok(meta) if meta.is_dir() => None,
+            Ok(_) => Some(format!(
+                "`{}` is a file now, not a directory, so no session can be started in it. \
+                 Catalogue the checkout where it actually lives, or archive this entry.",
+                self.path.display()
+            )),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(format!(
+                "there is nothing at `{}` any more, so no session can be started in it. The \
+                 checkout was deleted or renamed — catalogue it at the path it lives at now, \
+                 or archive this entry if it is gone for good.",
+                self.path.display()
+            )),
+            // Kept separate from "it is not there": a path this process cannot
+            // look at is usually an unmounted disk or a parent directory whose
+            // permissions changed, and the answer to that is to put it back
+            // rather than to re-catalogue anything.
+            Err(e) => Some(format!(
+                "`{}` could not be read: {e}. No session can be started in it until this \
+                 machine can reach it again — check whether the disk holding it is mounted.",
+                self.path.display()
+            )),
+        }
+    }
 }
 
 /// A project about to be added.
@@ -1414,6 +1471,113 @@ mod tests {
         assert!(
             store.projects(true).unwrap().is_empty(),
             "the refusal still wrote a row"
+        );
+    }
+
+    /// The hole the two refusals above leave: a path that was fine when it was
+    /// catalogued and went bad afterwards.
+    ///
+    /// `add_project` is the only thing that ever looks at a project's path, so
+    /// deleting the checkout leaves the row exactly as it was and the listing
+    /// goes on presenting it as a healthy repository. It is worse than a stale
+    /// line of text, because the catalog is ordered by where work last
+    /// happened: the checkout deleted five minutes ago sorts to the *top*, and
+    /// is therefore the best guess for an instruction that names no project.
+    #[test]
+    fn a_checkout_deleted_after_it_was_catalogued_is_flagged_not_listed_as_healthy() {
+        let dir = scratch("gone-after-cataloguing");
+        let store = Store::in_memory().unwrap();
+        let added = store
+            .add_project(NewProject::at(&dir).named("ephemeral-proj"))
+            .unwrap();
+        assert!(
+            added.path_trouble().is_none(),
+            "a checkout that is really there was reported as missing"
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        let listed = store.projects(false).unwrap();
+        let listed = listed
+            .iter()
+            .find(|p| p.id == added.id)
+            .expect("the entry vanished from the listing — it is meant to be kept, and flagged");
+        let said = listed
+            .path_trouble()
+            .expect("a deleted checkout is still listed as a healthy repository");
+        assert!(
+            said.contains(&dir.display().to_string()),
+            "the warning does not say which path is gone: {said}"
+        );
+        assert!(
+            said.contains("archive"),
+            "the warning says what is wrong but not what to do about it: {said}"
+        );
+    }
+
+    /// The row is kept, not quietly tidied away.
+    ///
+    /// An unmounted disk and a worktree part-way through being rebuilt both
+    /// look exactly like a deleted checkout, and both come back. Archiving or
+    /// deleting the row on their behalf would throw away the name, aliases and
+    /// notes that are the only reason the catalog exists — so a missing
+    /// directory changes what is *said* about a project and nothing else about
+    /// it.
+    #[test]
+    fn a_missing_directory_does_not_archive_or_delete_the_project() {
+        let dir = scratch("missing-but-kept");
+        let store = Store::in_memory().unwrap();
+        let added = store
+            .add_project(
+                NewProject::at(&dir)
+                    .named("tetris")
+                    .with_aliases(vec!["the game".into()])
+                    .with_notes("worth keeping"),
+            )
+            .unwrap();
+
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        let still = store.projects(false).unwrap();
+        assert_eq!(still.len(), 1, "the entry was dropped from the catalog");
+        assert_eq!(still[0].id, added.id);
+        assert_eq!(still[0].state, State::Active, "the entry was auto-archived");
+        assert_eq!(still[0].aliases, vec!["the game".to_string()]);
+        assert_eq!(still[0].notes, "worth keeping");
+        assert_eq!(
+            store.projects_by_name("tetris").unwrap().len(),
+            1,
+            "a project whose directory is gone can no longer be named"
+        );
+    }
+
+    /// A directory replaced by a file is the same hole from the other side, and
+    /// it gets its own sentence because the answer differs: nothing is coming
+    /// back, so the entry wants re-cataloguing or archiving.
+    #[test]
+    fn a_checkout_replaced_by_a_file_is_flagged_too() {
+        let dir = scratch("replaced-by-a-file");
+        let checkout = dir.join("proj");
+        std::fs::create_dir_all(&checkout).unwrap();
+
+        let store = Store::in_memory().unwrap();
+        let added = store
+            .add_project(NewProject::at(&checkout).named("replaced-proj"))
+            .unwrap();
+
+        std::fs::remove_dir_all(&checkout).unwrap();
+        std::fs::write(&checkout, "not a checkout any more\n").unwrap();
+
+        let said = added
+            .path_trouble()
+            .expect("a checkout replaced by a file is still reported as healthy");
+        assert!(
+            said.contains("file"),
+            "the warning does not say the path is a file now: {said}"
+        );
+        assert!(
+            said.contains(&checkout.display().to_string()),
+            "the warning does not say which path is wrong: {said}"
         );
     }
 

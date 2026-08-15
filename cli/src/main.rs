@@ -3120,7 +3120,24 @@ fn project_command(jod: &Jod, what: ProjectCommand) -> Result<()> {
         ProjectCommand::Ls { all, json } => {
             let projects = store.projects(all)?;
             if json {
-                println!("{}", serde_json::to_string_pretty(&projects)?);
+                // The stored row, plus a live look at whether its directory is
+                // still there. `path_trouble` is not a column and so cannot be
+                // serialised off `Project`; it is added to the serialised form
+                // here instead of being cached on the struct, because the
+                // answer changes without the database being touched.
+                let mut rows = serde_json::to_value(&projects)?;
+                let array = rows
+                    .as_array_mut()
+                    .expect("a list of projects serialises to an array");
+                for (row, project) in array.iter_mut().zip(&projects) {
+                    let trouble = project.path_trouble();
+                    let row = row
+                        .as_object_mut()
+                        .expect("a project serialises to an object");
+                    row.insert("path_usable".into(), serde_json::json!(trouble.is_none()));
+                    row.insert("path_trouble".into(), serde_json::json!(trouble));
+                }
+                println!("{}", serde_json::to_string_pretty(&rows)?);
             } else if projects.is_empty() {
                 println!(
                     "no projects yet — `jod project add .` catalogs the repository you are in"
@@ -3128,6 +3145,15 @@ fn project_command(jod: &Jod, what: ProjectCommand) -> Result<()> {
             } else {
                 for p in &projects {
                     println!("{}", p.summary_line());
+                    // On its own line under the entry rather than folded into
+                    // it. The summary says what the project is, which is still
+                    // true and still worth reading; this says what is wrong
+                    // with it now, and it is long because it has to say what to
+                    // do about it. Left indented so a healthy catalog still
+                    // reads as one line per project.
+                    if let Some(trouble) = p.path_trouble() {
+                        println!("  cannot be worked in: {trouble}");
+                    }
                 }
             }
         }

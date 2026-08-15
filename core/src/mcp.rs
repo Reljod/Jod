@@ -468,7 +468,11 @@ pub fn catalogue() -> Vec<Tool> {
                  other names he calls each one. This is what an instruction that names no \
                  project has to be resolved against — the roots belong to sessions that have \
                  already exited and the works have already closed, so this is the only record \
-                 that outlives them.",
+                 that outlives them. Each entry also says whether its directory is still on \
+                 disk: an entry with `path_usable` false has been deleted, renamed or \
+                 unmounted since it was catalogued, and opening work there will be reported \
+                 as running and then fail with an error that names the harness binary rather \
+                 than the project. Read `path_trouble` and say that instead of starting it.",
             needs: ToolAccess::ReadOnly,
             schema: obj(
                 json!({
@@ -1836,6 +1840,14 @@ impl Server {
     }
 
     /// The catalog, in the order that makes the first entry the best guess.
+    ///
+    /// Each entry says whether its directory is still there. The catalog is
+    /// what an instruction naming no project gets resolved against, so an
+    /// entry whose checkout has been deleted or renamed is a resolution target
+    /// that cannot be worked in, and a model reading this list has no other
+    /// way to find that out. It learns instead by opening work there, being
+    /// told the work is running, and then reading a supervisor error about the
+    /// harness binary — see [`crate::projects::Project::path_trouble`].
     fn project_list(&self, args: &Value) -> Result<String, ToolError> {
         let include_archived = opt_bool(args, "include_archived").unwrap_or(false);
         let projects = self
@@ -1846,6 +1858,11 @@ impl Server {
             &projects
                 .iter()
                 .map(|p| {
+                    // Both halves are carried: the flag is what a model can
+                    // branch on without reading prose, and the sentence is what
+                    // it can repeat to Reljod instead of inventing its own
+                    // explanation for why the project will not open.
+                    let trouble = p.path_trouble();
                     json!({
                         "name": p.name,
                         "path": p.path.to_string_lossy(),
@@ -1853,6 +1870,8 @@ impl Server {
                         "state": p.state.as_str(),
                         "notes": p.notes,
                         "last_touched_ms": p.last_touched_ms,
+                        "path_usable": trouble.is_none(),
+                        "path_trouble": trouble,
                     })
                 })
                 .collect::<Vec<_>>(),
@@ -3546,6 +3565,53 @@ mod tests {
             !said(&answer).contains("ceiling"),
             "a permission at the ceiling was refused: {}",
             said(&answer)
+        );
+    }
+
+    /// The catalog is what a model resolves an unnamed instruction against, so
+    /// an entry whose checkout has been deleted is a resolution target it will
+    /// pick and cannot work in. It used to be handed over looking exactly like
+    /// a healthy one, and the model's next move — opening work there — is
+    /// reported as running before it fails somewhere else entirely.
+    #[tokio::test]
+    async fn project_list_says_when_a_projects_checkout_has_gone_missing() {
+        let dir = std::env::temp_dir().join(format!("jod-mcp-stale-project-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let store = Arc::new(Store::in_memory().unwrap());
+        store
+            .add_project(crate::projects::NewProject::at(&dir).named("ephemeral-proj"))
+            .unwrap();
+        let server = Server::new(Jod::with_store(store)).with_access(ToolAccess::ReadOnly);
+
+        let listed = call(&server, "project_list", json!({})).await;
+        let healthy: Value = serde_json::from_str(&said(&listed)).unwrap();
+        assert_eq!(
+            healthy[0]["path_usable"],
+            json!(true),
+            "a checkout that is really there was reported as unusable: {healthy}"
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        let listed = call(&server, "project_list", json!({})).await;
+        let stale: Value = serde_json::from_str(&said(&listed)).unwrap();
+        assert_eq!(
+            stale[0]["path_usable"],
+            json!(false),
+            "a deleted checkout is still offered as a healthy resolution target: {stale}"
+        );
+        let trouble = stale[0]["path_trouble"]
+            .as_str()
+            .unwrap_or_else(|| panic!("no explanation of what is wrong: {stale}"));
+        assert!(
+            trouble.contains(&dir.display().to_string()),
+            "the explanation does not say which path is gone: {trouble}"
+        );
+        assert_eq!(
+            stale[0]["name"], "ephemeral-proj",
+            "the entry was removed rather than flagged: {stale}"
         );
     }
 
