@@ -93,6 +93,29 @@ authority, not this file. Deriving the statuses from that would stop the drift
 recurring. Nobody has built it, and until somebody does, the manual sweep is a
 known cost — not an oversight to blame anyone for.
 
+## Which tasks can be verified at all
+
+The rule below depends on tasks having a `Check:` line, so here is how many do.
+Of 70 entries, **24 carry none** — but most of those are exempt by kind rather
+than incomplete:
+
+- **O4–O10, G9, F7, F8** record a *pass* or cite the spec rather than asking for
+  work. There is nothing to verify; they are evidence, not tasks.
+- **T1–T7** are the project-manager spec's work, and each names which of that
+  spec's own seventeen numbered checks proves it. Their checks exist, by
+  reference.
+- **E1** is folded into L3 and says so.
+
+That leaves **six real tasks that were filed without a check**: L5, L6, R2, R3,
+S5, S6. Four are since fixed or closed, and L6's was written by the agent that
+fixed it — in the form the other tasks use, asserting both spellings, which is
+the right instinct.
+
+**The point worth keeping: a task with no check cannot be verified, so
+"verified" is silently unavailable for it.** That absence looks identical to
+nobody having got round to it. If you file a task, give it a check; if you fix
+one that has none, write the check you ran.
+
 ## A merge closes a pull request. The `Check:` line closes the task.
 
 Learned the hard way, twice in one afternoon, and worth more than any single

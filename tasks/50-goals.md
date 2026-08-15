@@ -485,8 +485,14 @@ never looks at a paused goal — and the ticker is the only thing that settles a
 run or notices its cost.
 
 Same family as G2, a goal denying a bill it incurred, reached through a
-different door. **It survives every fix that landed today**, because those all
-sit inside a tick that never happens for a paused goal.
+different door. **It survives every fix that landed today** — #147, #153, #166
+and #176 all sit inside a tick, and no tick happens for a paused goal.
+
+That is a different kind of fact from "same family as G2", and worth stating
+separately: **the bug is not in any of the branches those fixes touched, it is
+in whether the code is reached at all.** Which is why a reader who has followed
+every goal fix this afternoon would still not expect this one — each of those
+made the tick handle a case correctly, and none of them makes the tick happen.
 
 Read alongside [G13](#g13-a-real-run-reaches-tick_goalss-err_-branch-and-the-iteration-is-lost):
 both are "the iteration is real and the goal's record does not know it", and
