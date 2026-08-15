@@ -164,6 +164,81 @@ which project the router picked has no way to ask from a terminal.
 Fix: add the subcommand, printing the conversation's current project and how it
 was resolved. `project_resolutions` already records the how.
 
+## L7. Re-adding a root you already hold silently takes write access away
+Status: open · Owner: — · Severity: high
+
+`Store::add_root` (`core/src/roots.rs:179`) upserts:
+
+```sql
+ON CONFLICT(conversation_id, path) DO UPDATE SET
+  writable = excluded.writable,
+  origin   = excluded.origin
+```
+
+`position` is deliberately protected — the comment above it explains that a
+second add must not move a root to the end of the user's order. `writable` is
+not protected at all. So calling `add_root` with `NewRoot::reading` for a
+directory the conversation already holds as a **lease** flips it back to
+read-only, and the session loses the write it had. Silently: `add_root` returns
+the row and reports success.
+
+The upsert's *other* direction is deliberate and tested — re-adding as a lease
+is how a read-only root becomes writable
+(`a_root_added_twice_does_not_duplicate_the_row`). It is the read direction
+that nobody meant.
+
+Found by the agent that fixed L3, which hit it while making `jod main` grant
+its launch directory. The TUI never sees it because `ensure_launch_root` grants
+once per process and remembers it in a set; `jod main` is a single command, so
+running it twice inside a claimed worktree revokes the write.
+
+The L3 fix added a guard at its own call site. **That fixes `jod main` and not
+`add_root`**, so the next caller who adds a root twice gets the same surprise.
+
+This is the same shape as P1 in
+[`30-project-managers.md`](30-project-managers.md): an upsert that guards some
+columns and not others reads as safe when it is not. Both were found the same
+week. Worth checking every `ON CONFLICT DO UPDATE` in the codebase for the same
+pattern rather than fixing these two and waiting for the third.
+
+Relevant to L1 and L2, which both involve calling `add_root` more than once for
+the same directory.
+
+Fix: never let a re-add downgrade `writable`. Either protect the column the way
+`position` is protected, or make widening explicit and separate from adding.
+`set_root_writable` already exists as the sanctioned way to change it.
+
+Check: add a root as a lease, add the same path again as reading, assert it is
+still writable.
+
+## L8. `merge_pr.sh` exits non-zero after a merge that succeeded
+Status: open · Owner: — · Severity: medium
+
+Run from inside a git worktree, `merge_pr.sh <n> --ready` merges the pull
+request and *then* exits 1, with:
+
+```
+failed to run git: fatal: 'main' is already used by worktree at '/home/reljod/repo/Jod'
+```
+
+That is `gh pr merge --delete-branch` failing its local cleanup step, after the
+merge has already landed. The remote branch has to be deleted by hand.
+
+Seen three times across two sessions, so it reproduces rather than being a
+one-off. It happens whenever the primary checkout holds `main` and the merge is
+run from a worktree, which is how every agent on this box works.
+
+Why it matters more than a cosmetic error: the charter tells agents to run
+`merge_pr.sh` and **obey its exit code**. An agent that reads exit 1 as a
+refusal will either retry a merge that already happened or report a finished
+task as blocked. Both are worse than the original problem.
+
+Fix: the cleanup step should not fail the script when the merge succeeded, and
+should not try to check out `main` from a worktree in the first place. Deleting
+the remote branch does not need a local checkout.
+
+Check: run it from a worktree against a mergeable pull request and assert exit 0.
+
 ## L6. `jod team list` where every other noun uses `ls`
 Status: open · Owner: — · Severity: low
 
