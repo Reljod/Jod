@@ -111,10 +111,14 @@ Check: a conversation with roots `[$HOME, some-repo]` must default new work to
 `some-repo`.
 
 ## L3. Every entry point except the TUI starts in `$HOME`, wherever you ran it
-Status: **partially fixed — one of seven sites · check run and it fails** · Severity: medium ·
-#122 fixed `main_chat` (`jod main`) only. **Six sites still answer `$HOME`:**
-`cli/src/main.rs` lines 1701, 1702, 2147, 2233, 3815 and 4474 — `jod run`
-among them. A fix is in progress.
+Status: **fixed** · Severity was: medium
+
+#122 fixed `main_chat` (`jod main`) and only that. The remaining six sites —
+`cli/src/main.rs` lines 1701, 1702, 2147, 2233, 3815 and 4474 — were settled
+afterwards, one decision each; see "What each site decided" below. Before
+changing anything, the observation was reconfirmed on main: `jod run --detach -n
+probe "hi"`, fired from a scratch repository under a fresh `JOD_HOME`, still
+recorded `conversations.cwd = /home/reljod` and no roots at all.
 
 > Marked "fixed" here for a while, and it was not. #122 did exactly what its
 > own brief asked and its pull request was honest about its scope; the
@@ -167,17 +171,43 @@ Check: fresh `JOD_HOME`; run `jod main "hi"` and `jod run` from a scratch
 directory; assert `conversations.cwd` is that directory in both cases and that
 `jod root ls` lists it.
 
-**Check run against main `730e63b`. It fails, on the half that was never
-fixed.**
+**The check was run against main `730e63b` before any of this was fixed, and
+it failed on the half #122 never reached.**
 
 ```
 half 1, jod main:  cwd = /tmp/jod-verify-repo-439006   root listed   PASS
 half 2, jod run:   cwd = /home/reljod                  roots = []    FAIL
 ```
 
-`jod root ls` after `jod run` answers "no conversation given and there is no
-main chat yet". So the status above is correct and is now verified rather than
-inferred.
+`jod root ls` after `jod run` answered "no conversation given and there is no
+main chat yet". That is what turned the old "partially fixed" status from an
+inference into something observed, and it is the failure the change below
+removes.
+
+### What each site decided
+
+| Site | Command | Answer now | Why |
+| --- | --- | --- | --- |
+| `cli/src/main.rs:1701` `:1702` | `jod run` | the launch directory | A fresh run has no session to look up, so it fell through to `$HOME`. A resumed run still uses `session_cwd`, which is the site's real reason for existing. |
+| `:2147` | `jod team wake` | the member's own session directory | Every wake is a resume, so `$HOME` and "here" are both guesses. `session_cwd` is the answer, and the launch directory is only the fallback for a session Jod has never seen. |
+| `:2233` | `jod team start` | the launch directory | A fresh session, started from the checkout the member is meant to work in. |
+| `:3815` | `jod telegram serve` | **`$HOME`, left alone** | The one entry point that outlives its terminal. Its messages arrive later from a phone, from somebody standing nowhere; `--cwd` places its runs, and under a service manager the launch directory would be `/`. |
+| `:4474` | `jod chat` | the launch directory | The console without a screen. Same shape as `jod main`. |
+
+`jod run` and `jod chat` also grant the launch root now, so `open_work` has a
+checkout to inherit — that is the half of L4 that `jod main` alone did not
+reach.
+
+The grant lives in one place for every caller, `Store::grant_launch_root`
+(`core/src/roots.rs`), which the console's `ensure_launch_root` now calls too.
+The console keeps its own once-per-process set and its own way of reporting a
+failure, because those are about the console rather than about roots. The
+shared helper carries #122's guard: a directory the conversation already holds
+is left exactly as it is. That is no longer what protects a claimed worktree's
+write, because #155 fixed `add_root` itself. It still matters for the other
+half — a re-add relabels a root's `origin` as `human`, so without it every
+launch would turn a directory the program carried forward into one that claims
+somebody typed it.
 
 ## L4. A console with no root cannot open work at all
 Status: **verified fixed — check run against main, passes** · Severity was: medium
@@ -204,6 +234,12 @@ usual answer for anything about code".
 Not reachable through the TUI, which is why this is ranked below L1 and L2.
 
 Fix: falls out of L3. Keep the refusal.
+
+L3 is now finished, so `jod chat` and `jod run` seed a root as well, not only
+`jod main`. The check above was run through `jod main`, so that is the one path
+with a real instruction behind it. The other two reach the same
+`Store::grant_launch_root` and are covered by L3's tests rather than by a run
+of this check.
 
 Check: fresh `JOD_HOME`, `jod main` in a repository, one instruction that
 should open work, assert it opens rather than refuses.

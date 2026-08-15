@@ -1753,11 +1753,19 @@ async fn main() -> Result<()> {
             // wins: somebody who names a directory means it, and being told
             // where their session lives is [`continuing_conversation`]'s job
             // rather than this one's.
+            //
+            // A fresh run has no session to look up, and that is the case this
+            // used to get wrong. It fell through to `$HOME`, so `jod run` typed
+            // inside a repository started somewhere the caller was not — the
+            // same fault `jod main` had, in the command people reach for most.
+            // The launch directory is the answer there, exactly as it is for
+            // the console: nothing else in the invocation says where.
             let cwd = match (cwd, jod.store()) {
                 (Some(given), _) => given,
-                (None, Some(store)) => session_cwd(store, &resume, harness.into())?
-                    .unwrap_or_else(jod_core::service::default_cwd),
-                (None, None) => jod_core::service::default_cwd(),
+                (None, Some(store)) => {
+                    session_cwd(store, &resume, harness.into())?.unwrap_or_else(|| console_cwd(None))
+                }
+                (None, None) => console_cwd(None),
             };
 
             let req = SpawnRequest {
@@ -1765,7 +1773,7 @@ async fn main() -> Result<()> {
                 harness: harness.into(),
                 prompt,
                 system: None,
-                cwd,
+                cwd: cwd.clone(),
                 model,
                 permission: permission.into(),
                 resume,
@@ -1782,6 +1790,23 @@ async fn main() -> Result<()> {
             // Subscribe *before* spawning, so no early event is missed.
             let events = jod.subscribe();
             let agent = jod.spawn_agent(req).await?;
+
+            // The directory this run works in, recorded as somewhere it may
+            // read, the same grant the console and `jod main` make. Without it
+            // a run knows where it started and cannot name it: the roots are
+            // what `open_work` inherits a checkout from, and a conversation
+            // with none refuses to open work at all.
+            //
+            // After the spawn rather than before it, because the conversation
+            // does not exist until then — `jod run` mints one per run, and the
+            // id only comes back once the request has been through
+            // `spawn_agent`. A run bound to no conversation has nothing to
+            // grant to and is skipped.
+            if let (Some(store), Some(conversation)) =
+                (jod.store(), jod.conversation_of(&agent.id).await)
+            {
+                grant_launch_root(store, &conversation, &settled_cwd(store, &conversation, &cwd));
+            }
 
             if watch {
                 // Registered after the spawn, because a heartbeat for a run
@@ -2202,7 +2227,6 @@ async fn main() -> Result<()> {
                         }
                     }
 
-                    let cwd = cwd.unwrap_or_else(jod_core::service::default_cwd);
                     let mut woken = 0usize;
                     // Subscribe before any spawn, so no early event is missed.
                     let events = jod.subscribe();
@@ -2222,16 +2246,34 @@ async fn main() -> Result<()> {
                             woken += 1;
                             continue;
                         }
+                        // Where this member's session lives, not where the wake
+                        // was typed and not `$HOME`.
+                        //
+                        // Every wake is a resume, so this is the case
+                        // [`session_cwd`] exists for: a resumed session handed
+                        // the wrong directory is not a cosmetic mistake, and on
+                        // OpenCode it hangs for ever rather than failing. It
+                        // used to answer `$HOME` for every member, which was
+                        // consistently wrong and only survived by being
+                        // consistent — the member had been started in `$HOME`
+                        // too. `--cwd` still wins, and the launch directory is
+                        // the fallback for a session Jod has never seen.
+                        let resume = Resume::Session(order.session_id.clone());
+                        let where_it_lives = match &cwd {
+                            Some(given) => given.clone(),
+                            None => session_cwd(store, &resume, order.harness)?
+                                .unwrap_or_else(|| console_cwd(None)),
+                        };
                         let agent = jod
                             .spawn_agent(SpawnRequest {
                                 name: format!("{team}-{}", order.member),
                                 harness: order.harness,
                                 prompt: order.prompt,
                                 system: None,
-                                cwd: cwd.clone(),
+                                cwd: where_it_lives,
                                 model: None,
                                 permission: permission.into(),
-                                resume: Resume::Session(order.session_id),
+                                resume,
                                 tools: None,
                                 ..SpawnRequest::default()
                             })
@@ -2288,7 +2330,16 @@ async fn main() -> Result<()> {
                             harness: who.harness,
                             prompt: prompt.join(" "),
                             system: None,
-                            cwd: cwd.unwrap_or_else(jod_core::service::default_cwd),
+                            // The repository the team is being started on. This
+                            // is a fresh session, so there is no stored
+                            // directory to look up and the one the command was
+                            // typed in is all there is to go on — and it is the
+                            // right answer, because starting a member is
+                            // something you do from the checkout they are meant
+                            // to work in. It answered `$HOME` before, which set
+                            // the directory every later `jod team wake` had to
+                            // agree with.
+                            cwd: console_cwd(cwd),
                             model: None,
                             permission: permission.into(),
                             resume: Resume::Fresh,
@@ -3975,6 +4026,20 @@ async fn telegram_command(jod: std::sync::Arc<Jod>, what: TelegramCommand) -> Re
             // of an empty allowlist at startup rather than at the first
             // message: a bot that silently answers nobody looks exactly like
             // a bot with a bad token.
+            //
+            // **The directory is `$HOME`, on purpose: this is the one entry
+            // point that keeps it.**
+            //
+            // Every other command here now starts where it was typed, because
+            // the person typing it is standing in the directory they mean. The
+            // bridge is the exception: it runs until it is stopped, and the
+            // messages it answers arrive later from a phone, from somebody who
+            // is not standing anywhere. Tying its runs to whichever terminal
+            // happened to start it would make the answer depend on a fact
+            // nobody can see afterwards, and if it is ever put behind a service
+            // manager the launch directory is `/`, which is worse than the home
+            // directory rather than better. `--cwd` is how you place its runs,
+            // and its own help text says so.
             let mut config = Config::from_parts(
                 Some(telegram_token()?),
                 std::env::var("JOD_TELEGRAM_ALLOWED_USERS").ok(),
@@ -4520,69 +4585,57 @@ fn grants_for_run(
 /// directory at all — a working directory that has been deleted out from under
 /// the process, which is where `current_dir` fails.
 ///
-/// This is the console and `jod main`, which is the console's one-shot twin.
-/// `jod run` is a one-shot that may be fired from anywhere by anything, and a
-/// batch job silently inheriting whatever directory its caller happened to be
-/// in is the opposite of what a resumed run wants — see [`session_cwd`], which
-/// looks the answer up rather than assuming it.
+/// This is every entry point a person types at a terminal: the console, `jod
+/// main`, `jod chat`, `jod run` and `jod team start`. All of them are opened
+/// *inside* something, and all of them used to answer `$HOME`.
+///
+/// Two commands deliberately do not use it, and both have a better answer than
+/// "here". A run being resumed belongs in the directory its session lives in —
+/// see [`session_cwd`], which looks that up, and which `jod run` and `jod team
+/// wake` consult before falling back to this. And `jod telegram serve` outlives
+/// the terminal that started it, so `$HOME` stays its default; the directory a
+/// bridge was launched from says nothing about a message that arrives from a
+/// phone two days later.
 fn console_cwd(given: Option<PathBuf>) -> PathBuf {
     given
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_else(jod_core::service::default_cwd)
 }
 
-/// Give the main chat the directory `jod main` was run in, to read.
+/// Give a conversation the directory the command was run in, to read, and say
+/// so when it cannot be done.
 ///
-/// The same grant [`crate::tui::ensure_launch_root`] makes when a console
-/// opens, and made here for the same reason: an orchestrator that cannot read
-/// the repository you are standing in has to be told the path you have just
-/// `cd`-ed to. `jod main` made no grant at all, so an instruction typed in a
-/// checkout reached a chat with an empty root set.
-///
-/// Read-only, like every root Jod adds itself; a worktree is what makes one
-/// writable.
-///
-/// **Skipped when the directory is already a root, which is the one place this
-/// differs from the console's version.** The console grants once per process
-/// and holds a set to remember it; a `jod main` is one command, so every
-/// invocation is a launch and there is nothing to remember.
-///
-/// This guard is no longer what protects a claimed worktree's write.
-/// [`jod_core::store::Store::add_root`] now keeps a write that a re-add did not
-/// ask for, so running `jod main` twice inside a worktree the chat had claimed
-/// would be harmless even without the check here. It stays because the two
-/// still differ on one thing: a re-add relabels a read-only root's `origin` as
-/// `human`, and a directory that arrived as the conversation's own `cwd` should
-/// go on saying so. Skipping the write entirely is the cheapest way to leave a
-/// row that is already right exactly as it is. Removal still behaves as it does
-/// in the console: `jod root remove` takes the directory away, and the next
-/// launch — here, the next command — grants it again.
+/// The grant itself lives in [`jod_core::store::Store::grant_launch_root`],
+/// which is the one place any entry point makes it — the console included.
+/// This wrapper exists only to choose where a failure is reported: on the
+/// console it is a notice in the transcript, and here it is a line on stderr.
+/// Neither stops the command, because the instruction the caller typed is still
+/// the thing they asked for.
 fn grant_launch_root(store: &Store, conversation: &str, cwd: &std::path::Path) {
-    // Nowhere to grant. `console_cwd` only returns this if `$HOME` is unset and
-    // the working directory is gone, and an empty path reads as `/` to anything
-    // that joins onto it.
-    if cwd.as_os_str().is_empty() {
-        return;
-    }
-    // Compared against the normalised form, because that is the spelling
-    // `add_root` stores and the one every later match is made against.
-    let here = jod_core::roots::normalise(cwd);
-    match store.roots(conversation) {
-        Ok(roots) if roots.iter().any(|r| r.path == here) => return,
-        Ok(_) => {}
-        // Worth one line and not worth stopping for: the instruction is still
-        // the thing the caller asked for.
-        Err(e) => {
-            eprintln!("· could not read this chat's roots: {e}");
-            return;
-        }
-    }
-    if let Err(e) = store.add_root(conversation, jod_core::roots::NewRoot::reading(cwd)) {
+    if let Err(e) = store.grant_launch_root(conversation, cwd) {
         eprintln!(
             "· {} is where this command was run, but it could not be added as a root: {e}",
             cwd.display()
         );
     }
+}
+
+/// The directory a spawn settled on, read back rather than assumed.
+///
+/// Almost always the path handed in, and the exception is worth the read: a
+/// relative `--cwd` is resolved inside `spawn_agent` against the run's declared
+/// roots, not against this process's own working directory, so the two can
+/// disagree. Granting a root the run does not work in would be a root pointing
+/// at nothing anybody asked about, which is harder to notice than no root at
+/// all. Falls back to what was asked for when the row cannot be read.
+fn settled_cwd(store: &Store, conversation: &str, asked_for: &std::path::Path) -> PathBuf {
+    store
+        .conversation(conversation)
+        .ok()
+        .flatten()
+        .map(|c| PathBuf::from(c.cwd))
+        .filter(|cwd| !cwd.as_os_str().is_empty())
+        .unwrap_or_else(|| asked_for.to_path_buf())
 }
 
 /// The directory a resumed session belongs to, when Jod knows it.
@@ -4658,7 +4711,11 @@ async fn chat(
     use std::io::Write;
 
     let kind: HarnessKind = harness.into();
-    let cwd = cwd.unwrap_or_else(jod_core::service::default_cwd);
+    // The directory this command was typed in. `jod chat` is the console
+    // without a screen — you `cd` into a repository and start talking — so it
+    // answers this the way `jod tui` and `jod main` do rather than starting in
+    // the home directory.
+    let cwd = console_cwd(cwd);
     let mut resume = if continue_last {
         Resume::Last
     } else {
@@ -4702,14 +4759,26 @@ async fn chat(
                 conversation.clone(),
             )
             .await?;
-        render::stream(events, &agent.id, false, false).await;
 
         // The rest of the chat lands in the conversation the first turn opened,
         // so `jod conv show` reads back as the conversation it was rather than
         // as one thread per line typed.
+        //
+        // That conversation also gets the launch directory to read, the same
+        // grant the console and `jod main` make, and this is the first moment
+        // it can be made: the id does not exist until the request has been
+        // through `spawn_agent_in`. Before the turn is streamed rather than
+        // after, so a chat interrupted part-way through its first answer still
+        // leaves a chat that knows where it is. Once per chat in practice — the
+        // second turn finds the root already there and adds nothing.
         if let Some(id) = jod.conversation_of(&agent.id).await {
+            if let Some(store) = jod.store() {
+                grant_launch_root(store, &id, &settled_cwd(store, &id, &cwd));
+            }
             conversation = RunConversation::Existing(id);
         }
+
+        render::stream(events, &agent.id, false, false).await;
 
         // Prefer the id the harness reported; fall back to "continue the most
         // recent", which every harness also supports.
