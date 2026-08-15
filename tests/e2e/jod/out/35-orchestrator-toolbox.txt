@@ -1,0 +1,103 @@
+==============================================================
+== 1. two instructions into the pinned main chat
+==============================================================
+$ /tmp/jod-r5/bin/jod main -p auto --cwd /tmp/jod-e2e/toolbox-repo what does the acronym A2A stand for in this project? answer in one line
+→ 23af984e · handed to the orchestrator
+  `jod main` reads the chat · `jod watch 23af984e` follows it
+
+$ (waiting for every run to reach a terminal status)
+settled after 145s
+
+$ /tmp/jod-r5/bin/jod main -p auto --cwd /tmp/jod-e2e/toolbox-repo count how many markdown files are in this repo and tell me
+→ 9d33349c · handed to the orchestrator
+  `jod main` reads the chat · `jod watch 9d33349c` follows it
+
+$ (waiting for every run to reach a terminal status)
+settled after 85s
+
+==============================================================
+== 2. every tool the main chat called, in order
+==============================================================
+$ q "SELECT e.run_id, e.seq, substr(e.payload, 1, 120) AS payload
+             FROM events e
+            WHERE e.kind = 'tool_call'
+              AND e.run_id IN (SELECT d.run_id FROM delegations d
+                                 JOIN conversations c ON c.id = d.conversation_id
+                                WHERE c.pinned = 1 AND d.kind = 'orchestrate')
+            ORDER BY e.run_id, e.seq"
+run_id | seq | payload
+-------+-----+--------
+23af984e-fb42-4cf8-8a5c-673f8ad222dc | 6 | {"kind":"tool_call","name":"ToolSearch","input":{"max_results":5,"query":"select:mcp__jod__list_agents,mcp__jod__project
+23af984e-fb42-4cf8-8a5c-673f8ad222dc | 8 | {"kind":"tool_call","name":"mcp__jod__list_agents","input":{}}
+23af984e-fb42-4cf8-8a5c-673f8ad222dc | 9 | {"kind":"tool_call","name":"mcp__jod__project_current","input":{}}
+23af984e-fb42-4cf8-8a5c-673f8ad222dc | 21 | {"kind":"tool_call","name":"mcp__jod__delegate","input":{"cwd":"/tmp/jod-e2e/toolbox-repo","name":"a2a-acronym-lookup","
+23af984e-fb42-4cf8-8a5c-673f8ad222dc | 26 | {"kind":"tool_call","name":"ToolSearch","input":{"max_results":2,"query":"select:mcp__jod__project_add,mcp__jod__project
+23af984e-fb42-4cf8-8a5c-673f8ad222dc | 34 | {"kind":"tool_call","name":"mcp__jod__project_add","input":{"name":"toolbox-repo","notes":"The repo this conversation st
+23af984e-fb42-4cf8-8a5c-673f8ad222dc | 40 | {"kind":"tool_call","name":"mcp__jod__project_switch","input":{"project":"toolbox-repo","reason":"\"this project\" with 
+23af984e-fb42-4cf8-8a5c-673f8ad222dc | 43 | {"kind":"tool_call","name":"mcp__jod__list_agents","input":{"limit":5}}
+23af984e-fb42-4cf8-8a5c-673f8ad222dc | 50 | {"kind":"tool_call","name":"mcp__jod__list_agents","input":{"limit":3}}
+23af984e-fb42-4cf8-8a5c-673f8ad222dc | 54 | {"kind":"tool_call","name":"mcp__jod__list_agents","input":{"limit":3}}
+9d33349c-0b05-42ec-ba66-78a2e78f3a5b | 11 | {"kind":"tool_call","name":"mcp__jod__delegate","input":{"cwd":"/tmp/jod-e2e/toolbox-repo","name":"md-file-count","promp
+9d33349c-0b05-42ec-ba66-78a2e78f3a5b | 15 | {"kind":"tool_call","name":"mcp__jod__list_agents","input":{"limit":3}}
+9d33349c-0b05-42ec-ba66-78a2e78f3a5b | 21 | {"kind":"tool_call","name":"mcp__jod__list_agents","input":{"limit":2}}
+9d33349c-0b05-42ec-ba66-78a2e78f3a5b | 25 | {"kind":"tool_call","name":"mcp__jod__list_agents","input":{"limit":2}}
+9d33349c-0b05-42ec-ba66-78a2e78f3a5b | 29 | {"kind":"tool_call","name":"mcp__jod__list_agents","input":{"limit":2}}
+9d33349c-0b05-42ec-ba66-78a2e78f3a5b | 33 | {"kind":"tool_call","name":"mcp__jod__list_agents","input":{"limit":2}}
+9d33349c-0b05-42ec-ba66-78a2e78f3a5b | 37 | {"kind":"tool_call","name":"mcp__jod__list_agents","input":{"limit":2}}
+(17 rows)
+
+==============================================================
+== 3. verdict — is every one of them Jod's, or a read?
+==============================================================
+2 main-chat runs, 17 tool calls, 17 inside the toolbox
+  inside   ToolSearch
+  inside   mcp__jod__list_agents
+  inside   mcp__jod__project_current
+  inside   mcp__jod__delegate
+  inside   ToolSearch
+  inside   mcp__jod__project_add
+  inside   mcp__jod__project_switch
+  inside   mcp__jod__list_agents
+  inside   mcp__jod__list_agents
+  inside   mcp__jod__list_agents
+  inside   mcp__jod__delegate
+  inside   mcp__jod__list_agents
+  inside   mcp__jod__list_agents
+  inside   mcp__jod__list_agents
+  inside   mcp__jod__list_agents
+  inside   mcp__jod__list_agents
+  inside   mcp__jod__list_agents
+
+PASS — every call was mcp__jod__*, a read, or a schema load for one of those.
+==============================================================
+== 4. what the chat actually said back
+==============================================================
+$ /tmp/jod-r5/bin/jod main --cwd /tmp/jod-e2e/toolbox-repo
+   22 └ [ { "run_id": "03d6d114-0fef-4a3d-a755-f505f55b2278", "name": "a2a-acronym-lookup", "harne…
+   23 ⚙ list_agents
+   24 └ [ { "run_id": "03d6d114-0fef-4a3d-a755-f505f55b2278", "name": "a2a-acronym-lookup", "harne…
+   25   Delegated the A2A lookup to a fresh read-only run in this repo (no warm agent existed — `l…
+   30 › count how many markdown files are in this repo and tell me
+   31 ⚙ delegate md-file-count
+   33 └ { "harness": "claude_code", "name": "md-file-count", "run_id": "edb409de-e18b-4fe6-86d4-73…
+   34 ⚙ list_agents
+   35 └ [ { "run_id": "edb409de-e18b-4fe6-86d4-73b0c9c35352", "name": "md-file-count", "harness": …
+   36 ⚙ list_agents
+   37 └ [ { "run_id": "edb409de-e18b-4fe6-86d4-73b0c9c35352", "name": "md-file-count", "harness": …
+   38 ⚙ list_agents
+   39 └ [ { "run_id": "edb409de-e18b-4fe6-86d4-73b0c9c35352", "name": "md-file-count", "harness": …
+   41 ⚙ list_agents
+   42 └ [ { "run_id": "edb409de-e18b-4fe6-86d4-73b0c9c35352", "name": "md-file-count", "harness": …
+   45 ⚙ list_agents
+   46 └ [ { "run_id": "edb409de-e18b-4fe6-86d4-73b0c9c35352", "name": "md-file-count", "harness": …
+   47 ⚙ list_agents
+   48 └ [ { "run_id": "edb409de-e18b-4fe6-86d4-73b0c9c35352", "name": "md-file-count", "harness": …
+   49   Two things: **A2A** — that run finished: it stands for **agent-to-agent** (the agent-to-ag…
+
+set in motion:
+  Aug 15 19:08 (1m15s ago) delegate     edb409de
+  Aug 15 19:08 (1m25s ago) orchestrate  9d33349c
+  Aug 15 19:06 (3m35s ago) delegate     03d6d114
+  Aug 15 19:06 (3m50s ago) orchestrate  23af984e
+
+SCRIPT EXIT=0
