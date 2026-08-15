@@ -2400,6 +2400,7 @@ impl Store {
             )?;
             Ok(())
         })
+        .map_err(|e| name_already_taken(e, "schedule", &s.name, "schedules.name"))
     }
 
     pub fn schedules(&self) -> Result<Vec<Schedule>> {
@@ -2732,6 +2733,7 @@ impl Store {
             )?;
             Ok(())
         })
+        .map_err(|e| name_already_taken(e, "goal", &g.name, "goals.name"))
     }
 
     pub fn goals(&self) -> Result<Vec<Goal>> {
@@ -3349,6 +3351,40 @@ const MAX_PATH_DEPTH: u32 = 6;
 /// caller can use rather than what SQLite can produce — and it bounds the sort,
 /// which is the part that grows fastest.
 const MAX_NEIGHBOURS: i64 = 500;
+
+/// Turn the database's refusal of a name already in use into a sentence.
+///
+/// Reusing a name is an ordinary mistake, and until this existed the reader was
+/// handed `UNIQUE constraint failed: schedules.name` and two lines of SQLite
+/// internals for making it. Every other refusal in this area — the `Misfire`
+/// and `Overlap` parsers, `schedule::validate` — answers with a plain
+/// [`JodError::Invalid`], and so does this one now.
+///
+/// Translating the database's own refusal, rather than looking the name up
+/// first, is what makes it correct rather than merely usually correct. A
+/// daemon, a TUI and an MCP server all hold this one file open, so between a
+/// lookup and the insert another process can take the name; the check would
+/// pass, the insert would still fail, and the raw error would come back out of
+/// the losing path. The unique index is the thing enforcing the rule, so its
+/// refusal is the only report that cannot be overtaken.
+///
+/// `column` is the qualified column the caller means, and it is checked rather
+/// than assumed. Both of these tables also have a `TEXT PRIMARY KEY`, and an id
+/// that collided would be a different fault entirely; reporting it as a name
+/// somebody else is using would send the reader looking for a schedule that is
+/// not there. Anything this function does not recognise is passed through
+/// untouched.
+fn name_already_taken(err: JodError, thing: &str, name: &str, column: &str) -> JodError {
+    match &err {
+        JodError::Db(rusqlite::Error::SqliteFailure(code, Some(detail)))
+            if code.code == rusqlite::ErrorCode::ConstraintViolation
+                && detail.contains(column) =>
+        {
+            JodError::Invalid(format!("a {thing} named `{name}` already exists"))
+        }
+        _ => err,
+    }
+}
 
 /// Every column of a schedule, in the order `row_to_schedule` reads them.
 const SCHEDULE_COLUMNS: &str = "SELECT id, name, prompt, harness, cwd, model, cron, timezone,
