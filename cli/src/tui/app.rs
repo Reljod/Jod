@@ -1663,6 +1663,29 @@ impl App {
         rows
     }
 
+    /// The fleet's runs that the tree has no node for.
+    ///
+    /// `Store::forest_of` reads only conversations that belong to a work, so a
+    /// run started by `delegate` never reaches the forest — by design, because
+    /// a work is what the tree is a tree *of*. These are the rows the tree
+    /// cannot draw, and the fleet shows them beside it rather than dropping
+    /// them: a run nothing on screen accounts for is a run nobody stops.
+    ///
+    /// Reads the same [`App::fleet_rows`] the flat list does, so the fleet's
+    /// filter and sort apply here too.
+    pub fn loose_rows(&self) -> Vec<&AgentLine> {
+        let held: std::collections::HashSet<&str> = self
+            .forest
+            .iter()
+            .filter(|n| n.kind == jod_core::tree::NodeKind::Run)
+            .map(|n| n.id.id.as_str())
+            .collect();
+        self.fleet_rows()
+            .into_iter()
+            .filter(|a| !held.contains(a.id.as_str()))
+            .collect()
+    }
+
     pub fn memory_rows(&self) -> Vec<&MemoryNode> {
         let mut rows: Vec<&MemoryNode> = self
             .memory

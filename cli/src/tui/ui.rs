@@ -3133,13 +3133,123 @@ fn work_colour(name: &str) -> Color {
     }
 }
 
+/// One agent, as the row both halves of the fleet screen draw it.
+///
+/// Shared rather than copied, because the loose pane below the tree and the
+/// flat list are the same row in two places: a run that reads one way in the
+/// list and another way under the tree is a run you have to look at twice.
+fn fleet_row<'a>(
+    app: &App,
+    a: &'a super::AgentLine,
+    chosen: bool,
+    inner: usize,
+    show_id: bool,
+    show_harness: bool,
+) -> Line<'a> {
+    let age = super::app::short_duration(app.now_ms.saturating_sub(a.created_at_ms));
+    let watched = app.watching.as_deref() == Some(a.id.as_str());
+    let mut spans = vec![
+        delivery_gutter(a.delivery),
+        Span::styled(if chosen { "▸ " } else { "  " }, fg(USER)),
+        Span::styled(
+            format!("{} ", run_glyph(&a.status)),
+            fg(status_colour(&a.status)),
+        ),
+    ];
+    if show_id {
+        spans.push(Span::styled(format!("{:<9}", short(&a.id)), fg(MUTED)));
+    }
+    spans.push(Span::styled(
+        format!("{:<9}", a.status),
+        fg(status_colour(&a.status)),
+    ));
+    spans.push(Span::styled(format!("{age:>7} "), fg(MUTED)));
+    if show_harness {
+        spans.push(Span::styled(format!("{:<4}", code(&a.harness)), fg(MUTED)));
+    }
+    // The name was clipped by the widget with nothing saying so —
+    // `port the p` at the design width. It is cut with an ellipsis
+    // now, and the marker beside it is reserved first.
+    let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+    let marker = if watched { "  \u{2190} on screen" } else { "" };
+    let (name, marked) = fit_row(used, &a.name, marker, inner);
+    spans.push(Span::styled(
+        name,
+        if chosen { bold(USER) } else { fg(AGENT) },
+    ));
+    if marked {
+        spans.push(Span::styled(marker.to_string(), fg(USER)));
+    }
+    Line::from(spans)
+}
+
+/// How tall the loose pane may grow before the tree starts losing rows.
+///
+/// The tree is the reason the screen exists, so the runs hanging off nothing
+/// get the smaller share: enough for a few of them plus the border, and a
+/// count in the title once there are more than fit.
+fn loose_height(area: Rect, runs: usize) -> u16 {
+    let wanted = runs as u16 + 2;
+    wanted.min(area.height / 3).max(3).min(area.height)
+}
+
+/// The runs that belong to no work, drawn under the tree that cannot hold them.
+fn draw_loose(f: &mut Frame, app: &App, area: Rect, runs: &[&super::AgentLine]) {
+    let inner = area.width.saturating_sub(2) as usize;
+    let show_id = inner >= 35;
+    let show_harness = inner >= 31;
+    let room = area.height.saturating_sub(2) as usize;
+    let items: Vec<ListItem> = runs
+        .iter()
+        .take(room)
+        .map(|a| ListItem::new(fleet_row(app, a, false, inner, show_id, show_harness)))
+        .collect();
+    // The count is in the title rather than on a row of its own, because the
+    // pane is small enough that a row spent saying "3 more" is a row not
+    // spent showing one of them.
+    let title = if runs.len() > room {
+        format!(" loose · {} of {} ", room, runs.len())
+    } else {
+        format!(" loose · {} ", runs.len())
+    };
+    f.render_widget(
+        List::new(items).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(fg(MUTED))
+                .title(title)
+                .title_bottom(fit_verbs(" in no work — jod ls ", area.width)),
+        ),
+        area,
+    );
+}
+
 fn draw_fleet(f: &mut Frame, app: &App, area: Rect) {
     // The tree the moment there is one. Not a replacement for the flat list
     // below but the other half of the same screen: a session belonging to no
     // work has no node in the forest, and the list is what shows it.
     if app.has_tree() {
         let (left, right) = split(area);
-        draw_tree(f, app, left);
+        // Both halves, not one instead of the other. A run started by
+        // `delegate` belongs to no work, so `Store::forest_of` gives it no node
+        // and the tree cannot draw it at any width. Returning here the moment a
+        // single work existed made every such run invisible — the screen said
+        // "1 running" in its status bar and showed nothing that was.
+        let loose = app.loose_rows();
+        let tree_area = if loose.is_empty() {
+            left
+        } else {
+            let rows = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Min(3),
+                    Constraint::Length(loose_height(left, loose.len())),
+                ])
+                .split(left);
+            draw_loose(f, app, rows[1], &loose);
+            rows[0]
+        };
+        draw_tree(f, app, tree_area);
         if let Some(right) = right {
             draw_tree_detail(f, app, right);
         }
@@ -3180,42 +3290,14 @@ fn draw_fleet(f: &mut Frame, app: &App, area: Rect) {
             ))));
             continue;
         }
-        let a = rows[i - 1];
-        let age = super::app::short_duration(app.now_ms.saturating_sub(a.created_at_ms));
-        let watched = app.watching.as_deref() == Some(a.id.as_str());
-        let mut spans = vec![
-            delivery_gutter(a.delivery),
-            Span::styled(if chosen { "▸ " } else { "  " }, fg(USER)),
-            Span::styled(
-                format!("{} ", run_glyph(&a.status)),
-                fg(status_colour(&a.status)),
-            ),
-        ];
-        if show_id {
-            spans.push(Span::styled(format!("{:<9}", short(&a.id)), fg(MUTED)));
-        }
-        spans.push(Span::styled(
-            format!("{:<9}", a.status),
-            fg(status_colour(&a.status)),
-        ));
-        spans.push(Span::styled(format!("{age:>7} "), fg(MUTED)));
-        if show_harness {
-            spans.push(Span::styled(format!("{:<4}", code(&a.harness)), fg(MUTED)));
-        }
-        // The name was clipped by the widget with nothing saying so —
-        // `port the p` at the design width. It is cut with an ellipsis
-        // now, and the marker beside it is reserved first.
-        let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
-        let marker = if watched { "  \u{2190} on screen" } else { "" };
-        let (name, marked) = fit_row(used, &a.name, marker, inner);
-        spans.push(Span::styled(
-            name,
-            if chosen { bold(USER) } else { fg(AGENT) },
-        ));
-        if marked {
-            spans.push(Span::styled(marker.to_string(), fg(USER)));
-        }
-        items.push(ListItem::new(Line::from(spans)));
+        items.push(ListItem::new(fleet_row(
+            app,
+            rows[i - 1],
+            chosen,
+            inner,
+            show_id,
+            show_harness,
+        )));
     }
     // Said under the pinned row rather than instead of the list, because the
     // list is no longer empty — the chat is always in it, and "no agents yet"
@@ -9386,6 +9468,98 @@ mod tests {
         assert!(!a.has_tree());
         let frame = rendered(&a, 150, 30);
         assert!(frame.contains("aaa11111"), "the flat list still draws:\n{frame}");
+    }
+
+    /// A work and a loose run at the same time, which is the case the empty
+    /// fleet above cannot cover.
+    ///
+    /// A run started by `delegate` belongs to no work, so its conversation has
+    /// no `work_id` and `Store::forest_of` — which reads only conversations
+    /// that have one — gives it no node. The tree therefore cannot show it, and
+    /// the flat list is the half of the screen that can. Built off a real store
+    /// rather than a hand-made forest, because the claim being made here is
+    /// about what the query returns as much as about what is drawn.
+    #[test]
+    fn the_fleet_still_shows_a_run_that_belongs_to_no_work() {
+        use jod_core::tree::NodeId;
+        use jod_core::works::Origin;
+
+        let store = RealStore::in_memory().expect("an in-memory store");
+        let work = store.create_work("port the parser").expect("a work");
+        store
+            .set_work_title(&work.id, "the parser")
+            .expect("a work title");
+        let lead = store
+            .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
+            .expect("a conversation")
+            .id;
+        store
+            .set_conversation_title(&lead, "port the lexer")
+            .expect("a session title");
+        store
+            .attach_conversation(&lead, &work.id, None, Origin::Agent)
+            .expect("a session under the work");
+
+        // The delegated run. `attach_conversation` is never called for it, so
+        // its `work_id` stays null — which is exactly what `delegate` leaves
+        // behind.
+        let loose = store
+            .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
+            .expect("a conversation")
+            .id;
+        store
+            .set_conversation_title(&loose, "say potato")
+            .expect("a title");
+        store
+            .save_run(&jod_core::store::StoredRun {
+                id: "de1e6a7e".into(),
+                name: "hello-agent".into(),
+                harness: "claude-code".into(),
+                status: "running".into(),
+                cwd: "/tmp".into(),
+                session_id: None,
+                pid: None,
+                pgid: None,
+                created_at_ms: 1,
+                summary: serde_json::json!({}),
+            })
+            .expect("a run");
+        store
+            .append_message(
+                &loose,
+                jod_core::conversation::NewMessage::new(
+                    jod_core::conversation::Role::Assistant,
+                    "on it",
+                )
+                .from_run("de1e6a7e"),
+            )
+            .expect("a message");
+
+        let mut a = app();
+        a.forest = store.forest().expect("a forest");
+        a.agents = vec![agent_line("de1e6a7e", "hello-agent", "running")];
+        a.go(Workspace::Fleet);
+        a.reconcile();
+
+        assert!(a.has_tree(), "one work is enough to put a tree on screen");
+        assert!(
+            !a.forest.iter().any(|n| n.id == NodeId::run("de1e6a7e")),
+            "the loose run has no node, which is the whole reason for the list",
+        );
+
+        let frame = rendered(&a, 150, 30);
+        assert!(
+            frame.contains("the parser"),
+            "the tree is still drawn:\n{frame}"
+        );
+        assert!(
+            frame.contains("de1e6a7e"),
+            "the delegated run is on the screen too:\n{frame}"
+        );
+        assert!(
+            frame.contains("hello-agent"),
+            "and it is named, not just numbered:\n{frame}"
+        );
     }
 
     // ---- the secret card ----
