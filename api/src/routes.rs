@@ -442,44 +442,30 @@ pub(crate) fn audit_write(
     state.audit.append(&e);
 }
 
-/// A short, human-recognisable name from the prompt's first words — the same
-/// rule the CLI uses, so an agent is called the same thing in both places.
-pub fn default_name(prompt: &str) -> String {
-    let name = prompt
-        .split_whitespace()
-        .take(5)
-        .collect::<Vec<_>>()
-        .join(" ");
-    if name.is_empty() {
-        "agent".to_string()
-    } else if name.chars().count() > 48 {
-        format!("{}…", name.chars().take(47).collect::<String>())
-    } else {
-        name
-    }
-}
+/// A short, human-recognisable name from the prompt's first words.
+///
+/// Re-exported rather than defined: this used to be a copy of the CLI's rule
+/// with a comment promising the two matched. Now they are the same function, so
+/// an agent is called the same thing whether it was started here or in a
+/// terminal. → [`jod_core::harness::default_name`]
+pub use jod_core::harness::default_name;
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// The rule itself is pinned in `jod_core::harness`, which is now the only
+    /// place it is written down. What this asserts is that the re-export still
+    /// reaches it — a spawn with no name must be labelled the same here as in a
+    /// terminal, and a rename that quietly left this pointing at a second copy
+    /// is exactly the failure the move was for.
     #[test]
-    fn a_name_is_derived_from_the_first_words_of_the_prompt() {
+    fn an_unnamed_spawn_borrows_the_same_rule_the_cli_uses() {
         assert_eq!(
             default_name("summarise the inbox please now ok"),
-            "summarise the inbox please now"
+            jod_core::harness::default_name("summarise the inbox please now ok")
         );
-    }
-
-    #[test]
-    fn an_empty_prompt_still_yields_a_usable_name() {
         assert_eq!(default_name("   "), "agent");
-    }
-
-    #[test]
-    fn a_long_name_is_truncated_rather_than_left_unbounded() {
-        let name = default_name(&"averyverylongword ".repeat(5));
-        assert!(name.chars().count() <= 48);
     }
 
     #[test]

@@ -55,21 +55,13 @@ use ratatui::Terminal;
 
 use tui::{App, Workspace};
 
-/// What the TUI names a delegated run, mirrored from `src/main.rs`.
+/// What the TUI names a delegated run.
 ///
 /// The module compiled in above calls `crate::default_name` when it spawns an
-/// agent. This example never spawns one, but the call has to resolve.
-fn default_name(prompt: &str) -> String {
-    let words: Vec<&str> = prompt.split_whitespace().take(5).collect();
-    let name = words.join(" ");
-    if name.is_empty() {
-        "agent".to_string()
-    } else if name.chars().count() > 48 {
-        format!("{}…", name.chars().take(47).collect::<String>())
-    } else {
-        name
-    }
-}
+/// agent. This example never spawns one, but the call has to resolve — and it
+/// now resolves to the real function rather than a copy of it, for the reason
+/// the stub below already gives: a local copy is a second thing to keep in step.
+use jod_core::harness::default_name;
 
 /// The other symbol the compiled-in module reaches for in the crate root.
 ///

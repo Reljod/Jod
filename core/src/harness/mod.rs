@@ -358,6 +358,42 @@ impl Default for SpawnRequest {
     }
 }
 
+/// A short, human-recognisable name from the prompt's first words.
+///
+/// Fills [`SpawnRequest::name`] when the caller does not pass one, which every
+/// entry point has to do: `jod run` without `--name`, `POST /v1/agents` without
+/// `"name"`, the TUI's delegate, and the `delegate` MCP tool.
+///
+/// It lives here because it was written four times — once in `cli/src/main.rs`,
+/// once in `api/src/routes.rs`, once privately in `core/src/mcp.rs`, and once
+/// more in `cli/examples/screens.rs` — each with a comment promising it matched
+/// the others. It did, but only because nobody had touched it yet. The activity
+/// feed made the same promise across two files and had already broken it. An
+/// agent should be called the same thing whether it was started from a terminal,
+/// a phone or another agent, and that is a property worth having the compiler
+/// keep rather than a comment.
+///
+/// Five words, because a name is a label in a list and not a summary. The 48
+/// character bound is on *characters* rather than bytes: a prompt is whatever
+/// the user typed, and slicing bytes through a multi-byte character panics.
+pub fn default_name(prompt: &str) -> String {
+    let name = prompt
+        .split_whitespace()
+        .take(5)
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    if name.is_empty() {
+        // A run with no name is a row nobody can point at. "agent" is a poor
+        // name and an honest one; an empty string is neither.
+        "agent".to_string()
+    } else if name.chars().count() > 48 {
+        format!("{}…", name.chars().take(47).collect::<String>())
+    } else {
+        name
+    }
+}
+
 /// What an agent may do to Jod itself.
 ///
 /// A capability set rather than a boolean, because "can see what is running" and
@@ -540,6 +576,47 @@ pub trait Harness: Send {
 mod tests {
     use super::*;
     use crate::store::Origin;
+
+    #[test]
+    fn a_name_is_derived_from_the_first_words_of_the_prompt() {
+        assert_eq!(
+            default_name("summarise the inbox please now ok"),
+            "summarise the inbox please now"
+        );
+    }
+
+    #[test]
+    fn an_empty_prompt_still_yields_a_usable_name() {
+        assert_eq!(default_name("   "), "agent");
+        assert_eq!(default_name(""), "agent");
+    }
+
+    #[test]
+    fn a_long_name_is_truncated_rather_than_left_unbounded() {
+        let name = default_name(&"averyverylongword ".repeat(5));
+        assert!(
+            name.chars().count() <= 48,
+            "got {} chars: {name}",
+            name.chars().count()
+        );
+        assert!(name.ends_with('…'), "a truncated name should say so: {name}");
+    }
+
+    /// The bound is on characters, not bytes. Slicing a prompt mid-character
+    /// panics, and a prompt is whatever the user typed — which for this repo's
+    /// own users includes plenty that is not ASCII.
+    #[test]
+    fn a_long_multibyte_prompt_is_truncated_without_panicking() {
+        let name = default_name(&"日本語のとても長い単語 ".repeat(5));
+        assert!(name.chars().count() <= 48, "got {name}");
+    }
+
+    /// Whitespace is a separator, not content: a prompt that arrives with
+    /// newlines and runs of spaces must not turn them into part of the name.
+    #[test]
+    fn runs_of_whitespace_collapse_to_single_spaces() {
+        assert_eq!(default_name("summarise\n\n  the   inbox"), "summarise the inbox");
+    }
 
     /// The bug this split exists to fix. `Ask` used to mean Claude Code's
     /// `plan`, so every run Jod started could only describe work — and since

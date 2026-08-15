@@ -4502,43 +4502,27 @@ async fn settle_member(
     Ok(())
 }
 
-fn default_name(prompt: &str) -> String {
-    let words: Vec<&str> = prompt.split_whitespace().take(5).collect();
-    let name = words.join(" ");
-    if name.is_empty() {
-        "agent".to_string()
-    } else if name.chars().count() > 48 {
-        format!("{}…", name.chars().take(47).collect::<String>())
-    } else {
-        name
-    }
-}
+/// A short, human-recognisable name from the prompt's first words.
+///
+/// `pub(crate)` because the TUI reaches it as `crate::default_name`. It used to
+/// be defined here and copied into the API and into core's MCP tools, each copy
+/// carrying a comment promising it matched the others. → [`jod_core::harness`]
+pub(crate) use jod_core::harness::default_name;
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// The rule is pinned in `jod_core::harness`. This asserts only that the
+    /// name a terminal spawn gets still comes from there, so `jod run` and
+    /// `POST /v1/agents` cannot start labelling the same prompt differently.
     #[test]
-    fn a_name_is_derived_from_the_first_words_of_the_prompt() {
+    fn an_unnamed_run_borrows_the_shared_naming_rule() {
         assert_eq!(
             default_name("summarise the inbox please now ok"),
             "summarise the inbox please now"
         );
-    }
-
-    #[test]
-    fn an_empty_prompt_still_yields_a_usable_name() {
         assert_eq!(default_name("   "), "agent");
-    }
-
-    #[test]
-    fn a_long_name_is_truncated_rather_than_left_unbounded() {
-        let name = default_name(&"averyverylongword ".repeat(5));
-        assert!(
-            name.chars().count() <= 48,
-            "got {} chars",
-            name.chars().count()
-        );
     }
 
     #[test]
