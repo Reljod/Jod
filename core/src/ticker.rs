@@ -931,11 +931,44 @@ impl Ticker {
                         // guarantees hang off this.
                         let verdict = self.check_done(&goal).await;
 
+                        // What this iteration cost and what it said, recorded
+                        // before anything decides how the goal ends. The turn
+                        // happened and was billed whichever way the check went,
+                        // and the iteration that *passes* the check is the one
+                        // that did the work — writing it only on the path where
+                        // the goal keeps going left the last iteration of every
+                        // successful goal missing from `goal log`, missing from
+                        // the iteration count, and missing from `spent_usd`.
+                        let cost = agent.usage.cost_usd.unwrap_or(0.0);
+                        let outcome = agent
+                            .last_message
+                            .clone()
+                            .unwrap_or_else(|| format!("{:?}", agent.status).to_lowercase());
+                        store.remember(
+                            NewFact::new(
+                                subject.clone(),
+                                "iteration",
+                                format!("{}: {}", goal.iteration + 1, one_line(&outcome)),
+                            )
+                            .in_scope(&scope)
+                            .from(Origin::System),
+                        )?;
+
                         // A goal whose check passes is finished. Without this
                         // there was no path by which a goal could ever succeed:
                         // `should_stop` only ever returned exhausted or
                         // stalled, so every goal ran until it ran out.
                         if verdict.as_ref().is_some_and(|v| v.satisfied) {
+                            // The counter and the spend first. `advance_goal`
+                            // applies the stop conditions itself, so an
+                            // iteration that both passed the check and used up
+                            // the last of the budget is left marked exhausted
+                            // for a moment; setting satisfied *after* it is
+                            // what keeps the true ending. Passing `true` for
+                            // progress is the same reasoning — the check going
+                            // from failing to passing is the largest change it
+                            // can see, and the goal stops here either way.
+                            store.advance_goal(&goal.id, now_ms, cost, true)?;
                             store.remember(
                                 NewFact::new(subject.clone(), "ended", "satisfied")
                                     .in_scope(&scope)
@@ -975,20 +1008,6 @@ impl Ticker {
                                     .from(Origin::System),
                             )?;
                         }
-                        let cost = agent.usage.cost_usd.unwrap_or(0.0);
-                        let outcome = agent
-                            .last_message
-                            .clone()
-                            .unwrap_or_else(|| format!("{:?}", agent.status).to_lowercase());
-                        store.remember(
-                            NewFact::new(
-                                subject.clone(),
-                                "iteration",
-                                format!("{}: {}", goal.iteration + 1, one_line(&outcome)),
-                            )
-                            .in_scope(&scope)
-                            .from(Origin::System),
-                        )?;
                         let state = store.advance_goal(&goal.id, now_ms, cost, progressed)?;
                         if !state.is_live() {
                             // It stopped on its own — satisfied, stalled or out
@@ -2070,6 +2089,162 @@ mod tests {
         // Pretend an iteration just finished, which is when the check runs.
         let verdict = ticker.check_done(&g).await.expect("a check was configured");
         assert!(verdict.satisfied, "`true` exits zero");
+    }
+
+    /// A finished run, of the kind the previous tick left behind for this one
+    /// to settle, carrying a real bill.
+    fn a_finished_run(store: &Store, id: &str, cost_usd: f64, said: &str) {
+        let summary = crate::service::AgentSummary {
+            id: id.into(),
+            name: "the goal's iteration".into(),
+            harness: HarnessKind::ClaudeCode,
+            harness_label: "Claude Code".into(),
+            status: AgentStatus::Completed,
+            cwd: "/tmp".into(),
+            model: None,
+            permission: PermissionPolicy::default(),
+            // A pid from a process that is long gone, as a settled run has.
+            pid: Some(4_000_000),
+            pgid: Some(4_000_000),
+            process_alive: false,
+            watch_command: crate::service::watch_command(id),
+            created_at_ms: 0,
+            session_id: None,
+            usage: crate::event::Usage {
+                cost_usd: Some(cost_usd),
+                ..Default::default()
+            },
+            event_count: 0,
+            last_message: Some(said.into()),
+        };
+        store
+            .save_run(&crate::store::StoredRun {
+                id: id.into(),
+                name: summary.name.clone(),
+                harness: "claude_code".into(),
+                status: "completed".into(),
+                cwd: summary.cwd.clone(),
+                session_id: None,
+                pid: summary.pid,
+                pgid: summary.pgid,
+                created_at_ms: 0,
+                summary: serde_json::to_value(&summary).unwrap(),
+            })
+            .unwrap();
+    }
+
+    /// The iteration that made the check pass is the one that did the work, and
+    /// it was billed. Recording the ending without recording that iteration
+    /// leaves the goal denying a bill it incurred: `goal log` shows no line for
+    /// it, `goal ls` reads the iteration count from before it ran, and its cost
+    /// never reaches `spent_usd`.
+    #[tokio::test]
+    async fn the_iteration_that_satisfied_a_goal_is_recorded_with_its_cost() {
+        let store = std::sync::Arc::new(crate::store::Store::in_memory().unwrap());
+        let mut g = a_goal("finisher");
+        g.done_when = Some("true".into());
+        store.add_goal(&g).unwrap();
+
+        a_finished_run(&store, "run-finisher", 0.073, "Hello");
+        store
+            .remember(
+                NewFact::new("goal/finisher", "current-run", "run-finisher")
+                    .in_scope(g.memory_scope())
+                    .from(Origin::System),
+            )
+            .unwrap();
+        store.run_goal_now("finisher", 1).unwrap();
+
+        let jod = Jod::with_store(store.clone());
+        jod.rehydrate(100).await.unwrap();
+        Ticker::new(jod)
+            .as_owner("t")
+            .tick_goals(chrono::Utc::now().timestamp_millis())
+            .await
+            .unwrap();
+
+        let facts = store.facts_about("goal/finisher").unwrap();
+        assert!(
+            facts
+                .iter()
+                .any(|f| f.predicate == "ended" && f.object == "satisfied"),
+            "the goal was found satisfied"
+        );
+        let history: Vec<_> = facts.iter().filter(|f| f.predicate == "iteration").collect();
+        assert_eq!(
+            history.len(),
+            1,
+            "the run that made the check pass must appear in the log exactly once"
+        );
+        assert!(
+            history[0].object.starts_with("1: "),
+            "it is the goal's first iteration: {}",
+            history[0].object
+        );
+
+        let after = store.goal_named("finisher").unwrap().unwrap();
+        assert_eq!(
+            after.state,
+            crate::schedule::GoalState::Satisfied,
+            "satisfied is the ending, whatever else the counters say"
+        );
+        assert_eq!(after.iteration, 1, "the iteration counter counts it");
+        assert!(
+            (after.spent_usd - 0.073).abs() < 1e-9,
+            "a billed agent turn the goal's own record denies: spent_usd is {}",
+            after.spent_usd
+        );
+    }
+
+    /// The awkward case for the ordering above: the iteration that passes the
+    /// check is also the last one the goal was allowed. `advance_goal` applies
+    /// the stop conditions itself and would leave this goal exhausted, so the
+    /// satisfied state has to be written after it — and the cost still has to
+    /// be counted exactly once.
+    #[tokio::test]
+    async fn a_goal_satisfied_on_its_last_allowed_iteration_still_ends_satisfied() {
+        let store = std::sync::Arc::new(crate::store::Store::in_memory().unwrap());
+        let mut g = a_goal("lastchance");
+        g.done_when = Some("true".into());
+        g.max_iterations = Some(1);
+        store.add_goal(&g).unwrap();
+
+        a_finished_run(&store, "run-lastchance", 0.5, "Hello");
+        store
+            .remember(
+                NewFact::new("goal/lastchance", "current-run", "run-lastchance")
+                    .in_scope(g.memory_scope())
+                    .from(Origin::System),
+            )
+            .unwrap();
+        store.run_goal_now("lastchance", 1).unwrap();
+
+        let jod = Jod::with_store(store.clone());
+        jod.rehydrate(100).await.unwrap();
+        Ticker::new(jod)
+            .as_owner("t")
+            .tick_goals(chrono::Utc::now().timestamp_millis())
+            .await
+            .unwrap();
+
+        let facts = store.facts_about("goal/lastchance").unwrap();
+        let endings: Vec<_> = facts.iter().filter(|f| f.predicate == "ended").collect();
+        assert_eq!(endings.len(), 1, "one ending, not two");
+        assert_eq!(endings[0].object, "satisfied", "the check passed");
+        assert_eq!(
+            facts.iter().filter(|f| f.predicate == "iteration").count(),
+            1,
+            "the iteration is recorded once, not once per path through the tick"
+        );
+
+        let after = store.goal_named("lastchance").unwrap().unwrap();
+        assert_eq!(after.state, crate::schedule::GoalState::Satisfied);
+        assert_eq!(after.iteration, 1);
+        assert!(
+            (after.spent_usd - 0.5).abs() < 1e-9,
+            "the turn is billed once: {}",
+            after.spent_usd
+        );
     }
 
     #[tokio::test]
