@@ -1118,12 +1118,41 @@ impl Ticker {
             return Ok(TickReport::default());
         };
         let due = store.claim_due_goals(&self.owner, now_ms, LEASE_MS)?;
+
+        // Pausing a goal means "start no new iterations". It also stopped Jod
+        // noticing the iteration that was already in flight, which is a
+        // different thing and was never the intention: `claim_due_goals` looks
+        // only at running goals, and this loop is the only thing that settles a
+        // finished run or reads what it cost. So a goal paused mid-iteration
+        // read `iter 0 · $0.00` beside a run that had finished and cost
+        // $0.0963, and only a resume made it admit the bill.
+        //
+        // Settling is separated from spawning rather than the claim being
+        // widened. A paused goal is claimed here only when it has a run in
+        // flight, so one with nothing to settle is never claimed at all and
+        // cannot spin; and the guard below — a goal whose state is not live
+        // releases before the spawn — is what keeps the pause meaning what it
+        // says.
+        let mut settling = Vec::new();
+        for goal in store.paused_goals()? {
+            if self
+                .current_run(&store, &format!("goal/{}", goal.name))?
+                .is_none()
+            {
+                continue;
+            }
+            if let Some(claimed) = store.claim_paused_goal(&goal.id, &self.owner, now_ms, LEASE_MS)?
+            {
+                settling.push(claimed);
+            }
+        }
+
         let mut report = TickReport {
-            claimed: due.len(),
+            claimed: due.len() + settling.len(),
             ..Default::default()
         };
 
-        for goal in due {
+        for goal in due.into_iter().chain(settling) {
             let scope = goal.memory_scope();
             let subject = format!("goal/{}", goal.name);
 
@@ -1252,7 +1281,13 @@ impl Ticker {
                             )?;
                         }
                         let state = store.advance_goal(&goal.id, now_ms, cost, progressed)?;
-                        if !state.is_live() {
+                        // A pause is not an ending, and a goal settled while it
+                        // is paused comes back from `advance_goal` still
+                        // paused. Writing that down as an ending would leave
+                        // `ended: paused` in the goal's memory for good, which
+                        // a resume cannot take back and which `goal log` would
+                        // show for ever beside a goal that went on to finish.
+                        if !state.is_live() && state != crate::schedule::GoalState::Paused {
                             // It stopped on its own — satisfied, stalled or out
                             // of budget. Say which, in the goal's own memory,
                             // so the reason survives the process that found it.
@@ -1273,6 +1308,16 @@ impl Ticker {
                 continue;
             };
             if !goal.state.is_live() {
+                // Every branch below this leads to a spawn, and a goal that is
+                // paused or has just ended is getting no new iteration. What it
+                // does need is the `current-run` pointer retired: the run that
+                // pointer names has just been settled above, and leaving it in
+                // place would have the next tick claim this goal again, settle
+                // the same run a second time, and charge the goal twice for one
+                // turn.
+                if in_flight.is_some() {
+                    store.forget(&scope, &subject, "current-run")?;
+                }
                 store.release_goal(&goal.id)?;
                 continue;
             }
@@ -1285,9 +1330,13 @@ impl Ticker {
             // check passing, and stopped — one real iteration and one real
             // bill for an objective that was met before the goal existed.
             //
-            // So ask first, on a goal that has never had a run in flight. That
-            // is the only case: after one iteration there is always a
-            // `current-run` fact, and the block above has already asked.
+            // So ask first, whenever nothing is in flight. That is a goal which
+            // has never run, and now also a goal that was paused while an
+            // iteration was in flight: settling that iteration retires the
+            // `current-run` pointer, so the first tick after the resume arrives
+            // here. Asking there is right rather than wasteful, because a goal
+            // can sit paused for weeks and something other than the goal itself
+            // can meet its objective in the meantime.
             //
             // Nothing is recorded that would look like work. There is no
             // `iteration` fact and no `advance_goal` call, because both would
@@ -2761,6 +2810,179 @@ mod tests {
         assert_eq!(
             after.spent_usd, 0.0,
             "there is no number to add, so the total is unchanged"
+        );
+    }
+
+    /// A goal paused in the middle of an iteration, with that iteration
+    /// finished and waiting to be settled.
+    fn a_goal_paused_mid_iteration(store: &Store, name: &str, check: &str, cost_usd: f64) {
+        let mut g = a_goal(name);
+        g.done_when = Some(check.into());
+        store.add_goal(&g).unwrap();
+        a_finished_run(store, &format!("run-{name}"), cost_usd, "Read three files");
+        store
+            .remember(
+                NewFact::new(format!("goal/{name}"), "current-run", format!("run-{name}"))
+                    .in_scope(g.memory_scope())
+                    .from(Origin::System),
+            )
+            .unwrap();
+        store.run_goal_now(name, 1).unwrap();
+        store
+            .set_goal_state(name, crate::schedule::GoalState::Paused)
+            .unwrap();
+    }
+
+    /// G14. A goal paused mid-iteration knew nothing about the run it still had
+    /// going. `claim_due_goals` looks only at running goals, and the tick it
+    /// gates is the only thing that settles a finished run or reads what it
+    /// cost, so a real goal read `iter 0 · $0.00` beside an iteration that had
+    /// already finished and cost $0.0963. Only resuming it made it admit the
+    /// bill, which meant the record of a paused goal was wrong for as long as
+    /// the pause lasted.
+    #[tokio::test]
+    async fn a_paused_goals_finished_iteration_is_settled_without_a_resume() {
+        let store = std::sync::Arc::new(crate::store::Store::in_memory().unwrap());
+        // A check that keeps failing, so what is under test is the ordinary
+        // settling rather than the satisfied ending.
+        a_goal_paused_mid_iteration(&store, "paused-mid-run", "false", 0.0963);
+
+        let jod = Jod::with_store(store.clone());
+        jod.rehydrate(100).await.unwrap();
+        let report = Ticker::new(jod)
+            .as_owner("t")
+            .tick_goals(chrono::Utc::now().timestamp_millis())
+            .await
+            .unwrap();
+        assert_eq!(
+            report.started, 0,
+            "pausing still means no new iteration starts"
+        );
+
+        let after = store.goal_named("paused-mid-run").unwrap().unwrap();
+        assert_eq!(
+            after.iteration, 1,
+            "the iteration finished, so the goal has run one"
+        );
+        assert!(
+            (after.spent_usd - 0.0963).abs() < 1e-9,
+            "the goal was billed $0.0963 for a turn it denies: spent_usd is {}",
+            after.spent_usd
+        );
+        assert_eq!(
+            after.state,
+            crate::schedule::GoalState::Paused,
+            "settling a goal is not resuming it"
+        );
+
+        let facts = store.facts_about("goal/paused-mid-run").unwrap();
+        assert_eq!(
+            facts.iter().filter(|f| f.predicate == "iteration").count(),
+            1,
+            "`goal log` has to show the iteration, once"
+        );
+        assert!(
+            !facts.iter().any(|f| f.predicate == "ended"),
+            "a pause is not an ending, and writing one down is not undone by a resume"
+        );
+    }
+
+    /// The other half of settling a paused goal: it happens exactly once. The
+    /// pointer at the run has to be retired, because a paused goal is never
+    /// *due* and so nothing else would ever stop the next tick claiming it,
+    /// settling the same finished run again, and charging the goal a second
+    /// time for one turn.
+    #[tokio::test]
+    async fn a_paused_goals_iteration_is_settled_once_however_many_ticks_run() {
+        let store = std::sync::Arc::new(crate::store::Store::in_memory().unwrap());
+        a_goal_paused_mid_iteration(&store, "paused-twice", "false", 0.0963);
+
+        let jod = Jod::with_store(store.clone());
+        jod.rehydrate(100).await.unwrap();
+        let ticker = Ticker::new(jod).as_owner("t");
+        let now = chrono::Utc::now().timestamp_millis();
+        ticker.tick_goals(now).await.unwrap();
+        assert_eq!(
+            ticker.tick_goals(now).await.unwrap().claimed,
+            0,
+            "with the run settled there is nothing left to claim it for"
+        );
+
+        let after = store.goal_named("paused-twice").unwrap().unwrap();
+        assert_eq!(after.iteration, 1, "one turn, counted once");
+        assert!(
+            (after.spent_usd - 0.0963).abs() < 1e-9,
+            "one turn, billed once: spent_usd is {}",
+            after.spent_usd
+        );
+    }
+
+    /// The loop this fix must not create. A paused goal with nothing in flight
+    /// has nothing to settle, so it is never claimed at all — the failure that
+    /// would follow from simply widening the due-goal claim, which would hand
+    /// the same goal back on every tick for the rest of its life.
+    #[tokio::test]
+    async fn a_paused_goal_with_nothing_in_flight_is_never_claimed() {
+        let store = std::sync::Arc::new(crate::store::Store::in_memory().unwrap());
+        store.add_goal(&a_goal("paused-idle")).unwrap();
+        store.run_goal_now("paused-idle", 1).unwrap();
+        store
+            .set_goal_state("paused-idle", crate::schedule::GoalState::Paused)
+            .unwrap();
+
+        let ticker = Ticker::new(Jod::with_store(store.clone())).as_owner("t");
+        let now = chrono::Utc::now().timestamp_millis();
+        for tick in 1..=3 {
+            assert_eq!(
+                ticker.tick_goals(now).await.unwrap().claimed,
+                0,
+                "tick {tick} found nothing to settle and must leave the goal alone"
+            );
+        }
+        let after = store.goal_named("paused-idle").unwrap().unwrap();
+        assert_eq!(after.iteration, 0);
+        assert_eq!(after.spent_usd, 0.0);
+    }
+
+    /// The judgement call this change contains, written down. Settling runs the
+    /// goal's `done-when` check on a paused goal exactly as on a running one,
+    /// because the verdict is a measurement of the iteration that has just
+    /// finished and it cannot honestly be taken later: by the time somebody
+    /// resumes the goal, days may have passed and the check would be answering
+    /// about a different world. So a paused goal whose iteration met the
+    /// objective ends satisfied rather than sitting on a stale record.
+    ///
+    /// It still starts nothing. Every state settling can leave a paused goal in
+    /// — paused, satisfied, stalled or exhausted — is one that no claim will
+    /// iterate, so this path can only ever leave a goal further from running.
+    #[tokio::test]
+    async fn settling_a_paused_goal_runs_its_check_and_can_end_it_satisfied() {
+        let store = std::sync::Arc::new(crate::store::Store::in_memory().unwrap());
+        a_goal_paused_mid_iteration(&store, "paused-done", "true", 0.0963);
+
+        let jod = Jod::with_store(store.clone());
+        jod.rehydrate(100).await.unwrap();
+        let now = chrono::Utc::now().timestamp_millis();
+        Ticker::new(jod).as_owner("t").tick_goals(now).await.unwrap();
+
+        let after = store.goal_named("paused-done").unwrap().unwrap();
+        assert_eq!(
+            after.state,
+            crate::schedule::GoalState::Satisfied,
+            "the check passed, and the iteration that made it pass was paid for"
+        );
+        assert_eq!(after.iteration, 1);
+        assert!(
+            (after.spent_usd - 0.0963).abs() < 1e-9,
+            "spent_usd is {}",
+            after.spent_usd
+        );
+        assert!(
+            store
+                .claim_due_goals("t", now + 86_400_000, 60_000)
+                .unwrap()
+                .is_empty(),
+            "whatever settling leaves behind, nothing iterates it"
         );
     }
 
