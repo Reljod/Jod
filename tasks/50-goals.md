@@ -532,7 +532,7 @@ counter.
 ---
 
 ## G10. `jod goal ls`, `pause`, `resume` and `rm` carry no help text
-Status: open · Owner: — · Severity: low
+Status: **fixed — merged as #169** · Severity was: low
 
 `jod goal --help` shows blank descriptions for `ls`, `pause`, `resume` and
 `rm`, and `jod goal rm --help` / `jod goal ls --help` etc. print only the bare

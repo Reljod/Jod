@@ -78,6 +78,15 @@ recovered by cherry-pick, but for a while the file said `open` about tasks I had
 personally verified, which is the worst version of this: a record contradicted
 by its own author's work.
 
+**It is invisible while it happens**, which is why it ran five times before
+anyone noticed. The new branch is clean, CI passes, the pull request merges —
+nothing anywhere reports a problem. It surfaces only later, as a file that has
+quietly reverted.
+
+**The remedy is one line: branch from the previous branch, not from `main`,
+until the previous one has landed.** Anyone running several pull requests in
+sequence against the same file has this waiting for them.
+
 **If you are maintaining these statuses:** every merged pull request names its
 task id in its body, so `gh pr list --state merged --json number,body` is the
 authority, not this file. Deriving the statuses from that would stop the drift
