@@ -11,6 +11,7 @@ you start. Add findings to your area's file, never to this index.
 |---|---|---|
 | Launch, roots and the TUI's working directory | [`tasks/00-launch-and-roots.md`](tasks/00-launch-and-roots.md) | — |
 | Routing: answer it yourself or hand it over | [`tasks/01-routing.md`](tasks/01-routing.md) | — |
+| The TUI itself | [`tasks/02-tui.md`](tasks/02-tui.md) | — |
 | Orchestration scenarios | [`tasks/10-orchestration.md`](tasks/10-orchestration.md) | — |
 | Fleets and the tree | [`tasks/20-fleets.md`](tasks/20-fleets.md) | — |
 | Project managers | [`tasks/30-project-managers.md`](tasks/30-project-managers.md) | — |
