@@ -1860,27 +1860,47 @@ impl Server {
         let store = self.store()?;
 
         let found = store
-            .project_by_name(&wanted)
+            .projects_by_name(&wanted)
             .map_err(|e| ToolError::Refused(format!("could not search the catalog: {e}")))?;
-        let Some(project) = found else {
-            // Listing what does exist, because the usual cause is a name that
-            // is nearly right, and a bare "not found" makes the model guess
-            // again rather than pick from what is there.
-            let known: Vec<String> = store
-                .projects(false)
-                .map_err(|e| ToolError::Refused(format!("could not read the catalog: {e}")))?
-                .into_iter()
-                .map(|p| p.name)
-                .collect();
-            return Err(ToolError::Refused(format!(
-                "no project called `{wanted}`. The catalog has: {}. \
-                 Use project_add if this is somewhere new.",
-                if known.is_empty() {
-                    "(nothing yet)".to_string()
-                } else {
-                    known.join(", ")
-                }
-            )));
+        let project = match found.as_slice() {
+            [only] => only.clone(),
+            [] => {
+                // Listing what does exist, because the usual cause is a name
+                // that is nearly right, and a bare "not found" makes the model
+                // guess again rather than pick from what is there.
+                let known: Vec<String> = store
+                    .projects(false)
+                    .map_err(|e| ToolError::Refused(format!("could not read the catalog: {e}")))?
+                    .into_iter()
+                    .map(|p| p.name)
+                    .collect();
+                return Err(ToolError::Refused(format!(
+                    "no project called `{wanted}`. The catalog has: {}. \
+                     Use project_add if this is somewhere new.",
+                    if known.is_empty() {
+                        "(nothing yet)".to_string()
+                    } else {
+                        known.join(", ")
+                    }
+                )));
+            }
+            // Two projects answer to this name, so the tool cannot know which
+            // one was meant. Refusing with both paths is what lets the model
+            // ask Reljod or name one exactly; picking would point the
+            // conversation at a repository nobody chose.
+            several => {
+                let candidates = several
+                    .iter()
+                    .map(|p| format!("{} ({})", p.name, p.path.display()))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return Err(ToolError::Refused(format!(
+                    "`{wanted}` is the name of {} projects — {candidates}. \
+                     Ask Reljod which one he means, or call project_switch \
+                     again with the exact name of one of them.",
+                    several.len()
+                )));
+            }
         };
 
         // A switch away from an inferred project is Reljod's correction
