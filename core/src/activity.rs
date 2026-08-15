@@ -241,7 +241,10 @@ pub fn feed(store: &Store, query: Query) -> crate::Result<Vec<Item>> {
     }
 
     for g in store.goals()? {
-        for f in store.facts_about(&format!("goal/{}", g.name))? {
+        // In the goal's own scope. Read by subject alone, the feed would show
+        // a new goal the ending of a removed one that happened to share its
+        // name — and an ending is the one goal event marked as needing you.
+        for f in store.facts_about_in_scope(&g.memory_scope(), &format!("goal/{}", g.name))? {
             let ended = f.predicate == "ended";
             if !ended && f.predicate != "iteration" {
                 continue;
@@ -472,9 +475,13 @@ mod tests {
             created_at_ms: 0,
         };
         s.add_goal(&g).unwrap();
-        s.remember(NewFact::new("goal/ship-it", "iteration", "first pass"))
-            .unwrap();
-        s.remember(NewFact::new("goal/ship-it", "ended", "satisfied"))
+        // In the goal's own scope, which is where `Ticker::tick_goals` writes
+        // every one of these and where the feed now reads them.
+        s.remember(
+            NewFact::new("goal/ship-it", "iteration", "first pass").in_scope(&g.memory_scope()),
+        )
+        .unwrap();
+        s.remember(NewFact::new("goal/ship-it", "ended", "satisfied").in_scope(&g.memory_scope()))
             .unwrap();
 
         let items = feed(&s, Query::default()).unwrap();

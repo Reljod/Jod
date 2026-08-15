@@ -1002,7 +1002,7 @@ fn goal_row(store: &Store, g: Goal) -> GoalRow {
     // that is what makes it memory rather than a job queue — so its history is
     // read the same way `Ticker::spawn_iteration` reads it.
     let facts = store
-        .facts_about(&format!("goal/{}", g.name))
+        .facts_about_in_scope(&g.memory_scope(), &format!("goal/{}", g.name))
         .unwrap_or_default();
     let mut iterations: Vec<Iteration> = facts
         .iter()

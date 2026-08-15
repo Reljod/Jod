@@ -2354,6 +2354,31 @@ impl Store {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
+    /// Everything currently believed about one subject inside one scope.
+    ///
+    /// [`Store::facts_about`] answers "everything believed about this name",
+    /// which is right for a person and wrong for anything whose name can be
+    /// reused. A goal is exactly that: its facts are filed under
+    /// `goal/<name>` but its scope is `goal:<id>`, so a goal removed and
+    /// re-created under the same name used to be handed the dead one's record
+    /// — its `ended` verdict, its done-when fingerprint, and its pointer to a
+    /// run that belonged to something else.
+    ///
+    /// This is also the cheaper of the two. `facts` is indexed on
+    /// `(scope, subject)`, so a read that gives both uses the index where a
+    /// read on the subject alone has to scan.
+    pub fn facts_about_in_scope(&self, scope: &str, subject: &str) -> Result<Vec<Fact>> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT id, scope, subject, predicate, object, origin, source,
+                    valid_from, valid_to, recorded_at_ms, state
+               FROM facts WHERE scope = ?1 AND subject = ?2 AND valid_to IS NULL
+              ORDER BY recorded_at_ms DESC",
+        )?;
+        let rows = stmt.query_map(params![scope, subject], row_to_fact)?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
     /// Forget something completely. Returns how many versions were destroyed.
     ///
     /// This physically deletes *every* version, not just the current one, and
@@ -6005,6 +6030,41 @@ mod tests {
         let back = s.goal_named("inbox").unwrap().unwrap();
         assert_eq!(back.state, GoalState::Running);
         assert!(back.next_fire_at_ms.unwrap() > now_ms());
+    }
+
+    /// The read that tells two goals of the same name apart.
+    ///
+    /// A goal's facts are filed under `goal/<name>`, so the subject alone
+    /// cannot say which goal wrote them. The scope can: it is keyed on the id.
+    /// This is the case `delete_goal` does not cover — rows left in a database
+    /// by a goal removed before the memory was cleared with it.
+    #[test]
+    fn a_goal_reads_only_what_was_written_in_its_own_scope() {
+        let s = store();
+        let g = a_goal("nightly-tidy");
+        s.add_goal(&g).unwrap();
+        // What some earlier goal of that name left behind.
+        s.remember(
+            NewFact::new("goal/nightly-tidy", "ended", "satisfied")
+                .in_scope("goal:g-someone-else")
+                .from(Origin::System),
+        )
+        .unwrap();
+        s.remember(
+            NewFact::new("goal/nightly-tidy", "pursuing", "tidy the first thing")
+                .in_scope(&g.memory_scope())
+                .from(Origin::System),
+        )
+        .unwrap();
+
+        let mine = s
+            .facts_about_in_scope(&g.memory_scope(), "goal/nightly-tidy")
+            .unwrap();
+        assert_eq!(mine.len(), 1, "another goal's record was read as mine");
+        assert_eq!(mine[0].predicate, "pursuing");
+        // The scope-blind read is still there, and still sees both — which is
+        // what made this a bug rather than a difference of opinion.
+        assert_eq!(s.facts_about("goal/nightly-tidy").unwrap().len(), 2);
     }
 
     #[test]

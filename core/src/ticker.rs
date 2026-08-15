@@ -1136,7 +1136,7 @@ impl Ticker {
         let mut settling = Vec::new();
         for goal in store.paused_goals()? {
             if self
-                .current_run(&store, &format!("goal/{}", goal.name))?
+                .current_run(&store, &goal.memory_scope(), &format!("goal/{}", goal.name))?
                 .is_none()
             {
                 continue;
@@ -1160,7 +1160,7 @@ impl Ticker {
             // never has two runs in flight and its spend is counted once.
             // Whether there was one is also what tells the code below that this
             // goal has never run at all, so it is read once and kept.
-            let in_flight = self.current_run(&store, &subject)?;
+            let in_flight = self.current_run(&store, &scope, &subject)?;
             if let Some(run) = &in_flight {
                 match self.jod.agent(run).await {
                     Ok(agent) if agent.status == AgentStatus::Running => {
@@ -1267,12 +1267,12 @@ impl Ticker {
                         // With no check there is nothing to observe, and the
                         // honest answer is no: a goal nobody can measure should
                         // stall and ask rather than run for ever.
-                        let progressed = match (&verdict, self.last_fingerprint(&store, &subject)?)
-                        {
-                            (Some(v), Some(previous)) => v.fingerprint != previous,
-                            (Some(_), None) => true,
-                            (None, _) => false,
-                        };
+                        let progressed =
+                            match (&verdict, self.last_fingerprint(&store, &scope, &subject)?) {
+                                (Some(v), Some(previous)) => v.fingerprint != previous,
+                                (Some(_), None) => true,
+                                (None, _) => false,
+                            };
                         if let Some(v) = &verdict {
                             store.remember(
                                 NewFact::new(subject.clone(), "done-when", v.fingerprint.clone())
@@ -2074,18 +2074,32 @@ impl Ticker {
     }
 
     /// The fingerprint the previous iteration recorded, if any.
-    fn last_fingerprint(&self, store: &Store, subject: &str) -> Result<Option<String>> {
+    ///
+    /// Read in the goal's own scope, not by subject alone. The subject is
+    /// `goal/<name>` and a name can be handed to a second goal, so a
+    /// subject-only read would compare this goal's check against one a
+    /// removed goal ran.
+    fn last_fingerprint(
+        &self,
+        store: &Store,
+        scope: &str,
+        subject: &str,
+    ) -> Result<Option<String>> {
         Ok(store
-            .facts_about(subject)?
+            .facts_about_in_scope(scope, subject)?
             .into_iter()
             .find(|f| f.predicate == "done-when")
             .map(|f| f.object))
     }
 
     /// The run this goal has in flight, if any.
-    fn current_run(&self, store: &Store, subject: &str) -> Result<Option<String>> {
+    ///
+    /// Scoped for the same reason as [`Ticker::last_fingerprint`], and here it
+    /// matters more: a stale pointer inherited from another goal names a run
+    /// this goal never started, and the tick would wait on it.
+    fn current_run(&self, store: &Store, scope: &str, subject: &str) -> Result<Option<String>> {
         Ok(store
-            .facts_about(subject)?
+            .facts_about_in_scope(scope, subject)?
             .into_iter()
             .find(|f| f.predicate == "current-run")
             .map(|f| f.object))
@@ -2105,7 +2119,7 @@ impl Ticker {
         // more history than a prompt can hold, and the recent past is the part
         // that bears on what to do next.
         let recent: Vec<String> = store
-            .facts_about(subject)?
+            .facts_about_in_scope(scope, subject)?
             .into_iter()
             .filter(|f| f.predicate == "iteration")
             .take(5)
@@ -2180,7 +2194,7 @@ impl Ticker {
 
         // Supersede rather than insert, so the current run is one lookup and
         // every previous one stays answerable.
-        let existing = store.facts_about(subject)?;
+        let existing = store.facts_about_in_scope(scope, subject)?;
         for predicate in ["pursuing", "current-run"] {
             let value = if predicate == "pursuing" {
                 goal.objective.clone()
