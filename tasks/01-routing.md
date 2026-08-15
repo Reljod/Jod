@@ -11,7 +11,7 @@ A quick question it should just answer, and today it does not.
 ---
 
 ## R1. The orchestrator is forbidden from ever answering anything
-Status: open · Owner: — · Severity: high
+Status: **in flight** · Severity: high
 
 `orchestrator_preamble` (`core/src/orchestrator.rs:353`) opens with:
 
@@ -77,7 +77,7 @@ instruction that must be handed over.
 ---
 
 ## R2. Nothing tests that a routing decision is correct
-Status: open · Owner: — · Severity: medium
+Status: **closed — satisfied by R1's disposition suite** · Severity was: medium
 
 `parse_decision` and `router_prompt` (`core/src/orchestrator.rs:229`, `:300`)
 are tested for *shape* — that a decision parses — and nothing anywhere asserts
@@ -104,7 +104,7 @@ unit suite.
 ---
 
 ## R3. A delegated run has no route back to the orchestrator
-Status: open · Owner: — · Severity: medium · needs confirming
+Status: **fix open as #134** · Severity: medium
 
 Reljod's ask includes the return leg: the sub-agent communicates back to the
 orchestrator with answers, or to say it has finished. The bus exists —
@@ -125,7 +125,7 @@ a turn, the way `core/src/delivery.rs` already starts one for a teammate.
 ---
 
 ## R4. The orchestrator blocks itself busy-waiting on the run it just delegated
-Status: open · Owner: — · Severity: high
+Status: open · Owner: — · Severity: high — **now small, see below**
 
 Observed in the same exchange as R1. Having spawned the sub-agent, the
 orchestrator did this, in its own turn:
@@ -162,7 +162,7 @@ Check: delegate something from the main chat and assert the turn returns
 without a `sleep` or a poll loop in its tool calls.
 
 ## R5. The orchestrator reaches for tools outside Jod's set
-Status: open · Owner: — · Severity: high
+Status: **fix open as #127** · Severity: high
 
 (Raised from medium. The orchestration sweep found this on **every one** of its
 roughly ten live runs, and my own run too. It is universal, not occasional —
@@ -186,7 +186,7 @@ question for `docs/harness-support.md`.
 Check: assert a main-chat turn's tool calls are all `mcp__jod__*` plus reading.
 
 ## R6. The compaction warning measures against a window the model does not have
-Status: open · Owner: — · Severity: medium — **diagnosed**
+Status: **fixed — merged as #125** · Severity was: medium
 
 (Ranked low at first because the fix is one word. That was the wrong axis: the
 consequence is that somebody compacts a conversation with five sixths of its

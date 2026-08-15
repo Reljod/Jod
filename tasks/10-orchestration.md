@@ -20,7 +20,7 @@ repeats L1–L6 or R1–R6; several findings corroborate them instead, and say s
 ---
 
 ## O1. A work session can never actually write anything — the read-only-root-then-claim-a-worktree design is unreachable
-Status: open · Owner: — · Severity: critical
+Status: **open — needs Reljod's decision, deliberately unclaimed** · Severity: critical
 Verified independently by two further readers. Nobody needs to check it a
 third time — spend the effort on the decision instead.
 
@@ -110,7 +110,7 @@ a commit exists on the leased worktree's branch afterwards.
 ---
 
 ## O2. The pinned main chat's own transcript can permanently lose the answer
-Status: **claimed, in progress** · Severity: high
+Status: **fixed — merged as #133** · Severity was: high
 
 ### What "fixed" means here, and the trap on the way
 

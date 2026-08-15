@@ -18,7 +18,7 @@ some findings below cite the same goal more than once.
 ---
 
 ## G1. A goal's memory is keyed on its name, so a new goal inherits a dead one's record
-Status: open · Owner: — · Severity: high
+Status: **fix open as #126, waiting on a human** · Severity: high
 
 Every fact a goal writes is filed under the subject `goal/<name>`
 (`core/src/ticker.rs:908`), and every read is `facts_about("goal/<name>")` —

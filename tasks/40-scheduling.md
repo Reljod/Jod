@@ -21,7 +21,7 @@ This file only covers what's specific to scheduling.
 ---
 
 ## S1. The circuit breaker never trips for the ordinary way a schedule fails
-Status: open · Owner: — · Severity: high
+Status: **fixed — merged as #135** · Severity was: high
 
 `BREAK_AFTER_FAILURES = 5` and the backoff curve exist, by the module's own
 account, because a schedule whose every run fails made **288 spawn attempts in
@@ -87,7 +87,7 @@ it five times, assert `consecutive_failures >= 5` and `state == "broken"`.
 ---
 
 ## S2. A cron expression that can never fire is armed anyway
-Status: open · Owner: — · Severity: high
+Status: **in flight** · Severity: high
 
 The module's own comment on `validate` says the reason it exists: "a schedule
 that can never fire is refused when it is written rather than discovered as

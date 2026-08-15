@@ -23,7 +23,7 @@ The real fault is somewhere else, and it is below.
 ---
 
 ## L1. The console Reljod actually uses is rooted at `$HOME`, and never in a repository
-Status: open · Owner: — · Severity: high — **this is the reported bug**
+Status: **open — needs Reljod's decision between three options** · Severity: high — **this is the reported bug**
 
 Reljod does not run `jod tui` in a directory. He attaches to a console that was
 already running. `jod-tui.service` starts it at boot:
@@ -111,7 +111,7 @@ Check: a conversation with roots `[$HOME, some-repo]` must default new work to
 `some-repo`.
 
 ## L3. Every entry point except the TUI starts in `$HOME`, wherever you ran it
-Status: open · Owner: — · Severity: medium
+Status: **fixed — merged as #122** · Severity was: medium
 
 Observed twice on a fresh `JOD_HOME`, both times from inside a scratch
 repository:
@@ -155,7 +155,7 @@ directory; assert `conversations.cwd` is that directory in both cases and that
 `jod root ls` lists it.
 
 ## L4. A console with no root cannot open work at all
-Status: open · Owner: — · Severity: medium — real, but rarer than it looked
+Status: **probably resolved by #122 — verify before starting** · Severity was: medium
 
 `open_work` with no `checkout` and no roots refuses (`core/src/mcp.rs:2149`):
 
@@ -246,7 +246,7 @@ Check: add a root as a lease, add the same path again as reading, assert it is
 still writable.
 
 ## L8. `merge_pr.sh` exits non-zero after a merge that succeeded
-Status: open · Owner: — · Severity: medium
+Status: **fix open as #128, waiting on a human** · Severity: medium
 
 Run from inside a git worktree, `merge_pr.sh <n> --ready` merges the pull
 request and *then* exits 1, with:
