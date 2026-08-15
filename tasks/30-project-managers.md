@@ -123,7 +123,21 @@ Check: add a project with an alias and a note, re-add the same path with only
 ---
 
 ### P2. Cataloguing a file, not a directory, is accepted with no complaint
-Status: open · Owner: — · Severity: medium
+Status: **fixed — merged as #136** · Severity was: medium
+
+**What fixing it turned up, which was worse than the finding.** A catalogued
+path pointing at a *file* is not a politeness problem. `open_work` succeeds and
+reports "opened and running"; the failure lands one process later as
+`could not start "/home/reljod/.local/bin/claude": Not a directory` — naming the
+harness binary and never the project or the path, so it reads as Claude Code
+being broken. And `claim_worktree` raised a card saying the path "is not inside
+a git repository", which was demonstrably false: the file was inside a real one.
+
+Two lessons outlive the fix. An error that names the wrong subject sends the
+reader to the wrong codebase, and a diagnostic that states something false is
+worse than one that says nothing. It also found that a *missing* path was never
+refused either — which the task had guessed at rather than tested, so the guess
+was under-stated rather than wrong.
 
 `add_project` never checks that the path exists or is a directory.
 
@@ -153,7 +167,7 @@ row is flagged in a way `project_list` surfaces.
 ---
 
 ### P3. Two projects that share a spoken form are never reported as ambiguous — one is silently picked
-Status: **claimed, in progress** · Severity: high
+Status: **fixed — merged as #131** · Severity was: high
 
 Note for whoever reviews it: there are two halves and only one is easy.
 Reporting `Match::Ambiguous` from an interactive command like

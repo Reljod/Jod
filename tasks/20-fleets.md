@@ -34,7 +34,7 @@ number rather than refiled.
 ---
 
 ## F1. Once any work exists, every delegated run disappears from the fleet screen
-Status: open · Owner: — · Severity: high
+Status: **fixed — merged as #121** · Severity was: high
 
 A `delegate`d run (or any session started before works existed) belongs to no
 work — `conversations.work_id IS NULL`. `Store::forest_of` only ever looks at
@@ -104,7 +104,7 @@ test can run) and assert the delegated run's id appears somewhere on it.
 ---
 
 ## F2. A run's tree node cannot say finished, failed, or killed — only "running" or not
-Status: open · Owner: — · Severity: high
+Status: **fixed — merged as #130** · Severity was: high
 
 `Node` (`core/src/tree.rs:59-80`) carries a single `running: bool` for a run,
 set by `RawRun.running = status == "running"` (`core/src/tree.rs:132-133,
@@ -182,7 +182,7 @@ terminal width; assert the row's rendered width does not exceed the box.
 ---
 
 ## F4. `list_agents` silently truncates at 20 with no signal there is more
-Status: open · Owner: — · Severity: high — this is what lets the router miss a wedged agent
+Status: **in flight** · Severity: high — this is what lets the router miss a wedged agent
 
 `list_agents`'s own description (`core/src/mcp.rs:164-168`) says:
 
@@ -216,7 +216,7 @@ limit, assert the response says how many were omitted.
 ---
 
 ## F5. "Stop a running agent and everything it started" does not stop what it started
-Status: open · Owner: — · Severity: high — misleading given the tool's own wording
+Status: **in flight** · Severity: high — misleading given the tool's own wording
 
 `stop_agent`/`jod kill`'s docs (`core/src/mcp.rs:223`, `cli/src/main.rs` kill
 help) both say **"Stop an agent and everything it started."**
@@ -261,7 +261,13 @@ behaviour) — or, if the fix is to cascade, assert the child is also stopped.
 ---
 
 ## F6. Deleting a work's last conversation leaves its runs as permanent, contextless ghosts
-Status: open · Owner: — · Severity: medium
+Status: **fixed — merged as #137** · Severity was: medium
+
+**A second reason not to cascade, found while fixing it.** `events.run_id` has
+no foreign key to `runs`, so deleting the run row would strand its events and
+its recorded cost with nothing left listing them at all — trading visible
+orphans for invisible ones. That is why the fix reports what a delete leaves
+behind rather than deleting more.
 
 `jod work delete` cascades: `messages.conversation_id` is `REFERENCES
 conversations(id) ON DELETE CASCADE` (`core/src/store.rs:430`), so deleting a
@@ -345,7 +351,7 @@ the fleet does not yet say once that the daemon is missing.
 ---
 
 ## F9. `screens.rs` shows an empty fleet whatever the database holds
-Status: **claimed, in progress** · Severity: medium
+Status: **fix open as #132** · Severity: medium
 
 `cli/examples/screens.rs` is the one tool that lets someone render a TUI screen
 without a terminal, and it renders every workspace off a real database — except
