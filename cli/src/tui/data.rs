@@ -36,6 +36,7 @@ use jod_core::schedule::{
     Fire, FireOutcome, Goal, GoalState as StoredGoalState, Schedule,
     ScheduleState as StoredScheduleState,
 };
+use jod_core::activity as core_activity;
 use jod_core::store::{Edge, Fact, Origin, Store, StoredRun};
 use jod_core::team::{Scope, TeamTask};
 use jod_core::webhook::{Delivery as StoredDelivery, DeliveryStatus, Rule};
@@ -422,6 +423,22 @@ pub enum Source {
 }
 
 impl Source {
+    /// The screen's name for one of core's sources.
+    ///
+    /// A total mapping rather than a `From` over strings: if core grows a sixth
+    /// source this stops compiling, which is the point — a filter that silently
+    /// drops a whole category of activity is the failure this screen exists to
+    /// prevent.
+    pub fn of(source: core_activity::Source) -> Source {
+        match source {
+            core_activity::Source::Run => Source::Run,
+            core_activity::Source::Cron => Source::Cron,
+            core_activity::Source::Goal => Source::Goal,
+            core_activity::Source::Hook => Source::Hook,
+            core_activity::Source::Memory => Source::Memory,
+        }
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Source::Run => "run",
@@ -957,8 +974,9 @@ fn run_note(run: Option<&StoredRun>, outcome: FireOutcome) -> String {
 }
 
 /// The first line of a message, which is all a table row has room for.
+/// Delegated so the terminal and the API trim a feed row identically.
 fn one_line(text: &str) -> String {
-    text.lines().next().unwrap_or_default().trim().to_string()
+    core_activity::one_line(text)
 }
 
 fn runs_as(harness: &str, cwd: &str, model: Option<&str>) -> String {
@@ -1194,12 +1212,9 @@ fn delivery(d: &StoredDelivery) -> Delivery {
     Delivery {
         at_ms: d.received_at_ms,
         id: d.delivery_id.clone(),
-        what: match (&d.action, &d.repo) {
-            (Some(action), Some(repo)) => format!("{}.{action} on {repo}", d.event),
-            (Some(action), None) => format!("{}.{action}", d.event),
-            (None, Some(repo)) => format!("{} on {repo}", d.event),
-            (None, None) => d.event.clone(),
-        },
+        // Shared with the activity feed and the API, so a delivery reads the
+        // same wherever it is shown.
+        what: core_activity::delivery_what(d),
         accepted: d.status == DeliveryStatus::Accepted,
         run: d.run_id.clone(),
         verdict: match &d.detail {
@@ -1250,84 +1265,37 @@ pub fn activity(jod: &Arc<Jod>) -> Vec<ActivityItem> {
     }
 }
 
+/// The feed, as core builds it, dressed in this screen's vocabulary.
+///
+/// The rule for what counts as activity lives in [`jod_core::activity`] so that
+/// the terminal and the HTTP API cannot disagree about it — they used to, and
+/// the API was the one that lost: it had no webhook source at all. What stays
+/// here is the part that is genuinely this screen's own — the window to read
+/// over, the glyphs, and `unread`, which is a fact about a person that the store
+/// has nowhere to keep yet.
 fn activity_from(store: &Store) -> Vec<ActivityItem> {
-    let mut items: Vec<ActivityItem> = Vec::new();
+    let query = core_activity::Query {
+        fires_per_schedule: RECENT,
+        deliveries: DELIVERY_WINDOW,
+        limit: ACTIVITY_LIMIT,
+        only_needs_you: false,
+    };
 
-    for s in store.schedules().unwrap_or_default() {
-        for f in store.fires(&s.id, RECENT).unwrap_or_default() {
-            items.push(ActivityItem {
-                id: format!("fire/{}", f.id),
-                at_ms: f.fired_at_ms,
-                source: Source::Cron,
-                text: format!("{} · {}", s.name, f.outcome.as_str().replace('_', " ")),
-                unread: false,
-                // A schedule Jod could not start, or one whose claimant died,
-                // is silence that nothing else will report.
-                needs_you: matches!(f.outcome, FireOutcome::SpawnFailed | FireOutcome::Abandoned),
-                jump_to: Some((Workspace::Schedules, s.name.clone())),
-            });
-        }
-    }
-
-    for g in store.goals().unwrap_or_default() {
-        for f in store
-            .facts_about(&format!("goal/{}", g.name))
-            .unwrap_or_default()
-        {
-            let ended = f.predicate == "ended";
-            if !ended && f.predicate != "iteration" {
-                continue;
-            }
-            items.push(ActivityItem {
-                id: format!("goal/{}/{}", g.name, f.id),
-                at_ms: f.recorded_at_ms,
-                source: Source::Goal,
-                text: format!("{} · {}", g.name, one_line(&f.object)),
-                unread: false,
-                // A goal ending is the one goal event a person has to see: it
-                // is the loop saying it will not run again.
-                needs_you: ended,
-                jump_to: Some((Workspace::Goals, g.name.clone())),
-            });
-        }
-    }
-
-    // A delivery names its rule by id; the hooks screen's rows are keyed by
-    // name. Without the translation `⏎` would jump to the screen and select
-    // nothing, and the next tick's `reconcile` would move the cursor somewhere
-    // else entirely — a jump that looks like it worked and did not.
-    let rule_names: HashMap<String, String> = store
-        .webhook_rules()
+    // Swallowed like every other loader here: a locked database costs one stale
+    // frame, never the session.
+    core_activity::feed(store, query)
         .unwrap_or_default()
         .into_iter()
-        .map(|r| (r.id, r.name))
-        .collect();
-
-    for d in store.deliveries(DELIVERY_WINDOW).unwrap_or_default() {
-        items.push(ActivityItem {
-            id: format!("delivery/{}", d.delivery_id),
-            at_ms: d.received_at_ms,
-            source: Source::Hook,
-            text: format!(
-                "{} · {}",
-                delivery(&d).what,
-                d.status.as_str().replace('_', " ")
-            ),
+        .map(|i| ActivityItem {
+            id: i.id,
+            at_ms: i.at_ms,
+            source: Source::of(i.source),
+            text: i.text,
             unread: false,
-            // A rejected delivery is a secret that stopped verifying; a failed
-            // one is a rule that matched and could not run.
-            needs_you: matches!(d.status, DeliveryStatus::Rejected | DeliveryStatus::Failed),
-            jump_to: d
-                .rule_id
-                .as_deref()
-                .and_then(|id| rule_names.get(id))
-                .map(|name| (Workspace::Hooks, name.clone())),
-        });
-    }
-
-    items.sort_by_key(|i| Reverse(i.at_ms));
-    items.truncate(ACTIVITY_LIMIT);
-    items
+            needs_you: i.needs_you,
+            jump_to: i.jump_to.map(|(to, row)| (Workspace::of(to), row)),
+        })
+        .collect()
 }
 
 /// The task board, promoted out of the team panel into a screen of its own.

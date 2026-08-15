@@ -150,7 +150,7 @@ All JSON, all under `/v1`. Errors are
 | `GET` | `/v1/goals/{name}` | `read` | One goal. |
 | `GET` | `/v1/hooks` | `read` | Webhook rules with their deliveries, `?limit=`. |
 | `GET` | `/v1/tasks` | `read` | A team's board, `?team=`. |
-| `GET` | `/v1/activity` | `read` | Fires and goal iterations, `?limit=&needs_you=`. |
+| `GET` | `/v1/activity` | `read` | Fires, goal iterations and webhook deliveries, `?limit=&needs_you=`. |
 | `GET` | `/v1/fleet` | `read` | The fleet tree, flattened, `?filter=live\|closed\|all`. |
 | `GET` | `/v1/conversations` | `read` | Every conversation, `?limit=`. |
 | `GET` | `/v1/conversations/main` | `read` | The pinned main chat and its thread. |
@@ -214,12 +214,21 @@ repeats.
 
 Both are pinned by tests in `api/tests/workspaces.rs`.
 
-`/v1/activity` is a poll, not a stream. Its rows are derived from schedule fires
-and goal facts rather than from an append-only log, so there is no natural `seq`
-to resume from and a cursor here would be a fiction. Each row carries a stable
-`id` so a client can diff rather than redraw. Read/unread is deliberately not
-server-side: the TUI tracks it in process memory, and a shared notion of "read"
-would make two clients disagree about it.
+`/v1/activity` is a poll, not a stream. Its rows are derived from schedule fires,
+goal facts and webhook deliveries rather than from an append-only log, so there
+is no natural `seq` to resume from and a cursor here would be a fiction. Each row
+carries a stable `id` so a client can diff rather than redraw. Read/unread is
+deliberately not server-side: the TUI tracks it in process memory, and a shared
+notion of "read" would make two clients disagree about it.
+
+The projection itself is `jod_core::activity`, and this route is a passthrough to
+it. That matters because it used to be composed here, in parallel with the
+terminal's copy in `cli/src/tui/data.rs`, and the two had already drifted: this
+route had no webhook source at all, so a rejected signature — a secret that
+stopped verifying — was visible only to whoever was sitting at the terminal.
+`source` is therefore now one of `cron`, `goal` or `hook`, and `?needs_you=true`
+filters *before* the page is cut, so a narrow page of escalations is a page of
+escalations rather than whatever survived the truncation of a mixed feed.
 
 An empty store answers with an empty list, never a 404 and never a 500. "There
 are no goals" is a fact, and the screen that asks wants to draw *no goals yet*

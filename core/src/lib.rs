@@ -20,6 +20,7 @@
 //! is held only in the memory of the process that started it, which is why a
 //! restarted daemon — or a phone — can pick it straight back up.
 
+pub mod activity;
 pub mod approvals;
 pub mod cards;
 pub mod commands;

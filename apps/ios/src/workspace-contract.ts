@@ -259,7 +259,18 @@ export type HookView = Rule & { deliveries: Delivery[] };
 
 // ─── api/src/workspaces.rs — activity ───────────────────────────────────────
 
-export type ActivitySource = "cron" | "goal";
+/**
+ * Where one activity line came from.
+ *
+ * `hook` arrived when the feed's projection moved into `jod_core::activity`.
+ * Before that the HTTP feed was built separately from the terminal's and had no
+ * webhook source at all, so a rejected signature reached nobody holding a phone.
+ *
+ * `run` and `memory` are in core's vocabulary but have no producer yet; they are
+ * absent here until one lands, because a type that promises a variant the server
+ * never sends is a type you cannot exhaustively switch on with confidence.
+ */
+export type ActivitySource = "cron" | "goal" | "hook";
 
 /**
  * One line in the activity feed.
@@ -275,10 +286,13 @@ export interface ActivityItem {
   text: string;
   needs_you: boolean;
   /**
-   * Where this line points, as a Rust tuple: `["schedules" | "goals", name]`.
+   * Where this line points, as a Rust tuple:
+   * `["schedules" | "goals" | "hooks", name]`.
    *
    * It must actually navigate. An activity row that names a schedule and cannot
-   * reach it is the feature without the point of it.
+   * reach it is the feature without the point of it. For a webhook row the
+   * second element is the rule's *name*, not the id the delivery stores —
+   * core does that translation so no client has to.
    */
   jump_to: [string, string] | null;
 }
