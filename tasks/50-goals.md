@@ -102,6 +102,12 @@ log` shows one iteration line and the `ended satisfied` line together, and that
 ## G3. A quiet done-check can never show progress, so the goal always stalls
 Status: open · Owner: — · Severity: medium
 
+> **"Always stalls" is not quite what happens in practice — see G15.** Resuming
+> a goal resets its no-progress counter to zero, so pausing and resuming is an
+> accidental workaround for this bug. Anyone who has hit G3 in the wild may
+> already have found it and be using it without knowing why it works. That
+> changes which fix is right here, so read G15 before choosing one.
+
 Progress is a change in the check's *output*, fingerprinted by
 `seen.digest()` (`core/src/ticker.rs:1704`), and the comment there explains why:
 a check whose output is identical run after run is a goal going nowhere,
@@ -462,6 +468,66 @@ goal loop can settle.
 
 Check: drive a goal iteration whose run is outside the rehydrate window; assert
 an `iteration` fact is written and `spent_usd` includes its cost.
+
+---
+
+## G14. A paused goal's counters know nothing about the iteration still running
+Status: open · Owner: — · Severity: medium
+
+Observed: a goal paused mid-run, then three daemon ticks over two minutes.
+`jod goal ls` read `iter 0 · $0.00` and `jod goal log` said "no iteration has
+finished yet" — beside an iteration that had already finished and cost
+**$0.0963**. Resuming picked it up on the next tick and it read `iter 1 · $0.10`.
+
+Cause, verified in the schema: `claim_due_goals`
+(`core/src/store.rs:2769`) selects `WHERE state = 'running'`, so the ticker
+never looks at a paused goal — and the ticker is the only thing that settles a
+run or notices its cost.
+
+Same family as G2, a goal denying a bill it incurred, reached through a
+different door. **It survives every fix that landed today**, because those all
+sit inside a tick that never happens for a paused goal.
+
+Read alongside [G13](#g13-a-real-run-reaches-tick_goalss-err_-branch-and-the-iteration-is-lost):
+both are "the iteration is real and the goal's record does not know it", and
+anyone who finds one should be shown the other.
+
+Check: pause a goal with an iteration in flight, let the run finish, tick the
+daemon; assert `jod goal ls` shows the iteration and its cost without needing a
+resume.
+
+---
+
+## G15. Resuming a goal clears its no-progress counter
+Status: open · Owner: — · Severity: medium · **may be intended — needs a decision**
+
+`set_goal_state` (`core/src/store.rs:2897`) writes:
+
+```sql
+no_progress = CASE WHEN ?2 = 'running' THEN 0 ELSE no_progress END
+```
+
+So a goal one iteration away from being declared stalled gets its full
+allowance back by being paused and resumed. Confirmed by setting the counter to
+5 in a test database and running the real `jod goal resume` against it, which
+brought it to 0.
+
+**The reason to file it rather than shrug is what it does to G3.** G3 says a
+quiet done-check can never show progress, so such a goal always stalls. If
+pause-and-resume resets the counter, this is an *accidental workaround* for G3
+— and anyone who hit G3 in the wild may already be relying on it without
+knowing why it works. That changes what "always stalls" means in practice, and
+it may change which fix is right for G3.
+
+Whether the reset is intended is a separate question and nobody has a view.
+Arguments both ways: resuming is a human saying "carry on", which is evidence
+of progress a counter cannot see; and equally, a goal that has genuinely stopped
+making progress does not start again because somebody toggled its state. That is
+a decision, not a defect, which is why this is filed rather than fixed.
+
+Check: depends on the decision. If the reset stays, say so in the doc comment,
+because it is currently silent. If it goes, assert a resumed goal keeps its
+counter.
 
 ---
 
