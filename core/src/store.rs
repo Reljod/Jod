@@ -2368,12 +2368,13 @@ impl Store {
 
     // ---- schedules --------------------------------------------------------
 
-    /// Write a schedule, refusing one that could never fire.
+    /// Write a schedule, refusing one that has no name or could never fire.
     ///
     /// Validation happens here rather than at the tick because a cron
     /// expression nobody can parse is otherwise indistinguishable from a job
     /// whose time has not come — you find out weeks later, from silence.
     pub fn add_schedule(&self, s: &Schedule) -> Result<()> {
+        require_a_name("schedule", &s.name)?;
         crate::schedule::validate(&s.cron, &s.timezone)?;
         if s.jitter_ms >= s.grace_ms && s.jitter_ms > 0 {
             // Measured: jitter wider than the grace window pushes fires past
@@ -2716,6 +2717,7 @@ impl Store {
     // ---- goals ------------------------------------------------------------
 
     pub fn add_goal(&self, g: &Goal) -> Result<()> {
+        require_a_name("goal", &g.name)?;
         crate::schedule::validate(&g.cron, &g.timezone)?;
         let next = crate::schedule::next_fire(&g.cron, &g.timezone, now_ms())?;
         self.write(|tx| {
@@ -3351,6 +3353,39 @@ const MAX_PATH_DEPTH: u32 = 6;
 /// caller can use rather than what SQLite can produce — and it bounds the sort,
 /// which is the part that grows fastest.
 const MAX_NEIGHBOURS: i64 = 500;
+
+/// Refuse a name that is blank, before anything is written.
+///
+/// A goal or a schedule is addressed by its name for the rest of its life:
+/// `pause`, `resume` and `rm` all take one, and so do the `goal_create` and
+/// `schedule_create` tools. A blank name still satisfies the `UNIQUE` index, so
+/// the database happily stores it, and every listing then prints an empty
+/// column that reads as terminal padding rather than as a row. Two of them
+/// would make `pause`, `resume` and `rm` ambiguous, with no way to say which
+/// one was meant.
+///
+/// This lives in the store rather than in the argument parser because the
+/// command line is not the only way in. The MCP server calls
+/// [`Store::add_goal`] and [`Store::add_schedule`] directly, so a check in
+/// `cli/src/main.rs` would still let a model create a nameless goal — and would
+/// pass a command-line test while doing it.
+///
+/// The test is `trim`, not `is_empty`. A name of three spaces looks exactly
+/// like no name at all in a listing, so it is the same defect and has to be
+/// refused the same way. `str::trim` cuts Unicode whitespace, which means an
+/// ideographic space is caught too; it leaves every other script alone, so a
+/// name like `夜間トリアージ🌙` passes here exactly as it did before.
+fn require_a_name(thing: &str, name: &str) -> Result<()> {
+    if !name.trim().is_empty() {
+        return Ok(());
+    }
+    let fault = if name.is_empty() { "empty" } else { "only whitespace" };
+    Err(JodError::Invalid(format!(
+        "a {thing} needs a name, and this one is {fault}. The name is how you \
+         pause, resume and remove it, and a blank one shows up in a listing as \
+         an empty column. Give it a name and try again."
+    )))
+}
 
 /// Turn the database's refusal of a name already in use into a sentence.
 ///

@@ -513,3 +513,121 @@ fn a_second_goal_with_a_taken_name_is_refused_in_plain_words() {
     assert_eq!(kept.id, "g-zero-budget");
     assert_eq!(kept.objective, "keep the inbox at zero");
 }
+
+// ---- a name that is not a name ----
+
+/// A refusal has to tell the reader what to do about it, not only that
+/// something was wrong. Every blank-name message is checked for the same two
+/// things: the word that names the fault, and a sentence about the fix.
+fn assert_says_what_to_do(message: &str, expected: &str) {
+    assert!(
+        message.contains(expected),
+        "the message should say `{expected}`, and said: {message}"
+    );
+    assert!(
+        message.contains("Give it a name"),
+        "the message should tell the reader what to do, and said: {message}"
+    );
+}
+
+/// A goal with no name is accepted today and lists as a blank column, which
+/// reads as terminal padding rather than as a goal. It is also the key
+/// `jod goal pause`, `resume` and `rm` take, so a second blank-named goal would
+/// make all three ambiguous. The store refuses it, because the CLI is not the
+/// only way in — the `goal_create` MCP tool reaches this same function, and a
+/// check in `cli/src/main.rs` would leave that door open.
+#[test]
+fn a_goal_with_no_name_is_refused() {
+    let scratch = Scratch::new("blank-goal");
+    let store = scratch.open();
+
+    let err = store
+        .add_goal(&goal(""))
+        .expect_err("a goal with no name must be refused");
+    assert_says_what_to_do(&err.to_string(), "a goal needs a name, and this one is empty");
+
+    assert!(
+        store.goals().unwrap().is_empty(),
+        "the refusal must not have written the goal anyway"
+    );
+}
+
+/// Three spaces render exactly like nothing at all, so a name made only of
+/// whitespace is the same defect wearing a disguise. It is called out
+/// separately because `is_empty()` alone would let it through.
+#[test]
+fn a_goal_named_only_with_spaces_is_refused() {
+    let scratch = Scratch::new("spaces-goal");
+    let store = scratch.open();
+
+    let err = store
+        .add_goal(&goal("   "))
+        .expect_err("a goal named only with spaces must be refused");
+    assert_says_what_to_do(
+        &err.to_string(),
+        "a goal needs a name, and this one is only whitespace",
+    );
+
+    assert!(store.goals().unwrap().is_empty(), "nothing should have been written");
+}
+
+#[test]
+fn a_schedule_with_no_name_is_refused() {
+    let scratch = Scratch::new("blank-schedule");
+    let store = scratch.open();
+
+    let err = store
+        .add_schedule(&schedule("", "0 3 * * *"))
+        .expect_err("a schedule with no name must be refused");
+    assert_says_what_to_do(
+        &err.to_string(),
+        "a schedule needs a name, and this one is empty",
+    );
+
+    assert!(
+        store.schedules().unwrap().is_empty(),
+        "the refusal must not have armed the schedule anyway"
+    );
+}
+
+#[test]
+fn a_schedule_named_only_with_spaces_is_refused() {
+    let scratch = Scratch::new("spaces-schedule");
+    let store = scratch.open();
+
+    let err = store
+        .add_schedule(&schedule("  ", "0 3 * * *"))
+        .expect_err("a schedule named only with spaces must be refused");
+    assert_says_what_to_do(
+        &err.to_string(),
+        "a schedule needs a name, and this one is only whitespace",
+    );
+
+    assert!(
+        store.schedules().unwrap().is_empty(),
+        "nothing should have been armed"
+    );
+}
+
+/// The passing case, written down so a later tightening of the rule cannot
+/// quietly take it away. Names outside ASCII work end to end today — armed,
+/// stored, and found again by the name they were given — and the blank-name
+/// refusal must not catch them. A rule written as "ASCII letters only", or one
+/// that measured bytes, would fail here rather than in a user's terminal.
+#[test]
+fn a_name_in_another_script_is_still_accepted() {
+    let scratch = Scratch::new("unicode-names");
+    let store = scratch.open();
+
+    let name = "夜間トリアージ🌙";
+    store.add_schedule(&schedule(name, "0 4 * * *")).unwrap();
+    store.add_goal(&goal(name)).unwrap();
+
+    // Found again by the same name, which is what `pause`, `resume` and `rm`
+    // all rely on.
+    let armed = store.schedule_named(name).unwrap().unwrap();
+    assert_eq!(armed.name, name);
+    assert_eq!(armed.cron, "0 4 * * *");
+    let kept = store.goal_named(name).unwrap().unwrap();
+    assert_eq!(kept.name, name);
+}
