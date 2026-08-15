@@ -399,14 +399,21 @@ pub fn orchestrator_preamble() -> &'static str {
      **Decide by the task.** A quick question you can answer in one turn, you \
      answer. Something that will still be running when this turn ends, you \
      hand to an agent, and the agent reports back. Something that is really a \
-     project, you open a work for. Take those in that order, because the \
+     project, you open a work for. Check them in that order, because the \
      first is the cheapest and it is the one this chat used to skip.\n\n\
+     Only the first of those three is new. Once you have ruled it out, the \
+     tool list below decides which verb you reach for, and this paragraph \
+     does not override it — an instruction that says *keep* or *until* is \
+     still `goal_create` even though it will outlast the turn and touch a \
+     repository, and one that says *when* is still `schedule_create`.\n\n\
      **Answer directly** when the instruction needs no repository, no work \
      that outlasts this turn, and nothing you would have to go away and \
      research. One trivial call you finish inside this turn — reading the \
-     clock, checking `recall` — is still answering; opening a checkout is \
-     not. \"What time is it in Manila\" and \"what does A2A stand for\" are \
-     answers, not agents. \
+     clock, checking `recall` — is still answering. Touching a repository \
+     never is. Running a command in one, or opening one of its files, is \
+     somebody else's job however small the question looks: counting what a \
+     repository contains is a `delegate`, not an answer. \"What time is it \
+     in Manila\" and \"what does A2A stand for\" are answers, not agents. \
      Spawning one costs a process, a conversation row and a round-trip, and \
      it buys nothing when you already knew the answer — worse, the reply that \
      comes back on the turn is \"still working\", which is not an answer at \
@@ -2082,6 +2089,21 @@ mod tests {
         assert!(said.contains("really a project, you open a work for"), "{said}");
     }
 
+    /// The summary of the three sizes is a way in, not a routing table, and on
+    /// its first live run it behaved like one: "keep working until the README
+    /// explains what jod main does" went to `open_work` because it will outlast
+    /// the turn and touch a repository, when `tests/e2e/main-chat/REPORT.md`
+    /// records that same instruction arming a goal. The paragraph now says
+    /// which of the two wins.
+    #[test]
+    fn the_summary_of_the_three_sizes_does_not_override_the_verb_list() {
+        let said = orchestrator_preamble();
+        assert!(said.contains("Only the first of those three is new"), "{said}");
+        assert!(said.contains("this paragraph does not override it"), "{said}");
+        assert!(said.contains("is still `goal_create`"), "{said}");
+        assert!(said.contains("is still `schedule_create`"), "{said}");
+    }
+
     /// Answering is bounded by three things, and the bound is the whole reason
     /// this is not a licence to do the work. Losing any of them lets the chat
     /// start reading a checkout, which is the failure the old rule was written
@@ -2093,8 +2115,14 @@ mod tests {
         assert!(said.contains("no work that outlasts this turn"), "{said}");
         assert!(said.contains("nothing you would have to go away and research"), "{said}");
         assert!(
-            said.contains("opening a checkout is not"),
-            "a trivial in-turn call is still answering, and a checkout is still not: {said}"
+            said.contains("Touching a repository \\\nnever is")
+                || said.contains("Touching a repository never is"),
+            "a trivial in-turn call is still answering, and a repository still is not: {said}"
+        );
+        assert!(
+            said.contains("counting what a repository contains is a `delegate`, not an answer"),
+            "the first live run of this branch answered \"count the files in this repository\" \
+             itself, with a shell command, which is the failure the old rule existed for: {said}"
         );
         assert!(
             said.contains("hand it over rather than guess"),

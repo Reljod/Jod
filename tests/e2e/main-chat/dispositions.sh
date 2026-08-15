@@ -17,6 +17,24 @@
 #   tests/e2e/main-chat/dispositions.sh
 #
 # Slow on purpose. Every row is a real model turn, and the two-turn row is two.
+# Each turn is capped at 420 seconds; a row that hits the cap is still graded,
+# because the grade comes from the store rather than from the process exiting.
+#
+# It asserts in both directions, and that is the reason it is worth running at
+# all. Three rows must be answered directly and check that nothing was handed
+# over. Five rows must be handed over and check the exact tool, which an empty
+# value does not satisfy. So a preamble that had collapsed to "always answer"
+# fails five rows, and one that had collapsed to "always delegate" fails three.
+# Neither direction can pass on its own.
+#
+# It is not deterministic, and pretending otherwise would be worse than saying
+# so. Every row is a live model turn, so a row can pass or fail on how the model
+# reads a sentence that minute. The bug it guards is itself a coin flip — the
+# same question answered directly one time and delegated the next, depending on
+# whether the words "in this project" appeared — and a check cannot be more
+# solid than the thing it measures. What makes it useful anyway is the paragraph
+# above: it cannot report green on an orchestrator that has simply stopped
+# choosing.
 #
 # Nothing here is faked. There is no stub harness, no seeded row and no
 # pre-written answer: each instruction goes to the same code path `jod main`
@@ -248,14 +266,16 @@ rm -rf "$CONT"; mkdir -p "$CONT"
 CONT_DB="$CONT/jod.db"
 
 echo "asked (1): Count how many files are tracked in this repository and tell me."
-JOD_HOME="$CONT" jod main --wait --cwd "$SCRATCH" \
+JOD_HOME="$CONT" timeout "${DISPOSITION_TURN_TIMEOUT:-420}" \
+  jod main --wait --cwd "$SCRATCH" \
   "Count how many files are tracked in this repository and tell me." \
   >"$CONT/turn1.log" 2>&1
 MARK="$(high_water "$CONT_DB")"
 echo "first turn routed to: $(routed_since "$CONT_DB" 0 | tail -1)"
 
 echo "asked (2): Follow up on that file count — also break it down by extension."
-JOD_HOME="$CONT" jod main --wait --cwd "$SCRATCH" \
+JOD_HOME="$CONT" timeout "${DISPOSITION_TURN_TIMEOUT:-420}" \
+  jod main --wait --cwd "$SCRATCH" \
   "Follow up on that file count — also break it down by extension." \
   >"$CONT/turn2.log" 2>&1
 SECOND="$(routed_since "$CONT_DB" "$MARK" | tail -1)"
