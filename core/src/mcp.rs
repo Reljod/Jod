@@ -36,7 +36,7 @@ use serde_json::{json, Value};
 use crate::cards::{Card, CardKind, Importance, NewCard, Source, Status};
 use crate::delivery;
 use crate::event::AgentEvent;
-use crate::harness::ToolAccess;
+use crate::harness::{default_name, ToolAccess};
 use crate::orchestrator::Delegation;
 use crate::schedule::{Goal, GoalState, Schedule, ScheduleState};
 use crate::secrets;
@@ -2809,19 +2809,6 @@ fn permission_id(p: PermissionPolicy) -> &'static str {
 /// a deleted cwd should not stop a schedule being armed.
 fn working_dir() -> PathBuf {
     std::env::current_dir().unwrap_or_else(|_| default_cwd())
-}
-
-/// A short, recognisable name from the prompt's first words — the same rule the
-/// CLI applies when nobody passes `--name`.
-fn default_name(prompt: &str) -> String {
-    let name = prompt.split_whitespace().take(5).collect::<Vec<_>>().join(" ");
-    if name.is_empty() {
-        "agent".to_string()
-    } else if name.chars().count() > 48 {
-        format!("{}…", name.chars().take(47).collect::<String>())
-    } else {
-        name
-    }
 }
 
 fn as_json<T: Serialize>(value: &T) -> Result<String, ToolError> {
