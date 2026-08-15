@@ -673,6 +673,38 @@ const HUMAN_ROLE: &str = "the person this work is for";
 /// asks [`is_human`] rather than looking at the harness.
 const HUMAN_HARNESS: &str = "human";
 
+/// What the main chat is called on the bus.
+///
+/// A **reserved name**, for the same reason [`HUMAN`] is one. A run that was
+/// started by the orchestrator has to be able to answer it without guessing
+/// what to call it, and a message claiming to come from the orchestrator must
+/// actually have come from the pinned chat. Sender identity is derived from the
+/// run ([`Store::caller_for_run`]), so the only way to forge it would be to *be
+/// called* `main` — which is why [`Store::join_scope`] and
+/// [`Store::enrol_session`] both refuse the name.
+///
+/// This was measured before it was written. A run started by `delegate` was
+/// asked to call `roster` and then `send_message` to `main`, and every bus tool
+/// answered `run ... is not a member of any team or work`. A session started by
+/// `open_work` got as far as the roster, saw only `reljod` on it, and its
+/// message to `main` was recorded undeliverable with `` `main` is not a member
+/// of this work ``. There was no return leg at all.
+pub const MAIN: &str = "main";
+
+/// Whether this name is the main chat's.
+///
+/// Case-insensitive, for the same reason [`is_human`] is: a name typed on a
+/// command line or capitalised in a sentence must still reach the chat.
+pub fn is_main(name: &str) -> bool {
+    name.eq_ignore_ascii_case(MAIN)
+}
+
+/// What the roster calls the main chat, so a run knows what it is answering.
+const MAIN_ROLE: &str = "the orchestrator that started this — report your answer here";
+
+/// What the roster calls a run started by `delegate`, on its own return channel.
+const DELEGATED_ROLE: &str = "the run the orchestrator delegated this to";
+
 /// The longest a generated member name may be.
 ///
 /// A name is typed by one agent to address another, and it appears in every
@@ -1140,6 +1172,15 @@ impl Store {
                 "`{name}` is the person's name on the bus and cannot be joined as an agent"
             )));
         }
+        // Same argument, one level up. `main` is the address a delegated run
+        // answers on, and an agent joined under it would send messages no
+        // reader could tell from the orchestrator's own.
+        // [`insert_main_member_in`] is the only way that row is written.
+        if is_main(name) {
+            return Err(JodError::Invalid(format!(
+                "`{name}` is the main chat's name on the bus and cannot be joined as an agent"
+            )));
+        }
         self.write(|tx| {
             tx.execute(
                 "INSERT INTO team_members
@@ -1217,6 +1258,202 @@ impl Store {
         self.mark_mail_delivered(ids)
     }
 
+    // ---- the way back to the orchestrator --------------------------------
+
+    /// Put the main chat on this scope's roster.
+    ///
+    /// The counterpart to [`Store::ensure_human_member`], and it exists for the
+    /// half of Reljod's ask that was missing: a run he delegated something to
+    /// should be able to come back and say what the answer is, or that it has
+    /// finished. Before this there was no address for that. A delegated run was
+    /// in no scope at all and every bus tool refused it; a work session had a
+    /// roster with the person on it and nothing else, so `send_message` to
+    /// `main` was written down as undeliverable.
+    ///
+    /// A real row rather than a special case in the send path, for the same
+    /// reason the person gets one: [`Store::post`] already refuses a recipient
+    /// who is not a member and [`Store::roster`] already lists members, so a row
+    /// makes the chat addressable and visible through code that is already
+    /// there.
+    ///
+    /// Returns `false` when there is no main chat yet — a work opened from the
+    /// command line before anybody has ever typed into `jod main` — because a
+    /// roster entry for a conversation that does not exist would be an address
+    /// that silently goes nowhere.
+    pub fn ensure_main_member(&self, scope: Scope, team: &str) -> Result<bool> {
+        let Some(conversation) = self.pinned_conversation()? else {
+            return Ok(false);
+        };
+        let harness = self
+            .conversation(&conversation)?
+            .and_then(|c| c.harness_kind())
+            .unwrap_or(HarnessKind::ClaudeCode);
+        let at = now_ms();
+        self.write(|tx| insert_main_member_in(tx, scope, team, &conversation, harness, at))?;
+        Ok(true)
+    }
+
+    /// Whether the member called `main` in this scope really is the main chat.
+    ///
+    /// The name is reserved from now on, but a database written before it was
+    /// cannot be. `jod team join crew main` was legal, and so was a work session
+    /// whose title slugged to `main`, so a roster somewhere may already hold an
+    /// ordinary teammate under that name. Deciding from the name alone would
+    /// divert that teammate's mail to the orchestrator and it would simply stop
+    /// receiving anything — the kind of fault that surfaces weeks later as an
+    /// unexplained silence.
+    ///
+    /// So identity is the pinned conversation on the row, which only
+    /// [`insert_main_member_in`] ever writes, and never the spelling of the
+    /// name.
+    pub fn is_main_chat_member(&self, scope: Scope, team: &str, name: &str) -> Result<bool> {
+        if !is_main(name) {
+            return Ok(false);
+        }
+        let Some(pinned) = self.pinned_conversation()? else {
+            return Ok(false);
+        };
+        let conn = self.conn.lock().expect("store lock poisoned");
+        let on_row: Option<Option<String>> = conn
+            .query_row(
+                "SELECT conversation_id FROM team_members
+                  WHERE scope = ?1 AND team = ?2 AND name = ?3",
+                params![scope.as_str(), team, name],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(on_row.flatten().as_deref() == Some(pinned.as_str()))
+    }
+
+    /// Whether mail to the main chat would actually start a turn.
+    ///
+    /// True once the chat holds a harness session to resume. Before that — a
+    /// pinned conversation that exists but has never run — a message would have
+    /// to start a fresh context, and an orchestrator woken with no memory of
+    /// what it delegated is worse than one that has not been woken yet.
+    pub fn main_chat_is_resumable(&self) -> Result<bool> {
+        let Some(id) = self.pinned_conversation()? else {
+            return Ok(false);
+        };
+        Ok(self
+            .conversation(&id)?
+            .and_then(|c| c.session_id)
+            .is_some())
+    }
+
+    /// Open a two-party bus between a delegated run and the main chat.
+    ///
+    /// `delegate` starts a run that belongs to no work and therefore to no
+    /// addressing scope, which is why every bus tool used to refuse it outright.
+    /// This gives it one: a team named after the run itself, holding exactly the
+    /// run and `main`.
+    ///
+    /// Named after the run rather than shared between all delegated runs on
+    /// purpose. One standing scope would put every one-shot Jod has ever started
+    /// on every other one's roster, and a `send_message` with no recipient — a
+    /// broadcast — would wake all of them. A private channel costs no more code
+    /// and cannot do that.
+    ///
+    /// Bound by `agent_id` rather than by conversation, because at the moment
+    /// `delegate` returns the run has usually not written into a conversation
+    /// yet; the run id is the one identifier that certainly exists.
+    /// [`Store::caller_for_run`] reads the binding first, so the run resolves to
+    /// this member from its very first tool call.
+    ///
+    /// Returns the name the run answers to, or `None` when there is no main chat
+    /// to report to and a channel would therefore lead nowhere.
+    pub fn open_return_channel(
+        &self,
+        run_id: &str,
+        run_name: &str,
+        harness: HarnessKind,
+    ) -> Result<Option<String>> {
+        if self.pinned_conversation()?.is_none() {
+            return Ok(None);
+        }
+        // A run whose name would collide with one of the two reserved ones is
+        // renamed rather than refused. The delegation has already happened; a
+        // bookkeeping quarrel is not a reason to leave it unable to answer.
+        let name = if is_main(run_name) || is_human(run_name) || run_name.trim().is_empty() {
+            format!("{run_name}-run").trim_start_matches('-').to_string()
+        } else {
+            run_name.to_string()
+        };
+        self.join_scope(Scope::Team, run_id, &name, harness, DELEGATED_ROLE, None)?;
+        self.bind_member(run_id, &name, Some(run_id), None)?;
+        self.ensure_main_member(Scope::Team, run_id)?;
+        Ok(Some(name))
+    }
+
+    /// Take everything waiting for a member and queue it on a conversation.
+    ///
+    /// The join between the two halves of the return leg. Mail is addressed to a
+    /// *member*; the main chat is a *conversation*, and the queue in
+    /// [`crate::delivery`] is the thing that already knows how to turn something
+    /// waiting for a conversation into a turn — it resolves the session, resumes
+    /// it, and batches whatever else arrived in the meantime into the same turn.
+    /// The module's own notes say a member that is a conversation "would fit
+    /// straight away", and the main chat is exactly that case: one pinned
+    /// conversation with a stable id that outlives every run.
+    ///
+    /// So this is deliberately not a second delivery mechanism. It is the drain
+    /// [`crate::ticker::Ticker::tick_mail`] already does for a teammate, ending
+    /// in [`crate::delivery`]'s queue instead of in a fresh spawn.
+    ///
+    /// One transaction, because the two halves must not come apart: a drain that
+    /// committed without its queue rows would mark mail delivered that nobody
+    /// will ever be told about, and a queue written without the drain would
+    /// deliver the same message on every tick for ever.
+    pub fn hand_mail_to_conversation(
+        &self,
+        team: &str,
+        member: &str,
+        conversation_id: &str,
+    ) -> Result<usize> {
+        let at = now_ms();
+        self.write(|tx| {
+            let mut stmt = tx.prepare(
+                "SELECT id, team, sender, recipient, body, at_ms FROM team_messages
+                  WHERE team = ?1 AND recipient = ?2 AND delivered = 0 ORDER BY id",
+            )?;
+            let taken: Vec<Message> = stmt
+                .query_map(params![team, member], |r| {
+                    Ok(Message {
+                        id: r.get(0)?,
+                        team: r.get(1)?,
+                        from: r.get(2)?,
+                        to: r.get(3)?,
+                        text: r.get(4)?,
+                        at_ms: r.get(5)?,
+                    })
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            drop(stmt);
+            for message in &taken {
+                // `as_prompt` and not the bare text: it carries the sender and
+                // the message number, and the number is the only thing the
+                // orchestrator has to `reply` into the same thread with.
+                crate::delivery::insert_pending(
+                    tx,
+                    conversation_id,
+                    crate::delivery::Kind::Mail,
+                    &message.id.to_string(),
+                    &message.as_prompt(),
+                    at,
+                )?;
+            }
+            // The same predicate the read used, inside the same transaction —
+            // not the ids it returned — so a message that arrived between the
+            // two is not marked without being handed over.
+            tx.execute(
+                "UPDATE team_messages SET delivered = 1, state = ?3
+                  WHERE team = ?1 AND recipient = ?2 AND delivered = 0",
+                params![team, member, MailState::Delivered.as_str()],
+            )?;
+            Ok(taken.len())
+        })
+    }
+
     /// Make a session a member of its work, with no join step.
     ///
     /// A work *is* an addressing scope — asking the sessions the orchestrator
@@ -1256,9 +1493,13 @@ impl Store {
         // one the human sent — sender identity is derived from the run
         // precisely so that it cannot be claimed, and a *name* that can be
         // claimed would give it all back.
+        //
+        // The orchestrator's name is taken for the same reason and by the same
+        // rule: a session titled "main" would otherwise slug to `main` and be
+        // indistinguishable from the chat that opened the work.
         let mut name = base.clone();
         let mut n = 2;
-        while taken.contains(&name) || is_human(&name) {
+        while taken.contains(&name) || is_human(&name) || is_main(&name) {
             name = format!("{base}-{n}");
             n += 1;
         }
@@ -1325,17 +1566,32 @@ impl Store {
     /// not need a tenth to say the same thing.
     pub fn roster(&self, scope: Scope, team: &str, asking: &str) -> Result<Vec<Addressee>> {
         let members = self.members_in(scope, team)?;
+        // Asked once for the whole roster rather than per member: the main
+        // chat's row holds no `session_id` of its own, because the thing that
+        // gets resumed is the pinned conversation and that is where the session
+        // id lives. Copying it onto the member row would be a second copy of a
+        // value that changes on every turn.
+        let main_resumable = self.main_chat_is_resumable().unwrap_or(false);
+        // And once for whether the `main` on *this* roster is the chat at all.
+        // A teammate named `main` on an older database is an ordinary member
+        // and is described as one.
+        let main_is_the_chat = self.is_main_chat_member(scope, team, MAIN)?;
         let mut out = Vec::with_capacity(members.len());
         for m in members.into_iter().filter(|m| m.name != asking) {
             let waiting = self.team_unread(team, &m.name)?.len();
             let human = is_human(&m.name);
+            let main = is_main(&m.name) && main_is_the_chat;
             out.push(Addressee {
                 idle: m.status == MemberStatus::Ready,
                 // A person is never "woken". False here says the same word to
                 // an agent as it does about a stuck teammate, which is why
                 // `human` sits beside it: one of them is waiting to be read,
                 // the other cannot be reached at all.
-                can_be_woken: !human && m.session_id.is_some(),
+                can_be_woken: if main {
+                    main_resumable
+                } else {
+                    !human && m.session_id.is_some()
+                },
                 name: m.name,
                 role: m.role,
                 harness: m.harness,
@@ -1652,6 +1908,46 @@ pub(crate) fn insert_human_member_in(
          VALUES (?1, ?2, ?3, ?4, 'ready', ?5, ?6, NULL)
          ON CONFLICT(team, name) DO UPDATE SET role = ?4, scope = ?6",
         params![team, HUMAN, HUMAN_HARNESS, HUMAN_ROLE, at_ms, scope.as_str()],
+    )?;
+    Ok(())
+}
+
+/// Write the main chat's member row.
+///
+/// Takes a transaction for the same reason the person's does:
+/// [`crate::works::Store::create_work`] enrols both inside the transaction that
+/// opens the work, so a work never exists — even for an instant — that an agent
+/// could be told to report into and then find nobody to report to.
+///
+/// The conversation goes on the row because that is what makes the address mean
+/// something: mail for `main` ends up on the pinned conversation's delivery
+/// queue, and the queue addresses conversations. `session_id` and `agent_id`
+/// stay empty on purpose — the session to resume belongs to the conversation and
+/// changes every turn, so a copy here would be a second value free to disagree
+/// with the first.
+pub(crate) fn insert_main_member_in(
+    tx: &rusqlite::Transaction,
+    scope: Scope,
+    team: &str,
+    conversation_id: &str,
+    harness: HarnessKind,
+    at_ms: i64,
+) -> Result<()> {
+    tx.execute(
+        "INSERT INTO team_members
+           (team, name, harness, role, status, joined_at_ms, scope, conversation_id)
+         VALUES (?1, ?2, ?3, ?4, 'ready', ?5, ?6, ?7)
+         ON CONFLICT(team, name) DO UPDATE SET
+           harness = ?3, role = ?4, scope = ?6, conversation_id = ?7",
+        params![
+            team,
+            MAIN,
+            harness.id(),
+            MAIN_ROLE,
+            at_ms,
+            scope.as_str(),
+            conversation_id
+        ],
     )?;
     Ok(())
 }
@@ -3083,6 +3379,308 @@ mod tests {
         )
         .unwrap();
         assert_eq!(s.team_members("夜間チーム").unwrap()[0].name, "偵察🌙");
+    }
+
+    // ---- the way back to the orchestrator --------------------------------
+
+    /// A store with a main chat that has already had a turn, so there is a
+    /// session to resume. This is the ordinary state: a delegated run exists
+    /// only because the chat ran and delegated it.
+    fn with_a_main_chat() -> (Store, String) {
+        let s = Store::in_memory().unwrap();
+        let id = s.main_conversation(HarnessKind::ClaudeCode, "/tmp").unwrap();
+        s.record_session(&id, HarnessKind::ClaudeCode, "ses-main")
+            .unwrap();
+        (s, id)
+    }
+
+    /// The measured failure, as an assertion. A run started by `delegate`
+    /// belongs to no work, so before this it was in no scope at all and every
+    /// bus tool answered "is not a member of any team or work".
+    #[test]
+    fn a_delegated_run_gets_a_scope_with_the_main_chat_in_it() {
+        let (s, _) = with_a_main_chat();
+        let name = s
+            .open_return_channel("run-1", "reporter", HarnessKind::ClaudeCode)
+            .unwrap()
+            .expect("a channel");
+        assert_eq!(name, "reporter");
+
+        let caller = s
+            .caller_for_run("run-1")
+            .unwrap()
+            .expect("the run must resolve to a member from its first tool call");
+        assert_eq!(caller.name, "reporter");
+        assert_eq!(caller.scope, Scope::Team);
+        assert_eq!(caller.team, "run-1");
+
+        let roster = s.roster(caller.scope, &caller.team, &caller.name).unwrap();
+        let main = roster
+            .iter()
+            .find(|a| a.name == MAIN)
+            .expect("`main` must be on a delegated run's roster");
+        assert_eq!(main.role, MAIN_ROLE);
+        assert!(!main.human, "the orchestrator is not the person");
+        assert!(main.can_be_woken, "mail to `main` must start a turn");
+    }
+
+    /// The channel is private. One standing scope for every delegated run would
+    /// put each one-shot on every other's roster, and a broadcast would wake
+    /// all of them.
+    #[test]
+    fn two_delegated_runs_cannot_see_each_other() {
+        let (s, _) = with_a_main_chat();
+        s.open_return_channel("run-1", "first", HarnessKind::ClaudeCode)
+            .unwrap();
+        s.open_return_channel("run-2", "second", HarnessKind::ClaudeCode)
+            .unwrap();
+
+        let names: Vec<String> = s
+            .roster(Scope::Team, "run-1", "first")
+            .unwrap()
+            .into_iter()
+            .map(|a| a.name)
+            .collect();
+        assert_eq!(names, vec![MAIN.to_string()]);
+    }
+
+    /// No main chat means no address, and an address that leads nowhere is
+    /// worse than an absent one.
+    #[test]
+    fn a_delegated_run_gets_no_channel_when_there_is_no_main_chat() {
+        let s = Store::in_memory().unwrap();
+        assert_eq!(
+            s.open_return_channel("run-1", "reporter", HarnessKind::ClaudeCode)
+                .unwrap(),
+            None
+        );
+        assert!(s.caller_for_run("run-1").unwrap().is_none());
+    }
+
+    /// The other measured failure: a work session's `send_message` to `main`
+    /// was recorded undeliverable, because the work's roster held the person
+    /// and nobody else.
+    #[test]
+    fn a_work_has_the_main_chat_on_its_roster_from_the_moment_it_exists() {
+        let (s, main) = with_a_main_chat();
+        let work = s.create_work("check the plumbing").unwrap();
+
+        let names: Vec<String> = s
+            .roster(Scope::Work, &work.id, "nobody")
+            .unwrap()
+            .into_iter()
+            .map(|a| a.name)
+            .collect();
+        assert!(names.contains(&MAIN.to_string()), "{names:?}");
+        assert!(names.contains(&HUMAN.to_string()), "{names:?}");
+
+        let member = s.member_in(Scope::Work, &work.id, MAIN).unwrap().unwrap();
+        assert_eq!(member.role, MAIN_ROLE);
+        assert!(
+            member.agent_id.is_none() && member.session_id.is_none(),
+            "the chat's session belongs to its conversation, not to a member row"
+        );
+        let conversation: Option<String> = s
+            .write(|tx| {
+                tx.query_row(
+                    "SELECT conversation_id FROM team_members WHERE team = ?1 AND name = ?2",
+                    params![work.id, MAIN],
+                    |r| r.get(0),
+                )
+                .map_err(Into::into)
+            })
+            .unwrap();
+        assert_eq!(conversation.as_deref(), Some(main.as_str()));
+    }
+
+    /// A work opened before anybody has typed into `jod main` has no chat to
+    /// report to, and must not pretend otherwise.
+    #[test]
+    fn a_work_opened_with_no_main_chat_has_no_main_on_its_roster() {
+        let s = Store::in_memory().unwrap();
+        let work = s.create_work("check the plumbing").unwrap();
+        assert!(s.member_in(Scope::Work, &work.id, MAIN).unwrap().is_none());
+    }
+
+    /// The whole return leg, through the real send path: a delegated run
+    /// addresses `main`, the message is accepted rather than recorded
+    /// undeliverable, and it becomes a turn waiting for the pinned chat.
+    #[test]
+    fn a_message_to_main_becomes_a_turn_the_orchestrator_will_take() {
+        let (s, main) = with_a_main_chat();
+        s.open_return_channel("run-1", "reporter", HarnessKind::ClaudeCode)
+            .unwrap();
+
+        let sent = s
+            .post(&Post::new(Scope::Team, "run-1", "reporter", "the answer is 42").to(MAIN))
+            .unwrap();
+        let (ids, _, _) = queued(&sent);
+        assert_eq!(ids.len(), 1);
+
+        let waiting = s.mail_waiting().unwrap();
+        assert_eq!(waiting.len(), 1);
+        assert_eq!(waiting[0].member.name, MAIN);
+
+        let moved = s
+            .hand_mail_to_conversation("run-1", MAIN, &main)
+            .unwrap();
+        assert_eq!(moved, 1);
+
+        let injection = s
+            .plan_injection(&main, false)
+            .unwrap()
+            .expect("the main chat must have a turn waiting");
+        assert!(injection.prompt.contains("the answer is 42"), "{}", injection.prompt);
+        assert!(
+            injection.prompt.contains("[message from another agent]"),
+            "the chat has to be told this came off the bus: {}",
+            injection.prompt
+        );
+        assert!(
+            injection.prompt.contains(&format!("message #{}", ids[0])),
+            "without the number the chat cannot reply into the thread: {}",
+            injection.prompt
+        );
+    }
+
+    /// The drain and the queue commit together. Handing the same mail over
+    /// twice would deliver the answer twice, and a queue written without the
+    /// drain would deliver it on every tick for ever.
+    #[test]
+    fn mail_handed_to_a_conversation_is_taken_off_the_bus_in_the_same_breath() {
+        let (s, main) = with_a_main_chat();
+        s.open_return_channel("run-1", "reporter", HarnessKind::ClaudeCode)
+            .unwrap();
+        s.post(&Post::new(Scope::Team, "run-1", "reporter", "done").to(MAIN))
+            .unwrap();
+
+        assert_eq!(s.hand_mail_to_conversation("run-1", MAIN, &main).unwrap(), 1);
+        assert_eq!(
+            s.hand_mail_to_conversation("run-1", MAIN, &main).unwrap(),
+            0,
+            "the second pass must find nothing"
+        );
+        assert_eq!(s.pending_for(&main).unwrap().len(), 1);
+        assert!(s.mail_waiting().unwrap().is_empty());
+    }
+
+    /// Sender identity is derived from the run precisely so it cannot be
+    /// claimed. A name that can be claimed would give it all back.
+    #[test]
+    fn nothing_may_join_a_scope_as_the_main_chat() {
+        let s = Store::in_memory().unwrap();
+        for spelling in ["main", "Main", "MAIN"] {
+            assert!(
+                matches!(
+                    s.join_scope(
+                        Scope::Team,
+                        "crew",
+                        spelling,
+                        HarnessKind::ClaudeCode,
+                        "impostor",
+                        None
+                    ),
+                    Err(JodError::Invalid(_))
+                ),
+                "`{spelling}` was allowed to join as an agent"
+            );
+        }
+    }
+
+    /// A session whose title slugs to `main` is renamed rather than allowed to
+    /// become indistinguishable from the chat that opened its work.
+    #[test]
+    fn a_session_titled_main_does_not_get_the_orchestrators_name() {
+        let (s, _) = with_a_main_chat();
+        let work = s.create_work("a job").unwrap();
+        let c = s
+            .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
+            .unwrap();
+        s.set_conversation_title(&c.id, "main").unwrap();
+        let name = s
+            .enrol_session(&work.id, &c.id, "main", HarnessKind::ClaudeCode, "agent")
+            .unwrap();
+        assert_ne!(name, MAIN);
+    }
+
+    /// A roster written before the name was reserved may already hold an
+    /// ordinary teammate called `main`, and it must keep working exactly as it
+    /// did. Deciding from the spelling would divert its mail to the
+    /// orchestrator and leave it silently receiving nothing.
+    ///
+    /// The row is written the only way an older Jod could have written it —
+    /// straight into the table, since both join paths now refuse the name.
+    #[test]
+    fn a_teammate_who_was_already_called_main_is_not_mistaken_for_the_chat() {
+        let (s, _) = with_a_main_chat();
+        s.write(|tx| {
+            tx.execute(
+                "INSERT INTO team_members
+                   (team, name, harness, role, status, joined_at_ms, scope, conversation_id)
+                 VALUES ('crew', 'main', 'claude_code', 'an ordinary teammate', 'ready',
+                         1, 'team', NULL)",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        s.join_scope(Scope::Team, "crew", "scout", HarnessKind::ClaudeCode, "", None)
+            .unwrap();
+
+        assert!(
+            !s.is_main_chat_member(Scope::Team, "crew", MAIN).unwrap(),
+            "a teammate named `main` was taken for the orchestrator"
+        );
+        let roster = s.roster(Scope::Team, "crew", "scout").unwrap();
+        let impostor = roster.iter().find(|a| a.name == MAIN).unwrap();
+        assert_eq!(impostor.role, "an ordinary teammate");
+        assert!(
+            !impostor.can_be_woken,
+            "it holds no session of its own, and the chat's must not be lent to it"
+        );
+
+        // And the row this change writes is recognised, in the same store.
+        s.open_return_channel("run-1", "reporter", HarnessKind::ClaudeCode)
+            .unwrap();
+        assert!(s.is_main_chat_member(Scope::Team, "run-1", MAIN).unwrap());
+    }
+
+    /// The two reserved names are refused on both join paths. The gap was real:
+    /// `jod team join` calls [`Store::join_team`], which had neither guard.
+    #[test]
+    fn neither_reserved_name_can_be_joined_from_the_command_line() {
+        let s = Store::in_memory().unwrap();
+        for name in ["main", "Main", "reljod", "Reljod"] {
+            assert!(
+                matches!(
+                    s.join_team("crew", name, HarnessKind::ClaudeCode, "impostor"),
+                    Err(JodError::Invalid(_))
+                ),
+                "`{name}` was allowed onto a team"
+            );
+        }
+        assert!(s
+            .join_team("crew", "scout", HarnessKind::ClaudeCode, "research")
+            .is_ok());
+    }
+
+    /// A pinned chat that exists but has never run has no session to resume.
+    /// Waking it would start a fresh context, and an orchestrator that has
+    /// forgotten what it delegated is worse than one that has not answered yet.
+    #[test]
+    fn a_main_chat_that_has_never_run_is_not_reported_as_wakeable() {
+        let s = Store::in_memory().unwrap();
+        s.main_conversation(HarnessKind::ClaudeCode, "/tmp").unwrap();
+        s.open_return_channel("run-1", "reporter", HarnessKind::ClaudeCode)
+            .unwrap();
+
+        assert!(!s.main_chat_is_resumable().unwrap());
+        let roster = s.roster(Scope::Team, "run-1", "reporter").unwrap();
+        let main = roster.iter().find(|a| a.name == MAIN).unwrap();
+        assert!(
+            !main.can_be_woken,
+            "a chat with no session to resume must not be advertised as wakeable"
+        );
     }
 
     #[test]

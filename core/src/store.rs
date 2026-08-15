@@ -1948,6 +1948,13 @@ impl Store {
     /// The team and the member together are the key. Mail is addressed to that
     /// pair, `member_in` looks a member up by it, and a run is named
     /// `<team>-<member>`, so neither half can be blank.
+    ///
+    /// The two reserved names are refused here as well as in
+    /// [`Store::join_scope`], and the gap between them was real: this is what
+    /// `jod team join` calls, so until now a person could type
+    /// `jod team join crew main` and put an agent on the roster under the
+    /// orchestrator's address. Sender identity is derived from the run so that
+    /// it cannot be claimed, and a name that can be claimed gives it all back.
     pub fn join_team(
         &self,
         team: &str,
@@ -1957,6 +1964,16 @@ impl Store {
     ) -> Result<()> {
         require_a_name("team", team)?;
         require_a_name("team member", name)?;
+        if crate::team::is_human(name) {
+            return Err(JodError::Invalid(format!(
+                "`{name}` is the person's name on the bus and cannot be joined as an agent"
+            )));
+        }
+        if crate::team::is_main(name) {
+            return Err(JodError::Invalid(format!(
+                "`{name}` is the main chat's name on the bus and cannot be joined as an agent"
+            )));
+        }
         self.write(|tx| {
             tx.execute(
                 "INSERT INTO team_members (team, name, harness, role, status, joined_at_ms)
