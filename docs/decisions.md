@@ -2856,3 +2856,44 @@ A work is therefore an addressing scope automatically, and its sessions are its
 members, named by their short titles — so nobody has to decide whether a given
 delegation is "a work" or "a team". Explicit teams stay for the case works do
 not cover: a standing crew that outlives any one intent.
+
+## The rail on a phone had a keyboard it could not reach
+
+Putting the rail along the bottom of a narrow terminal made the blocking card
+readable, and left it unanswerable. Every verb the rail has is a key: `Ctrl-N`
+to focus it, `⏎` to expand, a digit to pick an option, `Esc` to hand the
+keyboard back. On a phone terminal there is no `Ctrl` and no `Esc` worth
+reaching for, and the composer owns every bare letter, so the cards were prose
+to be read and nothing else. The screen said a run had stopped and offered no
+way to unstop it.
+
+The rail now takes the pointer. A tap on a card in the stack opens it, a tap on
+one of its numbered options answers with that option, and a tap on the expanded
+card's title — spelled `◂ card #7`, so the gesture is visible — puts it back in
+the stack. A tap anywhere else inside a card does nothing at all, deliberately:
+the rest of the card is prose being read, and a stray tap that answered the
+question would be worse than no pointer at all. The wheel scrolls, which is what
+a touch drag arrives as: over the stack it walks the cards, and over an expanded
+card it scrolls the card's own text, stopping at the last line rather than at a
+pane of blank rows.
+
+Two things follow from resolving a click rather than a key. The frame that drew
+the cards is the only thing that knows where they went, so `ui::draw` now hands
+back the geometry it painted instead of the event loop recomputing a layout that
+moves between a left-hand column and a bottom panel. And an option that has been
+scrolled out of the pane is taken off the map rather than left pointing at a row
+something else now holds.
+
+The stack also stops at five cards. It used to draw as many as the column had
+rows for, which on a tall terminal is a dozen — and `Pressing` has already put
+the blocking ones at the top, so every row past the fifth was spent on a card
+nobody was reading. Five is what a phone can hold under the chat without the
+panel becoming the screen. The cards past it are still reachable, because the
+window follows the cursor, and a line under the header says which slice is on
+screen — `1–5 of 12` — because five drawn out of twelve with no note saying so
+is seven cards that read as never having been raised. That line is its own row
+rather than a suffix on the header: the rail is thirty-four columns, it
+truncates from the right, and appending the window there pushed `2 blocked` off
+the end. It costs a row only when the stack overflows, which is measured twice
+— once without the line and once with it — because drawing it takes a row off
+the stack, which is what decides whether it is needed.

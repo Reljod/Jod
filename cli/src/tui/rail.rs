@@ -58,6 +58,15 @@ const KINDS: [Option<CardKind>; 4] = [
 /// puts blocking first.
 pub const LIMIT: u32 = 50;
 
+/// How many cards the stack draws at once, however many rows it has been given.
+///
+/// Five, rather than as many as fit. `Pressing` has already put the blocking
+/// cards at the top, so the rows past the fifth are spent on cards nobody is
+/// reading — and on the bottom panel, which is the phone case, they are spent
+/// on rows the chat needed. The rest of the stack stays reachable: the cursor
+/// keys and the wheel both move the selection, and the window follows it.
+pub const VISIBLE: usize = 5;
+
 /// Everything the rail remembers between frames.
 ///
 /// The filter, the sort and both filters survive navigating away and coming
@@ -71,6 +80,15 @@ pub struct RailState {
     pub focused: bool,
     /// Whether the selected card is shown in full rather than as two lines.
     pub expanded: bool,
+    /// How many lines the expanded card has been scrolled down by.
+    ///
+    /// An expanded card can be taller than the pane holding it — a long body,
+    /// nine options and five lines of provenance do not fit in twelve rows at
+    /// the bottom of a phone screen — and before this there was no way to read
+    /// the part underneath. It belongs to the card under the cursor, so moving
+    /// the cursor or collapsing the card puts it back to zero: carrying an
+    /// offset onto the next card would open it halfway down.
+    pub scroll: u16,
     /// The cursor, held as a **card id** and never as a row index: the rail
     /// re-queries on the tick and re-sorts under the cursor, so an index would
     /// silently move the selection onto a different card the moment an agent
@@ -113,6 +131,7 @@ impl Default for RailState {
             shown: false,
             focused: false,
             expanded: false,
+            scroll: 0,
             selected: None,
             filter: None,
             editing_filter: false,
@@ -200,7 +219,7 @@ impl RailState {
         // is about *one* of them. Collapsing rather than trying to keep the
         // cursor across the change is the honest move: the card that was
         // expanded is, by definition, not in the stack now on screen.
-        self.expanded = false;
+        self.collapse();
         self.stack_now()
     }
 
@@ -219,11 +238,13 @@ impl RailState {
             // Nothing to expand, so nothing may claim to be expanded — the
             // renderer would otherwise draw an empty full-card pane and leave
             // no way out of it but `Esc`.
-            self.expanded = false;
+            self.collapse();
             return;
         }
         if !self.selected.is_some_and(|id| ids.contains(&id)) {
-            self.selected = ids.first().copied();
+            if let Some(first) = ids.first().copied() {
+                self.look_at(first);
+            }
         }
     }
 
@@ -237,7 +258,39 @@ impl RailState {
         }
         let at = self.index(ids) as isize;
         let landed = (at + delta).clamp(0, ids.len() as isize - 1) as usize;
-        self.selected = Some(ids[landed]);
+        self.look_at(ids[landed]);
+    }
+
+    /// Put the cursor on one specific card — what a click on it means.
+    ///
+    /// Separate from [`RailState::step`] because a pointer names the card
+    /// directly and never has to know where it sits in the stack, which is the
+    /// one thing the sort keeps changing underneath.
+    pub fn look_at(&mut self, id: i64) {
+        if self.selected != Some(id) {
+            // See `scroll`: the offset is the *card's*, so it does not travel.
+            self.scroll = 0;
+        }
+        self.selected = Some(id);
+    }
+
+    /// Put the card back into the stack, at the top of its text.
+    ///
+    /// Every way out of the expanded card goes through here, so none of them
+    /// can leave an offset behind for the next card to open on.
+    pub fn collapse(&mut self) {
+        self.expanded = false;
+        self.scroll = 0;
+    }
+
+    /// Scroll the expanded card, stopping at both ends.
+    ///
+    /// `past` is how many lines of the card fall below the pane, measured by
+    /// the last frame — scrolling into blank space below the last line reads as
+    /// the card having been emptied.
+    pub fn scroll_card(&mut self, delta: i16, past: u16) {
+        let landed = (self.scroll as i32 + delta as i32).clamp(0, past as i32);
+        self.scroll = landed as u16;
     }
 
     /// `Ctrl-N`: focus the rail and move on to the next card.
@@ -261,11 +314,13 @@ impl RailState {
             if self.selected.is_some_and(|id| ids.contains(&id)) {
                 return;
             }
-            self.selected = ids.first().copied();
+            if let Some(first) = ids.first().copied() {
+                self.look_at(first);
+            }
             return;
         }
         let next = (self.index(ids) + 1) % ids.len();
-        self.selected = Some(ids[next]);
+        self.look_at(ids[next]);
     }
 
     /// Hand the keyboard back to whatever was underneath, leaving the typed
@@ -282,7 +337,7 @@ impl RailState {
             return true;
         }
         if self.expanded {
-            self.expanded = false;
+            self.collapse();
             return true;
         }
         if self.focused {
