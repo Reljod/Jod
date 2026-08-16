@@ -237,6 +237,48 @@ impl Store {
         })
     }
 
+    /// Give a conversation the directory a launch happened in, to read.
+    ///
+    /// Every entry point that opens a conversation makes this grant, and they
+    /// all make it here so that they cannot answer differently. The console
+    /// (`crate::tui::ensure_launch_root` in the CLI), `jod main`, `jod run` and
+    /// `jod chat` each resolved the launch directory for themselves before this
+    /// existed, and the result was the drift this function is meant to end: the
+    /// console granted the root, and for a long time nothing else did.
+    ///
+    /// Read-only, like every root Jod adds itself; a worktree is what makes one
+    /// writable.
+    ///
+    /// **A directory the conversation already holds is left exactly as it is.**
+    /// This is not what protects a claimed worktree's write — [`Store::add_root`]
+    /// does that itself now, keeping a write a re-add never asked for. The check
+    /// stays because the two still differ on one thing: a re-add relabels the
+    /// root's `origin` as `human`, and a directory that arrived as the
+    /// conversation's own `cwd` should go on saying [`Origin::Inherited`].
+    /// Launches are frequent — every console, every `jod main`, every turn of a
+    /// `jod chat` — so a row that is already right is best left untouched.
+    ///
+    /// Returns whether a root was added, so a caller can stay quiet when there
+    /// was nothing to do. Removal still behaves the way it always has: `jod
+    /// root remove` takes the directory away, and the next launch grants it
+    /// again.
+    pub fn grant_launch_root(&self, conversation_id: &str, cwd: &Path) -> Result<bool> {
+        // Nowhere to grant. The CLI's `console_cwd` returns this only if `$HOME`
+        // is unset and the working directory is gone, and an empty path reads
+        // as `/` to anything that joins onto it.
+        if cwd.as_os_str().is_empty() {
+            return Ok(false);
+        }
+        // Compared against the normalised form, because that is the spelling
+        // `add_root` stores and the one every later match is made against.
+        let here = normalise(cwd);
+        if self.roots(conversation_id)?.iter().any(|r| r.path == here) {
+            return Ok(false);
+        }
+        self.add_root(conversation_id, NewRoot::reading(cwd))?;
+        Ok(true)
+    }
+
     /// Drop a root. `false` when there was nothing there to drop.
     pub fn remove_root(&self, conversation_id: &str, path: &Path) -> Result<bool> {
         let normalised = normalise(path).to_string_lossy().to_string();
@@ -675,6 +717,67 @@ mod tests {
             Ok(())
         })
         .unwrap();
+        assert!(s.roots(&c).unwrap().is_empty());
+    }
+
+    /// The first launch grants the directory; every launch after it finds the
+    /// root already there and adds nothing.
+    #[test]
+    fn a_launch_root_is_granted_once_and_then_left_alone() {
+        let s = store();
+        let dir = scratch("launch-once");
+        let c = conversation(&s, &dir.to_string_lossy());
+
+        assert!(s.grant_launch_root(&c, &dir).unwrap(), "the first launch");
+        assert!(
+            !s.grant_launch_root(&c, &dir).unwrap(),
+            "the second launch has nothing to do"
+        );
+        assert_eq!(paths(&s.roots(&c).unwrap()), vec![dir.to_string_lossy()]);
+    }
+
+    /// The reason the guard above is a guard and not an optimisation.
+    ///
+    /// A conversation that predates roots carries its `cwd` forward as an
+    /// `inherited` root, which is how the picker explains a directory nobody
+    /// remembers adding. Every entry point launches in that same directory, so
+    /// every launch would re-add it — and a re-add sets `origin` from what was
+    /// handed in, turning a root the program carried forward into one that
+    /// claims a person typed it. Nothing warns, because relabelling a row is
+    /// not an error.
+    ///
+    /// Separate from what `add_root` protects on its own. It keeps a write a
+    /// re-add did not ask for, which is a different rule and covered by
+    /// `adding_a_leased_root_again_as_reading_keeps_its_write`. Both roots here
+    /// are read-only, so that rule cannot be what makes this pass.
+    #[test]
+    fn a_launch_does_not_relabel_a_root_the_program_carried_forward() {
+        let s = store();
+        let dir = scratch("launch-keeps-origin");
+        let c = conversation(&s, &dir.to_string_lossy());
+        s.ensure_inherited_root(&c).unwrap();
+        assert_eq!(s.roots(&c).unwrap()[0].origin, Origin::Inherited);
+
+        let granted = s.grant_launch_root(&c, &dir).unwrap();
+
+        let roots = s.roots(&c).unwrap();
+        assert_eq!(roots.len(), 1, "{roots:?}");
+        assert_eq!(
+            roots[0].origin,
+            Origin::Inherited,
+            "a launch relabelled a carried-forward root as one somebody added"
+        );
+        assert!(!roots[0].writable);
+        assert!(!granted, "there was nothing to grant");
+    }
+
+    /// A path that resolves to nothing is not a directory anybody is standing
+    /// in, and an empty one reads as `/` to whatever joins onto it.
+    #[test]
+    fn an_empty_launch_directory_grants_nothing() {
+        let s = store();
+        let c = conversation(&s, "/tmp/work");
+        assert!(!s.grant_launch_root(&c, Path::new("")).unwrap());
         assert!(s.roots(&c).unwrap().is_empty());
     }
 

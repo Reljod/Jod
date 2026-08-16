@@ -5555,6 +5555,18 @@ fn bind_rail(jod: &Arc<Jod>, app: &mut App, thread: &Thread) {
 /// worse than one that never offered the root. Removal therefore holds for the
 /// rest of the session, and the next launch grants it again — which is the same
 /// bargain `/add-dir` itself makes.
+///
+/// The grant itself is [`jod_core::store::Store::grant_launch_root`], shared
+/// with `jod main`, `jod chat` and `jod run` so that the console and the
+/// commands cannot answer this question differently again. What this function
+/// keeps is the part that is genuinely the console's: the set, which is a
+/// record of what *this process* has done, and a notice in the transcript,
+/// which is how a console reports a failure.
+///
+/// What the shared helper adds is a check the console never had. A directory
+/// the conversation already holds is left alone, so opening a second console
+/// inside a worktree this conversation had claimed no longer takes the write
+/// back — `add_root` upserts, and its update clause writes `writable`.
 fn ensure_launch_root(jod: &Arc<Jod>, app: &mut App, granted: &mut HashSet<String>) {
     // Nowhere to put it, or nowhere to put it *in*. A fixture with no launch
     // directory is not a session standing anywhere.
@@ -5595,7 +5607,7 @@ fn ensure_launch_root(jod: &Arc<Jod>, app: &mut App, granted: &mut HashSet<Strin
     // the screen already says. A failure is worth one line — it is the
     // difference between "`@` searches here" and "`@` says there is nothing to
     // search", and the popup's own empty state cannot explain why.
-    if let Err(e) = store.add_root(&conversation, jod_core::roots::NewRoot::reading(&cwd)) {
+    if let Err(e) = store.grant_launch_root(&conversation, &cwd) {
         app.push(Entry::Notice(format!(
             "{} is where this console is, but it could not be added as a root: {e}",
             cwd.display()
