@@ -756,6 +756,40 @@ impl Store {
             // question it was asked must not be told the asker does not exist,
             // and the first session may well be the one asking.
             crate::team::insert_human_member_in(tx, Scope::Work, &id, at)?;
+            // And the orchestrator, on the same terms and for the same reason.
+            // A work is opened by the main chat, and its first session is
+            // usually running an instruction the chat is waiting on the answer
+            // to — so the chat has to be addressable from inside the work.
+            // Measured before it was written: a session told to report back
+            // called `send_message` to `main`, and the message was recorded
+            // undeliverable with "`main` is not a member of this work".
+            //
+            // Read inside the transaction rather than passed in, because
+            // `create_work` has callers that are nowhere near the pinned chat.
+            // A work opened before anybody has ever typed into `jod main` gets
+            // no row at all: an address that leads to a conversation which does
+            // not exist is worse than an absent one.
+            let main: Option<(String, Option<String>)> = tx
+                .query_row(
+                    "SELECT id, harness FROM conversations WHERE pinned = 1",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?;
+            if let Some((conversation, harness)) = main {
+                let harness = harness
+                    .as_deref()
+                    .and_then(HarnessKind::from_id)
+                    .unwrap_or(HarnessKind::ClaudeCode);
+                crate::team::insert_main_member_in(
+                    tx,
+                    Scope::Work,
+                    &id,
+                    &conversation,
+                    harness,
+                    at,
+                )?;
+            }
             tx.query_row(
                 &format!("SELECT {WORK_COLUMNS} FROM works WHERE id = ?1"),
                 params![id],

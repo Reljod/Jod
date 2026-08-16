@@ -542,6 +542,29 @@ fn is_live(status: &str) -> bool {
     matches!(status, "running" | "starting" | "queued")
 }
 
+/// How much of Jod a conversation resumed by [`Ticker::tick_deliveries`] holds.
+///
+/// `Delegate` for an ordinary session, which is enough to act on what it has
+/// just been told. `Orchestrate` for the main chat, because that is what
+/// [`crate::orchestrator::hand_to_orchestrator`] gives it on every turn a person
+/// starts, and a turn started by an answer coming back from a delegated run is
+/// the same chat doing the same job. A main chat that could arm a schedule when
+/// Reljod typed and not when the answer arrived would be two different
+/// orchestrators depending on who spoke last.
+///
+/// A free function rather than a branch inside the loop so the rule is one
+/// decision with one reason, and can be asserted without spawning anything.
+fn delivery_access(
+    conversation_id: &str,
+    main_chat: Option<&str>,
+) -> crate::harness::ToolAccess {
+    if main_chat == Some(conversation_id) {
+        crate::harness::ToolAccess::Orchestrate
+    } else {
+        crate::harness::ToolAccess::Delegate
+    }
+}
+
 /// What one tick did, for logging and for tests.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct TickReport {
@@ -1439,6 +1462,32 @@ impl Ticker {
         };
 
         for held in waiting {
+            // The main chat is answered, not woken. Everything else on this
+            // list is a member whose turn is a fresh spawn resuming its own
+            // harness session; the orchestrator is one pinned conversation that
+            // has to keep accumulating, so its mail joins the delivery queue
+            // and `tick_deliveries` resumes the conversation itself. Waking it
+            // the ordinary way would start a run in a *new* conversation, and
+            // the chat Reljod reads would never show the answer at all.
+            //
+            // Asked of the row rather than of the name. The name is reserved
+            // from now on, but a database written before it was is not, so a
+            // teammate somebody called `main` years ago must keep receiving its
+            // own mail rather than having it quietly diverted here.
+            if store
+                .is_main_chat_member(held.scope, &held.team, &held.member.name)
+                .unwrap_or(false)
+            {
+                match self.hand_to_main(&store, &held) {
+                    Ok(0) => report.held += 1,
+                    Ok(_) => report.started += 1,
+                    Err(e) => {
+                        report.failed += 1;
+                        eprintln!("[jod/tick] could not hand mail to the main chat: {e}");
+                    }
+                }
+                continue;
+            }
             let Some(order) = team::wake_order(&held.member, &held.pending) else {
                 report.held += 1;
                 self.note_why_it_waits(&store, &held);
@@ -1780,6 +1829,10 @@ impl Ticker {
             return Ok(TickReport::default());
         };
         let waiting = store.conversations_awaiting_delivery()?;
+        // Read once for the whole sweep, so the question "is this the main
+        // chat" is answered from one value rather than re-resolved per
+        // conversation and given a chance to disagree with itself.
+        let main_chat = store.pinned_conversation()?;
         let mut report = TickReport {
             claimed: waiting.len(),
             ..Default::default()
@@ -1829,7 +1882,16 @@ impl Ticker {
                 // handed a decision it may not carry out is a turn spent
                 // saying so — the same reasoning that gives a woken teammate
                 // its tools in `tick_mail`.
-                tools: Some(crate::harness::ToolAccess::Delegate),
+                //
+                // The main chat is the exception, and it has to be. It is the
+                // orchestrator, `hand_to_orchestrator` gives it
+                // `ToolAccess::Orchestrate` on every turn a person starts, and
+                // a turn started by an answer coming back from a delegated run
+                // is the same chat with the same job. Handing it a smaller
+                // toolbox because of how the turn began would mean the answer
+                // it delegated for arrives and it can no longer arm the
+                // schedule it was about to arm.
+                tools: Some(delivery_access(&conversation_id, main_chat.as_deref())),
                 ..SpawnRequest::default()
             };
             // The conversation's own model and permission, not this process's
@@ -1953,6 +2015,39 @@ impl Ticker {
     }
 
     /// Resume one member on its own conversation, carrying its unread mail.
+    /// Move mail addressed to the main chat onto the main chat's own queue.
+    ///
+    /// The return leg Reljod asked for: a run he delegated something to says
+    /// what the answer is, and the orchestrator takes a turn carrying it. No
+    /// new delivery mechanism — [`crate::delivery`] already turns something
+    /// waiting for a conversation into a resumed turn, batching whatever else
+    /// arrives in the meantime into the same one, and the main chat is the one
+    /// member of any roster that *is* a conversation.
+    ///
+    /// Returns how many messages moved. Zero means there was nothing to hand
+    /// over, or that the chat is not resumable yet — a pinned conversation that
+    /// has never run has no session, and an orchestrator resumed into a fresh
+    /// context would answer having forgotten what it delegated. The mail stays
+    /// on the bus and visible, which is the same choice `wake_order` makes for
+    /// a member with no session.
+    fn hand_to_main(&self, store: &Store, held: &team::Waiting) -> Result<usize> {
+        let Some(conversation) = store.pinned_conversation()? else {
+            return Ok(0);
+        };
+        if !store.main_chat_is_resumable()? {
+            return Ok(0);
+        }
+        let moved =
+            store.hand_mail_to_conversation(&held.team, &held.member.name, &conversation)?;
+        if moved > 0 {
+            eprintln!(
+                "[jod/tick] queued {moved} message(s) for the main chat from {}",
+                held.team
+            );
+        }
+        Ok(moved)
+    }
+
     async fn wake(
         &self,
         store: &Store,
@@ -5350,6 +5445,133 @@ mod tests {
         async fn a_jod_with_no_database_ticks_the_mail_without_complaining() {
             let ticker = Ticker::new(Jod::new());
             assert_eq!(ticker.tick_mail(1).await.unwrap().claimed, 0);
+        }
+
+        // ---- the way back to the orchestrator ----------------------------
+
+        /// A main chat that has already had a turn, and one delegated run with
+        /// a channel back to it. This is the ordinary state: a delegated run
+        /// exists only because the chat ran and delegated it.
+        fn a_delegated_run() -> (Arc<Store>, String) {
+            let store = Arc::new(Store::in_memory().unwrap());
+            let main = store
+                .main_conversation(HarnessKind::ClaudeCode, "/tmp")
+                .unwrap();
+            store
+                .record_session(&main, HarnessKind::ClaudeCode, "ses-main")
+                .unwrap();
+            store
+                .open_return_channel("run-1", "reporter", HarnessKind::ClaudeCode)
+                .unwrap();
+            (store, main)
+        }
+
+        /// R3, end to end through the tick that actually runs.
+        ///
+        /// The measured failure was that a delegated run had no address for the
+        /// chat that started it and nothing woke the chat when it tried. This
+        /// asserts the whole leg: the run addresses `main`, the tick takes the
+        /// message off the bus, and the orchestrator has a turn waiting that
+        /// carries the answer. `tick_deliveries` is what resumes it, and it is
+        /// asserted separately below, because a spawn needs a supervisor and a
+        /// test box has none.
+        #[tokio::test]
+        async fn a_delegated_runs_answer_becomes_a_turn_of_the_main_chats() {
+            let (store, main) = a_delegated_run();
+            store
+                .post(
+                    &Post::new(Scope::Team, "run-1", "reporter", "the answer is 42").to("main"),
+                )
+                .unwrap();
+
+            let report = ticker_over(&store).tick_mail(1_000_000).await.unwrap();
+            assert_eq!(report.claimed, 1);
+            assert_eq!(report.started, 1, "the answer never reached the chat");
+            assert_eq!(report.failed, 0);
+
+            assert!(
+                store.mail_waiting().unwrap().is_empty(),
+                "the message was queued and left on the bus as well"
+            );
+            let injection = store
+                .plan_injection(&main, false)
+                .unwrap()
+                .expect("the orchestrator must have a turn waiting");
+            assert!(
+                injection.prompt.contains("the answer is 42"),
+                "{}",
+                injection.prompt
+            );
+            assert!(
+                injection.prompt.contains("call `reply`"),
+                "the chat has to be told how to answer it: {}",
+                injection.prompt
+            );
+        }
+
+        /// The chat is answered, never woken. Waking it the way a teammate is
+        /// woken would spawn a run in a *new* conversation, and the chat Reljod
+        /// reads would never show the answer at all.
+        #[tokio::test]
+        async fn mail_for_the_main_chat_starts_no_run_of_its_own() {
+            let (store, _) = a_delegated_run();
+            store
+                .post(&Post::new(Scope::Team, "run-1", "reporter", "done").to("main"))
+                .unwrap();
+
+            ticker_over(&store).tick_mail(1_000_000).await.unwrap();
+            assert!(
+                store.runs(10).unwrap().is_empty(),
+                "handing mail to the chat spawned something"
+            );
+        }
+
+        /// A pinned chat with no session to resume gets nothing handed to it.
+        /// Delivering into a fresh context would have the orchestrator answer
+        /// having forgotten what it delegated — the same judgement `wake_order`
+        /// makes for a member with no session.
+        #[tokio::test]
+        async fn mail_for_a_main_chat_that_has_never_run_waits() {
+            let store = Arc::new(Store::in_memory().unwrap());
+            let main = store
+                .main_conversation(HarnessKind::ClaudeCode, "/tmp")
+                .unwrap();
+            store
+                .open_return_channel("run-1", "reporter", HarnessKind::ClaudeCode)
+                .unwrap();
+            store
+                .post(&Post::new(Scope::Team, "run-1", "reporter", "done").to("main"))
+                .unwrap();
+
+            let report = ticker_over(&store).tick_mail(1_000_000).await.unwrap();
+            assert_eq!(report.started, 0);
+            assert_eq!(report.held, 1);
+            assert_eq!(
+                store.team_unread("run-1", "main").unwrap().len(),
+                1,
+                "holding is not dropping"
+            );
+            assert!(store.pending_for(&main).unwrap().is_empty());
+        }
+
+        /// The chat resumed by an answer is the same orchestrator as the chat
+        /// resumed by Reljod typing, so it gets the same toolbox. Handing it a
+        /// smaller one would mean the answer it delegated for arrives and it can
+        /// no longer arm the schedule it was about to arm.
+        #[test]
+        fn the_main_chat_keeps_its_own_tools_when_an_answer_resumes_it() {
+            assert_eq!(
+                delivery_access("c-main", Some("c-main")),
+                crate::harness::ToolAccess::Orchestrate
+            );
+            assert_eq!(
+                delivery_access("c-worker", Some("c-main")),
+                crate::harness::ToolAccess::Delegate
+            );
+            assert_eq!(
+                delivery_access("c-worker", None),
+                crate::harness::ToolAccess::Delegate
+            );
         }
     }
 }

@@ -1102,10 +1102,17 @@ impl Server {
             name: opt_str(args, "name").unwrap_or_else(|| default_name(&prompt)),
             harness,
             prompt,
-            // A delegated agent gets its role from the prompt it was handed.
-            // Nothing here is standing framing, so there is no system prompt to
-            // give it.
-            system: None,
+            // A delegated agent gets its role from the prompt it was handed, so
+            // there is almost nothing standing to tell it. The one exception is
+            // who it answers to: a run that has an address for the orchestrator
+            // and does not know it has one is a run that finishes silently, and
+            // that was the whole of the missing return leg.
+            //
+            // Only when it can actually send. Telling a read-only run to report
+            // back would be telling it to call a tool it has not been given.
+            system: tools
+                .may_delegate()
+                .then(|| crate::orchestrator::delegated_preamble().to_string()),
             cwd: opt_str(args, "cwd").map(PathBuf::from).unwrap_or_else(default_cwd),
             model: opt_str(args, "model"),
             permission,
@@ -1124,11 +1131,43 @@ impl Server {
         // orchestrator's own `jod main` listed the handoff *to* it and never
         // one of the agents it started.
         self.record_handoff("delegate", &agent.id, true);
+        // And the way back. A delegated run belongs to no work and therefore to
+        // no addressing scope, so until this existed every bus tool it called
+        // answered `run ... is not a member of any team or work` — measured, in
+        // a real run, on `roster`, `send_message` and `read_messages` alike.
+        // Reljod's ask has a return leg in it: the run says what the answer is,
+        // or that it has finished. This is the address it says it to.
+        //
+        // Best-effort, like the handoff above and for the same reason: a
+        // delegation that happened and cannot report back is a smaller problem
+        // than one refused over bookkeeping.
+        let reports_back = match self.store() {
+            Ok(store) => store
+                .open_return_channel(&agent.id, &agent.name, agent.harness)
+                .unwrap_or_else(|e| {
+                    eprintln!("[jod] could not open a return channel for {}: {e}", agent.id);
+                    None
+                }),
+            Err(_) => None,
+        };
         as_json(&json!({
             "run_id": agent.id,
             "name": agent.name,
             "harness": agent.harness.id(),
             "watch": agent.watch_command,
+            "reports_back_as": reports_back,
+            "note": match (&reports_back, tools.may_delegate()) {
+                (Some(name), true) => format!(
+                    "running. It can reach you: `main` is on its roster and it is `{name}` on \
+                     yours, so when it sends you the answer you will take a turn carrying it. \
+                     Do not wait for it."
+                ),
+                (Some(_), false) => "running. It holds read-only tools, so it cannot send you \
+                     anything — pass `tools: \"delegate\"` when you want the answer back. Do not \
+                     wait for it."
+                    .to_string(),
+                (None, _) => "running. Do not wait for it.".to_string(),
+            },
         }))
     }
 

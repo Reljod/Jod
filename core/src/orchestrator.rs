@@ -166,6 +166,13 @@ pub fn orchestrator_preamble() -> &'static str {
        says *keep* or *until*.\n\
      - `recall` and `related` before asking Reljod something he has already told \
        you.\n\
+     - `reply` when a turn opens with a message from a run you started. \
+       Everything you hand over can answer you: you are `main` on its roster, \
+       and what it sends arrives as a turn of yours, carrying the message and \
+       its number. You do not fetch it and you do not wait for it — it starts \
+       a turn on its own, whenever it lands. When you want the answer back \
+       from a `delegate`, pass `tools: \"delegate\"`, because a read-only run \
+       has no way to send one.\n\
      - `record_decision` and `ask_question` for anything Reljod should see. \
        Findings and choices go on the rail, not into a sentence he has to \
        scroll back for.\n\n\
@@ -204,6 +211,31 @@ pub fn orchestrator_preamble() -> &'static str {
      Answer in one or two sentences: what you did with it, and who has it now. \
      Say plainly when you delegated to an existing run rather than a new one, \
      and why — a routing decision nobody can see is one nobody can correct."
+}
+
+/// The standing framing a run started by `delegate` gets, and nothing more.
+///
+/// A delegated run used to get no system prompt at all, on the reasoning that
+/// its whole role arrives in the prompt it was handed. That was right about the
+/// role and wrong about one thing: it has an address for the chat that started
+/// it, and a run that has one without knowing it finishes silently. Reljod's
+/// ask is that the sub-agent reports back when it has an answer or is done, and
+/// a report nobody was told to send is a report nobody sends.
+///
+/// Deliberately four sentences. Everything else about this run is in its
+/// prompt, and a long preamble on a one-shot lookup is context spent on nothing.
+///
+/// Only given to a run that holds [`ToolAccess::Delegate`] or better, since
+/// `send_message` is on that line — see [`crate::mcp`]'s `delegate`.
+pub fn delegated_preamble() -> &'static str {
+    "You were started by Jod's main chat, which is waiting on you and is not \
+     watching you work.\n\n\
+     `main` is on your roster. When you have the answer you were asked for, or \
+     you are finished, call `send_message` with `to: \"main\"` and say it in \
+     full — that message is what starts the chat's next turn, and it is the \
+     only way what you found reaches the person who asked. Finishing without \
+     sending it means nobody is told. Use `roster` to see who else is \
+     addressable and `read_messages` to read anything sent to you."
 }
 
 // ---- what a worker is told ------------------------------------------------
@@ -509,7 +541,11 @@ fn bus_lines(brief: &Brief) -> Vec<PreambleLine> {
          - **Report up, ask sideways.** Anything for Reljod — what you found, what you \
            decided, what is blocked — goes on a card. A question for a peer goes on the bus. \
            Put a finding on the bus and nobody with authority sees it; put a question to a \
-           peer on a card and it waits for a person who was never the right one to ask.",
+           peer on a card and it waits for a person who was never the right one to ask.\n\
+         - **`main` on your roster is the chat that opened this work**, and it is waiting on \
+           you. When you have the answer it asked for, or you are finished, `send_message` to \
+           `main`. That message starts its next turn; a card reaches Reljod, and this reaches \
+           the chat that has to decide what happens next.",
     ));
     out
 }
@@ -1622,6 +1658,37 @@ mod tests {
             opens < delegates,
             "`delegate` is offered before `open_work`, so the cheaper and less \
              visible of the two reads as the default"
+        );
+    }
+
+    /// The answer arrives carried, and this pins which verb the chat is sent
+    /// to when it does.
+    ///
+    /// Worth a test of its own because the obvious wording is wrong and was
+    /// written first. This bullet said `read_messages`, which reads as the
+    /// natural verb for "mail arrived" and would have spent a turn finding an
+    /// empty inbox: `hand_mail_to_conversation` marks the message delivered as
+    /// it queues it, and `drain_inbox` selects `delivered = 0`. What actually
+    /// reaches the chat is the message and its number, already in the turn, so
+    /// the only verb it needs is the one that answers into the same thread.
+    #[test]
+    fn the_orchestrator_is_told_an_answer_arrives_carried_rather_than_fetched() {
+        let said = orchestrator_preamble();
+        assert!(
+            said.contains("carrying the message and its number"),
+            "the chat is not told the answer is already in front of it: {said}"
+        );
+        assert!(
+            said.contains("You do not fetch it and you do not wait for it"),
+            "{said}"
+        );
+        assert!(
+            !said.contains("`read_messages` when a turn opens"),
+            "the chat is sent to an inbox that this path has already emptied: {said}"
+        );
+        assert!(
+            said.contains("pass `tools: \"delegate\"`"),
+            "a read-only child cannot report back, and the chat has to know it: {said}"
         );
     }
 
