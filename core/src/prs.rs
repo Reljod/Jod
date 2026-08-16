@@ -29,7 +29,7 @@
 //! [`run_gh`] actually spawning `gh` is **not exercised by any test**, and that
 //! is deliberate rather than an oversight to be tidied up later. Exercising it
 //! end to end means opening a pull request, which is externally visible and
-//! which SPECS.md lists as stop-and-ask; it has not been authorised, so it has
+//! which docs/spec-harness.md lists as stop-and-ask; it has not been authorised, so it has
 //! not been done.
 //!
 //! What *is* held to reality either side of that gap: the argv, run verbatim
@@ -883,7 +883,7 @@ impl Store {
     /// The two above, with the binary passed in.
     ///
     /// Split out so the absent-tooling path can be exercised for real. Faking
-    /// `gh` itself is out of bounds — SPECS.md says so — but a machine that has
+    /// `gh` itself is out of bounds — docs/spec-harness.md says so — but a machine that has
     /// none is not a fake, it is the case this degrades for, and `None` is
     /// exactly what [`gh_binary`] returns there.
     pub fn reconcile_pull_request_with(
@@ -2149,7 +2149,7 @@ thing for the MCP server.
     }
 
     /// The charter is emphatic that a script decides what merges unread, and
-    /// SPECS.md puts merging out of scope entirely. This is the guard that
+    /// docs/spec-harness.md puts merging out of scope entirely. This is the guard that
     /// nobody quietly adds it here — the word is assembled a character at a
     /// time so the test does not find itself.
     #[test]

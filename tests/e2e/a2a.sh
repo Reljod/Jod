@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Agent-to-agent coordination, end to end, with real agents and no fakes.
 #
-# The verification command in SPECS-a2a.md. It proves the two claims that spec
+# The verification command in docs/spec-a2a.md. It proves the two claims that spec
 # makes and that no unit test can:
 #
 #   G1 — an agent reaches the bus **from inside a run**. One agent asks another
@@ -14,7 +14,7 @@
 # Every turn after the first is started by the ticker finding waiting mail.
 #
 # What is faked: nothing except the two agents' instructions, which are written
-# to make them reliably keep replying. SPECS-a2a.md sanctions exactly that and
+# to make them reliably keep replying. docs/spec-a2a.md sanctions exactly that and
 # nothing else — no fake MCP client, no simulated harness, no seeded rows.
 #
 # This is slow on purpose. Each hop is a real model turn, and a member is
@@ -226,7 +226,7 @@ echo
 echo "roles: asker=$ASKER_HARNESS  answerer=$ANSWERER_HARNESS"
 if [ "$ASKER_HARNESS" = "$ANSWERER_HARNESS" ]; then
   echo "NOTE: only one harness here can reach the bus, so both roles run on it."
-  echo "      SPECS-a2a.md asks for two *different* harnesses; saying so rather"
+  echo "      docs/spec-a2a.md asks for two *different* harnesses; saying so rather"
   echo "      than passing quietly is the point of this block."
 else
   echo "This is the cross-harness case: the two agents are different programs,"

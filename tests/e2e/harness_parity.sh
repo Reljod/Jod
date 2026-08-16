@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Harness parity, end to end, with real harnesses and no fakes.
 #
-# The verification command in SPECS.md: for each harness present on this box it
+# The verification command in docs/spec-harness.md: for each harness present on this box it
 # drives one run that sets two roots, mentions a file in the second, records a
 # decision, asks a blocking question answered from the CLI, requests a secret,
 # and prints it — then asserts the cards exist, the answer is stored, and the
@@ -10,7 +10,7 @@
 # What is faked: nothing but the credential. `PARITY_SECRET` is a token this
 # script generates at run time; it authenticates nothing anywhere, and it exists
 # so that finding those bytes in a file is unambiguous evidence of a leak.
-# SPECS.md sanctions exactly that and nothing else — no fake harness, no fake
+# docs/spec-harness.md sanctions exactly that and nothing else — no fake harness, no fake
 # MCP client, no seeded rows.
 #
 # Slow on purpose. Every run here is a real model turn with real tool calls, and
@@ -510,7 +510,7 @@ verbatim. If the variable is empty the command prints TOKEN= and that is the ans
   check "[$h] the file in the second root reached the agent" \
     grep -q "$marker" <<<"$transcript"
 
-  # --- the check SPECS.md names -------------------------------------------
+  # --- the check docs/spec-harness.md names -------------------------------------------
   #
   # Three claims, deliberately separated, because the interesting failure is a
   # vacuous pass. "No value in the database" holds trivially when no value was

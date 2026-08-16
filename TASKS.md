@@ -8,17 +8,26 @@ below, so several people can file at once without touching the same file.
 One owner per task. Claim one by putting your name in its `Owner:` line before
 you start. Add findings to the area file, never to this index.
 
-| Area | File | Findings | Owner |
-|---|---|---|---|
-| Launch, roots and the console's directory | [`tasks/00-launch-and-roots.md`](tasks/00-launch-and-roots.md) | L1–L9 | — |
-| Routing: answer it yourself or hand it over | [`tasks/01-routing.md`](tasks/01-routing.md) | R1–R7 | — |
-| The TUI itself | [`tasks/02-tui.md`](tasks/02-tui.md) | T1 | — |
-| Orchestration scenarios | [`tasks/10-orchestration.md`](tasks/10-orchestration.md) | O1–O10, **one critical** | — |
-| Orchestration edge cases and bad input | [`tasks/11-orchestration-edge-cases.md`](tasks/11-orchestration-edge-cases.md) | E1 + 14 scenarios | — |
-| Fleets and the tree | [`tasks/20-fleets.md`](tasks/20-fleets.md) | F1–F9 | — |
-| Project managers | [`tasks/30-project-managers.md`](tasks/30-project-managers.md) | P1–P5 + spec tasks T1–T7 | — |
-| Scheduling | [`tasks/40-scheduling.md`](tasks/40-scheduling.md) | S1–S6 | — |
-| Goals | [`tasks/50-goals.md`](tasks/50-goals.md) | G1–G12 | — |
+Counts below were taken by reading each file's `Status:` lines on 16 August
+2026. They go stale the moment someone files or closes a finding, so trust the
+area file over this table and correct the table when you notice it drifting.
+
+| Area | File | Findings | Done | Open | Owner |
+|---|---|---|---|---|---|
+| Launch, roots and the console's directory | [`tasks/00-launch-and-roots.md`](tasks/00-launch-and-roots.md) | L1–L9 | 5 | 3 + 1 blocked | — |
+| Routing: answer it yourself or hand it over | [`tasks/01-routing.md`](tasks/01-routing.md) | R1–R7 | 4 | 3 | — |
+| The TUI itself | [`tasks/02-tui.md`](tasks/02-tui.md) | T1 | 1 | 0 | — |
+| Orchestration scenarios | [`tasks/10-orchestration.md`](tasks/10-orchestration.md) | O1–O10, **one critical** | 2 | 8 | — |
+| Orchestration edge cases and bad input | [`tasks/11-orchestration-edge-cases.md`](tasks/11-orchestration-edge-cases.md) | E1 + 14 scenarios | 1 | 0 | — |
+| Fleets and the tree | [`tasks/20-fleets.md`](tasks/20-fleets.md) | F1–F9 | 5 | 4 | — |
+| Project managers | [`tasks/30-project-managers.md`](tasks/30-project-managers.md) | P1–P5 + spec tasks T1–T7 | 4 | 1, and T1–T7 unstarted | — |
+| Scheduling | [`tasks/40-scheduling.md`](tasks/40-scheduling.md) | S1–S6 | 5 | 1 | — |
+| Goals | [`tasks/50-goals.md`](tasks/50-goals.md) | G1–G14 | 9 | 6 | — |
+
+That is **36 findings closed, 26 open and one blocked**, plus the seven
+project-manager tasks nobody has started. The largest pile of open work is
+orchestration, and the manager tasks are the largest piece of unbuilt design —
+nothing in the tree implements a project manager today.
 
 Every file ends with a "Scenarios run" table listing what was tried, what was
 expected, and what happened — passes included. A clean pass is worth recording;

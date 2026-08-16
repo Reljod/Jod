@@ -51,7 +51,7 @@ and **$0.39**, was:
 > lands.
 
 He never got the answer. The question was one line, needed no repository, and
-the orchestrator already had the answer available to it in `SPECS-a2a.md`. This
+the orchestrator already had the answer available to it in `docs/spec-a2a.md`. This
 is the whole of R1 in one exchange: not a slow answer, no answer, for the price
 of a spawned agent.
 
@@ -109,7 +109,7 @@ Status: **fix open as #134** · Severity: medium
 Reljod's ask includes the return leg: the sub-agent communicates back to the
 orchestrator with answers, or to say it has finished. The bus exists —
 `send_message`, `reply`, `ask`, `roster`, `read_messages` in `core/src/mcp.rs`,
-designed in `SPECS-a2a.md` — but it is addressed by *roster name*, and it is
+designed in `docs/spec-a2a.md` — but it is addressed by *roster name*, and it is
 not yet confirmed that a run started by `delegate` or `open_work` can address
 the main chat, or that anything makes the orchestrator take a turn when mail
 arrives for it.

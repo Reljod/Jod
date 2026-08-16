@@ -1,5 +1,15 @@
 # SPEC — Jod as the coding harness
 
+> **Shipped, and kept for its vocabulary — this is not pending work.** Epics E1
+> through E7 are built and `tests/e2e/harness_parity.sh` is the check that
+> covers them. The file stayed instead of being deleted because roughly a
+> hundred comments across `core/` and `cli/` cite its ids (`D2`, `E4.S4`,
+> `E7.S2`), and deleting it would leave every one of them pointing at nothing.
+> Read it to find out what an id means, never to find out what to build next —
+> open work is in [`../TASKS.md`](../TASKS.md). The reasoning behind D1–D8 now
+> lives in [`decisions.md`](decisions.md), which is the copy to trust if the two
+> ever disagree.
+
 High level only. What gets built, in what order, and **what can be built at the
 same time as what**. No implementation detail — the executing session decides
 that. Task ids are stable (`E2.S4`); quote them in branches, commits and PRs so
