@@ -1201,6 +1201,54 @@ impl App {
         format!("mode: {}{when}", self.mode.label())
     }
 
+    /// Why this model name will not work here, when the harness's own list is
+    /// able to say so.
+    ///
+    /// `None` means "no objection", and it covers two different things on
+    /// purpose. Either the name is on the list, or there is no list to check it
+    /// against — the binary is missing, `models` failed, the answer has not
+    /// arrived yet, or it belongs to a harness that has since been swapped out.
+    /// Only a loaded list for the harness we are actually on can convict a
+    /// name, because "not in a list I could not read" is not a fact about the
+    /// name.
+    ///
+    /// This exists because the harness's own complaint is useless. A name
+    /// OpenCode does not have makes its server answer `UnknownError: Unexpected
+    /// server error. Check server logs for details.`, which names neither the
+    /// model nor the problem, and Jod printed it verbatim. Reljod asked main
+    /// "what's the weather today" and got that, twice, with no way to tell from
+    /// the screen that a model name set some days earlier was the reason.
+    pub fn model_objection(&self, name: &str) -> Option<String> {
+        if self.models_for != Some(self.harness) || self.models.is_empty() {
+            return None;
+        }
+        if jod_core::harness::models::accepts(name, &self.models) {
+            return None;
+        }
+        let harness = self.harness.label();
+        let near = jod_core::harness::models::nearest(name, &self.models);
+        Some(match near.as_slice() {
+            // Nothing close enough to name. All that is left is to point at
+            // the list and at the way out of choosing altogether.
+            [] => format!(
+                "{harness} has no model called {name}. Type /model and a space to \
+                 see what it does have, or /model default to let it choose."
+            ),
+            // The common case, and the one worth being specific about: the
+            // model is right and only its spelling is wrong, so the sentence
+            // ends with something that can be typed straight back.
+            [only] => format!(
+                "{harness} has no model called {name}. It calls that one {only} — \
+                 try /model {only}."
+            ),
+            _ => format!(
+                "{harness} has no model called {name}. The closest it has are {}. \
+                 Type /model and a space to see the whole list.",
+                near.join(", ")
+            ),
+        })
+    }
+
     /// A turn has started on `run`: watch it, and say the conversation is busy.
     ///
     /// One function because there are two ways in — a line typed into the main
@@ -2375,7 +2423,18 @@ impl App {
             AgentEvent::Delta { .. } => {
                 self.liveness = Some(Liveness::Generating);
             }
-            AgentEvent::Error { message } => self.push(Entry::Notice(message.clone())),
+            // The harness's own words first, then Jod's, when Jod can see
+            // something the harness did not say. A model this harness has no
+            // name for fails every turn identically and says nothing about
+            // itself, so the transcript has to carry the reason: the message
+            // above is the same one whatever went wrong, and on its own it
+            // sends the reader to a server log they do not have.
+            AgentEvent::Error { message } => {
+                self.push(Entry::Notice(message.clone()));
+                if let Some(objection) = self.model.clone().and_then(|m| self.model_objection(&m)) {
+                    self.push(Entry::Notice(objection));
+                }
+            }
             AgentEvent::Raw { line } => {
                 if !line.trim().is_empty() {
                     self.push(Entry::Raw(line.clone()));
@@ -2735,6 +2794,105 @@ mod tests {
         let mut a = app();
         a.apply(&AgentEvent::Message { text: "hi".into() });
         assert_eq!(a.transcript, vec![Entry::Agent("hi".into())]);
+    }
+
+    // ---- a model name the harness has no model for ----
+
+    /// What OpenCode really answers when it is asked for a name it does not
+    /// have. It names neither the model nor the problem, which is the whole
+    /// reason Jod has to.
+    const OPAQUE: &str = "UnknownError: Unexpected server error. Check server logs for details.";
+
+    /// An OpenCode session whose model list has loaded, cut down to two rows.
+    fn opencode(model: Option<&str>) -> App {
+        let mut a = App::new(
+            HarnessKind::OpenCode,
+            model.map(str::to_string),
+            Resume::Fresh,
+        );
+        a.models = jod_core::harness::models::parse(
+            HarnessKind::OpenCode,
+            "opencode/claude-opus-5\nopencode/hy3-free\n",
+        );
+        a.models_for = Some(HarnessKind::OpenCode);
+        a
+    }
+
+    /// The failure in full. Main was on OpenCode holding `claude-opus-5`, which
+    /// is Claude Code's spelling, so every turn died on the server error above.
+    /// Naming the id OpenCode does use is the difference between a dead end and
+    /// a fix, so the objection has to carry it.
+    #[test]
+    fn a_model_the_harness_lacks_is_named_along_with_the_one_it_has() {
+        let said = opencode(None).model_objection("claude-opus-5").unwrap();
+        assert!(
+            said.contains("OpenCode has no model called claude-opus-5"),
+            "{said}"
+        );
+        assert!(said.contains("/model opencode/claude-opus-5"), "{said}");
+    }
+
+    /// Nothing to object to. A name on the list is the ordinary case and must
+    /// stay silent, or the objection is noise on every turn.
+    #[test]
+    fn a_model_the_harness_has_draws_no_objection() {
+        assert_eq!(opencode(None).model_objection("opencode/hy3-free"), None);
+    }
+
+    /// An empty list is a harness that could not be asked — no binary, a failed
+    /// subcommand, an answer still in flight. Convicting a name on that would
+    /// refuse every `/model` on a machine where `opencode models` happens not
+    /// to run, which is worse than the bug this fixes.
+    #[test]
+    fn a_list_that_never_loaded_convicts_nothing() {
+        let mut a = opencode(None);
+        a.models.clear();
+        assert_eq!(a.model_objection("claude-opus-5"), None);
+    }
+
+    /// `/harness` mid-session leaves the previous harness's list in place until
+    /// the new one answers. Checking a name against it would judge it by the
+    /// wrong harness, which is exactly the confusion being fixed.
+    #[test]
+    fn a_list_belonging_to_another_harness_convicts_nothing() {
+        let mut a = opencode(None);
+        a.models_for = Some(HarnessKind::ClaudeCode);
+        assert_eq!(a.model_objection("claude-opus-5"), None);
+    }
+
+    /// The transcript keeps the harness's own words and adds the reason under
+    /// them. This is what unsticks a conversation whose model was set before
+    /// anything checked it: the error alone repeats forever and explains
+    /// nothing.
+    #[test]
+    fn the_opaque_harness_error_is_followed_by_the_reason_for_it() {
+        let mut a = opencode(Some("claude-opus-5"));
+        a.apply(&AgentEvent::Error {
+            message: OPAQUE.into(),
+        });
+        assert_eq!(a.transcript.len(), 2, "{:?}", a.transcript);
+        assert_eq!(a.transcript[0], Entry::Notice(OPAQUE.into()));
+        match &a.transcript[1] {
+            Entry::Notice(said) => {
+                assert!(said.contains("/model opencode/claude-opus-5"), "{said}")
+            }
+            other => panic!("expected the reason, got {other:?}"),
+        }
+    }
+
+    /// An error with nothing wrong with the model is somebody else's problem —
+    /// a rate limit, a dropped connection, a bad tool call. Blaming the model
+    /// for those would send the reader after the one thing that is fine.
+    #[test]
+    fn an_error_under_a_model_the_harness_has_gains_nothing() {
+        let mut a = opencode(Some("opencode/hy3-free"));
+        a.apply(&AgentEvent::Error {
+            message: "APIError: rate limited".into(),
+        });
+        assert_eq!(
+            a.transcript,
+            vec![Entry::Notice("APIError: rate limited".into())]
+        );
     }
 
     /// The database half of this fix cannot reach a console that is already

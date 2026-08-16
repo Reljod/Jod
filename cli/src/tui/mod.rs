@@ -4666,6 +4666,20 @@ fn apply_slash(app: &mut App, slash: command::Slash) -> Option<Action> {
         // once per turn, so both are re-read at every spawn, and a choice held
         // only in this struct lasted until the next `jod tui` and no longer.
         Slash::Model(model) => {
+            // Checked here rather than in `command::parse`, which is a
+            // harness-agnostic sieve and has no list to check against. Refused
+            // rather than warned about: a name this harness has no model for
+            // does not degrade the next turn, it kills it, and every turn after
+            // it, with an error that names neither the model nor the cause.
+            // Storing it would be storing a broken conversation.
+            //
+            // Only ever refuses against a list that actually loaded, so
+            // `/model <anything>` still works when the harness could not be
+            // asked — the list stays an aid there, exactly as before.
+            if let Some(objection) = model.as_deref().and_then(|m| app.model_objection(m)) {
+                app.push(Entry::Notice(objection));
+                return None;
+            }
             let said = match &model {
                 Some(m) => format!("model: {m}"),
                 None => "model: the harness default".to_string(),
@@ -6421,6 +6435,72 @@ mod tests {
         assert_eq!(app.model, None);
         assert_eq!(app.reported_model, None);
         assert!(!app.status().contains("claude-opus-5"), "{}", app.status());
+    }
+
+    /// An OpenCode session whose model list has loaded.
+    fn opencode_with_list() -> App {
+        let mut app = app_on(HarnessKind::OpenCode);
+        app.models = jod_core::harness::models::parse(
+            HarnessKind::OpenCode,
+            "opencode/claude-opus-5\nopencode/hy3-free\n",
+        );
+        app.models_for = Some(HarnessKind::OpenCode);
+        app
+    }
+
+    /// `/model claude-opus-5` on OpenCode is the mistake that broke main: the
+    /// model is right, the spelling belongs to Claude Code, and OpenCode
+    /// answers every turn after it with a server error that names nothing. It
+    /// has to be caught where it is typed, and the id that would have worked
+    /// has to be on the screen.
+    #[test]
+    fn a_model_the_harness_does_not_have_is_refused_rather_than_stored() {
+        let mut app = opencode_with_list();
+        let action = apply_slash(&mut app, command::Slash::Model(Some("claude-opus-5".into())));
+
+        assert!(action.is_none(), "a refused name must not be written down");
+        assert_eq!(app.model, None, "the working choice is left alone");
+        match app.transcript.last() {
+            Some(Entry::Notice(said)) => {
+                assert!(said.contains("no model called claude-opus-5"), "{said}");
+                assert!(said.contains("/model opencode/claude-opus-5"), "{said}");
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    /// The refusal must not cost the model that was already working. Somebody
+    /// mistyping a name should end the command where they started it.
+    #[test]
+    fn a_refused_name_leaves_the_previous_model_in_place() {
+        let mut app = opencode_with_list();
+        app.model = Some("opencode/hy3-free".into());
+        apply_slash(&mut app, command::Slash::Model(Some("claude-opus-5".into())));
+        assert_eq!(app.model.as_deref(), Some("opencode/hy3-free"));
+    }
+
+    /// A name the harness does have goes through exactly as it always did.
+    #[test]
+    fn a_model_on_the_harnesss_own_list_is_still_stored() {
+        let mut app = opencode_with_list();
+        let action = apply_slash(
+            &mut app,
+            command::Slash::Model(Some("opencode/claude-opus-5".into())),
+        );
+        assert!(action.is_some(), "an accepted name is written down");
+        assert_eq!(app.model.as_deref(), Some("opencode/claude-opus-5"));
+    }
+
+    /// The list is an aid, not a gate. When the harness could not be asked —
+    /// no binary, a failed `models`, an answer still in flight — `/model`
+    /// accepts whatever it is given, which is how it behaved before any of
+    /// this and is the only safe reading of an empty list.
+    #[test]
+    fn a_model_is_accepted_unchecked_when_no_list_ever_loaded() {
+        let mut app = app_on(HarnessKind::OpenCode);
+        let action = apply_slash(&mut app, command::Slash::Model(Some("claude-opus-5".into())));
+        assert!(action.is_some());
+        assert_eq!(app.model.as_deref(), Some("claude-opus-5"));
     }
 
     /// Re-selecting the harness you are on must change nothing at all. It used

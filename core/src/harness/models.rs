@@ -128,6 +128,60 @@ pub fn parse(kind: HarnessKind, stdout: &str) -> Vec<Model> {
         .collect()
 }
 
+/// Whether a harness's own list has this name in it.
+///
+/// Only ask this of a list that came back non-empty. An empty list means the
+/// harness could not be asked — the binary is missing, the subcommand failed,
+/// it timed out — and "not in an empty list" says nothing about the name.
+pub fn accepts(name: &str, models: &[Model]) -> bool {
+    models.iter().any(|m| m.id == name)
+}
+
+/// The ids in this list that a name the harness does not have was reaching for.
+///
+/// Two rules, because there are two ways to get a real model's name wrong and
+/// both of them happen. Dropping the provider is the common one: OpenCode
+/// spells Opus `opencode/claude-opus-5`, Claude Code spells it `claude-opus-5`,
+/// and a name carried over from one to the other is right about the model and
+/// wrong about nothing else. So a listed id whose tail matches the typed tail
+/// is the first suggestion — which also covers reaching for the right model
+/// under the wrong provider, `anthropic/claude-opus-5` for OpenCode's own.
+///
+/// The second is a missing suffix, which is how AGY differs: it has
+/// `claude-opus-4-6-thinking` and no bare `claude-opus-4-6`. Any listed id
+/// containing the typed name catches that.
+///
+/// Three at most. This exists to put the right name on the screen next to the
+/// wrong one, and a list of ten is the model list again, which the person can
+/// already see.
+pub fn nearest(name: &str, models: &[Model]) -> Vec<String> {
+    let wanted = tail(name).to_lowercase();
+    if wanted.is_empty() {
+        return vec![];
+    }
+    let mut found: Vec<String> = models
+        .iter()
+        .filter(|m| tail(&m.id).eq_ignore_ascii_case(&wanted))
+        .map(|m| m.id.clone())
+        .collect();
+    for m in models {
+        if found.len() >= 3 {
+            break;
+        }
+        if m.id.to_lowercase().contains(&wanted) && !found.contains(&m.id) {
+            found.push(m.id.clone());
+        }
+    }
+    found.truncate(3);
+    found
+}
+
+/// A model id without its provider — `opencode/claude-opus-5` is Opus 5, and so
+/// is a bare `claude-opus-5`.
+fn tail(id: &str) -> &str {
+    id.rsplit('/').next().unwrap_or(id)
+}
+
 /// Run `<bin> <arg>` and hand back its stdout, or nothing.
 ///
 /// Killed at [`TIMEOUT`] rather than waited on: this is called from a blocking
@@ -205,6 +259,98 @@ mod tests {
     fn prose_lines_are_not_models() {
         assert!(parse(HarnessKind::OpenCode, "no models configured\n").is_empty());
         assert!(parse(HarnessKind::Agy, "not logged in\n").is_empty());
+    }
+
+    /// The list OpenCode actually prints on Reljod's box, cut down to the rows
+    /// these tests need.
+    fn opencode_list() -> Vec<Model> {
+        parse(
+            HarnessKind::OpenCode,
+            "opencode/claude-opus-5\n\
+             opencode/claude-sonnet-5\n\
+             opencode/hy3-free\n",
+        )
+    }
+
+    /// The failure this was written for. Reljod asked main "what's the weather
+    /// today", the run died two seconds in with `UnknownError: Unexpected
+    /// server error. Check server logs for details.`, and the cause was the
+    /// conversation holding `claude-opus-5` — Claude Code's spelling — against
+    /// an OpenCode harness that only has `opencode/claude-opus-5`. The name is
+    /// not in the list, and the id it was reaching for is.
+    #[test]
+    fn a_claude_code_spelling_is_not_a_model_opencode_has() {
+        let list = opencode_list();
+        assert!(!accepts("claude-opus-5", &list));
+        assert_eq!(
+            nearest("claude-opus-5", &list),
+            vec!["opencode/claude-opus-5"]
+        );
+    }
+
+    /// Right model, wrong provider. The tail is what identifies the model, so
+    /// the provider being wrong is the same mistake as the provider being
+    /// absent and gets the same answer.
+    #[test]
+    fn the_right_model_under_the_wrong_provider_still_finds_the_right_id() {
+        assert_eq!(
+            nearest("anthropic/claude-opus-5", &opencode_list()),
+            vec!["opencode/claude-opus-5"]
+        );
+    }
+
+    /// AGY's names carry a suffix Claude Code's do not, so the tails never
+    /// match and only the substring rule can find these.
+    #[test]
+    fn a_name_missing_its_suffix_finds_the_ids_that_extend_it() {
+        let list = parse(
+            HarnessKind::Agy,
+            "claude-opus-4-6-thinking\tClaude Opus 4.6 (Thinking)\n\
+             claude-opus-4-6-fast\tClaude Opus 4.6 (Fast)\n\
+             gemini-3.6-flash-high\tGemini 3.6 Flash (High)\n",
+        );
+        assert_eq!(
+            nearest("claude-opus-4-6", &list),
+            vec!["claude-opus-4-6-thinking", "claude-opus-4-6-fast"]
+        );
+    }
+
+    /// A name the harness does have is not a mistake, and nothing should be
+    /// suggested in place of it.
+    #[test]
+    fn a_name_the_harness_has_is_accepted() {
+        let list = opencode_list();
+        assert!(accepts("opencode/hy3-free", &list));
+    }
+
+    /// An empty list is a harness that could not be asked, not a harness with
+    /// no models. Suggesting nothing is the only honest answer, and the caller
+    /// must not read it as "this name is wrong".
+    #[test]
+    fn an_unavailable_list_suggests_nothing() {
+        assert!(nearest("claude-opus-5", &[]).is_empty());
+    }
+
+    /// A name with nothing recognisable in it matches nothing, rather than
+    /// matching everything through an empty substring.
+    #[test]
+    fn a_name_with_no_tail_matches_nothing() {
+        assert!(nearest("/", &opencode_list()).is_empty());
+        assert!(nearest("", &opencode_list()).is_empty());
+    }
+
+    /// Three at most, however many the list could offer. `claude` matches
+    /// plenty and a wall of them is the model list, which `/model` already
+    /// shows.
+    #[test]
+    fn no_more_than_three_suggestions() {
+        let list = parse(
+            HarnessKind::OpenCode,
+            "opencode/claude-opus-5\nopencode/claude-opus-4-8\n\
+             opencode/claude-sonnet-5\nopencode/claude-haiku-4-5\n\
+             opencode/claude-fable-5\n",
+        );
+        assert_eq!(nearest("claude", &list).len(), 3);
     }
 
     /// Claude Code's list is static, so the only thing that can go wrong with
