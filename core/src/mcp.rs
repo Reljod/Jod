@@ -210,7 +210,9 @@ pub fn catalogue() -> Vec<Tool> {
             name: "continue_agent",
             description:
                 "Send a follow-up to an agent that already ran, keeping its context. Only works \
-                 once that run has reported a session id.",
+                 once that run has reported a session id. If stopping this agent also stopped \
+                 agents working under it, they are started again too, each carrying on its own \
+                 work.",
             needs: ToolAccess::Delegate,
             schema: obj(
                 json!({
@@ -227,9 +229,11 @@ pub fn catalogue() -> Vec<Tool> {
         Tool {
             name: "stop_agent",
             description:
-                "Stop a running agent, together with the commands it ran itself. An agent it \
-                 started with `delegate` or `open_work` is a separate run, and it keeps going: \
-                 stop each one by its own run id.",
+                "Stop a running agent, everything it forked, and every agent working under it. \
+                 The agents it delegated to are stopped too, and so are theirs, all the way \
+                 down: stopping a manager stops its workers. The main chat is the one \
+                 exception — stopping that stops only the chat, and leaves the projects \
+                 running. Continuing a stopped agent brings its workers back.",
             needs: ToolAccess::Delegate,
             schema: obj(json!({ "run_id": text("The run to stop.") }), &["run_id"]),
         },
@@ -1292,17 +1296,35 @@ impl Server {
         };
         let next = self
             .jod
-            .spawn_agent_in(req, conversation)
+            .spawn_agent_in(req, conversation.clone())
             .await
             .map_err(|e| ToolError::Refused(format!("could not continue that agent: {e}")))?;
         // No link: the run being continued already sits wherever it sits, and
         // re-parenting it onto whoever happened to send this follow-up would
         // move a session in the tree for saying a second thing to it.
         self.record_handoff("continue", &next.id, false);
+
+        // Bring back whatever stopping this conversation took down with it. A
+        // manager resumed alone is a manager whose workers are gone, so the
+        // resume has to reach as far as the stop did. Only runs the cascade
+        // itself stopped come back; see `Jod::resume_cascade`.
+        let brought_back = match &conversation {
+            RunConversation::Existing(id) => self.jod.resume_cascade(id).await,
+            _ => Vec::new(),
+        };
+
         as_json(&json!({
             "run_id": next.id,
             "continued": run_id,
             "watch": next.watch_command,
+            // Omitted when the resume took nothing else with it, so the
+            // ordinary follow-up answer stays the shape it has always been.
+            "resumed_with_it": (!brought_back.is_empty()).then(|| {
+                brought_back
+                    .iter()
+                    .map(|r| json!({ "stopped": r.stopped, "now_running": r.resumed }))
+                    .collect::<Vec<_>>()
+            }),
         }))
     }
 
@@ -3677,35 +3699,66 @@ mod tests {
         );
     }
 
-    /// `stop_agent` reaches one process group, and a delegated run is never in
-    /// it — `runner::launch` gives every run its own session through `setsid`,
-    /// so the run a session starts is a sibling of that session rather than a
-    /// member of it. Observed on a real pair: killing the parent emptied its
-    /// group and left the delegated child's four processes running.
+    /// `stop_agent` stops a branch of the fleet, not one process, and the
+    /// description is the only place a model finds that out.
     ///
-    /// The model reads this description and decides from it whether one call
-    /// has finished the job. It therefore has to say the part that surprises:
-    /// the agent this one started is still going.
+    /// Both halves have to be there and they fail differently. Without the
+    /// reach, a model that wants a whole project stopped calls this once per
+    /// worker and races its own cascade. Without the exception, a model reading
+    /// "and every agent working under it" has every reason to believe stopping
+    /// the main chat stops the machine, and will avoid the call that is
+    /// actually safe.
     #[test]
-    fn stop_agent_says_that_a_delegated_run_keeps_going() {
+    fn stop_agent_says_it_stops_the_agents_underneath() {
         let stop = catalogue()
             .into_iter()
             .find(|t| t.name == "stop_agent")
             .expect("`stop_agent` is not in the catalogue");
         let said = stop.description.to_lowercase();
         assert!(
+            said.contains("under it") || said.contains("underneath"),
+            "`stop_agent` does not say it reaches the agents below the one \
+             named, so a caller will stop them one at a time: {said}"
+        );
+        assert!(
             said.contains("delegate"),
-            "`stop_agent` does not mention delegation, so a caller cannot tell \
-             that a delegated run survives the call: {said}"
+            "`stop_agent` does not say that delegated agents are included, \
+             which is the reach that surprises: {said}"
         );
         assert!(
-            said.contains("keeps going") || said.contains("keeps running"),
-            "`stop_agent` does not say the delegated run keeps going: {said}"
+            said.contains("main chat"),
+            "`stop_agent` does not name the one conversation that does not \
+             cascade, so its reach reads as unbounded: {said}"
         );
         assert!(
-            !said.contains("everything it started"),
-            "`stop_agent` still promises to stop everything the agent started, \
-             which is more than one process group can reach: {said}"
+            !said.contains("keeps going") && !said.contains("keeps running"),
+            "`stop_agent` still tells the caller a delegated run survives, \
+             which stopped being true when the stop began to cascade: {said}"
+        );
+    }
+
+    /// The resume has to advertise the same reach the stop does.
+    ///
+    /// A model that knows `stop_agent` takes a whole branch down, and does not
+    /// know `continue_agent` brings it back, has one obvious way to restore a
+    /// fleet: delegate every worker again by hand. That would start second
+    /// copies alongside the ones this brings back, which is the exact failure
+    /// `Store::claim_cascaded_stop` exists to prevent from the other direction.
+    #[test]
+    fn continue_agent_says_it_brings_the_stopped_workers_back() {
+        let go_on = catalogue()
+            .into_iter()
+            .find(|t| t.name == "continue_agent")
+            .expect("`continue_agent` is not in the catalogue");
+        let said = go_on.description.to_lowercase();
+        assert!(
+            said.contains("started again") || said.contains("brought back"),
+            "`continue_agent` does not say the workers come back with it: {said}"
+        );
+        assert!(
+            said.contains("under it") || said.contains("underneath"),
+            "`continue_agent` does not say which agents come back — the ones \
+             that were working under this one: {said}"
         );
     }
 

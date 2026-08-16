@@ -91,6 +91,54 @@ general lesson it drew still stands and still constrains the design: a killed
 supervisor is asked with `SIGTERM` and only then `SIGKILL`, precisely so it can
 record how the run ended rather than vanishing and leaving it marked running.
 
+## Surviving a launcher that quit is not surviving a stop
+
+A run leads its own session, so nothing that happens to the process that started
+it can reach it. That is the promise above and it is the reason the supervisor is
+a separate `setsid`'d executable. It made stopping an agent stop one process
+group and nothing else, which meant stopping a manager left its workers running.
+We watched one do it: a delegated child went on to finish a ten-minute command
+about ten minutes after the run that asked for it had been stopped.
+
+The two properties sound like the same property and are not. Surviving the
+launcher is about an *accident* — an SSH connection dropped, a laptop closed, the
+`jod` process exited. Nobody decided anything, so nothing should stop. A stop is
+a *decision*, and it is a decision about a piece of work rather than about a
+process. A fleet is a tree of responsibility: a worker whose manager has been
+stopped has nobody to report to, nobody to review it and nobody to answer its
+questions, so it is spending money on something no one is waiting for.
+
+So `Jod::kill_agent` keeps the process-group signal and adds a walk. The tree it
+walks is the one `Server::record_handoff` already wrote — a delegated run's
+conversation hangs under the conversation that asked for it — and it goes to the
+bottom, because a manager's manager being stopped says the same thing about the
+worker two levels down.
+
+**Main is the exception, and the exception is what makes the rule coherent.**
+Everything eventually hangs under the pinned main conversation, because main
+delegates for a living. If its stop cascaded, closing the chat you are typing
+into would stop every project on the machine. Main is the front door: it hands
+work out and owns none of it, so stopping it says nothing about whether that work
+should continue. Every other conversation belongs to some piece of work, and
+stopping it is a statement about that work.
+
+**The resume has to reach as far as the stop.** A manager brought back alone is a
+manager whose workers are gone, so continuing a stopped conversation starts its
+workers again, each resuming its own session. That needs the stop to write down
+what it took, in `cascaded_stops`, because `runs.status` says `killed` for a run
+the cascade reached and for a run somebody stopped by name, and only the first
+kind should come back. Undoing a deliberate stop by accident would make a
+deliberate stop impossible to make stick.
+
+The row is claimed before the replacement is launched, never after. A claim with
+no launch costs one worker somebody can start by hand; a launch with no claim
+lets the next resume start a second copy, and two agents on one task edit the
+same files.
+
+Heartbeat reaping is left alone: `Jod::fail_agent` still stops one run. A wedged
+run being reaped is not somebody deciding the work should end, and a stall
+detector that could empty a fleet is a stall detector nobody will leave armed.
+
 ### Superseded: Agents run in tmux, not as child processes
 
 Every delegated task gets its own `tmux` session. A child process would have

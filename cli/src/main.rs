@@ -141,16 +141,23 @@ enum Command {
         #[arg(long)]
         no_thinking: bool,
     },
-    /// Stop an agent, together with the commands it ran itself.
+    /// Stop an agent and every agent working under it.
     ///
     /// The signal goes to the agent's process group, so the harness and every
     /// process still in that group — a `Bash` call, a compiler, a test run —
     /// go with it.
     ///
-    /// An agent this one started by delegating to it is not in that group.
-    /// Every run leads its own session, which is what lets a run outlive the
-    /// thing that launched it, so a delegated agent keeps going and has to be
-    /// stopped by its own id. `jod ls` lists the runs still going.
+    /// An agent this one delegated to is not in that group, because every run
+    /// leads a session of its own, so Jod walks down to it and stops it
+    /// separately. That goes all the way down: stopping a manager stops its
+    /// workers, and stops theirs. A fleet is a tree, and a worker whose manager
+    /// has been stopped is working on something nobody is waiting for.
+    ///
+    /// The main chat is the exception. Stopping it stops the chat and nothing
+    /// else, because main hands work out rather than owning any of it.
+    ///
+    /// Continuing a stopped agent starts its workers again, each in its own
+    /// session. `jod ls` lists the runs still going.
     Kill { id: String },
     /// Counts and total spend across all agents.
     Report {
@@ -4888,13 +4895,17 @@ mod tests {
         Cli::command().debug_assert();
     }
 
-    /// `jod kill` signals one process group. A run that was started by
-    /// delegation has its own group, because `setsid` gives every run a fresh
-    /// session, so the signal cannot reach it. The help has to say so: someone
-    /// who reads "and everything it started" and walks away leaves a delegated
-    /// agent working, and paying, behind them.
+    /// `jod kill` stops a branch of the fleet, and the help is where a person
+    /// finds that out before they type it rather than after.
+    ///
+    /// This is a destructive command whose reach grew, so the help has to carry
+    /// three things. What it takes: the agents working underneath, not just
+    /// this one. What it spares: the main chat, which stops alone. And how to
+    /// undo it, because a person who stops a manager by mistake needs to know
+    /// in that moment that continuing it brings the workers back, not to
+    /// discover it a day later.
     #[test]
-    fn the_kill_help_says_a_delegated_agent_is_not_stopped() {
+    fn the_kill_help_says_it_stops_the_agents_underneath() {
         use clap::CommandFactory;
         let mut cli = Cli::command();
         cli.build();
@@ -4906,18 +4917,24 @@ mod tests {
         )
         .to_lowercase();
         assert!(
-            help.contains("delegate"),
-            "`jod kill` never mentions delegation, so nothing warns the reader \
-             that a delegated agent survives the command: {help}"
+            help.contains("under it") || help.contains("underneath"),
+            "`jod kill` does not say it stops the agents below the one named, \
+             which is the reach that surprises: {help}"
         );
         assert!(
-            help.contains("keeps going") || help.contains("keeps running"),
-            "`jod kill` does not say the delegated agent keeps going: {help}"
+            help.contains("main chat"),
+            "`jod kill` does not name the one agent that stops alone, so its \
+             reach reads as unbounded: {help}"
         );
         assert!(
-            !help.contains("everything it started"),
-            "`jod kill` still promises to stop everything the agent started, \
-             which is more than one process group can reach: {help}"
+            help.contains("continuing") || help.contains("continue"),
+            "`jod kill` does not say how to undo it, and a person who stopped \
+             a manager by mistake needs that now, not tomorrow: {help}"
+        );
+        assert!(
+            !help.contains("keeps going") && !help.contains("keeps running"),
+            "`jod kill` still tells the reader a delegated agent survives, \
+             which stopped being true when the stop began to cascade: {help}"
         );
     }
 

@@ -391,11 +391,12 @@ pub async fn spawn_agent(
     Ok((StatusCode::CREATED, location(&agent), Json(agent)).into_response())
 }
 
-/// Stop an agent, together with the commands it ran itself.
+/// Stop an agent and every agent working under it.
 ///
-/// An agent this one started by delegating to it leads its own session, so it
-/// is outside the process group this signals and keeps going. Stopping it takes
-/// a second call naming its own id. → [`jod_core::service::Jod::kill_agent`]
+/// An agent this one delegated to leads its own session, so it is outside the
+/// process group this signals; Jod walks the fleet down to it and stops it
+/// separately, all the way to the bottom. The main chat is the one exception
+/// and stops alone. → [`jod_core::service::Jod::kill_agent`]
 ///
 /// Killing an already-finished agent is not an error: the session outlives the
 /// agent, so this also serves as "reclaim the session".

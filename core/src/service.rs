@@ -17,10 +17,38 @@ use crate::cards::{CardKind, Importance, NewCard, Source};
 use crate::conversation::{Conversation, NewMessage};
 use crate::error::{JodError, Result};
 use crate::event::{AgentEnvelope, AgentEvent, Usage};
-use crate::harness::{HarnessKind, PermissionPolicy, SpawnRequest};
+use crate::harness::{HarnessKind, PermissionPolicy, Resume, SpawnRequest, ToolAccess};
 use crate::store::{Store, StoredRun};
 use crate::workdir::Workdir;
 use crate::{paths, proc, recall, runner, workdir};
+
+/// What a worker is told when the stop that took it down has been undone.
+///
+/// It says three things, and it needs all three. That it was stopped, because
+/// otherwise the gap in its own transcript is unexplained and a model will
+/// invent an explanation. That the stop is over, so it knows to carry on rather
+/// than to report a failure. And that its work may be halfway through
+/// something, because the stop landed wherever it landed — mid-edit, mid-test,
+/// mid-commit — and a worker that assumes its last action completed will build
+/// on something that did not.
+const RESUMED_AFTER_CASCADE: &str = "\
+The session that gave you this work was stopped, and stopping it stopped you \
+too. It has now been resumed, so please carry on.
+
+Check the state of your work before you change anything. You were stopped \
+without warning, so whatever you were part-way through was left part-way \
+through — a file half written, a command that never finished, a test run that \
+never reported. Establish where things actually stand, say briefly what you \
+found, and then continue from there.";
+
+/// One worker brought back by [`Jod::resume_cascade`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CascadeResumed {
+    /// The run the cascade stopped.
+    pub stopped: String,
+    /// The run now carrying on its work, in the same conversation.
+    pub resumed: String,
+}
 
 /// The persisted view of one agent. The whole summary is kept verbatim so
 /// adding a field to `AgentSummary` never needs a schema migration.
@@ -1173,40 +1201,78 @@ impl Jod {
             .ok_or_else(|| JodError::UnknownAgent(id.to_string()))
     }
 
-    /// Stop one run, together with the commands it ran itself.
+    /// Stop a run, and everything working underneath it.
     ///
-    /// The signal goes to the whole process group, so a harness that spawned
-    /// children does not leave them behind — the same reach `tmux kill-session`
-    /// had. `SIGTERM` first, so the supervisor gets to record how the run ended
-    /// rather than disappearing and leaving it marked running for ever;
-    /// `SIGKILL` only for a group that ignores it.
+    /// Two reaches, and they are different mechanisms.
     ///
-    /// **A run this one delegated to is not in that group, and survives.**
+    /// **The run's own process group.** `SIGTERM` to the group, so the harness
+    /// and every command it forked — a `Bash` call, a compiler, a test run — go
+    /// with it. `SIGTERM` first, so the supervisor gets to record how the run
+    /// ended rather than disappearing and leaving it marked running for ever;
+    /// `SIGKILL` only for a group that ignores it. Works from any process,
+    /// including one that never launched this run: the process-group id is a
+    /// column, not a handle.
+    ///
+    /// **Every run below it in the fleet.** A run this one delegated to is not
+    /// in that group and cannot be reached by that signal.
     /// [`crate::runner::launch`] starts every supervisor through `setsid`, so
-    /// each run leads its own session — the property that lets a run outlive
-    /// its launcher. A delegated run is therefore a sibling of the run that
-    /// asked for it, whatever the conversation tree says, and signalling one
-    /// group cannot reach the other. Seen on a real pair: the child's
-    /// supervisor was forked by the parent's own MCP server, which sat inside
-    /// the parent's group, and still came out in a group of its own; stopping
-    /// the parent emptied the parent's group and left the child running.
+    /// each run leads a session of its own — the property that lets a run
+    /// outlive the shell that started it. So the descendants are stopped by
+    /// walking to them and signalling each in turn, using the tree
+    /// `Server::record_handoff` already writes: the child's conversation hangs
+    /// under the parent's on every `delegate`. See
+    /// [`Jod::cascade_stop`] for the walk.
     ///
-    /// Walking `parent_conversation_id` and stopping the descendants too is a
-    /// decision about what the verb should mean, not a repair of this one, and
-    /// it would make a destructive call destroy strictly more than it does
-    /// today. Until that decision is made, the wording on `stop_agent` and
-    /// `jod kill` says what this reaches, and
-    /// `stopping_a_run_leaves_the_run_it_delegated_to_alive` holds it there.
+    /// The reason the second reach exists is that a fleet is a tree of
+    /// responsibility, not a pile of unrelated processes. A manager that has
+    /// been stopped has no one left to report to, review its workers or answer
+    /// their questions, so workers that keep going are working on something
+    /// nobody asked for any more and spending money to do it. Stopping the
+    /// branch is what the person who typed `jod kill` meant.
     ///
-    /// Works from any process, including one that never launched this run: the
-    /// process-group id is a column, not a handle.
+    /// **The main chat is the exception, and it is the only one.** Stopping the
+    /// pinned conversation stops that run alone and leaves every project
+    /// running. Main is not a manager of the work; it is the long-lived front
+    /// door that hands work out and is tied to no project of its own, so its
+    /// stop says nothing at all about whether the work below it should
+    /// continue. → [`Jod::cascade_stop`].
     pub async fn kill_agent(&self, id: &str) -> Result<()> {
-        let (pgid, was_running) = match self.state.read().await.agents.get(id) {
-            Some(record) => (
-                record.summary.pgid,
-                record.summary.status == AgentStatus::Running,
-            ),
-            None => return Err(JodError::UnknownAgent(id.to_string())),
+        // The named run is looked up in memory and fails loudly if it is not
+        // there. That is the existing contract for the run a caller named, and
+        // it is not the contract for the cascade below, which finds runs the
+        // caller never mentioned and cannot expect to be rehydrated.
+        let known = self.state.read().await.agents.contains_key(id);
+        if !known {
+            return Err(JodError::UnknownAgent(id.to_string()));
+        }
+        self.stop_one(id).await?;
+        self.cascade_stop(id).await;
+        Ok(())
+    }
+
+    /// Signal one run's process group and mark the row, with no walk.
+    ///
+    /// Reads the pgid from memory and falls back to the stored column, for the
+    /// same reason [`Jod::fail_agent`] does: the cascade reaches runs the
+    /// caller never named, and a daemon rehydrates a bounded number of them, so
+    /// "in the map" and "stoppable" are not the same set.
+    async fn stop_one(&self, id: &str) -> Result<()> {
+        let in_memory = self
+            .state
+            .read()
+            .await
+            .agents
+            .get(id)
+            .map(|r| (r.summary.pgid, r.summary.status == AgentStatus::Running));
+        let (pgid, was_running) = match in_memory {
+            Some(found) => found,
+            None => match &self.store {
+                Some(store) => match store.run(id)? {
+                    Some(row) => (row.pgid, row.status == AgentStatus::Running.as_str()),
+                    None => return Err(JodError::UnknownAgent(id.to_string())),
+                },
+                None => return Err(JodError::UnknownAgent(id.to_string())),
+            },
         };
 
         if let Some(pgid) = pgid {
@@ -1215,35 +1281,246 @@ impl Jod {
                 .map_err(|e| JodError::Kill(format!("process group {pgid}: {e}")))?;
         }
 
+        // `Failed` counts, and this is the whole of it: the harness dies
+        // *because* of the signal above, and its own ending arrives — as a
+        // `Finished { is_error: true }`, folded in by `apply` — while
+        // `terminate_group` is still waiting out the grace. So by the time this
+        // lock is taken the status may already say the run failed, written by
+        // the exit this call caused. The supervisor knows better and stores
+        // `killed`; without this the memory the TUI reads disagreed with the
+        // row `jod ls` reads, and a run the user stopped on purpose showed as a
+        // red failure until the next restart.
+        //
+        // `was_running` is what keeps that from relabelling somebody else's
+        // failure: only a run that was still going when this was asked can have
+        // been ended by it.
         let mut guard = self.state.write().await;
-        if let Some(record) = guard.agents.get_mut(id) {
-            record.summary.process_alive = false;
-            // `Failed` counts, and this is the whole of it: the harness dies
-            // *because* of the signal above, and its own ending arrives — as a
-            // `Finished { is_error: true }`, folded in by `apply` — while
-            // `terminate_group` is still waiting out the grace. So by the time
-            // this lock is taken the status may already say the run failed,
-            // written by the exit this call caused. The supervisor knows better
-            // and stores `killed`; without this the memory the TUI reads
-            // disagreed with the row `jod ls` reads, and a run the user stopped
-            // on purpose showed as a red failure until the next restart.
-            //
-            // `was_running` is what keeps that from relabelling somebody else's
-            // failure: only a run that was still going when this was asked can
-            // have been ended by it.
-            let ended_here = was_running
-                && matches!(
-                    record.summary.status,
-                    AgentStatus::Running | AgentStatus::Failed
-                );
-            if ended_here {
-                record.summary.status = AgentStatus::Killed;
-                if let Some(store) = &self.store {
-                    let _ = store.set_run_status(id, AgentStatus::Killed.as_str());
+        match guard.agents.get_mut(id) {
+            Some(record) => {
+                record.summary.process_alive = false;
+                let ended_here = was_running
+                    && matches!(
+                        record.summary.status,
+                        AgentStatus::Running | AgentStatus::Failed
+                    );
+                if ended_here {
+                    record.summary.status = AgentStatus::Killed;
+                    if let Some(store) = &self.store {
+                        let _ = store.set_run_status(id, AgentStatus::Killed.as_str());
+                    }
+                }
+            }
+            // Not rehydrated, so there is no live view to correct and the row
+            // is the only record there is.
+            None => {
+                if was_running {
+                    if let Some(store) = &self.store {
+                        let _ = store.set_run_status(id, AgentStatus::Killed.as_str());
+                    }
                 }
             }
         }
         Ok(())
+    }
+
+    /// Stop every run below `id` in the fleet, and write down what was taken.
+    ///
+    /// The walk is over conversations, not processes, because that is where the
+    /// tree is written: `Server::record_handoff` hangs a delegated run's
+    /// conversation under the conversation that asked for it, and
+    /// `Store::descendant_conversations` follows those edges to the bottom.
+    ///
+    /// **Main is exempt.** If the stopped run belongs to the pinned
+    /// conversation this returns without walking anything. Main delegates for a
+    /// living and is tied to no project, so everything in the store hangs under
+    /// it eventually; cascading from there would turn "stop the chat I am
+    /// typing into" into "stop the entire machine", which is never what anyone
+    /// means. Every other conversation belongs to some piece of work, and
+    /// stopping it is a statement about that work.
+    ///
+    /// **Each run is stopped before it is recorded, never after.** A crash
+    /// between the two leaves a stopped run that no resume will bring back,
+    /// which costs one worker somebody can restart by hand. The other order
+    /// leaves a *running* run recorded as taken down, and the next resume of
+    /// the parent would start a second copy of it — two agents on one piece of
+    /// work, editing the same files. A lost worker is a smaller wrong than a
+    /// duplicated one.
+    ///
+    /// Returns nothing and reports failures to stderr rather than to the
+    /// caller. The run the caller actually named has already been stopped by
+    /// the time this runs, and failing the whole call because one descendant
+    /// could not be signalled would tell them the stop did not happen when it
+    /// did.
+    async fn cascade_stop(&self, id: &str) {
+        let Some(store) = &self.store else { return };
+        let Ok(Some(conversation)) = store.conversation_for_run(id) else {
+            // No conversation means no recorded tree, so there is nothing to
+            // walk. A run that has not written a message yet is the ordinary
+            // case here, and it has not had time to delegate either.
+            return;
+        };
+
+        if matches!(store.pinned_conversation(), Ok(Some(main)) if main == conversation) {
+            return;
+        }
+
+        let below = match store.descendant_conversations(&conversation) {
+            Ok(below) => below,
+            Err(e) => {
+                eprintln!("[jod] could not read what is running under {conversation}: {e}");
+                return;
+            }
+        };
+
+        let at_ms = chrono::Utc::now().timestamp_millis();
+        for descendant in below {
+            let running = match store.running_runs_in(&descendant) {
+                Ok(running) => running,
+                Err(e) => {
+                    eprintln!("[jod] could not read the runs in {descendant}: {e}");
+                    continue;
+                }
+            };
+            for run in running {
+                if let Err(e) = self.stop_one(&run).await {
+                    eprintln!("[jod] could not stop {run}, which {id} was above: {e}");
+                    continue;
+                }
+                if let Err(e) = store.record_cascaded_stop(&run, &conversation, at_ms) {
+                    eprintln!("[jod] stopped {run} but could not record why: {e}");
+                }
+            }
+        }
+    }
+
+    /// Bring back the runs that stopping this conversation took down.
+    ///
+    /// The other half of [`Jod::cascade_stop`], and deliberately its mirror: a
+    /// stop that reaches a whole branch and a resume that reaches only the run
+    /// somebody named would leave a manager working alone, wondering where its
+    /// workers went. Called when a stopped conversation is continued.
+    ///
+    /// **Only what the cascade took.** A run that finished on its own, failed
+    /// on its own, or was stopped by name is not in `cascaded_stops` and does
+    /// not come back. `runs.status` cannot make that distinction — every one of
+    /// them reads `killed` or `failed` — which is why the cascade writes down
+    /// what it did at the time.
+    ///
+    /// **Every depth, in one pass.** `cascade_stop` records the conversation
+    /// that was *stopped* against each run it reached, not each run's immediate
+    /// parent, so a three-level fleet has all three levels pointing at the
+    /// manager. Resuming the manager therefore brings the whole branch back
+    /// without walking anything, and a worker cannot be left behind because its
+    /// own parent came back in the wrong order.
+    ///
+    /// **Read-only tools, whatever the run held before.** A resumed worker is
+    /// an unattended spawn — nobody typed it, the machinery decided — and
+    /// [`crate::harness::ToolAccess::unattended`] is what this system already
+    /// gives those, for the compounding reason set out there. A worker brought
+    /// back automatically that could delegate could rebuild a fleet nobody
+    /// asked for.
+    ///
+    /// Returns the pairs it started, oldest stop first: the run that was taken
+    /// down, and the run now carrying on its work.
+    pub async fn resume_cascade(&self, conversation_id: &str) -> Vec<CascadeResumed> {
+        let Some(store) = self.store.clone() else {
+            return Vec::new();
+        };
+        let pending = match store.pending_cascaded_stops(conversation_id) {
+            Ok(pending) => pending,
+            Err(e) => {
+                eprintln!("[jod] could not read what {conversation_id} took down: {e}");
+                return Vec::new();
+            }
+        };
+
+        let mut brought_back = Vec::new();
+        for row in pending {
+            // Nothing to resume into. A run whose harness never reported a
+            // session id has no context to continue, exactly as `continue_agent`
+            // refuses for the same reason.
+            let Some(session) = row.session_id.clone() else {
+                eprintln!(
+                    "[jod] cannot bring back {} — it never reported a session id",
+                    row.id
+                );
+                continue;
+            };
+            // Belt and braces against a row that says stopped and a process
+            // that disagrees. Starting a second copy alongside a live one is
+            // the failure this whole path is arranged to avoid.
+            if row.status == AgentStatus::Running.as_str() {
+                continue;
+            }
+            let Ok(Some(thread)) = store.conversation_for_run(&row.id) else {
+                eprintln!(
+                    "[jod] cannot bring back {} — it is in no conversation to continue",
+                    row.id
+                );
+                continue;
+            };
+
+            // Claimed before anything is launched, so two resumes racing on one
+            // conversation cannot both start this worker. Losing the claim is
+            // the ordinary outcome of a race, not an error.
+            match store.claim_cascaded_stop(&row.id, chrono::Utc::now().timestamp_millis()) {
+                Ok(true) => {}
+                Ok(false) => continue,
+                Err(e) => {
+                    eprintln!("[jod] could not claim {} for a resume: {e}", row.id);
+                    continue;
+                }
+            }
+
+            // The summary is the whole client-facing record of how this run was
+            // launched, so it is where the model and the permission come from.
+            // A summary that will not parse is not a reason to refuse to bring
+            // the worker back — it is a reason to bring it back cautiously.
+            let was: Option<AgentSummary> = serde_json::from_value(row.summary.clone()).ok();
+            let req = SpawnRequest {
+                name: row.name.clone(),
+                harness: was
+                    .as_ref()
+                    .map(|s| s.harness)
+                    .unwrap_or(HarnessKind::ClaudeCode),
+                prompt: RESUMED_AFTER_CASCADE.to_string(),
+                // Its framing arrived with its first turn and is already in the
+                // session being resumed.
+                system: None,
+                cwd: PathBuf::from(&row.cwd),
+                model: was.as_ref().and_then(|s| s.model.clone()),
+                permission: was.as_ref().map(|s| s.permission).unwrap_or_default(),
+                resume: Resume::Session(session),
+                tools: Some(ToolAccess::unattended()),
+                ..SpawnRequest::default()
+            };
+
+            match self
+                .spawn_agent_in(req, RunConversation::Existing(thread))
+                .await
+            {
+                Ok(next) => {
+                    if let Err(e) = store.name_cascade_replacement(&row.id, &next.id) {
+                        eprintln!(
+                            "[jod] brought {} back as {} but could not record it: {e}",
+                            row.id, next.id
+                        );
+                    }
+                    brought_back.push(CascadeResumed {
+                        stopped: row.id,
+                        resumed: next.id,
+                    });
+                }
+                // The claim above is not given back. A launch that failed once
+                // will fail the same way on the next resume, and a row that
+                // retries for ever is how one broken worker turns every future
+                // resume into a series of failures. The row keeps its claim and
+                // no run id, which is what a person reading the table sees as
+                // "this one did not come back".
+                Err(e) => eprintln!("[jod] could not bring {} back: {e}", row.id),
+            }
+        }
+        brought_back
     }
 
     /// Stop a run a watchdog has judged dead, and make its status say so.
@@ -1988,144 +2265,369 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// How far a stop actually reaches: one process group, and no further.
+    /// A fleet of real, separately-grouped processes, wired together in the
+    /// store the way delegation wires real runs together.
     ///
-    /// This is the behaviour the wording on `stop_agent` and `jod kill` now
-    /// describes, pinned so a later change to either has to change this test
-    /// too. Every run leads its own session — `runner::launch` starts the
-    /// supervisor through `setsid` — so a run started by delegation is a
-    /// sibling of the run that asked for it, not a member of its group. The
-    /// two fixtures here are each `spawn_detached`, which is the same call,
-    /// so they stand in the same relation to each other that two real runs do.
+    /// Every run here is its own `spawn_detached`, which is the same call
+    /// `runner::launch` makes, so each leads a session of its own exactly as a
+    /// real run does. That is the whole reason a cascade has to exist: one
+    /// `kill(-pgid)` provably cannot reach any of the others, so the only way
+    /// down the tree is to walk it.
     ///
-    /// Watched happen on a real pair before it was written down. A Claude Code
-    /// run delegated a second one; the child's supervisor was forked by the
-    /// parent's own MCP server, which sat inside the parent's group, and still
-    /// came out in a group of its own. Stopping the parent emptied the parent's
-    /// group and left all four of the child's processes running, with its
-    /// `runs.status` still `running`.
-    ///
-    /// Stopping the child as well is a separate decision about what the verb
-    /// should mean, not a repair of this one. Nothing here argues against it —
-    /// the parentage the walk would need is written and asserted below.
-    #[tokio::test]
-    async fn stopping_a_run_leaves_the_run_it_delegated_to_alive() {
-        let dir = std::env::temp_dir().join(format!("jod-cascade-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let prog = dir.join("run.sh");
-        // No `TERM` trap: both fixtures die the moment their own group is
-        // signalled, so "the child is still there" cannot be a slow death.
-        std::fs::write(
-            &prog,
-            "#!/usr/bin/env bash\n: > \"$1\"\nfor _ in $(seq 1 600); do sleep 0.1; done\n",
-        )
-        .unwrap();
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&prog, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+    /// `names` are wired into a chain, each hanging under the one before it, so
+    /// `fleet(&["manager", "worker", "sub"])` builds three levels. Returns the
+    /// store, the live `Jod`, the process-group ids and the conversation ids,
+    /// all in the order given.
+    struct Fleet {
+        dir: PathBuf,
+        store: Arc<Store>,
+        jod: Arc<Jod>,
+        pgids: Vec<u32>,
+        conversations: Vec<String>,
+    }
 
-        let started = |ready: &str| {
-            crate::proc::spawn_detached(
-                &prog,
-                &[ready.to_string()],
-                &dir,
-                &dir.join(format!("{ready}.log")),
-            )
-            .unwrap()
-        };
-        let parent_pgid = started("parent-ready");
-        let child_pgid = started("child-ready");
+    impl Fleet {
+        fn alive(&self, which: usize) -> bool {
+            crate::proc::group_alive(self.pgids[which])
+        }
+        fn status(&self, run: &str) -> String {
+            self.store.run(run).unwrap().unwrap().status
+        }
+        fn stop_everything(&self) {
+            for pgid in &self.pgids {
+                let _ = crate::proc::signal_group(*pgid, libc::SIGKILL);
+            }
+            std::fs::remove_dir_all(&self.dir).ok();
+        }
+    }
+
+    async fn fleet(tag: &str, names: &[&str]) -> Fleet {
+        let dir = std::env::temp_dir().join(format!("jod-{tag}-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // `/bin/sh -c` rather than a script written to disk, deliberately. A
+        // fixture that writes its own executable and then execs it has to hold
+        // that file open for writing moments before a `fork`, and every other
+        // test forking at that instant inherits the descriptor — which is how
+        // an unrelated `spawn_detached` elsewhere in the suite comes back
+        // `ETXTBSY`. Nothing here creates an executable, so nothing here can
+        // join that race.
+        //
+        // No `TERM` trap anywhere: every fixture dies the moment its own group
+        // is signalled, so "this one is still running" can never be a slow
+        // death being mistaken for a survivor.
+        let shell = PathBuf::from("/bin/sh");
+        let script = ": > \"$1\"; while :; do sleep 0.1; done";
+
+        let mut pgids: Vec<u32> = Vec::new();
+        for name in names {
+            pgids.push(
+                crate::proc::spawn_detached(
+                    &shell,
+                    &[
+                        "-c".to_string(),
+                        script.to_string(),
+                        format!("jod-fixture-{name}"),
+                        dir.join(format!("{name}-ready")).to_string_lossy().into(),
+                    ],
+                    &dir,
+                    &dir.join(format!("{name}.log")),
+                )
+                .unwrap(),
+            );
+        }
         for _ in 0..300 {
-            if dir.join("parent-ready").exists() && dir.join("child-ready").exists() {
+            if names.iter().all(|n| dir.join(format!("{n}-ready")).exists()) {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
-        assert_ne!(
-            parent_pgid, child_pgid,
-            "two runs never share a process group"
-        );
-        assert!(crate::proc::group_alive(parent_pgid) && crate::proc::group_alive(child_pgid));
-
-        let store = std::sync::Arc::new(Store::in_memory().unwrap());
-        for (id, pgid) in [("parent", parent_pgid), ("child", child_pgid)] {
-            let mut summary = record().summary;
-            summary.id = id.into();
-            summary.status = AgentStatus::Running;
-            summary.pid = Some(pgid);
-            summary.pgid = Some(pgid);
-            store.save_run(&stored_run(&summary)).unwrap();
+        for (i, name) in names.iter().enumerate() {
+            assert!(
+                crate::proc::group_alive(pgids[i]),
+                "the {name} fixture never started"
+            );
+            for (j, other) in names.iter().enumerate().skip(i + 1) {
+                assert_ne!(
+                    pgids[i], pgids[j],
+                    "{name} and {other} share a process group, so this fixture \
+                     cannot tell a cascade apart from one signal"
+                );
+            }
         }
 
-        // The delegation, written the way `Server::record_handoff` writes it:
-        // the child's conversation hangs under the parent's, and the choice
-        // itself is a row. This is the whole trail a cascade would have to walk.
-        let conversation = |run: &str| {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let mut conversations: Vec<String> = Vec::new();
+        for (i, name) in names.iter().enumerate() {
+            let mut summary = record().summary;
+            summary.id = (*name).into();
+            summary.status = AgentStatus::Running;
+            summary.pid = Some(pgids[i]);
+            summary.pgid = Some(pgids[i]);
+            summary.session_id = Some(format!("session-{name}"));
+            store.save_run(&stored_run(&summary)).unwrap();
+
+            // A conversation with a message in it, because `messages.run_id` is
+            // the only link from a conversation back to its run — a fixture
+            // that skipped the message would be a run the walk cannot find, and
+            // would pass this test by being invisible.
             let c = store
                 .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
                 .unwrap()
                 .id;
-            store.append_prompt(&c, run, "do the thing").unwrap();
-            c
-        };
-        let parent_conversation = conversation("parent");
-        let child_conversation = conversation("child");
-        store
-            .set_conversation_parent(&child_conversation, &parent_conversation)
-            .unwrap();
-        store
-            .record_delegation(&crate::orchestrator::Delegation {
-                id: 0,
-                conversation_id: parent_conversation.clone(),
-                message_id: None,
-                kind: "delegate".into(),
-                run_id: Some("child".into()),
-                schedule_name: None,
-                goal_name: None,
-                reason: String::new(),
-                at_ms: 0,
-            })
-            .unwrap();
-        assert_eq!(
-            store.conversation_for_run("child").unwrap().as_deref(),
-            Some(child_conversation.as_str()),
-            "the child has to be reachable from its run id, or the fixture is \
-             not the shape delegation leaves behind"
-        );
+            store.append_prompt(&c, name, "do the thing").unwrap();
+            assert_eq!(
+                store.conversation_for_run(name).unwrap().as_deref(),
+                Some(c.as_str()),
+                "{name} is not reachable from its run id, so this fixture is \
+                 not the shape delegation leaves behind"
+            );
+
+            // The delegation, written the way `Server::record_handoff` writes
+            // it: the child's conversation hangs under its parent's, and the
+            // choice itself is a row.
+            if let Some(parent) = conversations.last().cloned() {
+                store.set_conversation_parent(&c, &parent).unwrap();
+                store
+                    .record_delegation(&crate::orchestrator::Delegation {
+                        id: 0,
+                        conversation_id: parent,
+                        message_id: None,
+                        kind: "delegate".into(),
+                        run_id: Some((*name).into()),
+                        schedule_name: None,
+                        goal_name: None,
+                        reason: String::new(),
+                        at_ms: 0,
+                    })
+                    .unwrap();
+            }
+            conversations.push(c);
+        }
 
         let jod = Jod::with_store(store.clone());
         jod.rehydrate(100).await.unwrap();
-        jod.kill_agent("parent").await.unwrap();
+        Fleet { dir, store, jod, pgids, conversations }
+    }
+
+    /// The change this whole branch is about: a stop reaches the fleet under it.
+    ///
+    /// Three levels, because two would not tell the difference between a
+    /// cascade and a single hop. `cascade_stop` records the conversation that
+    /// was *stopped* against every run it reaches rather than each run's own
+    /// parent, and the grandchild is the assertion that keeps it that way — a
+    /// walk that only recorded the immediate parent would still kill the
+    /// grandchild here, and would then fail to bring it back on the resume.
+    ///
+    /// The behaviour before this change was watched on a real pair: a Claude
+    /// Code run delegated a second one, the parent was stopped, and the child
+    /// went on to finish its ten-minute command about ten minutes after the
+    /// thing that asked for it had gone.
+    #[tokio::test]
+    async fn stopping_a_manager_stops_every_worker_below_it() {
+        let f = fleet("cascade", &["manager", "worker", "sub"]).await;
+        f.jod.kill_agent("manager").await.unwrap();
+
+        for (i, name) in ["manager", "worker", "sub"].iter().enumerate() {
+            assert!(
+                !f.alive(i),
+                "{name} is still running after the manager above it was stopped"
+            );
+            assert_eq!(
+                f.status(name),
+                "killed",
+                "{name}'s row does not say it was stopped on purpose"
+            );
+        }
+
+        // Both workers point at the manager's conversation, not at their own
+        // parents. That is what lets one resume of the manager bring the whole
+        // branch back in a single pass.
+        let waiting: Vec<String> = f
+            .store
+            .pending_cascaded_stops(&f.conversations[0])
+            .unwrap()
+            .into_iter()
+            .map(|r| r.id)
+            .collect();
+        assert_eq!(
+            waiting,
+            vec!["worker".to_string(), "sub".to_string()],
+            "the manager's stop did not record both levels below it as waiting \
+             to come back"
+        );
+        assert!(
+            f.store
+                .pending_cascaded_stops(&f.conversations[1])
+                .unwrap()
+                .is_empty(),
+            "the worker was recorded as the thing that stopped the sub-worker; \
+             resuming the manager would then leave the sub-worker behind"
+        );
+
+        f.stop_everything();
+    }
+
+    /// The one exception, and the reason it is not an inconsistency.
+    ///
+    /// Main delegates for a living and owns no work of its own, so everything
+    /// in the store hangs under it eventually. If its stop cascaded, closing
+    /// the chat you are typing into would stop every project on the machine —
+    /// which is never what anybody means by closing a chat. Every other
+    /// conversation belongs to a piece of work, and stopping it is a statement
+    /// about that work.
+    #[tokio::test]
+    async fn stopping_the_main_chat_leaves_the_projects_running() {
+        let f = fleet("main-exempt", &["main", "manager"]).await;
+        // Make the top of this fleet the pinned conversation, which is what
+        // `Store::main_conversation` produces and what `cascade_stop` checks.
+        f.store
+            .set_pinned_conversation(&f.conversations[0])
+            .unwrap();
+        assert_eq!(
+            f.store.pinned_conversation().unwrap().as_deref(),
+            Some(f.conversations[0].as_str()),
+        );
+
+        f.jod.kill_agent("main").await.unwrap();
+
+        assert!(!f.alive(0), "the main chat itself was not stopped");
+        assert_eq!(f.status("main"), "killed");
 
         assert!(
-            !crate::proc::group_alive(parent_pgid),
-            "the run that was asked to stop is still running"
+            f.alive(1),
+            "stopping the main chat stopped a project under it — main hands \
+             work out and owns none of it, so its stop says nothing about \
+             whether that work should continue"
         );
         assert_eq!(
-            store.run("parent").unwrap().unwrap().status,
-            "killed",
-            "the run that was asked to stop should read as stopped on purpose"
-        );
-
-        assert!(
-            crate::proc::group_alive(child_pgid),
-            "the delegated run's process group was reached after all — the \
-             stop now goes further than `stop_agent` and `jod kill` say it does"
-        );
-        assert_eq!(
-            store.run("child").unwrap().unwrap().status,
+            f.status("manager"),
             "running",
-            "stopping the parent must leave the delegated run's own row alone"
+            "the project's own row was changed by a stop that was not about it"
         );
-        assert_eq!(
-            jod.agent("child").await.unwrap().status,
-            AgentStatus::Running,
-            "and the live view has to agree with the row"
+        assert!(
+            f.store
+                .pending_cascaded_stops(&f.conversations[0])
+                .unwrap()
+                .is_empty(),
+            "main's stop recorded work as waiting to come back, so the next \
+             time anyone types into main it would restart projects nobody stopped"
         );
 
-        let _ = crate::proc::signal_group(child_pgid, libc::SIGKILL);
-        std::fs::remove_dir_all(&dir).ok();
+        f.stop_everything();
+    }
+
+    /// A run stopped by name is not a run the cascade took, and only the second
+    /// kind comes back.
+    ///
+    /// `runs.status` cannot tell them apart — both read `killed` — which is the
+    /// entire reason `cascaded_stops` is written at the time. Without this
+    /// distinction, resuming a manager would restart a worker that somebody had
+    /// deliberately stopped, and the deliberate stop would be impossible to
+    /// make stick.
+    #[tokio::test]
+    async fn a_worker_stopped_on_purpose_is_not_waiting_to_come_back() {
+        let f = fleet("by-name", &["manager", "worker"]).await;
+
+        // Stopped by name, before anything cascades. `worker` is the bottom of
+        // this fleet, so this stop cascades onto nothing.
+        f.jod.kill_agent("worker").await.unwrap();
+        assert_eq!(f.status("worker"), "killed");
+
+        f.jod.kill_agent("manager").await.unwrap();
+        assert!(
+            f.store
+                .pending_cascaded_stops(&f.conversations[0])
+                .unwrap()
+                .is_empty(),
+            "a worker somebody stopped by name was recorded as collateral of \
+             the manager's stop, so continuing the manager would undo a \
+             decision somebody made on purpose"
+        );
+
+        f.stop_everything();
+    }
+
+    /// A worker that cannot be brought back is left alone, not consumed.
+    ///
+    /// Resuming a session needs a session id, and a run whose harness never
+    /// reported one has no context to continue — `continue_agent` refuses for
+    /// exactly this reason. The interesting half is what happens to the row:
+    /// the guards run *before* the claim, so a worker that could not be started
+    /// this time is still waiting to be started next time. Claiming first and
+    /// discovering the problem afterwards would silently drop the worker on the
+    /// first resume and leave nothing behind to say why.
+    #[tokio::test]
+    async fn a_worker_with_no_session_to_resume_is_left_waiting() {
+        let f = fleet("no-session", &["manager", "worker"]).await;
+        f.jod.kill_agent("manager").await.unwrap();
+        assert_eq!(
+            f.store
+                .pending_cascaded_stops(&f.conversations[0])
+                .unwrap()
+                .len(),
+            1,
+        );
+
+        // The harness never reported a session, so there is nothing to resume
+        // into. `save_run` writes `session_id` straight through.
+        let mut summary = record().summary;
+        summary.id = "worker".into();
+        summary.status = AgentStatus::Killed;
+        summary.session_id = None;
+        f.store.save_run(&stored_run(&summary)).unwrap();
+
+        let brought_back = f.jod.resume_cascade(&f.conversations[0]).await;
+        assert!(
+            brought_back.is_empty(),
+            "a worker with no session to resume into was started anyway: \
+             {brought_back:?}"
+        );
+        assert_eq!(
+            f.store
+                .pending_cascaded_stops(&f.conversations[0])
+                .unwrap()
+                .len(),
+            1,
+            "the worker was consumed by a resume that could not start it, so \
+             nothing records that it never came back"
+        );
+
+        f.stop_everything();
+    }
+
+    /// One stopped worker, one replacement, however many resumes race for it.
+    ///
+    /// Two clients continuing the same manager at the same time both read the
+    /// same pending row. If both acted on it there would be two agents resuming
+    /// one session, working the same task in the same directory. The claim is
+    /// an `UPDATE ... WHERE resumed_at_ms IS NULL`, so exactly one wins, and
+    /// this asserts the loser is told it lost rather than told nothing.
+    #[tokio::test]
+    async fn only_one_resume_can_bring_a_stopped_worker_back() {
+        let f = fleet("claim", &["manager", "worker"]).await;
+        f.jod.kill_agent("manager").await.unwrap();
+
+        assert!(
+            f.store.claim_cascaded_stop("worker", 1).unwrap(),
+            "the first resume could not claim a worker that is waiting"
+        );
+        assert!(
+            !f.store.claim_cascaded_stop("worker", 2).unwrap(),
+            "a second resume claimed the same worker, which is how one stopped \
+             agent becomes two running ones on the same files"
+        );
+        assert!(
+            f.store
+                .pending_cascaded_stops(&f.conversations[0])
+                .unwrap()
+                .is_empty(),
+            "a claimed worker is still listed as waiting, so every later resume \
+             would try it again"
+        );
+
+        f.stop_everything();
     }
 
     /// The converse, and the reason the row is not trusted blindly: a row left

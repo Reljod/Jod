@@ -1137,14 +1137,28 @@ impl Store {
         }
         let created = self.new_conversation(harness, cwd, None)?;
         let id = created.id.clone();
+        self.set_pinned_conversation(&id)?;
+        Ok(id)
+    }
+
+    /// Make this the main chat, and the only one.
+    ///
+    /// The `pinned = 0` first is not tidiness. `pinned_conversation` is a
+    /// `query_row` with no `ORDER BY`, so a second pinned row does not fail
+    /// loudly — it makes which conversation counts as main depend on the order
+    /// SQLite happens to return, and `hand_to_orchestrator` would start
+    /// appending Reljod's instructions to whichever one won. One statement
+    /// clearing the flag and one setting it, in a single transaction, is what
+    /// keeps "the main chat" a question with one answer.
+    pub fn set_pinned_conversation(&self, id: &str) -> Result<()> {
         self.write(|tx| {
+            tx.execute("UPDATE conversations SET pinned = 0 WHERE pinned = 1", [])?;
             tx.execute(
                 "UPDATE conversations SET pinned = 1, title = 'main' WHERE id = ?1",
                 rusqlite::params![id],
             )?;
             Ok(())
-        })?;
-        Ok(id)
+        })
     }
 
     pub fn pinned_conversation(&self) -> Result<Option<String>> {
