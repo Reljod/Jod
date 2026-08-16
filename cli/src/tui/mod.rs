@@ -2172,8 +2172,11 @@ fn toggle_goal(store: &Store, name: &str) -> String {
 
 fn delete_goal(store: &Store, name: &str) -> String {
     match store.delete_goal(name) {
-        Ok(true) => format!("deleted {name} — what it learned stays in memory"),
-        Ok(false) => format!("no goal called {name}"),
+        // The store writes the line, so the run this leaves working is named
+        // on screen as well as on the terminal. A notice wraps on `\n`, so the
+        // second sentence lands on its own line rather than being run on.
+        Ok(Some(forgotten)) => forgotten.summary(),
+        Ok(None) => format!("no goal called {name}"),
         Err(e) => format!("could not delete {name}: {e}"),
     }
 }
