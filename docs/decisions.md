@@ -2708,3 +2708,33 @@ person; and the read-back now covers whatever limit was asked for, the same sum
 
 The general shape: a signal that a result was cut is worth nothing if the way
 out it names is capped somewhere the caller cannot see.
+
+## The narrow rail counted the blockers and never showed one
+
+A terminal under eighty-four columns dropped the decision rail and put a single
+line in its place: how many cards were waiting, how many of those were blocking,
+and `Ctrl-N` to answer. The reasoning was sound as far as it went — thirty
+columns taken off an eighty-column terminal leaves neither a readable rail nor a
+readable chat — but it only ever asked what to do about the missing *columns*.
+
+A phone terminal is eighty columns at best, so that path was not the edge case
+it looked like. It was the whole mobile experience, and on it a card that had
+stopped an agent could never be read. The rail's one job is to show you the
+question a run is waiting on; the summary told you such a question existed and
+then declined to show it, and the key it named opened a rail that was still one
+line tall. There was nothing to press.
+
+The rail now lies along the bottom on those terminals instead, twelve rows of it,
+which holds a header and two collapsed cards or one expanded card with its body
+and options. Rows are what a narrow terminal still has; columns are what it is
+short of. It sits under the chat rather than over it, directly above the keybar
+that names the keys for answering, so the composer stays where the hands already
+are and an arriving card does not push the conversation down the screen.
+
+The one-line summary survives for the two cases where the panel would be a worse
+answer: a rail with no cards in it, which would spend half a phone screen saying
+nothing is waiting, and a body under twelve rows, where halving it leaves two
+unreadable halves instead of one honest sentence.
+
+The general shape: when a layout gives up on a dimension, check whether the
+other one is still there before falling back to a sentence about the content.

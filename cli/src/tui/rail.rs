@@ -373,12 +373,13 @@ pub fn kind_glyph(kind: CardKind) -> &'static str {
     }
 }
 
-/// The rail, reduced to the one line a narrow terminal gets instead.
+/// The rail, reduced to a single line.
 ///
-/// A summary rather than a squeezed rail, because thirty columns taken off an
-/// eighty-column terminal leaves neither a readable rail nor a readable chat.
-/// It still has to carry the one thing the rail exists for — that something is
-/// blocked — and the key that opens it.
+/// A narrow terminal gets the rail as a panel across the bottom rather than a
+/// squeezed column, so this is what is left for the two cases even that cannot
+/// serve: a rail with no cards in it, and a body too short to divide. It still
+/// has to carry the one thing the rail exists for — that something is blocked —
+/// and the key that opens it.
 pub fn summary(cards: &[Card]) -> String {
     if cards.is_empty() {
         return String::new();
