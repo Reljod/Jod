@@ -12,6 +12,7 @@ use crate::event::{AgentEvent, Usage};
 
 pub mod agy;
 pub mod claude;
+pub mod grants;
 pub mod models;
 pub mod opencode;
 
