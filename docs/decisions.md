@@ -2738,3 +2738,121 @@ unreadable halves instead of one honest sentence.
 
 The general shape: when a layout gives up on a dimension, check whether the
 other one is still there before falling back to a sentence about the content.
+
+## The picker builds fzf's feel and depends on no picker binary
+
+What `@` has to deliver is an interaction, not a program: type a few scattered
+letters, watch ranked matches update on every keystroke with the matched
+characters highlighted, move with the arrows, accept with enter.
+
+Shelling out to `fzf` would actively prevent the good version of that. `fzf`
+owns a whole terminal, so every `@` would tear down and restore the screen, and
+an inline popup under the cursor is not something an external full-screen
+program can draw at all. So the matching runs in process, over a candidate list
+ripgrep enumerates, with a directory walker behind it when ripgrep is absent. No
+picker binary is required, preferred, or supported.
+
+The bar this sets, and what the picker is checked against: results ranked rather
+than merely filtered, matched characters highlighted in every row, redrawn on
+every keystroke with no perceptible lag on a large repository, arrows and enter,
+and escape that leaves what you typed alone.
+
+## A card answer is asynchronous, and the interface must not pretend otherwise
+
+Three MCP tools — record a decision, ask a question, request a secret — are the
+supported way an agent raises a card, and they behave identically on all three
+harnesses. Neither raising a card nor answering one may disturb a turn that is
+already running, so both directions are queued.
+
+Raising is a write and a return. The agent does not wait to find out whether
+anyone is looking, and even an explicitly blocking question gives up after a
+bounded wait rather than hanging the run.
+
+Answering enqueues a pending delivery against the conversation. It does not
+interrupt the turn in flight, because an answer spliced into the middle of a
+turn arrives in a context that was assembled before that answer existed — and
+the agent then either ignores it or acts on it twice.
+
+One small handler owns the timing, and it reuses the rules `wake_order` already
+encodes for team mail: deliver to an idle session now, hold for a running one
+until its turn ends, batch whatever accumulated in between into a single turn
+rather than one turn each, and never deliver into a session with no context to
+receive it. Delivery is the same synthetic user turn the bus uses, so card
+answers and agent mail travel one road and exactly one place in Jod decides when
+an agent is spoken to.
+
+The consequence the interface has to honour: an answered card reads as
+*answered, queued* until the handler delivers it, and only then as *delivered*.
+Reljod can answer ten cards mid-turn and none of them touch the run until it
+comes up for air.
+
+## A work is a group, not a second kind of session
+
+Nothing in Jod learns a new session type. A work is a titled group over the
+sessions that already exist, which makes the fleet tree a self-join rather than
+a union of two shapes. Every feature that already works on a session keeps
+working, and the tree gains a level without the data model gaining a concept.
+
+## The titler is a throwaway conversation that is then deleted
+
+Naming a conversation is one turn on a cheap model, in a conversation that is
+removed as soon as it answers. That is the whole reason deleting a conversation
+is a supported operation rather than something only a human ever does — the
+titler needs it on every run.
+
+## Repo slash commands are forwarded, not reimplemented
+
+Jod sends the command line through to harnesses that expand it themselves, and
+inlines the command's text for the ones that do not. Reimplementing expansion
+would mean owning a parser per harness for a feature each harness already has.
+
+Which harness does which is *measured* before the code is written, never
+assumed, and the measurements live in
+[`harness-support.md`](harness-support.md). That mattered: two of the three
+behave differently from what their `--help` implies, and a guess would have been
+cheap to make and expensive to discover. The branch that inlined commands for
+harnesses that turned out not to need it was deleted rather than kept, because a
+branch kept just in case is a branch nobody exercises.
+
+## No network protocol between processes that share a file
+
+There are external standards for agents in different organisations reaching each
+other over the internet, and for that they are the right answer. Jod's agents
+are processes on one box writing to one SQLite file.
+
+Putting HTTP and a JSON-RPC envelope between them would buy interoperability we
+do not need, and cost the atomicity we already have. The single-statement drain
+and the single-statement claim are the reason two agents racing produce one
+winner; a network hop between them is how that becomes two winners.
+
+What we do keep is the message *shape* — sender, recipient, thread id, parts —
+so the whole thing is convertible later if an external agent ever needs to join.
+That is the only cost of being wrong here, and it is small.
+
+## Every agent conversation is bounded three ways, and a bound raises a card
+
+Depth counts hops in one thread, budget counts messages per work, and any wait
+for a reply carries a deadline. This is the core safety property of agents that
+can talk to each other: two of them in a polite loop are a way to spend money at
+machine speed, and the failure is invisible because every individual message in
+it looks reasonable.
+
+Bounds are per work and generous by default, and hitting one *escalates* rather
+than killing anything. The human sees that two sessions have exchanged forty
+messages without closing a task, and answers on a card: continue, redirect, or
+stop.
+
+The deadline half is the same rule the rail's blocking question already follows.
+An agent may wait, but only with a deadline, after which it is told there was no
+reply and decides for itself. An agent that can hang waiting for a peer is an
+agent that can hang for ever, because the peer might be dead.
+
+## Talk is scoped to the work; only the orchestrator crosses works
+
+A star between works, a mesh inside one. Without that scope every session is
+reachable from every other, and the traffic grows with the square of the fleet.
+
+A work is therefore an addressing scope automatically, and its sessions are its
+members, named by their short titles — so nobody has to decide whether a given
+delegation is "a work" or "a team". Explicit teams stay for the case works do
+not cover: a standing crew that outlives any one intent.

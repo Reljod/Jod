@@ -1,6 +1,17 @@
 # SPEC — Agent-to-agent coordination
 
-High level. Companion to [`SPECS.md`](SPECS.md), and it depends on parts of it —
+> **Shipped, and kept for its vocabulary — this is not pending work.** Groups G1
+> through G6 are built: `send_message`, `read_messages`, `ask`, `ask_question`,
+> `reply`, `roster` and `handoff` are live in `core/src/mcp.rs`, and
+> `tests/e2e/a2a.sh` is the check that covers them. The file stayed instead of
+> being deleted because comments in `core/` cite its ids (`A5`, `A8`, `G4`), and
+> deleting it would leave them pointing at nothing. Read it to find out what an
+> id means, never to find out what to build next — open work is in
+> [`../TASKS.md`](../TASKS.md). The reasoning behind A1–A8 now lives in
+> [`decisions.md`](decisions.md), which is the copy to trust if the two ever
+> disagree.
+
+High level. Companion to [`spec-harness.md`](spec-harness.md), and it depends on parts of it —
 see *Where this sits*. Task ids are stable (`G3.S2`); quote them in branches and
 PRs.
 
@@ -55,25 +66,25 @@ the traffic becoming a way to spend money in a loop. Five user-visible changes:
 
 ## Where this sits
 
-This spec is **not** independent of `SPECS.md`:
+This spec is **not** independent of `spec-harness.md`:
 
 | Group | Needs | Can start |
 |---|---|---|
 | G1 reach the bus | nothing | **today** |
 | G2 automatic delivery | nothing | **today** |
-| G3 a work is a team | `SPECS.md` E4 (works) | after E4 |
-| G4 bounded conversation | `SPECS.md` E2 (cards), for escalation | after E2 |
-| G5 visible traffic | `SPECS.md` E5 (the fleet tree), to hang off | after E5 |
+| G3 a work is a team | `spec-harness.md` E4 (works) | after E4 |
+| G4 bounded conversation | `spec-harness.md` E2 (cards), for escalation | after E2 |
+| G5 visible traffic | `spec-harness.md` E5 (the fleet tree), to hang off | after E5 |
 | G6 the protocol prompts | G1, and E6.S1's preamble | after G1 |
 
 G1 and G2 are the whole "an agent cannot talk" problem, and neither waits on
-anything. **They are worth shipping before `SPECS.md` starts**, or as a fourth
+anything. **They are worth shipping before `spec-harness.md` starts**, or as a fourth
 slice inside its wave 1 if a lane has room — they are small and they unblock the
 thing you asked about.
 
 ## Vocabulary
 
-Extends `SPECS.md`'s. Same rule: a drifting noun is a bug.
+Extends `spec-harness.md`'s. Same rule: a drifting noun is a bug.
 
 | Word | Means |
 |---|---|
@@ -102,7 +113,7 @@ if an external agent ever needs to join, which is the only cost of being wrong.
 all three harnesses because every harness resumes a session by id, and no
 harness has to know teams exist. Nothing about A2A changes it.
 
-**A3 — the work is the team.** `SPECS.md` gives us a tree of sessions for one
+**A3 — the work is the team.** `spec-harness.md` gives us a tree of sessions for one
 intent, with a colour and cascading cards. That is a team in everything but
 name, and asking Reljod to decide "is this a team or a work" would be a tax on
 every delegation. So a work is automatically an addressing scope and its
@@ -129,7 +140,7 @@ between works, mesh inside one. Without this, every session is reachable from
 every other and the traffic grows with the square of the fleet.
 
 **A7 — coordination *on code* is git, not chat.** Ownership is a lease and a
-branch (`SPECS.md` D5) or a path (`docs/teamwork.md`), never a message saying "I
+branch (`spec-harness.md` D5) or a path (`docs/teamwork.md`), never a message saying "I
 am editing this now". Messages carry questions, findings and handoffs. A message
 bus is a bad distributed lock and an excellent way to lose an edit, and Jod
 already has the atomic primitives — claiming a task, claiming a lease — that a
@@ -188,7 +199,7 @@ interval, and ten messages sent at once produce exactly one resumed turn.
 
 ## G3 — A work is a team
 
-Depends on `SPECS.md` E4.
+Depends on `spec-harness.md` E4.
 
 - **G3.S1 Works are addressing scopes.** A work's sessions are its members, named
   by short title, with no join step.
@@ -203,14 +214,14 @@ Depends on `SPECS.md` E4.
 - **G3.S6 A work's bus ends with the work.** Closing a work stops delivery into
   it — waiting mail is reported, not delivered into sessions that are finishing.
   Deleting a work takes its traffic with it, in the same transaction as its
-  sessions (`SPECS.md` E4.S7), so no thread outlives its participants.
+  sessions (`spec-harness.md` E4.S7), so no thread outlives its participants.
 
 **Check:** two sessions the orchestrator opened for one work message each other
 by name, having never been joined to a team.
 
 ## G4 — Bounded conversation
 
-Depends on `SPECS.md` E2 for the escalation card.
+Depends on `spec-harness.md` E2 for the escalation card.
 
 - **G4.S1 Threads count depth.** A reply to a reply is depth two; a fresh
   question is depth zero.
@@ -232,7 +243,7 @@ one card raised naming both, and no further model calls until it is answered.
 
 ## G5 — Visible traffic
 
-Depends on `SPECS.md` E5.
+Depends on `spec-harness.md` E5.
 
 - **G5.S1 A message log per work** — who said what to whom, in order, threaded.
 - **G5.S2 Reachable from the tree.** A work or session node opens its traffic.
@@ -247,7 +258,7 @@ with one undelivered message marked.
 
 ## G6 — What agents are told
 
-Depends on G1 and `SPECS.md` E6.S1.
+Depends on G1 and `spec-harness.md` E6.S1.
 
 - **G6.S1 The preamble teaches the protocol**: who you can reach, that you should
   read your inbox before asking, that a question to a peer costs a turn of
@@ -266,22 +277,22 @@ Depends on G1 and `SPECS.md` E6.S1.
 
 # Parallelisation
 
-Same three lanes as `SPECS.md`, same meaning: **A** owns data and core, **B**
+Same three lanes as `spec-harness.md`, same meaning: **A** owns data and core, **B**
 owns the terminal, **C** owns the edges — supervisor, MCP, orchestrator, CLI,
 docs.
 
 This spec is unusually lopsided toward **C**, because most of it is MCP tools and
 prompts. That is the reason to interleave rather than run it as a block: C is the
-lightest-loaded lane in `SPECS.md`'s waves, and G1, G2 and G6 fit in its gaps.
+lightest-loaded lane in `spec-harness.md`'s waves, and G1, G2 and G6 fit in its gaps.
 
 | Group | Lane | Runs during |
 |---|---|---|
-| G1 reach the bus | **C** | before `SPECS.md`, or its wave 1 |
-| G2 automatic delivery | **A** (the ticker) | before `SPECS.md`, or its wave 1 |
-| G3 a work is a team | **A** | `SPECS.md` wave 3 |
-| G4 bounded conversation | **A**, card by **B** | `SPECS.md` wave 3 |
-| G5 visible traffic | **B** | after `SPECS.md` wave 4 |
-| G6 protocol prompts | **C** | with `SPECS.md` E6.S1 |
+| G1 reach the bus | **C** | before `spec-harness.md`, or its wave 1 |
+| G2 automatic delivery | **A** (the ticker) | before `spec-harness.md`, or its wave 1 |
+| G3 a work is a team | **A** | `spec-harness.md` wave 3 |
+| G4 bounded conversation | **A**, card by **B** | `spec-harness.md` wave 3 |
+| G5 visible traffic | **B** | after `spec-harness.md` wave 4 |
+| G6 protocol prompts | **C** | with `spec-harness.md` E6.S1 |
 
 **The sequencing that matters:** G1 without G4 is a money leak, so if G1 ships
 early — and it should — the depth and budget bounds come with it, even if the
@@ -342,7 +353,7 @@ reach it — take the blocked exit instead:
 
 ## Files & interfaces
 
-Areas, not signatures. Same lane-map purpose as `SPECS.md`'s table.
+Areas, not signatures. Same lane-map purpose as `spec-harness.md`'s table.
 
 | Area | What changes | Lane |
 |---|---|---|
@@ -398,7 +409,7 @@ Each has a default, so nothing is blocked.
 3. **Should the orchestrator see every message, or only what is escalated?**
    Default: **only escalations**, on cards. An orchestrator reading all traffic
    is an orchestrator doing the work, which the charter forbids.
-4. **Ship G1+G2 before `SPECS.md`, or inside its wave 1?** Default: **before** —
+4. **Ship G1+G2 before `spec-harness.md`, or inside its wave 1?** Default: **before** —
    they are small, they depend on nothing, and they close a gap that is open
    today.
 

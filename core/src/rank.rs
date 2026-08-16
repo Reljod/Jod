@@ -849,7 +849,7 @@ mod tests {
         );
     }
 
-    /// SPECS.md names this assertion as E1's check: the picker ranks a deep
+    /// docs/spec-harness.md names this assertion as E1's check: the picker ranks a deep
     /// exact path above a scattered-letters match.
     #[test]
     fn a_deep_exact_path_outranks_a_scattered_letters_coincidence() {

@@ -57,11 +57,22 @@ A check that can't pass makes faking it the cheapest path.
 ## How work runs
 
 - **Non-trivial work starts with a spec, not a plan.** Interview until nothing
-  material is guessed → `SPEC.md` → execute in a *fresh* session. Delete the
+  material is guessed → `SPEC.md` → execute in a *fresh* session. Retire the
   spec once it has shipped; a delivered spec left at the root reads as pending
-  work. → **`/write-spec`**
+  work. Delete it if nothing cites it. If the code cites its ids in comments —
+  `D2`, `A5`, `E4.S4` — move it under `docs/` and mark it shipped instead, and
+  record any decision it holds in `docs/decisions.md` first, because that is
+  where the reasoning is supposed to live. → **`/write-spec`**
+- **Open work lives in [`TASKS.md`](TASKS.md).** It indexes one file per area
+  under `tasks/`, each finding carrying a `Status:` line and one owner. Claim a
+  finding by putting your name on it before you start, and file new ones in the
+  area file rather than the index.
 - **Every task needs one runnable check.** Without one, "looks done" is the only
   stop signal and you are the loop.
+- **Reproduce a bug before you fix it.** A finding written from the code plus
+  old database rows tells you what the code says and what the data became, and
+  neither tells you what happens when the thing runs. Old rows are the worst of
+  it: they record behaviour that has since been fixed.
 - **Unattended runs need their whole dependency set present.** Missing key,
   service, or fixture → prepare it first or run attended.
 - **PRs carry evidence, not claims** — real output plus diff-derived deltas.

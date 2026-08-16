@@ -1,6 +1,6 @@
 # Jod desktop
 
-A Tauri v2 shell over [`jod-core`](../../crates/jod-core). Delegate a task, watch
+A Tauri v2 shell over [`jod-core`](../../core). Delegate a task, watch
 the agent stream in, follow it in a real terminal, kill it.
 
 The shell is deliberately thin — every command in `src-tauri/src/lib.rs` is a

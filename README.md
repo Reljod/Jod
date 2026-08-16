@@ -276,15 +276,24 @@ This brings slash commands directly into your Claude Code workflow:
 ```
 AGENTS.md          Charter, coding conventions, and agent rules
 CLAUDE.md          Symlink to AGENTS.md for Claude integration
+TASKS.md           Index of open findings, one file per area under tasks/
 install.sh         Bootstrap installer for Jod — clones and builds from source
 bin/               jod-upgrade.sh, what `jod upgrade` runs to install a release
 core/              Rust core: process supervision, SQLite store, events, MCP tools
 supervisor/        jod-run supervisor daemon
 cli/               jod CLI and full-screen TUI implementation
 api/               jod-api HTTP server
+voice/             Dictation crate, kept separate so the console builds headless
+browser/           Browser egress via Camoufox and a proxy pool
 .agents/skills/    Portable agent skills and slash commands
+agents/            Subagent definitions, mirrored into .claude/agents/
 apps/              Desktop, mobile, web, and voice client applications
-docs/              Architecture specs and decision documentation
+packages/          Shared front-end packages (the HUD)
+docs/              Architecture, the decision log, and shipped design specs
+tasks/             Open findings from testing the orchestrator end to end
+tests/             End-to-end suites, including the harness parity check
+research/          Dated investigations behind the larger design calls
+deploy/            VPS deployment assets
 ```
 
 ---

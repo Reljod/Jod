@@ -32,7 +32,7 @@ Both peers confirmed they will not touch `apps/ios/**`. This lane touches
 nothing outside it — in particular it adds **no API routes** and does **not**
 add a `CorsLayer` (§4 explains why that would be the wrong fix).
 
-`SPECS.md` on `feat/harness-spec` maps three lanes and **none of them covers
+`docs/spec-harness.md` (then `SPECS.md` on `feat/harness-spec`) maps three lanes and **none of them covers
 `apps/ios/`**. Flagged for Reljod: this lane should be recognised there.
 
 ## 2. The nav model: mirror the TUI, do not invent one

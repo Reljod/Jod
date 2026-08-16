@@ -5,10 +5,11 @@ this machine rather than by reading their documentation. Everything below is
 reproducible: each row cites the command that produced it and quotes the output
 it produced.
 
-This file exists because [decision D7](../SPECS.md) makes forwarding behaviour a
-*measurement* taken before the code is written. A guess here would have been
-cheap to make and expensive to discover: two of the three harnesses behave
-differently from what their `--help` implies.
+This file exists because [forwarding is a measurement, not an
+assumption](decisions.md#repo-slash-commands-are-forwarded-not-reimplemented)
+— taken before the code is written. A guess here would have been cheap to make
+and expensive to discover: two of the three harnesses behave differently from
+what their `--help` implies.
 
 Measured on 12 August 2026, Linux, against `claude` 2.1.228, `opencode` 1.18.15
 and `agy` 1.1.12. Re-measure when a harness is upgraded — none of this is a
