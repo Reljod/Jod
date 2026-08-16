@@ -27,7 +27,7 @@ the same database, line for line against `core/src/tree.rs`. That is a
 faithful re-derivation of the query, not the compiled function — I say so
 again wherever a finding rests only on it.
 
-I read `docs/spec-ceo-and-managers:SPEC.md` and `tasks/00-launch-and-roots.md`
+I read `docs/spec-ceo-and-managers.md` and `tasks/00-launch-and-roots.md`
 first, as instructed. Findings the spec already covers are cited by change
 number rather than refiled.
 

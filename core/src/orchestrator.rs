@@ -163,10 +163,11 @@ pub fn should_compact(
 /// or anything still running when the turn ends, the routing below is exactly
 /// what it always was.
 ///
-/// This is the shape `docs/spec-ceo-and-managers` settles on for main — "it
-/// routes and it answers", and "main may route and may run repo-less one-shots"
-/// — brought forward on its own, without the manager tier that spec adds around
-/// it.
+/// This is the shape `docs/spec-ceo-and-managers.md` settles on for main — "it
+/// routes and it answers", and "main may route and may run repo-less one-shots".
+/// The manager tier that spec adds around it has since shipped too, which is
+/// why the tool list below names `ask_manager` and says `open_work` is not
+/// main's to call.
 ///
 /// It fixes instructions that never needed a child. It does **not** fix the
 /// separate hole the same live run exposed: main delegating and then wanting
