@@ -1377,7 +1377,7 @@ dependencies = [
 
 [[package]]
 name = "jod-api"
-version = "0.1.0"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -1403,7 +1403,7 @@ dependencies = [
 
 [[package]]
 name = "jod-cli"
-version = "0.1.0"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1421,7 +1421,7 @@ dependencies = [
 
 [[package]]
 name = "jod-core"
-version = "0.1.0"
+version = "0.2.4"
 dependencies = [
  "chrono",
  "chrono-tz",
@@ -1441,7 +1441,7 @@ dependencies = [
 
 [[package]]
 name = "jod-supervisor"
-version = "0.1.0"
+version = "0.2.4"
 dependencies = [
  "chrono",
  "jod-core",
@@ -1451,7 +1451,7 @@ dependencies = [
 
 [[package]]
 name = "jod-voice-core"
-version = "0.1.0"
+version = "0.2.4"
 dependencies = [
  "base64",
  "hound",
