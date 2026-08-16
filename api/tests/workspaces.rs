@@ -373,11 +373,14 @@ async fn hooks_are_an_empty_list_when_none_are_configured() {
 #[tokio::test]
 async fn activity_is_newest_first() {
     let h = harness_with(|store| {
-        store.add_goal(&goal("ship-it")).unwrap();
+        let g = goal("ship-it");
+        store.add_goal(&g).unwrap();
         // Two iterations, written in order, so "newest first" is checkable.
+        // In the goal's own scope, which is where `Ticker::tick_goals` writes
+        // them and the only place the feed reads them from.
         for n in ["first pass", "second pass"] {
             store
-                .remember(NewFact::new("goal/ship-it", "iteration", n))
+                .remember(NewFact::new("goal/ship-it", "iteration", n).in_scope(&g.memory_scope()))
                 .unwrap();
         }
     });
@@ -399,9 +402,13 @@ async fn activity_is_newest_first() {
 #[tokio::test]
 async fn an_activity_row_says_where_to_jump_to() {
     let h = harness_with(|store| {
-        store.add_goal(&goal("ship-it")).unwrap();
+        let g = goal("ship-it");
+        store.add_goal(&g).unwrap();
         store
-            .remember(NewFact::new("goal/ship-it", "iteration", "first pass"))
+            .remember(
+                NewFact::new("goal/ship-it", "iteration", "first pass")
+                    .in_scope(&g.memory_scope()),
+            )
             .unwrap();
     });
 
@@ -419,12 +426,18 @@ async fn an_activity_row_says_where_to_jump_to() {
 #[tokio::test]
 async fn the_needs_you_filter_keeps_only_what_wants_a_human() {
     let h = harness_with(|store| {
-        store.add_goal(&goal("ship-it")).unwrap();
+        let g = goal("ship-it");
+        store.add_goal(&g).unwrap();
         store
-            .remember(NewFact::new("goal/ship-it", "iteration", "first pass"))
+            .remember(
+                NewFact::new("goal/ship-it", "iteration", "first pass")
+                    .in_scope(&g.memory_scope()),
+            )
             .unwrap();
         store
-            .remember(NewFact::new("goal/ship-it", "ended", "satisfied"))
+            .remember(
+                NewFact::new("goal/ship-it", "ended", "satisfied").in_scope(&g.memory_scope()),
+            )
             .unwrap();
     });
 

@@ -4404,32 +4404,48 @@ fn goal_command(jod: &Jod, what: GoalCommand) -> Result<()> {
             println!("{}", if gone { format!("{name} forgotten") } else { format!("no goal {name}") });
         }
         GoalCommand::Log { name, limit } => {
-            if store.goal_named(&name)?.is_none() {
+            let Some(goal) = store.goal_named(&name)? else {
                 bail!("no goal {name}");
-            }
-            // Keyed on the subject, which is derived from the name, precisely
-            // so this does not need the id the scope is keyed on.
-            let facts = store.facts_about(&format!("goal/{name}"))?;
-            if facts.is_empty() {
-                println!("{name} has not iterated yet");
-                return Ok(());
-            }
-            for f in facts.iter().filter(|f| f.predicate == "pursuing") {
-                println!("pursuing  {}", f.object);
-            }
-            for f in facts.iter().filter(|f| f.predicate == "ended") {
-                println!("ended     {}", f.object);
-            }
-            let history: Vec<_> = facts.iter().filter(|f| f.predicate == "iteration").collect();
-            if history.is_empty() {
-                println!("no iteration has finished yet");
-            }
-            for f in history.iter().take(limit) {
-                println!("  {}", f.object);
+            };
+            for line in goal_log(&store, &goal, limit)? {
+                println!("{line}");
             }
         }
     }
     Ok(())
+}
+
+/// What `jod goal log` prints, one line at a time.
+///
+/// Read in the goal's own scope rather than by subject alone. The facts are
+/// filed under `goal/<name>`, but the name is not the goal: remove a goal and
+/// add another with the same name and a subject-only read hands the new one
+/// everything the old one wrote — its `ended` verdict, its done-when
+/// fingerprint, and a pointer to a run it never started. The id is the only
+/// thing that tells the two apart, and `memory_scope()` is where the id
+/// already lives.
+///
+/// Separate from the command so the reading can be tested without a terminal.
+fn goal_log(store: &Store, goal: &jod_core::schedule::Goal, limit: usize) -> Result<Vec<String>> {
+    let facts = store.facts_about_in_scope(&goal.memory_scope(), &format!("goal/{}", goal.name))?;
+    if facts.is_empty() {
+        return Ok(vec![format!("{} has not iterated yet", goal.name)]);
+    }
+    let mut lines = Vec::new();
+    for f in facts.iter().filter(|f| f.predicate == "pursuing") {
+        lines.push(format!("pursuing  {}", f.object));
+    }
+    for f in facts.iter().filter(|f| f.predicate == "ended") {
+        lines.push(format!("ended     {}", f.object));
+    }
+    let history: Vec<_> = facts.iter().filter(|f| f.predicate == "iteration").collect();
+    if history.is_empty() {
+        lines.push("no iteration has finished yet".to_string());
+    }
+    for f in history.iter().take(limit) {
+        lines.push(format!("  {}", f.object));
+    }
+    Ok(lines)
 }
 
 /// Refuse to start an agent when nothing could supervise it.
@@ -5403,6 +5419,71 @@ mod tests {
         assert!(
             store.secret_names(jod_core::secrets::Scope::Global, "").unwrap().is_empty(),
             "a refusal still stored something"
+        );
+    }
+
+    // ---- `jod goal log` reads one goal's memory, not one name's ----
+
+    fn a_goal(id: &str, name: &str, objective: &str) -> jod_core::schedule::Goal {
+        jod_core::schedule::Goal {
+            id: id.into(),
+            name: name.into(),
+            objective: objective.into(),
+            done_when: None,
+            harness: "claude_code".into(),
+            cwd: "/tmp".into(),
+            model: None,
+            cron: "0 * * * *".into(),
+            timezone: "UTC".into(),
+            state: jod_core::schedule::GoalState::Running,
+            iteration: 0,
+            max_iterations: None,
+            budget_usd: None,
+            spent_usd: 0.0,
+            stall_after: 6,
+            no_progress: 0,
+            next_fire_at_ms: None,
+            created_at_ms: 0,
+        }
+    }
+
+    /// Seen on this box, not argued from the code: `jod goal log` on a goal
+    /// added seconds earlier printed `ended satisfied`. The verdict belonged to
+    /// a goal of the same name that had already been removed, because facts are
+    /// filed under `goal/<name>` and the read matched the subject alone.
+    #[test]
+    fn a_new_goal_does_not_inherit_the_record_of_a_removed_one() {
+        let store = Store::in_memory().unwrap();
+        let first = a_goal("g-first", "nightly-tidy", "tidy the first thing");
+        store.add_goal(&first).unwrap();
+        store
+            .remember(
+                NewFact::new("goal/nightly-tidy", "ended", "satisfied")
+                    .in_scope(&first.memory_scope())
+                    .from(Origin::System),
+            )
+            .unwrap();
+        assert_eq!(
+            goal_log(&store, &first, 10).unwrap(),
+            vec![
+                "ended     satisfied".to_string(),
+                "no iteration has finished yet".to_string()
+            ],
+            "the goal that wrote the verdict cannot read it back"
+        );
+
+        assert!(store.delete_goal("nightly-tidy").unwrap());
+        let second = a_goal(
+            "g-second",
+            "nightly-tidy",
+            "a totally different second objective",
+        );
+        store.add_goal(&second).unwrap();
+
+        assert_eq!(
+            goal_log(&store, &second, 10).unwrap(),
+            vec!["nightly-tidy has not iterated yet".to_string()],
+            "a goal that has never run reported a previous goal's ending"
         );
     }
 
