@@ -125,6 +125,18 @@ Refusal is the ordinary outcome and not an error — do not retry it, do not
 work around it, and do not reach for `gh pr merge` because the script said
 no. That is the same move as deleting a failing test.
 
+The exit code tracks whether the pull request merged, and nothing else. After
+merging, `gh` tries to tidy up the local checkout, and that step fails
+whenever the script runs inside a git worktree, because the base branch is
+already checked out in the primary checkout. When that happens the script
+confirms with the server that the pull request really is merged, exits 0
+anyway, and prints the branches `gh` left behind along with the commands to
+remove them. Delete those branches; nothing else is outstanding. If the
+server does not confirm the merge, the run still fails.
+
+The `gh` error stays on screen in the middle of that output, so read the last
+line rather than the last error. The last line is the verdict.
+
 The script checks, and merges only if all of it holds:
 
 - the PR is open, not a draft, and has no requested changes
