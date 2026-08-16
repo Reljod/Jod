@@ -9,6 +9,15 @@ description = "The jod command — delegate to an agent harness, watch it, repor
 name = "jod"
 path = "src/main.rs"
 
+# `examples/screens.rs` renders every workspace off a real database, and it
+# carries the test that holds it to that. Cargo builds examples during
+# `cargo test` but does not *run* the tests inside one unless the target says
+# so, which is how that example came to claim it renders the fleet while
+# rendering an empty one on every database it was pointed at.
+[[example]]
+name = "screens"
+test = true
+
 [dependencies]
 jod-core.workspace = true
 jod-voice-core.workspace = true

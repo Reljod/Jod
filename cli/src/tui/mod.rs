@@ -6133,7 +6133,14 @@ fn reload(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) 
     )));
 }
 
-async fn list_agents(jod: &Arc<Jod>) -> Vec<AgentLine> {
+/// The fleet's rows, read out of this process's runs.
+///
+/// Public for the same reason `data` and `ui` are: `examples/screens.rs`
+/// renders every screen off a real database and has to fill `App::agents` the
+/// way the tick does. It called none of this and drew an empty fleet on a
+/// database full of runs, which is worse than an error because it looks like
+/// an answer.
+pub async fn list_agents(jod: &Arc<Jod>) -> Vec<AgentLine> {
     // Read once for the whole listing rather than per row. Without a store
     // every run reads as `Nothing`, which is the honest answer: with no ledger
     // there is nothing that could have failed to arrive.
