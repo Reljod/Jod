@@ -134,7 +134,7 @@ All JSON, all under `/v1`. Errors are
 | `GET` | `/v1/agents` | `read` | Every agent this daemon knows about. |
 | `POST` | `/v1/agents` | `write` | Delegate a prompt. Returns the agent. |
 | `GET` | `/v1/agents/{id}` | `read` | One agent. |
-| `DELETE` | `/v1/agents/{id}` | `write` | Stop it and the commands it ran. A run it delegated to keeps going. |
+| `DELETE` | `/v1/agents/{id}` | `write` | Stop it, the commands it ran, and every run below it. Main stops alone. |
 | `GET` | `/v1/agents/{id}/events` | `read` | History, `?after_seq=&limit=`. |
 | `GET` | `/v1/agents/{id}/stream` | `read` | SSE: that agent, live, resumable. |
 | `GET` | `/v1/events` | `read` | SSE: every agent, for a dashboard. |

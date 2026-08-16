@@ -1355,6 +1355,45 @@ const MIGRATIONS: &[(&str, &str)] = &[
       (SELECT MAX(id) FROM schedule_fires WHERE schedule_id = schedules.id), 0);
     "#,
     ),
+    (
+    "0019_a_stop_cascades",
+    r#"
+    -- Which runs were stopped because something above them was stopped.
+    --
+    -- Its own table rather than a column on `runs`, for the reason
+    -- `delegations` is its own table: this is not a property of the run, it is
+    -- the record of one decision that reached several runs at once. The
+    -- question asked of it later — "bring back what that stop took" — is a
+    -- lookup by the conversation that was stopped, not by the run.
+    --
+    -- `runs.status` already says `killed`. It cannot say *why*, and the
+    -- difference matters: a run somebody stopped by name was a decision about
+    -- that run, and a run the cascade reached was collateral. Only the second
+    -- kind comes back when the parent is resumed.
+    CREATE TABLE cascaded_stops (
+      -- One row per run. A run can only be taken down once.
+      run_id            TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
+      -- The conversation whose stop reached this run. Resuming that
+      -- conversation is what brings this one back.
+      from_conversation TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+      at_ms             INTEGER NOT NULL,
+      -- When a resume claimed this row, and what it started. Claimed and
+      -- filled in by two separate statements, which is why they are two
+      -- columns: `resumed_at_ms` is written *before* the replacement run is
+      -- launched, so that two resumes racing on one conversation cannot both
+      -- win the same row and start two copies of the same worker.
+      -- `resumed_run_id` is written after, and stays null if the launch failed.
+      resumed_at_ms     INTEGER,
+      resumed_run_id    TEXT REFERENCES runs(id) ON DELETE SET NULL
+    );
+    -- The resume's only query: what did this conversation's stop take down that
+    -- has not been brought back yet. Partial on the null so the rows that have
+    -- already been resumed cost nothing to skip.
+    CREATE INDEX ix_cascaded_stops_pending
+      ON cascaded_stops(from_conversation, at_ms)
+      WHERE resumed_at_ms IS NULL;
+    "#,
+    ),
 ];
 
 /// Who asserted a fact. Kept out of the fact's text so that content Jod
@@ -1774,6 +1813,144 @@ impl Store {
         )?;
         let rows = stmt.query_map(params![limit as i64], run_from_row)?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    // ---- what a stop reaches -------------------------------------------
+    //
+    // A fleet is a tree, and stopping a branch of it stops the branch. These
+    // four queries are the whole of that: find the branch, find what is still
+    // running on it, write down what the stop took, and read that back when
+    // the branch is resumed. `Jod::kill_agent` calls the first three and
+    // `Server::continue_agent` calls the last.
+
+    /// Every conversation below this one, however deep.
+    ///
+    /// The edge is `conversations.parent_conversation_id`, written by
+    /// `Server::record_handoff` on each `delegate`. Excludes the root itself:
+    /// a caller stopping a run has already dealt with that run, and including
+    /// it would make the walk look like it stops the thing twice.
+    ///
+    /// `UNION` rather than `UNION ALL` so a parent edge that somehow points
+    /// back up the tree ends the walk instead of running for ever. That should
+    /// be impossible — a child is created after its parent — but a recursive
+    /// query that can loop on bad data is one that hangs the process holding
+    /// the store lock, and the cost of ruling it out here is one word.
+    pub fn descendant_conversations(&self, root: &str) -> Result<Vec<String>> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        let mut stmt = conn.prepare(
+            "WITH RECURSIVE below(id) AS (
+               SELECT id FROM conversations WHERE parent_conversation_id = ?1
+               UNION
+               SELECT c.id FROM conversations c
+                 JOIN below b ON c.parent_conversation_id = b.id
+             )
+             SELECT id FROM below",
+        )?;
+        let rows = stmt.query_map(params![root], |r| r.get::<_, String>(0))?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// The runs still going in one conversation.
+    ///
+    /// A conversation reaches its runs through `messages.run_id`, which is the
+    /// inverse of [`Store::conversation_for_run`] and scans for the same
+    /// reason: `messages` is indexed on `(conversation_id, id)`, so the rows
+    /// for one conversation are contiguous and the scan is over that
+    /// conversation rather than the table.
+    ///
+    /// A run that has not written a message yet is invisible here. That is a
+    /// real gap and it is the honest one: with no message there is no link
+    /// from the conversation to the run, so there is nothing to find. It
+    /// closes on its own within a turn, because a harness writes its first
+    /// message long before it does anything worth stopping.
+    pub fn running_runs_in(&self, conversation_id: &str) -> Result<Vec<String>> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT m.run_id FROM messages m
+               JOIN runs r ON r.id = m.run_id
+              WHERE m.conversation_id = ?1
+                AND m.run_id IS NOT NULL
+                AND r.status = 'running'",
+        )?;
+        let rows = stmt.query_map(params![conversation_id], |r| r.get::<_, String>(0))?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// Write down that a stop of `from_conversation` reached this run.
+    ///
+    /// `OR IGNORE`, so a run already recorded keeps the conversation that
+    /// first took it down. Two cascades reaching the same run means the tree
+    /// had a shape nobody expects, and in that case the first answer is the
+    /// one that explains what happened.
+    pub fn record_cascaded_stop(
+        &self,
+        run_id: &str,
+        from_conversation: &str,
+        at_ms: i64,
+    ) -> Result<()> {
+        self.write(|tx| {
+            tx.execute(
+                "INSERT OR IGNORE INTO cascaded_stops
+                   (run_id, from_conversation, at_ms) VALUES (?1, ?2, ?3)",
+                params![run_id, from_conversation, at_ms],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// What this conversation's stop took down and has not brought back.
+    ///
+    /// Oldest first, so a fleet comes back in the order it was stopped.
+    pub fn pending_cascaded_stops(&self, from_conversation: &str) -> Result<Vec<StoredRun>> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT r.id, r.name, r.harness, r.status, r.cwd, r.session_id,
+                    r.pid, r.pgid, r.created_at_ms, r.summary
+               FROM cascaded_stops c JOIN runs r ON r.id = c.run_id
+              WHERE c.from_conversation = ?1 AND c.resumed_at_ms IS NULL
+              ORDER BY c.at_ms",
+        )?;
+        let rows = stmt.query_map(params![from_conversation], run_from_row)?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// Take ownership of one stopped run, so exactly one resume brings it back.
+    ///
+    /// True means the caller won it and should launch the replacement; false
+    /// means somebody else already has, and the caller must not launch
+    /// anything. The `IS NULL` in the `WHERE` is the whole of that guarantee:
+    /// two resumes racing on the same conversation read the same pending row,
+    /// and only one `UPDATE` matches.
+    ///
+    /// Claimed before the launch rather than after, because the two failures
+    /// are not the same size. A claim that is never followed by a launch costs
+    /// one worker that a person can start again by hand. A launch that is never
+    /// followed by a claim lets the next resume start a second copy, and two
+    /// agents on one piece of work will edit the same files.
+    pub fn claim_cascaded_stop(&self, run_id: &str, at_ms: i64) -> Result<bool> {
+        self.write(|tx| {
+            let n = tx.execute(
+                "UPDATE cascaded_stops SET resumed_at_ms = ?2
+                  WHERE run_id = ?1 AND resumed_at_ms IS NULL",
+                params![run_id, at_ms],
+            )?;
+            Ok(n > 0)
+        })
+    }
+
+    /// Say which run replaced a stopped one, once it has started.
+    ///
+    /// Bookkeeping for whoever reads the history later, not a lock — the claim
+    /// above is the lock. A row still holding a claim and no run id is one
+    /// whose replacement failed to launch, and it says so by being that shape.
+    pub fn name_cascade_replacement(&self, run_id: &str, resumed_run_id: &str) -> Result<()> {
+        self.write(|tx| {
+            tx.execute(
+                "UPDATE cascaded_stops SET resumed_run_id = ?2 WHERE run_id = ?1",
+                params![run_id, resumed_run_id],
+            )?;
+            Ok(())
+        })
     }
 
     /// How many runs are on record. What a capped listing needs to say how
