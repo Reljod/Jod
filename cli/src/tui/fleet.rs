@@ -377,6 +377,12 @@ pub fn marker(node: &Node, expanded: bool) -> &'static str {
 /// colour.
 pub fn kind_glyph(kind: NodeKind) -> &'static str {
     match kind {
+        // Solid, and the widest of the set: a project is the outermost group,
+        // and the gutter is what says so on a screen with no colour.
+        NodeKind::Project => "▪",
+        // A manager is a conversation, so it takes the session's shape filled
+        // in — the same kind of thing, and the one that is always there.
+        NodeKind::Manager => "◆",
         NodeKind::Work => "■",
         NodeKind::Session => "◇",
         NodeKind::Run => "·",
