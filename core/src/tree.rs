@@ -166,6 +166,23 @@ struct RawSession {
     blocked: usize,
 }
 
+/// Everything a work's rows are built out of, read once for the whole forest.
+///
+/// Gathered into one value rather than passed as four arguments, because
+/// [`push_work`] already needs a depth and a parent on top of them and the pile
+/// was over clippy's limit. Bundling the *reads* is also the honest grouping:
+/// these four are the query results, and the other two say where the work goes.
+///
+/// The maps are `&mut` because the walk drains them — a session belongs to one
+/// work, so taking it out is both cheaper than cloning and a guard against
+/// emitting it twice.
+struct Flatten<'a> {
+    sessions: &'a mut HashMap<String, Vec<RawSession>>,
+    runs: &'a mut HashMap<String, Vec<RawRun>>,
+    stalled: &'a HashMap<String, i64>,
+    now_ms: i64,
+}
+
 /// Emit one work, its sessions and their runs, and say what cascaded up.
 ///
 /// Extracted so a work can hang from a project row as easily as from the top
@@ -176,18 +193,14 @@ struct RawSession {
 /// Returns the work's own cards, blocked cards and whether anything under it is
 /// running, so a project row can add them up the same way a work adds up its
 /// sessions.
-#[allow(clippy::too_many_arguments)]
 fn push_work(
     out: &mut Vec<Node>,
     work: &Work,
-    sessions: &mut HashMap<String, Vec<RawSession>>,
-    runs: &mut HashMap<String, Vec<RawRun>>,
-    stalled: &HashMap<String, i64>,
-    now_ms: i64,
+    from: &mut Flatten<'_>,
     base_depth: usize,
     parent: Option<NodeId>,
 ) -> (usize, usize, bool) {
-    let own = sessions.remove(&work.id).unwrap_or_default();
+    let own = from.sessions.remove(&work.id).unwrap_or_default();
     // A session whose parent is outside this work — the main chat is the usual
     // one — hangs from the work itself. Otherwise the whole subtree would be
     // dropped for pointing at a row that is not here.
@@ -246,7 +259,7 @@ fn push_work(
                 stack.push((kid, depth + 1, Some(session.id.clone())));
             }
         }
-        let session_runs = runs.remove(&session.id).unwrap_or_default();
+        let session_runs = from.runs.remove(&session.id).unwrap_or_default();
         let has_children = !session_runs.is_empty()
             || children.get(&Some(session.id.clone())).is_some_and(|c| !c.is_empty());
         work_cards += session.cards;
@@ -287,10 +300,11 @@ fn push_work(
                 // Only for a run that still claims to be running. A finished
                 // run's leftover mark, if a sweep has not yet retired the row,
                 // would draw a badge on something that has already stopped.
-                stalled_for_ms: stalled
+                stalled_for_ms: from
+                    .stalled
                     .get(&run.id)
                     .filter(|_| run.status == "running")
-                    .map(|since| now_ms.saturating_sub(*since).max(0)),
+                    .map(|since| from.now_ms.saturating_sub(*since).max(0)),
                 status: Some(run.status),
                 cards: 0,
                 blocked: 0,
@@ -485,6 +499,13 @@ impl Store {
             }
         }
 
+        let mut from = Flatten {
+            sessions: &mut sessions,
+            runs: &mut runs,
+            stalled: &stalled,
+            now_ms,
+        };
+
         let mut out = Vec::new();
         for project_id in order {
             let Some(project) = self.project(&project_id)? else {
@@ -543,10 +564,7 @@ impl Store {
                 let (cards, blocked, running) = push_work(
                     &mut out,
                     &work,
-                    &mut sessions,
-                    &mut runs,
-                    &stalled,
-                    now_ms,
+                    &mut from,
                     1,
                     Some(NodeId::project(&project.id)),
                 );
@@ -560,16 +578,7 @@ impl Store {
         }
 
         for work in loose {
-            push_work(
-                &mut out,
-                &work,
-                &mut sessions,
-                &mut runs,
-                &stalled,
-                now_ms,
-                0,
-                None,
-            );
+            push_work(&mut out, &work, &mut from, 0, None);
         }
 
         Ok(out)
