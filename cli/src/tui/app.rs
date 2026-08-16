@@ -474,6 +474,14 @@ pub struct App {
     pub liveness: Option<Liveness>,
     /// Ticks since start, which is all the spinner needs.
     pub tick: u64,
+    /// Whether this console has already said that nothing is sweeping
+    /// heartbeats.
+    ///
+    /// Once per session, not once per tick. The tick runs every second and the
+    /// condition it tests stays true until somebody starts the daemon, so a
+    /// notice without this flag would be a line a second — which is not a
+    /// warning, it is the feed being destroyed.
+    pub said_nothing_is_sweeping: bool,
     /// Which entry of the slash-command popup is highlighted. Meaningless when
     /// there is no popup, and clamped every time the input changes.
     pub suggestion: usize,
@@ -1012,6 +1020,7 @@ impl App {
             turn_started_ms: None,
             liveness: None,
             tick: 0,
+            said_nothing_is_sweeping: false,
             suggestion: 0,
             team: None,
             members: Vec::new(),

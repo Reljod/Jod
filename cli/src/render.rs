@@ -93,7 +93,11 @@ pub fn launched(agent: &AgentSummary) {
 /// that silently does not hold.
 pub fn watching(run_id: &str, stall_ms: i64) {
     eprintln!(
-        "{} watching {} — stopped if silent for {} minutes (needs `jod daemon`)",
+        // "stopped" was true when a stalled session was reaped. It is now
+        // flagged and left running, and a message that promises a kill which
+        // never comes is what somebody decides not to intervene on.
+        "{} watching {} — flagged if silent for {} minutes, not stopped \
+         (needs `jod daemon`)",
         paint(DIM, "♥"),
         paint(BOLD, run_id),
         stall_ms / 60_000,

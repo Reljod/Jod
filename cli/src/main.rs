@@ -79,12 +79,17 @@ enum Command {
         /// Return as soon as the agent is launched instead of waiting for it.
         #[arg(long)]
         detach: bool,
-        /// Watch this run for signs of life, and reap it if it wedges.
+        /// Watch this run for signs of life, and flag it if it wedges.
         ///
         /// For work measured in hours. A run that stops producing output for
-        /// longer than its stall window is stopped and marked failed by the
-        /// scheduler, rather than sitting there looking busy for ever. Needs
+        /// longer than its stall window is marked stalled and shown as such,
+        /// rather than sitting there looking busy for ever. It is not stopped:
+        /// killing a session destroys a transcript and possibly a checkout
+        /// mid-edit, and that is a call for the person watching. Needs
         /// `jod daemon` to be running — the sweep happens on its tick.
+        ///
+        /// Every session is watched anyway now. This flag survives because it
+        /// is also how a stall window is set, and because re-arming resets one.
         #[arg(long)]
         watch: bool,
         /// How long this run may go silent before it counts as stalled.

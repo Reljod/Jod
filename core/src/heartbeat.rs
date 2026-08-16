@@ -158,6 +158,19 @@ pub struct Heartbeat {
     pub last_progress_ms: i64,
     pub last_beat_ms: i64,
     pub beats: i64,
+    /// When this run went quiet, for a run that is being marked rather than
+    /// reaped. `None` means healthy.
+    ///
+    /// This is the moment of the *last event*, not the moment the sweep noticed
+    /// — so it is the same value on the first stalled tick and the fiftieth,
+    /// and "how long has it been silent" is one subtraction rather than a
+    /// number that depends on when a daemon happened to look.
+    ///
+    /// A fact derived from the heartbeat rather than a variant on
+    /// [`crate::AgentStatus`], because `runs.status` is written by the
+    /// supervisor — a separate process — and a status that process never writes
+    /// would drift the moment the two disagreed.
+    pub stalled_since_ms: Option<i64>,
 }
 
 impl Heartbeat {
@@ -182,7 +195,13 @@ impl Heartbeat {
             last_progress_ms: now_ms,
             last_beat_ms: now_ms,
             beats: 0,
+            stalled_since_ms: None,
         }
+    }
+
+    /// Whether this run is currently marked as stalled.
+    pub fn is_stalled(&self) -> bool {
+        self.stalled_since_ms.is_some()
     }
 
     /// Override the silence window. Refuses anything below [`MIN_STALL_MS`].
@@ -304,7 +323,7 @@ impl Verdict {
 }
 
 /// A duration a person reads, not a number of milliseconds.
-fn human_ms(ms: i64) -> String {
+pub fn human_ms(ms: i64) -> String {
     let secs = ms / 1000;
     match secs {
         s if s < 90 => format!("{s}s"),
@@ -372,6 +391,81 @@ pub fn decide(hb: &Heartbeat, obs: &Observed, now_ms: i64) -> Verdict {
     Verdict::Quiet { silence_ms }
 }
 
+/// What the sweep does about a verdict, once it takes into account *what* is
+/// being watched.
+///
+/// [`decide`] answers "what is true of this run" and knows nothing about who
+/// asked. This answers "so what do we do", and it is a separate function
+/// because the same verdict means two different things:
+///
+/// - A **goal iteration** that wedges blocks its goal's loop for ever. Nothing
+///   else will ever notice, and the goal's own cadence stops meaning anything.
+///   Reaping it is the case heartbeats were written for.
+/// - A **session Reljod is watching** is not blocking a loop. Killing it
+///   destroys a transcript and possibly a checkout mid-edit, to fix a problem
+///   he can see and decide about himself. He chose mark-and-surface, so a stall
+///   here is a *fact on a row*, not an execution.
+///
+/// Splitting it here rather than inside [`decide`] keeps the verdict honest —
+/// a silent run is stalled whoever is watching it, and only the response
+/// differs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Response {
+    /// Still going, or quiet inside its window. Record the beat, keep watching.
+    Beat,
+    /// Silent past its window, on a run that is not to be killed for it. Write
+    /// the mark, keep watching, signal nothing.
+    Mark,
+    /// It went quiet and came back. Clear the mark and carry on. Coming back is
+    /// not a failure and must stop looking like one.
+    Clear,
+    /// Stop watching, and correct the run to `failed`. `terminate` says whether
+    /// there is still a process group to signal — [`Verdict::Vanished`] means
+    /// there is not, and `kill` against a recycled pgid reaches a stranger.
+    Reap { terminate: bool },
+    /// The run ended on its own. Drop the row, touch nothing.
+    Retire,
+}
+
+impl Response {
+    /// Whether the heartbeat row survives this response.
+    pub fn keeps_watching(&self) -> bool {
+        matches!(self, Response::Beat | Response::Mark | Response::Clear)
+    }
+}
+
+/// What to do about one run, given the verdict and what the heartbeat watches.
+///
+/// The one place the mark-don't-kill rule lives. Pure, so every cell of the
+/// table below is reachable from a literal in a test.
+pub fn respond(hb: &Heartbeat, verdict: &Verdict) -> Response {
+    match verdict {
+        // Progress clears a mark. Checked here rather than in the store so
+        // that "it came back" is a decision with a name, not an `UPDATE` that
+        // happens to set a column to null.
+        Verdict::Beating { .. } if hb.is_stalled() => Response::Clear,
+        Verdict::Beating { .. } | Verdict::Quiet { .. } => Response::Beat,
+
+        // The split. `Expired` rides along with `Stalled` rather than being
+        // special-cased twice: a run that outlived a ceiling somebody set is
+        // still just a session, and `Watching::Run` has no ceiling by default
+        // anyway (see `Heartbeat::starting`), so this only fires for one that
+        // was given one explicitly.
+        Verdict::Stalled { .. } | Verdict::Expired { .. } => match hb.watching {
+            Watching::Goal(_) => Response::Reap { terminate: true },
+            Watching::Run => Response::Mark,
+        },
+
+        // Not part of the split, and deliberately. A vanished run has no
+        // process left: its supervisor died without recording an ending, so the
+        // row is lying. Marking it stalled would leave `jod ls` claiming a
+        // process is running when the kernel says otherwise, which is the bug
+        // this module exists to remove rather than one to add a second copy of.
+        Verdict::Vanished => Response::Reap { terminate: false },
+        Verdict::Ended => Response::Retire,
+    }
+}
+
 /// The record a sweep writes back after a verdict that leaves the run going.
 ///
 /// Split out so the store's update is a value rather than a pile of arguments,
@@ -383,6 +477,13 @@ pub struct Beat {
     pub last_seq: i64,
     pub last_progress_ms: i64,
     pub last_beat_ms: i64,
+    /// The mark, carried on the same write as the cursor.
+    ///
+    /// One write rather than a separate `mark_stalled`/`clear_stalled` pair,
+    /// because every sweep that sets or clears this is already writing the
+    /// cursor in the same tick — and two statements would let a crash between
+    /// them leave a run marked stalled with a cursor that says it is working.
+    pub stalled_since_ms: Option<i64>,
 }
 
 impl Beat {
@@ -392,19 +493,36 @@ impl Beat {
     /// still records that the sweep happened, because "the scheduler has not
     /// looked at this run since Tuesday" and "this run has been silent since
     /// Tuesday" are different problems, and one column cannot answer both.
+    ///
+    /// The mark follows [`respond`], so the column and the decision cannot
+    /// disagree: a `Beating` verdict clears it, a stall that is being marked
+    /// sets it to when the run actually went quiet, and everything else leaves
+    /// it as it was.
     pub fn after(hb: &Heartbeat, verdict: &Verdict, now_ms: i64) -> Beat {
+        let stalled_since_ms = match respond(hb, verdict) {
+            Response::Clear => None,
+            // `last_progress_ms`, not `now_ms`: the run went quiet when it
+            // stopped producing events, not when a daemon got round to
+            // noticing. Recording the sweep's clock would make the same stall
+            // report a different age depending on how busy the box was, and
+            // would move every tick.
+            Response::Mark => Some(hb.stalled_since_ms.unwrap_or(hb.last_progress_ms)),
+            _ => hb.stalled_since_ms,
+        };
         match verdict {
             Verdict::Beating { seq } => Beat {
                 run_id: hb.run_id.clone(),
                 last_seq: *seq,
                 last_progress_ms: now_ms,
                 last_beat_ms: now_ms,
+                stalled_since_ms,
             },
             _ => Beat {
                 run_id: hb.run_id.clone(),
                 last_seq: hb.last_seq,
                 last_progress_ms: hb.last_progress_ms,
                 last_beat_ms: now_ms,
+                stalled_since_ms,
             },
         }
     }
@@ -419,6 +537,9 @@ pub struct SweepReport {
     pub beating: usize,
     /// Runs stopped: stalled or expired.
     pub stopped: usize,
+    /// Runs marked stalled and left alone — counted separately from `stopped`
+    /// precisely because they are the ones that were *not* stopped.
+    pub marked: usize,
     /// Heartbeats retired, for any reason.
     pub retired: usize,
 }
@@ -661,6 +782,144 @@ mod tests {
             assert_eq!(v.terminates(), terminates, "{v:?} terminates");
             assert_eq!(v.fails_the_run(), fails, "{v:?} fails the run");
             assert_eq!(v.retires(), retires, "{v:?} retires");
+        }
+    }
+
+    // ---- the mark-don't-kill split --------------------------------------
+
+    /// Check 3, in the pure half. The verdict is unchanged — a silent run is
+    /// stalled whoever is watching — and only the response differs.
+    #[test]
+    fn a_watched_session_that_stalls_is_marked_rather_than_killed() {
+        let h = hb(0);
+        let verdict = decide(&h, &running(-1), DEFAULT_STALL_MS);
+        assert!(matches!(verdict, Verdict::Stalled { .. }), "still stalled");
+        assert_eq!(respond(&h, &verdict), Response::Mark);
+        assert!(
+            respond(&h, &verdict).keeps_watching(),
+            "the heartbeat must survive, or the next tick forgets it stalled"
+        );
+    }
+
+    /// Check 4, the regression guard on the split. A goal iteration that wedges
+    /// blocks its goal's loop for ever, and nothing else will notice.
+    #[test]
+    fn a_goal_iteration_that_stalls_is_still_reaped() {
+        let g = Heartbeat::starting("r", Watching::Goal("green-ci".into()), 0);
+        let verdict = decide(&g, &running(-1), DEFAULT_STALL_MS);
+        assert_eq!(respond(&g, &verdict), Response::Reap { terminate: true });
+        assert!(!respond(&g, &verdict).keeps_watching());
+    }
+
+    /// The `Expired` half of the same split, so a ceiling cannot become a
+    /// second way to kill a session Reljod is watching.
+    #[test]
+    fn a_ceiling_reaps_a_goal_and_only_marks_a_session() {
+        let session = hb(0).with_max_lifetime_ms(Some(1_000));
+        let expired = decide(&session, &running(99), 1_000);
+        assert_eq!(expired, Verdict::Expired { lifetime_ms: 1_000 });
+        assert_eq!(respond(&session, &expired), Response::Mark);
+
+        let mut goal = Heartbeat::starting("r", Watching::Goal("g".into()), 0);
+        goal.max_lifetime_ms = Some(1_000);
+        let expired = decide(&goal, &running(99), 1_000);
+        assert_eq!(
+            respond(&goal, &expired),
+            Response::Reap { terminate: true },
+            "a goal's ceiling is the whole reason it has one"
+        );
+    }
+
+    /// A session gets no ceiling unless somebody asks for one, which is what
+    /// keeps `Expired` from firing on an ordinary long run at all.
+    #[test]
+    fn a_watched_session_has_no_ceiling_to_expire_against() {
+        assert_eq!(hb(0).max_lifetime_ms, None);
+    }
+
+    /// Check 5. Coming back is not a failure and must stop looking like one.
+    #[test]
+    fn a_marked_run_that_produces_an_event_is_unmarked() {
+        let mut h = hb(0);
+        h.stalled_since_ms = Some(0);
+        let verdict = decide(&h, &running(7), DEFAULT_STALL_MS * 2);
+        assert_eq!(verdict, Verdict::Beating { seq: 7 });
+        assert_eq!(respond(&h, &verdict), Response::Clear);
+        assert_eq!(
+            Beat::after(&h, &verdict, 99_000).stalled_since_ms,
+            None,
+            "the mark has to actually come off the row"
+        );
+    }
+
+    /// The mark names when the run went quiet, not when a daemon noticed. A
+    /// sweep that ran late, or ran fifty times, must report the same age.
+    #[test]
+    fn the_mark_does_not_move_when_the_sweep_runs_again() {
+        let h = hb(0);
+        let first = Beat::after(&h, &decide(&h, &running(-1), DEFAULT_STALL_MS), DEFAULT_STALL_MS);
+        assert_eq!(
+            first.stalled_since_ms,
+            Some(0),
+            "it went quiet at its last event, which for a fresh run is its start"
+        );
+
+        // Feed that back in as the stored row and sweep again, much later.
+        let mut second = h.clone();
+        second.stalled_since_ms = first.stalled_since_ms;
+        let later = DEFAULT_STALL_MS * 9;
+        let again = Beat::after(&second, &decide(&second, &running(-1), later), later);
+        assert_eq!(
+            again.stalled_since_ms, first.stalled_since_ms,
+            "a second sweep must not restamp the moment it went quiet"
+        );
+    }
+
+    /// A vanished run is not marked. There is no process, so a row that said
+    /// `running` would keep lying — which is the bug this module removes.
+    #[test]
+    fn a_vanished_run_is_still_corrected_rather_than_marked() {
+        let h = hb(0);
+        let gone = Observed {
+            status: Some("running".into()),
+            alive: false,
+            last_seq: 4,
+        };
+        let verdict = decide(&h, &gone, 1_000);
+        assert_eq!(verdict, Verdict::Vanished);
+        assert_eq!(respond(&h, &verdict), Response::Reap { terminate: false });
+    }
+
+    /// The whole table, stated in one place for the same reason the terminates/
+    /// fails/retires one is: a single wrong cell is either a session killed for
+    /// being slow or a wedged goal blocking its loop for ever.
+    #[test]
+    fn what_each_verdict_does_depends_on_what_is_being_watched() {
+        let session = hb(0);
+        let goal = Heartbeat::starting("r", Watching::Goal("g".into()), 0);
+        let cases = [
+            (Verdict::Beating { seq: 1 }, Response::Beat, Response::Beat),
+            (Verdict::Quiet { silence_ms: 1 }, Response::Beat, Response::Beat),
+            (
+                Verdict::Stalled { silence_ms: 1 },
+                Response::Mark,
+                Response::Reap { terminate: true },
+            ),
+            (
+                Verdict::Expired { lifetime_ms: 1 },
+                Response::Mark,
+                Response::Reap { terminate: true },
+            ),
+            (
+                Verdict::Vanished,
+                Response::Reap { terminate: false },
+                Response::Reap { terminate: false },
+            ),
+            (Verdict::Ended, Response::Retire, Response::Retire),
+        ];
+        for (verdict, for_session, for_goal) in cases {
+            assert_eq!(respond(&session, &verdict), for_session, "session {verdict:?}");
+            assert_eq!(respond(&goal, &verdict), for_goal, "goal {verdict:?}");
         }
     }
 

@@ -3305,12 +3305,24 @@ fn draw_tree(f: &mut Frame, app: &App, area: Rect) {
         // that finished, one that failed and one that was killed — and a person
         // scanning the fleet needs to see the failure. Works and sessions have
         // no status of their own and keep the spinner-or-nothing they had.
-        let mark = match (node.running, node.status.as_deref()) {
-            (true, _) => Some((format!(" {}", app.spinner()), WARN)),
-            (false, Some(status)) => {
+        //
+        // A stalled run is checked first and takes the spinner away, because a
+        // stalled run is still `running` — that is the whole problem. An
+        // animation is the strongest "this is fine" signal on the screen, and a
+        // spinner turning on a wedged agent is the exact picture that let the
+        // fleet fill up with hung sessions nobody noticed. It says how long,
+        // too: "stalled" alone does not distinguish a run that went quiet a
+        // minute ago from one that has been dead since yesterday.
+        let mark = match (node.stalled_for_ms, node.running, node.status.as_deref()) {
+            (Some(silent_for), _, _) => Some((
+                format!(" ⏸ stalled {}", jod_core::heartbeat::human_ms(silent_for)),
+                BAD,
+            )),
+            (None, true, _) => Some((format!(" {}", app.spinner()), WARN)),
+            (None, false, Some(status)) => {
                 Some((format!(" {}", run_glyph(status)), status_colour(status)))
             }
-            (false, None) => None,
+            (None, false, None) => None,
         };
         if let Some((glyph, colour)) = mark {
             if room >= columns(&glyph) {
@@ -3423,9 +3435,24 @@ fn draw_tree_detail(f: &mut Frame, app: &App, area: Rect) {
             // finish both read as "idle" — the pane that is supposed to explain
             // the row was hiding the one thing worth knowing about it. A work
             // and a session have no status of their own, so they keep the pair.
-            match node.status.as_deref() {
-                Some(status) => lines.push(detail_in("state", status, status_colour(status))),
-                None => lines.push(detail(
+            //
+            // A stall overrides the status here for the same reason it
+            // overrides the spinner on the row: `runs.status` still says
+            // `running`, truthfully, and that is the least useful true thing to
+            // tell someone looking at a wedged agent.
+            match (node.stalled_for_ms, node.status.as_deref()) {
+                (Some(silent_for), _) => lines.push(detail_in(
+                    "state",
+                    &format!(
+                        "stalled — running, but silent for {}",
+                        jod_core::heartbeat::human_ms(silent_for)
+                    ),
+                    BAD,
+                )),
+                (None, Some(status)) => {
+                    lines.push(detail_in("state", status, status_colour(status)))
+                }
+                (None, None) => lines.push(detail(
                     "state",
                     if node.running { "running" } else { "idle" },
                 )),
@@ -10355,6 +10382,7 @@ mod tests {
             summary: String::new(),
             running: false,
             status: None,
+            stalled_for_ms: None,
             cards: 0,
             blocked: 0,
             colour: "cyan".into(),

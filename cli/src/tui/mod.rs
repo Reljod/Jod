@@ -1370,7 +1370,12 @@ async fn perform(
                     );
                     store.watch_run(&hb).map(|()| {
                         format!(
-                            "heartbeat on {} — reaped if silent for {} min (needs `jod daemon`)",
+                            // It used to say "reaped". A session is now marked
+                            // and left running, and a message promising a kill
+                            // that will not happen is worse than none: it is
+                            // what somebody decides not to intervene on.
+                            "heartbeat on {} — flagged if silent for {} min, not stopped \
+                             (needs `jod daemon`)",
                             short(&id),
                             hb.stall_ms / 60_000
                         )
@@ -5721,6 +5726,18 @@ fn refresh_workspaces(jod: &Arc<Jod>, app: &mut App) {
     // second message. Cheap when nothing has been opened — `data::traffic`
     // returns an empty log without touching the store.
     app.traffic = data::traffic(jod, app.traffic_of.as_ref());
+    // Said once, and only while there is something being watched. Every session
+    // now arms a heartbeat, so without a daemon the fleet would draw every
+    // wedged agent as healthy — which is precisely the state the mark was added
+    // to end, quietly restored by a daemon nobody started.
+    if !app.said_nothing_is_sweeping && data::watched_but_unswept(jod, app.now_ms) {
+        app.said_nothing_is_sweeping = true;
+        app.push(Entry::Notice(
+            "nothing is watching these sessions for stalls — start `jod daemon`, \
+             or a wedged agent will keep reading as running"
+                .into(),
+        ));
+    }
     app.reconcile();
     refresh_rail(jod, app);
 }
@@ -10466,6 +10483,7 @@ mod tests {
             summary: String::new(),
             running: false,
             status: None,
+            stalled_for_ms: None,
             cards: 0,
             blocked: 0,
             colour: "cyan".into(),
@@ -10746,6 +10764,7 @@ mod tests {
             summary: String::new(),
             running: false,
             status: None,
+            stalled_for_ms: None,
             cards: 0,
             blocked: 0,
             colour: String::new(),
