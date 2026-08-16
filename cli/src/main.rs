@@ -141,7 +141,16 @@ enum Command {
         #[arg(long)]
         no_thinking: bool,
     },
-    /// Stop an agent and everything it started.
+    /// Stop an agent, together with the commands it ran itself.
+    ///
+    /// The signal goes to the agent's process group, so the harness and every
+    /// process still in that group — a `Bash` call, a compiler, a test run —
+    /// go with it.
+    ///
+    /// An agent this one started by delegating to it is not in that group.
+    /// Every run leads its own session, which is what lets a run outlive the
+    /// thing that launched it, so a delegated agent keeps going and has to be
+    /// stopped by its own id. `jod ls` lists the runs still going.
     Kill { id: String },
     /// Counts and total spend across all agents.
     Report {
@@ -4808,6 +4817,39 @@ mod tests {
     fn the_cli_definition_is_valid() {
         use clap::CommandFactory;
         Cli::command().debug_assert();
+    }
+
+    /// `jod kill` signals one process group. A run that was started by
+    /// delegation has its own group, because `setsid` gives every run a fresh
+    /// session, so the signal cannot reach it. The help has to say so: someone
+    /// who reads "and everything it started" and walks away leaves a delegated
+    /// agent working, and paying, behind them.
+    #[test]
+    fn the_kill_help_says_a_delegated_agent_is_not_stopped() {
+        use clap::CommandFactory;
+        let mut cli = Cli::command();
+        cli.build();
+        let kill = cli.find_subcommand("kill").expect("no `kill` subcommand");
+        let help = format!(
+            "{} {}",
+            kill.get_about().map(|s| s.to_string()).unwrap_or_default(),
+            kill.get_long_about().map(|s| s.to_string()).unwrap_or_default()
+        )
+        .to_lowercase();
+        assert!(
+            help.contains("delegate"),
+            "`jod kill` never mentions delegation, so nothing warns the reader \
+             that a delegated agent survives the command: {help}"
+        );
+        assert!(
+            help.contains("keeps going") || help.contains("keeps running"),
+            "`jod kill` does not say the delegated agent keeps going: {help}"
+        );
+        assert!(
+            !help.contains("everything it started"),
+            "`jod kill` still promises to stop everything the agent started, \
+             which is more than one process group can reach: {help}"
+        );
     }
 
     /// The complaint this default answers: a run followed from a shell printed

@@ -93,8 +93,13 @@ Four properties fall out, and they are the same four tmux used to provide:
   so unlike `tmux attach` it needs no shell on the box: the web client and the
   phone show the same run through the API.
 - **A kill switch that works** — the supervisor leads its own process group, so
-  its pid *is* its pgid. `kill(-pgid, SIGTERM)` stops the agent and everything
-  it started, from any process, whether or not Jod is running.
+  its pid *is* its pgid. `kill(-pgid, SIGTERM)` stops the agent and every
+  process still in that group, from any process, whether or not Jod is
+  running. It stops
+  that one run and no other: a run started by delegation leads a session of its
+  own, so it is outside the group and keeps going until it is stopped by its own
+  id. That is the same independence the next point describes, seen from the
+  other side.
 - **Survivability** — `setsid` gives the run no controlling terminal, so closing
   an SSH connection cannot `SIGHUP` it. On a VPS this is the difference between
   an assistant and a foreground script.
