@@ -85,7 +85,98 @@ const GUTTER: u16 = 2;
 const PANEL: u16 = 34;
 const PANEL_BESIDE: u16 = 88;
 
-pub fn draw(f: &mut Frame, app: &App) -> usize {
+/// What one frame put where, for the events that arrive as screen coordinates
+/// rather than as keys.
+///
+/// A mouse click carries a column and a row and nothing else, so something has
+/// to say which card was under it. That something is the frame that drew the
+/// card, and not a second copy of the layout arithmetic in the event loop — the
+/// rail moves between a left-hand column and a bottom panel depending on the
+/// terminal's width, and two places computing where it went is how they come to
+/// disagree.
+#[derive(Debug, Clone, Default)]
+pub struct Painted {
+    /// How many transcript lines one page holds.
+    pub viewport: usize,
+    pub rail: RailHits,
+}
+
+/// Where the rail's clickable parts landed.
+#[derive(Debug, Clone, Default)]
+pub struct RailHits {
+    /// The whole rail, so a wheel event can tell it from the chat beside it.
+    /// `None` when the rail is not on screen at all.
+    pub area: Option<Rect>,
+    /// One entry per collapsed card the stack drew.
+    pub cards: Vec<CardHit>,
+    /// The card shown in full, when one is.
+    pub expanded: Option<i64>,
+    /// The row carrying the expanded card's title, which is the way back to the
+    /// stack for somebody with no keyboard.
+    pub back: Option<u16>,
+    /// One entry per numbered option of the expanded card.
+    pub options: Vec<OptionHit>,
+    /// How many lines of the expanded card fall past the bottom of its pane.
+    pub past: u16,
+}
+
+/// A collapsed card and the rows it occupies, top inclusive, bottom exclusive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CardHit {
+    pub id: i64,
+    pub top: u16,
+    pub bottom: u16,
+}
+
+/// One numbered option of the expanded card, and the row it was printed on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OptionHit {
+    pub card: i64,
+    /// The index into `Card::options` — the digit on screen, less one.
+    pub at: usize,
+    pub row: u16,
+}
+
+impl RailHits {
+    /// Whether a pointer at these coordinates is over the rail.
+    pub fn holds(&self, column: u16, row: u16) -> bool {
+        self.area.is_some_and(|area| {
+            column >= area.x
+                && column < area.x + area.width
+                && row >= area.y
+                && row < area.y + area.height
+        })
+    }
+
+    /// The collapsed card under the pointer.
+    pub fn card_at(&self, column: u16, row: u16) -> Option<i64> {
+        if !self.holds(column, row) {
+            return None;
+        }
+        self.cards
+            .iter()
+            .find(|hit| row >= hit.top && row < hit.bottom)
+            .map(|hit| hit.id)
+    }
+
+    /// The option under the pointer, as the card it belongs to and its index.
+    pub fn option_at(&self, column: u16, row: u16) -> Option<(i64, usize)> {
+        if !self.holds(column, row) {
+            return None;
+        }
+        self.options
+            .iter()
+            .find(|hit| hit.row == row)
+            .map(|hit| (hit.card, hit.at))
+    }
+
+    /// Whether the pointer is on the expanded card's way back to the stack.
+    pub fn on_back(&self, column: u16, row: u16) -> bool {
+        self.holds(column, row) && self.back == Some(row)
+    }
+}
+
+pub fn draw(f: &mut Frame, app: &App) -> Painted {
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -135,9 +226,10 @@ pub fn draw(f: &mut Frame, app: &App) -> usize {
         body.height.saturating_sub(4).max(1) as usize
     };
 
-    if let Some(rail) = rail {
-        draw_rail(f, app, rail);
-    }
+    let hits = match rail {
+        Some(rail) => draw_rail(f, app, rail),
+        None => RailHits::default(),
+    };
     if let Some(side) = side {
         draw_panel(f, app, side);
     }
@@ -151,7 +243,10 @@ pub fn draw(f: &mut Frame, app: &App) -> usize {
     draw_completions(f, app, input);
     draw_mention(f, app, input);
     draw_overlay(f, app);
-    height
+    Painted {
+        viewport: height,
+        rail: hits,
+    }
 }
 
 // ---- layout ------------------------------------------------------------
@@ -421,14 +516,22 @@ fn rail_beside(app: &App, area: Rect) -> (Option<Rect>, Rect) {
     (Some(halves[0]), body)
 }
 
-fn draw_rail(f: &mut Frame, app: &App, area: Rect) {
+fn draw_rail(f: &mut Frame, app: &App, area: Rect) -> RailHits {
     if area.height <= 1 {
-        return draw_rail_summary(f, app, area);
+        draw_rail_summary(f, app, area);
+        // Nothing clickable: one line saying a run is blocked is not a card,
+        // and pretending it can be answered would answer the wrong one.
+        return RailHits::default();
     }
+    let mut hits = RailHits {
+        area: Some(area),
+        ..RailHits::default()
+    };
     match app.selected_card().filter(|_| app.rail.expanded) {
-        Some(card) => draw_card(f, app, card, area),
-        None => draw_rail_stack(f, app, area),
+        Some(card) => draw_card(f, app, card, area, &mut hits),
+        None => draw_rail_stack(f, app, area, &mut hits),
     }
+    hits
 }
 
 /// The rail with a single row to say it in.
@@ -456,21 +559,48 @@ fn draw_rail_summary(f: &mut Frame, app: &App, area: Rect) {
 }
 
 /// The stack: a header, and one bordered two-line card per row.
-fn draw_rail_stack(f: &mut Frame, app: &App, area: Rect) {
+fn draw_rail_stack(f: &mut Frame, app: &App, area: Rect, hits: &mut RailHits) {
     let ids = app.card_ids();
     let selected = app.rail.index(&ids);
 
-    let mut head = vec![rail_header(app)];
     // The sort and the two filters are printed whenever they are in force, and
     // whenever the rail has the keyboard. A stack silently showing a subset is
     // a stack whose missing card reads as a card that was never raised.
-    if let Some(line) = rail_settings(app) {
+    let filter = rail_filter_line(app);
+    let settled = rail_settings(app).is_some();
+    // How many cards fit under a header of a given height. Five at most,
+    // however tall the terminal is — see [`rail::VISIBLE`].
+    let fits = |head: u16| {
+        let room = area.height.saturating_sub(head.min(area.height));
+        (room / CARD_HEIGHT).max(1).min(rail::VISIBLE as u16) as usize
+    };
+    let plain = 1 + settled as u16 + filter.iter().count() as u16;
+    // Measured twice, because the line saying which cards are on screen is only
+    // drawn when some of them are not — and drawing it takes a row off the
+    // stack, which is what decides whether some of them are not. The second
+    // pass settles it: a stack that overflows the shorter list overflows the
+    // taller one too, so this cannot oscillate.
+    let crowded = app.cards.len() > fits(plain + !settled as u16);
+    let used = (plain + (crowded && !settled) as u16).min(area.height);
+
+    let rest = Rect {
+        y: area.y + used,
+        height: area.height.saturating_sub(used),
+        ..area
+    };
+    let rows = fits(used);
+    let first = window_start(selected, rows, app.cards.len());
+    let shown = rows.min(app.cards.len().saturating_sub(first));
+
+    let mut head = vec![rail_header(app)];
+    // Below the header rather than in it. The header already carries the count,
+    // the scope and the blocker tally, and thirty-four columns truncates from
+    // the right — a window note appended there pushes `2 blocked` off the end,
+    // which trades one honest line for a less honest one.
+    if let Some(line) = rail_window(app, first, shown) {
         head.push(line);
     }
-    if let Some(line) = rail_filter_line(app) {
-        head.push(line);
-    }
-    let used = (head.len() as u16).min(area.height);
+    head.extend(filter);
     f.render_widget(
         Paragraph::new(head),
         Rect {
@@ -479,11 +609,6 @@ fn draw_rail_stack(f: &mut Frame, app: &App, area: Rect) {
         },
     );
 
-    let rest = Rect {
-        y: area.y + used,
-        height: area.height.saturating_sub(used),
-        ..area
-    };
     if rest.height == 0 {
         return;
     }
@@ -496,13 +621,16 @@ fn draw_rail_stack(f: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
-    let rows = (rest.height / CARD_HEIGHT).max(1) as usize;
-    let first = window_start(selected, rows, app.cards.len());
     for (slot, (at, card)) in app.cards.iter().enumerate().skip(first).take(rows).enumerate() {
         let y = rest.y + slot as u16 * CARD_HEIGHT;
         if y + CARD_HEIGHT > rest.y + rest.height {
             break;
         }
+        hits.cards.push(CardHit {
+            id: card.id,
+            top: y,
+            bottom: y + CARD_HEIGHT,
+        });
         let box_ = Rect {
             y,
             height: CARD_HEIGHT,
@@ -633,6 +761,30 @@ fn rail_header(app: &App) -> Line<'static> {
     Line::from(spans)
 }
 
+/// Which slice of the stack is on screen, when it is not the whole of it.
+///
+/// Not decoration: five cards drawn out of twelve, with nothing saying so, is
+/// seven cards that read as never having been raised — the same failure the
+/// settings line exists to prevent for a filter. It shares that line when the
+/// settings are already being printed, and takes one of its own when they are
+/// not, because it is drawn from a cap the reader never chose and so cannot be
+/// expected to remember.
+fn rail_window(app: &App, first: usize, shown: usize) -> Option<Line<'static>> {
+    let settings = rail_settings(app);
+    if shown == 0 || shown >= app.cards.len() {
+        return settings;
+    }
+    let window = format!("{}–{} of {}", first + 1, first + shown, app.cards.len());
+    Some(match settings {
+        Some(line) => {
+            let mut spans = line.spans;
+            spans.push(Span::styled(format!(" · {window}"), fg(MUTED)));
+            Line::from(spans)
+        }
+        None => Line::from(Span::styled(format!(" {window}"), fg(MUTED))),
+    })
+}
+
 /// The sort and the kind filter, when either is worth saying.
 fn rail_settings(app: &App) -> Option<Line<'static>> {
     let sort = app.rail.sort_now();
@@ -678,8 +830,10 @@ fn empty_rail(app: &App) -> String {
 }
 
 /// One card in full: what it says, what it offers, and who raised it.
-fn draw_card(f: &mut Frame, app: &App, card: &Card, area: Rect) {
+fn draw_card(f: &mut Frame, app: &App, card: &Card, area: Rect, hits: &mut RailHits) {
     let width = area.width.saturating_sub(4) as usize;
+    // Line indices, paired with the option each one is for. See the loop below.
+    let mut chosen_rows: Vec<(usize, usize)> = Vec::new();
     let mut lines: Vec<Line> = vec![Line::from(vec![
         Span::styled(
             format!(" {} ", rail::kind_glyph(card.kind)),
@@ -740,6 +894,12 @@ fn draw_card(f: &mut Frame, app: &App, card: &Card, area: Rect) {
         )));
         for (at, option) in card.options.iter().take(9).enumerate() {
             let picked = card.chosen.as_deref() == Some(option.as_str());
+            // Which line of the card this option went on. Turned into a screen
+            // row further down, once every line's wrapped height is known — a
+            // long body above pushes the options down by more rows than it has
+            // lines, and a pointer that trusted the line number would answer
+            // whichever option happened to sit at that index.
+            chosen_rows.push((lines.len(), at));
             lines.push(Line::from(vec![
                 Span::styled(format!("   {} ", at + 1), bold(USER)),
                 Span::styled(
@@ -782,12 +942,51 @@ fn draw_card(f: &mut Frame, app: &App, card: &Card, area: Rect) {
     lines.push(detail("source", card.source.as_str()));
     lines.push(detail("state", &card_state(card)));
 
+    // Where each line lands once the pane has wrapped everything above it.
+    let inner = area.width.saturating_sub(2) as usize;
+    let mut tops: Vec<usize> = Vec::with_capacity(lines.len());
+    let mut deep = 0usize;
+    for line in &lines {
+        tops.push(deep);
+        deep += rows_for(line, inner);
+    }
+    let pane = area.height.saturating_sub(2) as usize;
+    // How much of the card is below the pane, which is what stops the wheel at
+    // the last line rather than at a screenful of nothing.
+    let past = deep.saturating_sub(pane);
+    let scroll = (app.rail.scroll as usize).min(past);
+
+    hits.expanded = Some(card.id);
+    // The title row, which is the top border. Clicking it puts the card back in
+    // the stack — the only way out of an expanded card that does not need a
+    // keyboard, which is the whole point on a phone.
+    hits.back = Some(area.y);
+    hits.past = past as u16;
+    for (line, at) in chosen_rows {
+        let Some(top) = tops.get(line) else { continue };
+        // Off the top or off the bottom because of the scroll: not on screen,
+        // so not clickable. A hit recorded for a row the reader cannot see
+        // would answer the card from a click meant for whatever is there now.
+        let Some(offset) = top.checked_sub(scroll) else {
+            continue;
+        };
+        if offset >= pane {
+            continue;
+        }
+        hits.options.push(OptionHit {
+            card: card.id,
+            at,
+            row: area.y + 1 + offset as u16,
+        });
+    }
+
+    // The title carries the way back, because a gesture nobody can see is a
+    // gesture nobody uses.
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(card_border(card))
-        .title(format!(" card #{} ", card.id))
+        .title(format!(" ◂ card #{} ", card.id))
         .title_bottom(fit_verbs(&keys::rail_footer(), area.width));
-    let _ = app;
     // Wrapped, because the state sentence is the longest line here and it is
     // the one that must not be clipped: "answered, queued — the agent is told
     // at the end of the turn in flight" cut at fifty columns says "answered,
@@ -796,9 +995,22 @@ fn draw_card(f: &mut Frame, app: &App, card: &Card, area: Rect) {
     f.render_widget(
         Paragraph::new(lines)
             .block(block)
-            .wrap(Wrap { trim: false }),
+            .wrap(Wrap { trim: false })
+            .scroll((scroll as u16, 0)),
         area,
     );
+}
+
+/// How many rows one built line takes once the pane wraps it to `width`.
+///
+/// The same greedy break the pane itself does, so the answer is the row the
+/// reader's pointer is actually over. An empty line still costs a row.
+fn rows_for(line: &Line, width: usize) -> usize {
+    let text: String = line.spans.iter().map(|span| span.content.as_ref()).collect();
+    if text.trim().is_empty() {
+        return 1;
+    }
+    wrap(&text, width, 0).len().max(1)
 }
 
 /// The card's state as a sentence, which is where D2 is either honoured or
@@ -9348,6 +9560,323 @@ mod tests {
         assert!(
             narrow.contains("the run is waiting on this"),
             "and it says what being blocked costs: {narrow}"
+        );
+    }
+
+
+
+    /// A rail holding more cards than the stack draws at once.
+    fn crowded_store(how_many: usize) -> (RealStore, String) {
+        let store = RealStore::in_memory().expect("an in-memory store");
+        let conversation = store
+            .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
+            .expect("a conversation")
+            .id;
+        for at in 0..how_many {
+            store
+                .raise_card(NewCard {
+                    conversation_id: conversation.clone(),
+                    run_id: Some("3f2ab1c0".into()),
+                    kind: Some(CardKind::Question),
+                    blocking: false,
+                    title: format!("question number {at}"),
+                    body: "The alternatives were weighed and one was picked.".into(),
+                    ..Default::default()
+                })
+                .expect("a card");
+        }
+        (store, conversation)
+    }
+
+    /// One blocking card with more to say than a phone-sized panel can hold.
+    ///
+    /// Which is the ordinary case, not a contrived one: an agent that has
+    /// stopped explains why it stopped, and the explanation is a paragraph.
+    fn wordy_store() -> (RealStore, String) {
+        let store = RealStore::in_memory().expect("an in-memory store");
+        let conversation = store
+            .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
+            .expect("a conversation")
+            .id;
+        store
+            .raise_card(NewCard {
+                conversation_id: conversation.clone(),
+                run_id: Some("3f2ab1c0".into()),
+                kind: Some(CardKind::Question),
+                importance: Some(Importance::High),
+                blocking: true,
+                title: "which port for the API?".into(),
+                body: "The deploy script wants a port and the box already has \
+                       something on 8080, which is the default the compose file \
+                       carries. Nothing else in the repository names a port, so \
+                       this is a choice rather than a lookup, and the answer \
+                       goes into the unit file as well as the compose file."
+                    .into(),
+                options: vec!["8080".into(), "8081".into(), "3000".into()],
+                ..Default::default()
+            })
+            .expect("a card");
+        (store, conversation)
+    }
+
+    /// The frame, with the geometry a pointer is resolved against.
+    fn painted(app: &App, w: u16, h: u16) -> Painted {
+        let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+        let mut out = Painted::default();
+        terminal.draw(|f| out = draw(f, app)).unwrap();
+        out
+    }
+
+    /// A tall terminal used to fill the whole column with cards. Five is the
+    /// cap, and the cards past it are reached by moving the cursor.
+    #[test]
+    fn the_stack_draws_five_cards_at_most_however_tall_the_terminal_is() {
+        let (store, conversation) = crowded_store(12);
+        let a = rail_app(&store, &conversation, Default::default());
+        assert_eq!(a.cards.len(), 12, "all twelve are in hand");
+
+        let hits = painted(&a, 150, 60).rail;
+        assert_eq!(
+            hits.cards.len(),
+            rail::VISIBLE,
+            "a sixty-row terminal still draws five: {:?}",
+            hits.cards
+        );
+
+        let frame = rendered(&a, 150, 60);
+        assert!(
+            frame.contains("1–5 of 12"),
+            "and it says the other seven exist: {frame}"
+        );
+    }
+
+    /// The cap is on the cards, not on the cursor. Every card in the stack has
+    /// to be reachable, or five cards is five cards and the rest were dropped.
+    #[test]
+    fn the_window_follows_the_cursor_to_the_bottom_of_a_crowded_stack() {
+        let (store, conversation) = crowded_store(12);
+        let mut a = rail_app(&store, &conversation, Default::default());
+        let ids = a.card_ids();
+        a.rail.look_at(*ids.last().expect("twelve cards"));
+
+        let hits = painted(&a, 150, 60).rail;
+        assert!(
+            hits.cards.iter().any(|hit| Some(hit.id) == a.rail.selected),
+            "the card under the cursor is on screen: {:?}",
+            hits.cards
+        );
+        let frame = rendered(&a, 150, 60);
+        assert!(
+            frame.contains("8–12 of 12"),
+            "and the header says which five those are: {frame}"
+        );
+    }
+
+    /// The gesture the whole thing exists for: a tap on a card, on a terminal
+    /// with no keyboard to press `Ctrl-N` on.
+    #[test]
+    fn every_drawn_card_answers_to_a_pointer_on_any_of_its_rows() {
+        let (store, conversation) = rail_store();
+        let a = rail_app(&store, &conversation, Default::default());
+        let hits = painted(&a, 150, 40).rail;
+        assert_eq!(hits.cards.len(), 3, "three cards drawn: {:?}", hits.cards);
+
+        for hit in &hits.cards {
+            for row in hit.top..hit.bottom {
+                assert_eq!(
+                    hits.card_at(hits.area.expect("a rail").x + 2, row),
+                    Some(hit.id),
+                    "row {row} belongs to card {}",
+                    hit.id
+                );
+            }
+        }
+        // And nothing outside the rail does. A click in the transcript must not
+        // answer whatever card happens to share its row.
+        assert!(!hits.holds(0, 0), "the top-left corner is the chat's");
+
+        // The phone, where the rail is a twelve-row panel with room for two of
+        // the three. The two it drew are still clickable, and the header says
+        // the third is there.
+        let narrow = painted(&a, 78, 30).rail;
+        assert!(
+            !narrow.cards.is_empty(),
+            "the panel draws what it has room for: {:?}",
+            narrow.cards
+        );
+        let hit = narrow.cards[0];
+        assert_eq!(
+            narrow.card_at(narrow.area.expect("a rail").x + 2, hit.top + 1),
+            Some(hit.id)
+        );
+        let frame = rendered(&a, 78, 30);
+        assert!(
+            frame.contains(&format!("of {}", a.cards.len())),
+            "and the panel says how many it is not showing: {frame}"
+        );
+    }
+
+    /// An option is answered by tapping the option, which means the row it is
+    /// recorded on has to be the row it was printed on.
+    #[test]
+    fn the_row_an_option_is_offered_on_is_the_row_it_is_printed_on() {
+        let (store, conversation) = rail_store();
+        let rail = RailState {
+            expanded: true,
+            ..Default::default()
+        };
+        let mut a = rail_app(&store, &conversation, rail);
+        let decision = a
+            .cards
+            .iter()
+            .find(|c| c.kind == CardKind::Decision)
+            .expect("the decision card")
+            .id;
+        a.rail.look_at(decision);
+
+        let hits = painted(&a, 78, 30).rail;
+        assert_eq!(hits.expanded, Some(decision));
+        assert_eq!(hits.options.len(), 2, "both options: {:?}", hits.options);
+
+        let lines: Vec<String> = rendered(&a, 78, 30).lines().map(str::to_string).collect();
+        for (hit, label) in hits.options.iter().zip(["SQLite", "Postgres"]) {
+            assert_eq!(hit.card, decision);
+            assert!(
+                lines[hit.row as usize].contains(label),
+                "row {} was recorded for {label} and reads {:?}",
+                hit.row,
+                lines[hit.row as usize]
+            );
+            let column = hits.area.expect("a rail").x + 4;
+            assert_eq!(hits.option_at(column, hit.row), Some((decision, hit.at)));
+        }
+    }
+
+    /// A card taller than its pane was unreadable below the fold on a phone.
+    /// Scrolling brings the bottom of it up, and stops there.
+    #[test]
+    fn a_card_taller_than_its_pane_scrolls_to_its_last_line_and_no_further() {
+        let (store, conversation) = wordy_store();
+        let rail = RailState {
+            expanded: true,
+            ..Default::default()
+        };
+        let mut a = rail_app(&store, &conversation, rail);
+
+        let hits = painted(&a, 78, 30).rail;
+        assert!(
+            hits.past > 0,
+            "the bottom panel is twelve rows and the card is taller"
+        );
+
+        // The state sentence is the last line of the card, and the one the
+        // reader is scrolling to reach.
+        let folded = rendered(&a, 78, 30);
+        assert!(
+            !folded.contains("the run is waiting on this"),
+            "it starts below the fold: {folded}"
+        );
+        a.rail.scroll_card(hits.past as i16, hits.past);
+        let scrolled = rendered(&a, 78, 30);
+        assert!(
+            scrolled.contains("the run is waiting on this"),
+            "and scrolling reaches it: {scrolled}"
+        );
+
+        // Past the end is not a place. A wheel that kept going would leave a
+        // pane of blank rows where the card was.
+        a.rail.scroll_card(50, hits.past);
+        assert_eq!(a.rail.scroll, hits.past, "the wheel stops at the last line");
+        let stopped = rendered(&a, 78, 30);
+        assert!(stopped.contains("the run is waiting on this"), "{stopped}");
+    }
+
+    /// An option below the fold is not on screen, so a click on the row it will
+    /// eventually occupy must not answer with it — and once it has been
+    /// scrolled to, the row it is offered on has to be the row it is drawn on.
+    #[test]
+    fn an_option_below_the_fold_is_offered_only_once_it_is_on_screen() {
+        let (store, conversation) = wordy_store();
+        let rail = RailState {
+            expanded: true,
+            ..Default::default()
+        };
+        let mut a = rail_app(&store, &conversation, rail);
+
+        let folded = painted(&a, 78, 30).rail;
+        assert!(folded.past > 0, "the card is taller than the panel");
+        assert!(
+            folded.options.is_empty(),
+            "the ports are below the fold, so nothing offers them: {:?}",
+            folded.options
+        );
+
+        a.rail.scroll_card(folded.past as i16, folded.past);
+        let scrolled = painted(&a, 78, 30).rail;
+        assert_eq!(scrolled.options.len(), 3, "all three ports: {scrolled:?}");
+        let lines: Vec<String> = rendered(&a, 78, 30).lines().map(str::to_string).collect();
+        for hit in &scrolled.options {
+            let label = &a.cards[0].options[hit.at];
+            assert!(
+                lines[hit.row as usize].contains(label.as_str()),
+                "row {} is offered as {label} and reads {:?}",
+                hit.row,
+                lines[hit.row as usize]
+            );
+            let column = scrolled.area.expect("a rail").x + 4;
+            assert_eq!(
+                scrolled.option_at(column, hit.row),
+                Some((a.cards[0].id, hit.at))
+            );
+        }
+    }
+
+    /// A click is resolved against the frame it was made on, so the option map
+    /// has to travel with the text rather than staying where the card opened.
+    #[test]
+    fn the_option_map_moves_up_the_pane_with_the_scroll() {
+        let (store, conversation) = wordy_store();
+        let rail = RailState {
+            expanded: true,
+            ..Default::default()
+        };
+        let mut a = rail_app(&store, &conversation, rail);
+
+        let past = painted(&a, 78, 30).rail.past;
+        a.rail.scroll_card(past as i16 - 1, past);
+        let before = painted(&a, 78, 30).rail;
+        assert!(!before.options.is_empty(), "the ports are on screen");
+
+        a.rail.scroll_card(1, past);
+        let after = painted(&a, 78, 30).rail;
+        for was in &before.options {
+            let now = after
+                .options
+                .iter()
+                .find(|hit| hit.at == was.at)
+                .expect("the same option is still drawn");
+            assert_eq!(now.row, was.row - 1, "one line up, with the text");
+        }
+    }
+
+    /// The way out of an expanded card, for somebody with no `Esc` key.
+    #[test]
+    fn the_expanded_cards_title_is_the_way_back_to_the_stack() {
+        let (store, conversation) = rail_store();
+        let rail = RailState {
+            expanded: true,
+            ..Default::default()
+        };
+        let a = rail_app(&store, &conversation, rail);
+
+        let hits = painted(&a, 78, 30).rail;
+        let back = hits.back.expect("a way back");
+        assert!(hits.on_back(hits.area.expect("a rail").x + 3, back));
+        let frame = rendered(&a, 78, 30);
+        assert!(
+            frame.contains("◂ card #"),
+            "and it is visible, because a gesture nobody can see is one nobody \
+             uses: {frame}"
         );
     }
 

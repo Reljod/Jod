@@ -54,7 +54,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use crossterm::event::{
     DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyCode, KeyEvent, KeyEventKind,
-    KeyModifiers, MouseEventKind,
+    KeyModifiers, MouseButton, MouseEventKind,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -616,6 +616,9 @@ async fn event_loop(
     let mut keys = EventStream::new();
     let mut events = jod.subscribe();
     let mut viewport = 20usize;
+    // Where the last frame put the rail, so a click can be resolved against the
+    // cards that were actually on screen when it happened.
+    let mut hits = ui::RailHits::default();
     // Four frames a second: enough for the spinner to read as motion and for an
     // elapsed counter to look like a clock, cheap enough to be free.
     let mut ticks = tokio::time::interval(std::time::Duration::from_millis(250));
@@ -649,7 +652,11 @@ async fn event_loop(
     let mut session: Option<(jod_voice_core::Session, crate::voice::Engine)> = None;
 
     loop {
-        terminal.draw(|f| viewport = ui::draw(f, &app))?;
+        terminal.draw(|f| {
+            let painted = ui::draw(f, &app);
+            viewport = painted.viewport;
+            hits = painted.rail;
+        })?;
         if app.should_quit {
             return Ok(());
         }
@@ -703,7 +710,11 @@ async fn event_loop(
                                 // and a frozen clock is how a program looks
                                 // when it has hung rather than when it is
                                 // doing what it was told.
-                                terminal.draw(|f| viewport = ui::draw(f, &app))?;
+                                terminal.draw(|f| {
+                                    let painted = ui::draw(f, &app);
+                                    viewport = painted.viewport;
+                                    hits = painted.rail;
+                                })?;
                                 perform(&jod, &mut app, &opts, &mut thread, action).await
                             }
                             None => {}
@@ -716,11 +727,32 @@ async fn event_loop(
                         refresh_mention(&jod, &mut app);
                         refresh_search(&jod, &mut app);
                     }
-                    Event::Mouse(m) => match m.kind {
-                        MouseEventKind::ScrollUp => app.scroll_up(3, app.transcript.len()),
-                        MouseEventKind::ScrollDown => app.scroll_down(3),
-                        _ => {}
-                    },
+                    // The pointer. The rail claims the events that land on it —
+                    // a click answers a card, and the wheel walks the stack or
+                    // the expanded card — and everything else scrolls the
+                    // transcript as it always has.
+                    Event::Mouse(m) => {
+                        let asked = app.rail.query(app.conversation.clone());
+                        match m.kind {
+                            MouseEventKind::Down(MouseButton::Left) => {
+                                if let Some(action) = on_click(&mut app, &hits, m.column, m.row) {
+                                    perform(&jod, &mut app, &opts, &mut thread, action).await;
+                                }
+                            }
+                            MouseEventKind::ScrollUp if hits.holds(m.column, m.row) => {
+                                on_rail_wheel(&mut app, &hits, -1);
+                            }
+                            MouseEventKind::ScrollDown if hits.holds(m.column, m.row) => {
+                                on_rail_wheel(&mut app, &hits, 1);
+                            }
+                            MouseEventKind::ScrollUp => app.scroll_up(3, app.transcript.len()),
+                            MouseEventKind::ScrollDown => app.scroll_down(3),
+                            _ => {}
+                        }
+                        if app.rail.query(app.conversation.clone()) != asked {
+                            refresh_rail(&jod, &mut app);
+                        }
+                    }
                     // A resize just needs a redraw, which the next loop does.
                     _ => {}
                 }
@@ -2581,6 +2613,68 @@ fn on_rail_key(app: &mut App, key: KeyEvent) -> Option<Action> {
     }
 }
 
+/// A click, resolved against what the last frame drew.
+///
+/// The rail is the only thing on screen that takes the pointer, and it takes it
+/// for one reason: on a phone the rail lies along the bottom of the chat, the
+/// bare keys belong to the composer, and reaching a card meant a chord followed
+/// by a digit — on a keyboard that is not there. A tap has to be able to do it.
+///
+/// Three gestures, and no more: a tap on a card in the stack opens it, a tap on
+/// one of its numbered options answers with that option, and a tap on the
+/// expanded card's title puts it back in the stack. A tap anywhere else inside
+/// the card does nothing on purpose — the rest of the card is prose being read,
+/// and a stray tap that collapsed it, or worse answered it, would be the one
+/// mistake this feature must not introduce.
+fn on_click(app: &mut App, hits: &ui::RailHits, column: u16, row: u16) -> Option<Action> {
+    if !hits.holds(column, row) {
+        return None;
+    }
+    // A pointer in the rail is the same statement as `Ctrl-N`: the rail has the
+    // keyboard now. Without this the digits would still be the composer's, and
+    // the card that was just tapped could not be answered by typing.
+    app.rail.shown = true;
+    app.rail.focused = true;
+
+    if let Some((id, at)) = hits.option_at(column, row) {
+        let card = app.cards.iter().find(|c| c.id == id)?;
+        let chosen = card.options.get(at)?.clone();
+        app.rail.look_at(id);
+        return Some(Action::AnswerCard {
+            id,
+            chosen: Some(chosen),
+            answer: None,
+        });
+    }
+    if hits.on_back(column, row) {
+        app.rail.collapse();
+        return None;
+    }
+    if let Some(id) = hits.card_at(column, row) {
+        app.rail.look_at(id);
+        // Opened, not merely selected. A tap that only moved a cursor would
+        // need a second gesture nobody has been told about, and the card's body
+        // — the actual question — is only in the expanded view.
+        app.rail.expanded = true;
+    }
+    None
+}
+
+/// The wheel over the rail: the expanded card scrolls, the stack walks.
+///
+/// The stack moves its *selection* rather than an offset of its own. The window
+/// is derived from where the cursor is, so one position is the only one there
+/// is — a second, independent offset would let the cursor drift off screen, and
+/// then a digit would answer a card nobody can see.
+fn on_rail_wheel(app: &mut App, hits: &ui::RailHits, delta: i16) {
+    if hits.expanded.is_some() {
+        app.rail.scroll_card(delta, hits.past);
+        return;
+    }
+    let ids = app.card_ids();
+    app.rail.step(delta as isize, &ids);
+}
+
 /// A digit in the rail picks the numbered option under the cursor.
 ///
 /// A digit that names no option says so rather than doing nothing: the options
@@ -2727,7 +2821,7 @@ fn on_chord(app: &mut App, key: KeyEvent) -> Option<Option<Action>> {
             app.rail.shown = !app.rail.shown;
             if !app.rail.shown {
                 app.rail.focused = false;
-                app.rail.expanded = false;
+                app.rail.collapse();
             }
             handled(None)
         }
@@ -11468,6 +11562,156 @@ mod tests {
                 answer: None,
             })
         );
+    }
+
+    /// A rail as one frame drew it, so a click can be aimed at a real row.
+    fn drawn(app: &App, w: u16, h: u16) -> ui::RailHits {
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap();
+        let mut out = ui::Painted::default();
+        terminal.draw(|f| out = ui::draw(f, app)).unwrap();
+        out.rail
+    }
+
+    /// The gesture the pointer exists for. On a phone the rail is a panel under
+    /// the chat, the bare keys belong to the composer, and reaching a card took
+    /// a chord — on a keyboard that is not there. A tap has to do it.
+    #[test]
+    fn a_tap_on_a_card_opens_it_and_hands_the_rail_the_keyboard() {
+        let mut app = with_cards();
+        app.rail.shown = true;
+        let hits = drawn(&app, 78, 30);
+        let hit = *hits.cards.last().expect("a card was drawn");
+
+        assert_eq!(on_click(&mut app, &hits, hits.area.unwrap().x + 2, hit.top + 1), None);
+        assert_eq!(app.rail.selected, Some(hit.id), "the card that was tapped");
+        assert!(app.rail.expanded, "opened, not merely selected");
+        assert!(app.rail.focused, "and the digits are the rail's now");
+    }
+
+    /// The option is the label on screen, whether it is pressed or tapped.
+    #[test]
+    fn a_tap_on_an_option_answers_the_card_with_it() {
+        let mut app = with_cards();
+        app.rail.shown = true;
+        app.rail.focused = true;
+        app.rail.expanded = true;
+        app.rail.look_at(1);
+
+        let hits = drawn(&app, 150, 40);
+        let second = hits
+            .options
+            .iter()
+            .find(|hit| hit.at == 1)
+            .copied()
+            .expect("the second option is drawn");
+        assert_eq!(
+            on_click(&mut app, &hits, hits.area.unwrap().x + 4, second.row),
+            Some(Action::AnswerCard {
+                id: 1,
+                chosen: Some("3000".into()),
+                answer: None,
+            }),
+            "the same answer the digit gives"
+        );
+    }
+
+    /// The rest of an expanded card is prose being read. A stray tap on it must
+    /// not answer the card or put it away — that is the one mistake a pointer
+    /// could introduce that the keyboard never could.
+    #[test]
+    fn a_tap_on_the_body_of_a_card_does_nothing_at_all() {
+        let mut app = with_cards();
+        app.rail.shown = true;
+        app.rail.expanded = true;
+        app.rail.look_at(1);
+
+        let hits = drawn(&app, 150, 40);
+        let area = hits.area.expect("a rail");
+        // The row under the title, which is the card's own facts line — inside
+        // the card, on nothing that can be pressed.
+        assert_eq!(on_click(&mut app, &hits, area.x + 4, area.y + 2), None);
+        assert!(app.rail.expanded, "still open");
+        assert_eq!(app.rail.selected, Some(1), "and still the same card");
+    }
+
+    /// The way back for somebody with no `Esc` key.
+    #[test]
+    fn a_tap_on_the_expanded_cards_title_puts_it_back_in_the_stack() {
+        let mut app = with_cards();
+        app.rail.shown = true;
+        app.rail.expanded = true;
+        app.rail.look_at(1);
+
+        let hits = drawn(&app, 78, 30);
+        let back = hits.back.expect("a way back");
+        assert_eq!(on_click(&mut app, &hits, hits.area.unwrap().x + 3, back), None);
+        assert!(!app.rail.expanded, "back to the stack");
+        assert_eq!(app.rail.selected, Some(1), "on the card that was open");
+    }
+
+    /// A click outside the rail is the transcript's business, and must not
+    /// answer whatever card happens to share its row.
+    #[test]
+    fn a_click_outside_the_rail_is_not_the_rails() {
+        let mut app = with_cards();
+        app.rail.shown = true;
+        let hits = drawn(&app, 150, 40);
+        let before = app.rail.clone();
+        assert_eq!(on_click(&mut app, &hits, 140, 5), None);
+        assert_eq!(app.rail, before, "the rail did not move");
+    }
+
+    /// The wheel over the stack walks it, and the window follows the cursor —
+    /// which is how the cards past the fifth are reached at all.
+    #[test]
+    fn the_wheel_over_the_stack_walks_the_cards() {
+        let mut app = with_cards();
+        app.rail.shown = true;
+        let hits = drawn(&app, 150, 40);
+        assert_eq!(app.rail.selected, Some(1));
+
+        on_rail_wheel(&mut app, &hits, 1);
+        assert_eq!(app.rail.selected, Some(2), "down one card");
+        on_rail_wheel(&mut app, &hits, 1);
+        assert_eq!(app.rail.selected, Some(2), "and it stops at the end");
+        on_rail_wheel(&mut app, &hits, -1);
+        assert_eq!(app.rail.selected, Some(1));
+    }
+
+    /// The wheel over an expanded card scrolls the card, because that is the
+    /// only way to read the part of it below the fold on a phone.
+    #[test]
+    fn the_wheel_over_an_expanded_card_scrolls_its_text() {
+        let mut app = with_cards();
+        app.cards[0].body = "a paragraph of context\n".repeat(20);
+        app.rail.shown = true;
+        app.rail.expanded = true;
+        app.rail.look_at(1);
+
+        let hits = drawn(&app, 78, 30);
+        assert!(hits.past > 0, "the card is taller than the panel");
+        on_rail_wheel(&mut app, &hits, 1);
+        assert_eq!(app.rail.scroll, 1);
+        on_rail_wheel(&mut app, &hits, -5);
+        assert_eq!(app.rail.scroll, 0, "and it stops at the first line");
+    }
+
+    /// The offset belongs to the card under the cursor. Carried onto the next
+    /// one, it would open that card halfway down.
+    #[test]
+    fn moving_off_a_scrolled_card_puts_the_next_one_at_its_first_line() {
+        let mut app = with_cards();
+        app.cards[0].body = "a paragraph of context\n".repeat(20);
+        app.rail.shown = true;
+        app.rail.expanded = true;
+        app.rail.look_at(1);
+
+        let hits = drawn(&app, 78, 30);
+        on_rail_wheel(&mut app, &hits, 3);
+        assert!(app.rail.scroll > 0);
+        app.rail.look_at(2);
+        assert_eq!(app.rail.scroll, 0);
     }
 
     /// A digit naming no option says so. Silence would leave the reader
