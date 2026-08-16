@@ -335,21 +335,59 @@ const RAIL_WIDE: u16 = 58;
 
 /// The narrowest body that can hold the rail *beside* the content.
 ///
-/// Below it the rail becomes a single line rather than being squeezed, which is
-/// what Reljod chose when the question was put: taking thirty columns off an
-/// eighty-column terminal leaves neither a readable rail nor a readable chat,
-/// and a rail you cannot read is worse than one sentence saying how many cards
-/// are waiting and which key opens them.
+/// Below it the rail stops being a column, because taking thirty columns off an
+/// eighty-column terminal leaves neither a readable rail nor a readable chat.
+/// It lies along the bottom instead — see [`rail_below`].
 const RAIL_BESIDE: u16 = 84;
+
+/// How many rows the rail gets when it lies along the bottom.
+///
+/// Twelve holds a header and two collapsed cards, or an expanded card with room
+/// for its body and its options. Fewer would put the blocking card back where it
+/// was: technically on screen, and cut off before it says anything.
+const RAIL_BELOW: u16 = 12;
+
+/// The shortest bottom panel worth drawing instead of the one-line summary.
+///
+/// Under this the panel and the chat are both too short to read, and one honest
+/// sentence beats two unreadable halves.
+const RAIL_BELOW_MIN: u16 = 6;
 
 /// A collapsed card: a border, two lines of card, a border.
 const CARD_HEIGHT: u16 = 4;
 
+/// How many rows the bottom rail gets on a terminal too narrow for a column.
+///
+/// A panel tall enough to read, except in the two cases where it would be a
+/// worse answer than the one-line summary: nothing has been raised, so there is
+/// no card to show; or the body is so short that halving it leaves neither part
+/// legible.
+fn rail_below(app: &App, area: Rect) -> u16 {
+    if app.cards.is_empty() {
+        return 1;
+    }
+    // Never past half the body, for the same reason the column never passes
+    // half the width: a panel bigger than what it sits beside has stopped
+    // being a panel.
+    let room = area.height / 2;
+    if room < RAIL_BELOW_MIN {
+        return 1;
+    }
+    RAIL_BELOW.min(room)
+}
+
 /// Where the rail goes, and what is left for everything else.
 ///
-/// Three outcomes, and the middle one is the interesting one: hidden, a column
-/// down the left, or one line across the top when the terminal is too narrow
-/// for a column.
+/// Three outcomes: hidden, a column down the left, or a panel across the bottom
+/// when the terminal is too narrow for a column.
+///
+/// The bottom panel is the mobile case, and it is a panel rather than the single
+/// line it used to be because the line could not do the rail's one job. A phone
+/// terminal is eighty columns at best, so it took the narrow path every time,
+/// and a card that had stopped an agent was never drawn — you got the count of
+/// blockers and the key that opens them, and no way to read the question without
+/// a wider screen. Columns are what a narrow terminal is short of; rows it still
+/// has, so the rail spends rows instead.
 fn rail_beside(app: &App, area: Rect) -> (Option<Rect>, Rect) {
     if !app.rail.shown {
         return (None, area);
@@ -360,11 +398,14 @@ fn rail_beside(app: &App, area: Rect) -> (Option<Rect>, Rect) {
     // it — fifty-eight columns is most of a hundred-column terminal.
     let width = want.min(area.width / 2);
     if area.width < RAIL_BESIDE || width < RAIL || area.height < 4 {
+        // Below the chat rather than above it: it sits directly over the keybar
+        // that names the keys for answering, and the composer stays where the
+        // hands already are.
         let rows = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(1), Constraint::Min(1)])
+            .constraints([Constraint::Min(1), Constraint::Length(rail_below(app, area))])
             .split(area);
-        return (Some(rows[0]), rows[1]);
+        return (Some(rows[1]), rows[0]);
     }
     let halves = Layout::default()
         .direction(Direction::Horizontal)
@@ -390,11 +431,13 @@ fn draw_rail(f: &mut Frame, app: &App, area: Rect) {
     }
 }
 
-/// The rail on a terminal too narrow to hold it.
+/// The rail with a single row to say it in.
 ///
-/// It owes the reader exactly two things — that something is blocked, and the
-/// key that opens the rail — and it must not pretend to be the rail. Hence a
-/// bar glyph and a sentence rather than a squeezed card.
+/// What is left when even the bottom panel will not fit — an empty rail, or a
+/// body too short to divide. It owes the reader exactly two things — that
+/// something is blocked, and the key that opens the rail — and it must not
+/// pretend to be the rail. Hence a bar glyph and a sentence rather than a
+/// squeezed card.
 fn draw_rail_summary(f: &mut Frame, app: &App, area: Rect) {
     let blocking = app.cards.iter().any(|c| c.blocking && c.is_open());
     let text = rail::summary(&app.cards);
@@ -9226,32 +9269,122 @@ mod tests {
         );
     }
 
-    /// Reljod's own answer to "rail or third column": on a narrow terminal it
-    /// is one line, not a squeezed rail.
+    /// A narrow terminal is short of columns, not rows, so the rail lies along
+    /// the bottom rather than standing beside the chat. What it must not do is
+    /// what the one-line summary used to do here: count the blockers without
+    /// ever showing one.
     #[test]
-    fn a_narrow_terminal_gets_one_line_instead_of_a_squeezed_rail() {
+    fn a_narrow_terminal_gets_the_rail_along_the_bottom_rather_than_a_squeezed_column() {
         let (store, conversation) = rail_store();
         let a = rail_app(&store, &conversation, Default::default());
 
         let wide = rendered(&a, 150, 40);
         assert!(wide.contains("chat DB: chose SQLite"), "{wide}");
 
+        // The blocking card, not merely some card: `Sort::Pressing` puts it at
+        // the top of the stack, and it is the one the panel exists to show.
         let narrow = rendered(&a, 78, 30);
         assert!(
-            narrow.contains("3 cards"),
-            "the one-liner still says how many: {narrow}"
+            narrow.contains("which port for the API?"),
+            "the blocking question has to be readable, which is the whole point: {narrow}"
         );
         assert!(
-            narrow.contains("1 blocked"),
-            "and that one of them stopped a run: {narrow}"
+            narrow.contains(rail::BLOCKED),
+            "and it still says that it stopped a run: {narrow}"
+        );
+    }
+
+    /// The panel goes *below* the chat, over the keybar that names the keys for
+    /// answering. Above it would push the conversation down the screen every
+    /// time an agent raised anything.
+    #[test]
+    fn the_narrow_rail_sits_under_the_chat_and_not_over_it() {
+        let (store, conversation) = rail_store();
+        let a = rail_app(&store, &conversation, Default::default());
+
+        let narrow = rendered(&a, 78, 30);
+        let lines: Vec<&str> = narrow.lines().collect();
+        let card = lines
+            .iter()
+            .position(|l| l.contains("which port for the API?"))
+            .expect("the card is drawn");
+        let header = lines
+            .iter()
+            .position(|l| l.contains(" rail"))
+            .expect("the rail header is drawn");
+        let composer = lines
+            .iter()
+            .position(|l| l.contains(CARET))
+            .expect("the composer is drawn");
+        assert!(
+            header < card,
+            "the header tops the panel: header {header}, card {card}\n{narrow}"
         );
         assert!(
-            narrow.contains("Ctrl-N"),
-            "and which key answers it: {narrow}"
+            composer < header,
+            "and the whole panel sits under the chat: composer {composer}, panel {header}\n{narrow}"
+        );
+    }
+
+    /// Expanding is what you press once the panel has told you a card is there,
+    /// so the panel has to have the rows to answer that press — the body of the
+    /// question and the sentence saying a run is waiting on it.
+    #[test]
+    fn the_narrow_rail_can_expand_the_blocking_card_in_place() {
+        let (store, conversation) = rail_store();
+        let mut rail = RailState::default();
+        rail.expanded = true;
+        let a = rail_app(&store, &conversation, rail);
+
+        let narrow = rendered(&a, 78, 30);
+        assert!(
+            narrow.contains("which port for the API?"),
+            "the blocking card is the one Pressing selected: {narrow}"
         );
         assert!(
-            !narrow.contains("chat DB: chose SQLite"),
-            "a squeezed rail is what this replaces: {narrow}"
+            narrow.contains("The alternatives were weighed"),
+            "and its body is readable, not just its title: {narrow}"
+        );
+        assert!(
+            narrow.contains("the run is waiting on this"),
+            "and it says what being blocked costs: {narrow}"
+        );
+    }
+
+    /// A rail with nothing in it must not spend half a phone screen saying so.
+    #[test]
+    fn a_narrow_rail_with_no_cards_costs_one_line() {
+        let (store, conversation) = rail_store();
+        let mut a = rail_app(&store, &conversation, Default::default());
+        a.cards.clear();
+        a.reconcile_rail();
+
+        let narrow = rendered(&a, 78, 30);
+        assert!(
+            narrow.contains("nothing waiting"),
+            "the one-liner is the whole truth here: {narrow}"
+        );
+    }
+
+    /// Halving a body that is already too short leaves two unreadable halves,
+    /// so the single sentence is still the better answer down there.
+    #[test]
+    fn a_terminal_too_short_to_divide_falls_back_to_the_one_line_summary() {
+        let (store, conversation) = rail_store();
+        let a = rail_app(&store, &conversation, Default::default());
+
+        let squat = rendered(&a, 78, 9);
+        assert!(
+            squat.contains("3 cards"),
+            "the one-liner still says how many: {squat}"
+        );
+        assert!(
+            squat.contains(&format!("1 {}", rail::BLOCKED)),
+            "and that one of them stopped a run: {squat}"
+        );
+        assert!(
+            squat.contains("Ctrl-N"),
+            "and which key answers it: {squat}"
         );
     }
 
