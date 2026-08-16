@@ -7273,6 +7273,7 @@ mod tests {
             notes: String::new(),
             created_at_ms: 0,
             last_touched_ms: 0,
+            manager_conversation_id: None,
         }
     }
 

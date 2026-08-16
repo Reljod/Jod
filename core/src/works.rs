@@ -82,6 +82,12 @@ pub struct Work {
     /// Distinguishes one work from another at a glance in the tree and on
     /// every cascaded card.
     pub colour: String,
+    /// The repository this work is about, when it was opened in one.
+    ///
+    /// `None` on a work opened before projects were recorded, and on one whose
+    /// checkout is not in the catalog. Both are ordinary rather than broken —
+    /// an uncatalogued directory is still somewhere to work.
+    pub project_id: Option<String>,
     pub state: State,
     /// Messages this work's agents may exchange before the human is asked
     /// whether to continue. `None` means the default.
@@ -697,7 +703,7 @@ impl Deletion {
 // ---- the store -------------------------------------------------------------
 
 const WORK_COLUMNS: &str = "id, title, summary, instruction, colour, state, message_budget,
-     messages_used, max_depth, created_at_ms, updated_at_ms, closed_at_ms";
+     messages_used, max_depth, created_at_ms, updated_at_ms, closed_at_ms, project_id";
 
 fn read_work(r: &rusqlite::Row<'_>) -> rusqlite::Result<Work> {
     Ok(Work {
@@ -713,6 +719,7 @@ fn read_work(r: &rusqlite::Row<'_>) -> rusqlite::Result<Work> {
         created_at_ms: r.get(9)?,
         updated_at_ms: r.get(10)?,
         closed_at_ms: r.get(11)?,
+        project_id: r.get(12)?,
     })
 }
 
@@ -726,6 +733,16 @@ impl Store {
     /// complete" is a state that can be reached rather than a sentence about
     /// an empty list.
     pub fn create_work(&self, instruction: &str) -> Result<Work> {
+        self.create_work_in(instruction, None)
+    }
+
+    /// Open a work, recording which repository it is about.
+    ///
+    /// Separate from [`Store::create_work`] rather than replacing it, because
+    /// the project is genuinely optional: a work opened in a directory nobody
+    /// catalogued is still a work, and forcing every caller to say `None` would
+    /// make the absence look like an oversight rather than a fact.
+    pub fn create_work_in(&self, instruction: &str, project_id: Option<&str>) -> Result<Work> {
         let instruction = instruction.trim().to_string();
         if instruction.is_empty() {
             return Err(JodError::Invalid(
@@ -746,9 +763,9 @@ impl Store {
             tx.execute(
                 "INSERT INTO works
                    (id, title, summary, instruction, colour, state, messages_used,
-                    created_at_ms, updated_at_ms)
-                 VALUES (?1, ?2, '', ?3, ?4, 'open', 0, ?5, ?5)",
-                params![id, title, instruction, colour_for(&taken), at],
+                    created_at_ms, updated_at_ms, project_id)
+                 VALUES (?1, ?2, '', ?3, ?4, 'open', 0, ?5, ?5, ?6)",
+                params![id, title, instruction, colour_for(&taken), at, project_id],
             )?;
             insert_task(tx, &id, &uuid::Uuid::new_v4().to_string(), &instruction, at)?;
             // The person is on the roster from the moment the work exists,

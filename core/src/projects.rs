@@ -172,6 +172,12 @@ pub struct Project {
     pub created_at_ms: i64,
     /// When work last happened here — the tiebreak for a vague instruction.
     pub last_touched_ms: i64,
+    /// The conversation that owns this project over time, once one exists.
+    ///
+    /// `None` until the first instruction about this project reaches a manager.
+    /// See [`crate::store::Store::manager_conversation`], and note that this
+    /// column and not `conversations.pinned` is how a manager is found.
+    pub manager_conversation_id: Option<String>,
 }
 
 impl Project {
@@ -473,7 +479,7 @@ fn clean_alias(alias: &str) -> String {
 }
 
 const PROJECT_COLUMNS: &str = "id, name, path, remote, aliases, state, colour, notes,
-     created_at_ms, last_touched_ms";
+     created_at_ms, last_touched_ms, manager_conversation_id";
 
 fn read_project(r: &rusqlite::Row<'_>) -> rusqlite::Result<Project> {
     let aliases: String = r.get(4)?;
@@ -491,6 +497,7 @@ fn read_project(r: &rusqlite::Row<'_>) -> rusqlite::Result<Project> {
         notes: r.get(7)?,
         created_at_ms: r.get(8)?,
         last_touched_ms: r.get(9)?,
+        manager_conversation_id: r.get(10)?,
     })
 }
 
@@ -958,6 +965,7 @@ mod tests {
             notes: String::new(),
             created_at_ms: 0,
             last_touched_ms: 0,
+            manager_conversation_id: None,
         }
     }
 

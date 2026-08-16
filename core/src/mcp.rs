@@ -168,11 +168,25 @@ pub fn catalogue() -> Vec<Tool> {
                  many exist in `total` and how many the page left out in `hidden`; if `hidden` \
                  is above zero, ask again with a bigger `limit` to see the rest. Check this \
                  before delegating: continuing a warm agent that already has the context beats \
-                 starting a cold one that has to rediscover it.",
+                 starting a cold one that has to rediscover it.\n\n\
+                 One exception, and it is the important one: an agent with `stalled_for_ms` \
+                 set **cannot be continued**. It is wedged — still `running`, because it is, \
+                 but it has produced nothing for that long and it will not answer you. Say so, \
+                 start a fresh session beside it, and leave the stalled one for Reljod to stop. \
+                 `busy` is the field that means what `status: running` used to: working, and \
+                 not stuck.\n\n\
+                 Each agent also says which `project` it is on and which `work` it belongs to. \
+                 Group by those rather than by `cwd` — a session holding a worktree lease has \
+                 the worktree as its cwd, not the checkout, so two agents on one repository \
+                 look like two repositories.",
             needs: ToolAccess::ReadOnly,
             schema: obj(
                 json!({
                     "running_only": { "type": "boolean", "description": "Only agents still working." },
+                    "project": text(
+                        "Only agents on this project, by name. What a project manager asks \
+                         with, so it reads its own repository instead of the whole fleet."
+                    ),
                     "limit": int(
                         "How many agents to return. Default 20. Running agents are listed \
                          first, so a small limit drops finished ones before running ones."
@@ -515,6 +529,34 @@ pub fn catalogue() -> Vec<Tool> {
                     "reason": text("Why this instruction is about that project. Shown to Reljod.")
                 }),
                 &["project"],
+            ),
+        },
+        Tool {
+            name: "ask_manager",
+            description:
+                "Hand an instruction to the manager that owns a project. Use it for anything \
+                 touching a repository — the manager decides whether to continue an agent \
+                 already working on it or open new work, because it is the one conversation \
+                 that has seen every instruction about that project.\n\n\
+                 Returns as soon as the manager has it, like everything else here. Its answer \
+                 arrives as a card on your rail rather than as this call's return value, so do \
+                 not wait for it and do not poll. A project with no manager yet gets one, and \
+                 the reply says so.\n\n\
+                 The reply also names the project it resolved to. Say that in your answer: a \
+                 routing decision nobody can see is one nobody can correct.",
+            needs: ToolAccess::Delegate,
+            schema: obj(
+                json!({
+                    "project": text("The project's name, or any name Reljod calls it."),
+                    "instruction": text(
+                        "What to do, in his words. Pass it through rather than paraphrasing \
+                         — the manager has the context to read it and you do not."
+                    ),
+                    "harness": one_of(
+                        "Which harness runs the manager. Default claude_code.", &HARNESS_IDS
+                    )
+                }),
+                &["project", "instruction"],
             ),
         },
         Tool {
@@ -998,6 +1040,7 @@ impl Server {
             "project_current" => self.project_current(),
             "project_switch" => self.project_switch(args),
             "project_add" => self.project_add(args),
+            "ask_manager" => self.ask_manager(args).await,
             "claim_worktree" => self.claim_worktree(args),
             "release_worktree" => self.release_worktree(args),
             "open_work" => self.open_work(args).await,
@@ -1018,6 +1061,11 @@ impl Server {
     async fn list_agents(&self, args: &Value) -> Result<String, ToolError> {
         let running_only = opt_bool(args, "running_only").unwrap_or(false);
         let limit = opt_usize(args, "limit")?.unwrap_or(20);
+        // What a manager asks with, so it reads its own project rather than the
+        // whole fleet. Matched against the project's name as `run_contexts`
+        // resolved it, case-insensitively — a model that types `jod` for `Jod`
+        // has not asked a different question.
+        let only_project = opt_str(args, "project");
 
         // A fresh process knows nothing until it reads the database back, and
         // it has to read back at least as far as it has been asked to return —
@@ -1040,25 +1088,61 @@ impl Server {
                 .cmp(&live(a.status))
                 .then(b.created_at_ms.cmp(&a.created_at_ms))
         });
-        let matching = agents
-            .iter()
-            .filter(|a| !running_only || a.status == AgentStatus::Running)
-            .count();
+        // Two reads for the whole answer, whatever the fleet's size. Both are
+        // best-effort: a store that cannot answer them leaves the fields empty
+        // rather than failing a call whose main job — listing the agents — it
+        // has already done.
+        let store = self.jod.store();
+        let contexts = store
+            .as_ref()
+            .and_then(|s| s.run_contexts().ok())
+            .unwrap_or_default();
+        let stalled = store
+            .as_ref()
+            .and_then(|s| s.stalled_runs().ok())
+            .unwrap_or_default();
+        let now_ms = chrono::Utc::now().timestamp_millis();
+
+        let keep = |a: &&crate::service::AgentSummary| {
+            if running_only && a.status != AgentStatus::Running {
+                return false;
+            }
+            match &only_project {
+                None => true,
+                Some(wanted) => contexts
+                    .get(&a.id)
+                    .and_then(|c| c.project.as_deref())
+                    .is_some_and(|p| p.eq_ignore_ascii_case(wanted)),
+            }
+        };
+
+        let matching = agents.iter().filter(keep).count();
         let views: Vec<AgentView> = agents
             .iter()
-            .filter(|a| !running_only || a.status == AgentStatus::Running)
+            .filter(keep)
             .take(limit)
-            .map(|a| AgentView {
-                run_id: &a.id,
-                name: &a.name,
-                harness: a.harness.id(),
-                status: a.status,
-                cwd: &a.cwd,
-                model: a.model.as_deref(),
-                session_id: a.session_id.as_deref(),
-                created_at_ms: a.created_at_ms,
-                cost_usd: a.usage.cost_usd,
-                last_message: a.last_message.as_deref(),
+            .map(|a| {
+                let context = contexts.get(&a.id);
+                let stalled_for_ms = stalled
+                    .get(&a.id)
+                    .filter(|_| a.status == AgentStatus::Running)
+                    .map(|since| now_ms.saturating_sub(*since).max(0));
+                AgentView {
+                    run_id: &a.id,
+                    name: &a.name,
+                    harness: a.harness.id(),
+                    status: a.status,
+                    cwd: &a.cwd,
+                    model: a.model.as_deref(),
+                    session_id: a.session_id.as_deref(),
+                    created_at_ms: a.created_at_ms,
+                    cost_usd: a.usage.cost_usd,
+                    last_message: a.last_message.as_deref(),
+                    project: context.and_then(|c| c.project.as_deref()),
+                    work: context.and_then(|c| c.work.as_deref()),
+                    stalled_for_ms,
+                    busy: a.status == AgentStatus::Running && stalled_for_ms.is_none(),
+                }
             })
             .collect();
 
@@ -1069,7 +1153,7 @@ impl Server {
         // reports what it matched, and an unfiltered one takes whichever of the
         // two numbers is larger. The same reasoning `jod ls` uses at
         // `cli/src/main.rs`, where it is `run_count()?.max(known)`.
-        let total = match running_only {
+        let total = match running_only || only_project.is_some() {
             true => matching,
             false => self.jod.run_count().unwrap_or(matching).max(matching),
         };
@@ -1100,6 +1184,38 @@ impl Server {
         };
         let permission = self.requested_permission(args)?;
         let tools = self.child_access(args)?;
+        let cwd = opt_str(args, "cwd").map(PathBuf::from).unwrap_or_else(default_cwd);
+
+        // The route around `open_work`'s refusal, closed.
+        //
+        // Main keeps `delegate` for genuinely repo-less one-shots — without it
+        // it could not answer "what's the weather in Manila" without opening a
+        // work. But `delegate` takes a `cwd`, so a model that has just been
+        // refused `open_work` and still wants to help will point one at the
+        // checkout, and it will feel entirely reasonable at the time. That is
+        // the rule routed around, silently.
+        //
+        // Refused only when the directory is a *catalogued* project. That is
+        // the same test `open_work`'s refusal rests on and it keeps the honest
+        // case working: a scratch directory is not a repository Reljod is
+        // managing, and a manager for it does not exist to be bypassed.
+        if let Ok(store) = self.store() {
+            if let Ok(Some(project)) = store.project_for_path(&cwd) {
+                if let Ok(raiser) = self.raiser() {
+                    if self.caller_is_main(&raiser) {
+                        return Err(ToolError::Refused(format!(
+                            "`{}` is {}'s checkout, and a run started there is repository work \
+                             however small the prompt looks. Call `ask_manager` with project \
+                             `{}` instead. `delegate` is still yours for a one-shot that needs \
+                             no repository at all.",
+                            cwd.display(),
+                            project.name,
+                            project.name
+                        )));
+                    }
+                }
+            }
+        }
 
         if !self.jod.supervisor_available() {
             return Err(ToolError::Refused(
@@ -1122,7 +1238,7 @@ impl Server {
             system: tools
                 .may_delegate()
                 .then(|| crate::orchestrator::delegated_preamble().to_string()),
-            cwd: opt_str(args, "cwd").map(PathBuf::from).unwrap_or_else(default_cwd),
+            cwd,
             model: opt_str(args, "model"),
             permission,
             resume: Resume::Fresh,
@@ -2018,6 +2134,151 @@ impl Server {
     /// Named rather than given by id: the model is resolving something Reljod
     /// *said*, and making it carry an opaque id would mean it had to list the
     /// catalog first on every switch just to translate a word it already has.
+    /// Whether the run calling this is the main chat.
+    ///
+    /// The MCP server already knows which run is calling — it resolves its own
+    /// process group against `runs.pgid` — so the caller cannot argue about its
+    /// identity, which is what makes a refusal here enforcement rather than a
+    /// request. Prompt wording is not enforcement: it is advice a model may
+    /// reasonably talk itself out of, and this rule is one it will be tempted
+    /// to, because routing around it always feels helpful in the moment.
+    ///
+    /// Unresolvable identity means "not main". A run Jod did not start has no
+    /// pinned conversation to be, and refusing everything Jod cannot identify
+    /// would break `jod run` against its own MCP server.
+    fn caller_is_main(&self, raiser: &Raiser) -> bool {
+        let Ok(store) = self.store() else {
+            return false;
+        };
+        match store.pinned_conversation() {
+            Ok(Some(main)) => main == raiser.conversation_id,
+            _ => false,
+        }
+    }
+
+    /// Refuse a repository-shaped call from the main chat, naming `ask_manager`.
+    ///
+    /// Main routes and answers. Anything touching a repository goes through
+    /// that project's manager, because a manager is only worth having if it is
+    /// the one conversation that has seen everything that ever happened in its
+    /// repository — and work started around it is work it does not know about.
+    fn refuse_repository_work_from_main(
+        &self,
+        raiser: &Raiser,
+        tool: &str,
+    ) -> Result<(), ToolError> {
+        if !self.caller_is_main(raiser) {
+            return Ok(());
+        }
+        Err(ToolError::Refused(format!(
+            "`{tool}` is not the main chat's to call. Anything touching a repository goes to \
+             that project's manager: call `ask_manager` with the project and Reljod's \
+             instruction, and it will decide whether to continue an agent or open new work. \
+             It answers onto your rail, so hand it over and come straight back."
+        )))
+    }
+
+    /// Route an instruction to the project's manager.
+    ///
+    /// The resolution is a plain string match over names, aliases and path
+    /// basenames — the same one the router already runs before a main-chat turn
+    /// starts. Naming a project is not a judgement call, so no model is asked
+    /// to make one here; this tool is wiring.
+    ///
+    /// Refuses on a name that matches nothing or matches several, listing what
+    /// it does know either way. The alternative — picking — points an
+    /// instruction at a repository nobody chose, and it reads as perfectly
+    /// ordinary in the manager that receives it.
+    async fn ask_manager(&self, args: &Value) -> Result<String, ToolError> {
+        let wanted = required_str(args, "project")?;
+        let instruction = required_str(args, "instruction")?;
+        if instruction.trim().is_empty() {
+            return Err(ToolError::BadParams(
+                "`instruction` is what the manager is being asked to do, and an empty one \
+                 would start a run with nothing to act on"
+                    .into(),
+            ));
+        }
+        let harness = match opt_str(args, "harness") {
+            Some(h) => parse_harness(&h)
+                .ok_or_else(|| ToolError::BadParams(format!("unknown harness `{h}`")))?,
+            None => HarnessKind::ClaudeCode,
+        };
+        let store = self.store()?;
+
+        let found = store
+            .projects_by_name(&wanted)
+            .map_err(|e| ToolError::Refused(format!("could not search the catalog: {e}")))?;
+        let project = match found.as_slice() {
+            [only] => only.clone(),
+            [] => {
+                let known: Vec<String> = store
+                    .projects(false)
+                    .map_err(|e| ToolError::Refused(format!("could not read the catalog: {e}")))?
+                    .into_iter()
+                    .map(|p| p.name)
+                    .collect();
+                return Err(ToolError::Refused(format!(
+                    "no project called `{wanted}`, so there is no manager to ask. The catalog \
+                     has: {}. Use project_add if this is somewhere new.",
+                    if known.is_empty() {
+                        "(nothing yet)".to_string()
+                    } else {
+                        known.join(", ")
+                    }
+                )));
+            }
+            several => {
+                let candidates = several
+                    .iter()
+                    .map(|p| format!("{} ({})", p.name, p.path.display()))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return Err(ToolError::Refused(format!(
+                    "`{wanted}` is the name of {} projects — {candidates}. Each has its own \
+                     manager, so ask Reljod which one he means rather than picking.",
+                    several.len()
+                )));
+            }
+        };
+
+        if !self.jod.supervisor_available() {
+            return Err(ToolError::Refused(
+                "`jod-run` is not installed on this machine, and it supervises every agent".into(),
+            ));
+        }
+
+        let managed = crate::orchestrator::hand_to_manager(
+            &self.jod,
+            &project.id,
+            &instruction,
+            harness,
+            self.max_permission,
+        )
+        .await
+        .map_err(|e| ToolError::Refused(format!("could not reach {}'s manager: {e}", project.name)))?;
+
+        as_json(&json!({
+            "run_id": managed.run_id,
+            "conversation_id": managed.conversation_id,
+            "project": managed.project,
+            "started_fresh": managed.started_fresh,
+            "note": if managed.started_fresh {
+                format!(
+                    "{} had no manager, so one was started. It will raise a card on your rail \
+                     when it has decided what to do.",
+                    managed.project
+                )
+            } else {
+                format!(
+                    "{}'s manager was resumed and has the instruction. It will raise a card on \
+                     your rail when it has decided what to do.",
+                    managed.project
+                )
+            },
+        }))
+    }
+
     fn project_switch(&self, args: &Value) -> Result<String, ToolError> {
         let raiser = self.raiser()?;
         let wanted = required_str(args, "project")?;
@@ -2324,6 +2585,7 @@ impl Server {
     /// onto a tree it has nothing to do with.
     async fn open_work(&self, args: &Value) -> Result<String, ToolError> {
         let raiser = self.raiser()?;
+        self.refuse_repository_work_from_main(&raiser, "open_work")?;
         let instruction = required_str(args, "instruction")?;
         let harness = match opt_str(args, "harness") {
             Some(h) => parse_harness(&h)
@@ -3163,6 +3425,28 @@ struct AgentView<'a> {
     created_at_ms: i64,
     cost_usd: Option<f64>,
     last_message: Option<&'a str>,
+    /// Which repository this agent is working on.
+    ///
+    /// `cwd` used to be the only hint, and it is a bad one: a session holding a
+    /// worktree lease has the *worktree* as its cwd, not the checkout, so a
+    /// router grouping by directory put the same project's agents in two
+    /// groups.
+    project: Option<&'a str>,
+    /// The work it belongs to, by title. `None` for a `delegate`d run, which
+    /// belongs to no work on purpose.
+    work: Option<&'a str>,
+    /// How long it has been silent, when it has been marked stalled.
+    ///
+    /// The field that stops the router starting a second agent beside a wedged
+    /// one without knowing it: `status` says `running` for a stalled run,
+    /// because it *is* running.
+    stalled_for_ms: Option<i64>,
+    /// Running and not stalled — that is, actually getting on with something.
+    ///
+    /// Derived rather than left to the caller, because "running" and "busy"
+    /// came apart the moment a stall could be marked, and every reader
+    /// recomputing the difference is a reader that can get it wrong.
+    busy: bool,
 }
 
 /// The spelling `parse_permission` reads back. Delegated rather than repeated:
@@ -3634,8 +3918,12 @@ mod tests {
     // Writing to a peer spends a turn of theirs, which is money now — the same
     // line `delegate` sits on. What stops it running away is not the access
     // level but the bounds in `team`: depth, budget, and a deadline on a wait.
-    const DELEGATE_TOOLS: [&str; 12] = [
+    const DELEGATE_TOOLS: [&str; 13] = [
         "delegate",
+        // Resuming a manager starts an agent, so it sits on the same line as
+        // every other tool that does. It is main's usual verb, and main runs at
+        // `Orchestrate`, which is above this.
+        "ask_manager",
         "continue_agent",
         "stop_agent",
         "send_message",
@@ -5024,6 +5312,427 @@ mod tests {
         .await;
         assert!(is_error_result(&answer), "{answer}");
         assert!(said(&answer).contains("exceeds"), "{}", said(&answer));
+    }
+
+    // ---- managers ---------------------------------------------------------
+
+    mod managers {
+        use super::*;
+        use crate::projects::NewProject;
+
+        /// A catalogued project on a real directory, plus a store.
+        fn with_project(dir: &str) -> (Arc<Store>, crate::projects::Project) {
+            let store = Arc::new(Store::in_memory().unwrap());
+            std::fs::create_dir_all(dir).unwrap();
+            let project = store
+                .add_project(NewProject::at(dir).named("tetris"))
+                .unwrap();
+            (store, project)
+        }
+
+        /// A run bound to a conversation, which is what `raiser` reads.
+        fn run_in(store: &Store, conversation: &str, run_id: &str) {
+            store.append_prompt(conversation, run_id, "do the thing").unwrap();
+        }
+
+        /// A real detached process group, so a run recorded as `running` still
+        /// reads as running after `Jod::rehydrate`.
+        ///
+        /// `rehydrate` probes the pgid and corrects a `running` row with no
+        /// live group to `failed` — rightly, since that is a supervisor that
+        /// died without saying so. A fixture with `pgid: None` therefore comes
+        /// back `failed`, and every assertion about a *working* agent would be
+        /// made against one that is not.
+        fn a_living_group() -> u32 {
+            use std::os::unix::process::CommandExt;
+            let mut cmd = std::process::Command::new("/bin/sleep");
+            cmd.arg("60")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            // SAFETY: `setsid` is async-signal-safe, which is the only
+            // requirement on code running between `fork` and `exec`.
+            unsafe {
+                cmd.pre_exec(|| {
+                    if libc::setsid() == -1 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
+            cmd.spawn()
+                .expect("could not spawn a test process group")
+                .id()
+        }
+
+        fn kill_group(pgid: u32) {
+            unsafe { libc::kill(-(pgid as i32), libc::SIGKILL) };
+            let mut status: libc::c_int = 0;
+            unsafe { libc::waitpid(pgid as i32, &mut status, 0) };
+        }
+
+        /// A running row that `Jod::rehydrate` can actually load back.
+        ///
+        /// The whole `AgentSummary` and not a stub: `rehydrate` deserialises
+        /// `runs.summary` into one and *skips the row* when it cannot, so a
+        /// thin fixture produces an empty fleet and a test that proves nothing.
+        fn running_run(store: &Store, run_id: &str, name: &str) -> u32 {
+            let pgid = a_living_group();
+            let summary = crate::service::AgentSummary {
+                id: run_id.into(),
+                name: name.into(),
+                harness: HarnessKind::ClaudeCode,
+                harness_label: "claude-code".into(),
+                status: crate::service::AgentStatus::Running,
+                cwd: "/tmp".into(),
+                model: None,
+                permission: PermissionPolicy::AcceptEdits,
+                pid: Some(pgid),
+                pgid: Some(pgid),
+                process_alive: true,
+                watch_command: crate::service::watch_command(run_id),
+                created_at_ms: 0,
+                session_id: None,
+                usage: Default::default(),
+                event_count: 0,
+                last_message: None,
+            };
+            store
+                .save_run(&crate::store::StoredRun {
+                    id: run_id.into(),
+                    name: name.into(),
+                    harness: "claude-code".into(),
+                    status: "running".into(),
+                    cwd: "/tmp".into(),
+                    session_id: None,
+                    pid: Some(pgid),
+                    pgid: Some(pgid),
+                    created_at_ms: 0,
+                    summary: serde_json::to_value(&summary).unwrap(),
+                })
+                .unwrap();
+            pgid
+        }
+
+        /// Check 12. A name that matches nothing refuses and lists what is
+        /// known, rather than picking or saying a bare "not found" that makes
+        /// the model guess again.
+        #[tokio::test]
+        async fn asking_an_unknown_projects_manager_refuses_and_names_what_is_known() {
+            let dir = format!("/tmp/jod-mgr-unknown-{}", std::process::id());
+            let (store, _) = with_project(&dir);
+            let conversation = store
+                .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
+                .unwrap()
+                .id;
+            run_in(&store, &conversation, "run-1");
+            let server = Server::new(Jod::with_store(store))
+                .with_access(ToolAccess::Orchestrate)
+                .for_run("run-1");
+
+            let answer = call(
+                &server,
+                "ask_manager",
+                json!({ "project": "pacman", "instruction": "fix the tests" }),
+            )
+            .await;
+
+            assert!(is_error_result(&answer), "{answer}");
+            let said = said(&answer);
+            assert!(said.contains("pacman"), "{said}");
+            assert!(
+                said.contains("tetris"),
+                "the refusal has to say what the catalog does have: {said}"
+            );
+            std::fs::remove_dir_all(&dir).ok();
+        }
+
+        /// Two projects answering to one name have two managers, so picking one
+        /// would route the instruction into a repository nobody chose — where
+        /// it reads as perfectly ordinary.
+        #[tokio::test]
+        async fn asking_an_ambiguous_projects_manager_refuses_and_names_both() {
+            let base = format!("/tmp/jod-mgr-ambig-{}", std::process::id());
+            let (a, b) = (format!("{base}/one/shared"), format!("{base}/two/shared"));
+            std::fs::create_dir_all(&a).unwrap();
+            std::fs::create_dir_all(&b).unwrap();
+            let store = Arc::new(Store::in_memory().unwrap());
+            store.add_project(NewProject::at(&a)).unwrap();
+            store.add_project(NewProject::at(&b)).unwrap();
+            let conversation = store
+                .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
+                .unwrap()
+                .id;
+            run_in(&store, &conversation, "run-1");
+            let server = Server::new(Jod::with_store(store))
+                .with_access(ToolAccess::Orchestrate)
+                .for_run("run-1");
+
+            let answer = call(
+                &server,
+                "ask_manager",
+                json!({ "project": "shared", "instruction": "fix the tests" }),
+            )
+            .await;
+
+            assert!(is_error_result(&answer), "{answer}");
+            let said = said(&answer);
+            assert!(said.contains(&a), "{said}");
+            assert!(said.contains(&b), "{said}");
+            std::fs::remove_dir_all(&base).ok();
+        }
+
+        /// Check 13. Refused at the tool boundary, not by prompt wording — the
+        /// server resolves the calling run itself, so the caller cannot argue
+        /// about its identity. And the refusal names the verb to use instead: a
+        /// rule that only says no leaves the model guessing at what yes is.
+        #[tokio::test]
+        async fn open_work_from_the_main_chat_is_refused_and_names_ask_manager() {
+            let store = Arc::new(Store::in_memory().unwrap());
+            let main = store
+                .main_conversation(HarnessKind::ClaudeCode, "/tmp")
+                .unwrap();
+            run_in(&store, &main, "run-main");
+            let server = Server::new(Jod::with_store(store))
+                .with_access(ToolAccess::Orchestrate)
+                .for_run("run-main");
+
+            let answer = call(
+                &server,
+                "open_work",
+                json!({ "instruction": "port the parser", "checkout": "/tmp" }),
+            )
+            .await;
+
+            assert!(is_error_result(&answer), "{answer}");
+            let said = said(&answer);
+            assert!(said.contains("ask_manager"), "{said}");
+            assert!(said.contains("not the main chat's to call"), "{said}");
+        }
+
+        /// The other half of check 13, and the reason it is a separate test: a
+        /// refusal that fired for everybody would pass the test above while
+        /// breaking every agent in the fleet.
+        #[tokio::test]
+        async fn open_work_from_a_session_that_is_not_main_is_not_refused_for_being_main() {
+            let store = Arc::new(Store::in_memory().unwrap());
+            store
+                .main_conversation(HarnessKind::ClaudeCode, "/tmp")
+                .unwrap();
+            let other = store
+                .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
+                .unwrap()
+                .id;
+            run_in(&store, &other, "run-2");
+            let server = Server::new(Jod::with_store(store))
+                .with_access(ToolAccess::Orchestrate)
+                .for_run("run-2");
+
+            let answer = call(
+                &server,
+                "open_work",
+                json!({ "instruction": "port the parser", "checkout": "/tmp" }),
+            )
+            .await;
+
+            // It may still fail for an unrelated reason on a box with no
+            // supervisor, which is fine and is why this asserts on the *reason*
+            // rather than on success.
+            let said = said(&answer);
+            assert!(
+                !said.contains("not the main chat's to call"),
+                "a manager or an engineer must still be able to open work: {said}"
+            );
+        }
+
+        /// The route around the rule, closed. A model just refused `open_work`
+        /// and still wanting to help will reach for `delegate` with the
+        /// checkout as `cwd`, and it feels entirely reasonable at the time.
+        #[tokio::test]
+        async fn delegate_at_a_known_projects_checkout_is_refused_from_main() {
+            let dir = format!("/tmp/jod-mgr-delegate-{}", std::process::id());
+            let (store, _) = with_project(&dir);
+            let main = store
+                .main_conversation(HarnessKind::ClaudeCode, "/tmp")
+                .unwrap();
+            run_in(&store, &main, "run-main");
+            let server = Server::new(Jod::with_store(store))
+                .with_access(ToolAccess::Orchestrate)
+                .for_run("run-main");
+
+            let answer = call(
+                &server,
+                "delegate",
+                json!({ "prompt": "count the tests", "cwd": dir.clone() }),
+            )
+            .await;
+
+            assert!(is_error_result(&answer), "{answer}");
+            let said = said(&answer);
+            assert!(said.contains("ask_manager"), "{said}");
+            assert!(said.contains("tetris"), "{said}");
+            std::fs::remove_dir_all(&dir).ok();
+        }
+
+        /// And the honest case still works. Removing `delegate` from main
+        /// outright would leave it unable to answer "what's the weather in
+        /// Manila" without opening a work, which is the thing this whole
+        /// design is trying to stop.
+        #[tokio::test]
+        async fn delegate_somewhere_that_is_not_a_project_is_still_mains_to_call() {
+            let store = Arc::new(Store::in_memory().unwrap());
+            let main = store
+                .main_conversation(HarnessKind::ClaudeCode, "/tmp")
+                .unwrap();
+            run_in(&store, &main, "run-main");
+            let server = Server::new(Jod::with_store(store))
+                .with_access(ToolAccess::Orchestrate)
+                .for_run("run-main");
+
+            let answer = call(
+                &server,
+                "delegate",
+                json!({ "prompt": "what is the weather in Manila", "cwd": "/tmp" }),
+            )
+            .await;
+
+            let said = said(&answer);
+            assert!(
+                !said.contains("ask_manager"),
+                "a repo-less one-shot must not be routed into a manager: {said}"
+            );
+        }
+
+        /// Check 8. What a manager asks with, so it reads its own repository
+        /// rather than the whole fleet.
+        #[tokio::test]
+        async fn list_agents_filtered_by_project_returns_only_that_projects_agents() {
+            let base = format!("/tmp/jod-mgr-filter-{}", std::process::id());
+            let (a, b) = (format!("{base}/tetris"), format!("{base}/pacman"));
+            std::fs::create_dir_all(&a).unwrap();
+            std::fs::create_dir_all(&b).unwrap();
+            let store = Arc::new(Store::in_memory().unwrap());
+            let tetris = store.add_project(NewProject::at(&a)).unwrap();
+            let pacman = store.add_project(NewProject::at(&b)).unwrap();
+
+            let mut groups = Vec::new();
+            for (run, project) in [("run-t", &tetris), ("run-p", &pacman)] {
+                let c = store
+                    .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
+                    .unwrap()
+                    .id;
+                store.append_prompt(&c, run, "work").unwrap();
+                store
+                    .set_current_project(
+                        &c,
+                        Some(&project.id),
+                        "work",
+                        crate::projects::How::Human,
+                        "test",
+                    )
+                    .unwrap();
+                groups.push(running_run(&store, run, run));
+            }
+
+            let server = Server::new(Jod::with_store(store)).with_access(ToolAccess::ReadOnly);
+            let answer = call(&server, "list_agents", json!({ "project": "tetris" })).await;
+            let page: Value = serde_json::from_str(&said(&answer)).unwrap();
+
+            let ids: Vec<&str> = page["agents"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|a| a["run_id"].as_str().unwrap())
+                .collect();
+            for pgid in groups {
+                kill_group(pgid);
+            }
+            std::fs::remove_dir_all(&base).ok();
+
+            assert_eq!(ids, vec!["run-t"], "{page}");
+            assert_eq!(page["agents"][0]["project"], "tetris");
+        }
+
+        /// Check 7. The four fields the router needs, and the one that stops it
+        /// starting a second agent beside a wedged one without knowing it.
+        #[tokio::test]
+        async fn list_agents_says_which_project_and_work_an_agent_is_on_and_whether_it_is_stuck() {
+            let dir = format!("/tmp/jod-mgr-view-{}", std::process::id());
+            let (store, project) = with_project(&dir);
+            let work = store
+                .create_work_in("port the parser", Some(&project.id))
+                .unwrap();
+            let c = store
+                .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
+                .unwrap()
+                .id;
+            store.attach_conversation(&c, &work.id, None, crate::works::Origin::Orchestrator)
+                .unwrap();
+            store.append_prompt(&c, "run-1", "work").unwrap();
+            store
+                .set_current_project(
+                    &c,
+                    Some(&project.id),
+                    "work",
+                    crate::projects::How::Human,
+                    "test",
+                )
+                .unwrap();
+            let pgid = running_run(&store, "run-1", "engineer");
+
+            let server =
+                Server::new(Jod::with_store(store.clone())).with_access(ToolAccess::ReadOnly);
+
+            // Healthy first.
+            let page: Value =
+                serde_json::from_str(&said(&call(&server, "list_agents", json!({})).await))
+                    .unwrap();
+            let agent = &page["agents"][0];
+            assert_eq!(agent["project"], "tetris", "{page}");
+            assert_eq!(agent["work"], work.title, "{page}");
+            assert_eq!(agent["stalled_for_ms"], Value::Null, "{page}");
+            assert_eq!(agent["busy"], json!(true), "{page}");
+
+            // Now mark it stalled, the way the sweep would.
+            let now = chrono::Utc::now().timestamp_millis();
+            store
+                .watch_run(&crate::heartbeat::Heartbeat::starting(
+                    "run-1",
+                    crate::heartbeat::Watching::Run,
+                    now,
+                ))
+                .unwrap();
+            store
+                .record_beat(&crate::heartbeat::Beat {
+                    run_id: "run-1".into(),
+                    last_seq: -1,
+                    last_progress_ms: now - 60_000,
+                    last_beat_ms: now,
+                    stalled_since_ms: Some(now - 60_000),
+                })
+                .unwrap();
+
+            let page: Value =
+                serde_json::from_str(&said(&call(&server, "list_agents", json!({})).await))
+                    .unwrap();
+            let agent = &page["agents"][0];
+            assert!(
+                agent["stalled_for_ms"].as_i64().unwrap() >= 60_000,
+                "{page}"
+            );
+            assert_eq!(
+                agent["busy"],
+                json!(false),
+                "a stalled agent is still `running`, which is exactly why `busy` \
+                 has to say otherwise: {page}"
+            );
+            assert_eq!(
+                agent["status"], "running",
+                "and `status` must keep telling the truth: {page}"
+            );
+            kill_group(pgid);
+            std::fs::remove_dir_all(&dir).ok();
+        }
     }
 
     // ---- claiming somewhere to write -------------------------------------

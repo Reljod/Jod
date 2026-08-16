@@ -1413,7 +1413,63 @@ const MIGRATIONS: &[(&str, &str)] = &[
     ALTER TABLE heartbeats ADD COLUMN stalled_since_ms INTEGER;
     "#,
     ),
+    (
+    "0021_a_work_knows_its_project",
+    r#"
+    -- Which repository this work is about.
+    --
+    -- "Which works are on Jod?" was unanswerable except by walking each work's
+    -- sessions and reading their sticky project — so nothing that had to group
+    -- by repository could, including the fleet tree.
+    --
+    -- `ON DELETE SET NULL` and not `CASCADE`: removing a project from the
+    -- catalog is a statement about the catalog, not an instruction to delete
+    -- the history of everything ever done in it.
+    --
+    -- Existing rows get NULL, which is the honest starting state. Old works
+    -- have no project and sit outside the project tree exactly as they do
+    -- today; backfilling them is its own task.
+    ALTER TABLE works ADD COLUMN project_id TEXT
+      REFERENCES projects(id) ON DELETE SET NULL;
+    CREATE INDEX IF NOT EXISTS ix_works_project ON works(project_id, created_at_ms);
+    "#,
+    ),
+    (
+    "0022_a_project_gets_a_manager",
+    r#"
+    -- The conversation that owns this project over time.
+    --
+    -- A manager is a *resumed conversation*, not a resident process: main
+    -- resumes it for each instruction, it answers, the process exits. Its
+    -- context lives in the transcript, so nothing sits idle burning money and
+    -- it cannot wedge between turns, because between turns it does not exist.
+    --
+    -- Found through this column and never through `conversations.pinned`.
+    -- `Store::pinned_conversation` is a `query_row` with no `LIMIT` and no
+    -- ordering, so a second pinned row would make "which conversation is main"
+    -- depend on SQLite's row order, and Reljod's instructions would start
+    -- landing in a project manager's transcript.
+    --
+    -- `ON DELETE SET NULL` leaves the transcript readable after its project is
+    -- gone, which is what the catalog is for.
+    ALTER TABLE projects ADD COLUMN manager_conversation_id TEXT
+      REFERENCES conversations(id) ON DELETE SET NULL;
+    "#,
+    ),
 ];
+
+/// What one run belongs to, for the fleet views that group by it.
+///
+/// Names rather than ids, because every reader of this is showing it to
+/// somebody — a model deciding whether to reuse an agent, or a person reading
+/// the tree — and an id would send both of them back for a second lookup.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RunContext {
+    /// The project its conversation is currently about.
+    pub project: Option<String>,
+    /// The title of the work its conversation belongs to.
+    pub work: Option<String>,
+}
 
 /// Who asserted a fact. Kept out of the fact's text so that content Jod
 /// ingested cannot claim a trust level it was not given.
@@ -2042,6 +2098,41 @@ impl Store {
             )?;
             Ok(())
         })
+    }
+
+    /// What each run belongs to: its project's name and its work's title.
+    ///
+    /// One query for the whole fleet rather than a lookup per run. The caller
+    /// is `list_agents`, which a router calls before deciding whether to reuse
+    /// an agent, and a read per row there is a read per agent on every routing
+    /// decision.
+    ///
+    /// Keyed off the *first* message a run wrote, the way
+    /// [`Store::conversation_for_run`] is, so the answer does not change as the
+    /// run goes on. A run that has written nothing yet is absent rather than
+    /// present-and-empty: it has no conversation, so it has no project, and the
+    /// two are the same fact.
+    pub fn run_contexts(&self) -> Result<HashMap<String, RunContext>> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT m.run_id, p.name, w.title
+               FROM (SELECT run_id, MIN(id) AS id FROM messages
+                      WHERE run_id IS NOT NULL GROUP BY run_id) first
+               JOIN messages m ON m.id = first.id
+               JOIN conversations c ON c.id = m.conversation_id
+               LEFT JOIN projects p ON p.id = c.current_project_id
+               LEFT JOIN works w ON w.id = c.work_id",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                RunContext {
+                    project: r.get(1)?,
+                    work: r.get(2)?,
+                },
+            ))
+        })?;
+        Ok(rows.collect::<std::result::Result<HashMap<_, _>, _>>()?)
     }
 
     /// Every run currently marked stalled, and when each went quiet.
