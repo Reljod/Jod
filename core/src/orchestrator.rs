@@ -2415,6 +2415,50 @@ mod tests {
             std::fs::remove_dir_all(format!("{dir}-2")).ok();
         }
 
+        /// A manager handed to another harness stays that project's manager.
+        ///
+        /// A manager is found through `projects.manager_conversation_id`, and
+        /// `switch_harness` compacts the thread into a *new* conversation. The
+        /// pointer was left on the old one — which still exists, so
+        /// `manager_conversation` happily returned it — and the next
+        /// `ask_manager` resumed the thread the switch had handed away, on the
+        /// harness it had been handed away from. The switch was undone without
+        /// a word and the summary sat in a conversation nobody opens again.
+        ///
+        /// Observed by switching alpha's manager to OpenCode: the console ended
+        /// up in `alpha → OpenCode` while the catalog still named the Claude
+        /// Code row.
+        #[test]
+        fn a_manager_handed_to_another_harness_is_still_the_projects_manager() {
+            let s = store();
+            let dir = format!("/tmp/jod-mc-{}-switch", std::process::id());
+            let project = catalogued_at(&s, &dir, "tetris");
+            let (manager, _) = s
+                .manager_conversation(&project.id, HarnessKind::ClaudeCode)
+                .unwrap();
+            // Something to carry over; a switch refuses an empty thread.
+            for turn in 0..3 {
+                s.append_prompt(&manager, &format!("run-{turn}"), "go").unwrap();
+            }
+
+            let switched = s
+                .switch_harness(&manager, HarnessKind::OpenCode, "so far", "moving")
+                .unwrap();
+            let now = switched.conversation.id;
+            assert_ne!(now, manager, "the switch opens a new thread, as it should");
+
+            let (found, fresh) = s
+                .manager_conversation(&project.id, HarnessKind::OpenCode)
+                .unwrap();
+            assert_eq!(
+                found, now,
+                "the project has to follow its manager onto the new harness",
+            );
+            assert!(!fresh, "and must not start a third conversation");
+
+            std::fs::remove_dir_all(&dir).ok();
+        }
+
         /// The promise both preambles make, held to by the data.
         ///
         /// `ask_manager` tells Reljod "It will raise a card on your rail", and

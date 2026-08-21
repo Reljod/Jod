@@ -1636,6 +1636,29 @@ impl Store {
                     params![conversation_id, new_id],
                 )?;
             }
+            // A project's manager follows its thread too, for the same reason
+            // and by the same rule.
+            //
+            // A manager is found through `projects.manager_conversation_id`,
+            // never through `pinned`, so the block above does not cover it —
+            // and `Store::manager_conversation` checks that the conversation it
+            // names still exists, which the compacted-away one does. So a
+            // manager handed to another harness left the project pointing at
+            // the thread it was handed *from*: the next `ask_manager` resumed
+            // the old conversation on the old harness, the switch was undone
+            // without a word, and the summary sat in a conversation nobody
+            // opens again.
+            //
+            // Observed by switching alpha's manager to OpenCode: the console
+            // ended up in `alpha → OpenCode` while the catalog still named the
+            // Claude Code row, and the composer's title — which says which
+            // manager you are in — went blank, because the conversation it was
+            // bound to was no longer any project's.
+            tx.execute(
+                "UPDATE projects SET manager_conversation_id = ?2
+                  WHERE manager_conversation_id = ?1",
+                params![conversation_id, new_id],
+            )?;
             Ok(())
         })?;
 
