@@ -1,27 +1,20 @@
 //! Jod as an MCP server — where a harness stops being a subprocess and starts
 //! being Jod's mind.
 //!
-//! Jod has no model client and never will. What it has is *effects*:
-//! delegating, scheduling, remembering, saying what is running. Exposing them
-//! over MCP — which Claude Code and OpenCode already speak — gives one run that
-//! thinks *and* acts, Jod owning the effects and the harness the reasoning.
+//! Jod has no model client. What it has is *effects*: delegating, scheduling,
+//! remembering, saying what is running. Exposing them over MCP gives one run
+//! that thinks *and* acts.
 //!
 //! JSON-RPC 2.0, one object per line, over stdin and stdout. Three methods
-//! carry the whole surface — `initialize`, `tools/list`, `tools/call` — which
-//! is why there is no SDK here: the dependency would be bigger than the
-//! protocol it hides.
+//! carry the whole surface, which is why there is no SDK here.
 //!
 //! Two rules hold everywhere below, because the caller is a language model that
 //! may have just read something hostile:
 //!
-//! 1. **No tool can raise its own permissions.** [`Tool::delegate`]'s
-//!    permission is capped at the ceiling this server was started with — the
-//!    same rule, and the same ordering, `jod-api` applies to a remote caller in
-//!    `api/src/config.rs` — and a child's [`ToolAccess`] is capped at the
-//!    parent's.
-//! 2. **Nothing here writes [`Origin::Owner`].** A fact an agent concluded is
-//!    [`Origin::Agent`], whatever the agent says about where it got it. Only a
-//!    person typing `jod remember` is the owner.
+//! 1. **No tool can raise its own permissions.** [`Tool::delegate`] is capped
+//! at this server's ceiling, and a child's [`ToolAccess`] at the parent's. 2.
+//! **Nothing here writes [`Origin::Owner`].** Only a person typing `jod
+//! remember` is the owner.
 
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
@@ -58,12 +51,10 @@ const REHYDRATE: usize = 200;
 
 /// How long [`Tool::ask`] waits for a reply when nobody says otherwise.
 ///
-/// Long enough for a peer to be woken by the next tick and take a turn — which
-/// is the shortest honest answer to "how long does a colleague take" — and
-/// short enough that a run blocked on a dead peer is stuck for two minutes
-/// rather than for ever. **There is deliberately no way to wait without a
-/// deadline**: A5 exists because an agent that can hang waiting for a peer can
-/// hang for ever, and that is how a fleet deadlocks.
+/// Long enough for a peer to be woken by the next tick, short enough that a run
+/// blocked on a dead peer is stuck for two minutes rather than for ever.
+/// **There is deliberately no way to wait without a deadline** (A5): an agent
+/// that can hang waiting for a peer is how a fleet deadlocks.
 pub const ASK_DEADLINE_SECS: i64 = 120;
 
 /// The longest wait a caller may ask for. A cap rather than a default, because
@@ -78,15 +69,11 @@ const ASK_POLL: std::time::Duration = std::time::Duration::from_millis(500);
 /// How long a **blocking** [`Tool::ask_question`] holds its run waiting for a
 /// person, when the caller does not say.
 ///
-/// Five minutes rather than `ask`'s two: `ask` waits for a peer Jod will wake
-/// within a tick, this waits for Reljod to look at the rail. Long enough to
-/// finish a sentence and turn to the screen; short enough that asking while
-/// nobody is at the desk costs one wait rather than a night of held context.
+/// Five minutes rather than `ask`'s two: that waits for a peer Jod will wake
+/// within a tick, this waits for Reljod to look at the rail.
 ///
-/// Bounded for the reason [`ASK_DEADLINE_SECS`] gives, and a human who has gone
-/// to bed is the clearest case of it. The card stays open when the deadline
-/// passes — giving up waiting is not withdrawing the question — and the answer
-/// reaches the run later through the ordinary delivery path.
+/// Bounded for [`ASK_DEADLINE_SECS`]'s reason. The card stays open when the
+/// deadline passes — giving up waiting is not withdrawing the question.
 pub const CARD_ANSWER_DEADLINE_SECS: i64 = 300;
 
 /// The longest wait a caller may ask for, as [`MAX_ASK_DEADLINE_SECS`] is for
@@ -104,11 +91,10 @@ pub const INVALID_PARAMS: i64 = -32602;
 
 /// One tool, as advertised and as dispatched.
 ///
-/// The name, the schema and the access it needs live in one value so that
-/// `tools/list` and `tools/call` cannot describe different things. A tool that
-/// is advertised but not dispatchable is the failure mode worth designing
-/// against: the model spends a turn discovering it, and has no way to tell that
-/// from Jod being broken.
+/// Name, schema and access in one value, so `tools/list` and `tools/call`
+/// cannot describe different things. A tool advertised but not dispatchable
+/// costs the model a turn to discover, and it cannot tell that from Jod being
+/// broken.
 pub struct Tool {
     pub name: &'static str,
     pub description: &'static str,
@@ -352,20 +338,18 @@ pub fn catalogue() -> Vec<Tool> {
                 &["subject"],
             ),
         },
-        // ---- the rail -----------------------------------------------------
+        // ---- the rail ----
         //
         // The three tools D2 names, which is why the rail is the same on all
         // three harnesses rather than a Claude Code feature reimplemented.
         //
-        // All three sit at `read_only`, which looks wrong for something that
-        // writes and is not: a card spends no money, starts no process and
-        // costs no peer a turn. The most confined agent is exactly the one
-        // whose choices most need to be visible enough to overrule, and gating
-        // this behind `delegate` would leave its rail empty.
+        // All three sit at `read_only`, which looks wrong and is not: a card
+        // spends no money, starts no process and costs no peer a turn. The most
+        // confined agent is the one whose choices most need to be visible
+        // enough to overrule.
         //
         // Note what appears in no schema below: a conversation. A card belongs
-        // to whoever raised it, which comes from the run — see
-        // [`Server::raiser`].
+        // to whoever raised it — see [`Server::raiser`].
         Tool {
             name: "record_decision",
             description:
@@ -431,10 +415,9 @@ pub fn catalogue() -> Vec<Tool> {
                  it now, you are blocked, and saying so is the correct ending.",
             // `read_only` for a credential request looks alarming and is not:
             // **asking is not getting.** A person answers, the value goes to a
-            // file the model cannot read, and the agent is told a name. An
-            // untrusted agent asking for a credential is a request Reljod can
-            // simply decline — which is strictly better than the two things it
-            // would otherwise do, invent one or fail without saying why.
+            // file the model cannot read, and the agent is told a name.
+            // Declining is strictly better than the two things it would
+            // otherwise do — invent one, or fail without saying why.
             needs: ToolAccess::ReadOnly,
             schema: obj(
                 json!({
@@ -541,17 +524,14 @@ pub fn catalogue() -> Vec<Tool> {
                  habit. Read the `writable` field in the answer before you write: it says \
                  whether this session can really write in the worktree, and `no` or \
                  `unverified` means stop and say so rather than trying anyway.",
-            // **D5's explicit step, and the reason it has to be a tool.**
-            // "Detect the first write" has no harness-agnostic implementation —
-            // every harness spells its pre-write hook differently and two of
-            // the three barely have one — so the claim is something the agent
-            // *does*, not something Jod notices. An agent that cannot call this
-            // has been told to claim a worktree and given no way to obey, which
-            // makes the instruction in its preamble unfollowable.
+            // **D5's explicit step, and why it has to be a tool.** "Detect the first write"
+            // has no harness-agnostic implementation, so the claim is something
+            // the agent
+            // *does* rather than something Jod notices. An agent that cannot call this has
+            // been told to claim a worktree and given no way to obey.
             //
             // `delegate` rather than `read_only`: this cuts a branch and
-            // creates a directory. It is the one card-adjacent verb that
-            // changes the world outside the database.
+            // creates a directory.
             needs: ToolAccess::Delegate,
             schema: obj(
                 json!({
@@ -588,18 +568,14 @@ pub fn catalogue() -> Vec<Tool> {
                  that session is launched; it is titled in the background and it claims a \
                  worktree itself the moment it needs one. Use this rather than `delegate` when \
                  the instruction is about a repository and will take more than one session.",
-            // **This tool is what makes E4.S4 reachable at all.** The
-            // orchestrator acts through MCP tools rather than through a parsed
-            // JSON `Decision`, so a routing outcome with no tool behind it
-            // cannot be chosen by the model — it would be a `core` function
-            // only Jod-side code could call, present in the codebase and never
-            // invoked. Written down because "the orchestrator can already
-            // delegate" is exactly the argument that would remove it.
+            // **What makes E4.S4 reachable at all.** The orchestrator acts through MCP tools
+            // rather than a parsed `Decision`, so a routing outcome with no
+            // tool behind it cannot be chosen by the model. Written down
+            // because "the orchestrator can already delegate" is exactly the
+            // argument that would remove it.
             //
-            // The line `delegate` sits on, and for the same reason: this starts
-            // an agent, and the thing you least want an unattended run to hold
-            // is the power to create more unattended runs. A webhook-triggered
-            // agent must not be able to open works.
+            // On the `delegate` line for the same reason: this starts an agent,
+            // and a webhook-triggered agent must not be able to open works.
             needs: ToolAccess::Delegate,
             schema: obj(
                 json!({
@@ -625,12 +601,12 @@ pub fn catalogue() -> Vec<Tool> {
                 &["instruction"],
             ),
         },
-        // ---- the bus ------------------------------------------------------
+        // ---- the bus ----
         //
         // Reading is free; writing costs a peer a turn, which is money spent
-        // now — the same line `delegate` sits on. Note what does *not* appear
-        // in any schema below: who is sending. That comes from the run, and an
-        // agent that could name its own sender could send as anyone.
+        // now. Note what appears in no schema below: who is sending. That comes
+        // from the run, and an agent that could name its own sender could send
+        // as anyone.
         Tool {
             name: "roster",
             description:
@@ -753,13 +729,12 @@ fn allows(have: ToolAccess, need: ToolAccess) -> bool {
 /// Is `requested` within `ceiling`?
 ///
 /// `Plan < Ask < AcceptEdits < Bypass`, ordered by how much can happen without
-/// anyone being asked — the same rule `jod-api` applies to a remote caller in
-/// `api/src/config.rs`. Restated here rather than shared because `jod-core`
-/// cannot depend on `jod-api`; if one side's ordering changes, the other has to
-/// change with it.
+/// anyone being asked. Restated here rather than shared because `jod-core`
+/// cannot depend on `jod-api`; if one side's ordering changes, so must the
+/// other.
 ///
 /// The rank is [`PermissionPolicy::ALL`]'s own index, so a mode added there and
-/// forgotten here is impossible rather than merely unlikely.
+/// forgotten here is impossible.
 pub fn permits(ceiling: PermissionPolicy, requested: PermissionPolicy) -> bool {
     fn rank(p: PermissionPolicy) -> usize {
         PermissionPolicy::ALL
@@ -774,16 +749,11 @@ pub fn permits(ceiling: PermissionPolicy, requested: PermissionPolicy) -> bool {
 ///
 /// A run's status is the only record of whether its session ended at the end of
 /// a sentence or the middle of one. `killed` and `failed` both mean part-way
-/// through: the resumed transcript breaks off wherever the process stopped and
-/// the model picks that up as its own last turn. Worse, it looks like success —
-/// a new run appears, `running`, and nothing says what it continues was stopped
-/// on purpose.
+/// through, and it looks like success — a new run appears, `running`, and
+/// nothing says what it continues was stopped on purpose.
 ///
-/// Refused at the tool boundary, where the caller still has somewhere useful to
-/// go: `delegate` and `open_work`.
-///
-/// Every status is written out rather than caught by a wildcard, so a fifth one
-/// must be decided here rather than inheriting the wildcard's answer.
+/// Refused at the tool boundary, where the caller still has somewhere to go.
+/// Every status is written out rather than caught by a wildcard.
 fn refusal_to_continue(run_id: &str, status: AgentStatus) -> Option<String> {
     match status {
         // The ordinary target of a follow-up, and the run a second instruction
@@ -843,14 +813,12 @@ pub enum ToolError {
     /// rather than a tool result: the model asked for something that was never
     /// advertised.
     Unknown(String),
-    /// The tool exists but this agent was never shown it, because its
-    /// [`ToolAccess`] does not reach that far.
+    /// The tool exists but this agent was never shown it.
     ///
-    /// A JSON-RPC error rather than a tool result, and the distinction is
-    /// deliberate: from the caller's side a tool it was never offered is
-    /// indistinguishable from one that does not exist, so the two answer alike.
-    /// Contrast [`ToolError::Refused`], which is "you may use this tool, but not
-    /// like that" — a well-formed call the caller could make differently.
+    /// A JSON-RPC error rather than a tool result: from the caller's side a
+    /// tool it was never offered is indistinguishable from one that does not
+    /// exist. Contrast [`ToolError::Refused`], which is "you may use this tool,
+    /// but not like that".
     Forbidden(String),
     /// The arguments do not describe a call that could be made.
     BadParams(String),
@@ -865,25 +833,23 @@ pub struct Server {
     jod: Arc<Jod>,
     access: ToolAccess,
     max_permission: PermissionPolicy,
-    /// Which run this server speaks as, worked out by [`identify`] from the
-    /// process group it is in.
+    /// Which run this server speaks as, worked out by [`identify`] from its
+    /// process group.
     ///
-    /// **This is sender identity, and it is why it lives on the server rather
-    /// than in any tool's arguments.** A server that belongs to a run answers
-    /// as that run's member and can answer as nothing else; one that belongs to
-    /// no run — a session somebody opened by hand — cannot send at all, which
-    /// is the honest refusal. There is deliberately no way to set it from a
-    /// tool call.
+    /// **This is sender identity, which is why it lives on the server rather than in a
+    /// tool's arguments.** A server belonging to a run answers as that run's
+    /// member and nothing else; one belonging to no run cannot send at all.
+    /// There is deliberately no way to set it from a tool call.
     identity: Identity,
 }
 
 impl Server {
     /// A server with the least authority there is: read Jod, change nothing,
-    /// and refuse any spawn above `ask`.
+    /// refuse any spawn above `ask`.
     ///
-    /// Fail-closed on purpose. A server started without saying what it may do
-    /// is one whose launcher forgot, and a forgotten line should not be the
-    /// thing that hands a stranger's pull request the power to schedule work.
+    /// Fail-closed. A server started without saying what it may do is one whose
+    /// launcher forgot, and a forgotten line should not hand a stranger's pull
+    /// request the power to schedule work.
     pub fn new(jod: Arc<Jod>) -> Self {
         Server {
             jod,
@@ -1009,12 +975,9 @@ impl Server {
         let limit = opt_usize(args, "limit")?.unwrap_or(20);
 
         // A fresh process knows nothing until it reads the database back, and
-        // it has to read back at least as far as it has been asked to return —
-        // the sum `jod ls` does at `cli/src/main.rs`. Reading a fixed few
-        // hundred rows while the caller asked for a thousand is what made
-        // "call again with a bigger limit" useless: an agent started before the
-        // newest few hundred runs never entered memory, so no limit could
-        // reach it.
+        // it has to read at least as far as it was asked to return. Reading a
+        // fixed few hundred rows while the caller asked for a thousand is what
+        // made "call again with a bigger limit" useless.
         self.jod
             .rehydrate(REHYDRATE.max(limit))
             .await
@@ -1051,13 +1014,11 @@ impl Server {
             })
             .collect();
 
-        // How many there were to choose from. The database is the authority on
-        // that — this process only ever reads back the newest few hundred runs,
-        // so counting what it holds would understate a busy box — but it can
+        // How many there were to choose from. The database is the authority —
+        // this process only reads back the newest few hundred runs — but it can
         // only count rows, not the ones a filter kept. So a filtered call
-        // reports what it matched, and an unfiltered one takes whichever of the
-        // two numbers is larger. The same reasoning `jod ls` uses at
-        // `cli/src/main.rs`, where it is `run_count()?.max(known)`.
+        // reports what it matched and an unfiltered one takes the larger of the
+        // two.
         let total = match running_only {
             true => matching,
             false => self.jod.run_count().unwrap_or(matching).max(matching),
@@ -1101,13 +1062,12 @@ impl Server {
             harness,
             prompt,
             // A delegated agent gets its role from the prompt it was handed, so
-            // there is almost nothing standing to tell it. The one exception is
-            // who it answers to: a run that has an address for the orchestrator
-            // and does not know it has one is a run that finishes silently, and
-            // that was the whole of the missing return leg.
+            // there is almost nothing standing to tell it. The exception is who
+            // it answers to: a run with an address for the orchestrator that
+            // does not know it has one finishes silently.
             //
-            // Only when it can actually send. Telling a read-only run to report
-            // back would be telling it to call a tool it has not been given.
+            // Only when it can actually send, or this is telling it to call a
+            // tool it has not been given.
             system: tools
                 .may_delegate()
                 .then(|| crate::orchestrator::delegated_preamble().to_string()),
@@ -1129,16 +1089,13 @@ impl Server {
         // orchestrator's own `jod main` listed the handoff *to* it and never
         // one of the agents it started.
         self.record_handoff("delegate", &agent.id, true);
-        // And the way back. A delegated run belongs to no work and therefore to
-        // no addressing scope, so until this existed every bus tool it called
+        // And the way back. A delegated run belongs to no work and therefore no
+        // addressing scope, so until this existed every bus tool it called
         // answered `run ... is not a member of any team or work` — measured, in
-        // a real run, on `roster`, `send_message` and `read_messages` alike.
-        // Reljod's ask has a return leg in it: the run says what the answer is,
-        // or that it has finished. This is the address it says it to.
+        // a real run.
         //
-        // Best-effort, like the handoff above and for the same reason: a
-        // delegation that happened and cannot report back is a smaller problem
-        // than one refused over bookkeeping.
+        // Best-effort: a delegation that happened and cannot report back is a
+        // smaller problem than one refused over bookkeeping.
         let reports_back = match self.store() {
             Ok(store) => store
                 .open_return_channel(&agent.id, &agent.name, agent.harness)
@@ -1172,14 +1129,12 @@ impl Server {
     /// Write down that this session set something in motion.
     ///
     /// `link_child` hangs the new run's conversation under the caller's, which
-    /// is right for `delegate` — it opened a fresh conversation — and wrong for
-    /// `continue_agent`, whose target already sits wherever it sits.
+    /// is right for `delegate` and wrong for `continue_agent`, whose target
+    /// already sits wherever it sits.
     ///
-    /// Best-effort in every part, and deliberately so: a delegation that
-    /// happened and was recorded badly is a smaller problem than one refused
-    /// over bookkeeping, and the caller may legitimately have no conversation
-    /// at all — a `jod mcp` started by hand has no run behind it. Every failure
-    /// here is a line on stderr and nothing more.
+    /// Best-effort in every part: the caller may legitimately have no
+    /// conversation at all, and a delegation recorded badly is a smaller
+    /// problem than one refused.
     fn record_handoff(&self, kind: &str, run_id: &str, link_child: bool) {
         let Ok(raiser) = self.raiser() else { return };
         let Ok(store) = self.store() else { return };
@@ -1332,21 +1287,20 @@ impl Server {
 
     /// The permission `delegate` may use, refusing anything above the ceiling.
     ///
-    /// `delegate` starts an agent on a bare prompt with no board behind it, so
-    /// it defaults to the most cautious thing that still runs. `open_work`
-    /// defaults differently — see [`Server::permission_arg`] — because a work
-    /// is the operator's own instruction being carried out, not an errand an
-    /// agent invented.
+    /// It starts an agent on a bare prompt with no board behind it, so it
+    /// defaults to the most cautious thing that still runs. `open_work`
+    /// defaults differently, because a work is the operator's own instruction
+    /// rather than an errand an agent invented.
     fn requested_permission(&self, args: &Value) -> Result<PermissionPolicy, ToolError> {
         self.permission_arg(args, PermissionPolicy::Ask)
     }
 
-    /// A `permission` argument, capped at the ceiling, falling back to
-    /// `fallback` when the caller said nothing.
+    /// A `permission` argument, capped at the ceiling, falling back when the
+    /// caller said nothing.
     ///
-    /// One function rather than two copies of the cap, because the two callers
-    /// disagree only about the fallback and a second copy of a *ceiling* check
-    /// is the copy that eventually forgets to check.
+    /// One function rather than two copies of the cap: the callers disagree
+    /// only about the fallback, and a second copy of a *ceiling* check is the
+    /// one that forgets.
     fn permission_arg(
         &self,
         args: &Value,
@@ -1370,10 +1324,10 @@ impl Server {
 
     /// How much of Jod a spawned agent may reach.
     ///
-    /// Defaults to the least, and can never exceed what this server itself
-    /// holds. Both halves matter: without the cap an agent could mint a child
-    /// with more authority than itself and then ask the child, and without the
-    /// low default every delegation would hand out the power to delegate again.
+    /// Defaults to the least, and can never exceed what this server holds.
+    /// Without the cap an agent could mint a child with more authority than
+    /// itself and then ask the child; without the low default every delegation
+    /// would hand out the power to delegate again.
     fn child_access(&self, args: &Value) -> Result<ToolAccess, ToolError> {
         let requested = match opt_str(args, "tools") {
             Some(t) => parse_access(&t)
@@ -1598,9 +1552,8 @@ impl Server {
     ///
     /// Factored out of [`Server::caller`] because the rail asks the same
     /// question the bus does and must not answer it a second way. `doing` is
-    /// the verb the refusal names — "sending", "raising a card" — so a model
-    /// reading it is told what it was refused rather than which function
-    /// refused it.
+    /// the verb the refusal names, so a model is told what it was refused
+    /// rather than which function refused it.
     fn identified_run(&self, doing: &str) -> Result<&str, ToolError> {
         match &self.identity {
             Identity::Run(id) => Ok(id.as_str()),
@@ -1624,18 +1577,15 @@ impl Server {
         }
     }
 
-    /// Whose rail a card lands on, resolved from the run and from nothing else.
+    /// Whose rail a card lands on, resolved from the run and nothing else.
     ///
-    /// **This is why no card tool takes a conversation.** A card is a sentence
-    /// addressed to a person about *this* agent's work; an argument naming the
-    /// conversation would let one run put words on another run's rail, and an
-    /// answer would then be delivered to an agent that never asked anything.
+    /// **This is why no card tool takes a conversation.** An argument naming one would
+    /// let a run put words on another run's rail, and the answer would be
+    /// delivered to an agent that never asked.
     ///
-    /// Deliberately laxer than [`Server::caller`] in exactly one respect, and
-    /// no more: it does not require membership of a team or a work. The bus
-    /// needs one because a message needs somebody to be addressed to; a card is
-    /// addressed to Reljod, who is always there. A plain `jod run` that could
-    /// not record a decision would leave the rail empty for the ordinary case.
+    /// Laxer than [`Server::caller`] in one respect: it does not require
+    /// membership of a team or work. A message needs somebody to be addressed
+    /// to; a card is addressed to Reljod, who is always there.
     pub fn raiser(&self) -> Result<Raiser, ToolError> {
         let run_id = self.identified_run("raising a card")?;
         let store = self.store()?;
@@ -1661,11 +1611,10 @@ impl Server {
 
     /// [`CardKind::Decision`] — the agent chose, and is saying so.
     ///
-    /// Never blocking: the choice has already been made and the run has already
-    /// carried on. What the card buys is the *undo*, and that is why `options`
-    /// carries weight the prose does not — a decision offered with its
-    /// alternatives is switched by pressing a number, and one without them is a
-    /// note that provokes a conversation.
+    /// Never blocking: the choice is made and the run has carried on. What the
+    /// card buys is the *undo*, which is why `options` carries weight the prose
+    /// does not — a decision offered with its alternatives is switched by
+    /// pressing a number.
     fn record_decision(&self, args: &Value) -> Result<String, ToolError> {
         let raiser = self.raiser()?;
         let title = required_str(args, "title")?;
@@ -1693,15 +1642,13 @@ impl Server {
                 // Keyed on the **choice and the subject**, not the prose, with
                 // the choice first.
                 //
-                // The subject, so a decision recorded twice — a retried turn, a
-                // rewritten `why` — produces one row. `read_only` is a wide
-                // door and a full rail is an unread rail.
+                // The subject, so a decision recorded twice produces one row —
+                // `read_only` is a wide door and a full rail is an unread rail.
                 //
                 // The choice, because a decision *reconsidered* is not a
                 // repeat: on the subject alone, "chat DB → postgres" would be
-                // swallowed by the earlier "chat DB → sqlite" and the rail
-                // would show a choice no longer in force. It leads so
-                // `dedupe_key`'s truncation can only cost the subject's tail.
+                // swallowed by the earlier "→ sqlite". It leads so truncation
+                // can only cost the subject's tail.
                 dedupe_key: Some(dedupe_key(
                     CardKind::Decision,
                     &format!("{chosen} for {title}"),
@@ -1717,12 +1664,11 @@ impl Server {
         }))
     }
 
-    /// [`CardKind::Question`] — and the one tool here that may wait.
+    /// [`CardKind::Question`] — the one tool here that may wait.
     ///
     /// Returns the card id at once unless the caller says it is blocked, per
-    /// D2: emission never blocks the agent. A blocking question waits, bounded
-    /// by [`CARD_ANSWER_DEADLINE_SECS`], and a wait that times out leaves the
-    /// card open rather than withdrawing it.
+    /// D2. A blocking question is bounded by [`CARD_ANSWER_DEADLINE_SECS`], and
+    /// a wait that times out leaves the card open rather than withdrawing it.
     async fn ask_question(&self, args: &Value) -> Result<String, ToolError> {
         let raiser = self.raiser()?;
         let question = required_str(args, "question")?;
@@ -1794,12 +1740,11 @@ impl Server {
                     }));
                 }
                 Status::Answered => {
-                    // Taken off the delivery queue here, for the same reason
-                    // `ask` settles a reply it received: answering a card
-                    // enqueues a synthetic turn, and a run that has just been
-                    // handed the answer as a tool result would be told the same
-                    // thing again later — which reads as a second instruction
-                    // and gets the work done twice.
+                    // Taken off the delivery queue here, as `ask` settles a
+                    // reply it received: answering a card enqueues a synthetic
+                    // turn, and a run already handed the answer would be told
+                    // the same thing again — which reads as a second
+                    // instruction and gets the work done twice.
                     self.settle_card_delivery(&raiser.conversation_id, card.id, &raiser.run_id);
                     return as_json(&json!({
                         "card_id": card.id,
@@ -1812,12 +1757,12 @@ impl Server {
         }
     }
 
-    /// Mark a card's queued answer as already delivered, best effort.
+    /// Mark a card's queued answer as delivered, best effort.
     ///
-    /// Best effort on purpose: the answer *is* in the caller's hands by the
-    /// time this runs, and failing the tool call over the bookkeeping would
-    /// turn a duplicate into a lost answer. The worst case is the milder bug —
-    /// the agent hears it twice — and it is visible in the transcript.
+    /// Best effort because the answer *is* in the caller's hands by now, and
+    /// failing the call over bookkeeping would turn a duplicate into a lost
+    /// answer. The worst case is the milder bug, and it is visible in the
+    /// transcript.
     fn settle_card_delivery(&self, conversation_id: &str, card_id: i64, run_id: &str) {
         let Ok(store) = self.store() else { return };
         let Ok(queued) = store.pending_for(conversation_id) else {
@@ -1835,17 +1780,15 @@ impl Server {
 
     /// [`CardKind::Secret`] — a name and a hint, and it cannot carry a value.
     ///
-    /// Two properties hold here and both are load-bearing:
+    /// Two load-bearing properties:
     ///
-    /// 1. **There is no argument a value could arrive in**, and one that turns
-    ///    up under an obvious name is refused rather than ignored. A credential
-    ///    that reached this function would already be in the model's context
-    ///    and in the transcript — D3 is about it never getting there, so the
-    ///    only useful place to refuse is before it is stored, not after.
-    /// 2. **It returns at once and never waits.** Waiting would be a lie:
-    ///    injection happens at *spawn*, so the value cannot reach the run that
-    ///    asked for it however long it sits there. Saying so is what turns a
-    ///    missing credential into a blocked ending rather than an invented one.
+    /// 1. **There is no argument a value could arrive in**, and one turning up
+    /// under an obvious name is refused rather than ignored. A credential that
+    /// reached here would already be in the model's context and the transcript.
+    /// 2. **It returns at once and never waits.** Injection happens at *spawn*,
+    /// so the value cannot reach the run that asked however long it sits.
+    /// Saying so turns a missing credential into a blocked ending rather than
+    /// an invented one.
     fn request_secret(&self, args: &Value) -> Result<String, ToolError> {
         for smuggled in ["value", "secret", "secret_value", "token"] {
             if args.get(smuggled).is_some() {
@@ -1931,13 +1874,10 @@ impl Server {
 
     /// The catalog, in the order that makes the first entry the best guess.
     ///
-    /// Each entry says whether its directory is still there. The catalog is
-    /// what an instruction naming no project gets resolved against, so an
-    /// entry whose checkout has been deleted or renamed is a resolution target
-    /// that cannot be worked in, and a model reading this list has no other
-    /// way to find that out. It learns instead by opening work there, being
-    /// told the work is running, and then reading a supervisor error about the
-    /// harness binary — see [`crate::projects::Project::path_trouble`].
+    /// Each entry says whether its directory is still there. An entry whose
+    /// checkout was deleted is a resolution target that cannot be worked in,
+    /// and a model has no other way to find out — it would learn by opening
+    /// work there and then reading a supervisor error about the harness binary.
     fn project_list(&self, args: &Value) -> Result<String, ToolError> {
         let include_archived = opt_bool(args, "include_archived").unwrap_or(false);
         let projects = self
@@ -2113,12 +2053,9 @@ impl Server {
 
     /// Claim somewhere to write — D5's explicit step.
     ///
-    /// Everything hard about this is already in [`Store::claim_lease`]: the
-    /// reuse-before-cutting rule, the race the partial index arbitrates, the
-    /// root rebinding that leaves the checkout readable beside the worktree,
-    /// and the card a non-git root raises instead of a crash. This is the seam
-    /// that lets an agent reach it, and it is the *only* reason any of that
-    /// runs outside a test.
+    /// Everything hard is already in [`Store::claim_lease`]. This is the seam
+    /// that lets an agent reach it, and the *only* reason any of that runs
+    /// outside a test.
     fn claim_worktree(&self, args: &Value) -> Result<String, ToolError> {
         let raiser = self.raiser()?;
         // A lease is per work *and* repository — that is what makes it
@@ -2296,17 +2233,14 @@ impl Server {
 
     /// Open a work and put its first session on a checkout.
     ///
-    /// **Returns as soon as the session is spawned.** That is the property the
-    /// whole orchestrator design exists to protect: the main chat is what you
-    /// reach for while something is already running, so a routing tool that
-    /// waited for the work would make it useless at the one moment it matters.
-    /// Nothing here reads the session's output, and the titler runs detached.
+    /// **Returns as soon as the session is spawned.** The main chat is what you reach
+    /// for while something is already running, so a routing tool that waited
+    /// would be useless at the one moment it matters. The titler runs detached.
     ///
-    /// The new session hangs under the *caller's* conversation, which is what
-    /// makes the tree deeper than two levels and what makes the caller's rail
-    /// show everything raised below it. Taken from the run, never from an
-    /// argument — a caller that could name its own parent could graft a session
-    /// onto a tree it has nothing to do with.
+    /// The new session hangs under the *caller's* conversation, which makes the
+    /// tree deeper than two levels. Taken from the run, never an argument — a
+    /// caller that could name its own parent could graft a session onto an
+    /// unrelated tree.
     async fn open_work(&self, args: &Value) -> Result<String, ToolError> {
         let raiser = self.raiser()?;
         let instruction = required_str(args, "instruction")?;
@@ -2362,10 +2296,9 @@ impl Server {
         // `orchestrator::hand_to_orchestrator` describes, which made the
         // console's `auto` a lie two levels down.
         //
-        // The ceiling *is* the operator's answer, arriving from the run that
-        // owns this server — see [`crate::mcp_config::server_args`]. An
-        // explicit argument overrides it, capped as `delegate`'s is, so a
-        // caller may ask for *less* without asking anybody.
+        // The ceiling *is* the operator's answer. An explicit argument
+        // overrides it, capped as `delegate`'s is, so a caller may ask for
+        // *less*.
         let permission = self.permission_arg(args, self.max_permission)?;
         let mut opening = crate::orchestrator::Opening::new(instruction, checkout)
             .on(harness)
@@ -2399,13 +2332,12 @@ impl Server {
 
     // ---- the bus ----------------------------------------------------------
 
-    /// Which member is calling, resolved from the run and from nothing else.
+    /// Which member is calling, resolved from the run and nothing else.
     ///
     /// Both refusals are deliberate and different. A server with no run behind
-    /// it is a session somebody opened by hand: it may read Jod, but it cannot
-    /// be anybody's teammate, and pretending otherwise would mean letting the
-    /// caller say who it is. A run that belongs to no scope has nobody to talk
-    /// to, which is a fact about the fleet rather than about this call.
+    /// it is a session opened by hand: it may read Jod but cannot be anybody's
+    /// teammate. A run belonging to no scope has nobody to talk to, which is a
+    /// fact about the fleet.
     pub fn caller(&self) -> Result<Caller, ToolError> {
         let run_id = self.identified_run("sending")?;
         self.store()?
@@ -2614,10 +2546,9 @@ impl Server {
 
     /// How every ending of a send reads to the agent that attempted it.
     ///
-    /// A bound and an undeliverable address both come back as refusals rather
-    /// than as errors, because they are answers: the model should read them and
-    /// choose differently, which is exactly what it cannot do with a protocol
-    /// error.
+    /// A bound and an undeliverable address come back as refusals rather than
+    /// errors, because they are answers: the model should read them and choose
+    /// differently, which is what it cannot do with a protocol error.
     fn rendered(&self, sent: Sent) -> Result<String, ToolError> {
         match sent {
             Sent::Queued {
@@ -2639,15 +2570,13 @@ impl Server {
                 thread_id,
                 ..
             } => {
-                // Logged as well as answered: a thread that stopped is a thing
-                // a person should be able to find afterwards without reading
-                // the transcript of either agent.
+                // Logged as well as answered: a thread that stopped is
+                // something a person should find afterwards without reading
+                // either agent's transcript.
                 //
-                // TODO(E2 cards): raise this as a card — "these two have
-                // exchanged N messages without closing a task; continue,
-                // redirect, or stop?" — once the card store lands. The card is
-                // the escalation surface the spec names; until it exists this
-                // line and the paused thread state are how a human finds out.
+                // TODO(E2 cards): raise this as a card once the card store
+                // lands. Until then this line and the paused thread state are
+                // how a human finds out.
                 eprintln!(
                     "[jod/mcp] thread {thread_id} paused: {} bound of {limit} reached at {reached}",
                     bound.as_str()
@@ -2699,16 +2628,13 @@ impl CanWrite {
 
     /// What to tell the session, when there is something to tell it.
     ///
-    /// Longer than it looks like it needs to be, and each part is load-bearing.
-    /// It names the worktree, because a session holding several paths cannot
-    /// act on "somewhere is not writable". It says the session cannot write,
-    /// rather than that a write failed, because the session has not tried yet
-    /// and should not have to. And it says whose bug this is: two
-    /// messages elsewhere in this codebase sent readers to hunt for a broken
-    /// harness binary and a repository that was not a git repository, and both
-    /// were wrong about where the problem lived. A session told only "cannot
-    /// write" would reasonably start checking file modes in Reljod's own
-    /// checkout and find nothing, because there is nothing there to find.
+    /// Each part is load-bearing. It names the worktree, because a session
+    /// holding several paths cannot act on "somewhere is not writable". It says
+    /// the session
+    /// *cannot* write rather than that a write failed, because it has not tried yet.
+    /// And it says whose bug this is — two messages elsewhere here sent readers
+    /// hunting for a broken harness binary, and both were wrong about where the
+    /// problem lived.
     fn warning(&self, worktree: &std::path::Path) -> Option<String> {
         let worktree = worktree.display();
         match self {
@@ -2749,18 +2675,15 @@ impl CanWrite {
 }
 
 /// Whether the session calling `claim_worktree` can write in the worktree it
-/// has just been handed.
+/// was just handed.
 ///
-/// **Not a probe, deliberately.** Writing a file and removing it answers "can
-/// Jod write here", which was never in doubt — and answers "yes" in exactly the
-/// case where the session cannot. Measured: the harness was refused the
-/// worktree while a Jod-shaped probe on the same directory succeeded. A check
-/// that cannot fail is worse than none, because it gets quoted as evidence.
+/// **Not a probe, deliberately.** Writing a file and removing it answers "can Jod
+/// write here", which was never in doubt — and answers "yes" in exactly the
+/// case where the session cannot. Measured: the harness was refused while a
+/// Jod-shaped probe on the same directory succeeded.
 ///
-/// It reads `runs/<id>/spawn.json` instead — the argument list and working
-/// directory the process was actually launched with, written before the
-/// supervisor starts and never edited. That says what the harness got rather
-/// than what Jod's tables say it should have, and the gap is the bug.
+/// It reads `runs/<id>/spawn.json` instead, which says what the harness got
+/// rather than what Jod's tables say it should have.
 fn can_write(run_id: &str, worktree: &std::path::Path) -> CanWrite {
     let path = crate::paths::spawn_path(run_id);
     let plan: crate::runner::SpawnPlan = match std::fs::read(&path) {
@@ -2820,19 +2743,16 @@ pub enum Identity {
 ///
 /// **Read this before simplifying it.** Taking the run id as an argument is the
 /// obvious version and it is wrong: sender identity is the one thing an agent
-/// must not be able to choose, and an argument, flag or reachable environment
-/// variable is only as trustworthy as whatever set it. A model that can write
-/// its own `from` can send as anyone on the team.
+/// must not be able to choose, and a model that can write its own `from` can
+/// send as anyone.
 ///
-/// So the authority is the **process group** and nothing else. The supervisor
-/// leads its own session; the harness and every MCP server it starts run in it.
-/// A process cannot move itself into another session's group — a kernel rule,
-/// not a convention — so the group id *is* the run.
+/// So the authority is the **process group**. A process cannot move itself into
+/// another session's group — a kernel rule, not a convention — so the group id
+/// *is* the run.
 ///
-/// [`crate::mcp_config::RUN_ID_ENV`] is **enrichment, never authority**, useful
-/// for one case: a group the store has no row for. Where the two **disagree**
-/// this returns [`Identity::Disputed`] and every tool needing a sender refuses.
-/// Quietly preferring either turns a misconfiguration — or an attempt at one —
+/// [`crate::mcp_config::RUN_ID_ENV`] is **enrichment, never authority**. Where
+/// the two disagree this returns [`Identity::Disputed`] and every tool needing
+/// a sender refuses, because quietly preferring either turns a misconfiguration
 /// into a wrong answer that keeps working.
 pub fn identify(store: &Store, claimed: Option<&str>) -> Identity {
     // SAFETY: `getpgrp` takes no arguments, touches no memory and cannot fail.
@@ -2869,16 +2789,13 @@ pub struct Raiser {
 /// The key the two emission paths must agree on, computed from what they both
 /// have: the kind, and the words of the question.
 ///
-/// A harness can emit one question twice — once by calling Jod's tool and once
-/// by printing its own — and two rail cards for one question is worse than
-/// none, because answering one leaves the other open for ever. Neither path can
-/// see the other, so the only thing they can agree on is the text, and it has
-/// to survive the differences between them: capitalisation, a trailing question
-/// mark, the whitespace a JSON payload keeps and a prompt does not.
+/// A harness can emit one question twice — by calling Jod's tool and by
+/// printing its own — and two cards for one question is worse than none,
+/// because answering one leaves the other open. Neither path can see the other,
+/// so the text has to survive capitalisation, a trailing question mark and
+/// differing whitespace.
 ///
-/// Capped, because an [`AgentEvent::ToolCall`] payload can be a whole plan and
-/// a key that long would never match a second emission that reworded one line
-/// near its end.
+/// Capped, because a `ToolCall` payload can be a whole plan.
 pub fn dedupe_key(kind: CardKind, subject: &str) -> String {
     let mut words = String::with_capacity(subject.len());
     for c in subject.chars() {
@@ -2894,11 +2811,10 @@ pub fn dedupe_key(kind: CardKind, subject: &str) -> String {
 
 /// A card recognised in a harness's own output, before it has a conversation.
 ///
-/// The passive half of D2. Jod's MCP server is the supported path and behaves
-/// identically everywhere; this is what a run launched *without* it still
-/// produces, so the rail is never simply empty because somebody started a
-/// session by hand. It reports what the harness already said out loud — it
-/// never invents a question that was not asked.
+/// The passive half of D2. Jod's MCP server is the supported path; this is what
+/// a run launched *without* it still produces, so the rail is never simply
+/// empty. It reports what the harness said out loud and never invents a
+/// question.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Lifted {
     pub kind: CardKind,
@@ -2931,11 +2847,10 @@ impl Lifted {
 
 /// The harness tool calls that are really questions to a person.
 ///
-/// Two, both Claude Code's, because those are the two that have been *measured*
-/// — see `docs/harness-support.md` for the standard this repository holds
-/// harness behaviour to. Adding a name here on the strength of a changelog
-/// would produce cards for a payload nobody has seen, which is worse than the
-/// gap: a wrong card is answered, and an absent one is noticed.
+/// Two, both Claude Code's, because those are the two that have been
+/// *measured*. Adding a name on the strength of a changelog would produce cards
+/// for a payload nobody has seen — a wrong card is answered, an absent one is
+/// noticed.
 const ASK_USER_QUESTION: &str = "AskUserQuestion";
 const EXIT_PLAN_MODE: &str = "ExitPlanMode";
 
@@ -2958,11 +2873,9 @@ pub fn lift(event: &AgentEvent) -> Vec<Lifted> {
 
 /// Claude Code's `AskUserQuestion`, in either shape it has been seen in.
 ///
-/// Deliberately tolerant. The payload is another program's private interface,
+/// Deliberately tolerant: the payload is another program's private interface,
 /// so the choice is between reading it loosely and dropping the card the moment
-/// a field is renamed — and a dropped card is a question Reljod never sees. A
-/// call with nothing question-shaped in it lifts nothing rather than raising a
-/// card titled with a fragment of JSON.
+/// a field is renamed. A call with nothing question-shaped lifts nothing.
 fn lift_questions(input: &Value) -> Vec<Lifted> {
     let asked: Vec<&Value> = match input.get("questions").and_then(Value::as_array) {
         Some(list) => list.iter().collect(),
