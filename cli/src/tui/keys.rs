@@ -114,6 +114,16 @@
 //! holding a letter is demoted to make room. The menu is the pressure valve and
 //! it has nine free letters left.
 //!
+//! **The first demotion has now happened, and it is the shape the rule
+//! predicted.** The projects panel spent a year on `Ctrl-G d` and turned out to
+//! be pressed constantly — it is the box that answers *which repository does my
+//! next sentence land in*, which is a question asked between one instruction and
+//! the next rather than twice a day. The directory picker on `Ctrl-P` is the
+//! opposite: a destination, opened when a new tree has to be added and not
+//! again. So they swapped. Nothing was added and nothing was lost; what changed
+//! is that the chord went to the key that is actually pressed, and the letter
+//! behind the leader now stands for something — `d` for directory.
+//!
 //! What did **not** move is the handful of Ctrl chords the terminal itself has
 //! taught everyone: `Ctrl-C`/`Ctrl-D` quit, `Ctrl-U` clears the line, `Ctrl-W`
 //! deletes a word, `Ctrl-A`/`Ctrl-E` go to the ends of it. Moving those would
@@ -191,7 +201,7 @@ pub const GLOBAL: &[Key] = &[
     // key, so a rail verb on `c` would type a `c` into the sentence being
     // written. See [`RAIL`].
     k("Ctrl-R", "show or hide the rail"),
-    k("Ctrl-N", "the rail's next card"),
+    k("Ctrl-N", "the cards — and away again"),
     // The side panel, which is where the projects, the sessions, the mode, the
     // harness, the spend and the context left are drawn — a large fraction of
     // what the program knows, behind one key.
@@ -206,7 +216,13 @@ pub const GLOBAL: &[Key] = &[
     // own test in `ui`: `is_chord` recognises a Ctrl or Alt prefix, and this
     // arrives as `BackTab` carrying neither, so nothing replays it.
     k("Shift-Tab", "show or hide the side panel"),
-    k("Ctrl-P", "add a directory to work in"),
+    // The catalog inside that panel, and the keyboard with it. `p` for
+    // projects, which is the letter the box's own title asks for; it was
+    // `Ctrl-G d`, where `d` stood for nothing and had been chosen only because
+    // `Ctrl-D` is quit. The directory picker that held this chord is a
+    // destination opened about twice a day and went behind the leader, which is
+    // what the leader is for.
+    k("Ctrl-P", "the projects — and away again"),
     // A switch, not a button: it stays on, and everything said streams into
     // the box until it is switched off. Saying "go ahead" sends, "stop
     // listening" switches off — the keyboard is optional once it is on, which
@@ -476,6 +492,29 @@ pub const RAIL: &[Key] = &[
 /// What the rail's keybar says on its right-hand half.
 pub const RAIL_EXIT: &str = "Esc back to the chat · ? keys";
 
+/// The project catalog's own verbs, in force only while it has the keyboard —
+/// which `Ctrl-P`, or a click on the box, is what gives it.
+///
+/// Four rows, and that is the whole screen. The catalog is a list of
+/// repositories; the verbs that *change* one already have homes that are better
+/// at it — `/project add` and `/project ls` from the chat box, and `x` on the
+/// fleet, which unlike a thirty-column panel can tell two projects of the same
+/// name apart. What did not exist anywhere was moving a cursor down the box and
+/// opening what it is on, so that is what this is and it stops there.
+///
+/// `⏎` says `manager` rather than `open` because that is the thing it opens: the
+/// conversation that owns the repository's work. A label saying "open" would
+/// leave the reader to guess what a project opens *into*.
+pub const CATALOG: &[Key] = &[
+    k("⏎", "manager"),
+    k("↑↓ / jk", "move the cursor"),
+    k("Home/End", "first / last"),
+    k("Ctrl-P", "put it away"),
+];
+
+/// What the catalog's keybar says on its right-hand half.
+pub const CATALOG_EXIT: &str = "Esc back to the chat · ? keys";
+
 /// The footer printed inside the expanded card's border. Same relationship to
 /// [`RAIL`] that [`footer`] has to [`local`], and fitted the same way at the
 /// call site.
@@ -522,6 +561,12 @@ pub fn keybar(ws: Workspace, width: u16) -> String {
 /// out is reserved first — for the reason the module header gives.
 pub fn rail_keybar(width: u16) -> String {
     fit_bar(RAIL, budget(RAIL_EXIT, width))
+}
+
+/// The keybar while the project catalog has the keyboard. Same argument as
+/// [`rail_keybar`]'s, one box over.
+pub fn catalog_keybar(width: u16) -> String {
+    fit_bar(CATALOG, budget(CATALOG_EXIT, width))
 }
 
 fn fit_bar(bindings: &'static [Key], budget: usize) -> String {
@@ -653,6 +698,15 @@ pub fn rail_keymap() -> Vec<(String, &'static [Key])> {
     ]
 }
 
+/// The `?` overlay while the project catalog has the keyboard. Same shape and
+/// same argument as [`rail_keymap`].
+pub fn catalog_keymap() -> Vec<(String, &'static [Key])> {
+    vec![
+        ("the projects — this has the keyboard".to_string(), CATALOG),
+        ("anywhere".to_string(), GLOBAL),
+    ]
+}
+
 /// The which-key overlay's keybar line, which has to name the leader it is
 /// waiting on — an overlay that says only "waiting for a key" tells you it is
 /// stuck without telling you what unstuck it.
@@ -738,15 +792,18 @@ pub fn all_documented_chords() -> Vec<String> {
         }
         found.extend(chords_in(keybar_exit(ws)));
     }
-    for (_, bindings) in rail_keymap() {
-        found.extend(
-            bindings
-                .iter()
-                .filter(|b| is_chord(b.key))
-                .map(|b| b.key.to_string()),
-        );
+    for sections in [rail_keymap(), catalog_keymap()] {
+        for (_, bindings) in sections {
+            found.extend(
+                bindings
+                    .iter()
+                    .filter(|b| is_chord(b.key))
+                    .map(|b| b.key.to_string()),
+            );
+        }
     }
     found.extend(chords_in(RAIL_EXIT));
+    found.extend(chords_in(CATALOG_EXIT));
     for making in [false, true] {
         found.extend(chords_in(&which_key_hint(making)));
         found.extend(chords_in(which_key_title(making)));

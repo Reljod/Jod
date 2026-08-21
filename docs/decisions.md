@@ -3117,6 +3117,7 @@ not disagree about the name of one verb.
 `paused` is deliberately untouched. It means dormant rather than finished and
 sides with `active` on every listing; the fleet is where the two would be
 easiest to conflate, so a test holds them apart.
+
 ## The session list is somewhere you go through, not somewhere you go
 
 Two screens listed things that were not conversations. The fleet lists **runs**,
@@ -3146,3 +3147,72 @@ the subject is actually named after were already spent. It sits behind the
 leader rather than on a chord under the rule the eleven free Ctrl letters were
 spent by: a chord is for a verb you need mid-sentence, and everything else is a
 destination.
+
+## A view you open with one key closes with the same one, and the panel takes a cursor
+
+Three complaints arrived together and they are one complaint: the console had
+two boxes you could summon and neither behaved like a thing you had opened.
+
+The decision rail opened on `Ctrl-N`. Pressing `Ctrl-N` again stepped to the
+next card, and the way to put the rail away was `Ctrl-R` — a chord the rail's
+own keybar never printed, so the only place it was written down was the `?`
+overlay's global section and this file. That is the shape of a view people leave
+open: the key that opened it does not close it, and the key that does close it
+is not on the screen you are looking at. `Ctrl-N` is now a toggle. Stepping
+through the stack is `↑↓`/`jk`, which the rail already answered and already
+printed. `Esc` now closes the rail on its last level instead of stopping at
+un-focusing, for the same reason — `Esc` is the key people press to leave a
+thing, and it was leaving it half-left.
+
+The projects catalog was worse off, because it never had a chord at all. It
+arrived in the batch that spent the last free Ctrl letter on dictation and went
+to `Ctrl-G d`, where `d` stood for nothing except that `Ctrl-D` is quit. A year
+of use settled the question the keymap header said the next verb would have to
+answer: the catalog is the box that says *which repository does my next sentence
+land in*, which is a question asked between one instruction and the next, and
+the directory picker that held `Ctrl-P` is opened when a new tree has to be
+added and not again. So they swapped. Nothing was added and nothing was lost —
+the chord went to the key that is actually pressed, and the letter behind the
+leader now stands for something.
+
+The third complaint is that you could not navigate to the panel, and that one
+was true in the plainest sense: the catalog had a cursor nowhere in the code.
+It now works exactly the way the rail does, because two focus idioms for two
+boxes drawn side by side is one idiom too many. `Ctrl-P` hands it the keyboard,
+the border and the keybar say who has it, `↑↓`/`jk` move, `⏎` goes into the
+project's manager, `Esc` gives the keyboard back with the typed line untouched,
+and the router checks the rail first so the two can never both hold the bare
+keys. A click anywhere in the box takes the keyboard and a click on a row moves
+the cursor — but a click stops there rather than entering the manager, unlike a
+tap on a card. A card is a question waiting to be answered; entering a manager
+rebinds the chat box to another conversation, and a stray click that moved the
+sentence you were typing into a different repository is the exact mistake the
+panel exists to prevent.
+
+Two bugs fell out of giving the box a cursor, both of them the same bug in
+different states. The catalog rendered every row into a paragraph the box then
+clipped, so a catalog longer than the box lost its tail silently — invisible,
+named by nothing, reachable by no key, and with a cursor in the box the cursor
+could sit on a row nothing drew. It windows around the cursor now and prints
+what it is leaving out. And below twelve rows of panel the box returned zero
+height whatever its state was, so on a short terminal the projects key flipped a
+flag nothing rendered: the key did nothing, said nothing, and gave no reason.
+That is the failure this same key had already been fixed for once, one state
+further out. An opened catalog is never nothing now; a collapsed one still gives
+the box up, because a one-line reminder is worth three rows only while there is
+a sessions list left underneath it.
+
+One more thing fell out of it, and it predates all of this. `data::current_project`
+returned the project's *name* and threw its id away, and the panel marked the
+current project by comparing names. Two checkouts called `api` are two rows —
+the catalog knows this, and `/project untrack api` already refuses to guess
+between them — so both rows got the `▸` and the box said two different
+repositories were the one the next sentence would land in. It carries the id
+now. The name is what a person reads; the id is what the screen points at.
+
+The reference renderer had its own version of the same failure. `cargo run
+--example screens` exists to prove the screens show what is in the store, and
+its loader — copied out of `refresh_workspaces` and then left behind by it —
+never loaded the catalog. So every panel it has ever printed said `none yet —
+/project add <path>` on a database with a full catalog in it: the one claim the
+example makes, failing on the one box a reader would check it against.

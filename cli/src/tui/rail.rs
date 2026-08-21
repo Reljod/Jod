@@ -22,12 +22,17 @@
 //! `j` into the sentence being written. Two ways out exist and the rail uses
 //! both, at different costs:
 //!
-//! - `Ctrl-R` shows or hides it, and `Ctrl-N` steps to the next card. Both are
-//!   chords, so both are safe mid-sentence — that is the property E2.S3 asks
-//!   for by name.
+//! - `Ctrl-N` opens the rail and puts it away again, and `Ctrl-R` shows or
+//!   hides it without taking the keyboard. Both are chords, so both are safe
+//!   mid-sentence — that is the property E2.S3 asks for by name.
 //! - `Ctrl-N` also *focuses* the rail, after which the bare keys are the rail's:
-//!   `↑↓`/`jk` move, `⏎` expands, a digit answers, `x` dismisses, `Esc` hands
-//!   the keyboard back with the typed line exactly as it was.
+//!   `↑↓`/`jk` move, `⏎` expands, a digit answers, `x` dismisses, and `Esc`
+//!   closes it with the typed line exactly as it was.
+//!
+//! `Ctrl-N` used to step to the next card instead of closing, which left the
+//! rail with no way out on the key that opened it — the only one was `Ctrl-R`,
+//! which the rail's own keybar never printed. Stepping is what `↑↓`/`jk` are
+//! for, and they were already there.
 //!
 //! The focus is what makes answering a card cheap once you are in it, and the
 //! chord is what makes getting in free. Neither ever touches `App::input`.
@@ -293,43 +298,65 @@ impl RailState {
         self.scroll = landed as u16;
     }
 
-    /// `Ctrl-N`: focus the rail and move on to the next card.
+    /// `Ctrl-N`: open the rail and take the keyboard, or put it away again.
     ///
-    /// Wraps, unlike [`RailState::step`], because this is a *cycle* key rather
-    /// than a cursor: pressing it repeatedly is how you walk the stack from the
-    /// chat box without ever touching the sentence you are typing, and a cycle
-    /// that stopped at the bottom would need a second chord to get back.
-    pub fn cycle(&mut self, ids: &[i64]) {
+    /// One key both ways, because the key that opened something is the key
+    /// people press to close it — a view you open with `Ctrl-N` and close with
+    /// a different chord is a view you leave open. The stack is walked with
+    /// `↑↓`/`jk` once the rail has the keyboard, which is where it belonged: a
+    /// second stepping key that also happened to be the only way in made the
+    /// way *out* the thing nobody could find.
+    ///
+    /// Three states rather than two, because the rail can be on screen without
+    /// holding the keyboard — [`RailState::auto_open`] puts it there when a
+    /// blocker arrives, and `Ctrl-R` shows it without focusing it. From there
+    /// this key takes the keyboard rather than closing a rail you have not
+    /// read yet.
+    pub fn toggle(&mut self, ids: &[i64]) {
+        if self.shown && self.focused {
+            self.close();
+            return;
+        }
         self.shown = true;
+        self.focused = true;
         if ids.is_empty() {
-            self.focused = true;
             self.selected = None;
             return;
         }
-        // The first press only focuses. Landing on the top card *and* stepping
-        // off it in one keystroke would make the most pressing card — which is
-        // what `Sort::Pressing` puts first — the one card the key skips.
-        if !self.focused {
-            self.focused = true;
-            if self.selected.is_some_and(|id| ids.contains(&id)) {
-                return;
-            }
-            if let Some(first) = ids.first().copied() {
-                self.look_at(first);
-            }
+        if self.selected.is_some_and(|id| ids.contains(&id)) {
             return;
         }
-        let next = (self.index(ids) + 1) % ids.len();
-        self.look_at(ids[next]);
+        if let Some(first) = ids.first().copied() {
+            self.look_at(first);
+        }
+    }
+
+    /// Take the rail off the screen and hand the keyboard back.
+    ///
+    /// Every way out ends here — the chord, `Esc`, and `Ctrl-R` hiding it —
+    /// so none of them can leave the rail holding the bare keys with no rail on
+    /// screen to spend them on.
+    ///
+    /// The filter and the sort are deliberately left alone. E2.S5 asks for them
+    /// to be held in state so that leaving the rail and coming back finds it as
+    /// you left it, and putting it away is leaving it. `Esc` clears the filter
+    /// on its own first level, which is a different key saying a different
+    /// thing: *undo the narrowing*, not *put the rail away*.
+    pub fn close(&mut self) {
+        self.shown = false;
+        self.focused = false;
+        self.collapse();
     }
 
     /// Hand the keyboard back to whatever was underneath, leaving the typed
     /// line alone.
     ///
     /// One level at a time, like `Esc` everywhere else in this program: the
-    /// expanded card first, then the filter, then the focus. The rail stays
-    /// *shown* — hiding it is `Ctrl-R`, and an `Esc` that also closed it would
-    /// mean leaving a card you were reading costs you the sight of the rest.
+    /// filter first, then the expanded card, and then the rail itself. That
+    /// last step used to stop at un-focusing and leave the rail on screen,
+    /// which meant the only way to get the screen back was a chord — `Ctrl-R` —
+    /// that nothing on the rail's own keybar named. `Esc` is what people press
+    /// to leave a thing, so it now leaves it.
     pub fn back(&mut self) -> bool {
         if self.editing_filter || self.filter.is_some() {
             self.filter = None;
@@ -340,8 +367,8 @@ impl RailState {
             self.collapse();
             return true;
         }
-        if self.focused {
-            self.focused = false;
+        if self.focused || self.shown {
+            self.close();
             return true;
         }
         false
@@ -695,33 +722,60 @@ mod tests {
     /// The first `Ctrl-N` must not skip the most pressing card, which is the
     /// one `Sort::Pressing` deliberately put at the top.
     #[test]
-    fn the_first_cycle_lands_on_the_top_card_and_the_next_moves_on() {
+    fn opening_the_rail_lands_on_the_top_card() {
         let mut rail = RailState::default();
-        let ids = [3, 4, 5];
-        rail.cycle(&ids);
+        rail.toggle(&[3, 4, 5]);
         assert!(rail.shown && rail.focused);
         assert_eq!(rail.selected, Some(3));
-        rail.cycle(&ids);
-        assert_eq!(rail.selected, Some(4));
     }
 
-    /// A cycle key that stopped at the bottom would need a second chord to get
-    /// back to the top, which is a chord for a job the first one can do.
+    /// The key that opened it is the key that closes it. Before this, `Ctrl-N`
+    /// stepped to the next card instead and the only way out was `Ctrl-R`,
+    /// which the rail's own keybar never printed.
     #[test]
-    fn cycling_past_the_last_card_comes_back_round() {
+    fn the_same_chord_puts_the_rail_away() {
+        let mut rail = RailState::default();
+        let ids = [3, 4, 5];
+        rail.toggle(&ids);
+        assert!(rail.shown && rail.focused);
+        rail.toggle(&ids);
+        assert!(!rail.shown, "the second press left it on screen");
+        assert!(!rail.focused, "and left it holding the bare keys");
+    }
+
+    /// A rail that is on screen without holding the keyboard — which is where
+    /// `auto_open` and `Ctrl-R` both leave it — is one you have not read yet.
+    /// The chord takes the keyboard there rather than closing it.
+    #[test]
+    fn the_chord_focuses_a_rail_that_is_merely_showing() {
         let mut rail = RailState {
-            focused: true,
+            shown: true,
+            ..Default::default()
+        };
+        rail.toggle(&[3, 4, 5]);
+        assert!(rail.shown, "a rail nobody has read was closed");
+        assert!(rail.focused);
+        assert_eq!(rail.selected, Some(3));
+    }
+
+    /// A cursor already on a card stays on it, so the chord is safe to press
+    /// when you are not sure whether the rail has the keyboard.
+    #[test]
+    fn focusing_keeps_a_cursor_that_is_already_on_a_card() {
+        let mut rail = RailState {
+            shown: true,
             selected: Some(5),
             ..Default::default()
         };
-        rail.cycle(&[3, 4, 5]);
-        assert_eq!(rail.selected, Some(3));
+        rail.toggle(&[3, 4, 5]);
+        assert_eq!(rail.selected, Some(5));
     }
 
-    /// `Esc` peels one layer at a time and never hides the rail — leaving a
-    /// card you were reading must not cost you the sight of the rest.
+    /// `Esc` peels one layer at a time, and the last layer is the rail itself.
+    /// It used to stop at un-focusing, which left the rail on screen with no
+    /// way out that its own keybar named.
     #[test]
-    fn escape_peels_one_layer_at_a_time_and_leaves_the_rail_showing() {
+    fn escape_peels_one_layer_at_a_time_and_then_closes_the_rail() {
         let mut rail = RailState {
             shown: true,
             focused: true,
@@ -735,8 +789,8 @@ mod tests {
         assert!(rail.back());
         assert!(!rail.expanded, "then the expanded card");
         assert!(rail.back());
-        assert!(!rail.focused, "then the focus");
-        assert!(rail.shown, "and the rail is still on screen");
+        assert!(!rail.focused, "then the rail itself");
+        assert!(!rail.shown, "and it leaves the screen with it");
         assert!(!rail.back(), "nothing left for this Esc to do");
     }
 

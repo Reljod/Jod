@@ -228,6 +228,17 @@ async fn main() -> anyhow::Result<()> {
     println!("── {} {}", "chat · working, panel open", "─".repeat(45));
     println!("{}", render(&app));
 
+    // ...and the same panel with the catalog holding the keyboard, which is the
+    // one state where the keybar is neither the screen's nor the rail's. It is
+    // its own screen for the reason the one above is: nothing else here shows a
+    // cursor inside the panel, and a reference that never draws the focused
+    // state cannot be checked against it.
+    app.busy = false;
+    app.focus_catalog();
+    println!();
+    println!("── {} {}", "chat · the projects have the keyboard", "─".repeat(34));
+    println!("{}", render(&app));
+
     Ok(())
 }
 
@@ -269,6 +280,12 @@ async fn load(jod: &Arc<Jod>, filter: Option<String>) -> anyhow::Result<App> {
     app.hooks = tui::data::hooks(jod);
     app.activity = tui::data::activity(jod);
     app.board = tui::data::tasks(jod, None);
+    // The catalog the side panel draws. Missed when these loaders were copied
+    // out of `refresh_workspaces`, which is why every panel this example has
+    // ever printed said `none yet — /project add <path>` on a database with a
+    // full catalog in it — the one claim the example exists to make, failing on
+    // the one box a reader would check it against.
+    app.projects = tui::data::projects(jod);
     let (forest, closed) = tui::data::forest(jod, app.tree.show_closed);
     app.forest = forest;
     app.closed_works = closed;

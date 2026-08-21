@@ -663,6 +663,8 @@ async fn event_loop(
     // Where the last frame put the rail, so a click can be resolved against the
     // cards that were actually on screen when it happened.
     let mut hits = ui::RailHits::default();
+    // ...and where it put the catalog, for the same reason.
+    let mut panel_hits = ui::PanelHits::default();
     // Four frames a second: enough for the spinner to read as motion and for an
     // elapsed counter to look like a clock, cheap enough to be free.
     let mut ticks = tokio::time::interval(std::time::Duration::from_millis(250));
@@ -700,6 +702,7 @@ async fn event_loop(
             let painted = ui::draw(f, &app);
             viewport = painted.viewport;
             hits = painted.rail;
+            panel_hits = painted.panel;
         })?;
         if app.should_quit {
             return Ok(());
@@ -761,6 +764,7 @@ async fn event_loop(
                                     let painted = ui::draw(f, &app);
                                     viewport = painted.viewport;
                                     hits = painted.rail;
+                                    panel_hits = painted.panel;
                                 })?;
                                 perform(&jod, &mut app, &opts, &mut thread, action).await
                             }
@@ -783,7 +787,9 @@ async fn event_loop(
                         let asked = app.rail.query(app.conversation.clone());
                         match m.kind {
                             MouseEventKind::Down(MouseButton::Left) => {
-                                if let Some(action) = on_click(&mut app, &hits, m.column, m.row) {
+                                if let Some(action) =
+                                    on_click(&mut app, &hits, &panel_hits, m.column, m.row)
+                                {
                                     perform(&jod, &mut app, &opts, &mut thread, action).await;
                                 }
                             }
@@ -792,6 +798,21 @@ async fn event_loop(
                             }
                             MouseEventKind::ScrollDown if hits.holds(m.column, m.row) => {
                                 on_rail_wheel(&mut app, &hits, 1);
+                            }
+                            // The catalog walks its cursor rather than holding
+                            // an offset of its own, for the reason
+                            // `on_rail_wheel` gives: the window is derived from
+                            // where the cursor is, and a second independent
+                            // offset would let the cursor scroll off screen.
+                            //
+                            // Scrolling does not take the keyboard. A wheel over
+                            // a box you are only reading is not a statement that
+                            // you want to type into it.
+                            MouseEventKind::ScrollUp if panel_hits.holds(m.column, m.row) => {
+                                app.step_project(-1);
+                            }
+                            MouseEventKind::ScrollDown if panel_hits.holds(m.column, m.row) => {
+                                app.step_project(1);
                             }
                             MouseEventKind::ScrollUp => app.scroll_up(3, app.transcript.len()),
                             MouseEventKind::ScrollDown => app.scroll_down(3),
@@ -1694,7 +1715,7 @@ async fn perform(
                     let roots = store.roots(&conversation).unwrap_or_default();
                     if roots.is_empty() {
                         vec![
-                            "no roots — /add-dir picks one (Ctrl-P), and `@` says so until there is"
+                            "no roots — /add-dir picks one (Ctrl-G d), and `@` says so until there is"
                                 .to_string(),
                         ]
                     } else {
@@ -1931,6 +1952,23 @@ const CATALOG_EMPTY: &str = "no projects — /project add <path> catalogs one, a
 fn reveal_catalog(app: &mut App) {
     app.panel = true;
     app.projects_open = true;
+}
+
+/// `Ctrl-P`: give the catalog the keyboard, or put it away again.
+///
+/// One key both ways, for the reason [`rail::RailState::toggle`] gives: the key
+/// that opened something is the key people press to close it.
+///
+/// Focusing rather than merely showing is the other half. The catalog has been
+/// on the panel since it was added and there has never been a way to put a
+/// cursor in it, so `⏎` on a project — the obvious thing to want, once you can
+/// see the list — did not exist.
+fn toggle_catalog(app: &mut App) {
+    if app.panel && app.projects_open && app.panel_focused {
+        app.close_catalog();
+        return;
+    }
+    app.focus_catalog();
 }
 
 fn on_store(jod: &Arc<Jod>, app: &mut App, verb: impl FnOnce(&Store) -> String) {
@@ -2711,6 +2749,12 @@ fn on_key(app: &mut App, thread: &mut Thread, key: KeyEvent, viewport: usize) ->
     match key.code {
         KeyCode::BackTab => {
             app.panel = !app.panel;
+            // Closing the panel hands the keyboard back with it, the way hiding
+            // the rail does — otherwise the bare keys stay the catalog's with no
+            // catalog on screen to explain them.
+            if !app.panel {
+                app.panel_focused = false;
+            }
             return None;
         }
         KeyCode::Tab if command::completions(&app.input, app).is_empty() => {
@@ -2728,6 +2772,14 @@ fn on_key(app: &mut App, thread: &mut Thread, key: KeyEvent, viewport: usize) ->
     // merely *visible* from stealing the letters you are typing.
     if app.rail.focused && app.rail.shown {
         return on_rail_key(app, key);
+    }
+    // The catalog, on the same terms and for the same reason: drawn beside every
+    // screen, so it is above both layers, and it holds the bare keys only once
+    // `Ctrl-P` or a click has handed them over. Below the rail because a card
+    // that is blocking a run is more pressing than a list of repositories, and
+    // both cannot hold the keyboard at once.
+    if app.panel_focused && app.panel && app.projects_open {
+        return on_catalog_key(app, key);
     }
     if app.workspace.is_list() {
         return on_workspace_key(app, key, viewport);
@@ -2884,6 +2936,75 @@ fn on_rail_key(app: &mut App, key: KeyEvent) -> Option<Action> {
     }
 }
 
+/// Keys while the project catalog has the keyboard.
+///
+/// Bare letters, which is only safe because the focus is explicit and printed,
+/// exactly as it is for the rail: `Ctrl-P` gives the catalog the keyboard, the
+/// keybar changes to the catalog's verbs while it holds it, and `Esc` gives it
+/// back with the typed line untouched. See [`keys::CATALOG`].
+///
+/// Deliberately few verbs. The catalog is a list of repositories and the useful
+/// things to do to one — cataloguing, untracking, restoring — already have
+/// homes: `/project` from the chat box, and `x` on the fleet, which knows which
+/// row you mean when two projects share a name. What was missing was the plain
+/// ability to move a cursor down the box and open one, so that is what this is.
+fn on_catalog_key(app: &mut App, key: KeyEvent) -> Option<Action> {
+    match key.code {
+        // One level, and there is only one: the catalog holds no filter and no
+        // expanded row, so `Esc` is the way out and nothing else.
+        KeyCode::Esc => {
+            app.close_catalog();
+            None
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            app.step_project(-1);
+            None
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            app.step_project(1);
+            None
+        }
+        KeyCode::Home => {
+            app.project_selected = app.catalog().first().map(|p| p.id.clone());
+            None
+        }
+        KeyCode::End => {
+            app.project_selected = app.catalog().last().map(|p| p.id.clone());
+            None
+        }
+        KeyCode::Char('?') => {
+            app.overlay = Overlay::Keymap;
+            None
+        }
+        // `⏎` goes into the project's manager, which is the conversation that
+        // owns that repository's work — the same movement `⏎` makes on a
+        // manager row of the fleet, and the reason the row is worth pointing at
+        // rather than merely reading.
+        //
+        // A project catalogued before managers existed has none, and says so
+        // rather than doing nothing: a key that appears inert is how somebody
+        // concludes the whole box is broken.
+        KeyCode::Enter => match app.selected_project() {
+            None => {
+                app.push(Entry::Notice(CATALOG_EMPTY.into()));
+                None
+            }
+            Some(project) => match project.manager_conversation_id.clone() {
+                Some(conversation) => Some(Action::EnterManager(conversation)),
+                None => {
+                    app.push(Entry::Notice(format!(
+                        "{} has no manager yet — one is made the first time work is \
+                         routed to it",
+                        project.name
+                    )));
+                    None
+                }
+            },
+        },
+        _ => None,
+    }
+}
+
 /// A click, resolved against what the last frame drew.
 ///
 /// The rail is the only thing on screen that takes the pointer, and it takes it
@@ -2891,16 +3012,32 @@ fn on_rail_key(app: &mut App, key: KeyEvent) -> Option<Action> {
 /// bare keys belong to the composer, and reaching a card meant a chord followed
 /// by a digit — on a keyboard that is not there. A tap has to be able to do it.
 ///
-/// Three gestures, and no more: a tap on a card in the stack opens it, a tap on
-/// one of its numbered options answers with that option, and a tap on the
-/// expanded card's title puts it back in the stack. A tap anywhere else inside
-/// the card does nothing on purpose — the rest of the card is prose being read,
-/// and a stray tap that collapsed it, or worse answered it, would be the one
-/// mistake this feature must not introduce.
-fn on_click(app: &mut App, hits: &ui::RailHits, column: u16, row: u16) -> Option<Action> {
+/// Three gestures on the rail, and no more: a tap on a card in the stack opens
+/// it, a tap on one of its numbered options answers with that option, and a tap
+/// on the expanded card's title puts it back in the stack. A tap anywhere else
+/// inside the card does nothing on purpose — the rest of the card is prose being
+/// read, and a stray tap that collapsed it, or worse answered it, would be the
+/// one mistake this feature must not introduce.
+///
+/// The catalog takes the pointer on the same terms, and it is the same argument
+/// one box over: a project row is a thing you point at, and on the panel there
+/// was no way to point at one at all.
+fn on_click(
+    app: &mut App,
+    hits: &ui::RailHits,
+    panel: &ui::PanelHits,
+    column: u16,
+    row: u16,
+) -> Option<Action> {
+    if panel.holds(column, row) {
+        return on_catalog_click(app, panel, column, row);
+    }
     if !hits.holds(column, row) {
         return None;
     }
+    // A pointer in the rail takes the keyboard, so it must take it from the
+    // catalog as well — see `App::focus_catalog`.
+    app.panel_focused = false;
     // A pointer in the rail is the same statement as `Ctrl-N`: the rail has the
     // keyboard now. Without this the digits would still be the composer's, and
     // the card that was just tapped could not be answered by typing.
@@ -2927,6 +3064,32 @@ fn on_click(app: &mut App, hits: &ui::RailHits, column: u16, row: u16) -> Option
         // need a second gesture nobody has been told about, and the card's body
         // — the actual question — is only in the expanded view.
         app.rail.expanded = true;
+    }
+    None
+}
+
+/// A click inside the project catalog.
+///
+/// Two gestures. A tap anywhere in the box hands it the keyboard, which is the
+/// same statement `Ctrl-P` makes and is what a click on a list means everywhere
+/// else in this program. A tap on a project row also puts the cursor on that
+/// row — and stops there rather than going into the project's manager.
+///
+/// Stopping there is the difference from the rail, and it is deliberate. A card
+/// is a question waiting to be answered, so a tap that opens it costs nothing;
+/// entering a manager rebinds the chat box to another conversation, and a stray
+/// click that moved the sentence you were typing into a different repository is
+/// precisely the mistake the panel exists to prevent. So the pointer selects and
+/// `⏎` commits, with the row highlighted in between.
+fn on_catalog_click(
+    app: &mut App,
+    panel: &ui::PanelHits,
+    column: u16,
+    row: u16,
+) -> Option<Action> {
+    app.focus_catalog();
+    if let Some(id) = panel.project_at(column, row) {
+        app.project_selected = Some(id.to_string());
     }
     None
 }
@@ -3080,9 +3243,11 @@ fn on_chord(app: &mut App, key: KeyEvent) -> Option<Option<Action>> {
         // while your hands are not on the keyboard.
         //
         // The projects toggle arrived in the same change and did not get one —
-        // `Ctrl-D` is quit, and there was nothing left to give it. It is
-        // `Ctrl-G d` now; Shift-Tab still closes the whole panel, which is the
-        // other half of the pair it was designed against.
+        // `Ctrl-D` is quit, and there was nothing left to give it. It has
+        // `Ctrl-P` now, taken off the directory picker: see the module header
+        // in `keys.rs` for why that swap and not another. Shift-Tab still
+        // closes the whole panel, which is the other half of the pair it was
+        // designed against.
         KeyCode::Char('v') if either => handled(Some(Action::Dictate)),
         // The rail. `Ctrl-R` is readline's reverse-search on paper, which Jod
         // has never implemented — the input is one prompt, not a history buffer
@@ -3093,23 +3258,33 @@ fn on_chord(app: &mut App, key: KeyEvent) -> Option<Option<Action>> {
         // cost you the keyboard. Hiding it also hands the keyboard back, or the
         // bare keys would still be the rail's with no rail on screen.
         KeyCode::Char('r') if either => {
-            app.rail.shown = !app.rail.shown;
-            if !app.rail.shown {
-                app.rail.focused = false;
-                app.rail.collapse();
+            if app.rail.shown {
+                app.rail.close();
+            } else {
+                app.rail.shown = true;
             }
             handled(None)
         }
-        // Focus the rail, and step through the cards — `n` for the next one.
-        // Safe in the middle of a sentence — this is the property E2.S3 asks
-        // for by name — because a chord never reaches `App::insert`.
+        // Open the rail, take the keyboard, and put it away again on the second
+        // press. Safe in the middle of a sentence — this is the property E2.S3
+        // asks for by name — because a chord never reaches `App::insert`.
         //
         // It was `Ctrl-C`, which is quit and always will be. This letter is the
         // one the oldest-unread jump used to have; that is a destination and
         // went behind the leader, where a card you have to answer is not.
+        //
+        // It used to *cycle* the stack instead of closing it, and that left the
+        // rail with no way out on its own key: the only one was `Ctrl-R`, which
+        // the rail's keybar never printed. Stepping is what `↑↓`/`jk` are for
+        // once the rail has the keyboard, and they were already there.
         KeyCode::Char('n') if either => {
             let ids = app.card_ids();
-            app.rail.cycle(&ids);
+            app.rail.toggle(&ids);
+            // The other half of the mutual exclusion `App::focus_catalog`
+            // keeps. Only one thing may hold the bare keys.
+            if app.rail.focused {
+                app.panel_focused = false;
+            }
             handled(None)
         }
         // Copy the last reply. The terminal's own selection stops working the
@@ -3125,17 +3300,22 @@ fn on_chord(app: &mut App, key: KeyEvent) -> Option<Option<Action>> {
                 None
             }
         }),
-        // The full-screen picker. `p` because it is the picker; `Ctrl-P` is a
-        // history motion in every shell that has one, and Jod's history is on
-        // the bare arrows.
+        // The projects. `p` for projects, which is the letter anybody would
+        // guess for the box titled `projects` — it was `Ctrl-G d`, a leader
+        // followed by a letter that stands for nothing, chosen only because
+        // `Ctrl-D` is quit and `Ctrl-P` was spent on the directory picker.
         //
-        // Enumerating from the key handler is the one place this file does
-        // I/O, and it is deliberate: the walk is bounded and happens once, on
-        // an explicit keystroke, rather than on the tick — a background walk of
-        // the filesystem to keep a picker warm that is opened twice a day is a
-        // cost nobody asked for. Every *keystroke* after this ranks in memory.
+        // The picker is a destination reached about twice a day and the catalog
+        // is a panel glanced at constantly, so the chord went to the one that is
+        // pressed. The picker is on `Ctrl-G d` now, and `/add-dir` still opens
+        // it by name.
+        //
+        // Same key both ways, and it takes the keyboard rather than only
+        // showing the box: "I cannot navigate to the panel" was the complaint,
+        // and a catalog you can see but not move a cursor through is a picture
+        // of a list.
         KeyCode::Char('p') if either => {
-            open_picker(app, launch_dir());
+            toggle_catalog(app);
             handled(None)
         }
         // Delegate: the typed line becomes an agent that runs without taking
@@ -3641,33 +3821,23 @@ fn on_which_key(app: &mut App, key: KeyEvent) -> Option<Action> {
             app.scroll_to_bottom();
             None
         }
-        // Collapse the catalog without closing the whole panel. Separate keys
-        // because they answer different questions: Shift-Tab is "I want the
-        // screen back", this is "I know which project I am in".
+        // The full-screen directory picker, which used to be `Ctrl-P` and gave
+        // that chord up to the projects catalog: a picker opened twice a day
+        // does not need a chord more than a panel glanced at constantly does,
+        // and `p` for projects is the letter a reader guesses. `/add-dir` is
+        // the same picker under its folder-first name.
         //
-        // Here rather than on a chord because `Ctrl-D` is quit, and the last
-        // free letter went to dictation in the same change that added this.
+        // `d` for directory, which is what it adds — the letter it inherited
+        // stood for nothing, having been picked because `Ctrl-D` is quit.
         //
-        // The catalog is drawn *inside* the side panel, so while the panel is
-        // shut this key used to flip a flag nothing rendered: from a cold start
-        // — the state every user begins in — the menu offered `projects · show
-        // or hide the catalog` and pressing it changed nothing on screen and
-        // said nothing about why. So a shut panel is opened rather than
-        // toggled: the key's promise is *show me the projects*, and that is the
-        // one reading which is true from either state.
-        //
-        // Guarded from a default `App`, with the panel left shut, by
-        // `ui::tests::the_projects_key_shows_the_catalog_from_a_cold_start` —
-        // the precondition `the_catalog_is_collapsed_without_closing_the_panel`
-        // sets away, which is how this survived a keymap refactor.
+        // Enumerating from the key handler is the one place this file does
+        // I/O, and it is deliberate: the walk is bounded and happens once, on
+        // an explicit keystroke, rather than on the tick — a background walk of
+        // the filesystem to keep a picker warm that is opened twice a day is a
+        // cost nobody asked for. Every *keystroke* after this ranks in memory.
         'd' => {
             app.overlay = Overlay::None;
-            if app.panel {
-                app.projects_open = !app.projects_open;
-            } else {
-                app.panel = true;
-                app.projects_open = true;
-            }
+            open_picker(app, launch_dir());
             None
         }
         // Search every transcript. `/` is the command palette in chat and the
@@ -5616,14 +5786,14 @@ fn forget_bound_session(store: &Store, thread: &Thread) -> Option<Entry> {
 
 /// Put the directory picker on screen, walking from `base`.
 ///
-/// One function because there are now three ways in — `Ctrl-P`, `/root add` and
+/// One function because there are now three ways in — `Ctrl-G d`, `/root add` and
 /// `/add-dir` — and they must open the *same* picker. Three copies of "walk,
 /// construct, assign" is three places for the bound, the noise list or the
 /// starting row to drift apart, which is exactly the drift `picker.rs` was
 /// written to prevent between its own two sizes.
 ///
 /// The walk is the one piece of I/O the key path does, and it stays here for
-/// the reason spelled out at `Ctrl-P`: bounded, on an explicit keystroke, never
+/// the reason spelled out at `Ctrl-G d`: bounded, on an explicit keystroke, never
 /// on the tick.
 fn open_picker(app: &mut App, base: PathBuf) {
     let (entries, truncated) = picker::directories(&base);
@@ -6119,6 +6289,10 @@ fn refresh_workspaces(jod: &Arc<Jod>, app: &mut App) {
     // console whenever the orchestrator resolves an instruction.
     app.projects = data::projects(jod);
     app.current_project = data::current_project(jod, app.conversation.as_deref());
+    // ...and that reordering is what the catalog's cursor has to survive. A row
+    // untracked from the fleet, or archived by another session, leaves the
+    // cursor naming a project nothing draws.
+    app.reconcile_catalog();
     let (forest, closed) = data::forest(jod, app.tree.show_closed);
     app.forest = forest;
     app.closed_works = closed;
@@ -6158,7 +6332,7 @@ fn refresh_rail(jod: &Arc<Jod>, app: &mut App) {
     // appears on its own without explanation reads as a rendering fault.
     if app.rail.auto_open(&app.cards) {
         app.push(Entry::Notice(
-            "a run is blocked — the rail is open; Ctrl-N answers, Ctrl-R hides it".into(),
+            "a run is blocked — the rail is open; Ctrl-N answers, and closes it again".into(),
         ));
     }
 }
@@ -8258,18 +8432,29 @@ mod tests {
         ));
     }
 
+    /// `Ctrl-P` reaches into the panel for one box. The sessions list and the
+    /// context bar beside it are `Shift-Tab`'s, and a key that took all three
+    /// off screen would be that key wearing a different letter.
     #[test]
     fn the_catalog_is_collapsed_without_closing_the_panel() {
         let mut app = app_on(HarnessKind::ClaudeCode);
         app.panel = true;
         assert!(app.projects_open);
-        ctrl(&mut app, KeyCode::Char('g'));
-        press(&mut app, KeyCode::Char('d'));
+
+        // The first press takes the keyboard — the box is already on screen.
+        ctrl(&mut app, KeyCode::Char('p'));
+        assert!(app.panel_focused);
+        assert!(app.projects_open);
+
+        // The second puts it away, and leaves the panel behind it.
+        ctrl(&mut app, KeyCode::Char('p'));
         assert!(!app.projects_open);
+        assert!(!app.panel_focused);
         assert!(app.panel, "collapsing the catalog closed the whole panel");
-        ctrl(&mut app, KeyCode::Char('g'));
-        press(&mut app, KeyCode::Char('d'));
+
+        ctrl(&mut app, KeyCode::Char('p'));
         assert!(app.projects_open, "the same key opens it");
+        assert!(app.panel_focused, "and hands it the keyboard");
     }
 
     #[test]
@@ -8280,6 +8465,21 @@ mod tests {
         assert!(app.panel);
         press(&mut app, KeyCode::BackTab);
         assert!(!app.panel, "the same key closes it");
+    }
+
+    /// Closing the whole panel takes the keyboard with it. Otherwise the bare
+    /// keys stay the catalog's with no catalog on screen to explain them —
+    /// the same trap hiding the rail was fixed for.
+    #[test]
+    fn shift_tab_takes_the_keyboard_back_from_the_catalog() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        ctrl(&mut app, KeyCode::Char('p'));
+        assert!(app.panel_focused);
+        press(&mut app, KeyCode::BackTab);
+        assert!(!app.panel);
+        assert!(!app.panel_focused, "no panel, no panel keys");
+        type_line(&mut app, "hello");
+        assert_eq!(app.input, "hello", "the letters are the chat's again");
     }
 
     /// Cycling has to reach every mode and come back, or Tab would be a way to
@@ -12869,11 +13069,11 @@ mod tests {
         }
     }
 
-    /// The constraint E2.S3 states outright: the cycle key must not cost the
-    /// sentence you were typing. A chord cannot reach `App::insert`, which is
-    /// the whole reason the rail's way in is one.
+    /// The constraint E2.S3 states outright: the way into the rail must not cost
+    /// the sentence you were typing. A chord cannot reach `App::insert`, which
+    /// is the whole reason the rail's way in is one.
     #[test]
-    fn alt_c_focuses_the_rail_without_touching_the_typed_line() {
+    fn the_rail_chord_focuses_without_touching_the_typed_line() {
         let mut app = with_cards();
         type_line(&mut app, "ship the parser");
 
@@ -12882,9 +13082,31 @@ mod tests {
         assert_eq!(app.rail.selected, Some(1), "on the most pressing card");
         assert_eq!(app.input, "ship the parser", "the sentence is untouched");
 
-        ctrl(&mut app, KeyCode::Char('n'));
-        assert_eq!(app.rail.selected, Some(2), "and again steps on");
+        // Stepping is the arrows' job now, and it costs the sentence nothing
+        // either — the rail has the keyboard, so `j` never reaches the box.
+        press(&mut app, KeyCode::Char('j'));
+        assert_eq!(app.rail.selected, Some(2), "and the cursor steps on");
         assert_eq!(app.input, "ship the parser");
+    }
+
+    /// The key that opened it closes it. Before this the only way out was
+    /// `Ctrl-R`, which the rail's own keybar never printed — so the rail was a
+    /// thing you opened and then had to go looking for a way to leave.
+    #[test]
+    fn the_same_chord_opens_the_rail_and_puts_it_away() {
+        let mut app = with_cards();
+        type_line(&mut app, "half a sentence");
+
+        ctrl(&mut app, KeyCode::Char('n'));
+        assert!(app.rail.shown && app.rail.focused);
+
+        ctrl(&mut app, KeyCode::Char('n'));
+        assert!(!app.rail.shown, "the same key left it on screen");
+        assert!(!app.rail.focused, "and left it holding the bare keys");
+        assert_eq!(app.input, "half a sentence", "and cost the sentence");
+
+        type_line(&mut app, "!");
+        assert_eq!(app.input, "half a sentence!", "the letters are the chat's again");
     }
 
     /// Hiding the rail has to hand the keyboard back with it, or the bare keys
@@ -12913,10 +13135,11 @@ mod tests {
         assert_eq!(app.input, "");
     }
 
-    /// `Esc` peels the rail's layers and gives the keyboard back, with the line
-    /// exactly as it was.
+    /// `Esc` peels the rail's layers and closes it, with the line exactly as it
+    /// was. The last layer used to stop at un-focusing, which left the rail on
+    /// screen and the way to take it off screen unadvertised.
     #[test]
-    fn esc_gives_the_keyboard_back_with_the_line_intact() {
+    fn esc_closes_the_rail_with_the_line_intact() {
         let mut app = with_cards();
         type_line(&mut app, "half a sentence");
         ctrl(&mut app, KeyCode::Char('n'));
@@ -12926,8 +13149,8 @@ mod tests {
         press(&mut app, KeyCode::Esc);
         assert!(!app.rail.expanded, "the expanded card first");
         press(&mut app, KeyCode::Esc);
-        assert!(!app.rail.focused, "then the focus");
-        assert!(app.rail.shown, "and the rail stays on screen");
+        assert!(!app.rail.focused, "then the rail itself");
+        assert!(!app.rail.shown, "and it leaves the screen with it");
         assert_eq!(app.input, "half a sentence");
     }
 
@@ -12966,7 +13189,7 @@ mod tests {
         let hits = drawn(&app, 78, 30);
         let hit = *hits.cards.last().expect("a card was drawn");
 
-        assert_eq!(on_click(&mut app, &hits, hits.area.unwrap().x + 2, hit.top + 1), None);
+        assert_eq!(on_click(&mut app, &hits, &ui::PanelHits::default(), hits.area.unwrap().x + 2, hit.top + 1), None);
         assert_eq!(app.rail.selected, Some(hit.id), "the card that was tapped");
         assert!(app.rail.expanded, "opened, not merely selected");
         assert!(app.rail.focused, "and the digits are the rail's now");
@@ -12989,7 +13212,7 @@ mod tests {
             .copied()
             .expect("the second option is drawn");
         assert_eq!(
-            on_click(&mut app, &hits, hits.area.unwrap().x + 4, second.row),
+            on_click(&mut app, &hits, &ui::PanelHits::default(), hits.area.unwrap().x + 4, second.row),
             Some(Action::AnswerCard {
                 id: 1,
                 chosen: Some("3000".into()),
@@ -13013,7 +13236,7 @@ mod tests {
         let area = hits.area.expect("a rail");
         // The row under the title, which is the card's own facts line — inside
         // the card, on nothing that can be pressed.
-        assert_eq!(on_click(&mut app, &hits, area.x + 4, area.y + 2), None);
+        assert_eq!(on_click(&mut app, &hits, &ui::PanelHits::default(), area.x + 4, area.y + 2), None);
         assert!(app.rail.expanded, "still open");
         assert_eq!(app.rail.selected, Some(1), "and still the same card");
     }
@@ -13028,7 +13251,7 @@ mod tests {
 
         let hits = drawn(&app, 78, 30);
         let back = hits.back.expect("a way back");
-        assert_eq!(on_click(&mut app, &hits, hits.area.unwrap().x + 3, back), None);
+        assert_eq!(on_click(&mut app, &hits, &ui::PanelHits::default(), hits.area.unwrap().x + 3, back), None);
         assert!(!app.rail.expanded, "back to the stack");
         assert_eq!(app.rail.selected, Some(1), "on the card that was open");
     }
@@ -13041,7 +13264,7 @@ mod tests {
         app.rail.shown = true;
         let hits = drawn(&app, 150, 40);
         let before = app.rail.clone();
-        assert_eq!(on_click(&mut app, &hits, 140, 5), None);
+        assert_eq!(on_click(&mut app, &hits, &ui::PanelHits::default(), 140, 5), None);
         assert_eq!(app.rail, before, "the rail did not move");
     }
 
@@ -13172,9 +13395,11 @@ mod tests {
         press(&mut app, KeyCode::Enter);
         let asked = app.rail.query(Some("conv".into()));
 
-        // Away to another screen, and back. Deliberately not by `Esc`, which
+        // Put it away and bring it back. Deliberately not by `Esc`, which
         // clears the filter on purpose — it is the key that undoes one level,
         // and undoing the filter is exactly what it should do there.
+        ctrl(&mut app, KeyCode::Char('n'));
+        assert!(!app.rail.shown, "the chord did not put the rail away");
         ctrl(&mut app, KeyCode::Char('f'));
         assert_eq!(app.workspace, Workspace::Fleet);
         app.go(Workspace::Chat);
@@ -13740,14 +13965,21 @@ mod tests {
         app
     }
 
-    /// The chord opens it against the directory you launched in, which is what
+    /// Press the leader, then `d` — the route the picker moved to when the
+    /// catalog took `Ctrl-P`.
+    fn picker_chord(app: &mut App) {
+        ctrl(app, KeyCode::Char('g'));
+        press(app, KeyCode::Char('d'));
+    }
+
+    /// The key opens it against the directory you launched in, which is what
     /// E1.S4 means by "starting at the current directory".
     #[test]
-    fn alt_p_opens_the_picker_at_the_current_directory() {
+    fn the_picker_key_opens_it_at_the_current_directory() {
         let mut app = app_on(HarnessKind::ClaudeCode);
-        ctrl(&mut app, KeyCode::Char('p'));
+        picker_chord(&mut app);
         let Overlay::Picker(p) = &app.overlay else {
-            panic!("Ctrl-P opens the picker, got {:?}", app.overlay);
+            panic!("Ctrl-G d opens the picker, got {:?}", app.overlay);
         };
         assert_eq!(
             p.base,
@@ -13760,13 +13992,13 @@ mod tests {
     }
 
     /// `/add-dir` is the folder-first name for the same picker, so it must
-    /// land in exactly the state the chord does — one picker, three doors.
+    /// land in exactly the state the key does — one picker, three doors.
     #[test]
-    fn add_dir_opens_the_same_picker_the_chord_does() {
+    fn add_dir_opens_the_same_picker_the_key_does() {
         let mut typed = app_on(HarnessKind::ClaudeCode);
         apply_slash(&mut typed, command::parse("/add-dir").expect("parses"));
         let mut chorded = app_on(HarnessKind::ClaudeCode);
-        ctrl(&mut chorded, KeyCode::Char('p'));
+        picker_chord(&mut chorded);
         assert_eq!(typed.overlay, chorded.overlay);
     }
 
@@ -13921,16 +14153,228 @@ mod tests {
             "the expanded empty state names no remedy:\n{open}"
         );
 
-        // ...and collapsed, which is one keypress away and used to say only
+        // ...and collapsed, which is two keypresses away — the first takes the
+        // keyboard, the second puts the box away — and used to say only
         // `nothing set`.
-        ctrl(&mut app, KeyCode::Char('g'));
-        press(&mut app, KeyCode::Char('d'));
+        ctrl(&mut app, KeyCode::Char('p'));
+        ctrl(&mut app, KeyCode::Char('p'));
         assert!(!app.projects_open);
         let shut = screen(&app, 100, 30);
         assert!(
             shut.contains("/project add"),
             "the collapsed empty state names no remedy:\n{shut}"
         );
+    }
+
+    // ---- moving a cursor through the catalog ----
+
+    /// A catalogued project, with a manager unless one is asked for.
+    fn project(name: &str, manager: Option<&str>) -> jod_core::projects::Project {
+        jod_core::projects::Project {
+            id: name.into(),
+            name: name.into(),
+            path: PathBuf::from(format!("/home/reljod/repo/{name}")),
+            remote: None,
+            aliases: Vec::new(),
+            state: jod_core::projects::State::Active,
+            colour: "cyan".into(),
+            notes: String::new(),
+            created_at_ms: 0,
+            last_touched_ms: 0,
+            manager_conversation_id: manager.map(str::to_string),
+        }
+    }
+
+    /// A console with a catalog in the panel and nothing focused yet.
+    fn with_projects() -> App {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.projects = vec![
+            project("tetris", Some("conv-tetris")),
+            project("zephyr", None),
+        ];
+        app.current_project = Some(app::Current {
+            id: "tetris".into(),
+            name: "tetris".into(),
+            how: jod_core::projects::How::Inferred,
+        });
+        app
+    }
+
+    /// The complaint this answers, word for word: *I cannot navigate to the
+    /// panel.* The catalog had been drawn on the panel since it was added and
+    /// there was no way to put a cursor in it.
+    #[test]
+    fn the_projects_chord_takes_the_keyboard_and_the_arrows_move_the_cursor() {
+        let mut app = with_projects();
+        type_line(&mut app, "half a sentence");
+
+        ctrl(&mut app, KeyCode::Char('p'));
+        assert!(app.panel && app.projects_open && app.panel_focused);
+        assert_eq!(
+            app.selected_project().map(|p| p.name.clone()),
+            Some("tetris".into()),
+            "the cursor starts on the project this conversation is about"
+        );
+        assert_eq!(app.input, "half a sentence", "the chord cost the sentence");
+
+        press(&mut app, KeyCode::Char('j'));
+        assert_eq!(app.selected_project().map(|p| p.name.clone()), Some("zephyr".into()));
+        press(&mut app, KeyCode::Up);
+        assert_eq!(app.selected_project().map(|p| p.name.clone()), Some("tetris".into()));
+        assert_eq!(app.input, "half a sentence", "and neither did the arrows");
+    }
+
+    /// The cursor stops at both ends. Arrows that wrapped would read as the
+    /// list having jumped.
+    #[test]
+    fn the_catalog_cursor_stops_at_both_ends() {
+        let mut app = with_projects();
+        ctrl(&mut app, KeyCode::Char('p'));
+        press(&mut app, KeyCode::Up);
+        assert_eq!(app.selected_project().map(|p| p.name.clone()), Some("tetris".into()));
+        press(&mut app, KeyCode::End);
+        press(&mut app, KeyCode::Down);
+        assert_eq!(app.selected_project().map(|p| p.name.clone()), Some("zephyr".into()));
+    }
+
+    /// `⏎` goes into the project's manager — the conversation that owns that
+    /// repository's work, and the reason a project row is worth pointing at
+    /// rather than merely reading.
+    #[test]
+    fn enter_on_a_project_goes_into_its_manager() {
+        let mut app = with_projects();
+        ctrl(&mut app, KeyCode::Char('p'));
+        assert_eq!(
+            press(&mut app, KeyCode::Enter),
+            Some(Action::EnterManager("conv-tetris".into()))
+        );
+    }
+
+    /// A project catalogued before managers existed has none. Saying so is the
+    /// difference between a key that is not applicable here and a key that is
+    /// broken — and from the outside those look identical.
+    #[test]
+    fn enter_on_a_project_with_no_manager_says_why_nothing_happened() {
+        let mut app = with_projects();
+        ctrl(&mut app, KeyCode::Char('p'));
+        press(&mut app, KeyCode::Char('j'));
+        assert_eq!(press(&mut app, KeyCode::Enter), None);
+        assert!(
+            last_notice(&app).contains("no manager"),
+            "got {:?}",
+            last_notice(&app)
+        );
+    }
+
+    /// The focus is what makes the bare letters safe, and it has to be total.
+    #[test]
+    fn letters_typed_at_a_focused_catalog_do_not_reach_the_input_box() {
+        let mut app = with_projects();
+        ctrl(&mut app, KeyCode::Char('p'));
+        type_line(&mut app, "jk");
+        assert_eq!(app.input, "");
+    }
+
+    /// `Esc` puts the catalog away and gives the keyboard back with the typed
+    /// line exactly as it was — the same contract the rail's `Esc` has.
+    #[test]
+    fn esc_closes_the_catalog_with_the_line_intact() {
+        let mut app = with_projects();
+        type_line(&mut app, "half a sentence");
+        ctrl(&mut app, KeyCode::Char('p'));
+
+        press(&mut app, KeyCode::Esc);
+        assert!(!app.panel_focused);
+        assert!(!app.projects_open);
+        assert!(app.panel, "Esc took the whole panel with it");
+        assert_eq!(app.input, "half a sentence");
+
+        type_line(&mut app, "!");
+        assert_eq!(app.input, "half a sentence!", "the letters are the chat's again");
+    }
+
+    /// Two things cannot hold the bare keys at once. The router checks the rail
+    /// first, so a rail left focused would swallow every key meant for the
+    /// catalog and the catalog would look inert.
+    #[test]
+    fn the_rail_and_the_catalog_never_hold_the_keyboard_at_once() {
+        let mut app = with_projects();
+        app.cards = vec![a_card(1, "which port for the API?", true, &["8080"])];
+        app.reconcile_rail();
+
+        ctrl(&mut app, KeyCode::Char('p'));
+        assert!(app.panel_focused);
+        ctrl(&mut app, KeyCode::Char('n'));
+        assert!(app.rail.focused);
+        assert!(!app.panel_focused, "the rail took the keys and the catalog kept them");
+
+        ctrl(&mut app, KeyCode::Char('p'));
+        assert!(app.panel_focused);
+        assert!(!app.rail.focused, "the catalog took the keys and the rail kept them");
+    }
+
+    /// A tap on a project row puts the cursor on it and stops there. Entering a
+    /// manager rebinds the chat box to another conversation, and a stray click
+    /// that moved the sentence you were typing into a different repository is
+    /// exactly the mistake the panel exists to prevent.
+    #[test]
+    fn a_click_on_a_project_selects_it_without_entering_it() {
+        let mut app = with_projects();
+        app.panel = true;
+        let hits = drawn_panel(&app, 140, 30);
+        let area = hits.catalog.expect("the catalog was drawn");
+        let row = hits
+            .projects
+            .iter()
+            .find(|h| h.id == "zephyr")
+            .expect("zephyr was drawn")
+            .row;
+
+        assert_eq!(
+            on_click(&mut app, &ui::RailHits::default(), &hits, area.x + 4, row),
+            None,
+            "a click entered a conversation on its own"
+        );
+        assert!(app.panel_focused, "a click did not hand over the keyboard");
+        assert_eq!(app.project_selected.as_deref(), Some("zephyr"));
+    }
+
+    /// ...and then `⏎` commits, which is the second half of "select, then act".
+    #[test]
+    fn a_click_then_enter_opens_the_project_that_was_clicked() {
+        let mut app = with_projects();
+        app.panel = true;
+        let hits = drawn_panel(&app, 140, 30);
+        let area = hits.catalog.expect("the catalog was drawn");
+        let row = hits.projects[0].row;
+        on_click(&mut app, &ui::RailHits::default(), &hits, area.x + 4, row);
+        assert_eq!(
+            press(&mut app, KeyCode::Enter),
+            Some(Action::EnterManager("conv-tetris".into()))
+        );
+    }
+
+    /// A cursor left on a project another session untracked would make `⏎` open
+    /// nothing and say nothing, which reads as a broken key.
+    #[test]
+    fn a_cursor_on_a_project_that_has_gone_moves_to_one_that_has_not() {
+        let mut app = with_projects();
+        ctrl(&mut app, KeyCode::Char('p'));
+        press(&mut app, KeyCode::Char('j'));
+        assert_eq!(app.project_selected.as_deref(), Some("zephyr"));
+
+        app.projects.retain(|p| p.name != "zephyr");
+        app.reconcile_catalog();
+        assert_eq!(app.project_selected.as_deref(), Some("tetris"));
+    }
+
+    /// The catalog as one frame drew it, so a click can be aimed at a real row.
+    fn drawn_panel(app: &App, w: u16, h: u16) -> ui::PanelHits {
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap();
+        let mut out = ui::Painted::default();
+        terminal.draw(|f| out = ui::draw(f, app)).unwrap();
+        out.panel
     }
 
     /// `/project` with nothing after it lists, and brings the box it is

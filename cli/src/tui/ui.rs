@@ -101,6 +101,53 @@ pub struct Painted {
     /// How many transcript lines one page holds.
     pub viewport: usize,
     pub rail: RailHits,
+    pub panel: PanelHits,
+}
+
+/// Where the side panel's clickable parts landed.
+///
+/// Only the catalog for now. The sessions box below it and the context bar below
+/// that are read-outs — there is nothing a click on a percentage could mean —
+/// whereas the catalog is a list of rows, and a list of rows on screen that
+/// cannot be pointed at is the complaint this answers.
+#[derive(Debug, Clone, Default)]
+pub struct PanelHits {
+    /// The catalog box, so a click can tell it from whatever it is drawn over.
+    /// `None` when the catalog is not on screen at all — the panel shut, the
+    /// catalog collapsed, or no room for a third box.
+    pub catalog: Option<Rect>,
+    /// One entry per project row the catalog drew, in drawn order.
+    pub projects: Vec<ProjectHit>,
+}
+
+/// A catalog row, and the line it was printed on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectHit {
+    pub id: String,
+    pub row: u16,
+}
+
+impl PanelHits {
+    /// Whether a pointer at these coordinates is over the catalog.
+    pub fn holds(&self, column: u16, row: u16) -> bool {
+        self.catalog.is_some_and(|area| {
+            column >= area.x
+                && column < area.x + area.width
+                && row >= area.y
+                && row < area.y + area.height
+        })
+    }
+
+    /// The project under the pointer.
+    pub fn project_at(&self, column: u16, row: u16) -> Option<&str> {
+        if !self.holds(column, row) {
+            return None;
+        }
+        self.projects
+            .iter()
+            .find(|hit| hit.row == row)
+            .map(|hit| hit.id.as_str())
+    }
 }
 
 /// Where the rail's clickable parts landed.
@@ -232,15 +279,16 @@ pub fn draw(f: &mut Frame, app: &App) -> Painted {
         Some(rail) => draw_rail(f, app, rail),
         None => RailHits::default(),
     };
+    let mut panel_hits = PanelHits::default();
     if let Some(side) = side {
-        draw_panel(f, app, side);
+        panel_hits = draw_panel(f, app, side);
     }
     draw_keybar(f, app, rows[1]);
     draw_status(f, app, rows[2]);
 
     // Last, so they float over everything.
     if app.panel && side.is_none() {
-        draw_floating_panel(f, app, body);
+        panel_hits = draw_floating_panel(f, app, body);
     }
     draw_completions(f, app, input);
     draw_mention(f, app, input);
@@ -248,6 +296,7 @@ pub fn draw(f: &mut Frame, app: &App) -> Painted {
     Painted {
         viewport: height,
         rail: hits,
+        panel: panel_hits,
     }
 }
 
@@ -1897,7 +1946,7 @@ const CONTEXT_HEIGHT: u16 = 7;
 /// Sessions above, context below — the two questions a panel that costs a
 /// third of the screen has to be worth answering: what else is running, and how
 /// much of the window this conversation has eaten.
-fn draw_panel(f: &mut Frame, app: &App, area: Rect) {
+fn draw_panel(f: &mut Frame, app: &App, area: Rect) -> PanelHits {
     let parts = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -1906,9 +1955,10 @@ fn draw_panel(f: &mut Frame, app: &App, area: Rect) {
             Constraint::Length(CONTEXT_HEIGHT),
         ])
         .split(area);
-    draw_projects(f, app, parts[0]);
+    let hits = draw_projects(f, app, parts[0]);
     draw_sessions(f, app, parts[1]);
     draw_context(f, app, parts[2]);
+    hits
 }
 
 /// How many rows the catalog gets.
@@ -1919,18 +1969,28 @@ fn draw_panel(f: &mut Frame, app: &App, area: Rect) {
 /// never past a third of the panel: the sessions below it are what a running
 /// fleet is watched through, and a twenty-project catalog must not push them
 /// off the screen.
+///
+/// **An opened catalog is never nothing.** Below twelve rows of panel this used
+/// to return zero whatever the state was, so on a short terminal `Ctrl-P`
+/// changed a flag nothing rendered: the key did nothing, said nothing, and gave
+/// no reason — which is the exact failure the old projects key had already been
+/// fixed once for, one state further out. Collapsed it still yields the whole
+/// box, because a collapsed catalog is worth three rows only while there is a
+/// sessions list left underneath it to be worth them against.
 fn projects_height(app: &App, available: u16) -> u16 {
-    if available < 12 {
-        // No honest room for a third box. The current project still reaches the
-        // status bar, which is where it matters most.
+    // Two borders and a line. Under that there is no box to draw and no
+    // arithmetic that produces one.
+    if available < 3 {
         return 0;
     }
     if !app.projects_open {
-        return 3;
+        // No honest room for a third box. The current project still reaches the
+        // status bar, which is where it matters most.
+        return if available < 12 { 0 } else { 3 };
     }
-    let ceiling = (available / 3).max(4);
+    let ceiling = (available / 3).max(4).min(available);
     let wanted = app.projects.len().clamp(1, 32) as u16 + 2;
-    wanted.min(ceiling)
+    wanted.clamp(3.min(ceiling), ceiling)
 }
 
 /// The way out of an empty catalog, in the thirty-odd columns the panel has.
@@ -1949,31 +2009,35 @@ pub(super) const CATALOG_REMEDY: &str = "/project add";
 /// will land in* is a fact worth a permanent corner of the panel, because the
 /// alternative is finding out when an agent starts editing the wrong
 /// repository.
-fn draw_projects(f: &mut Frame, app: &App, area: Rect) {
+fn draw_projects(f: &mut Frame, app: &App, area: Rect) -> PanelHits {
     if area.height == 0 {
-        return;
+        return PanelHits::default();
     }
     let inner = area.width.saturating_sub(2) as usize;
     let current = app.current_project.as_ref();
+    let focused = app.panel_focused && app.projects_open;
 
     // Named, carried, or nothing — three states with three different claims on
     // his attention, so they do not share a colour.
-    let (title, border) = match current.map(|(_, how)| how) {
+    let (title, border) = match current.map(|c| c.how) {
         Some(How::Sticky) => (" projects · carried ", WARN),
         Some(_) => (" projects ", MUTED),
         None => (" projects · none set ", MUTED),
     };
 
+    // The border says who has the keyboard, the way the rail's does. A box with
+    // a highlighted row in it and no other change would look like a box that had
+    // highlighted a row on its own.
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(fg(border))
+        .border_style(fg(if focused { USER } else { border }))
         .title(title);
 
     if !app.projects_open {
         let line = match current {
-            Some((name, _)) => Line::from(vec![
+            Some(c) => Line::from(vec![
                 Span::styled(" ▸ ", fg(MUTED)),
-                Span::styled(cut(name, inner.saturating_sub(3)), bold(GOOD)),
+                Span::styled(cut(&c.name, inner.saturating_sub(3)), bold(GOOD)),
             ]),
             None => Line::from(Span::styled(
                 format!(" ▸ nothing set — {CATALOG_REMEDY}"),
@@ -1981,7 +2045,7 @@ fn draw_projects(f: &mut Frame, app: &App, area: Rect) {
             )),
         };
         f.render_widget(Paragraph::new(line).block(block), area);
-        return;
+        return PanelHits::default();
     }
 
     if app.projects.is_empty() {
@@ -1993,31 +2057,82 @@ fn draw_projects(f: &mut Frame, app: &App, area: Rect) {
             .block(block),
             area,
         );
-        return;
+        // Clickable even while empty: a tap on the box still hands it the
+        // keyboard, and the remedy it prints is the next thing to read.
+        return PanelHits {
+            catalog: Some(area),
+            projects: Vec::new(),
+        };
     }
 
-    // The current project first regardless of recency, because the one fact
-    // this box exists to show must not be scrolled out of it by a catalog
-    // longer than the box is tall.
-    let mut rows: Vec<&jod_core::projects::Project> = app.projects.iter().collect();
-    rows.sort_by_key(|p| current.map(|(name, _)| &p.name != name).unwrap_or(true));
+    // The current project first regardless of recency, and the same order the
+    // cursor steps through and a click resolves against — see `App::catalog`.
+    let rows = app.catalog();
 
-    let lines: Vec<Line> = rows
+    // The box shows what fits, and the cursor decides which end of the catalog
+    // that is. It used to render every row into a paragraph the box then clipped
+    // silently: a twelve-project catalog in a nine-row box lost three projects,
+    // with nothing on screen saying they existed and no key that could reach
+    // them.
+    let room = area.height.saturating_sub(2) as usize;
+    let first = window_start(app.project_index(), room, rows.len());
+    let visible: Vec<&jod_core::projects::Project> =
+        rows.iter().skip(first).take(room).copied().collect();
+
+    let selected = focused.then(|| app.selected_project().map(|p| p.id.clone())).flatten();
+    let mut hits = PanelHits {
+        catalog: Some(area),
+        projects: Vec::new(),
+    };
+
+    let lines: Vec<Line> = visible
         .iter()
-        .map(|p| {
-            let is_current = current.is_some_and(|(name, _)| &p.name == name);
-            let marker = if is_current { " ▸ " } else { "   " };
+        .enumerate()
+        .map(|(at, p)| {
+            hits.projects.push(ProjectHit {
+                id: p.id.clone(),
+                row: area.y + 1 + at as u16,
+            });
+            // By id, not by name: two checkouts called `api` are two rows, and
+            // marking both as current says two different repositories are the
+            // one the next sentence lands in.
+            let is_current = current.is_some_and(|c| p.id == c.id);
+            let is_cursor = selected.as_deref() == Some(p.id.as_str());
+            // The cursor and the current project are two different facts and the
+            // row has to carry both: `▸` is *this is the repository your next
+            // sentence lands in*, and the highlight is *this is the row a key
+            // would act on*. They are usually the same row and must not be
+            // assumed to be.
+            let marker = match (is_cursor, is_current) {
+                (true, _) => " › ",
+                (false, true) => " ▸ ",
+                (false, false) => "   ",
+            };
+            let style = match (is_cursor, is_current) {
+                (true, _) => bold(USER),
+                (false, true) => bold(GOOD),
+                (false, false) => fg(AGENT),
+            };
             Line::from(vec![
                 Span::styled(marker, fg(if is_current { GOOD } else { MUTED })),
-                Span::styled(
-                    cut(&p.name, inner.saturating_sub(3)),
-                    if is_current { bold(GOOD) } else { fg(AGENT) },
-                ),
+                Span::styled(cut(&p.name, inner.saturating_sub(3)), style),
             ])
         })
         .collect();
 
+    // What the window is leaving out, in both directions, because a list that
+    // silently ends is a list you believe you have read.
+    let hidden = rows.len() - visible.len();
+    let block = if hidden > 0 {
+        block.title_bottom(cut(&format!(" {hidden} more · ↑↓ "), inner))
+    } else if focused {
+        block.title_bottom(cut(" ⏎ manager · Esc back ", inner))
+    } else {
+        block
+    };
+
     f.render_widget(Paragraph::new(lines).block(block), area);
+    hits
 }
 
 /// The panel when the terminal is too narrow to put it beside anything.
@@ -2026,7 +2141,7 @@ fn draw_projects(f: &mut Frame, app: &App, area: Rect) {
 /// whole screen: it is *the right-hand panel* whichever way it is drawn, and a
 /// float that covered the keybar would hide the keys while you were looking for
 /// them.
-fn draw_floating_panel(f: &mut Frame, app: &App, body: Rect) {
+fn draw_floating_panel(f: &mut Frame, app: &App, body: Rect) -> PanelHits {
     let width = PANEL.min(body.width);
     let area = Rect {
         x: body.x + body.width - width,
@@ -2034,7 +2149,7 @@ fn draw_floating_panel(f: &mut Frame, app: &App, body: Rect) {
         ..body
     };
     f.render_widget(Clear, area);
-    draw_panel(f, app, area);
+    draw_panel(f, app, area)
 }
 
 /// Every conversation this process knows about, two rows each.
@@ -2271,6 +2386,13 @@ fn draw_keybar(f: &mut Frame, app: &App, area: Rect) {
         ),
         Overlay::None if app.rail.focused && app.rail.shown => {
             (keys::rail_keybar(area.width), keys::RAIL_EXIT)
+        }
+        // The catalog, on the same terms and in the same place in the order:
+        // below the rail, because that is the order the router dispatches in,
+        // and a bar that named a layer the router checks second would print
+        // keys that are not the ones in force.
+        Overlay::None if app.panel_focused && app.panel && app.projects_open => {
+            (keys::catalog_keybar(area.width), keys::CATALOG_EXIT)
         }
         Overlay::None if app.here().editing_filter => (
             "typing filters this list".to_string(),
@@ -2990,7 +3112,7 @@ fn draw_which_key(f: &mut Frame, app: &App) {
         rows.push(("r".into(), "resume      any past conversation".into()));
         rows.push(("u".into(), "unread      the oldest thing unread".into()));
         rows.push(("l".into(), "clear       empty the screen only".into()));
-        rows.push(("d".into(), "projects    show or hide the catalog".into()));
+        rows.push(("d".into(), "add dir     a directory to work in".into()));
         rows.push(("/".into(), "search      every transcript".into()));
         rows.push(("?".into(), "keys        the whole keymap".into()));
     }
@@ -3048,6 +3170,8 @@ fn draw_keymap(f: &mut Frame, app: &App) {
     // does something else.
     let sections = if app.rail.focused && app.rail.shown {
         keys::rail_keymap()
+    } else if app.panel_focused && app.panel && app.projects_open {
+        keys::catalog_keymap()
     } else {
         keys::keymap(app.workspace)
     };
@@ -7540,7 +7664,13 @@ mod tests {
         let mut a = app();
         a.panel = true;
         a.projects = names.iter().map(|n| catalogued(n)).collect();
-        a.current_project = current.map(|(n, how)| (n.to_string(), how));
+        a.current_project = current.map(|(n, how)| crate::tui::app::Current {
+            // `catalogued` uses the name as the id, so a fixture that names a
+            // project names its row.
+            id: n.to_string(),
+            name: n.to_string(),
+            how,
+        });
         a
     }
 
@@ -7563,6 +7693,34 @@ mod tests {
             .find(|l| l.contains('▸') && l.contains("jod"))
             .is_some();
         assert!(marked, "the current project is not marked: {screen}");
+    }
+
+    /// Two checkouts can have the same directory name — the catalog knows it,
+    /// and `/project untrack` already refuses to guess between them. The panel
+    /// used to mark the current project by comparing names, so both rows got
+    /// the `▸` and the box said two different repositories were the one the
+    /// next sentence would land in. That is the one question it exists to
+    /// answer, so it must name a row rather than a word.
+    #[test]
+    fn two_projects_of_the_same_name_do_not_both_read_as_current() {
+        let mut a = app();
+        a.panel = true;
+        let mut work = catalogued("api");
+        work.id = "work-api".into();
+        work.path = std::path::PathBuf::from("/home/reljod/work/api");
+        let mut side = catalogued("api");
+        side.id = "side-api".into();
+        side.path = std::path::PathBuf::from("/home/reljod/side/api");
+        a.projects = vec![work, side];
+        a.current_project = Some(crate::tui::app::Current {
+            id: "side-api".into(),
+            name: "api".into(),
+            how: How::Inferred,
+        });
+
+        let screen = rendered(&a, 140, 30);
+        let marked = screen.lines().filter(|l| l.contains('▸') && l.contains("api")).count();
+        assert_eq!(marked, 1, "both rows read as the current project:\n{screen}");
     }
 
     /// A carried project is the one worth a glance before an agent starts, so
@@ -7613,6 +7771,107 @@ mod tests {
         assert!(screen.contains(CATALOG_REMEDY), "{screen}");
     }
 
+    /// What the last frame drew, for the tests that need the catalog's own
+    /// rects rather than the characters in them.
+    fn panel_hits(a: &App, w: u16, h: u16) -> PanelHits {
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap();
+        let mut out = Painted::default();
+        terminal.draw(|f| out = draw(f, a)).unwrap();
+        out.panel
+    }
+
+    /// A catalog longer than its box used to be rendered whole into a paragraph
+    /// the box then clipped: the rows past the bottom were on no screen, named
+    /// by nothing, and reachable by no key. With a cursor in the box that is
+    /// worse than invisible — the cursor could sit on a row nothing drew.
+    ///
+    /// So the box windows around the cursor, and says how many it is leaving
+    /// out. A list that silently ends is a list you believe you have read.
+    #[test]
+    fn a_catalog_taller_than_its_box_follows_the_cursor_and_counts_the_rest() {
+        let mut a = app();
+        a.panel = true;
+        a.projects = (0..20)
+            .map(|i| catalogued(&format!("project-{i:02}")))
+            .collect();
+        a.focus_catalog();
+
+        // The last row, which is the one the old renderer could never show.
+        a.project_selected = Some("project-19".into());
+        let screen = rendered(&a, 140, 30);
+        assert!(
+            screen.contains("project-19"),
+            "the cursor is on a row the box did not draw:\n{screen}"
+        );
+        assert!(
+            !screen.contains("project-00"),
+            "the window did not move at all:\n{screen}"
+        );
+        assert!(
+            screen.contains("more"),
+            "the box dropped rows without saying so:\n{screen}"
+        );
+    }
+
+    /// The cursor and the current project are two different facts, and a row
+    /// that is both must still say both — otherwise pointing at another project
+    /// looks like having switched to it.
+    #[test]
+    fn the_cursor_is_drawn_apart_from_the_current_project() {
+        let mut a = with_catalog(&["tetris", "zephyr"], Some(("tetris", How::Inferred)));
+        a.focus_catalog();
+        a.project_selected = Some("zephyr".into());
+        let screen = rendered(&a, 140, 30);
+        let row = |name: &str| {
+            screen
+                .lines()
+                .find(|l| l.contains(name))
+                .unwrap_or_default()
+                .to_string()
+        };
+        assert!(
+            row("zephyr").contains('›'),
+            "the cursor is not on the row it is on: {}",
+            row("zephyr")
+        );
+        assert!(
+            row("tetris").contains('▸'),
+            "the current project lost its mark to the cursor: {}",
+            row("tetris")
+        );
+    }
+
+    /// A click carries a column and a row and nothing else, so the frame that
+    /// drew the catalog is what says which project was under it.
+    #[test]
+    fn every_drawn_project_row_is_one_a_click_can_name() {
+        let mut a = with_catalog(&["tetris", "zephyr"], Some(("tetris", How::Inferred)));
+        a.focus_catalog();
+        let hits = panel_hits(&a, 140, 30);
+        let area = hits.catalog.expect("the catalog was drawn");
+        assert_eq!(hits.projects.len(), 2, "{:?}", hits.projects);
+        for hit in &hits.projects {
+            assert_eq!(
+                hits.project_at(area.x + 4, hit.row),
+                Some(hit.id.as_str()),
+                "the row it drew is not the row it resolves"
+            );
+        }
+        // The border rows belong to no project, or a click on the box's edge
+        // would move the cursor to whatever happened to be nearest.
+        assert_eq!(hits.project_at(area.x + 4, area.y), None);
+    }
+
+    /// A catalog that is not on screen must resolve no clicks at all, or a tap
+    /// on the chat would land on a project drawn by an earlier frame.
+    #[test]
+    fn a_collapsed_catalog_resolves_no_clicks() {
+        let mut a = with_catalog(&["tetris"], None);
+        a.projects_open = false;
+        assert!(panel_hits(&a, 140, 30).catalog.is_none());
+    }
+
     /// The sessions list is how a running fleet is watched. A long catalog must
     /// not push it off the panel.
     #[test]
@@ -7627,11 +7886,28 @@ mod tests {
     }
 
     /// Below a certain height there is no honest room for a third box, and
-    /// squeezing one in costs the sessions list its last row.
+    /// squeezing one in costs the sessions list its last row. That applies to
+    /// the *collapsed* catalog, which is a one-line reminder nobody asked for.
     #[test]
-    fn a_short_panel_drops_the_catalog_rather_than_squeezing_it() {
-        let a = with_catalog(&["tetris"], None);
+    fn a_short_panel_drops_a_collapsed_catalog_rather_than_squeezing_it() {
+        let mut a = with_catalog(&["tetris"], None);
+        a.projects_open = false;
         assert_eq!(projects_height(&a, 10), 0);
+    }
+
+    /// An *opened* catalog is never nothing, however short the panel is. This
+    /// used to return zero below twelve rows whatever the state was, so on a
+    /// short terminal `Ctrl-P` flipped a flag nothing rendered: the key did
+    /// nothing, said nothing, and gave no reason — the same failure the key had
+    /// already been fixed for once, one state further out.
+    #[test]
+    fn an_opened_catalog_keeps_a_box_on_a_short_panel() {
+        let a = with_catalog(&["tetris"], None);
+        assert!(a.projects_open);
+        assert!(
+            projects_height(&a, 10) >= 3,
+            "an opened catalog rendered as nothing on a ten-row panel"
+        );
     }
 
     // ---- dictation ----
@@ -11967,32 +12243,33 @@ mod tests {
     }
 
     /// Regression, from a **cold start** — the state every user is in and the
-    /// one precondition the older test set away. `Ctrl-G d` is advertised in
-    /// the workspace menu as `projects · show or hide the catalog`, and the
-    /// catalog draws inside the side panel, so while the panel was shut the key
-    /// flipped a flag that rendered nothing and said nothing about why.
+    /// one precondition the older test set away. The projects key has to open
+    /// the panel it draws inside, or it flips a flag that renders nothing and
+    /// says nothing about why.
+    ///
+    /// The key is `Ctrl-P` now, and it takes the keyboard as well as opening
+    /// the box, so the assertion is both halves: the catalog is on screen, and
+    /// the bar says whose keys are in force.
     #[test]
     fn the_projects_key_shows_the_catalog_from_a_cold_start() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         let mut a = app();
         assert!(!a.panel, "a cold start has the panel shut");
-        let mut thread = crate::tui::Thread::default();
         crate::tui::on_key(
             &mut a,
-            &mut thread,
-            KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL),
+            &mut crate::tui::Thread::default(),
+            KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
             20,
         );
-        crate::tui::on_key(
-            &mut a,
-            &mut thread,
-            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
-            20,
-        );
+        assert!(a.panel && a.projects_open && a.panel_focused);
         let screen = rendered(&a, 120, 30);
         assert!(
             screen.contains("projects"),
             "the projects key drew nothing at all:\n{screen}"
+        );
+        assert!(
+            screen.contains("manager"),
+            "the catalog has the keyboard and the bar does not say so:\n{screen}"
         );
     }
 
