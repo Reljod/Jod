@@ -1013,6 +1013,52 @@ mod tests {
         (store, convo.id)
     }
 
+    /// The one handle that is never ambiguous.
+    ///
+    /// Two checkouts whose directories share a name are catalogued under one
+    /// name, and every command that resolves by name then refuses — including
+    /// `jod project restore`, which the fleet offers as the way to undo an
+    /// untrack. `projects.path` is UNIQUE, so a path always answers with one
+    /// project or none.
+    #[test]
+    fn a_project_is_found_by_its_exact_path_however_its_name_is_spelled() {
+        let store = Store::in_memory().unwrap();
+        let base = format!("/tmp/jod-at-path-{}", std::process::id());
+        let one = format!("{base}/one/web");
+        let two = format!("{base}/two/web");
+        std::fs::create_dir_all(&one).unwrap();
+        std::fs::create_dir_all(&two).unwrap();
+        let first = store.add_project(NewProject::at(&one)).unwrap();
+        let second = store.add_project(NewProject::at(&two)).unwrap();
+        assert_eq!(first.name, second.name, "the premise: one name, two rows");
+
+        assert_eq!(
+            store.project_at_path(&one).unwrap().map(|p| p.id),
+            Some(first.id.clone()),
+        );
+        assert_eq!(
+            store.project_at_path(&two).unwrap().map(|p| p.id),
+            Some(second.id),
+        );
+
+        // A trailing slash is the same directory, or a path copied out of a
+        // shell would miss a row that is plainly there.
+        assert_eq!(
+            store.project_at_path(format!("{one}/")).unwrap().map(|p| p.id),
+            Some(first.id),
+            "the path is normalised, as it was on the way in",
+        );
+
+        // Exact, not the longest-prefix walk `project_for_path` does: a file
+        // inside a checkout is not the checkout, and a parent of one is not
+        // either.
+        assert!(store.project_at_path(format!("{one}/src/main.rs")).unwrap().is_none());
+        assert!(store.project_at_path(&base).unwrap().is_none());
+        assert!(store.project_at_path("/tmp/nothing-here").unwrap().is_none());
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
     // ---- matching -------------------------------------------------------
 
     #[test]

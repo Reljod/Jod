@@ -1870,11 +1870,28 @@ async fn perform(
                     [only] => match store
                         .set_project_state(&only.id, jod_core::projects::State::Archived)
                     {
-                        Ok(()) => format!(
-                            "{} untracked — off the fleet with its works, and out of \
-                             inference. `jod project restore {}` puts it back",
-                            only.name, only.name
-                        ),
+                        Ok(()) => {
+                            // The undo names the path when the name is shared,
+                            // because otherwise this sentence offers a command
+                            // that refuses: two checkouts called `web` both
+                            // answer to `web`, and `jod project restore web`
+                            // cannot pick between them. A remedy that does not
+                            // run is worse than none — it reads as reversible.
+                            let shared = store
+                                .projects_by_name(&only.name)
+                                .map(|found| found.len() > 1)
+                                .unwrap_or(false);
+                            let handle = if shared {
+                                only.path.display().to_string()
+                            } else {
+                                only.name.clone()
+                            };
+                            format!(
+                                "{} untracked — off the fleet with its works, and out of \
+                                 inference. `jod project restore {handle}` puts it back",
+                                only.name
+                            )
+                        }
                         Err(e) => format!("{} not untracked: {e}", only.name),
                     },
                     [] => format!(

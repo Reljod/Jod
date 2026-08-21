@@ -3271,6 +3271,16 @@ fn project_command(jod: &Jod, what: ProjectCommand) -> Result<()> {
     // command who can say which, which is exactly why refusing is the right
     // answer here and the wrong one inside `settle_project`.
     let find = |name: &str| -> Result<jod_core::projects::Project> {
+        // A path first, because `projects.path` is UNIQUE and a name is not.
+        // Without it the refusal below was a dead end: it asked for the one you
+        // meant "exactly" when both are spelled exactly the same, and the fleet
+        // offered `jod project restore <name>` as the way to undo an untrack
+        // that this command then refused to perform.
+        if name.starts_with('/') {
+            if let Some(project) = store.project_at_path(name)? {
+                return Ok(project);
+            }
+        }
         let found = store.projects_by_name(name)?;
         match found.as_slice() {
             [] => bail!("no project called `{name}` — `jod project ls` lists them"),
@@ -3283,7 +3293,8 @@ fn project_command(jod: &Jod, what: ProjectCommand) -> Result<()> {
                     .join(", ");
                 bail!(
                     "`{name}` is the name of {} projects — {candidates}. \
-                     Name the one you mean exactly.",
+                     Pass the full path of the one you mean; they share a name, \
+                     so nothing else tells them apart.",
                     several.len()
                 )
             }
