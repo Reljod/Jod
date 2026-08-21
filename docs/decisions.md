@@ -3485,3 +3485,45 @@ runs keep taking the tree's word alone — a closed work deliberately stops
 claiming to be running with something alive underneath it, and the roster cannot
 see that. Second-guessing it in the browser would put the two surfaces into
 disagreement about a fact only one of them can compute.
+
+## The fold belongs where the flatten does
+
+`condense` was written in `cli/src/tui/fleet.rs`, because the fleet screen was
+the only thing that needed it. Then the browser needed the same two levels, and
+there were two honest-looking options: port the fold to TypeScript, or move it
+down beside the flatten.
+
+Porting it would have been quicker and wrong. The fold is not a rendering
+choice — it decides which rows exist, which work a row belongs to, which run a
+row's verbs act on, and it carries a stall up from a run onto the agent that
+owns it. Every one of those is an answer about the fleet, not about a screen,
+and two copies of it would be two answers to "what is this repository doing"
+that agree right up until somebody fixes one of them. That is the same drift
+`Store::forest_of` is arranged to make impossible, and `/v1/fleet` exists to
+extend that guarantee across the wire; a hand-written copy on the far side
+would have quietly cancelled it.
+
+So `tree::condense` sits next to `tree::forest_of`, `Store::fleet` is the two
+queries and the fold as one answer, `jod tui` re-exports it under the name it
+already used, and the route serialises it. The TUI keeps its own `TreeState`,
+its cursor and its guide column, which genuinely are about a screen.
+
+What the wire gained is `run_of`. The fold removes run rows, so a row can no
+longer point at the process its verbs act on, and a browser that guessed —
+newest descendant, or a name ending in `-manager` — would be reimplementing the
+fold's judgement badly. The server already decided; it says so.
+
+## A fold that asks "have I seen a project" files strays under the wrong one
+
+`forest_of` emits every project first and the works with a null `project_id`
+after all of them. The fold decided whether a work belonged to a repository by
+asking whether a project had been seen yet — which is true for every loose
+work, because one always has. So a work opened before projects were recorded
+had its agents drawn under whichever repository happened to come last, and the
+screen said an old job was work in progress on a repository it had nothing to
+do with.
+
+The node already knew: a loose work has no `parent`. Reading it off the row is
+both correct and shorter than tracking it. The general shape — when a walk
+needs to know something about the item in front of it, prefer asking the item
+over remembering what came before.

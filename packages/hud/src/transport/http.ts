@@ -9,10 +9,18 @@ import type {
   SpawnRequest,
   StoredRun,
 } from "../types";
-import type { Scope, Transport, TransportHandlers, WorkDeletion } from "./index";
+import { fleetKey } from "../types";
+import { NO_FLEET } from "./index";
+import type { Fleet, Scope, Transport, TransportHandlers, WorkDeletion } from "./index";
 
 /** How many events one backfill request asks for. The route caps its own page. */
 export const EVENT_PAGE = 500;
+
+/** `/v1/fleet`'s body, exactly as `api::workspaces::FleetPage` serialises it. */
+interface FleetPage {
+  nodes?: FleetNode[];
+  run_of?: Record<string, string>;
+}
 
 /**
  * Talks to `jod-api` over REST + SSE.
@@ -154,18 +162,43 @@ export class HttpTransport implements Transport {
   }
 
   /**
-   * The fleet tree, straight from `Store::forest_of` — the same flatten the
-   * TUI renders, with no second implementation on either side of the wire.
+   * The fleet tree, straight from `Store::fleet` — the same rows the TUI
+   * renders, folded by the same function, with no second implementation on
+   * either side of the wire.
+   *
+   * Both payload shapes are accepted. The route answers with
+   * `{nodes, run_of}` now; it used to answer with a bare array of rows, and a
+   * daemon older than this build still does. Reading the array as an object
+   * would not fail loudly — `body.nodes` is simply `undefined` — so the fleet
+   * would go quietly empty against a server that was answering perfectly well.
    *
    * A failure is an empty fleet rather than a thrown error. This panel sits
    * beside the live stream and must not be able to take the HUD down with it;
-   * an older daemon without the route is exactly the case that would.
+   * an older daemon without the route at all is exactly the case that would.
    */
-  async fleet(): Promise<FleetNode[]> {
+  async fleet(): Promise<Fleet> {
     try {
-      return await this.json<FleetNode[]>("/v1/fleet");
+      const page = await this.json<FleetNode[] | FleetPage>("/v1/fleet");
+      // An unfolded forest still carries its runs as rows, so the map it did
+      // not send can be read off them: a run row stands for itself. Built here
+      // rather than allowed for in the panel, because normalising the wire into
+      // the shape the app expects is exactly this layer's job — and a panel
+      // that has to know which kind of server answered is a panel that will
+      // eventually get it wrong.
+      if (Array.isArray(page)) {
+        return {
+          nodes: page,
+          runOf: new Map(
+            page.filter((n) => n.kind === "run").map((n) => [fleetKey(n.id), n.id.id]),
+          ),
+        };
+      }
+      return {
+        nodes: page?.nodes ?? [],
+        runOf: new Map(Object.entries(page?.run_of ?? {})),
+      };
     } catch {
-      return [];
+      return NO_FLEET;
     }
   }
 

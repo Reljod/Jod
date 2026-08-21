@@ -14,7 +14,7 @@
 //! pressed enter.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::error::Result;
 use crate::store::Store;
@@ -738,6 +738,286 @@ impl Store {
     }
 }
 
+// ─── the fold ────────────────────────────────────────────────────────────────
+
+/// The forest folded to a roster, and what the fold took with it.
+///
+/// It lives here rather than in the TUI that first needed it, because both
+/// surfaces draw this shape now. `/v1/fleet` serves it and the browser renders
+/// it unchanged, which is the same rule [`Store::forest_of`] is under: a client
+/// that draws the fleet is drawing the TUI's screen, and a second fold on the
+/// far side of the wire is how the two would come to disagree about what a
+/// repository is doing.
+pub struct Condensed {
+    /// The rows the fleet draws: projects, and the agents inside them.
+    pub nodes: Vec<Node>,
+    /// Which work each remaining row belongs to.
+    ///
+    /// The work rows are gone from the tree, so the keys that act on a work —
+    /// `T`, which opens its message bus — can no longer climb to one. This is
+    /// how they still find it, and it is built from the forest *before* the
+    /// fold, where the answer is still written down.
+    pub works: HashMap<NodeId, String>,
+    /// The run each agent's row answers for — the one still going if there is
+    /// one, otherwise the last one it took.
+    ///
+    /// `s`, `a` and `t` act on a process, and the row that held one was the run
+    /// row this fold removes. The agent's own row inherits the verbs, which is
+    /// also the reading that matches the screen: the row says an agent is
+    /// running, so stopping it should stop that.
+    pub run_of: HashMap<NodeId, String>,
+    /// The ids of the runs the fold swallowed.
+    ///
+    /// The pane below the tree holds the runs the tree cannot show, and it used
+    /// to work that out by looking for a run's node. There are no run rows any
+    /// more, so without this list every run in the fleet would read as loose and
+    /// the pane would become a second copy of the whole flat list.
+    pub runs: HashSet<String>,
+}
+
+impl Condensed {
+    /// [`Condensed::run_of`], keyed the way a client keys a row.
+    ///
+    /// `NodeId` is a struct, and a JSON object's keys are strings, so the map
+    /// cannot go on the wire as it stands. `"<kind_tag>:<id>"` is the key the
+    /// browser already builds to hold a selection across a rebuild, so the
+    /// answer arrives in the form the reader is going to look it up by.
+    ///
+    /// Ordered, so the payload is stable between two identical reads and a
+    /// diff of two captures is about the fleet rather than about hashing.
+    pub fn run_by_key(&self) -> BTreeMap<String, String> {
+        self.run_of
+            .iter()
+            .map(|(id, run)| (format!("{}:{}", id.kind_tag, id.id), run.clone()))
+            .collect()
+    }
+}
+
+/// Fold the forest to the two levels the fleet reads as a roster.
+///
+/// A project keeps its manager and gains every session under every one of its
+/// works, all at the same level, in the order the works came back. Works and
+/// runs are dropped, and a session that spawned children sits beside them
+/// rather than above them — the fleet answers "who is on this repository",
+/// which is one list, not a hierarchy.
+///
+/// Nothing on it becomes unreachable. A run is inside the session that started
+/// it, so `⏎` on the session and the transcript has it; the work's bus is still
+/// one `T` away through [`Condensed::works`]; and what a run was *saying* — the
+/// stall, the status of the last one — is carried up onto the session's own
+/// row, because a wedged agent that says so only on a row three levels down is
+/// a wedged agent nobody sees.
+///
+/// Two headings survive the fold:
+///
+/// - A **work with no project**, which becomes a top-level row of its own.
+///   Those are the old ones with a null `project_id`; promoting their sessions
+///   to the top level would leave them loose on the screen with nothing saying
+///   what they belong to.
+/// - A **closed** work, which stays a heading under its project. `z` exists to
+///   show the archives, and flattening them in would leave a project holding a
+///   pile of finished agents with nothing marking which are over.
+pub fn condense(nodes: &[Node], closed: &HashSet<NodeId>) -> Condensed {
+    let mut out: Vec<Node> = Vec::new();
+    let mut works: HashMap<NodeId, String> = HashMap::new();
+    let mut runs: HashSet<String> = HashSet::new();
+    let mut run_of: HashMap<NodeId, String> = HashMap::new();
+    // The sessions whose chosen run is still going, so a finished run that
+    // comes after one does not take the row's verbs off a live process.
+    let mut live: HashSet<NodeId> = HashSet::new();
+    // Ids already emitted. `show_closed` asks core twice and the second forest
+    // repeats every project and manager row of the first, so without this a
+    // repository with one live work and one closed one is drawn twice.
+    let mut seen: HashSet<NodeId> = HashSet::new();
+    let mut project: Option<NodeId> = None;
+    // Where the sessions being read now hang, and how deep that row is.
+    let mut under: Option<(NodeId, usize)> = None;
+    let mut work: Option<String> = None;
+    // The rows a run's news has to reach: the conversation that owns it, by
+    // index into `out`. Jod and a manager are in here beside the sessions,
+    // because all three are conversations that hold runs.
+    let mut owner_at: HashMap<NodeId, usize> = HashMap::new();
+
+    for node in nodes {
+        match node.kind {
+            // Jod is a conversation holding runs, like a manager or a session,
+            // so his row collects their news the same way. He heads nothing —
+            // the repositories sit beside him, not under him — so `under` is
+            // deliberately untouched and the cursor never descends into him.
+            NodeKind::Main => {
+                if seen.insert(node.id.clone()) {
+                    owner_at.insert(node.id.clone(), out.len());
+                    out.push(Node {
+                        parent: None,
+                        depth: 0,
+                        ..node.clone()
+                    });
+                }
+            }
+            NodeKind::Project => {
+                project = Some(node.id.clone());
+                under = Some((node.id.clone(), 0));
+                work = None;
+                match out.iter_mut().find(|row| row.id == node.id) {
+                    // The same project from the archive query. Its counts are
+                    // over the *closed* works, so they add to the live ones
+                    // rather than replacing them.
+                    Some(row) => {
+                        row.cards += node.cards;
+                        row.blocked += node.blocked;
+                        row.running |= node.running;
+                    }
+                    None => {
+                        seen.insert(node.id.clone());
+                        out.push(Node {
+                            parent: None,
+                            depth: 0,
+                            ..node.clone()
+                        });
+                    }
+                }
+            }
+            NodeKind::Manager => {
+                if seen.insert(node.id.clone()) {
+                    owner_at.insert(node.id.clone(), out.len());
+                    out.push(Node {
+                        parent: project.clone(),
+                        depth: 1,
+                        ..node.clone()
+                    });
+                }
+            }
+            NodeKind::Work => {
+                work = Some(node.id.id.clone());
+                // Whether this work belongs to a repository is read off the
+                // node, not off whether a project has been seen. `forest_of`
+                // emits every project first and the works with a null
+                // `project_id` after all of them, so the running `project` is
+                // still the last repository read — and asking it would file a
+                // loose work's agents under a repository they have nothing to
+                // do with.
+                let loose = node.parent.is_none();
+                if loose {
+                    project = None;
+                }
+                let heading = loose || closed.contains(&node.id);
+                if !heading {
+                    under = project.clone().map(|id| (id, 0));
+                    continue;
+                }
+                let depth = usize::from(project.is_some());
+                under = Some((node.id.clone(), depth));
+                if seen.insert(node.id.clone()) {
+                    works.insert(node.id.clone(), node.id.id.clone());
+                    out.push(Node {
+                        parent: project.clone(),
+                        depth,
+                        ..node.clone()
+                    });
+                }
+            }
+            NodeKind::Session => {
+                let Some((parent, depth)) = under.clone() else {
+                    continue;
+                };
+                if !seen.insert(node.id.clone()) {
+                    continue;
+                }
+                if let Some(work) = &work {
+                    works.insert(node.id.clone(), work.clone());
+                }
+                owner_at.insert(node.id.clone(), out.len());
+                out.push(Node {
+                    parent: Some(parent),
+                    depth: depth + 1,
+                    ..node.clone()
+                });
+            }
+            // Dropped as a row, and read as news about the conversation above
+            // it. A stall is the whole reason the fleet is worth looking at,
+            // and it is a fact core only ever writes on a run.
+            NodeKind::Run => {
+                runs.insert(node.id.id.clone());
+                let Some(parent) = node.parent.as_ref().and_then(|id| owner_at.get(id)) else {
+                    continue;
+                };
+                let row = &mut out[*parent];
+                // The longest silence, not the newest: an agent with one wedged
+                // run and one chatty one is wedged.
+                if let Some(silent_for) = node.stalled_for_ms {
+                    row.stalled_for_ms = Some(row.stalled_for_ms.unwrap_or(0).max(silent_for));
+                }
+                // The newest run's ending, so a session whose last run failed
+                // wears the failure. Runs arrive oldest first, so the last one
+                // written wins. Only while the session itself is idle — a
+                // session with something running is running, whatever the run
+                // before it did.
+                if !row.running && !node.running {
+                    row.status = node.status.clone();
+                }
+                let owner = row.id.clone();
+                if node.running {
+                    run_of.insert(owner.clone(), node.id.id.clone());
+                    live.insert(owner);
+                } else if !live.contains(&owner) {
+                    run_of.insert(owner, node.id.id.clone());
+                }
+            }
+        }
+    }
+
+    // The shape that is left, rather than the one core described: a session
+    // that had runs under it is now a leaf, and a project whose only work was
+    // dropped has children it did not have before.
+    for at in 0..out.len() {
+        out[at].has_children = out
+            .get(at + 1)
+            .is_some_and(|next| next.depth > out[at].depth);
+    }
+    Condensed {
+        nodes: out,
+        works,
+        run_of,
+        runs,
+    }
+}
+
+impl Store {
+    /// The fleet as a screen draws it: the forest, folded.
+    ///
+    /// The queries and the fold are here rather than in each caller because
+    /// they are one answer, and because there are now two surfaces asking it.
+    /// Also returned: which works are archives, which the caller needs to know
+    /// to draw one shut and which a [`Node`] cannot say — it carries no state,
+    /// and inferring one from a label would be guessing.
+    ///
+    /// **`Filter::All` means two queries here, not one.** `forest_of(All)`
+    /// returns the live and closed works interleaved; this asks twice instead,
+    /// because the archives belong below the live rows and core's own ordering
+    /// already puts them there. Re-sorting the single answer afterwards would
+    /// be this function having an opinion about where a work goes.
+    ///
+    /// [`Filter::Live`] is the cheaper path *and* the default, because a fleet
+    /// that opens as a list of everything ever done is one people stop reading.
+    pub fn fleet(&self, filter: Filter) -> Result<(Condensed, HashSet<NodeId>)> {
+        let mut nodes = match filter {
+            Filter::Closed => Vec::new(),
+            _ => self.forest_of(Filter::Live)?,
+        };
+        let mut closed = HashSet::new();
+        if matches!(filter, Filter::All | Filter::Closed) {
+            let archived = self.forest_of(Filter::Closed)?;
+            for node in &archived {
+                if node.kind == NodeKind::Work {
+                    closed.insert(node.id.clone());
+                }
+            }
+            nodes.extend(archived);
+        }
+        Ok((condense(&nodes, &closed), closed))
+    }
+}
+
 /// The one line a node shows: what was last said, or which tool was last
 /// called.
 ///
@@ -1282,6 +1562,107 @@ mod tests {
         assert_eq!(nodes[0].kind, NodeKind::Work, "{nodes:?}");
         assert_eq!(nodes[0].depth, 0);
         assert_eq!(nodes[0].parent, None);
+    }
+
+    // ─── the fold ────────────────────────────────────────────────────────────
+
+    /// Jod survives the fold as a top-level row, and his runs fold into him.
+    ///
+    /// The fold drops every run row, so without an arm of his own he would be
+    /// dropped too — the fleet would lose the row for the conversation every
+    /// instruction arrives in, and the amber tier with it.
+    #[test]
+    fn the_fold_keeps_jod_and_reads_his_runs_onto_his_row() {
+        let s = store();
+        let main = s.main_conversation(HarnessKind::ClaudeCode, "/tmp").unwrap();
+        run_for(&s, &main, "main-run", "running");
+
+        let folded = condense(&s.forest().unwrap(), &HashSet::new());
+
+        assert_eq!(folded.nodes.len(), 1, "one row, no run beneath: {:?}", folded.nodes);
+        assert_eq!(folded.nodes[0].kind, NodeKind::Main);
+        assert_eq!(folded.nodes[0].depth, 0);
+        assert!(!folded.nodes[0].has_children);
+        assert_eq!(
+            folded.run_of.get(&NodeId::main(&main)).map(String::as_str),
+            Some("main-run"),
+            "his row answers for the run the fold removed"
+        );
+        assert!(folded.runs.contains("main-run"), "and the run is accounted for");
+    }
+
+    /// A manager's runs fold onto its row the same way, so the row that was
+    /// unopenable before this branch stays openable after the fold.
+    #[test]
+    fn the_fold_keeps_a_manager_and_the_run_it_answers_for() {
+        let s = store();
+        let dir = format!("/tmp/jod-fold-mgr-{}", std::process::id());
+        std::fs::create_dir_all(&dir).unwrap();
+        let project = s
+            .add_project(crate::projects::NewProject::at(&dir).named("tetris"))
+            .unwrap();
+        let (manager, _) = s
+            .manager_conversation(&project.id, HarnessKind::ClaudeCode)
+            .unwrap();
+        run_for(&s, &manager, "mgr-run", "running");
+
+        let folded = condense(&s.forest().unwrap(), &HashSet::new());
+        let row = folded
+            .nodes
+            .iter()
+            .find(|n| n.kind == NodeKind::Manager)
+            .unwrap_or_else(|| panic!("no manager row: {:?}", folded.nodes));
+
+        assert_eq!(row.depth, 1, "under its project");
+        assert_eq!(
+            folded.run_of.get(&NodeId::manager(&manager)).map(String::as_str),
+            Some("mgr-run")
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A work with no project keeps its own heading, and its agents stay under
+    /// it.
+    ///
+    /// `forest_of` emits every project first and the works with a null
+    /// `project_id` after all of them, so a fold that decides "does this work
+    /// belong to a repository" by asking whether a project has been *seen* says
+    /// yes for every loose work — and files its agents under whichever
+    /// repository happened to come last. Read off the node instead.
+    #[test]
+    fn a_loose_work_keeps_its_own_heading_after_a_project() {
+        let s = store();
+        let dir = format!("/tmp/jod-fold-loose-{}", std::process::id());
+        std::fs::create_dir_all(&dir).unwrap();
+        let project = s
+            .add_project(crate::projects::NewProject::at(&dir).named("tetris"))
+            .unwrap();
+        let owned = s
+            .create_work_in("port the parser", Some(&project.id))
+            .unwrap();
+        session(&s, &owned.id, None, "engineer");
+
+        let loose = s.create_work("an old job").unwrap();
+        s.set_work_title(&loose.id, "an old job").unwrap();
+        let stray = session(&s, &loose.id, None, "stray");
+
+        let folded = condense(&s.forest().unwrap(), &HashSet::new());
+        let row = folded
+            .nodes
+            .iter()
+            .find(|n| n.id == NodeId::session(&stray))
+            .unwrap_or_else(|| panic!("no stray row: {:?}", folded.nodes));
+
+        assert_eq!(
+            row.parent,
+            Some(NodeId::work(&loose.id)),
+            "the stray agent hangs from its own work, not from tetris: {:?}",
+            folded.nodes
+        );
+        assert_eq!(row.depth, 1, "and at the top level's child depth");
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// A project with no manager yet is still a project. It gets one on the

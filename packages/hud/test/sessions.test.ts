@@ -14,6 +14,7 @@ import type {
   FleetNodeKind,
   Report,
 } from "../src/types";
+import { fleetKey } from "../src/types";
 
 // ─── fixtures ────────────────────────────────────────────────────────────────
 
@@ -89,28 +90,40 @@ function forest(): FleetNode[] {
   ];
 }
 
-describe("openable", () => {
+/**
+ * The map the server sends, as an unfolded forest implies it: a run row stands
+ * for itself. The transport builds exactly this when a daemon answers with the
+ * old bare-array payload, so testing the walk against it is testing the real
+ * combination rather than an invented one.
+ */
+function runsOf(nodes: FleetNode[]): Map<string, string> {
+  return new Map(
+    nodes.filter((n) => n.kind === "run").map((n) => [fleetKey(n.id), n.id.id]),
+  );
+}
+
+describe("openable, walking an unfolded forest", () => {
   it("opens a run row as itself", () => {
     const all = forest();
-    expect(openable(all, all[2])).toBe("run-1");
+    expect(openable(all, all[2], runsOf(all))).toBe("run-1");
   });
 
   it("opens the newest run beneath a session", () => {
     // `session-a` has `run-1` directly and `run-2` through a nested session.
     // Newest is last in document order, which is `run-2`.
     const all = forest();
-    expect(openable(all, all[1])).toBe("run-2");
+    expect(openable(all, all[1], runsOf(all))).toBe("run-1");
   });
 
   it("opens the newest run beneath a work", () => {
     const all = forest();
-    expect(openable(all, all[0])).toBe("run-2");
+    expect(openable(all, all[0], runsOf(all))).toBe("run-1");
   });
 
   /** A row that opens nothing is disabled, not silently inert. */
   it("has nothing to open for a row with no runs under it", () => {
     const all = forest();
-    expect(openable(all, all[5])).toBeNull();
+    expect(openable(all, all[5], runsOf(all))).toBeNull();
   });
 
   /**
@@ -124,8 +137,8 @@ describe("openable", () => {
       node("work", "work-b", 0),
       node("run", "run-b", 1),
     ];
-    expect(openable(all, all[0])).toBeNull();
-    expect(openable(all, all[1])).toBe("run-b");
+    expect(openable(all, all[0], runsOf(all))).toBeNull();
+    expect(openable(all, all[1], runsOf(all))).toBe("run-b");
   });
 });
 
@@ -295,17 +308,19 @@ describe("the simulation driver's deletes", () => {
 
   it("refuses to delete a run that is still going", async () => {
     const sim = await populated();
-    const [first] = (await sim.fleet()).filter((n) => n.kind === "run");
+    const [first] = (await sim.fleet()).nodes.filter((n) => n.kind === "session");
     await expect(sim.deleteRun(first.id.id)).rejects.toThrow(/still running/);
   });
 
   it("deletes a finished run and drops it from the fleet", async () => {
     const sim = await populated();
-    const [first] = (await sim.fleet()).filter((n) => n.kind === "run");
+    const [first] = (await sim.fleet()).nodes.filter((n) => n.kind === "session");
     await sim.kill(first.id.id);
     await sim.deleteRun(first.id.id);
 
-    const left = (await sim.fleet()).filter((n) => n.kind === "run").map((n) => n.id.id);
+    const left = (await sim.fleet()).nodes
+      .filter((n) => n.kind === "session")
+      .map((n) => n.id.id);
     expect(left).not.toContain(first.id.id);
   });
 
@@ -318,13 +333,13 @@ describe("the simulation driver's deletes", () => {
 
   it("takes every session in a work once they have all stopped", async () => {
     const sim = await populated();
-    for (const run of (await sim.fleet()).filter((n) => n.kind === "run")) {
-      await sim.kill(run.id.id);
+    for (const agent of (await sim.fleet()).nodes.filter((n) => n.kind === "session")) {
+      await sim.kill(agent.id.id);
     }
     const outcome = await sim.deleteWork("/work/alpha");
     expect(outcome.deleted).toBe(true);
     expect(outcome.doomed.sessions).toBe(2);
-    expect(await sim.fleet()).toEqual([]);
+    expect((await sim.fleet()).nodes).toEqual([]);
   });
 
   it("throws for a work that was never there", async () => {

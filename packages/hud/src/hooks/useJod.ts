@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { WorldStore } from "../state/world";
-import type { Transport, TransportFactory, WorkDeletion } from "../transport";
+import type { Fleet, Transport, TransportFactory, WorkDeletion } from "../transport";
 import { createTransport, modeFromLocation } from "../transport/factory";
-import type { AgentSummary, FleetNode, HarnessInfo, SpawnRequest } from "../types";
+import { NO_FLEET } from "../transport";
+import type { AgentSummary, HarnessInfo, SpawnRequest } from "../types";
 
 /** How often the DOM panels re-render. The canvas is independent, at 60fps. */
 const PANEL_HZ = 10;
@@ -35,8 +36,12 @@ export interface JodApi {
   revision: number;
   transportLabel: string;
   harnesses: HarnessInfo[];
-  /** The fleet tree — works, sessions, runs. Empty until the first query. */
-  fleet: FleetNode[];
+  /**
+   * The fleet tree — the repositories and the agents in them, already folded
+   * by the server, plus the run each row stands for. Empty until the first
+   * query. → [`Fleet`]
+   */
+  fleet: Fleet;
   /**
    * The live driver, or null until it has been chosen.
    *
@@ -124,7 +129,7 @@ export function useJod(makeTransport?: TransportFactory): JodApi {
   const [transport, setTransport] = useState<Transport | null>(null);
   const [transportLabel, setTransportLabel] = useState("…");
   const [harnesses, setHarnesses] = useState<HarnessInfo[]>([]);
-  const [fleet, setFleet] = useState<FleetNode[]>([]);
+  const [fleet, setFleet] = useState<Fleet>(NO_FLEET);
   const [lastError, setLastError] = useState<string | null>(null);
   // Held in a ref rather than state: it is cleared and re-armed from inside the
   // envelope handler, which must not re-render for every event on the stream.
@@ -144,8 +149,8 @@ export function useJod(makeTransport?: TransportFactory): JodApi {
    */
   const pullFleet = useCallback(async () => {
     try {
-      const nodes = await transportRef.current?.fleet();
-      if (nodes) setFleet(nodes);
+      const next = await transportRef.current?.fleet();
+      if (next) setFleet(next);
     } catch {
       /* the tree keeps its last good shape; the next tick retries */
     }

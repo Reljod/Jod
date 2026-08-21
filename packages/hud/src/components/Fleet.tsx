@@ -11,6 +11,15 @@ import { SelectionBar } from "./SelectionBar";
 
 interface Props {
   nodes: FleetNode[];
+  /**
+   * The run each row's verbs act on, from the server's own fold.
+   *
+   * Clicking a row used to mean "find the newest run row beneath this one",
+   * which worked while the tree carried run rows. It does not any more:
+   * `jod_core::tree::condense` drops them and hands this over instead, so the
+   * row that *says* an agent is running is the row that opens it.
+   */
+  runOf: ReadonlyMap<string, string>;
   /** The selected *run*, shared with the rest of the HUD. */
   selectedId: string | null;
   /**
@@ -20,11 +29,9 @@ interface Props {
    * its own it is up to four seconds behind on the one fact people watch it
    * for. The roster behind this set is reconciled off the event stream within
    * about 400ms of a run starting or finishing, so it is what a row's pulse
-   * actually follows. Only run rows take it: a work, a session and a project
-   * each decide their own liveness on the Rust side for reasons this set cannot
-   * see — a closed work deliberately stops claiming to be running even with
-   * something alive underneath it — and second-guessing that here would put the
-   * two surfaces into disagreement.
+   * actually follows. Reached through the row's own run — see [`isLiveRow`] —
+   * so a heading keeps the tree's word alone and a closed work goes on
+   * declining to claim it is running.
    */
   liveRuns: ReadonlySet<string>;
   /** Open a run: select it and read it. */
@@ -35,13 +42,19 @@ interface Props {
 }
 
 /**
- * The fleet tree — works, the sessions under them, and the runs under those.
+ * The fleet tree — the repositories, and the agents inside them.
  *
- * The same forest `jod tui` draws, and not a second implementation of it:
- * `Store::forest_of` in `jod-core` does the flatten once, `GET /v1/fleet` hands
- * the result over unchanged, and this renders it. `depth` is the whole layout —
- * rows arrive in document order, each directly below its parent — so nothing
- * here rebuilds a hierarchy that already came flattened.
+ * The same tree `jod tui` draws, and not a second implementation of it:
+ * `jod-core` flattens the forest and folds it — `Store::forest_of`, then
+ * `tree::condense` — `GET /v1/fleet` hands the result over unchanged, and this
+ * renders it. `depth` is the whole layout: rows arrive in document order, each
+ * directly below its parent, so nothing here rebuilds a hierarchy that already
+ * came flattened, and nothing here folds one that already came folded.
+ *
+ * Two levels, not five. A work and a run are not rows — the fold drops them,
+ * because "who is working on this repository right now" was three expansions
+ * deep. Neither becomes unreachable: a run is inside the conversation that
+ * started it, and `runOf` is how a row still opens one.
  *
  * ## Why this panel and `Sessions` are both here
  *
@@ -59,11 +72,11 @@ interface Props {
  *
  * ## The twisty collapses; the row reads
  *
- * Two targets, because they are two intents. Clicking a row opens the newest
- * run beneath it in the trajectory — including on a work or a session row,
- * which is what somebody clicking "the thing that is running" means. Collapsing
- * is the twisty alone. When one target did both, every attempt to read a
- * session first folded it away.
+ * Two targets, because they are two intents. Clicking a row opens the run it
+ * stands for in the trajectory — including on a repository's row, which is what
+ * somebody clicking "the thing that is running" means. Collapsing is the twisty
+ * alone. When one target did both, every attempt to read a session first folded
+ * it away.
  *
  * ## Colour is rank, and only rank
  *
@@ -78,6 +91,7 @@ export function Fleet({
   nodes,
   selectedId,
   liveRuns,
+  runOf,
   onOpen,
   onDelete,
   canWrite,
@@ -85,24 +99,24 @@ export function Fleet({
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
   const seeded = useRef(false);
 
-  // Jod's row arrives folded, once, on the first tree that has one.
+  // Every repository arrives shut, once, on the first tree that has one.
   //
-  // Every instruction he has ever been given is a run in that one conversation
-  // — a real fleet had twenty-six under it — and unfolded they push every
-  // repository off the top of the panel. Nothing is hidden by this: his row
-  // still aggregates their liveness and still pulses while he is working, the
-  // twisty says there is more inside, and opening it opens the newest one. It
-  // is a fold, which is the idiom this tree already has, and not a cap.
+  // The same default `jod tui` opens on, and for its reason: with every agent
+  // in every repository on screen at once the fleet is a wall of rows and the
+  // one repository you came to look at is somewhere in it. Shut, the panel
+  // opens as the list of repositories and one click opens the one you want.
   //
-  // Seeded rather than filtered so it survives being reopened: once the user
-  // expands it, later polls must not fold it back up under them.
+  // Seeded rather than filtered so it survives being opened: once the user
+  // expands a project, later polls must not fold it back up under them. A
+  // repository that appears afterwards is left open, because it appeared while
+  // somebody was watching and folding it away would hide the new thing.
   useEffect(() => {
     if (seeded.current || nodes.length === 0) return;
     seeded.current = true;
-    const folded = nodes
-      .filter((n) => n.kind === "main" && n.has_children)
+    const shut = nodes
+      .filter((n) => n.kind === "project" && n.has_children)
       .map((n) => fleetKey(n.id));
-    if (folded.length > 0) setCollapsed((prev) => new Set([...prev, ...folded]));
+    if (shut.length > 0) setCollapsed((prev) => new Set([...prev, ...shut]));
   }, [nodes]);
 
   const visible = useMemo(() => hideUnder(nodes, collapsed), [nodes, collapsed]);
@@ -119,7 +133,11 @@ export function Fleet({
   const selection = useSelection(keys);
   const tiers = useMemo(() => tiersOf(nodes), [nodes]);
 
-  const running = nodes.filter((n) => isLiveRow(n, liveRuns)).length;
+  // Agents, not rows. A live session also makes its project's row live, and
+  // counting both would report two agents working where there is one.
+  const running = nodes.filter(
+    (n) => isAgentRow(n) && isLiveRow(n, liveRuns, runOf),
+  ).length;
 
   const toggle = (id: FleetNodeId) =>
     setCollapsed((prev) => {
@@ -143,10 +161,10 @@ export function Fleet({
         <ul className="fleet-tree">
           {visible.map((node) => {
             const key = fleetKey(node.id);
-            const target = openable(nodes, node);
+            const target = openable(nodes, node, runOf);
             const picked = selection.has(key);
             const tier = tiers.row.get(key);
-            const live = isLiveRow(node, liveRuns);
+            const live = isLiveRow(node, liveRuns, runOf);
             return (
               <li
                 key={key}
@@ -229,13 +247,29 @@ export function deletable(node: FleetNode): boolean {
 /**
  * Whether this row should draw as live right now.
  *
- * A run may be believed by two sources — the tree, which is a poll, and the
- * roster, which the event stream reconciles — so it takes either. Every other
- * kind of row takes the tree's word alone. → the `liveRuns` prop.
+ * Two sources, and either will do. The tree is a four-second poll, so a run
+ * that started two hundred milliseconds ago is running and the tree does not
+ * know yet; the roster behind `liveRuns` is reconciled off the event stream and
+ * does. → the `liveRuns` prop.
+ *
+ * The roster is consulted through the row's *own* run, which is what keeps this
+ * from contradicting the fold. A heading — a project, a closed work — holds no
+ * run, so it keeps the tree's word alone, and a closed work goes on declining
+ * to claim it is running even with something alive underneath it.
  */
-export function isLiveRow(node: FleetNode, liveRuns: ReadonlySet<string>): boolean {
-  if (node.kind !== "run") return node.running;
-  return node.running || liveRuns.has(node.id.id);
+export function isLiveRow(
+  node: FleetNode,
+  liveRuns: ReadonlySet<string>,
+  runOf: ReadonlyMap<string, string>,
+): boolean {
+  if (node.running) return true;
+  const run = runOf.get(fleetKey(node.id));
+  return run !== undefined && liveRuns.has(run);
+}
+
+/** The rows that stand for somebody working, as opposed to a heading. */
+export function isAgentRow(node: FleetNode): boolean {
+  return node.kind === "main" || node.kind === "manager" || node.kind === "session";
 }
 
 /**
@@ -266,36 +300,40 @@ export function humanMs(ms: number): string {
 /**
  * The run a click on this row should open, or null if there is none.
  *
- * A run row is itself. Every other row is the newest run anywhere beneath it,
- * which is what "show me what this is doing" means for a heading — the
- * alternative is a row that looks clickable and does nothing.
+ * Asked of the server rather than worked out here. This used to walk the rows
+ * beneath a heading looking for the newest run row, which was the only thing
+ * available while the tree carried them — and it is why a manager was
+ * unclickable for as long as one existed, since `forest_of` emitted that row as
+ * a permanent leaf with no run beneath it to find.
  *
- * This is unchanged, and it is the *tree* that changed under it. A manager was
- * unclickable here for as long as it existed, and the cause was not this
- * function: `Store::forest_of` emitted the row as a permanent leaf, so there
- * was never a run beneath one to find. Now a manager's runs hang from it the
- * way a session's do, and the same walk that always worked for a work finds
- * them. A manager that has genuinely never run still returns null, and the
- * button says why rather than going quiet. → [`hint`]
+ * `jod_core::tree::condense` decides it now, for every surface at once, and by
+ * a better rule than document position: the run still going if there is one,
+ * otherwise the last one the conversation took. A row that has never run
+ * anything still answers null, and the button says why rather than going quiet.
+ * → [`hint`]
  *
- * Newest by document position rather than by a timestamp, because a `FleetNode`
- * carries no clock. `Store::forest_of` emits each parent's children in the
- * order the tree holds them, so the last descendant is the one added most
- * recently. Exported for its test.
+ * A project answers for the whole repository beneath it: it holds no run of its
+ * own, so it takes the first one any row under it offers. Exported for its test.
  */
-export function openable(all: FleetNode[], row: FleetNode): string | null {
-  if (row.kind === "run") return row.id.id;
+export function openable(
+  all: FleetNode[],
+  row: FleetNode,
+  runOf: ReadonlyMap<string, string>,
+): string | null {
+  const own = runOf.get(fleetKey(row.id));
+  if (own) return own;
+  if (!row.has_children) return null;
 
   const start = all.indexOf(row);
   if (start === -1) return null;
-  let found: string | null = null;
   for (let i = start + 1; i < all.length; i++) {
     // Everything under a row is the rows after it that are deeper, up to the
     // next row at or above its own depth.
     if (all[i].depth <= row.depth) break;
-    if (all[i].kind === "run") found = all[i].id.id;
+    const run = runOf.get(fleetKey(all[i].id));
+    if (run) return run;
   }
-  return found;
+  return null;
 }
 
 /**

@@ -441,7 +441,10 @@ function ownTier(kind: FleetNodeKind): Tier | undefined {
  * every parent before its children, so the parent's rank is always already
  * known by the time a child asks for it.
  */
-export function tiersOf(nodes: readonly FleetNode[]): FleetTiers {
+export function tiersOf(
+  nodes: readonly FleetNode[],
+  runOf: ReadonlyMap<string, string> = new Map(),
+): FleetTiers {
   const row = new Map<string, Tier>();
   const run = new Map<string, Tier>();
 
@@ -449,7 +452,14 @@ export function tiersOf(nodes: readonly FleetNode[]): FleetTiers {
     const inherited = node.parent ? row.get(fleetKey(node.parent)) : undefined;
     const tier = ownTier(node.kind) ?? inherited;
     if (!tier) continue;
-    row.set(fleetKey(node.id), tier);
+    const key = fleetKey(node.id);
+    row.set(key, tier);
+    // Two ways a run gets its rank, because the tree can arrive either way. A
+    // folded fleet has no run rows at all and says which run a row answers for
+    // through `runOf`; an unfolded one — an older daemon, a driver that does
+    // not fold — carries the run as a row of its own.
+    const owned = runOf.get(key);
+    if (owned) run.set(owned, tier);
     if (node.kind === "run") run.set(node.id.id, tier);
   }
 

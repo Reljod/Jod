@@ -11954,7 +11954,7 @@ mod tests {
     /// would be pressing keys on a tree nobody can see.
     fn on_the_tree(selected: jod_core::tree::NodeId) -> App {
         let mut app = app_on(HarnessKind::ClaudeCode);
-        let folded = fleet::condense(&forest_of_one_work(), &std::collections::HashSet::new());
+        let folded = jod_core::tree::condense(&forest_of_one_work(), &std::collections::HashSet::new());
         app.forest = folded.nodes;
         app.work_of = folded.works;
         app.tree_runs = folded.runs;
@@ -12176,7 +12176,7 @@ mod tests {
             (NodeId::session("s1"), "a session", idle),
         ] {
             let mut app = app_on(HarnessKind::ClaudeCode);
-            let folded = fleet::condense(&forest, &std::collections::HashSet::new());
+            let folded = jod_core::tree::condense(&forest, &std::collections::HashSet::new());
             app.forest = folded.nodes;
             app.work_of = folded.works;
             app.tree_runs = folded.runs;

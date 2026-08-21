@@ -522,24 +522,52 @@ opposite turns a forgotten config line into an open shell.
 ### `/v1/fleet` — the tree, not the roster
 
 `/v1/agents` is a flat list built from the answering process's memory.
-`/v1/fleet` is the **jod → project → manager → work → session → run tree**,
-built by `Store::forest_of` in `jod-core` — the same function `jod tui`'s fleet
-screen renders, serialised and handed over unchanged. There is no second
-flatten on the API side and none in the browser; `depth` arrives with the rows
-and the client only indents.
+`/v1/fleet` is the **repositories and the agents in them**, built by
+`Store::fleet` in `jod-core` — the same function `jod tui`'s fleet screen
+renders, serialised and handed over unchanged. There is no second flatten on
+the API side and none in the browser, and no second fold either; `depth`
+arrives with the rows and the client only indents.
 
-Every row carries a `kind`, and there are **five** of them — `main`, `project`,
+The body is an object, not the bare array this route used to return:
+
+```json
+{
+  "nodes": [ … ],
+  "run_of": { "manager:c773340c-…": "755af576-…" }
+}
+```
+
+`nodes` is two levels deep. Underneath it, `Store::forest_of` still produces
+the whole truth — a project holds works, a work holds the session leading it,
+that session holds the sessions it spawned, and each of those holds its runs —
+and `tree::condense` folds the middle away before it goes on the wire. Five
+levels is the right model and the wrong screen: what you want from the fleet is
+who is working on this repository right now, and that was three expansions
+deep.
+
+`run_of` is what the fold owes the caller. With no run rows left, "open this
+agent" and "stop this agent" have nothing to reach for, so each row that stands
+for a conversation names the run it answers for — the one still going if there
+is one, otherwise the last one it took. Keyed `"<kind_tag>:<id>"`, which is the
+key a client already builds to hold a selection across a rebuild. A row that
+has never run anything is simply absent, which is a real state and not a
+missing answer.
+
+Every row carries a `kind`, and there are **six** of them — `main`, `project`,
 `manager`, `work`, `session`, `run`. A client that switches over `kind` has to
-handle all of them. The first three arrived after the other three, and a client
-that knew only the originals did not fail loudly: it composed class names no
-stylesheet defined, so a manager drew as an anonymous grey row nothing
-explained, and a delete routed by `kind` dropped it without a word.
+handle all of them, including the two the fold normally removes: `work` still
+appears as a heading for an archive and for a work belonging to no repository,
+and an older daemon answers unfolded. `main`, `project` and `manager` arrived
+after the others, and a client that knew only the originals did not fail
+loudly — it composed class names no stylesheet defined, so a manager drew as an
+anonymous grey row nothing explained, and a delete routed by `kind` dropped it
+without a word.
 
-The three rows that own a conversation — `main`, `manager` and `session` — each
-carry the runs that wrote into it as their children. That is what makes them
-openable and what makes their `running` mean anything. A manager used to be a
-permanent leaf that reported `running: false` whatever it was doing, so a
-manager mid-instruction and one nobody had ever spoken to drew identically.
+Nothing the fold drops becomes unreachable. A run is inside the conversation
+that started it, so opening the row and reading its transcript has it; what a
+run was *saying* — a stall, the status of the last one — is carried up onto the
+row itself, because a wedged agent that says so only three levels down is a
+wedged agent nobody sees.
 
 A project appears once it has works **or** a manager. A repository that has
 been catalogued but never discussed has no chain to draw and stays off the

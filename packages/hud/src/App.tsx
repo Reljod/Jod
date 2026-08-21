@@ -58,7 +58,10 @@ export default function App({ makeTransport }: HudProps = {}) {
    * fleet is the only source: a roster entry says nothing about rank, so the
    * sessions list borrows the tree's answer through `tiers.run`.
    */
-  const tiers = useMemo(() => tiersOf(jod.fleet), [jod.fleet]);
+  const tiers = useMemo(
+    () => tiersOf(jod.fleet.nodes, jod.fleet.runOf),
+    [jod.fleet],
+  );
 
   const liveRuns = useMemo(() => {
     const ids = new Set<string>();
@@ -261,7 +264,8 @@ export default function App({ makeTransport }: HudProps = {}) {
         */}
         <div className="right-rail">
           <Fleet
-            nodes={jod.fleet}
+            nodes={jod.fleet.nodes}
+            runOf={jod.fleet.runOf}
             selectedId={selectedId}
             liveRuns={liveRuns}
             onOpen={open}

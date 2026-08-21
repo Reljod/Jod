@@ -11399,7 +11399,7 @@ mod tests {
         }
 
         let mut a = app();
-        let folded = crate::tui::fleet::condense(
+        let folded = jod_core::tree::condense(
             &store.forest().expect("a forest"),
             &std::collections::HashSet::new(),
         );

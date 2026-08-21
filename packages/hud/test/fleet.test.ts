@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 
-import { deletable, hint, hideUnder, isLiveRow, openable } from "../src/components/Fleet";
+import {
+  deletable,
+  hint,
+  hideUnder,
+  isAgentRow,
+  isLiveRow,
+  openable,
+} from "../src/components/Fleet";
 import { SimTransport } from "../src/transport/sim";
 import { fleetKey, tiersOf, type FleetNode, type FleetNodeKind } from "../src/types";
 
@@ -123,67 +130,80 @@ describe("hideUnder", () => {
 });
 
 /**
- * The whole chain of command, as `Store::forest_of` emits it.
+ * The whole chain of command, as the server hands it over: **folded**.
  *
- *   jod                        ← main, and his own run under him
- *     jod-run
+ * `jod_core::tree::condense` has already run, so there are no work rows and no
+ * run rows. What a run was is carried in `runOf`, keyed the way a row is keyed.
+ *
+ *   jod                        ← main; answers for jod-run
  *   tetris                     ← project: a heading, holding no rank
- *     manager                  ← the row that owns the repository
- *       mgr-run
- *     port the parser          ← work
- *       lead                   ← session
- *         eng-run
+ *     manager                  ← owns the repository; answers for mgr-run
+ *     lead                     ← an engineer; answers for eng-run
  */
-function chain(): FleetNode[] {
+function chain(): { nodes: FleetNode[]; runOf: Map<string, string> } {
   const main = node("main", "main-conv", 0);
-  const mainRun = node("run", "jod-run", 1, main);
   const project = node("project", "tetris", 0);
   const manager = node("manager", "mgr-conv", 1, project);
-  const managerRun = node("run", "mgr-run", 2, manager);
-  const work = node("work", "work-a", 1, project);
-  const session = node("session", "lead", 2, work);
-  const engineerRun = node("run", "eng-run", 3, session);
-  return [main, mainRun, project, manager, managerRun, work, session, engineerRun];
+  const session = node("session", "lead", 1, project);
+  main.has_children = false;
+  manager.has_children = false;
+  session.has_children = false;
+  return {
+    nodes: [main, project, manager, session],
+    runOf: new Map([
+      ["main:main-conv", "jod-run"],
+      ["manager:mgr-conv", "mgr-run"],
+      ["session:lead", "eng-run"],
+    ]),
+  };
 }
 
 describe("tiersOf", () => {
   it("ranks each row by who owns it", () => {
-    const { row } = tiersOf(chain());
+    const { row } = tiersOf(chain().nodes);
     expect(row.get("main:main-conv")).toBe("jod");
     expect(row.get("manager:mgr-conv")).toBe("manager");
-    expect(row.get("work:work-a")).toBe("engineer");
     expect(row.get("session:lead")).toBe("engineer");
   });
 
-  it("gives a run the rank of whatever owns it", () => {
+  it("gives a run the rank of the row that answers for it", () => {
     // The point of the whole exercise: three runs, three ranks, and nothing
-    // about a run itself says which. Only the tree does.
-    const { run } = tiersOf(chain());
+    // about a run itself says which. Only the tree does — and after the fold it
+    // says so through `runOf` rather than through a row.
+    const { nodes, runOf } = chain();
+    const { run } = tiersOf(nodes, runOf);
     expect(run.get("jod-run")).toBe("jod");
     expect(run.get("mgr-run")).toBe("manager");
     expect(run.get("eng-run")).toBe("engineer");
   });
 
-  it("leaves a project unranked — it is the repository, not a party in it", () => {
-    expect(tiersOf(chain()).row.has("project:tetris")).toBe(false);
-  });
-
-  it("ranks a loose work and its runs as engineers", () => {
-    // A work opened before projects were recorded sits at the top level with no
-    // project above it. It is still somebody doing the work.
+  it("still ranks a run that arrives as a row of its own", () => {
+    // An older daemon answers with the unfolded forest. The rank has to survive
+    // that too, or the sessions list loses its colours against one.
     const work = node("work", "work-a", 0);
     const session = node("session", "lead", 1, work);
     const run = node("run", "run-1", 2, session);
-    const tiers = tiersOf([work, session, run]);
+    expect(tiersOf([work, session, run]).run.get("run-1")).toBe("engineer");
+  });
+
+  it("leaves a project unranked — it is the repository, not a party in it", () => {
+    expect(tiersOf(chain().nodes).row.has("project:tetris")).toBe(false);
+  });
+
+  it("ranks a loose work and the agents under it as engineers", () => {
+    // A work with no project keeps its own heading through the fold rather than
+    // turning its agents loose at the top level. It is still somebody working.
+    const work = node("work", "work-a", 0);
+    const session = node("session", "lead", 1, work);
+    const tiers = tiersOf([work, session], new Map([["session:lead", "run-1"]]));
     expect(tiers.row.get("work:work-a")).toBe("engineer");
     expect(tiers.run.get("run-1")).toBe("engineer");
   });
 
   it("leaves a row whose parent link is missing unranked, rather than guessing", () => {
-    // Rank is read off `parent`, and `Store::forest_of` sets it on every row
-    // below the top level. A row without one is a forest that did not come from
-    // there, and inventing a rank for it would draw a confident colour over an
-    // answer nobody knows.
+    // Rank is read off `parent`, and the server sets it on every row below the
+    // top level. A row without one did not come from there, and inventing a
+    // rank would draw a confident colour over an answer nobody knows.
     const orphan = node("run", "run-1", 2);
     expect(tiersOf([orphan]).run.has("run-1")).toBe(false);
   });
@@ -196,40 +216,45 @@ describe("tiersOf", () => {
 });
 
 describe("openable", () => {
-  it("opens a manager on the run beneath it", () => {
-    // The bug this whole change exists for. The manager row was a permanent
-    // leaf, so this returned null and the button rendered disabled — a row that
-    // was visibly there and could not be clicked.
-    const all = chain();
-    const manager = all.find((n) => n.kind === "manager")!;
-    expect(openable(all, manager)).toBe("mgr-run");
+  it("opens a manager on the run it answers for", () => {
+    // The bug this whole branch exists for. The manager row was a permanent
+    // leaf with no run beneath it, so this returned null and the button
+    // rendered disabled — a row visibly there that could not be clicked.
+    const { nodes, runOf } = chain();
+    const manager = nodes.find((n) => n.kind === "manager")!;
+    expect(openable(nodes, manager, runOf)).toBe("mgr-run");
   });
 
   it("opens jod on his own run and not on a manager's", () => {
-    const all = chain();
-    const main = all.find((n) => n.kind === "main")!;
-    expect(openable(all, main)).toBe("jod-run");
+    const { nodes, runOf } = chain();
+    const main = nodes.find((n) => n.kind === "main")!;
+    expect(openable(nodes, main, runOf)).toBe("jod-run");
+  });
+
+  it("opens a repository on the first run inside it", () => {
+    // A project holds no run of its own, so it takes one from underneath —
+    // which is what somebody clicking the repository's row means.
+    const { nodes, runOf } = chain();
+    const project = nodes.find((n) => n.kind === "project")!;
+    nodes[1].has_children = true;
+    expect(openable(nodes, project, runOf)).toBe("mgr-run");
   });
 
   it("does not reach past a row's own subtree", () => {
-    // `mgr-run` is the last run under the manager; `eng-run` lives under the
-    // work beside it and must not be what clicking the manager opens.
-    const all = chain();
-    const project = all.find((n) => n.kind === "project")!;
-    expect(openable(all, project)).toBe("eng-run");
+    // `lead` sits under `tetris`. A second repository's agent must not be what
+    // clicking the first one opens.
+    const { nodes, runOf } = chain();
+    const other = node("project", "zuma", 0);
+    other.has_children = false;
+    const all = [...nodes, other];
+    expect(openable(all, other, runOf)).toBeNull();
   });
 
   it("is null for a manager nobody has asked anything", () => {
     const project = node("project", "tetris", 0);
     const manager = node("manager", "mgr-conv", 1, project);
     manager.has_children = false;
-    expect(openable([project, manager], manager)).toBeNull();
-  });
-
-  it("a run is itself", () => {
-    const all = chain();
-    const run = all.find((n) => n.id.id === "eng-run")!;
-    expect(openable(all, run)).toBe("eng-run");
+    expect(openable([project, manager], manager, new Map())).toBeNull();
   });
 });
 
@@ -247,12 +272,12 @@ describe("hint", () => {
 });
 
 describe("deletable", () => {
-  it("covers exactly the three kinds the delete can route", () => {
+  it("covers exactly the kinds the delete can route", () => {
     // Pinned against `App.deleteFleetRows`'s switch. When these disagree, a
     // selected row is silently dropped and the delete reports success over
     // having done nothing — which is how it behaved before.
-    const kinds = chain().filter(deletable).map((n) => n.kind);
-    expect(new Set(kinds)).toEqual(new Set(["run", "work", "session"]));
+    const kinds = chain().nodes.filter(deletable).map((n) => n.kind);
+    expect(new Set(kinds)).toEqual(new Set(["session"]));
   });
 
   it("refuses jod, a project and a manager", () => {
@@ -260,25 +285,38 @@ describe("deletable", () => {
       expect(deletable(node(kind, "x", 0))).toBe(false);
     }
   });
+
+  it("still takes a work heading and a run, on an unfolded tree", () => {
+    expect(deletable(node("work", "w", 0))).toBe(true);
+    expect(deletable(node("run", "r", 0))).toBe(true);
+  });
 });
 
 describe("isLiveRow", () => {
-  it("believes the event stream about a run the tree has not caught up with", () => {
-    // The fleet is a four-second poll. A run that started 200ms ago is running,
-    // and a panel that waits for the next query to say so is the panel somebody
-    // is complaining looks asleep.
-    const run = node("run", "eng-run", 1);
-    expect(isLiveRow(run, new Set())).toBe(false);
-    expect(isLiveRow(run, new Set(["eng-run"]))).toBe(true);
+  it("believes the event stream about a row the tree has not caught up with", () => {
+    // The fleet is a four-second poll. An agent that started 200ms ago is
+    // working, and a panel that waits for the next query to say so is the panel
+    // somebody is complaining looks asleep.
+    const { nodes, runOf } = chain();
+    const session = nodes.find((n) => n.kind === "session")!;
+    expect(isLiveRow(session, new Set(), runOf)).toBe(false);
+    expect(isLiveRow(session, new Set(["eng-run"]), runOf)).toBe(true);
   });
 
-  it("takes the tree's word for every row that is not a run", () => {
+  it("takes the tree's word for a heading, which holds no run", () => {
     // A closed work deliberately stops claiming to be running even with
     // something alive under it, and the roster cannot see that.
     const work = node("work", "work-a", 0);
-    expect(isLiveRow(work, new Set(["work-a"]))).toBe(false);
+    expect(isLiveRow(work, new Set(["work-a"]), new Map())).toBe(false);
     work.running = true;
-    expect(isLiveRow(work, new Set())).toBe(true);
+    expect(isLiveRow(work, new Set(), new Map())).toBe(true);
+  });
+});
+
+describe("isAgentRow", () => {
+  it("counts the three that stand for somebody working", () => {
+    const agents = chain().nodes.filter(isAgentRow).map((n) => n.kind);
+    expect(agents).toEqual(["main", "manager", "session"]);
   });
 });
 
@@ -320,38 +358,58 @@ describe("the simulation driver's fleet", () => {
   }
 
   it("answers with a tree rather than throwing", async () => {
-    const nodes = await (await populated()).fleet();
+    const { nodes } = await (await populated()).fleet();
 
-    expect(nodes.some((n) => n.kind === "work")).toBe(true);
-    expect(nodes.some((n) => n.kind === "run")).toBe(true);
+    expect(nodes.some((n) => n.kind === "project")).toBe(true);
+    expect(nodes.some((n) => n.kind === "session")).toBe(true);
   });
 
   it("is empty rather than broken before anything has launched", async () => {
     // The first paint, before the staggered blueprints land. The panel must
     // draw "no work yet" here, not crash.
-    expect(await new SimTransport("test").fleet()).toEqual([]);
+    const fleet = await new SimTransport("test").fleet();
+    expect(fleet.nodes).toEqual([]);
+    expect(fleet.runOf.size).toBe(0);
   });
 
-  it("puts every run under a work, never at the root", async () => {
-    // The panel indents by `depth`; a run at depth 0 would render as a
+  it("draws the folded shape, with no work rows and no run rows", async () => {
+    // The server folds before it answers, so these two kinds never reach the
+    // panel. A simulation that emitted them would be exercising a shape the
+    // real driver cannot produce.
+    const { nodes } = await (await populated()).fleet();
+    expect(nodes.filter((n) => n.kind === "work")).toEqual([]);
+    expect(nodes.filter((n) => n.kind === "run")).toEqual([]);
+  });
+
+  it("puts every agent under a repository, never at the root", async () => {
+    // The panel indents by `depth`; an agent at depth 0 would render as a
     // top-level heading and the tree would read as a flat list.
-    const nodes = await (await populated()).fleet();
-    expect(nodes.filter((n) => n.kind === "run").length).toBe(3);
-    for (const run of nodes.filter((n) => n.kind === "run")) {
-      expect(run.depth).toBeGreaterThan(0);
-      expect(run.parent).not.toBeNull();
+    const { nodes } = await (await populated()).fleet();
+    const agents = nodes.filter((n) => n.kind === "session");
+    expect(agents.length).toBe(3);
+    for (const agent of agents) {
+      expect(agent.depth).toBe(1);
+      expect(agent.parent).not.toBeNull();
     }
   });
 
-  it("groups the two runs sharing a directory under one work", async () => {
-    const nodes = await (await populated()).fleet();
-    expect(nodes.filter((n) => n.kind === "work").length).toBe(2);
+  it("answers for a run on every agent's row", async () => {
+    // With no run rows left, this is the only thing that makes a row openable.
+    const { nodes, runOf } = await (await populated()).fleet();
+    for (const agent of nodes.filter((n) => n.kind === "session")) {
+      expect(runOf.get(fleetKey(agent.id))).toBe(agent.id.id);
+    }
+  });
+
+  it("groups the two agents sharing a directory under one repository", async () => {
+    const { nodes } = await (await populated()).fleet();
+    expect(nodes.filter((n) => n.kind === "project").length).toBe(2);
   });
 
   it("emits document order, each row at most one level deeper", async () => {
     // `hideUnder` depends on this ordering, so it is worth pinning on the
     // driver that produces it synthetically.
-    const nodes = await (await populated()).fleet();
+    const { nodes } = await (await populated()).fleet();
     expect(nodes[0].depth).toBe(0);
     for (let i = 1; i < nodes.length; i += 1) {
       expect(nodes[i].depth).toBeLessThanOrEqual(nodes[i - 1].depth + 1);

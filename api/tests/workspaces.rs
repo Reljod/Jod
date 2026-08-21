@@ -621,22 +621,31 @@ fn seed_fleet(store: &Store) {
         .unwrap();
 }
 
-/// The tree the TUI draws, over HTTP. Depth and order are the whole payload —
-/// a flat list of the same rows would render as a list, not a fleet.
+/// The tree the TUI draws, over HTTP — **folded**, as that screen draws it.
+///
+/// Depth and order are most of the payload; a flat list of the same rows would
+/// render as a list, not a fleet. The run is not a row: `condense` drops it and
+/// the session it belonged to answers for it, which is why `run_of` exists.
 #[tokio::test]
-async fn the_fleet_route_returns_the_work_session_run_tree() {
+async fn the_fleet_route_returns_the_folded_tree() {
     let h = harness_with(seed_fleet);
     let (status, body) = get_json(&h, "/v1/fleet").await;
     assert_eq!(status, StatusCode::OK);
 
-    let rows = body.as_array().unwrap();
-    assert_eq!(rows.len(), 3, "work, session and run");
+    let rows = body["nodes"].as_array().unwrap();
+    assert_eq!(rows.len(), 2, "the work and its session, not the run: {rows:?}");
+    // A work with no project keeps its heading rather than turning its sessions
+    // loose at the top level with nothing saying what they belong to.
     assert_eq!(rows[0]["kind"], "work");
     assert_eq!(rows[0]["depth"], 0);
     assert_eq!(rows[1]["kind"], "session");
     assert_eq!(rows[1]["depth"], 1);
-    assert_eq!(rows[2]["kind"], "run");
-    assert_eq!(rows[2]["depth"], 2);
+
+    let session = rows[1]["id"]["id"].as_str().unwrap();
+    assert_eq!(
+        body["run_of"][format!("session:{session}")], "run-1",
+        "the session answers for the run the fold removed: {body}"
+    );
 }
 
 /// Every field the browser panel draws has to survive the wire. If one is
@@ -646,13 +655,19 @@ async fn the_fleet_route_returns_the_work_session_run_tree() {
 async fn a_fleet_row_carries_what_a_client_needs_to_draw_it() {
     let h = harness_with(seed_fleet);
     let (_, body) = get_json(&h, "/v1/fleet").await;
-    let work = &body.as_array().unwrap()[0];
+    let work = &body["nodes"].as_array().unwrap()[0];
 
+    // Present, not necessarily filled: `parent` is null on a top-level row, and
+    // `status` and `stalled_for_ms` are null on anything that is not a process.
+    // A client switching on them has to receive the key either way.
     for field in [
-        "id", "parent", "kind", "depth", "label", "summary", "running", "cards", "blocked",
-        "colour", "has_children",
+        "id", "parent", "kind", "depth", "label", "summary", "running", "status",
+        "stalled_for_ms", "cards", "blocked", "colour", "has_children",
     ] {
-        assert!(!work[field].is_null() || field == "parent", "{field} was missing");
+        assert!(work.get(field).is_some(), "{field} was missing from {work}");
+    }
+    for field in ["id", "kind", "depth", "label", "running", "cards", "blocked", "colour"] {
+        assert!(!work[field].is_null(), "{field} was null");
     }
     assert_eq!(work["id"]["kind_tag"], "work");
     assert!(work["label"].as_str().unwrap().contains("parser"));
@@ -665,7 +680,10 @@ async fn an_empty_fleet_is_an_empty_list_rather_than_an_error() {
     let h = harness_with(|_| {});
     let (status, body) = get_json(&h, "/v1/fleet").await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body.as_array().unwrap().len(), 0);
+    assert_eq!(body["nodes"].as_array().unwrap().len(), 0);
+    // Present and empty, not absent. A client that reads `run_of` off every
+    // answer must not have to guard the one case where nothing has run.
+    assert!(body["run_of"].as_object().unwrap().is_empty(), "{body}");
 }
 
 /// A misspelled filter draws the default screen rather than refusing to draw
@@ -677,8 +695,8 @@ async fn an_unknown_filter_falls_back_to_the_live_view() {
         let (status, body) = get_json(&h, &format!("/v1/fleet{query}")).await;
         assert_eq!(status, StatusCode::OK, "/v1/fleet{query}");
         assert_eq!(
-            body.as_array().unwrap().len(),
-            3,
+            body["nodes"].as_array().unwrap().len(),
+            2,
             "/v1/fleet{query} did not draw the open work"
         );
     }

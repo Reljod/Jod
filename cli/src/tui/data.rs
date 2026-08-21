@@ -30,7 +30,7 @@ use jod_core::HarnessKind;
 use jod_core::projects::{How, Project};
 use jod_core::rank;
 use jod_core::roots::Root;
-use jod_core::tree::{Node, NodeId, NodeKind};
+use jod_core::tree::{Node, NodeId};
 use jod_core::works::Filter;
 use jod_core::schedule::{
     Fire, FireOutcome, Goal, GoalState as StoredGoalState, Schedule,
@@ -43,7 +43,6 @@ use jod_core::webhook::{Delivery as StoredDelivery, DeliveryStatus, Rule};
 use jod_core::Jod;
 
 use super::app::{short_duration, Current};
-use super::fleet;
 use super::traffic;
 use super::traffic::Watching;
 use super::workspace::Workspace;
@@ -1450,18 +1449,16 @@ pub fn forest(jod: &Arc<Jod>, show_closed: bool) -> Condensed {
             closed: HashSet::new(),
         };
     };
-    let mut nodes = store.forest_of(Filter::Live).unwrap_or_default();
-    let mut closed = HashSet::new();
-    if show_closed {
-        let archived = store.forest_of(Filter::Closed).unwrap_or_default();
-        for node in &archived {
-            if node.kind == NodeKind::Work {
-                closed.insert(node.id.clone());
-            }
-        }
-        nodes.extend(archived);
-    }
-    let folded = fleet::condense(&nodes, &closed);
+    let want = if show_closed { Filter::All } else { Filter::Live };
+    let Ok((folded, closed)) = store.fleet(want) else {
+        return Condensed {
+            nodes: Vec::new(),
+            works: HashMap::new(),
+            run_of: HashMap::new(),
+            runs: HashSet::new(),
+            closed: HashSet::new(),
+        };
+    };
     Condensed {
         nodes: folded.nodes,
         works: folded.works,
