@@ -36,44 +36,27 @@
 //! **card answers and human nudges**; [`crate::team`] is authoritative for
 //! **agent mail**, including whether the recipient may be woken at all.
 //!
-//! The merge was examined in full and is being done in order rather than at
-//! once. One of the three things in the way has been removed; two remain, and
-//! both are cheap to state and expensive to discover:
+//! Two things still block the merge, both cheap to state and expensive to
+//! discover:
 //!
 //! 1. **This queue addresses a conversation; a team member has not got one.**
-//!    A member of a work *is* a conversation and would fit straight away. A
-//!    member joined through `jod team join` holds a run and a harness-side
-//!    session, and every wake mints a *fresh* Jod conversation
-//!    ([`crate::service::RunConversation::New`]) — so there is no stable id to
-//!    key a queue on, and one resolved at send time would name a conversation
-//!    that is already finished by the time it is read. Mail sent to a member
-//!    that has never run has no conversation at all, and today that mail waits
-//!    on the bus, visibly, which is a property A8 asks for by name.
-//!    Fixing it properly means letting the queue address a *member*, which is
-//!    a schema change and therefore a stop-and-ask.
+//!    A member joined through `jod team join` holds a run and a harness-side
+//!    session, and every wake mints a *fresh* Jod conversation, so there is no
+//!    stable id to key a queue on. Mail to a member that has never run has no
+//!    conversation at all; today it waits on the bus, visibly, which is what A8
+//!    asks for. Fixing it means letting the queue address a *member* — a schema
+//!    change, and therefore a stop-and-ask.
 //! 2. **`wake_order` asks a question this module cannot.** `plan_injection`
 //!    knows only whether a turn is in flight; `wake_order` also refuses a
-//!    member that is shutting down, or that has no session to resume — where
-//!    waking would start a fresh context and the agent would answer having
-//!    forgotten the work. Until that judgement moves too, merging the queues
-//!    would leave two decisions in two modules and only look unified.
+//!    member shutting down, or with no session to resume. Merging before that
+//!    judgement moves would leave two decisions in two modules and only look
+//!    unified.
 //!
-//! **Removed:** this queue used to have no caller at all, and that was the
-//! largest of the three. [`Ticker::tick_deliveries`] now drains it on every
-//! tick, so a card answered from the rail reaches its session in a turn
-//! without anybody typing anything — E2.S7's other half, and the thing
-//! Reljod asked for most directly. Before that, an answer nobody fetched over
-//! MCP sat queued for ever and the rail said *queued* about answers the agent
-//! already had.
+//! Both queues already speak one [`State`], so `pending_deliveries.state` and
+//! `team_messages.state` cannot mean different things by the same word.
 //!
-//! Also unified, because it cost nothing and the drift was real: both queues
-//! speak one [`State`], so `pending_deliveries.state` and `team_messages.state`
-//! cannot mean different things by the same word.
-//!
-//! The order to do the rest in: move `wake_order`'s eligibility here, so there
-//! is one answer to "may this be spoken to"; then, with a migration, let this
-//! queue address a member as well as a conversation. Mail moves last — it is
-//! the path that works, and it should be the last thing asked to change.
+//! The order for the rest: move `wake_order`'s eligibility here, then let the
+//! queue address a member. Mail moves last — it is the path that works.
 
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -262,23 +245,18 @@ pub fn render_injection(items: &[Pending]) -> String {
 
 /// What the recipient needs in order to *act* on what it has just been handed.
 ///
-/// A turn like this arrives in a session whose framing is several turns back,
-/// and an agent does not reliably reach for a verb it was told about once at
-/// the start. Measured, not assumed: an answerer briefed at session start on
-/// how to use the bus was asked a question some turns later, replied in prose,
-/// and never touched the bus at all. Nothing failed loudly, because nothing
-/// failed — an agent that has forgotten a protocol is an agent behaving
-/// reasonably in the absence of one.
+/// A turn like this lands in a session whose framing is several turns back, and
+/// an agent does not reliably reach for a verb it was told about once at the
+/// start. Measured: an answerer briefed on the bus at session start was asked a
+/// question later, replied in prose, and never touched the bus. Nothing failed
+/// loudly, because nothing failed.
 ///
-/// So the turn carries its own instructions. This is the same argument that
-/// put the message id into the body of a delivered message rather than leaving
-/// the recipient to look it up: **whatever is needed to respond travels with
-/// the thing being responded to.**
+/// So the turn carries its own instructions — the same argument that puts the
+/// message id in the body: **whatever is needed to respond travels with the
+/// thing being responded to.**
 ///
-/// Deliberately short, and only for the kinds that need a verb. A card answer
-/// needs none — the agent asked a question and is being told the answer, which
-/// it acts on by carrying on. Mail needs one, because replying is a tool call
-/// the agent has to choose to make.
+/// Only for the kinds that need a verb. A card answer needs none; mail does,
+/// because replying is a tool call the agent has to choose to make.
 fn protocol_for(items: &[Pending]) -> Option<&'static str> {
     items.iter().any(|p| p.kind == Kind::Mail).then_some(
         "To answer any of the messages above, call `reply` with the message \
@@ -294,31 +272,20 @@ fn protocol_for(items: &[Pending]) -> Option<&'static str> {
 impl Store {
     /// Queue something to be said to a session at the next safe moment.
     ///
-    /// Every inbound thing goes through here — a card answer, a message from
-    /// another agent, a nudge typed by a human — because "is this session ready
-    /// to be spoken to" is one question, and answering it in three places is
-    /// three places to get it wrong.
+    /// `body` is the item's *content*, not its framing: the line saying where
+    /// it came from is added at render time from `kind`. `ref_id` identifies
+    /// the thing on the caller's side — a card id, a message id — kept as text
+    /// because those sources number themselves independently.
     ///
-    /// `body` is the item's *content*, not its framing: the line announcing
-    /// where it came from is added at render time from `kind`, so a caller
-    /// queuing a peer's message can pass the message and its sender and does
-    /// not have to remember to label it. `ref_id` is whatever identifies the
-    /// thing on the caller's side — a card id, a message id — kept as text
-    /// because those two sources number themselves independently.
+    /// **The entry point for a caller with no transaction of its own.** One
+    /// that has a transaction — [`Store::answer_card`] queues inside the one
+    /// that answers the card — goes through [`insert_pending`], and must: an
+    /// answered card with nothing queued would read *queued* in the rail for
+    /// ever. Not two front doors; one insert, reachable either way.
     ///
-    /// **This is the entry point for a caller that has no transaction of its
-    /// own.** A caller that does — [`Store::answer_card`] queues inside the
-    /// transaction that answers the card — goes through [`insert_pending`]
-    /// instead, and must: an answered card with nothing queued to carry it
-    /// would show as *queued* in the rail for ever and the agent would never be
-    /// told. That is not two front doors; it is one insert, reachable with or
-    /// without a transaction already open. Both write the same row and there is
-    /// no third way in.
-    ///
-    /// It has no production caller yet, and the honest reason is that its two
-    /// remaining sources do not exist: nothing produces [`Kind::Human`] until
-    /// the terminal grows "nudge a session mid-turn", and [`Kind::Mail`] waits
-    /// on the queue learning to address a member (see the module docs).
+    /// No production caller yet, because its two sources do not exist:
+    /// [`Kind::Human`] waits on "nudge a session mid-turn" and [`Kind::Mail`]
+    /// on the queue learning to address a member.
     pub fn enqueue_delivery(
         &self,
         conversation_id: &str,
@@ -497,24 +464,19 @@ impl Store {
     /// Decide what, if anything, to say to this conversation now.
     ///
     /// A value rather than an action, the same shape and for the same reason as
-    /// [`crate::team::wake_order`]: *when* to speak is where all the judgement
-    /// is, and keeping it out of the spawning means it can be tested without a
-    /// harness binary, a tmux server, or a running agent.
+    /// [`crate::team::wake_order`]: *when* to speak holds the judgement, and
+    /// keeping it out of the spawning means it can be tested without a harness
+    /// binary or a running agent.
     ///
-    /// Returns `None` — deliberately, in each case — when:
+    /// Returns `None`, deliberately, when:
     ///
-    /// - **A turn is in flight.** This is the rule the whole module exists for.
-    ///   The running turn's prompt was assembled before any of this arrived, so
-    ///   splicing it in produces an answer to a question the agent has already
-    ///   moved past. It waits; nothing is lost.
-    /// - **Nothing is queued.** Waking an agent to tell it nothing burns a turn
-    ///   and a context window.
+    /// - **A turn is in flight** — the rule the module exists for. The running
+    ///   prompt was assembled before any of this arrived, so splicing it in
+    ///   answers a question the agent has moved past. It waits; nothing is lost.
+    /// - **Nothing is queued.** Waking an agent to tell it nothing burns a turn.
     ///
-    /// Everything queued goes into **one** injection. Ten cards answered while a
-    /// run was mid-turn arrive as one turn carrying ten, not ten turns: cheaper,
-    /// and the better answer as well, because an agent reading everything that
-    /// changed in one go responds more coherently than one woken ten times with
-    /// a line each.
+    /// Everything queued goes into **one** injection, for the reason the module
+    /// header gives.
     pub fn plan_injection(&self, conversation_id: &str, busy: bool) -> Result<Option<Injection>> {
         if busy {
             return Ok(None);

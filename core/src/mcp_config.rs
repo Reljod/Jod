@@ -1,19 +1,14 @@
 //! Pointing a harness at Jod's own MCP server.
 //!
 //! [`crate::mcp`] answers the protocol and [`crate::harness::ToolAccess`] says
-//! how much of Jod an agent may reach. This is the piece that connects them to
-//! an actual command line, and without it both are decoration: `tools` was set,
-//! capped, and tested for two hours while reaching no harness at all.
-//!
-//! That failure is worth naming because it is the one this branch keeps
-//! producing — a component that is complete, tested, and wired to nothing. A
-//! green suite over a disconnected module reads exactly like a working system.
+//! how much of Jod an agent may reach. This connects them to an actual command
+//! line, and without it both are decoration — a green suite over a disconnected
+//! module reads exactly like a working system.
 //!
 //! ## Why the config is a file on disk
 //!
-//! Both harnesses take MCP servers as *files*: Claude Code has
-//! `--mcp-config <path>`, OpenCode reads its own config. Neither accepts a
-//! server definition inline on the command line, so Jod writes one.
+//! Neither harness accepts a server definition inline, so Jod writes one:
+//! Claude Code takes `--mcp-config <path>`, OpenCode reads its own config.
 //!
 //! One file per access level, not one per run. A run's config is a function of
 //! its level and nothing else, so a per-run temp file would be N copies of three
@@ -51,13 +46,10 @@ pub const CONVERSATION_ID_ENV: &str = "JOD_CONVERSATION_ID";
 /// moved — which fails as "the agent has no tools" long after anyone would
 /// connect it to an upgrade.
 ///
-/// **`access` is `Option`, and the `None` case is not the same as "no config".**
-/// It means this run was granted none of Jod's own verbs — it may not delegate,
-/// schedule or remember. It may still browse, because browsing is not one of
-/// Jod's verbs: it touches no run, no schedule and no memory. Conflating the
-/// two would have made the web reachable only by runs that could also spawn
-/// other agents, which is a strange thing to have to grant somebody so they can
-/// read a page.
+/// **`access` is `Option`, and `None` is not the same as "no config".** It
+/// means the run was granted none of Jod's own verbs. It may still browse,
+/// because browsing touches no run, schedule or memory — conflating the two
+/// would make the web reachable only by runs that can also spawn agents.
 pub fn config_for(access: Option<ToolAccess>, jod_home: &Path) -> Result<Option<PathBuf>> {
     config_with(
         access,
@@ -99,41 +91,32 @@ pub fn config_with(
 
 /// The MCP config for one *run*, written beside that run's own files.
 ///
-/// **NOT YET CALLED FROM ANYWHERE — its call site is
-/// `core/src/harness/claude.rs`, where `args()` currently reaches for
-/// [`config_for`] beside `--mcp-config`.** Left unwired deliberately: that file
-/// was being rewritten by another lane when this landed, and a concurrent edit
-/// to argv ordering there is exactly the collision worth avoiding. Swapping the
-/// call is the whole of the wiring; nothing else has to change.
+/// **Not yet called from anywhere.** Its call site is `harness/claude.rs`,
+/// where `args()` still reaches for [`config_for`]. Left unwired to avoid a
+/// concurrent edit to argv ordering in that file; swapping the call is the
+/// whole of the wiring.
 ///
-/// Nothing is broken while it waits. [`crate::mcp::identify`] resolves the run
-/// from the server's own process group, which is authoritative and works on
-/// every harness — including the two that read a globally installed config and
-/// so have no per-run document at all. What this adds is a second, agreeing
-/// source for the case where the store has no row for the group.
+/// Nothing is broken while it waits: [`crate::mcp::identify`] resolves the run
+/// from the process group, which is authoritative and works on every harness.
+/// This adds a second, agreeing source for the case where the store has no row
+/// for that group.
 ///
-/// The reason it exists at all is sender identity. Jod's messaging tools have
-/// to know which member is calling, and the only honest answer is the run — an
-/// agent that could name its own sender could send as anyone. The access level
-/// already travels in the argv and the database already travels in the
-/// environment; the run travels the same way, set by the launcher and readable
-/// by nothing the model can reach.
+/// It exists for sender identity. Jod's messaging tools must know which member
+/// is calling, and the only honest answer is the run — an agent that could name
+/// its own sender could send as anyone. So the run travels the way the access
+/// level and the database already do: set by the launcher, unreachable by the
+/// model.
 ///
-/// **In the run's directory, not in the shared `mcp/` one.** A per-run file in
-/// a shared directory is a cleanup problem and, worse, a grant left on disk by
-/// a killed run. Here it is created and removed with everything else that run
-/// wrote.
+/// **In the run's directory, not the shared `mcp/` one**, so a killed run does
+/// not leave a grant on disk. It is created and removed with everything else
+/// that run wrote.
 ///
-/// `access` is `Option` and returns `Option` for the same reason
-/// [`config_for`] does: a run granted none of Jod's verbs may still browse, and
-/// a run offered neither gets no `--mcp-config` flag rather than a document
-/// declaring no servers.
+/// `access` is `Option` for the reason [`config_for`] gives.
 ///
-/// `permission` is the run's *own* policy, and it becomes the ceiling of the
-/// server this document starts. Passed rather than left to default, because the
-/// default is `accept_edits` and a ceiling that quietly disagrees with the run
-/// it belongs to is how a session in `auto` opened background work in
-/// `accept_edits` — see [`server_args`].
+/// `permission` is the run's *own* policy and becomes the ceiling of the server
+/// this document starts. Passed rather than defaulted, because the default is
+/// `accept_edits` — which is how a session in `auto` opened background work in
+/// `accept_edits`. See [`server_args`].
 pub fn config_for_run(
     access: Option<ToolAccess>,
     jod_home: &Path,
@@ -202,24 +185,21 @@ fn write_config(
         "JOD_HOME".to_string(),
         jod_home.to_string_lossy().to_string().into(),
     );
-    // **Written even when there is no run, as an empty string, because leaving
-    // a variable out does not unset it — it inherits it.** An MCP server is
-    // started by the harness, the harness by the supervisor, the supervisor by
-    // whatever asked for the run: on the path that opens a work, that chain
-    // begins at the *orchestrator's* own MCP server, whose environment names
-    // the orchestrator's run. Omitting the key here let that value fall all the
-    // way through, so a fresh session's server claimed the run that started it.
+    // **Written even with no run, as an empty string, because leaving a
+    // variable out does not unset it — it inherits it.** On the path that opens
+    // a work the spawn chain begins at the *orchestrator's* MCP server, so
+    // omitting the key let its run id fall all the way through and a fresh
+    // session's server claimed the run that started it.
     //
-    // Observed rather than theorised: the parity suite's OpenCode leg refused
-    // every tool with "its process group belongs to run 9aeabbb1…, but its
-    // environment claims run 8a82f92b…", and `8a82f92b` was the main chat.
-    // Claude Code was unaffected only because its per-run config happens to
-    // overwrite the key with the right value — masking the leak rather than
-    // stopping it.
+    // Observed: the parity suite's OpenCode leg refused every tool with "its
+    // process group belongs to run 9aeabbb1…, but its environment claims run
+    // 8a82f92b…" — the main chat. Claude Code was unaffected only because its
+    // per-run config overwrites the key, masking the leak rather than stopping
+    // it.
     //
     // `identify` reads an empty claim as no claim, so a cleared variable means
-    // "ask the process group", which is the authority anyway. Nothing about
-    // `identify` had to be relaxed to fix this, and nothing should be.
+    // "ask the process group". Nothing about `identify` was relaxed to fix
+    // this, and nothing should be.
     env.insert(
         RUN_ID_ENV.to_string(),
         run_id.unwrap_or_default().to_string().into(),

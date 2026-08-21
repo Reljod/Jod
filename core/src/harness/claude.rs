@@ -60,14 +60,10 @@ impl Harness for ClaudeCode {
         // flag accumulates, and a run given two of them reported its cwd and
         // both roots when asked what it had access to.
         //
-        // The flag is variadic — `claude --help` spells it
-        // `--add-dir <directories...>` — so it keeps swallowing words until it
-        // meets another flag. That makes the position of `ArgPart::Prompt`
-        // above load-bearing: emitted first, it can never trail one of these.
-        // Moved to the end, it would be eaten as a directory and the run would
-        // die with "Input must be provided either through stdin or as a prompt
-        // argument", which names neither this flag nor the prompt. There is a
-        // test pinning the ordering for that reason.
+        // The flag is variadic, so it swallows words until the next flag. That
+        // makes `ArgPart::Prompt`'s position above load-bearing: moved to the
+        // end it would be eaten as a directory, and the run would die naming
+        // neither this flag nor the prompt. A test pins the ordering.
         //
         // Granting is not confining. A root Claude Code was never handed is
         // still a root it can read; see `docs/harness-support.md`.
@@ -138,24 +134,18 @@ impl Harness for ClaudeCode {
             PermissionPolicy::Bypass => args.push(ArgPart::lit("--dangerously-skip-permissions")),
         }
 
-        // Jod's own tools have to be named here or they are denied, however
-        // carefully they were granted. Found the hard way twice, and the second
-        // time was this line's own fault: the grant used to live *inside* the
-        // `Ask` arm, so the moment a run needed a mode other than plan it
-        // silently lost every Jod tool. `acceptEdits` auto-approves file edits
-        // and nothing else, so the orchestrator — whose only job is to call
-        // these tools — got four consecutive
-        // "requested permissions ... but you haven't granted it yet" and
-        // delegated nothing.
+        // Jod's own tools must be named here or they are denied, however
+        // carefully they were granted. This grant used to sit *inside* the
+        // `Ask` arm, so any other mode silently lost every Jod tool and the
+        // orchestrator — whose only job is calling them — delegated nothing.
         //
-        // The grant belongs to `req.tools`, which is what actually decides
-        // whether this run has Jod tools. The permission mode bounds what the
-        // run may do to the machine; it has no opinion about Jod's own verbs.
+        // So it belongs to `req.tools`, which is what decides whether this run
+        // has Jod tools at all. The permission mode bounds what the run may do
+        // to the machine and has no opinion about Jod's verbs.
         //
-        // Server-wide rather than per tool, because which tools exist is
-        // already decided by the access level the config carries. Listing them
-        // again here would be a second copy of that decision, free to drift
-        // from the first.
+        // Server-wide rather than per tool: which tools exist is already
+        // decided by the access level the config carries, and listing them
+        // again would be a second copy free to drift.
         if req.tools.is_some() {
             allowed.push(format!("mcp__{}", crate::mcp_config::SERVER_NAME));
         }
@@ -174,30 +164,21 @@ impl Harness for ClaudeCode {
 
         // Jod's own tools, if this run was granted any. Without these two flags
         // `SpawnRequest::tools` is decoration — set, capped, tested, and
-        // reaching no command line, which is precisely the failure this branch
-        // keeps producing.
+        // reaching no command line.
         //
-        // `--strict-mcp-config` matters as much as the config itself: without
-        // it Claude Code also loads whatever MCP servers the *user's* own
-        // configuration names, so an agent Jod meant to hold read-only tools
-        // could quietly inherit a filesystem server from `~/.claude.json`. The
-        // grant has to be exactly what Jod granted.
+        // `--strict-mcp-config` matters as much as the config: without it
+        // Claude Code also loads the *user's* own MCP servers, so an agent Jod
+        // meant to hold read-only tools could inherit a filesystem server from
+        // `~/.claude.json`. The grant must be exactly what Jod granted.
         //
-        // `req.tools` no longer decides *whether* there is a config, only what
-        // is in it: a run granted none of Jod's verbs still gets the browser,
-        // because reading a web page is not one of them.
+        // `req.tools` decides what is in the config, not whether there is one:
+        // a run granted none of Jod's verbs still gets the browser.
         //
-        // Per-run when the launcher stamped an id, shared otherwise.
-        //
-        // The per-run document names the run in the server's environment,
-        // which gives `mcp::identify` a second, agreeing source for who is
-        // calling. It is not the authoritative one — the process group is,
-        // because a model cannot argue its way into a different one — and
-        // `identify` refuses outright if the two disagree rather than picking a
-        // winner.
-        //
-        // The shared config remains correct for anything with no run: a session
-        // somebody started by hand, or `jod mcp install`.
+        // Per-run when the launcher stamped an id, shared otherwise. The
+        // per-run document names the run in the server's environment, giving
+        // `mcp::identify` a second, agreeing source — not the authoritative one,
+        // which is the process group. The shared config stays correct for
+        // anything with no run.
         let home = crate::paths::jod_home();
         let config = match &req.run_id {
             Some(run_id) => crate::mcp_config::config_for_run(
@@ -262,60 +243,44 @@ impl Harness for ClaudeCode {
                     session_id: str_at(&v, "session_id"),
                     model: str_at(&v, "model"),
                 }],
-                // The only thing a long think puts on the wire.
+                // The only thing a long think puts on the wire. A turn that
+                // reasons for minutes emits no assistant block, no tool call
+                // and no result — just this, steadily. Dropping it as
+                // bookkeeping is why a nine-minute think rendered as a frozen
+                // transcript behind a bare spinner.
                 //
-                // This arm used to read "hook_started / hook_response /
-                // thinking_tokens are bookkeeping" and drop all three. Two of
-                // those are bookkeeping. This one is the liveness signal: a
-                // turn that reasons for minutes emits no assistant block, no
-                // tool call and no result, and `system/thinking_tokens` arrives
-                // steadily throughout. Jod received every one of them and threw
-                // every one away, which is why a nine-minute think rendered as
-                // a frozen transcript behind a bare spinner.
-                //
-                // The shape is read off claude 2.1.231 itself rather than
-                // guessed — it emits
-                // `{subtype:"thinking_tokens", estimated_tokens, estimated_tokens_delta, uuid, session_id}`.
-                // Only the running total is carried up: a consumer wanting the
+                // Shape read off claude 2.1.231 rather than guessed:
+                // `{subtype:"thinking_tokens", estimated_tokens, estimated_tokens_delta, …}`.
+                // Only the running total is carried up; a consumer wanting the
                 // delta has the previous tick.
                 Some("thinking_tokens") => vec![AgentEvent::Progress {
                     thinking_tokens: u64_at(&v, "estimated_tokens"),
                 }],
-                // `hook_started` / `hook_response` stay dropped, and that is a
-                // decision rather than the status quo surviving by default.
-                // They cannot fill the silence this fix is about: a hook fires
-                // around something Jod already renders — `PreToolUse` and
-                // `PostToolUse` bracket a `ToolCall`/`ToolResult`, `Stop`
-                // brackets the end — so they are a second copy of an event the
-                // stream already carries, and none of them fires during a think
-                // with no tool in it. They are also conditional on the user
-                // having configured hooks at all, which a liveness signal
-                // cannot be. And `hook_response` carries the `stdout`/`stderr`
-                // of an arbitrary user shell command, so surfacing it would put
-                // unreviewed command output into the transcript and the
-                // persisted event log — a redaction question, not a liveness
-                // win.
+                // `hook_started` / `hook_response` stay dropped, deliberately.
+                // A hook brackets something Jod already renders, so it is a
+                // second copy of an event on the stream, and none fires during
+                // a think with no tool in it. They are also conditional on the
+                // user having configured hooks, which a liveness signal cannot
+                // be. And `hook_response` carries an arbitrary shell command's
+                // output, so surfacing it is a redaction question.
                 //
                 // Dropped here rather than left to fall through, because the
-                // catch-all below turns anything it reaches into
-                // `AgentEvent::Raw` and dumps the JSON into the transcript.
+                // catch-all below would dump the JSON into the transcript as
+                // `AgentEvent::Raw`.
                 _ => vec![],
             },
             // What `--include-partial-messages` actually turns on.
             //
-            // Read off claude 2.1.231 itself: each line is
-            // `{type:"stream_event", event:{type:"…", …}, session_id, uuid}`,
-            // wrapping the Anthropic Messages API's own streaming shape one
-            // level down. Only `content_block_delta` carries content; the
-            // rest of the wrapper is structural bookkeeping around blocks
-            // whose complete form Jod already renders once from `assistant`.
+            // Read off claude 2.1.231: each line is
+            // `{type:"stream_event", event:{…}, session_id, uuid}`, wrapping
+            // the Messages API's streaming shape. Only `content_block_delta`
+            // carries content; the rest brackets blocks Jod already renders
+            // once from `assistant`.
             //
-            // This has to land in the same commit as the flag above. Without
-            // a parser arm, every one of these frames falls through to the
-            // catch-all at the bottom of this match, becomes `AgentEvent::Raw`,
-            // and dumps harness JSON straight into the transcript and the
-            // persisted event log — strictly worse than the silence this flag
-            // exists to fix.
+            // Must land in the same commit as the flag above: with no arm here
+            // every frame falls through to the catch-all as `AgentEvent::Raw`
+            // and dumps harness JSON into the transcript, which is worse than
+            // the silence the flag exists to fix.
             Some("stream_event") => self.parse_stream_event(&v),
             Some("assistant") => self.parse_assistant(&v),
             Some("user") => self.parse_tool_results(&v),
@@ -477,31 +442,25 @@ impl ClaudeCode {
 
 /// How long a tool call may hang waiting for somebody to approve it, in seconds.
 ///
-/// Short on purpose. Every second here is a second an *unattended* run spends
-/// stopped at a question nobody is going to answer, and the cost is paid once
-/// per distinct question rather than once per retry — see the dedupe in
-/// `jod approve-hook`. Long enough to catch a person at the console; short
-/// enough that a run left alone overnight still gets on with what it can.
+/// Short on purpose: every second is one an *unattended* run spends stopped at
+/// a question nobody will answer. Long enough to catch a person at the console,
+/// short enough that a run left overnight gets on with what it can.
 ///
 /// **Measured, "once per distinct question" is once per tool call**, because
-/// the dedupe keys on the exact subject and two files are two subjects. An
-/// unattended run therefore pays a full minute per call and the waits add up:
-/// four one-word files read one at a time took four minutes fourteen seconds,
-/// against seven seconds for the same prompt under `auto`. Do not shorten this
-/// constant to paper over that — the wait is only useful when somebody can
-/// answer, and deciding how Jod knows that is the open question. See
-/// `docs/decisions.md`, "The approval wait is paid per tool call, and buys
-/// nothing unattended".
+/// the dedupe keys on the exact subject and two files are two subjects. Four
+/// one-word files read one at a time took 4m14s, against 7s under `auto`. Do
+/// not shorten this to paper over that — the wait is only useful when somebody
+/// can answer, and how Jod knows that is the open question. See
+/// `docs/decisions.md`, "The approval wait is paid per tool call".
 const APPROVAL_WAIT_SECS: u64 = 60;
 
 /// Write this run's `--settings` document: standing grants, and the hook.
 ///
-/// **This is the channel that makes `ask` and `edits` mean what they say.**
-/// Under `-p` Claude Code has nobody to put a permission prompt to, so those
-/// modes denied silently and the refusal reached the model as a failed tool
-/// call it read as its own mistake. A `PreToolUse` hook is the only way into
-/// that decision on this build — there is no `--permission-prompt-tool` — so
-/// the document carries two things:
+/// **The channel that makes `ask` and `edits` mean what they say.** Under `-p`
+/// Claude Code has nobody to prompt, so those modes denied silently and the
+/// refusal reached the model as its own failed tool call. A `PreToolUse` hook
+/// is the only way into that decision on this build, so the document carries
+/// two things:
 ///
 /// * **`permissions.allow`**, the standing grants in Claude Code's own rule
 ///   syntax, so the harness answers what it can without spawning anything.
@@ -606,21 +565,19 @@ fn usage_from(v: &Value) -> Usage {
 
 /// The session id in a "that conversation is gone" refusal, if this is one.
 ///
-/// Claude Code answers `--resume <id>` for an id it does not have with a bare
-/// line on stderr and exit 1 — no JSON, no `init`, nothing else on the wire:
+/// Claude Code answers an unknown `--resume <id>` with a bare stderr line and
+/// exit 1 — no JSON, no `init`:
 ///
 /// ```text
 /// No conversation found with session ID: 22c6a14d-2d8c-49ef-b21b-27e3fb76edd1
 /// ```
 ///
 /// Anchored at the start of the line, so a *model* quoting the error in its
-/// prose cannot be mistaken for the harness raising it — that text arrives
-/// inside a JSON assistant block and never reaches this function at all.
+/// prose cannot be mistaken for the harness raising it.
 ///
-/// The id is returned rather than a bool because the caller must be able to
-/// check it against the session it actually asked for. Clearing a pointer on
-/// the strength of an id nobody recognises would be repairing a thread by
-/// guess.
+/// Returns the id rather than a bool, because the caller must check it against
+/// the session it asked for. Clearing a pointer on an id nobody recognises
+/// would be repairing a thread by guess.
 fn rejected_session(line: &str) -> Option<String> {
     let rest = line
         .trim()
