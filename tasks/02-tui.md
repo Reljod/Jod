@@ -72,7 +72,7 @@ width from 20 to 120.
 
 ## What this pass fixed
 
-Twenty changes, each with a test that fails without it. Driven by running the
+Twenty-two changes, each with a test that fails without it. Driven by running the
 console against real harnesses under a throwaway `JOD_HOME`, on four projects,
 and then re-run end to end on an empty install.
 
@@ -102,6 +102,21 @@ and then re-run end to end on an empty install.
   binding to main so the reply can be watched here. Harmless from main, and a
   silent move when typed inside a manager. The promise was corrected rather than
   the behaviour, because watching the answer is the point of the command.
+
+**Two more the daemon found, which nothing in the console showed.**
+
+- **Compacting the main chat stranded every bus pointed at it, permanently.**
+  `is_main_chat_member` compares a member row against the *currently pinned*
+  conversation, and `continue_as_new` — what runs when main's context fills —
+  opens a fresh conversation and moves the pin onto it. Every team joined before
+  that kept naming the old one, so `main` matched nothing: mail was never handed
+  to the chat, fell through to a wake that cannot happen, and waited for ever.
+  The daemon said so once a second, indefinitely: *"1 message(s) waiting:
+  `main` has no session to resume"*. Main compacts itself, so every console that
+  stays up long enough gets there. `carry_forward` moves the rows now, and
+  migration `0025` repairs the consoles that have already compacted — verified
+  on the live store, where four stranded items were then delivered in one tick.
+- **The `(deleted)` binary.** See above; found while chasing the same log.
 
 **The chain of command.**
 
