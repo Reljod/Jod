@@ -2689,13 +2689,32 @@ impl Server {
                 // Refused rather than defaulted to this process's directory: a
                 // work opened in whatever directory the daemon happens to be
                 // started in is a run editing something nobody meant.
-                roots.first().map(|r| r.path.clone()).ok_or_else(|| {
-                    ToolError::Refused(
-                        "say which directory this work happens in — `checkout` — because this \
-                         session has no roots of its own to inherit one from"
-                            .into(),
-                    )
-                })?
+                //
+                // A project manager is the one caller that reliably has no
+                // roots and still knows the answer. It is created against its
+                // project and never adds a root of its own, so its every first
+                // `open_work` was refused, and the manager spent a model turn
+                // discovering a directory the store could have told it. The
+                // project's own path is not a guess in the way the process
+                // directory is: it is the repository this conversation exists
+                // to run, written down when the manager was created.
+                let project = self
+                    .store()?
+                    .current_project(&raiser.conversation_id)
+                    .ok()
+                    .flatten();
+                match (roots.first(), project) {
+                    (Some(root), _) => root.path.clone(),
+                    (None, Some(project)) => project.path,
+                    (None, None) => {
+                        return Err(ToolError::Refused(
+                            "say which directory this work happens in — `checkout` — because \
+                             this session has no roots of its own to inherit one from, and no \
+                             project to take one from either"
+                                .into(),
+                        ))
+                    }
+                }
             }
         };
 
@@ -6043,6 +6062,48 @@ mod tests {
                 !said.contains("not the main chat's to call"),
                 "a manager or an engineer must still be able to open work: {said}"
             );
+        }
+
+        /// A manager has no roots, and does not need to be told its own
+        /// repository.
+        ///
+        /// Observed by running one: alpha's manager called `open_work` with no
+        /// `checkout`, was refused with "this session has no roots of its own
+        /// to inherit one from", and spent a second model turn supplying the
+        /// path the store already had. A manager is created against its project
+        /// and never adds a root, so that happened on every manager's first
+        /// piece of work.
+        #[tokio::test]
+        async fn a_manager_opening_work_takes_the_checkout_from_its_project() {
+            let dir = format!("/tmp/jod-mgr-checkout-{}", std::process::id());
+            let (store, project) = with_project(&dir);
+            store
+                .main_conversation(HarnessKind::ClaudeCode, "/tmp")
+                .unwrap();
+            let (manager, _) = store
+                .manager_conversation(&project.id, HarnessKind::ClaudeCode)
+                .unwrap();
+            assert!(
+                store.roots(&manager).unwrap().is_empty(),
+                "the premise: a manager has no roots of its own",
+            );
+            run_in(&store, &manager, "run-manager");
+            let server = Server::new(Jod::with_store(store))
+                .with_access(ToolAccess::Delegate)
+                .for_run("run-manager");
+
+            // No `checkout` argument, which is the call that used to be refused.
+            let answer = call(&server, "open_work", json!({ "instruction": "port the parser" })).await;
+
+            // As above, this may still fail on a box with no supervisor, so it
+            // asserts on the reason rather than on success.
+            let said = said(&answer);
+            assert!(
+                !said.contains("no roots of its own"),
+                "a manager knows its own repository: {said}"
+            );
+
+            std::fs::remove_dir_all(&dir).ok();
         }
 
         /// The route around the rule, closed. A model just refused `open_work`
