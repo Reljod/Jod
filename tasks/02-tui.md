@@ -339,8 +339,18 @@ documents and tests: `keys.rs` promises the keymap is *complete* at 100x30, held
 by `the_keymap_overlay_is_complete_at_the_design_size`. Two rows of chrome cost
 two bindings, so the two cannot both hold at that size.
 
-The same question decides a second symptom, which is why they are one finding
-rather than two: on an empty console the splash's caption line shows either side
+The same question decides two more symptoms, which is why these are one finding
+rather than three. A notice toast is drawn over the bottom of the workspace, so
+the pane it covers is left with no bottom border —
+
+```
+┌ loose · 3 ──────────────┐
+│   ✓ 2e576bb0 completed  │
+┌ notice ─────────────────┐
+```
+
+— and reserving rows for it instead would make the fleet re-window every time a
+key guard fires, which is worse than a transient open box. And: on an empty console the splash's caption line shows either side
 of the overlay, cut mid-word —
 
 ```
