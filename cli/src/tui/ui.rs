@@ -3275,6 +3275,22 @@ fn draw_which_key(f: &mut Frame, app: &App) {
 
     let title = keys::which_key_title(making);
     let panel = centred(f.area(), (widest + 10) as u16, (rows.len() + 2) as u16);
+    // What a short terminal is leaving out. `centred` clamps to the screen and
+    // the list draws from the top, so at ten rows this menu simply stopped
+    // after `a activity` — ten entries gone, including the only routes to
+    // jobs, resume, search and the keymap, with nothing saying they existed.
+    // The `?` overlay beside it has always said so; these two now agree.
+    let room = panel.height.saturating_sub(2) as usize;
+    let hidden = rows
+        .iter()
+        .skip(room.min(rows.len()))
+        .filter(|(letter, _)| !letter.is_empty())
+        .count();
+    let bottom = if hidden > 0 {
+        format!(" Esc cancels · {hidden} more — widen the window ")
+    } else {
+        " Esc cancels · any other key is ignored ".to_string()
+    };
     f.render_widget(Clear, panel);
     f.render_widget(
         List::new(items).block(
@@ -3282,7 +3298,7 @@ fn draw_which_key(f: &mut Frame, app: &App) {
                 .borders(Borders::ALL)
                 .border_style(fg(USER))
                 .title(title)
-                .title_bottom(" Esc cancels · any other key is ignored "),
+                .title_bottom(bottom),
         ),
         panel,
     );
@@ -8733,6 +8749,39 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A short terminal must not drop menu entries in silence.
+    ///
+    /// At 100×10 the workspace menu stopped after `a activity` and lost ten
+    /// rows — including the only routes to jobs, resume, search and the keymap
+    /// — with nothing on screen saying they were there. The `?` overlay in the
+    /// same situation has always said "N more — widen the window", so the two
+    /// overlays disagreed about whether truncation is worth mentioning.
+    #[test]
+    fn the_workspace_menu_says_what_a_short_terminal_is_hiding() {
+        let mut a = app();
+        a.overlay = Overlay::WhichKey;
+
+        let short = rendered(&a, 100, 10);
+        assert!(
+            short.contains("more — widen the window"),
+            "ten rows cannot hold the menu, and it has to say so:\n{short}"
+        );
+        // The count is of entries, so it has to be a real number rather than
+        // the word "some".
+        assert!(
+            short.contains("· 10 more"),
+            "and say how many:\n{short}"
+        );
+
+        // Given room, it goes back to the ordinary footer and claims nothing.
+        let tall = rendered(&a, 100, 40);
+        assert!(
+            !tall.contains("more — widen the window"),
+            "nothing is hidden at forty rows:\n{tall}"
+        );
+        assert!(tall.contains("any other key is ignored"), "{tall}");
     }
 
     /// The size the overlay is actually used at has to be complete, not merely
