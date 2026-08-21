@@ -11,12 +11,14 @@ use serde::{Deserialize, Serialize};
 use crate::event::{AgentEvent, Usage};
 
 pub mod agy;
+pub mod auth;
 pub mod claude;
 pub mod grants;
 pub mod models;
 pub mod opencode;
 
 pub use agy::Agy;
+pub use auth::AuthState;
 pub use claude::ClaudeCode;
 pub use models::Model;
 pub use opencode::OpenCode;

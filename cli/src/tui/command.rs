@@ -21,6 +21,14 @@ pub enum Slash {
     Help,
     /// Use a different harness for the next turn.
     Harness(HarnessKind),
+    /// Sign in to a harness, through the harness's own flow.
+    ///
+    /// `None` means the harness this conversation is on, which is the one that
+    /// just refused to run — the whole reason anybody types this from here.
+    /// `jod login` on the command line defaults to *every* harness instead,
+    /// and the difference is deliberate: a terminal has one conversation in
+    /// front of it and a shell does not.
+    Login(Option<HarnessKind>),
     /// Set the model, or clear it back to the harness default.
     Model(Option<String>),
     /// Set how much the agent may do without asking, or — with no argument —
@@ -198,6 +206,13 @@ pub fn parse(line: &str) -> Option<Slash> {
             Some(kind) => Slash::Harness(kind),
             None if arg.is_empty() => Slash::NeedsArgument("/harness <claude|opencode|agy>"),
             None => Slash::Unknown(format!("/harness {arg}")),
+        },
+        // `auth` as well as `login`, because a harness that has just refused
+        // to authenticate has put that word in front of you, not this one.
+        "login" | "auth" | "signin" => match harness_named(arg) {
+            Some(kind) => Slash::Login(Some(kind)),
+            None if arg.is_empty() => Slash::Login(None),
+            None => Slash::Unknown(format!("/login {arg}")),
         },
         "model" | "models" => {
             if arg.is_empty() || arg == "default" || arg == "clear" {
@@ -593,6 +608,10 @@ pub const HELP: &[(&str, &str)] = &[
     (
         "/harness <name>",
         "claude, opencode or agy — takes effect next turn",
+    ),
+    (
+        "/login [name]",
+        "sign in to a harness — no argument means the one this conversation is on",
     ),
     (
         "/model <name>",
@@ -1933,6 +1952,38 @@ mod tests {
             );
         }
         assert_eq!(lines("/project a"), vec!["/project add "], "typing narrows");
+    }
+
+    /// The console is where the sign-in failure is met — a run dies
+    /// unauthenticated in the transcript — so the fix has to be reachable from
+    /// there without quitting the conversation to get to a shell.
+    #[test]
+    fn login_names_a_harness_or_means_the_one_on_screen() {
+        assert_eq!(parse("/login"), Some(Slash::Login(None)));
+        assert_eq!(
+            parse("/login opencode"),
+            Some(Slash::Login(Some(HarnessKind::OpenCode)))
+        );
+        assert_eq!(
+            parse("/login claude-code"),
+            Some(Slash::Login(Some(HarnessKind::ClaudeCode)))
+        );
+    }
+
+    /// `auth` is the word the harness itself puts in front of you — `claude
+    /// auth login`, `Failed to authenticate` — so it reaches the same command
+    /// rather than being reported as unknown.
+    #[test]
+    fn the_word_the_harness_uses_reaches_the_same_command() {
+        assert_eq!(parse("/auth"), Some(Slash::Login(None)));
+        assert_eq!(parse("/signin"), Some(Slash::Login(None)));
+    }
+
+    /// A name that is not a harness is refused rather than quietly treated as
+    /// "no argument", which would sign in to something nobody asked for.
+    #[test]
+    fn login_refuses_a_word_that_is_not_a_harness() {
+        assert!(matches!(parse("/login gemini"), Some(Slash::Unknown(_))));
     }
 
     /// `/help` must not list a command the parser rejects.

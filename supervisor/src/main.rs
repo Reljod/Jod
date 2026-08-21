@@ -30,6 +30,7 @@ use std::sync::Arc;
 
 use jod_core::cards::{CardKind, Importance, NewCard, Source};
 use jod_core::event::{AgentEnvelope, AgentEvent};
+use jod_core::harness::auth;
 use jod_core::redact::Scrubber;
 use jod_core::runner::SpawnPlan;
 use jod_core::secrets::read_secret_value;
@@ -43,6 +44,12 @@ use tokio::sync::mpsc;
 
 /// How long a harness gets to exit after being asked, before it is made to.
 const KILL_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// How much of the harness's output is kept in memory to explain a failure.
+///
+/// Enough to hold the prose a harness prints on its way out, and far too few
+/// to be a second transcript. The events are the transcript; this is a window.
+const TAIL_LINES: usize = 40;
 
 /// `0.1.0 (f4e4c72 2026-08-13)` — release, commit, commit date.
 ///
@@ -228,6 +235,11 @@ async fn run(plan_path: &PathBuf) -> Result<(), String> {
 
     let mut terminating = false;
     let mut outcome: Option<Exit> = None;
+    // The last thing the harness said, kept only so a failure can be explained.
+    // A harness that cannot authenticate says so in prose on stderr and then
+    // exits, and that sentence is the whole of the evidence — the parser turns
+    // it into a `Raw` line and nothing else looks at it again.
+    let mut tail: Vec<String> = Vec::new();
     // Every file this run put bytes into, as it goes. Accumulated here rather
     // than read back out of the events afterwards because this process already
     // has them in hand, and it is the one process that cannot miss any.
@@ -254,6 +266,14 @@ async fn run(plan_path: &PathBuf) -> Result<(), String> {
                     } else {
                         scrubber.scrub(&line)
                     };
+                    // After the scrub, never before: this is a copy of the
+                    // harness's output held in memory, and a copy taken
+                    // upstream of the scrubber would be a copy of the
+                    // credentials too.
+                    tail.push(line.clone());
+                    if tail.len() > TAIL_LINES {
+                        tail.remove(0);
+                    }
                     for event in harness.parse_line(&line) {
                         if let AgentEvent::Started { session_id: Some(id), .. } = &event {
                             writer.set_session(id);
@@ -305,6 +325,26 @@ async fn run(plan_path: &PathBuf) -> Result<(), String> {
     // record of its own.
     let finished = harness.finalize(outcome.code);
     let errored = matches!(finished, AgentEvent::Finished { is_error: true, .. });
+
+    // Before the finish event rather than after it, so the transcript reads in
+    // the order a person asks: what went wrong, then that it ended. A run that
+    // died because its harness was never signed in used to leave behind one
+    // sentence of the harness's prose and `✗ failed · $0.0000 · 1s`, which
+    // names the symptom and not one thing to do about it.
+    if errored && !terminating && !outcome.signalled {
+        let kind = plan.harness;
+        let said = std::mem::take(&mut tail);
+        // On a blocking pool because it may ask the harness a question, and
+        // that means spawning a process and waiting for it.
+        let advice = tokio::task::spawn_blocking(move || auth::advice_for_failure(kind, &said))
+            .await
+            .ok()
+            .flatten();
+        if let Some(message) = advice {
+            writer.emit(AgentEvent::Error { message });
+        }
+    }
+
     writer.emit(finished);
 
     let status = match (terminating || outcome.signalled, errored) {

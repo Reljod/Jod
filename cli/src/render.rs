@@ -1,8 +1,9 @@
 //! Turning the event stream into something readable in a terminal.
 
+use jod_core::harness::AuthState;
 use jod_core::service::{AgentStatus, AgentSummary, HarnessInfo, Report};
 use jod_core::store::Origin;
-use jod_core::{broadcast, AgentEnvelope, AgentEvent};
+use jod_core::{broadcast, AgentEnvelope, AgentEvent, HarnessKind};
 
 /// The first `n` *characters* of an id.
 ///
@@ -35,14 +36,47 @@ fn paint(colour: &str, text: &str) -> String {
 
 pub fn harnesses(list: &[HarnessInfo]) {
     for h in list {
-        let mark = if h.available {
-            paint(GREEN, "✓")
-        } else {
-            paint(RED, "✗")
+        // Three marks rather than two, because a harness can now fail in two
+        // different ways and they need different answers: install it, or sign
+        // in to it. A signed-out harness used to print the same green tick as
+        // a working one and then fail every run it was given.
+        let mark = match (h.available, &h.auth) {
+            (false, _) => paint(RED, "✗"),
+            (true, Some(AuthState::LoggedOut)) => paint(YELLOW, "!"),
+            (true, _) => paint(GREEN, "✓"),
         };
         let where_ = h.path.as_deref().unwrap_or("not installed");
         println!("{mark} {:<14} {}", h.label, paint(DIM, where_));
+        if let Some(state) = &h.auth {
+            let colour = match state {
+                AuthState::LoggedIn { .. } => DIM,
+                AuthState::LoggedOut => YELLOW,
+                AuthState::Unknown { .. } => DIM,
+            };
+            println!("  {:<14} {}", "", paint(colour, &state.describe()));
+        }
     }
+}
+
+/// What a harness will read its credentials from, when that is a thing a
+/// person can get wrong.
+///
+/// Printed beside the sign-in state because it is the difference between "my
+/// account expired" and "I signed in somewhere this process never looks".
+pub fn harness_profile(kind: HarnessKind) {
+    if let Some(hint) = kind.profile_hint() {
+        println!("  {:<14} {}", "", paint(DIM, &format!("reading {hint}")));
+    }
+}
+
+/// The line `jod login` prints before handing the terminal to the harness.
+pub fn logging_in(kind: HarnessKind) {
+    println!(
+        "{} {} {}",
+        paint(BOLD, "→"),
+        kind.label(),
+        paint(DIM, "— the harness takes over from here"),
+    );
 }
 
 pub fn launched(agent: &AgentSummary) {

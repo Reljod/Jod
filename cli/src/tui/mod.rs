@@ -193,6 +193,12 @@ pub enum Action {
     /// Open the typed line in `$EDITOR`. The TUI has to be suspended and
     /// restored around it, which only the loop can do.
     Editor,
+    /// Sign in to a harness, through the harness's own flow.
+    ///
+    /// Travels to the loop for the same reason `$EDITOR` does, and it is the
+    /// same discipline: the flow prints a URL and waits for a code, so it
+    /// needs the real terminal rather than a screen Jod is drawing over.
+    SignIn(HarnessKind),
     /// Start dictating, or stop and transcribe what was said.
     ///
     /// Belongs to the loop for the same reason [`Action::Editor`] does: it
@@ -683,6 +689,9 @@ async fn event_loop(
                             // done from here — with the same discipline as
                             // `enter`/`restore`, panic hook included.
                             Some(Action::Editor) => edit_in_editor(terminal, &mut app),
+                            // Takes the terminal for the same reason, and
+                            // gives it back the same way.
+                            Some(Action::SignIn(kind)) => sign_in(terminal, &mut app, kind),
                             // Both take something only the loop has: the
                             // terminal, or the job slot the update occupies.
                             Some(Action::Update { check }) => {
@@ -1606,6 +1615,14 @@ async fn perform(
         Action::Editor => app.push(Entry::Notice(
             "no $EDITOR handoff from here — set $EDITOR and try Ctrl-G e in chat".into(),
         )),
+        // The sign-in flow takes the terminal, so the same rule applies: only
+        // the loop can lend it, and a caller that is not the loop says so
+        // rather than starting a flow nobody can see or answer.
+        Action::SignIn(kind) => app.push(Entry::Notice(format!(
+            "signing in to {} needs the console's own loop — run `jod login {}` at a shell instead",
+            kind.label(),
+            kind.id().replace('_', "-"),
+        ))),
         // Both need something only the loop holds — the job table for one, the
         // terminal for the other. Reached only from a caller that has neither,
         // so they say so rather than pretending to have run.
@@ -4755,6 +4772,9 @@ fn apply_slash(app: &mut App, slash: command::Slash) -> Option<Action> {
         // client: so the first half of this is a run, and a run belongs to the
         // loop. `perform` decides whether one is owed at all.
         Slash::Harness(kind) => return Some(Action::SwitchHarness(kind)),
+        // No argument means the harness on screen: it is the one that just
+        // refused to run, which is why anybody is typing this.
+        Slash::Login(named) => return Some(Action::SignIn(named.unwrap_or(app.harness))),
         // Applied to the app *and* handed back to be written down. Neither of
         // these was ever a property of the process: the harness is respawned
         // once per turn, so both are re-read at every spawn, and a choice held
@@ -6076,6 +6096,77 @@ fn edit_in_editor(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &m
     let _ = std::fs::remove_file(&path);
 }
 
+/// Hand the terminal to a harness's own sign-in flow, and take it back.
+///
+/// `/login` exists in here rather than only on the command line because of
+/// where the failure is met. A run dies unauthenticated in the console, the
+/// advice it prints names a command, and quitting a full-screen interface to
+/// run that command loses the conversation you were in the middle of. This is
+/// the same handover `$EDITOR` gets, with the same discipline — `restore`,
+/// child, `enter`, and the panic hook that `enter` reinstalls.
+///
+/// Jod reads nothing the flow produces. It runs the harness's command, in this
+/// process's environment, and then asks the harness what happened — which is
+/// the same question a run will ask, from the same place.
+fn sign_in(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    app: &mut App,
+    kind: HarnessKind,
+) {
+    let Some(bin) = kind.locate() else {
+        app.push(Entry::Notice(format!(
+            "{} is not installed, so there is nothing to sign in to",
+            kind.label()
+        )));
+        return;
+    };
+    let Some(args) = kind.login_args() else {
+        app.push(Entry::Notice(format!(
+            "{} has no sign-in command Jod can run — start it once by hand and sign in there",
+            kind.label()
+        )));
+        return;
+    };
+
+    restore();
+    println!("{} — signing in", kind.label());
+    if let Some(hint) = kind.profile_hint() {
+        // The line that explains the whole failure when somebody has signed in
+        // to a different profile: this is the directory the account will land
+        // in, and the one every run Jod starts will read.
+        println!("reading {hint}");
+    }
+    let status = std::process::Command::new(&bin).args(args).status();
+    match enter() {
+        Ok(fresh) => *terminal = fresh,
+        Err(e) => {
+            app.push(Entry::Notice(format!(
+                "could not take the terminal back: {e}"
+            )));
+            return;
+        }
+    }
+    let _ = terminal.clear();
+
+    match status {
+        Err(e) => app.push(Entry::Notice(format!(
+            "could not run {}: {e}",
+            bin.display()
+        ))),
+        // Asked rather than believed, and asked even when the flow exited
+        // badly — somebody who backed out of it is owed the state they are
+        // actually in, not a report of which key they pressed.
+        Ok(_) => {
+            let state = kind.auth();
+            app.push(Entry::Notice(format!(
+                "{} — {}",
+                kind.label(),
+                state.describe()
+            )));
+        }
+    }
+}
+
 /// What a running `/update` sends back to the loop.
 enum UpdateMsg {
     /// One line the installer wrote, as it wrote it, and the job it belongs to.
@@ -6340,6 +6431,62 @@ mod tests {
         // The harness session belonged to the harness being left.
         assert_eq!(app.session, None);
         assert_eq!(app.resume, Resume::Fresh);
+    }
+
+    /// `/login` with nothing after it means the harness on screen. That is the
+    /// one that just failed to authenticate, and asking a person to retype its
+    /// name in the console that is already showing it is asking for the wrong
+    /// name to be typed.
+    #[test]
+    fn login_with_no_argument_signs_in_to_the_harness_on_screen() {
+        let mut app = app_on(HarnessKind::OpenCode);
+        assert_eq!(
+            apply_slash(&mut app, command::Slash::Login(None)),
+            Some(Action::SignIn(HarnessKind::OpenCode))
+        );
+    }
+
+    /// Named explicitly, it goes where it was told — a conversation on one
+    /// harness is a perfectly good place to fix another.
+    #[test]
+    fn login_with_a_name_signs_in_to_that_harness() {
+        let mut app = app_on(HarnessKind::OpenCode);
+        assert_eq!(
+            apply_slash(&mut app, command::Slash::Login(Some(HarnessKind::ClaudeCode))),
+            Some(Action::SignIn(HarnessKind::ClaudeCode))
+        );
+        assert_eq!(
+            app.harness,
+            HarnessKind::OpenCode,
+            "signing in to one harness must not move the conversation to it"
+        );
+    }
+
+    /// The action travels to the loop because the flow needs the real
+    /// terminal. Anything else that receives it has to say so rather than
+    /// start a sign-in nobody can see — the same rule `$EDITOR` follows.
+    #[tokio::test]
+    async fn a_sign_in_that_reaches_the_wrong_handler_says_where_it_belongs() {
+        let jod = jod_with(store());
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        perform(
+            &jod,
+            &mut app,
+            &options(),
+            &mut Thread::default(),
+            Action::SignIn(HarnessKind::ClaudeCode),
+        )
+        .await;
+        let said = app.transcript.iter().rev().find_map(|e| match e {
+            Entry::Notice(text) => Some(text.clone()),
+            _ => None,
+        });
+        assert!(
+            said.as_deref()
+                .is_some_and(|t| t.contains("jod login claude-code")),
+            "a handler that cannot lend the terminal has to name the one that \
+             can: {said:?}"
+        );
     }
 
     /// The model was just dropped, so the next question is what the new harness

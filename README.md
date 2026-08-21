@@ -238,8 +238,11 @@ jod chat
 # Query Jod memory and past run context
 jod recall "what were the test results for the last PR?"
 
-# Check available agent harnesses on your system
+# Check which agent harnesses are installed, and whether each is signed in
 jod harnesses
+
+# Sign in to a harness, through the harness's own flow
+jod login
 
 # Update Jod binaries to the latest patch release
 jod update

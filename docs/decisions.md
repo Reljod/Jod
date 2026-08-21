@@ -2897,3 +2897,49 @@ truncates from the right, and appending the window there pushed `2 blocked` off
 the end. It costs a row only when the stack overflows, which is measured twice
 — once without the line and once with it — because drawing it takes a row off
 the stack, which is what decides whether it is needed.
+
+## A harness with no account behind it is not an available harness
+
+`jod harnesses` used to answer one question — is the binary on disk — and print
+a green tick against it. That is half the question, and it is the half that
+almost never fails. The other half arrived by hand: a prompt went out to Claude
+Code, the harness printed `Failed to authenticate: OAuth session expired and
+could not be refreshed`, exited inside a second, and the console showed that
+sentence and `✗ failed · $0.0000 · 1s`. Every part of the system worked. The
+binary was found, the process ran, the output was recorded, the run was marked
+failed. Nothing anywhere said what to do about it, and the listing went on
+calling the harness usable.
+
+The cause was not an expired session. Claude Code keeps its account in
+`$CLAUDE_CONFIG_DIR`, and this machine signs in through shell aliases that
+point it at `~/.claude-personal` and `~/.claude-work`. Jod spawns the binary
+with whatever environment it inherited, which in a plain terminal sets nothing,
+so it read the default `~/.claude` — where `claude auth status` answers
+`loggedIn: false`. Two profiles signed in, one profile spawned, and the error
+message described neither.
+
+So Jod now asks, and the asking has three rules. **It asks the harness, never
+the harness's files** — `claude auth status --json`, `opencode auth list` —
+because a credential file's format is the harness's business and reading one
+would make Jod a second, worse implementation of it. **A harness that cannot be
+asked is `Unknown`, never signed out**: AGY has no such command, and reporting
+"not signed in" about a harness nobody could interrogate would put a sign-in
+prompt in front of credentials that are fine. **The cost is paid where it is
+noticed**: probing spawns a process per harness, so the listing that answers an
+HTTP `GET` still does not, and a run pays it only after it has already failed.
+
+`jod login` is the other half, and it is deliberately not a credential manager.
+It runs the harness's own flow with the terminal attached and reads nothing —
+its whole contribution is *where* that happens. Signing in from the shell Jod
+spawns from puts the account in the directory Jod's runs will read, which is the
+one thing the aliases got wrong.
+
+It is a slash command as well as a shell command because of where the failure
+is met. A run dies unauthenticated *in the console*, and a fix that is only
+reachable by quitting the console throws away the conversation it was met in.
+`/login` therefore suspends the interface and hands the harness the real
+terminal, exactly as `Ctrl-G e` does for `$EDITOR`: a flow that prints a URL and
+waits for a code cannot run on a screen Jod is drawing over. With no argument it
+means the harness that conversation is on rather than all three, because the
+console is already showing which one that is and asking somebody to retype it is
+asking for the wrong name.
