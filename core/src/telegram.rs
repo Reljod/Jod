@@ -1,68 +1,52 @@
 //! Telegram: the transport that puts Jod on a phone.
 //!
-//! This is the most exposed surface Jod has. A message that reaches [`Bridge`]
-//! becomes a prompt to an agent harness that can run a shell, so everything
-//! here is written from the assumption that the next `getUpdates` will return
-//! a message from someone hostile.
+//! The most exposed surface Jod has. A message that reaches [`Bridge`] becomes
+//! a prompt to a harness that can run a shell, so everything here assumes the
+//! next `getUpdates` returns a message from someone hostile.
 //!
 //! # Transport: long polling, not a webhook
 //!
 //! A webhook needs a public HTTPS URL with a certificate Telegram accepts, and
 //! Jod's box is a personal VPS behind NAT with neither. Getting there means a
 //! domain, a certificate, a renewal cron and an inbound port — four failure
-//! modes that each fail *silently*, by never delivering a message.
+//! modes that each fail *silently*. `getUpdates` needs one outbound connection.
 //!
-//! `getUpdates` needs an outbound TCP connection and nothing else, which is
-//! what a NATed box has. The costs are real and handled here:
+//! The costs are real and handled here:
 //!
-//! - **Only one poller may run per token.** A second one makes Telegram return
-//!   409 `Conflict` to *both*, so the failure is mutual rather than
-//!   last-writer-wins. [`BotError::Conflict`] is therefore fatal: the loop
-//!   stops rather than fighting for the token, because a poller that retries
-//!   through a conflict keeps the other one broken too.
-//! - **The offset is the acknowledgement.** Telegram holds an update until a
-//!   later `getUpdates` asks for `offset > update_id`; see [`next_offset`].
-//!   Advancing the offset before the work is done means a crash loses the
-//!   message, and advancing it after means a crash re-runs it. Jod advances
-//!   *before* dispatch, on purpose: re-running an unbounded agent turn on a
-//!   restart is worse than dropping it, and the person who sent it is sitting
-//!   in the chat and can send it again.
+//! - **Only one poller may run per token.** A second makes Telegram return 409
+//!   to
+//!   *both*, so [`BotError::Conflict`] is fatal: retrying through it keeps the
+//! other poller broken too.
+//! - **The offset is the acknowledgement.** Advancing before the work is done
+//! loses a message on a crash; advancing after re-runs it. Jod advances
+//!   *before* dispatch, because re-running an unbounded agent turn is worse than
+//! dropping it — the sender is in the chat and can send again.
 //!
 //! # Crate: raw JSON over `reqwest`
 //!
-//! Jod sends three Bot API methods — `getUpdates`, `sendMessage`,
-//! `editMessageText` — and reads four object shapes. `teloxide` brings a
-//! dispatcher, a dialogue state machine and derive macros to build a bot
-//! framework, and Jod already *has* the framework
-//! ([`crate::service::Jod`]); `frankenstein` still generates the whole API
-//! surface. Both wrap the same `reqwest` call made directly here, and every
-//! transitive crate is weight in the image and another thing to audit.
-//! `rustls` rather than system OpenSSL for the same reason.
+//! Three Bot API methods and four object shapes. `teloxide` brings a dispatcher
+//! and a dialogue state machine to build a bot framework, and Jod already *has*
+//! the framework; `frankenstein` generates the whole API surface. Both wrap the
+//! same `reqwest` call made directly here, and every transitive crate is weight
+//! in the image and another thing to audit.
 //!
 //! # The phone is a seat at the main chat, not a chat of its own
 //!
-//! To the person holding the phone there is one thread with Jod in it, going
-//! back weeks — and it is the *same* thread as the one at the desk. So a
-//! message here is not a conversation of its own: it is a turn in the pinned
-//! main chat, handed over by the same [`crate::orchestrator::hand_to_orchestrator`]
-//! that `jod main` and the TUI's `/main` call. Say something from the sofa and
-//! it is there in `jod main`; say something at the desk and the phone picks up
-//! from it.
+//! To the person holding the phone there is one thread with Jod in it, and it
+//! is the *same* thread as the one at the desk. So a message here is a turn in
+//! the pinned main chat, handed over by the same
+//! [`crate::orchestrator::hand_to_orchestrator`] the desk uses.
 //!
-//! The first version gave every chat its own conversation and a per-chat
-//! session in `channel_sessions`, which felt continuous on the phone and meant
-//! the main chat heard nothing said to it from outside a terminal.
-//! → [why](../../../docs/decisions.md)
+//! The first version gave every chat its own conversation, which felt
+//! continuous on the phone and meant the main chat heard nothing said from
+//! outside a terminal. → [why](../../../docs/decisions.md)
 //!
 //! So the resume cursor lives on the conversation row and survives a restart
-//! because the row does. (Kept in a `HashMap` on the bridge, a daemon restart
-//! silently started every chat over, with nothing on screen to say why.)
-//! `channel_sessions` is now the audit trail rather than the lookup.
+//! because the row does. `channel_sessions` is now the audit trail, not the
+//! lookup.
 //!
-//! Starting over is something you ask for, with `/new` or `/clear`, and because
-//! there is one chat those clear it for every surface — which the reply says
-//! out loud. They drop the harness session and never the transcript: Jod owns
-//! the transcript, and nothing else in here drops anything.
+//! `/new` and `/clear` drop the harness session and never the transcript: Jod
+//! owns the transcript.
 
 use std::collections::HashSet;
 use std::future::Future;
@@ -263,17 +247,14 @@ pub const MARKDOWN_V2_SPECIALS: [char; 18] = [
     '_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!',
 ];
 
-/// The exact MarkdownV2 escape rule, as the Bot API states it: **in all places,
-/// the characters `_ * [ ] ( ) ~ ` > # + - = | { } . !` must be preceded by
-/// `\`.** Every one of the eighteen, unconditionally, whether or not it looks
-/// like it could start an entity — a bare `.` at the end of a sentence is a
-/// 400.
+/// The exact MarkdownV2 escape rule: **in all places, the characters `_ * [ ] (
+/// ) ~ ` > # + - = | { } . !` must be preceded by `\`** — unconditionally,
+/// since a bare `.` at the end of a sentence is a 400.
 ///
 /// Note what the rule does *not* say: `\` itself is not on the list, so a
 /// backslash already in the text stays unescaped and Telegram reads it as an
-/// escape for whatever follows. There is no way to express a literal backslash
-/// under this rule, which is one of the reasons [`Formatting::Plain`] is the
-/// default.
+/// escape for whatever follows. There is no way to express a literal backslash,
+/// which is one reason [`Formatting::Plain`] is the default.
 pub fn escape_markdown_v2(text: &str) -> String {
     let mut out = String::with_capacity(text.len() + text.len() / 8);
     for ch in text.chars() {
@@ -362,19 +343,16 @@ impl ChatKind {
 
 /// Which chat a message came from, derived from the message alone.
 ///
-/// **Not which conversation it lands in** — that is always the pinned main chat
-/// now. This is the identity of the *place* it was sent from, and three things
-/// still key off it: the row in `channel_sessions` that records where a chat's
-/// turns went, the [`reply_key`] the delivery ledger owes an answer against, and
-/// the name the run answers to in `jod ls`.
+/// **Not which conversation it lands in** — that is always the pinned main chat.
+/// This identifies the *place* it was sent from, and three things key off it:
+/// the `channel_sessions` row, the [`reply_key`] the ledger owes an answer
+/// against, and the name the run answers to in `jod ls`.
 ///
-/// Three rules, and the first is the one that matters. **When an update carries
-/// no chat id, the sender's id stands in for it.** Defaulting to a constant
-/// instead — or to the chat kind alone — collapses every chat into one key, and
-/// the symptom is not a crash but one chat's ledger row answering for another's
-/// message. The other two follow Telegram's own grain: a thread is a place
-/// several people are talking about one thing, so it is shared; a group without
-/// threads is several conversations interleaved in one room, so it is per-user.
+/// **When an update carries no chat id, the sender's id stands in.** A constant
+/// instead would collapse every chat into one key, and the symptom is not a
+/// crash but one chat's ledger row answering for another's message. The other
+/// two rules follow Telegram's grain: a thread is shared, a group without
+/// threads is per-user.
 pub fn session_key(
     chat_id: Option<i64>,
     kind: ChatKind,
@@ -391,15 +369,12 @@ pub fn session_key(
 
 /// What one chat has been doing, as the database remembers it.
 ///
-/// Keyed by [`session_key`]. The question it answers is "where did this chat's
-/// turns go, and when did it last say anything" — `conversation_id` is the
-/// conversation they landed in (the main chat), and `session_id` is the harness
-/// session its last turn ran on.
+/// Keyed by [`session_key`]: where this chat's turns went, and when it last
+/// said anything.
 ///
 /// **Neither column is the resume cursor any more.** That lives on the
-/// conversation row, where [`Store::resume_for`] reads it, because the chat and
-/// the desk share one conversation and a second copy of the cursor is a second
-/// answer to one question.
+/// conversation row, because the chat and the desk share one conversation and a
+/// second copy is a second answer to one question.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChannelSession {
     pub key: String,
@@ -475,14 +450,11 @@ impl Store {
     }
 
     /// Forget what this chat was saying. Returns whether there was anything to
-    /// forget, so `/clear` can say "already fresh" instead of implying it threw
+    /// forget, so `/clear` can say "already fresh" rather than imply it threw
     /// something away.
     ///
-    /// Nulled rather than deleted: "this chat starts fresh next time" is a
-    /// state the schema already has a spelling for, and keeping the row keeps
-    /// `updated_at_ms` — the answer to "when did this chat last do anything" —
-    /// rather than making a cleared chat indistinguishable from one that has
-    /// never existed.
+    /// Nulled rather than deleted, so `updated_at_ms` survives — otherwise a
+    /// cleared chat is indistinguishable from one that never existed.
     pub fn clear_channel_session(&self, key: &str) -> Result<bool> {
         self.write(|tx| {
             let cleared = tx.execute(
@@ -552,27 +524,26 @@ pub fn help_text() -> String {
 const FRESH_START: &str = "🆕 Fresh start. The main chat begins its next message with no context behind it — here and at the desk both, since they're the one chat. The transcript is kept; only the context window is dropped.";
 
 /// Read `text` as a command. `None` means "this is an ordinary message", and
-/// ordinary messages are the only thing that ever reaches a harness.
+/// ordinary messages are the only thing that reaches a harness.
 ///
-/// The rules are lifted from the TUI's `command::parse`, which solved this
-/// first and whose behaviour this deliberately matches:
+/// The rules are the TUI's `command::parse`, deliberately matched:
 ///
 /// - **The whole first word decides.** `/newsletter` is not `/new`.
-/// - **Leading whitespace means it is not a command,** so a prompt can always
-///   be forced through by typing a space first.
-/// - **A bare `/` is a typo, not a command**, and reaches nobody as one.
-/// - **A first word containing a second `/` is a path, not a command.**
-///   "/usr/bin/foo is missing" is a sentence somebody typed about their
-///   machine, and answering it with "I don't know that command" would be
-///   answering the wrong question. This is the rule that costs something
-///   elsewhere — it means `/new/thing` reaches the agent — and it is still the
-///   right trade on a phone, where paths are pasted constantly.
+/// - **Leading whitespace means it is not a command**, so a prompt can always
+///   be
+/// forced through.
+/// - **A bare `/` is a typo.**
+/// - **A first word containing a second `/` is a path.** "/usr/bin/foo is
+///   missing"
+/// is a sentence about a machine. This costs something — `/new/thing` reaches
+/// the agent — and is still right on a phone, where paths are pasted
+/// constantly.
 /// - **Anything else beginning with `/` is reported, never forwarded.** A
-///   mistyped command that reaches a harness arrives as a *prompt*, and a
-///   prompt here starts a process that can run a shell.
+///   mistyped
+/// command reaching a harness arrives as a *prompt*, and a prompt here starts a
+/// process that can run a shell.
 ///
-/// One rule the TUI has no need for: Telegram appends `@thebotsname` to
-/// commands sent in a group, so `/new@jod_bot` has to mean `/new`.
+/// One rule the TUI does not need: Telegram appends `@thebotsname` in a group.
 pub fn parse_command(text: &str) -> Option<Command> {
     let rest = text.strip_prefix('/')?;
     let word = rest.split_whitespace().next()?;
@@ -1067,20 +1038,15 @@ fn now_ms() -> i64 {
 
 /// The ledger's idempotency key for the reply owed to one incoming message.
 ///
-/// **Both halves are load-bearing.** Telegram's `message_id` is unique *within a
-/// chat* and nowhere else — two different chats each hold a message 42, and a
-/// group and a DM will collide within a day of each other. `message_key` is
-/// `UNIQUE` in the schema, so a key that collided would mean the second chat's
-/// reply silently reusing the first chat's row: `record_obligation` does
-/// `ON CONFLICT DO NOTHING`, so nothing would be recorded, and the sweep would
-/// one day redeliver one chat's answer into the other. The chat id is what makes
-/// the pair an identity.
+/// **Both halves are load-bearing.** `message_id` is unique *within a chat* only,
+/// so two chats each hold a message 42. `message_key` is `UNIQUE`, and
+/// `record_obligation` does `ON CONFLICT DO NOTHING` — so a collision would
+/// record nothing, and the sweep would one day redeliver one chat's answer into
+/// the other.
 ///
 /// One key per incoming message rather than per outgoing one, because exactly
-/// one reply is ever owed for a message: `handle` either refuses to start and
-/// returns, or runs and answers. Keying it this way is also what makes a
-/// redelivered Telegram update — the same message arriving twice because the
-/// offset was never acknowledged — queue one reply instead of two.
+/// one reply is ever owed. That is also what makes a redelivered update queue
+/// one reply instead of two.
 fn reply_key(msg: &IncomingMessage) -> String {
     format!("telegram:{}:{}", msg.chat_id, msg.message_id)
 }
@@ -1191,19 +1157,13 @@ pub struct HttpBot {
 
 /// Replace a bot token wherever it appears in text bound for a log.
 ///
-/// Telegram puts the token in the URL path, and `reqwest` puts the URL in its
-/// error messages. So a single unreachable-network moment wrote a live
-/// credential into the bridge's log, in the clear, on a line nobody would think
-/// to treat as sensitive:
+/// Telegram puts the token in the URL path and `reqwest` puts the URL in its
+/// error messages, so one unreachable-network moment wrote a live credential
+/// into the log in the clear.
 ///
-/// ```text
-/// poll failed, retrying: could not reach Telegram: error sending request for
-/// url (https://api.telegram.org/bot<TOKEN>/getUpdates)
-/// ```
-///
-/// Redacting at the point the error is *built* rather than at the point it is
-/// printed, because there is no single point where it is printed — the error
-/// travels, and every future call site would have to remember.
+/// Redacted where the error is *built* rather than printed, because there is no
+/// single point where it is printed — the error travels, and every future call
+/// site would have to remember.
 fn redact_token(text: String, token: &str) -> String {
     if token.is_empty() {
         return text;
@@ -1491,24 +1451,20 @@ impl<B: BotApi + 'static> Bridge<B> {
 
     /// Send something Jod owes somebody, with the ledger bracketing the send.
     ///
-    /// **Not every outbound message is an obligation.** Two are, and go through
-    /// here: the answer a run produced, and the refusal when a run could not
-    /// start. Both are what `ledger`'s header names, and neither can be got
+    /// **Not every outbound message is an obligation.** Two are: the answer a run
+    /// produced, and the refusal when a run could not start. Neither can be got
     /// back by asking again, because the work has already happened.
     ///
     /// Three deliberately do not: the progress bubble and its completion edit,
-    /// superseded seconds later, and command replies, which have no run behind
-    /// them and can be had again by retyping. Redelivering those after a
-    /// restart puts yesterday's `⏳ working, 2m` in front of somebody.
+    /// superseded seconds later, and command replies, which can be had again by
+    /// retyping. Redelivering those after a restart puts yesterday's `⏳
+    /// working, 2m` in front of somebody.
     ///
-    /// **The order is the guarantee.** The row is written *before* the
-    /// transport is touched, because the crash the ledger exists for happens
-    /// between the two; a row written after a successful send records only the
-    /// sends that succeeded.
+    /// **The order is the guarantee.** The row is written *before* the transport is
+    /// touched, because the crash the ledger exists for happens between the
+    /// two.
     ///
-    /// `run_id` ties the row to the run it reports, which is what lets the
-    /// ledger answer "the store says `done` — did the person hear about it?"
-    /// `None` for the refusal, where there is no run to name.
+    /// `run_id` ties the row to the run it reports; `None` for the refusal.
     async fn deliver_owed(
         &self,
         key: &str,
@@ -1598,17 +1554,15 @@ impl<B: BotApi + 'static> Bridge<B> {
     /// Send anything a previous Jod died owing, before taking any new work.
     ///
     /// Here rather than in `Daemon::persistent`, which holds no transport.
-    /// `Store::sweep_recoverable` **claims as it reads**, so a sweep in a
-    /// process that cannot send would take every orphaned row, deliver none,
-    /// and then stay *alive* — making every later sweep correctly skip those
-    /// rows for as long as it runs. Recoverable messages would become
-    /// permanently stranded ones. The sweep belongs where the transport is.
+    /// `sweep_recoverable` **claims as it reads**, so a sweep in a process that
+    /// cannot send would take every orphaned row, deliver none, and then stay
+    /// *alive* — making every later sweep correctly skip them. Recoverable
+    /// messages would become permanently stranded.
     ///
-    /// Before the poll loop, not beside it: a message owed since yesterday goes
-    /// out ahead of whatever arrived this second.
+    /// Before the poll loop: a message owed since yesterday goes out ahead of
+    /// whatever arrived this second.
     ///
-    /// Nothing here is fatal — an unreadable ledger is a reason to get on with
-    /// answering people, not to refuse to start.
+    /// Nothing here is fatal.
     async fn redeliver_owed(&self) {
         let Some(store) = self.jod.store() else {
             return;
@@ -1633,17 +1587,15 @@ impl<B: BotApi + 'static> Bridge<B> {
         for r in recovered {
             let id = r.obligation.id;
 
-            // `pending` → `attempting`, spending an attempt. A row that was
-            // already `attempting` when Jod died is refused here and that is
-            // correct twice over: it is already in the state it should be in,
-            // and its attempt was spent by the process that died holding it.
+            // `pending` → `attempting`, spending an attempt. A row already
+            // `attempting` when Jod died is refused, correctly twice over: it
+            // is in the state it should be in, and its attempt was spent by the
+            // process that died holding it.
             //
-            // Before the address is parsed, not after, so that a row with a
-            // target this build cannot read still burns an attempt and settles
-            // after `MAX_ATTEMPTS` restarts. Failing it without spending one
-            // would return it to `pending` forever — `mark_failed` means "try
-            // again" — and a row retried forever by a process that will never
-            // manage it is the strand this whole function is arranged to avoid.
+            // Before the address is parsed, so a row with a target this build
+            // cannot read still burns an attempt and settles after
+            // `MAX_ATTEMPTS`. Failing it without spending one would return it
+            // to `pending` for ever.
             let _ = store.mark_attempting(id, &me, now_ms());
 
             // Only a malformed target reaches this now that the sweep filters
@@ -1682,23 +1634,18 @@ impl<B: BotApi + 'static> Bridge<B> {
 
     /// Note that this chat's turn landed in `conversation_id`.
     ///
-    /// **Where a chat picks up from is no longer this table's answer.** It used
-    /// to be: each chat carried its own harness session id here, and a phone
-    /// thread was a conversation of its own. That meant "what did I ask Jod
-    /// today" had a different answer depending on which device you had asked
-    /// from, and the main chat — the one `jod main` and the TUI sit at — never
-    /// heard any of it. Now every message is a turn at that one desk, and the
-    /// resume cursor lives where the desk does, on the conversation row.
+    /// **Where a chat picks up from is no longer this table's answer.** Each chat used
+    /// to carry its own session id here, so "what did I ask Jod today" answered
+    /// differently per device and the main chat never heard any of it. Now
+    /// every message is a turn at that one desk.
     ///
-    /// So this write is the record of *where a chat's turns went*, which is the
-    /// question the column `0011` added and nothing ever filled. It is also
-    /// what keeps `updated_at_ms` answering "when did this chat last do
-    /// anything", and it is where a future per-chat conversation would be a
-    /// write rather than a new code path.
+    /// So this records *where a chat's turns went* — the question column `0011`
+    /// added and nothing ever filled — and keeps `updated_at_ms` answering
+    /// "when did this chat last do anything".
     ///
-    /// Failure is logged, never raised. A binding Jod could not write down is a
+    /// Failure is logged, never raised: a binding Jod could not write down is a
     /// worse record of a turn that happened, not a reason to withhold the
-    /// answer from the person waiting for it.
+    /// answer.
     fn bind_to(&self, key: &str, conversation_id: &str) {
         let Some(store) = self.jod.store() else {
             return;
@@ -1727,17 +1674,14 @@ impl<B: BotApi + 'static> Bridge<B> {
     /// Start the main chat's harness session over. `Ok(false)` means it was
     /// already starting fresh.
     ///
-    /// **`/new` from a phone is not a private reset,** and the reply says so:
-    /// the chat it clears is the main one, shared with `jod main` and the TUI.
-    /// That is the honest consequence of one desk rather than several, and the
-    /// alternative — a `/new` that only *looks* like it worked, while the next
-    /// message resumes the same session anyway — is the failure this replaces.
+    /// **`/new` from a phone is not a private reset,** and the reply says so: the chat
+    /// it clears is the main one. The alternative — a `/new` that only *looks*
+    /// like it worked while the next message resumes the same session — is what
+    /// this replaces.
     ///
-    /// What it drops is the harness session id, which is the only thing
-    /// carrying a model's context window. Jod's own transcript stays, because
-    /// Jod owns it: `jod conv` still has to be able to read what happened, and
-    /// a reset that destroyed the record would make the main chat unauditable
-    /// from whichever surface reset it last.
+    /// It drops the harness session id, the only thing carrying a context
+    /// window. Jod's transcript stays, or the chat becomes unauditable from
+    /// whichever surface reset it last.
     fn forget_session(&self, key: &str) -> Result<bool> {
         let Some(store) = self.jod.store() else {
             return Ok(false);
@@ -1828,30 +1772,18 @@ impl<B: BotApi + 'static> Bridge<B> {
         // into a channel nobody is listening to.
         let mut events = self.jod.subscribe();
 
-        // **The message becomes a turn in the main chat**, through the same
-        // function `jod main` and the TUI's `/main` call. Not `spawn_agent`:
-        // that bound `RunConversation::New`, so every message from the phone
-        // minted a one-turn conversation of its own and the main chat — the
-        // conversation Jod is actually *for* — never heard a word of it. You
-        // could ask Jod something from the sofa and then find no trace of it at
-        // the desk.
+        // **The message becomes a turn in the main chat**, through the same function
+        // `jod main` and the TUI call. Not `spawn_agent`: that bound
+        // `RunConversation::New`, so every phone message minted a one-turn
+        // conversation and the main chat never heard a word of it.
         //
-        // Routing here decides three things that used to be decided locally,
-        // and it decides them the same way for every surface:
-        //
-        // - **Which conversation.** The pinned main one, resumed from its own
-        //   session id, so a phone turn and a console turn are consecutive
-        //   turns of one conversation rather than two threads about one topic.
-        // - **Which tools.** `ToolAccess::Orchestrate`. This is the widening
-        //   worth naming: a phone message used to run with no Jod tools at all.
-        //   It cannot stay that way, because the main chat's entire job is to
-        //   call those tools, and a session where every other turn could not
-        //   see them is a session whose transcript references tools that are
-        //   gone. The gate on a phone message is the allowlist, which is
-        //   default-deny and always was.
-        // - **Which permission mode.** `AcceptEdits`, for the reason
-        //   `hand_to_orchestrator` documents at length: `Ask` is plan mode, and
-        //   plan mode refuses the very MCP calls that are the point.
+        // Routing here decides three things the same way for every surface: the
+        // pinned **conversation**, so a phone turn and a console turn are
+        // consecutive; the **tools**, `ToolAccess::Orchestrate`, because the
+        // main chat's whole job is to call them and the real gate is the
+        // default-deny allowlist; and the **permission mode**, `AcceptEdits`,
+        // because `Ask` is plan mode and plan mode refuses the very MCP calls
+        // that are the point.
         let handed = match hand_to_orchestrator(
             &self.jod,
             &msg.text,
