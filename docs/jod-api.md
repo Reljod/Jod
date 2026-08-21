@@ -569,6 +569,28 @@ run was *saying* — a stall, the status of the last one — is carried up onto 
 row itself, because a wedged agent that says so only three levels down is a
 wedged agent nobody sees.
 
+Three fields carry that idea further, and a client showing a fleet wants all
+three.
+
+`branch` and `worktree` say **where the work actually is**. A work session reads
+its checkout and writes to a git worktree it claims part-way through its run, so
+an agent can report a file changed while the checkout the reader is looking at
+is untouched — which is exactly what it looks like from the outside when
+something has gone wrong, and is not wrong at all. Both are null on `main`,
+`project` and `manager`, none of which do work, and on a work that has not
+claimed a worktree; that null is the honest starting state rather than a missing
+answer. They are set on the work **and** on every session under it, because the
+fold usually leaves the session as the row a person sees.
+
+`stalled` counts the stalled runs anywhere in a row's subtree, itself included,
+the way `cards` counts open cards. `stalled_for_ms` stays a fact about one
+process and is null on every group row — which meant a project whose only
+engineer had been silent for half an hour rendered as *running*, and a client
+drawing a spinner from `running` drew the most reassuring thing on the screen
+over the least reassuring state in the system. Prefer `stalled > 0` over
+`running` when deciding what to draw: they are both true of a wedged agent, and
+only one of them is worth saying.
+
 A project appears once it has works **or** a manager. A repository that has
 been catalogued but never discussed has no chain to draw and stays off the
 tree; one whose manager is mid-instruction appears immediately, which is
