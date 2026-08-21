@@ -1617,6 +1617,24 @@ impl Store {
                     "UPDATE conversations SET pinned = 1, title = 'main' WHERE id = ?1",
                     params![new_id],
                 )?;
+                // Every bus that has a `main` on its roster follows the pin.
+                //
+                // `Store::is_main_chat_member` decides whether mail addressed
+                // to `main` is handed to the main chat by comparing the member
+                // row's conversation against the *currently pinned* one. Moving
+                // the pin and leaving those rows behind makes every existing
+                // team's `main` a member of nothing: the mail is not diverted,
+                // falls through to a wake that cannot happen — a work member
+                // never gets a `session_id` — and waits for ever.
+                //
+                // Observed on a live daemon, once per tick, indefinitely:
+                // "1 message(s) waiting: `main` has no session to resume". It
+                // is not an edge case; main compacts itself when its context
+                // fills, so every long-running console reaches it.
+                tx.execute(
+                    "UPDATE team_members SET conversation_id = ?2 WHERE conversation_id = ?1",
+                    params![conversation_id, new_id],
+                )?;
             }
             Ok(())
         })?;

@@ -3645,6 +3645,61 @@ mod tests {
         assert!(s.is_main_chat_member(Scope::Team, "run-1", MAIN).unwrap());
     }
 
+    /// A bus keeps its `main` when the main chat compacts.
+    ///
+    /// `is_main_chat_member` compares a member row against the *currently
+    /// pinned* conversation, and compaction moves that pin to a fresh
+    /// conversation. Every team joined before it then held a `main` that
+    /// matched nothing: mail to the orchestrator stopped being handed to the
+    /// chat, fell through to a wake that cannot happen — a member never gets a
+    /// `session_id` — and waited for ever.
+    ///
+    /// Observed on a live daemon, once per tick and indefinitely: *"1
+    /// message(s) waiting: `main` has no session to resume"*. Main compacts
+    /// itself when its context fills, so every long-running console gets there.
+    #[test]
+    fn a_return_channel_follows_the_main_chat_through_a_compaction() {
+        let (s, main) = with_a_main_chat();
+        s.open_return_channel("run-1", "reporter", HarnessKind::ClaudeCode)
+            .unwrap();
+        assert!(
+            s.is_main_chat_member(Scope::Team, "run-1", MAIN).unwrap(),
+            "the premise: the channel names the chat that is pinned now",
+        );
+
+        // Something to compact. `compact` refuses an empty transcript, rightly.
+        let mut ids = Vec::new();
+        for turn in 0..4 {
+            if let Some(id) = s.append_prompt(&main, &format!("run-{turn}"), "go").unwrap() {
+                ids.push(id);
+            }
+            ids.push(
+                s.append_message(
+                    &main,
+                    crate::conversation::NewMessage::new(
+                        crate::conversation::Role::Assistant,
+                        "on it",
+                    )
+                    .from_run(&format!("run-{turn}")),
+                )
+                .unwrap(),
+            );
+        }
+
+        // What compaction does to the pin, through the code that does it.
+        // `continue_as_new` is what the console runs when a context fills: it
+        // compacts into a *fresh* conversation and moves the pin onto it.
+        s.continue_as_new(&main, "what happened so far", "full")
+            .unwrap();
+        let moved = s.pinned_conversation().unwrap().unwrap();
+        assert_ne!(moved, main, "the pin moved, which is the premise of the bug");
+
+        assert!(
+            s.is_main_chat_member(Scope::Team, "run-1", MAIN).unwrap(),
+            "and the bus followed it, so mail to main is still deliverable",
+        );
+    }
+
     /// The two reserved names are refused on both join paths. The gap was real:
     /// `jod team join` calls [`Store::join_team`], which had neither guard.
     #[test]
