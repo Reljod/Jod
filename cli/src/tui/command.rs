@@ -7,8 +7,13 @@
 //! The set is deliberately smaller than OpenCode's. Every command here maps
 //! onto something Jod can actually do; a command that would need a capability
 //! the harness seam does not expose is *absent* rather than present and inert,
-//! because a `/compact` that silently does nothing is worse than no `/compact`.
+//! because a command that silently does nothing is worse than no command.
 //! Unrecognised input is reported, never swallowed.
+//!
+//! `/compact` was the standing example of that rule and is now the example of
+//! how it lifts: it stayed out while nothing behind the seam could shorten a
+//! context, and arrived the day `Store::continue_as_new` could. The rule is
+//! "earn the command", not "never grow".
 
 use jod_core::{HarnessKind, PermissionPolicy};
 
@@ -123,6 +128,19 @@ pub enum Slash {
     /// Distinct from [`Slash::New`], which drops the context *and* leaves the
     /// conversation. `/clear` keeps you where you are standing.
     Clear,
+    /// Summarise this conversation and carry on from the summary.
+    ///
+    /// The half-measure `/clear` is not: it keeps the thread going instead of
+    /// dropping what was said, at the cost of a model call to write the
+    /// summary. Jod has no model of its own, so the harness on screen is asked
+    /// to write it and the command finishes when that run does.
+    ///
+    /// This used to be absent on purpose — see the note at the top of this
+    /// module — because nothing behind the harness seam could shorten a
+    /// context. `Store::continue_as_new` is what changed: the thread is
+    /// compacted and continues on the same harness with the summary as its
+    /// first turn, so the next run resumes nothing.
+    Compact,
     /// The background shells this console started, running and finished.
     Jobs,
     /// Restart the console into whatever `jod` is on disk now.
@@ -501,6 +519,9 @@ pub fn parse(line: &str) -> Option<Slash> {
             }
         }
         "clear" => Slash::Clear,
+        // `summarise` as well, because that is what it visibly does and it is
+        // the word someone reaches for who has not read the help.
+        "compact" | "summarise" | "summarize" => Slash::Compact,
         // Not `bg`: that already means `/delegate`, and a word that means
         // "start one" on one line and "list them" on the next is a trap.
         "jobs" | "shells" => Slash::Jobs,
@@ -715,6 +736,10 @@ pub const HELP: &[(&str, &str)] = &[
     (
         "/clear",
         "empty the screen and start the next message with no context behind it",
+    ),
+    (
+        "/compact",
+        "summarise this conversation and carry on from the summary — happens on its own when the context fills",
     ),
     ("/jobs", "background shells — what is building (Ctrl-G j)"),
     (
@@ -1588,6 +1613,9 @@ mod tests {
         assert_eq!(parse("/agents"), Some(Slash::Open(Workspace::Fleet)));
         assert_eq!(parse("/team"), Some(Slash::Open(Workspace::Team)));
         assert_eq!(parse("/clear"), Some(Slash::Clear));
+        for text in ["/compact", "/summarise", "/summarize"] {
+            assert_eq!(parse(text), Some(Slash::Compact), "{text}");
+        }
         for text in ["/exit", "/quit", "/q"] {
             assert_eq!(parse(text), Some(Slash::Exit), "{text}");
         }
@@ -1607,7 +1635,8 @@ mod tests {
     fn an_unknown_command_is_named_back_rather_than_sent_to_the_agent() {
         assert_eq!(parse("/wibble"), Some(Slash::Unknown("/wibble".into())));
         // The ones OpenCode has and Jod does not: reported, not silently inert.
-        for missing in ["/compact", "/undo", "/share", "/themes"] {
+        // `/compact` used to be on this list and has since been earned.
+        for missing in ["/undo", "/share", "/themes"] {
             assert_eq!(
                 parse(missing),
                 Some(Slash::Unknown(missing.into())),

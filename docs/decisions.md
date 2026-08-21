@@ -3303,3 +3303,53 @@ That cost is why the session picker above is the answer to "get me back into a
 conversation" and `c` is not. `c` prints a list, and a printed list is now a
 list you have a few seconds to read. Anyone who wants to *choose* a thread has
 `Ctrl-G r`, which was built to be chosen from.
+
+## Advice you cannot act on is worse than no advice, so the console compacts itself
+
+The context bar showed `⚠ compact recommended` once the harness's reported usage
+crossed 75% of an assumed 200,000-token window, and after every main-chat turn
+the orchestrator added `the main chat is due for compaction (size) — 128400 chars
+live`. Neither line could be acted on. `/compact` was deliberately absent from
+the console, with a note at the top of `cli/src/tui/command.rs` explaining that a
+command which silently does nothing is worse than no command, and the only way to
+compact anything was `jod conv compact <id> "<summary>"` at the shell — a command
+that takes the summary as an argument, because Jod has no model to write one.
+Two screens naming a problem, and the fix behind a verb nobody could reasonably
+run.
+
+Writing to the `compactions` table would not have been enough on its own, which
+is the part worth keeping. That narrows what *Jod* replays. The harness holds its
+own transcript and is resumed into it every turn, so a compaction that only wrote
+to the database would have left the bar exactly where it was and the next turn
+exactly as expensive. The only way to shorten what the harness is looking at is
+to stop resuming that session and start a new one with the summary in its prompt.
+
+So `Store::continue_as_new` is `Store::switch_harness` with the destination held
+still: compact the thread, mint a conversation seeded with the summary, let the
+pin follow it. They share one body — `carry_forward` — because the tricky parts
+are the loss guard, the two-transaction ordering and the pin, and a second copy
+of those is a second place for them to go wrong. A new conversation rather than a
+rewritten row for the reason a switch mints one: the old row's `session_id` still
+names a live transcript, and overwriting it would strand it.
+
+Past the threshold the console now does it rather than recommending it, at the
+end of a turn with nothing queued — the natural break the `idle` trigger was
+describing anyway. `/compact` is the same thing on demand. Both spawn a
+summariser on the harness in front of them, which is the only thing in the room
+with a model.
+
+Three things hold the automatic half honest. It gives up permanently after one
+failure, because the threshold is met on *every* turn once crossed and a
+compaction that cannot succeed would otherwise buy a model call after every turn
+forever; from then on the bar asks for the command instead. The status badge
+still says `(estimate)`, and the word earns its place more as an action than it
+did as advice — `CONTEXT_WINDOW` is one assumed figure for every model, so on a
+million-token model this fires at about 15% of the real capacity. And what makes
+firing early a cost rather than a loss is that nothing is deleted: the compacted
+turns keep their rows, stay searchable, and the thread behind the summary is
+still in `/sessions`.
+
+The shell keeps its notice. `jod main "<instruction>"` is a one-shot command, and
+starting a summariser and waiting for it is the wrong shape for one — but the
+line it printed named `jod conv compact <id>` without the summary that command
+requires, so it now points at the console instead.

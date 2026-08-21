@@ -2518,7 +2518,13 @@ async fn main_chat(
         hand_to_orchestrator(jod, &instruction, kind, cwd, None, "main", permission).await?;
     if let Some((reason, chars)) = handed.compaction_due {
         println!("· the chat is due for compaction ({reason}) — {chars} chars in the live window");
-        println!("  `jod conv compact {}` summarises it", &id[..8.min(id.len())]);
+        // Not `jod conv compact <id>`, which is what this used to say. That
+        // command takes the summary as an argument — Jod has no model to write
+        // one — so the line named something nobody could actually run as
+        // printed. The console has a model in front of it and compacts on its
+        // own; a one-shot shell command is the wrong place to start a
+        // summariser run and then wait for it.
+        println!("  `jod tui` compacts it on its own, or type /compact in there");
     }
     let agent = handed.agent;
 

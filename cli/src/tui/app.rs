@@ -603,6 +603,17 @@ pub struct App {
     /// the window. It is an estimate and the screen must say so rather than
     /// print a precise-looking number nobody can check.
     pub context_tokens: u64,
+    /// Whether the console still compacts on its own once the window fills.
+    ///
+    /// True until an automatic pass fails, and then false for the rest of the
+    /// session. The trigger is a threshold that is met on *every* turn once it
+    /// is crossed, so a compaction that cannot succeed — a store that refuses, a
+    /// summariser that keeps coming back empty — would otherwise spawn a model
+    /// call after every single turn and never stop. Giving up once and saying so
+    /// is the only ending that does not quietly bill somebody.
+    ///
+    /// `/compact` is unaffected: a person asking for it is not a loop.
+    pub auto_compact: bool,
     /// Shell jobs this console started and is not watching — an update
     /// building in the background, and whatever joins it later.
     ///
@@ -1252,6 +1263,7 @@ impl App {
             mode: PermissionPolicy::default(),
             panel: false,
             context_tokens: 0,
+            auto_compact: true,
             jobs: Vec::new(),
             // Set by the event loop from `Options::cwd`, like the mode and the
             // team beside it: `new` builds an app, the launch flags fill it in.
