@@ -393,6 +393,31 @@ export class WorldStore {
     this.dirty = true;
   }
 
+  /**
+   * Drop an agent and everything the world holds about it.
+   *
+   * Called after a delete the server accepted, so the row disappears on the
+   * click rather than on the next roster refresh — which for a deleted run
+   * never comes, because the roster is rebuilt from what the daemon still has.
+   *
+   * The feed and the pulses go with it. A stream line naming an agent that is
+   * no longer in `agents` renders as an untitled row and, worse, selecting it
+   * would select nothing; a pulse animates along an edge whose node is gone.
+   *
+   * `report` is deliberately left alone. It is the server's tally, and the
+   * server is the one that gets to change it — guessing here would put a
+   * count on screen that the next refresh silently corrects.
+   */
+  forget(agentId: string): boolean {
+    const w = this.world;
+    if (!w.agents.delete(agentId)) return false;
+    w.order = w.order.filter((id) => id !== agentId);
+    w.feed = w.feed.filter((f) => f.agentId !== agentId);
+    w.pulses = w.pulses.filter((p) => p.agentId !== agentId);
+    this.dirty = true;
+    return true;
+  }
+
   private pulse(agentId: string, kind: Pulse["kind"], toolName?: string): void {
     const w = this.world;
     w.pulses.push({ id: this.pulseId++, agentId, kind, born: performance.now(), toolName });

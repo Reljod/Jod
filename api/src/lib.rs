@@ -30,6 +30,7 @@ pub mod routes;
 pub mod session;
 pub mod sse;
 pub mod webhook;
+pub mod works;
 pub mod workspaces;
 
 use std::sync::Arc;
@@ -125,6 +126,11 @@ pub fn router(state: AppState) -> Router {
             "/v1/agents/{id}",
             get(routes::get_agent).delete(routes::kill_agent),
         )
+        // Stopping a run and forgetting one are different asks, so they are
+        // different paths. `DELETE /v1/agents/{id}` ends a run and keeps the
+        // record; this removes the record, and refuses while the run is alive.
+        // → [`routes::delete_run`]
+        .route("/v1/runs/{id}", axum::routing::delete(routes::delete_run))
         .route("/v1/agents/{id}/events", get(routes::agent_events))
         .route("/v1/agents/{id}/stream", get(sse::agent_stream))
         .route("/v1/events", get(sse::all_agents_stream))
@@ -155,8 +161,13 @@ pub fn router(state: AppState) -> Router {
         )
         .route(
             "/v1/conversations/{id}",
-            get(conversations::get_conversation),
+            get(conversations::get_conversation)
+                .delete(conversations::delete_conversation),
         )
+        // The only other way to remove a session, and the one that takes a
+        // whole tree. Refuses once and arms itself; repeat to confirm.
+        // → [`works::delete_work`]
+        .route("/v1/works/{id}", axum::routing::delete(works::delete_work))
         .route(
             "/v1/conversations/{id}/messages",
             get(conversations::get_messages),

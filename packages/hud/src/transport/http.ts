@@ -9,7 +9,7 @@ import type {
   SpawnRequest,
   StoredRun,
 } from "../types";
-import type { Scope, Transport, TransportHandlers } from "./index";
+import type { Scope, Transport, TransportHandlers, WorkDeletion } from "./index";
 
 /** How many events one backfill request asks for. The route caps its own page. */
 export const EVENT_PAGE = 500;
@@ -261,6 +261,49 @@ export class HttpTransport implements Transport {
       method: "DELETE",
     });
     void this.refreshReport();
+  }
+
+  /**
+   * `/v1/runs/{id}`, not `/v1/agents/{id}` — the second is the kill.
+   *
+   * No report refresh: the roster is rebuilt from the daemon's memory, which
+   * this call has just removed the run from, and the caller has already dropped
+   * it locally. Refreshing would be a round trip to confirm an absence.
+   */
+  async deleteRun(agentId: string): Promise<void> {
+    await this.json<void>(`/v1/runs/${encodeURIComponent(agentId)}`, {
+      method: "DELETE",
+    });
+  }
+
+  async deleteConversation(conversationId: string): Promise<void> {
+    await this.json<void>(`/v1/conversations/${encodeURIComponent(conversationId)}`, {
+      method: "DELETE",
+    });
+  }
+
+  /**
+   * The one call whose refusal is a *body*, not an error.
+   *
+   * A work holding worktrees answers 409 with everything the delete would take,
+   * which is what a confirmation dialog is made of. `json` throws on any
+   * non-2xx, so this reads the response itself and only falls back to that
+   * behaviour for a status it cannot interpret — a 403, a 404, a proxy's 502.
+   */
+  async deleteWork(workId: string): Promise<WorkDeletion> {
+    const path = `/v1/works/${encodeURIComponent(workId)}`;
+    const res = await fetch(this.url(path), {
+      method: "DELETE",
+      credentials: "include",
+      headers: { "content-type": "application/json", ...this.authHeaders() },
+    });
+    if (res.status === 401 || res.status === 403) {
+      throw new UnauthorizedError(await problemDetail(res, path), res.status);
+    }
+    if (res.ok || res.status === 409) {
+      return (await res.json()) as WorkDeletion;
+    }
+    throw new Error(await problemDetail(res, path));
   }
 
   // ─── live feed ───────────────────────────────────────────────────────────

@@ -24,8 +24,6 @@ interface Props {
   store: WorldStore;
   selectedId: string | null;
   onSelect(id: string | null): void;
-  /** Bumped by the parent to request a re-centre. */
-  recentreNonce: number;
 }
 
 /**
@@ -35,7 +33,7 @@ interface Props {
  * directly each frame, so a burst of a hundred events costs one frame of
  * physics rather than a hundred component renders.
  */
-export function TacticalView({ store, selectedId, onSelect, recentreNonce }: Props) {
+export function TacticalView({ store, selectedId, onSelect }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const rendererRef = useRef<TacticalRenderer | null>(null);
   const bodiesRef = useRef(new Map<string, Body>());
@@ -80,7 +78,11 @@ export function TacticalView({ store, selectedId, onSelect, recentreNonce }: Pro
       store.tick(nowMs, dtMs);
       store.reapPulses(nowPerf, PULSE_LIFETIME);
 
-      const { visible, hidden: nHidden } = rankForDisplay(world, NODE_BUDGET);
+      // Live sessions only. The graph animates heat, phase and contention, all
+      // of which are zero once a run ends — see `DisplayOptions.onlyRunning`.
+      const { visible, hidden: nHidden } = rankForDisplay(world, NODE_BUDGET, {
+        onlyRunning: true,
+      });
       setHidden((prev) => (prev === nHidden ? prev : nHidden));
       const visibleSet = new Set(visible);
 
@@ -121,13 +123,6 @@ export function TacticalView({ store, selectedId, onSelect, recentreNonce }: Pro
       rendererRef.current = null;
     };
   }, [store]);
-
-  // ─── recentre ────────────────────────────────────────────────────────────
-  useEffect(() => {
-    if (recentreNonce === 0) return;
-    manualRef.current = false;
-    setAutoFit(true);
-  }, [recentreNonce]);
 
   /**
    * Pan to the selected agent — but only once the operator has taken manual
@@ -308,13 +303,16 @@ export function TacticalView({ store, selectedId, onSelect, recentreNonce }: Pro
         </button>
       )}
       {hidden > 0 && (
-        <div className="tactical-truncation" title="Ranked by liveness, then recency">
-          +{hidden} agent{hidden === 1 ? "" : "s"} not plotted
+        <div
+          className="tactical-truncation"
+          title="Only running sessions are plotted here; the rest are in the sessions list"
+        >
+          +{hidden} not plotted
         </div>
       )}
       <div className="tactical-legend">
-        <span><i className="sw sw-claude" /> CLAUDE CODE</span>
-        <span><i className="sw sw-open" /> OPENCODE</span>
+        <span><i className="sw sw-claude" /> CLDE</span>
+        <span><i className="sw sw-open" /> OPNC</span>
         <span><i className="sw sw-agy" /> AGY</span>
         <span className="sep" />
         <span><i className="sw sw-contend" /> SHARED CWD</span>

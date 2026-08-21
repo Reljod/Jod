@@ -14,7 +14,7 @@ import type {
   StoredRun,
   Usage,
 } from "../types";
-import type { Transport, TransportHandlers } from "./index";
+import type { Transport, TransportHandlers, WorkDeletion, WorkDoomed } from "./index";
 import { makeRng } from "../util/rng";
 
 /**
@@ -586,6 +586,62 @@ export class SimTransport implements Transport {
       }
     }
     return nodes;
+  }
+
+  /**
+   * Forget a run, with the same refusal the API makes.
+   *
+   * The refusal is the part worth simulating. A driver that deleted anything
+   * asked of it would let the HUD's delete path be built and demoed against a
+   * server that never says no, and the first refusal a person ever saw would be
+   * against their own fleet.
+   */
+  async deleteRun(agentId: string): Promise<void> {
+    const agent = this.agents.get(agentId);
+    if (!agent) throw new Error(`no agent \`${agentId}\``);
+    if (agent.status === "running") {
+      throw new Error(`run \`${agentId}\` is still running: stop it before deleting it`);
+    }
+    this.agents.delete(agentId);
+    this.streams.delete(agentId);
+    this.prompts.delete(agentId);
+    this.seq.delete(agentId);
+    this.pushReport();
+  }
+
+  /** A conversation here is one run's transcript, so this is that run. */
+  async deleteConversation(conversationId: string): Promise<void> {
+    await this.deleteRun(runIdFor(conversationId));
+  }
+
+  /**
+   * A "work" in this driver is a working directory, so deleting one takes every
+   * run in it. Live runs are refused for the same reason a single one is.
+   */
+  async deleteWork(workId: string): Promise<WorkDeletion> {
+    const inside = [...this.agents.values()].filter((a) => a.cwd === workId);
+    if (inside.length === 0) throw new Error(`no work \`${workId}\``);
+
+    const live = inside.filter((a) => a.status === "running");
+    const doomed: WorkDoomed = {
+      work_id: workId,
+      title: workId.split("/").filter(Boolean).pop() ?? workId,
+      sessions: inside.length,
+      transcripts: inside.length,
+      unanswered_cards: 0,
+      mail: 0,
+      orphaned_runs: 0,
+      leases: [],
+    };
+    if (live.length > 0) {
+      return {
+        deleted: false,
+        detail: `${live.length} run(s) here are still going. Stop them, then delete.`,
+        doomed,
+      };
+    }
+    for (const a of inside) await this.deleteRun(a.id);
+    return { deleted: true, detail: `deleted ${inside.length} session(s)`, doomed };
   }
 
   async history(limit: number): Promise<StoredRun[]> {

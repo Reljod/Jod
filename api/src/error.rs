@@ -137,6 +137,11 @@ impl From<jod_core::JodError> for ApiError {
             jod_core::JodError::SupervisorNotFound => ApiError::Internal(
                 "`jod-run` is not installed on this machine, and it supervises every agent".into(),
             ),
+            // Core's refusals are addressed to the caller, not to the operator
+            // reading a log: "this run is still running, stop it first" is
+            // something the client can act on, and a 500 tells them the server
+            // broke when it did no such thing.
+            jod_core::JodError::Invalid(why) => ApiError::BadRequest(why),
             other => ApiError::Internal(other.to_string()),
         }
     }

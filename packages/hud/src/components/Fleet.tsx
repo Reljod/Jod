@@ -1,11 +1,17 @@
 import { useMemo, useState } from "react";
 import { fleetKey, type FleetNode, type FleetNodeId } from "../types";
+import { useSelection } from "../hooks/useSelection";
+import { SelectionBar } from "./SelectionBar";
 
 interface Props {
   nodes: FleetNode[];
   /** The selected *run*, shared with the rest of the HUD. */
   selectedId: string | null;
-  onSelect(id: string): void;
+  /** Open a run: select it and read it. */
+  onOpen(id: string): void;
+  /** Delete these rows. Keys are `fleetKey` values, so kind travels with id. */
+  onDelete(keys: string[]): void;
+  canWrite: boolean;
 }
 
 /**
@@ -17,12 +23,12 @@ interface Props {
  * rows arrive in document order, each directly below its parent — so nothing
  * here rebuilds a hierarchy that already came flattened.
  *
- * ## Why this panel and `Roster` are both here
+ * ## Why this panel and `Sessions` are both here
  *
- * They answer different questions from different places. `Roster` lists the
- * agents in *this daemon's memory*; the fleet is a query against the database,
- * so it shows work started by any process — the TUI, a schedule, another shell.
- * A run appears here whether or not the process serving this page launched it.
+ * They answer different questions from different places. `Sessions` lists the
+ * runs in *this daemon's memory*; the fleet is a query against the database, so
+ * it shows work started by any process — the TUI, a schedule, another shell. A
+ * run appears here whether or not the process serving this page launched it.
  *
  * ## Collapse is held by id
  *
@@ -30,16 +36,23 @@ interface Props {
  * child, a work closes. An index survives none of that, so collapsed rows are
  * remembered by `NodeId` — the same rule `core/src/tree.rs` states for
  * selection, and for the same reason.
+ *
+ * ## The twisty collapses; the row reads
+ *
+ * Two targets, because they are two intents. Clicking a row opens the newest
+ * run beneath it in the trajectory — including on a work or a session row,
+ * which is what somebody clicking "the thing that is running" means. Collapsing
+ * is the twisty alone. When one target did both, every attempt to read a
+ * session first folded it away.
  */
-export function Fleet({ nodes, selectedId, onSelect }: Props) {
+export function Fleet({ nodes, selectedId, onOpen, onDelete, canWrite }: Props) {
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
 
   const visible = useMemo(() => hideUnder(nodes, collapsed), [nodes, collapsed]);
+  const keys = useMemo(() => visible.map((n) => fleetKey(n.id)), [visible]);
+  const selection = useSelection(keys);
 
   const running = nodes.filter((n) => n.kind === "run" && n.running).length;
-  // Counts live on every row of a subtree, so summing them would count a run's
-  // cards once per ancestor. The roots already carry their whole subtree.
-  const blocked = nodes.filter((n) => n.depth === 0).reduce((t, n) => t + n.blocked, 0);
 
   const toggle = (id: FleetNodeId) =>
     setCollapsed((prev) => {
@@ -53,55 +66,94 @@ export function Fleet({ nodes, selectedId, onSelect }: Props) {
     <aside className="panel fleet">
       <h2>
         FLEET
-        {running > 0 && <span className="badge st-running">{running} RUNNING</span>}
-        {blocked > 0 && <span className="badge st-blocked">{blocked} BLOCKED</span>}
+        {running > 0 && <span className="live-count">{running}</span>}
+        <span className="count">{nodes.length}</span>
       </h2>
 
       {nodes.length === 0 ? (
-        <p className="empty">
-          No work yet.
-          <br />
-          <span className="hint">
-            Works, sessions and runs appear here however they were started.
-          </span>
-        </p>
+        <p className="empty">No work yet.</p>
       ) : (
         <ul className="fleet-tree">
           {visible.map((node) => {
             const key = fleetKey(node.id);
-            const isRun = node.kind === "run";
-            const selected = isRun && node.id.id === selectedId;
+            const target = openable(nodes, node);
+            const picked = selection.has(key);
             return (
               <li
                 key={key}
-                className={`fleet-row k-${node.kind}${selected ? " selected" : ""}${
-                  node.running ? " live" : ""
-                }`}
-                style={{ paddingLeft: `${node.depth * 14 + 8}px` }}
-                onClick={() => {
-                  if (isRun) onSelect(node.id.id);
-                  else if (node.has_children) toggle(node.id);
-                }}
+                className={`fleet-row k-${node.kind}${
+                  target && target === selectedId ? " selected" : ""
+                }${node.running ? " live" : ""}${picked ? " picked" : ""}`}
+                style={{ paddingLeft: `${node.depth * 12 + 4}px` }}
               >
-                <span className="twisty">
-                  {node.has_children ? (collapsed.has(key) ? "▸" : "▾") : "·"}
-                </span>
-                <span className={`dot k-${node.kind}`} />
-                <span className="fleet-label" title={node.summary || node.label}>
-                  {node.label}
-                </span>
-                {node.blocked > 0 ? (
-                  <span className="badge st-blocked">{node.blocked} blocked</span>
-                ) : node.cards > 0 ? (
-                  <span className="badge st-cards">{node.cards} open</span>
-                ) : null}
+                <button
+                  className="pick"
+                  role="checkbox"
+                  aria-checked={picked}
+                  aria-label={`Select ${node.label}`}
+                  onClick={() => selection.toggle(key)}
+                >
+                  <i />
+                </button>
+                <button
+                  className="twisty"
+                  disabled={!node.has_children}
+                  aria-label={node.has_children ? "Collapse" : undefined}
+                  onClick={() => node.has_children && toggle(node.id)}
+                >
+                  {node.has_children ? (collapsed.has(key) ? "▸" : "▾") : ""}
+                </button>
+                <button
+                  className="fleet-open"
+                  disabled={!target}
+                  title={node.summary || node.label}
+                  onClick={() => target && onOpen(target)}
+                >
+                  <span className={`dot k-${node.kind}`} />
+                  <span className="fleet-label">{node.label}</span>
+                  {node.blocked > 0 && <span className="badge st-blocked">{node.blocked}</span>}
+                </button>
               </li>
             );
           })}
         </ul>
       )}
+
+      <SelectionBar
+        selection={selection}
+        canWrite={canWrite}
+        noun="row"
+        onDelete={() => onDelete(selection.chosen)}
+      />
     </aside>
   );
+}
+
+/**
+ * The run a click on this row should open, or null if there is none.
+ *
+ * A run row is itself. A work or a session row is the newest run anywhere
+ * beneath it, which is what "show me what this is doing" means for a heading —
+ * the alternative is a row that looks clickable and does nothing.
+ *
+ * Newest by document position rather than by a timestamp, because a `FleetNode`
+ * carries no clock. `Store::forest_of` emits each parent's children in the
+ * order the tree holds them, so the last descendant is the one added most
+ * recently. Exported for its test.
+ */
+export function openable(all: FleetNode[], row: FleetNode): string | null {
+  if (row.kind === "run") return row.id.id;
+
+  const start = all.indexOf(row);
+  if (start === -1) return null;
+  let found: string | null = null;
+  for (let i = start + 1; i < all.length; i++) {
+    // Everything under a row is the rows after it that are deeper, up to the
+    // next row at or above its own depth.
+    if (all[i].depth <= row.depth) break;
+    if (all[i].kind === "run") found = all[i].id.id;
+  }
+  return found;
 }
 
 /**
