@@ -11842,6 +11842,46 @@ mod tests {
         }
     }
 
+    /// The fleet is the agents somebody delegated, not Jod's own errands.
+    ///
+    /// A titler and a compaction write into no conversation, so the forest has
+    /// no node for them and they fell into the pane for runs that belong to no
+    /// work. On a machine with four projects on it, five of that pane's six
+    /// rows were housekeeping and the delegated run it exists to show was the
+    /// one scrolled out of sight.
+    #[test]
+    fn the_fleet_does_not_count_jods_own_errands_as_agents() {
+        let mut a = two_works();
+        let titler = jod_core::works::titler_run_name(&uuid::Uuid::new_v4().to_string());
+        a.agents = vec![
+            agent_line("de1e6a7e", "hello-agent", "running"),
+            agent_line("7171e2ed", &titler, "completed"),
+            agent_line(
+                "c0m9ac70",
+                jod_core::works::COMPACTION_RUN_NAME,
+                "completed",
+            ),
+        ];
+        a.reconcile();
+
+        let loose: Vec<&str> = a.loose_rows().iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(
+            loose,
+            vec!["hello-agent"],
+            "only the delegated run belongs in the pane",
+        );
+
+        let frame = rendered(&a, 150, 30);
+        assert!(
+            frame.contains("hello-agent"),
+            "the delegated run is still drawn:\n{frame}"
+        );
+        assert!(
+            !frame.contains(&titler),
+            "and the titler is not:\n{frame}"
+        );
+    }
+
     /// The pane was drawn and could not be reached: no row in it was ever
     /// highlighted, so the cursor keys stopped at the last node of the tree and
     /// the detail pane beside it said "nothing selected" whatever you pressed.

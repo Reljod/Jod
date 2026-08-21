@@ -2240,6 +2240,13 @@ impl App {
         self.fleet_rows()
             .into_iter()
             .filter(|a| !self.tree_runs.contains(&a.id))
+            // Jod's own titlers and compactions write into no conversation, so
+            // they have no node in the forest and land here — the pane for
+            // runs somebody delegated that happen to belong to no work. On a
+            // fleet with four projects on it, five of the six rows in this
+            // pane were housekeeping, and the runs it exists to show were the
+            // ones scrolled out of sight.
+            .filter(|a| !jod_core::works::is_housekeeping_run(&a.name))
             .collect()
     }
 

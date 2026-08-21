@@ -522,7 +522,9 @@ impl Summarising {
     fn label(&self) -> String {
         match self {
             Summarising::Handover(to) => format!("summarise for {}", to.id()),
-            Summarising::Compaction { .. } => "summarise to compact".to_string(),
+            Summarising::Compaction { .. } => {
+                jod_core::works::COMPACTION_RUN_NAME.to_string()
+            }
         }
     }
 }
