@@ -3890,10 +3890,17 @@ fn on_tree_key(app: &mut App, key: KeyEvent, viewport: usize) -> Option<Option<A
         // refusal says which row to go to rather than only that this one is
         // wrong.
         KeyCode::Char('x') => {
-            let Some(node) = app.selected_node().cloned() else {
-                return handled(None);
-            };
-            if node.kind != jod_core::tree::NodeKind::Project {
+            // The pinned chat lands here too. It is a sentinel rather than a row
+            // in the forest, so `selected_node` answers None for it, and the
+            // guard above only intercepts the run verbs — `x` is not one, and
+            // adding it there would refuse with a sentence about processes.
+            // Left silent it would be a printed key that does nothing and says
+            // nothing, which is the thing that guard exists to stop.
+            //
+            // A fleet with no tree at all never reaches this function; its `x`
+            // is answered in `on_fleet_key`.
+            let node = app.selected_node().cloned();
+            if node.as_ref().map(|n| n.kind) != Some(jod_core::tree::NodeKind::Project) {
                 app.push(Entry::Notice(
                     "untracking is a repository's, so `x` works on a project row — \
                      the top row of the group this one is in"
@@ -3901,6 +3908,7 @@ fn on_tree_key(app: &mut App, key: KeyEvent, viewport: usize) -> Option<Option<A
                 ));
                 return handled(None);
             }
+            let node = node.expect("the kind was just matched, so there is a node");
             handled(Some(Action::UntrackProject {
                 id: Some(node.id.id.clone()),
                 name: node.label.clone(),
@@ -4227,6 +4235,19 @@ fn on_fleet_key(app: &mut App, key: KeyEvent) -> Option<Action> {
             )));
             return None;
         }
+    }
+    // `x` on a fleet with no tree. The keybar advertises it either way, and
+    // `on_tree_key` — where the real verb lives — is only called when there is
+    // a forest, so without this the key is printed and silent on exactly the
+    // screen with no project rows to explain it. The sentence says that rather
+    // than sending the reader hunting for a row that is not drawn.
+    if !app.has_tree() && key.code == KeyCode::Char('x') {
+        app.push(Entry::Notice(
+            "no projects on the fleet to untrack — these sessions belong to no work, \
+             and `/project add` catalogs a repository"
+                .into(),
+        ));
+        return None;
     }
     // The pinned row is a conversation, not a run, so the verbs that act on a
     // run are answered rather than attempted. Without this branch every one of
@@ -11224,6 +11245,32 @@ mod tests {
         assert_eq!(press(&mut app, KeyCode::Char('x')), None);
         let said = format!("{:?}", app.transcript.last().unwrap());
         assert!(said.contains("project row"), "{said}");
+
+        // The pinned chat is a sentinel and not a row in the forest, so
+        // `selected_node` answers None for it. Same sentence: there is still a
+        // project row on this screen to go to.
+        app.tree.selected = Some(crate::tui::fleet::main_id());
+        assert_eq!(press(&mut app, KeyCode::Char('x')), None);
+        let said = format!("{:?}", app.transcript.last().unwrap());
+        assert!(said.contains("project row"), "{said}");
+    }
+
+    /// `x` is advertised on the keybar whether or not there is a tree, and a
+    /// printed key that does nothing and says nothing is the failure the two
+    /// guards at the top of `on_fleet_key` exist to stop. With no works there
+    /// are no project rows at all, so the sentence has to say that rather than
+    /// send the reader looking for a row that is not drawn.
+    #[test]
+    fn x_on_a_fleet_with_no_tree_says_there_is_nothing_to_untrack() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.agents = vec![running("r1", "run one")];
+        app.go(Workspace::Fleet);
+        assert!(!app.has_tree(), "this case only exists without a forest");
+
+        assert_eq!(press(&mut app, KeyCode::Char('x')), None);
+        let said = format!("{:?}", app.transcript.last().unwrap());
+        assert!(said.contains("no projects on the fleet"), "{said}");
+        assert!(said.contains("/project add"), "{said}");
     }
 
     /// And a project row is a heading, so it folds rather than pretending to
