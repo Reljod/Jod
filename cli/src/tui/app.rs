@@ -1415,6 +1415,29 @@ impl App {
         self.forest.iter().find(|n| n.id == *id)
     }
 
+    /// The name of the project row this node hangs under, if it has one.
+    ///
+    /// Walks the parent chain rather than reading `depth`, because a work with
+    /// no project is drawn at depth 0 exactly like a project row is — the two
+    /// are siblings on the screen and only the chain tells them apart. `None`
+    /// means the row is genuinely outside every project, which is what a work
+    /// opened in an uncatalogued directory looks like.
+    ///
+    /// The walk is bounded by the forest's own length: a parent chain is
+    /// acyclic by construction, and the bound is there so that a malformed one
+    /// refuses rather than hangs the interface.
+    pub fn project_above(&self, node: &Node) -> Option<String> {
+        let mut at = node;
+        for _ in 0..self.forest.len() {
+            if at.kind == jod_core::tree::NodeKind::Project {
+                return Some(at.label.clone());
+            }
+            let parent = at.parent.as_ref()?;
+            at = self.forest.iter().find(|n| n.id == *parent)?;
+        }
+        None
+    }
+
     /// Whether the fleet shows the tree rather than its older flat list.
     ///
     /// A session that belongs to no work has no node in the forest, so the flat

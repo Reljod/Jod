@@ -477,6 +477,49 @@ Observed: `jod ls`, `jod work ls`, `jod schedule ls`, `jod goal ls` and
 
 Fix: accept `ls` on `team`, keeping `list` as an alias so nothing breaks.
 
+## L10. `cargo test` migrates the developer's real `~/.jod/jod.db`
+Status: **open** · Owner: — · Severity: high
+
+Every file in this directory says its checks were run against an isolated
+`JOD_HOME`, never `~/.jod`. The test suite does not keep that promise.
+
+`ClaudeCode::args` calls `write_settings(run_id)` for any run whose policy stops
+to ask (`core/src/harness/claude.rs:232`), and `write_settings` opens a store of
+its own on the default path — `Store::open(&crate::paths::db_path())`
+(`core/src/harness/claude.rs:528`). With `JOD_HOME` unset, which is how a plain
+`cargo test` runs, that path is the real `~/.jod/jod.db`, and `Store::open` runs
+`migrate()` before it returns.
+
+Observed, and this is what found it. A new migration was added on a branch and
+`cargo test --workspace` was run once, from a worktree, with no `jod` command
+issued and no daemon started. The migration then appeared in the *live*
+database:
+
+```
+$ sqlite3 -readonly ~/.jod/jod.db "SELECT name, applied_at_ms FROM migrations
+                                    ORDER BY name DESC LIMIT 3;"
+0023_an_old_work_finds_its_project|1787331522548     <- 2026-08-22 00:58:42
+0022_a_project_gets_a_manager|1787320415898
+0021_a_work_knows_its_project|1787320415887
+```
+
+It did no harm this time, because the migration was correct and the work it did
+was the work it was written to do. That is luck, not a property of the
+arrangement: a migration under development is exactly the thing most likely to
+be wrong, and this hands it a person's real history to be wrong on. A rebuild
+migration that drops rows — `0003` rebuilds `runs` — would take history with it.
+
+Fix: `write_settings` should be handed the store its caller already holds rather
+than opening one from a global path. The comment at that line argues threading a
+store through would be the more invasive change; that trade was priced without
+this cost in it. Failing that, the test harness has to set `JOD_HOME` to a
+scratch directory for every test binary, so that no test can reach the real
+home whatever it calls.
+
+Check: a test that sets `JOD_HOME` to a temporary directory, builds args for a
+`claude_code` run with `PermissionPolicy::Ask` and a run id, and asserts no
+`jod.db` was created or opened outside it.
+
 ---
 
 ## Scenarios run

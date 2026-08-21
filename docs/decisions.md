@@ -3527,3 +3527,35 @@ The node already knew: a loose work has no `parent`. Reading it off the row is
 both correct and shorter than tracking it. The general shape — when a walk
 needs to know something about the item in front of it, prefer asking the item
 over remembering what came before.
+
+## A verb that needs a row it was never given cannot be pressed
+
+`x` on the fleet untracks the project row under the cursor, and that is only a
+verb if the project has a row. A project gets one when a work points at it, so a
+repository whose only work predates `works.project_id` — which every work
+created before migration `0021` does — has no project row at all. A work with a
+null project is drawn at depth 0, which is where project rows are drawn, so the
+screen showed four rows that looked exactly like repositories and refused `x` on
+every one of them. The catalog said the repositories were tracked, the fleet
+appeared to list them, and the key that untracks them had nothing to land on.
+
+`0021` said backfilling was its own task. `0023` is that task, and it guesses
+nothing: a work session records the directory it started in on
+`conversations.cwd`, and for a work session that directory is the checkout —
+the same path `prepare_work` hands to `project_for_path` before it creates the
+work. So the backfill asks the question that would have been asked at the time,
+of the same column, and matches the same way: a whole leading component rather
+than a string prefix, deepest match wins, archived projects count.
+
+A work whose sessions name two different repositories is left null. There is no
+answer to choose between them, and a wrong link is worse than the null it
+replaces: it files the work under a repository it was never about, and
+untracking that repository would then take it off the fleet — the exact failure
+this is fixing, in the opposite direction.
+
+The refusal also had to change, because it was answering three rows with one
+sentence. Told to press `x` on "the top row of the group this one is in", the
+pinned chat is in no group and a work with no project *is* the top row, so two
+of the three readers were being sent to a row they were already on or to one
+that does not exist. A refusal that describes where to go instead of naming what
+is there is a refusal the reader has to test to understand.
