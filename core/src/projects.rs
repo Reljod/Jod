@@ -49,24 +49,17 @@ pub const MAX_NAME_CHARS: usize = 60;
 
 /// Whether a project is still in play.
 ///
-/// `Archived` is a state rather than a deletion because the catalog's whole
-/// job is to still answer "what was that repo called" months later, and a
-/// deleted row answers nothing.
+/// `Archived` is a state rather than a deletion, because the catalog's job is
+/// to still answer "what was that repo called" months later.
 ///
-/// Two things separate the three states, and it helps to keep them apart.
-/// *Inference* is whether an unqualified mention may land here, and only
-/// `Active` allows it — see [`State::inferrable`] and [`resolve`]. *Listing*
-/// is whether the project shows up when nobody asked for the whole catalog,
-/// and there `Paused` sides with `Active`: [`Store::projects`] filters on
-/// `state != 'archived'`, so pausing a project leaves it on every everyday
-/// surface while archiving takes it off them. Naming a project outright works
-/// in all three states, through [`Store::projects_by_name`].
+/// Two things separate the three states. *Inference* is whether an unqualified
+/// mention may land here, and only `Active` allows it. *Listing* is whether it
+/// shows up when nobody asked for the whole catalog, and there `Paused` sides
+/// with `Active`. Naming a project outright works in all three.
 ///
-/// **Nothing can reach `Paused` yet.** There is no `jod project pause` and no
-/// MCP tool that sets it, so today it is a state the code understands and no
-/// caller can produce. Whether to expose it is a product question about what
-/// "dormant" should mean, and it is open — see P4 in
-/// `tasks/30-project-managers.md`.
+/// **Nothing can reach `Paused` yet** — no `jod project pause`, no MCP tool.
+/// Today it is a state the code understands and no caller can produce; whether
+/// to expose it is open, see P4 in `tasks/30-project-managers.md`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum State {
@@ -205,37 +198,26 @@ impl Project {
         line
     }
 
-    /// Why nothing can be started in this project's directory, when nothing
-    /// can be.
+    /// Why nothing can be started in this project's directory, when nothing can
+    /// be.
     ///
-    /// [`Store::add_project`] looks at the path once, on the way in, and
-    /// nothing looks at it again. A checkout that is deleted, renamed, or
-    /// living on a disk that is no longer mounted leaves its row exactly as it
-    /// was, so the catalog carries on offering it as somewhere to start a
-    /// session and every reader sees a healthy entry.
+    /// [`Store::add_project`] looks at the path once on the way in and nothing
+    /// looks again, so a checkout that is deleted, renamed or on an unmounted
+    /// disk leaves a healthy-looking row.
     ///
     /// Nothing downstream catches it either, and both failures name something
-    /// other than the project. A run opened here is launched, recorded, and
-    /// reported as running, and then dies in the supervisor with `could not
-    /// start "/home/reljod/.local/bin/claude": No such file or directory (os
-    /// error 2)` — the operating system refusing the working directory, blamed
-    /// on the harness binary, which reads as Claude Code being missing from
-    /// the machine. `claim_worktree` fares no better: `toplevel` gives up on
-    /// anything that is not a directory, so the session gets a blocking card
-    /// saying the path "is not inside a git repository", which sends the
-    /// reader to `git init` a directory that is not there.
+    /// else. A run here dies in the supervisor with `could not start
+    /// ".../claude": No such file or directory` — the OS refusing the working
+    /// directory, blamed on the harness binary. `claim_worktree` gives a card
+    /// saying the path "is not inside a git repository", which sends the reader
+    /// to `git init` a directory that is not there.
     ///
     /// This looks at the disk every time rather than storing a column, because
-    /// the answer changes without anybody touching the database. It returns a
-    /// sentence rather than a flag so each surface can print it as it stands.
+    /// the answer changes without the database being touched.
     ///
-    /// The row itself is deliberately left alone. Deleting or archiving a
-    /// project because its directory is absent would answer a question nobody
-    /// asked — an unmounted disk and a worktree part-way through being rebuilt
-    /// both look exactly like this, and both come back — and it would throw
-    /// away the name, aliases and notes that are the catalog's whole point.
-    /// So the catalog says what it sees and leaves the decision to whoever is
-    /// reading.
+    /// The row is deliberately left alone: an unmounted disk and a half-rebuilt
+    /// worktree both look like this and both come back, and deleting would
+    /// throw away the name, aliases and notes that are the catalog's point.
     pub fn path_trouble(&self) -> Option<String> {
         match std::fs::metadata(&self.path) {
             Ok(meta) if meta.is_dir() => None,
@@ -507,37 +489,22 @@ fn now_ms() -> i64 {
 impl Store {
     /// Put a repository in the catalog, or update the entry already there.
     ///
-    /// Adding a path twice is not an error and does not duplicate it — the
-    /// same call is how you rename a project or give it a new alias set, which
-    /// is what every caller wants: the picker cannot know whether this
-    /// directory has been added before, and neither can a voice instruction.
-    /// The path is canonicalised first, so a symlink into a directory already
-    /// in the catalog updates that entry rather than adding a second one.
+    /// Adding a path twice is not an error and does not duplicate it — the same
+    /// call is how you rename a project or give it new aliases, which is what
+    /// every caller wants. The path is canonicalised first, so a symlink into a
+    /// catalogued directory updates that entry.
     ///
-    /// A field the second call leaves empty is left alone rather than emptied.
-    /// Passing aliases replaces the alias set and passing notes replaces the
-    /// notes, but passing neither keeps both, because renaming a project must
-    /// not quietly delete what somebody typed. An empty value carries no way
-    /// to tell "I did not mention this" apart from "I want this gone", and of
-    /// the two readings only one is safe. Clearing an alias set or a note is
-    /// therefore a thing to ask for through its own flag.
+    /// A field the second call leaves empty is left alone rather than emptied:
+    /// an empty value carries no way to tell "I did not mention this" from "I
+    /// want this gone", and only one reading is safe. Clearing is a thing to
+    /// ask for through its own flag.
     ///
     /// `last_touched_ms` is deliberately *not* refreshed on a repeat add.
-    /// Editing a catalog entry is not working in the repository, and letting
-    /// an edit fake recency would corrupt the tiebreak that inference depends
-    /// on.
+    /// Editing a catalog entry is not working in the repository, and letting an
+    /// edit fake recency would corrupt the tiebreak inference depends on.
     ///
-    /// The path has to be a directory that is actually there, and a path that
-    /// is not one is refused rather than written. A project is somewhere a
-    /// session gets started, so a file or a typo can never become one, and
-    /// everything downstream finds that out far too late to say anything
-    /// useful about it. A run opened on such a path is launched, recorded, and
-    /// then dies in the supervisor with `could not start ".../claude": Not a
-    /// directory (os error 20)` — a message about the harness binary that
-    /// names neither the project nor the path. `claim_worktree` fares no
-    /// better: it decides the path "is not inside a git repository", which is
-    /// plainly untrue when the file sits in one. This is the last point where
-    /// the mistake is still cheap to explain, so it is explained here.
+    /// The path has to be a directory that is actually there, since a project
+    /// is somewhere a session gets started.
     pub fn add_project(&self, new: NewProject) -> Result<Project> {
         let name: String = new.name.trim().chars().take(MAX_NAME_CHARS).collect();
         if name.is_empty() {

@@ -1,14 +1,12 @@
 //! Slash commands.
 //!
-//! Parsing is separated from doing, so the whole of "what did the user ask
-//! for" is a pure function over a string and can be tested without a terminal,
-//! a store or an agent.
+//! Parsing is separated from doing, so "what did the user ask for" is a pure
+//! function over a string, testable without a terminal or a store.
 //!
-//! The set is deliberately smaller than OpenCode's. Every command here maps
-//! onto something Jod can actually do; a command that would need a capability
-//! the harness seam does not expose is *absent* rather than present and inert,
-//! because a `/compact` that silently does nothing is worse than no `/compact`.
-//! Unrecognised input is reported, never swallowed.
+//! The set is deliberately smaller than OpenCode's: a command that would need a
+//! capability the harness seam does not expose is *absent* rather than present
+//! and inert, because a `/compact` that silently does nothing is worse than
+//! none. Unrecognised input is reported, never swallowed.
 
 use jod_core::{HarnessKind, PermissionPolicy};
 
@@ -110,18 +108,17 @@ pub enum Slash {
     Todo(String),
     /// Mark one of those tasks finished.
     Done(String),
-    /// Start over: empty the screen and drop the context the next message
-    /// would have carried. Jod's own transcript is kept.
+    /// Start over: empty the screen and drop the context the next message would
+    /// have carried. Jod's own transcript is kept.
     ///
-    /// It used to mean the first half only, and that was the bug. Typed in the
-    /// main chat it emptied the screen while the pinned conversation kept its
-    /// harness session, so the next message resumed the whole history the user
-    /// had just watched disappear. Telegram's `/clear` has always meant "drop
-    /// the context window, keep the transcript", and the main chat is one chat
-    /// across every surface — so the desk now means what the phone means.
+    /// It used to mean the first half only. Typed in the main chat it emptied
+    /// the screen while the pinned conversation kept its harness session, so
+    /// the next message resumed the history the user had just watched
+    /// disappear. Telegram's `/clear` has always meant "drop the context
+    /// window, keep the transcript", and the main chat is one chat across every
+    /// surface.
     ///
-    /// Distinct from [`Slash::New`], which drops the context *and* leaves the
-    /// conversation. `/clear` keeps you where you are standing.
+    /// Distinct from [`Slash::New`], which also *leaves* the conversation.
     Clear,
     /// The background shells this console started, running and finished.
     Jobs,
@@ -545,17 +542,14 @@ const MODEL_MAX_LEN: usize = 256;
 
 /// Why `/model <arg>` cannot be a model name, if it cannot be one.
 ///
-/// Two checks only, and both are true for every harness Jod knows about:
-/// a model id is one token, and none of them come close to
-/// [`MODEL_MAX_LEN`]. That is deliberately short of "is this actually a model
-/// this harness offers" — this function is a pure read of the typed string,
-/// run before an `App` or a harness choice exists, so it has no model list to
-/// check against. A harness's own list (`app.models`) is the finer sieve and
-/// belongs where that list lives; this is the coarse one that catches what is
-/// *always* wrong regardless of harness or list — chiefly a whole prompt, or a
-/// long paste, landing in the model slot. Catching that here means it reads
-/// back as Jod's own refusal immediately, not as the harness's "model not
-/// found" a whole turn later.
+/// Two checks only, both true for every harness Jod knows: a model id is one
+/// token, and none come close to [`MODEL_MAX_LEN`]. Deliberately short of "is
+/// this a model this harness offers" — this is a pure read of the typed string,
+/// run before a harness choice exists, so it has no list to check against.
+///
+/// The coarse sieve catches what is *always* wrong: chiefly a whole prompt
+/// landing in the model slot. Caught here it reads back as Jod's own refusal
+/// immediately, rather than the harness's "model not found" a turn later.
 fn model_refusal(arg: &str) -> Option<String> {
     let len = arg.chars().count();
     if len >= MODEL_MAX_LEN {
@@ -760,22 +754,20 @@ impl Completion {
 
 /// What could complete the line being typed.
 ///
-/// Empty means "no popup": either this is not a command, or it is already
-/// finished. Completing arguments as well as names matters more than it looks
-/// — `/harness ` is the point where a user has to remember three spellings, and
-/// the commands that take an agent id are otherwise a UUID-retyping exercise,
-/// so the live fleet is offered there.
+/// Empty means "no popup". Completing arguments as well as names matters more
+/// than it looks: `/harness ` is where a user has to remember three spellings,
+/// and the commands taking an agent id are otherwise a UUID-retyping exercise.
+///
+/// ---
+///
 /// The repository's own commands, as palette rows.
 ///
-/// **Marked with their source**, and that is not decoration: `/review` from
-/// Jod and `/review` from the checkout you happen to be in are different
-/// things, and a palette that showed them identically would make which one
-/// fired a matter of ordering. The mark says `repo` or `user`, and `skill` or
-/// `command`, because those are the two facts that decide what it will do.
+/// **Marked with their source.** `/review` from Jod and `/review` from the
+/// checkout you are in are different things, and a palette showing them
+/// identically would make which one fires a matter of ordering.
 ///
-/// `app.discovered` is already filtered to the harness on screen — see
-/// `data::discovered` — so nothing here can offer a command that would not
-/// resolve.
+/// `app.discovered` is already filtered to the harness on screen, so nothing
+/// here can offer a command that would not resolve.
 fn repo_commands(typed: &str, app: &crate::tui::App) -> Vec<Completion> {
     app.discovered
         .iter()
