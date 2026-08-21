@@ -14,7 +14,7 @@ area file over this table and correct the table when you notice it drifting.
 
 | Area | File | Findings | Done | Open | Owner |
 |---|---|---|---|---|---|
-| Launch, roots and the console's directory | [`tasks/00-launch-and-roots.md`](tasks/00-launch-and-roots.md) | L1–L9 | 5 | 3 + 1 blocked | — |
+| Launch, roots and the console's directory | [`tasks/00-launch-and-roots.md`](tasks/00-launch-and-roots.md) | L1–L10 | 5 | 4 + 1 blocked | — |
 | Routing: answer it yourself or hand it over | [`tasks/01-routing.md`](tasks/01-routing.md) | R1–R7 | 4 | 3 | — |
 | The TUI itself | [`tasks/02-tui.md`](tasks/02-tui.md) | T1 | 1 | 0 | — |
 | Orchestration scenarios | [`tasks/10-orchestration.md`](tasks/10-orchestration.md) | O1–O10, **one critical** | 2 | 8 | — |
@@ -24,7 +24,7 @@ area file over this table and correct the table when you notice it drifting.
 | Scheduling | [`tasks/40-scheduling.md`](tasks/40-scheduling.md) | S1–S6 | 5 | 1 | — |
 | Goals | [`tasks/50-goals.md`](tasks/50-goals.md) | G1–G14 | 9 | 6 | — |
 
-That is **36 findings closed, 26 open and one blocked**. The seven
+That is **36 findings closed, 27 open and one blocked**. The seven
 project-manager tasks T1–T7 have since shipped, so the largest pile of open work
 is orchestration. What is left under project managers is P4, a decision about
 `State::Paused` that is Reljod's to make rather than anybody's to build.

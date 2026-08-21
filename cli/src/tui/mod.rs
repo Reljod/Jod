@@ -4589,11 +4589,34 @@ fn on_tree_key(app: &mut App, key: KeyEvent, viewport: usize) -> Option<Option<A
             // is answered in `on_fleet_key`.
             let node = app.selected_node().cloned();
             if node.as_ref().map(|n| n.kind) != Some(jod_core::tree::NodeKind::Project) {
-                app.push(Entry::Notice(
-                    "untracking is a repository's, so `x` works on a project row — \
-                     the top row of the group this one is in"
-                        .into(),
-                ));
+                // Three different rows reach this point and they need three
+                // different sentences. Saying "the top row of the group this one
+                // is in" to all of them was wrong for two: the pinned chat is in
+                // no group, and a work with no project *is* a top-level row, so
+                // the instruction sent the reader looking upwards at the row
+                // they were already on.
+                app.push(Entry::Notice(match &node {
+                    None => "that is the main chat, not a repository — `x` untracks the \
+                             project row the cursor is on"
+                        .to_string(),
+                    Some(node) => match app.project_above(node) {
+                        Some(project) => format!(
+                            "untracking is a repository's, so `x` works on a project row — \
+                             `{project}`, above this one"
+                        ),
+                        // No project row above it because there is no project:
+                        // the work was opened in a directory the catalog does
+                        // not know, so it is drawn at the top level beside the
+                        // project rows rather than under one. That is the thing
+                        // to say, because the row looks like a repository and
+                        // the reason it cannot be untracked is that it is not
+                        // one.
+                        None => "this work belongs to no catalogued repository, so there is \
+                                 nothing to untrack — it sits at the top level because it has \
+                                 no project, and `/project add <path>` catalogs one"
+                            .to_string(),
+                    },
+                }));
                 return handled(None);
             }
             let node = node.expect("the kind was just matched, so there is a node");
@@ -12538,18 +12561,66 @@ mod tests {
         // climbs to the work above the cursor and that is right for a key that
         // navigates; a mutating verb that climbed would untrack a whole
         // repository from a keystroke aimed at one job inside it.
+        //
+        // It names the project rather than describing where it is. "The top row
+        // of the group this one is in" is a direction the reader has to follow
+        // to find out what it points at, and the screen already knows.
         app.tree.selected = Some(NodeId::work("w1"));
         assert_eq!(press(&mut app, KeyCode::Char('x')), None);
         let said = last_notice(&app);
         assert!(said.contains("project row"), "{said}");
+        assert!(said.contains("tetris"), "{said}");
 
         // The pinned chat is a sentinel and not a row in the forest, so
-        // `selected_node` answers None for it. Same sentence: there is still a
-        // project row on this screen to go to.
+        // `selected_node` answers None for it. Its own sentence, because it is
+        // in no group and being told to look at the top row of one is an
+        // instruction it cannot follow.
         app.tree.selected = Some(crate::tui::fleet::main_id());
         assert_eq!(press(&mut app, KeyCode::Char('x')), None);
         let said = last_notice(&app);
+        assert!(said.contains("main chat"), "{said}");
         assert!(said.contains("project row"), "{said}");
+    }
+
+    /// `x` on a work that belongs to no project says so, instead of naming a
+    /// row above it that does not exist.
+    ///
+    /// A work with a null `project_id` is drawn at depth 0, beside the project
+    /// rows rather than under one, so on screen it is indistinguishable from a
+    /// repository. Told to press `x` on "the top row of the group this one is
+    /// in", the reader is being sent to the row they are already on — which is
+    /// what made the key look broken rather than refused.
+    #[test]
+    fn x_on_a_work_with_no_project_says_it_has_none() {
+        use jod_core::tree::{Node, NodeId, NodeKind};
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.forest = vec![Node {
+            id: NodeId::work("w1"),
+            parent: None,
+            kind: NodeKind::Work,
+            depth: 0,
+            label: "port the parser".into(),
+            summary: String::new(),
+            running: false,
+            status: None,
+            stalled_for_ms: None,
+            cards: 0,
+            blocked: 0,
+            colour: "cyan".into(),
+            expanded: true,
+            has_children: false,
+        }];
+        app.go(Workspace::Fleet);
+        app.tree.selected = Some(NodeId::work("w1"));
+
+        assert_eq!(press(&mut app, KeyCode::Char('x')), None);
+        let said = last_notice(&app);
+        assert!(said.contains("no catalogued repository"), "{said}");
+        assert!(said.contains("/project add"), "{said}");
+        assert!(
+            !said.contains("the group this one is in"),
+            "there is no group above a top-level row: {said}"
+        );
     }
 
     /// `x` is advertised on the keybar whether or not there is a tree, and a

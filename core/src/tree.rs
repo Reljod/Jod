@@ -552,9 +552,10 @@ impl Store {
         // does not reorder itself against `works`' own sort.
         //
         // Works with no project sit at the top level exactly as they did
-        // before. Old ones have a null and are not going to be given one:
-        // backfilling them is its own task, and hiding them under an invented
-        // project would be worse than leaving them loose.
+        // before. Migration `0023` gave one to every old work whose checkout
+        // named a catalogued repository, so what is left here is the honest
+        // remainder: work opened somewhere nobody had catalogued. Hiding those
+        // under an invented project would be worse than leaving them loose.
         let mut order: Vec<String> = Vec::new();
         let mut by_project: HashMap<String, Vec<Work>> = HashMap::new();
         let mut loose: Vec<Work> = Vec::new();

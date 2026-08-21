@@ -1456,6 +1456,83 @@ const MIGRATIONS: &[(&str, &str)] = &[
       REFERENCES conversations(id) ON DELETE SET NULL;
     "#,
     ),
+    (
+    "0023_an_old_work_finds_its_project",
+    r#"
+    -- The backfill `0021` said was its own task.
+    --
+    -- Every work created before `0021` has a NULL `project_id`, and a work with
+    -- no project is drawn at the top level of the fleet tree — beside the
+    -- project rows rather than under one. So a repository whose only work
+    -- predates that column gets no project row at all, and `x` on the fleet,
+    -- which untracks the project row under the cursor, has nothing to land on.
+    -- The rows that look like the repository are its works, and they are not
+    -- the same thing.
+    --
+    -- The checkout is already recorded, so nothing here is guessed. A work's
+    -- session keeps the directory it was started in on `conversations.cwd`, and
+    -- for a work session that directory is the checkout: `prepare_work` derives
+    -- the project from exactly that path before it creates the work. So this
+    -- asks the question that would have been asked at the time, of the same
+    -- column, and a work links only to a repository one of its sessions
+    -- actually ran inside.
+    --
+    -- `cwd` rather than the first root, though both hold the checkout today.
+    -- Every conversation has a cwd and it is written when the row is created,
+    -- while a work whose session never had a root added has no row in
+    -- `conversation_roots` at all.
+    --
+    -- The pinned chat is excluded, and only a row older than the check can hit
+    -- that: `attach_conversation` refuses to make main a session of a work. It
+    -- is worth the clause anyway, because main's cwd is wherever `jod` was
+    -- launched — a fact about the terminal, not about any work — so one such
+    -- row would file every work it touched under whatever repository Reljod
+    -- happened to be standing in.
+    --
+    -- The matching mirrors `project_for_path` in both of its details. A project
+    -- matches when its path is the whole cwd or a whole leading component of
+    -- it, so `/src/appstore` never matches a project at `/src/app` — hence the
+    -- `substr` rather than a `LIKE`, which would also read `_` in a path as a
+    -- wildcard. The deepest match wins, which is what makes a repository
+    -- catalogued inside another one resolve to the inner one. Archived projects
+    -- count, exactly as they do there: a work in an untracked repository
+    -- belongs to it, and `jod project restore` brings the whole subtree back.
+    --
+    -- A work whose sessions disagree about the repository is left alone. There
+    -- is no answer to pick between them, and a wrong link is worse than the
+    -- NULL it replaces: it files a work under a repository it was never about,
+    -- and untracking that repository would then take it off the fleet.
+    WITH checkout AS (
+      SELECT c.work_id AS work_id, c.cwd AS path
+        FROM conversations c
+       WHERE c.work_id IS NOT NULL
+         AND COALESCE(c.pinned, 0) = 0
+         AND c.cwd <> ''
+    ),
+    matched AS (
+      SELECT k.work_id AS work_id,
+             (SELECT p.id
+                FROM projects p
+               WHERE substr(k.path, 1, length(p.path)) = p.path
+                 AND (length(k.path) = length(p.path)
+                      OR substr(k.path, length(p.path) + 1, 1) = '/')
+               ORDER BY length(p.path) DESC
+               LIMIT 1) AS project_id
+        FROM checkout k
+    ),
+    settled AS (
+      SELECT work_id, MIN(project_id) AS project_id
+        FROM matched
+       WHERE project_id IS NOT NULL
+       GROUP BY work_id
+      HAVING COUNT(DISTINCT project_id) = 1
+    )
+    UPDATE works
+       SET project_id = (SELECT s.project_id FROM settled s WHERE s.work_id = works.id)
+     WHERE project_id IS NULL
+       AND id IN (SELECT work_id FROM settled);
+    "#,
+    ),
 ];
 
 /// What one run belongs to, for the fleet views that group by it.
@@ -4963,6 +5040,130 @@ mod tests {
         assert_eq!(store.run("done").unwrap().unwrap().pgid, Some(111));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `0023` — the backfill `0021` left for later, and the reason the fleet
+    /// needed one.
+    ///
+    /// A work with a null `project_id` is drawn at the top level of the fleet
+    /// tree, beside the project rows rather than under one, so a repository
+    /// whose only work predates that column gets no project row at all. `x` on
+    /// the fleet untracks the project row under the cursor, so with no project
+    /// row there is nothing to press it on, and the rows that look like the
+    /// repository are its works — which `x` correctly refuses.
+    ///
+    /// Applied by name rather than by opening a hand-built database: the
+    /// fixtures here are five tables deep and writing them as raw SQL would be
+    /// asserting against a schema this test had itself invented.
+    #[test]
+    fn an_old_work_is_filed_under_the_repository_it_was_opened_in() {
+        use crate::projects::NewProject;
+        use crate::works::Origin;
+
+        let base = std::env::temp_dir().join(format!("jod-backfill-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let zuma = base.join("zuma");
+        let uncatalogued = base.join("nobody-catalogued-this");
+        let inner = zuma.join("vendor").join("marbles");
+        let below_zuma = zuma.join("src");
+        // Every one of them has to exist. `normalise` keeps an unresolvable
+        // path exactly as given, so on macOS a directory that is not there
+        // stays under `/var` while one that is resolves to `/private/var` —
+        // and the test would then be measuring the symlink rather than the
+        // migration.
+        for d in [&zuma, &uncatalogued, &inner, &below_zuma] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+
+        let s = store();
+        let project = s.add_project(NewProject::at(&zuma).named("zuma")).unwrap();
+        let vendor = s.add_project(NewProject::at(&inner).named("marbles")).unwrap();
+
+        // The path as the store spells it, which is what a session started
+        // there would have recorded. Spelling it by hand would make this a test
+        // about macOS symlinking `/tmp` at `/private/tmp`.
+        let at = |p: &std::path::Path| crate::roots::normalise(p).to_string_lossy().to_string();
+        let session = |work: &str, cwd: &std::path::Path| {
+            let c = s
+                .new_conversation(HarnessKind::ClaudeCode, &at(cwd), None)
+                .unwrap();
+            s.attach_conversation(&c.id, work, None, Origin::Agent).unwrap();
+            c.id
+        };
+
+        // One session, inside the repository. The ordinary case.
+        let old = s.create_work("build the marble shooter").unwrap();
+        session(&old.id, &zuma);
+
+        // Deeper than the project's own directory. `project_for_path` matches a
+        // whole leading component rather than the exact path, and so does this.
+        let below = s.create_work("fix the launcher").unwrap();
+        session(&below.id, &below_zuma);
+
+        // Two catalogued repositories, one inside the other. The inner one is
+        // the answer, exactly as `project_for_path` decides it.
+        let nested = s.create_work("bump the vendored physics").unwrap();
+        session(&nested.id, &inner);
+
+        // Nobody catalogued this directory, so there is no answer and the null
+        // stands. A work in an uncatalogued directory is still a work.
+        let stray = s.create_work("poke at something").unwrap();
+        session(&stray.id, &uncatalogued);
+
+        // Two sessions that disagree about the repository. A wrong link is
+        // worse than the null it replaces — it files the work under a
+        // repository it was never about, and untracking that repository would
+        // then take it off the fleet — so it is left alone.
+        let split = s.create_work("move the parser across").unwrap();
+        session(&split.id, &zuma);
+        session(&split.id, &inner);
+
+        // Already answered at creation. The backfill only fills nulls.
+        let recent = s.create_work_in("the new one", Some(&vendor.id)).unwrap();
+        session(&recent.id, &zuma);
+
+        let (_, sql) = MIGRATIONS
+            .iter()
+            .find(|(name, _)| name.starts_with("0023"))
+            .expect("the backfill migration");
+        s.write(|tx| {
+            tx.execute_batch(sql)?;
+            Ok(())
+        })
+        .unwrap();
+
+        let project_of = |id: &str| s.work(id).unwrap().unwrap().project_id;
+        assert_eq!(project_of(&old.id), Some(project.id.clone()));
+        assert_eq!(project_of(&below.id), Some(project.id.clone()));
+        assert_eq!(
+            project_of(&nested.id),
+            Some(vendor.id.clone()),
+            "the deepest catalogued repository wins, as it does at creation"
+        );
+        assert_eq!(project_of(&stray.id), None, "no catalogued repository to name");
+        assert_eq!(
+            project_of(&split.id),
+            None,
+            "two answers is not one answer, and a wrong link is worse than none"
+        );
+        assert_eq!(
+            project_of(&recent.id),
+            Some(vendor.id.clone()),
+            "a work that already knew its project keeps it"
+        );
+
+        // What the fleet does with it, which is the whole point. The work stops
+        // being a top-level row beside the project rows and becomes one under
+        // its own, where `x` reaches the repository.
+        let forest = s.forest().unwrap();
+        let row = forest
+            .iter()
+            .find(|n| n.id == crate::tree::NodeId::work(&old.id))
+            .expect("the work is still drawn");
+        assert_eq!(row.depth, 1, "under its project rather than beside it: {forest:?}");
+        assert_eq!(row.parent, Some(crate::tree::NodeId::project(&project.id)));
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// Regression, found by killing a real detached run: a follower's
