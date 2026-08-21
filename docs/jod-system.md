@@ -37,7 +37,7 @@ Note which way the arrows run. Nothing reads a run *through* the process that
 started it, so "watch this agent" is a query rather than a privilege held by one
 process.
 
-## The four pillars
+## The pillars
 
 | # | Pillar | What it is | Status |
 |---|--------|-----------|--------|
@@ -128,15 +128,31 @@ running for ever.
 pub trait Harness: Send {
     fn kind(&self) -> HarnessKind;
     fn args(&self, req: &SpawnRequest) -> Vec<ArgPart>;
+    fn takes_system_prompt(&self) -> bool { false }
     fn parse_line(&mut self, line: &str) -> Vec<AgentEvent>;
     fn finalize(&mut self, exit_code: Option<i32>) -> AgentEvent;
 }
 ```
 
+`takes_system_prompt` defaults to `false` because that is both the safe answer
+and the true one for most CLIs. A harness that never learned the flag would
+otherwise drop the framing on the floor, and framing that vanishes silently is
+worse than framing in the wrong place, so the runner folds it into the prompt
+for everyone who answers `false`.
+
 Adding a harness means one file. Nothing above the seam changes, because every
 harness is normalised into one vocabulary:
 
-`Started · Thinking · Message · ToolCall · ToolResult · Finished · Raw · Error`
+`Started · Thinking · Progress · Delta · Message · ToolCall · ToolResult ·
+Finished · Raw · SessionLost · Error`
+
+Three of those exist because a transcript that goes quiet is indistinguishable
+from a process that died. `Progress` is a bare tick carrying at most a
+reasoning-token count, for a turn that thinks for nine minutes and emits nothing
+else. `Delta` is a fragment of a block the harness has not finished writing,
+which is what covers a long *write* rather than a long think — seven `Write`
+calls in a row, each streaming a whole file. `SessionLost` is how a harness
+says the conversation it was asked to resume is gone.
 
 `Raw` matters more than it looks: an unrecognised line is *surfaced*, never
 dropped. All three harnesses print human-readable prose onto the same stream as
@@ -150,7 +166,7 @@ and cost in `finalize`.
 
 | Harness | Invocation | Resume | Cost reported |
 |---|---|---|---|
-| **Claude Code** | `claude -p … --output-format stream-json --verbose` | `--continue` / `--resume <id>` | yes |
+| **Claude Code** | `claude -p … --output-format stream-json --verbose --include-partial-messages` | `--continue` / `--resume <id>` | yes |
 | **OpenCode** | `opencode run --format json …` | `--continue` / `--session <id>` | yes |
 | **AGY** (Google Antigravity) | `agy --print … --output-format stream-json` | `--continue` / `--conversation <id>` | no |
 
@@ -197,11 +213,85 @@ documented here because each one makes a *failed* run look successful:
 
 ### The interface
 
-`jod tui` is a full-screen interface built on ratatui: a scrolling transcript,
-an input box with line editing, a status bar, and `Ctrl-A` for a panel listing
-every delegation. That panel is the reason it is not just a chat window — Jod's
-job is watching several agents, and it shows runs from earlier processes too,
-because `rehydrate` puts them back.
+`jod tui` is a full-screen interface built on ratatui. It is no longer a chat
+window with a panel bolted on: it is **eleven workspaces**, and chat is one of
+them.
+
+| Digit | Workspace | What it is |
+|---|---|---|
+| 1 | Chat | the transcript, the input box, the status bar |
+| 2 | Fleet | every run, as a tree over the conversations behind them |
+| 3 | Memory | what Jod knows |
+| 4 | Schedules | cron-triggered runs |
+| 5 | Goals | looping objectives |
+| 6 | Hooks | webhook rules |
+| 7 | Tasks | the board |
+| 8 | Activity | what happened while you were away |
+| 9 | Team | the roster and its board |
+| — | MemoryGraph | one memory node with its neighbours, reached with `g` |
+| — | Traffic | one work's agent-to-agent messages, threaded, reached with `T` |
+
+The last two have no digit on purpose. Neither means anything without a node or
+a work already picked, so there is nowhere for a digit to land.
+
+Nine of the eleven answer a digit, and all of them answer the leader key. The
+fleet still shows runs from earlier processes, because `rehydrate` puts them
+back.
+
+**The keymap is Ctrl throughout, and that is a decision with a cost.** The
+verbs were briefly on Alt to stay clear of a multiplexer that eats Ctrl chords
+before this process sees them. That fixed the wrong half of the problem: on
+macOS, Option does not send Alt unless the terminal is specially configured, so
+the chords could not be typed at all. A binding nobody can press is worse than
+one tmux eats, because the second at least has a workaround.
+
+So the verbs are Ctrl, minus what something else already holds — tmux's prefix
+and pane keys, the terminal's `Ctrl-Q`/`Ctrl-Z`, `Ctrl-I`/`Ctrl-M` for Tab and
+Enter, and readline's `Ctrl-C/D/E/U/W`. Eleven letters survive: **B F G N O P R
+T V X Y**. There are eighteen verbs.
+
+They do not fit, so what keeps a letter is decided by what a chord is *for*. The
+chat box turns every bare key into text, so a chord buys exactly one thing: a
+verb you can reach without stopping the sentence you are typing or looking away
+from the run you are watching.
+
+| Chord | What it does |
+|---|---|
+| `Ctrl-B` | delegate the typed line |
+| `Ctrl-X` | stop the run being watched |
+| `Ctrl-Y` | copy the last reply |
+| `Ctrl-T` · `Ctrl-O` | show or hide reasoning · what tools returned |
+| `Ctrl-V` | dictate — a switch, not a button |
+| `Ctrl-R` · `Ctrl-N` | show or hide the decision rail · its next card |
+| `Ctrl-P` | add a directory this session may work in |
+| `Shift-Tab` | show or hide the side panel |
+| `Ctrl-↑↓` | scroll the transcript |
+
+Everything else is a *destination*, and destinations go behind the leader:
+**`Ctrl-G` opens a menu, and one more letter lands you anywhere.** The
+workspaces take `c f m s g h t a w`, and the verbs that could not afford a chord
+take the rest — `n` new, `e` compose in `$EDITOR`, `j` background shells, `u`
+the oldest unread, `l` clear the screen, `d` the project catalog. The letters
+are free of the workspaces by construction, and a test stops a new screen
+quietly taking one back.
+
+`Ctrl-F` is the one destination that kept a chord, because the fleet is where a
+delegated run goes and `Ctrl-B` `Ctrl-F` is a single thought.
+
+**The eleven letters are now spent**, which makes the next verb a decision
+rather than a default: either it is a destination and goes behind the leader, or
+something already holding a letter is demoted. The menu is the pressure valve,
+and it has letters left.
+
+What did not move is the handful of chords the terminal itself taught everyone.
+`Ctrl-C`/`Ctrl-D` quit, `Ctrl-U` clears the line, `Ctrl-W` deletes a word, and
+`Ctrl-A`/`Ctrl-E` go to the ends of it. Moving those would break forty years of
+muscle memory to solve a problem nobody has.
+
+Two tables generate both the always-on keybar and the `?` overlay, so the two
+cannot disagree. The keybar reserves the way out *first* and spends what is left
+on verbs, dropping whole chords rather than half of one — half a chord teaches a
+key that does not exist — and saying `? more` when it has dropped any.
 
 **One of its conversations is the main chat, and you can now be in it.** The
 pinned conversation was reachable only by *sending* to it — `jod main "…"`,
@@ -212,10 +302,11 @@ the keyboard route, `/new` to leave. Inside it a typed line goes to the
 orchestrator, because that is what being in it means; in every other
 conversation the chat box behaves exactly as it always did.
 
-`jod tui --team <name>` adds `Ctrl-G`: the team's members, their harnesses and
-statuses, and the task board. It is read from the store on every refresh rather
-than kept in memory, because teammates run in their own processes and no
-in-memory copy could be authoritative.
+`jod tui --team <name>` fills the team workspace — `Ctrl-G w`, or digit `9` —
+with the team's members, their harnesses and statuses, and the task board. It is
+read from the store on every refresh rather than kept in memory, because
+teammates run in their own processes and no in-memory copy could be
+authoritative.
 
 ### Running several agents at once
 
@@ -229,19 +320,26 @@ nobody gave it, and two agents writing into one session is not a conversation.
 When it ends, a notice says which one, how it went and how long it took, because
 the whole point of delegating is that you were not watching.
 
-**The panel as a control surface.** `Ctrl-A` is a cursor over the fleet, sorted
-running-first then newest, showing each run's age, with the main chat as a
-permanent first row above the sort — `⏎` there goes into the chat, and the run
-verbs say why they do not apply rather than doing nothing. The chat's own runs,
-one per instruction, are collapsed into that row instead of filling the list
-with copies of itself. The cursor still starts on the first *agent*: managing
-the work is what opening this list means, and the chat is one `k` away. From an
-agent row: `⏎` puts a run on screen, `s` stops one, `r` points the next turn at
-its conversation — bringing its harness with it, since a session id belongs to
-the harness that issued it — and `a` gives the `tmux attach` line. The same
-reaches the keyboard as
-`/watch`, `/stop`, `/attach`, where an id prefix is enough and an ambiguous one
-is refused rather than guessed: stopping the wrong agent is not undoable.
+**The fleet as a control surface.** `Ctrl-F` is a cursor over every run, with
+the main chat as a permanent first row — `⏎` there goes into the chat, and the
+run verbs say why they do not apply rather than doing nothing. The chat's own
+runs, one per instruction, are collapsed into that row instead of filling the
+list with copies of itself. The cursor starts on the first *agent*: managing the
+work is what opening this list means, and the chat is one `k` away.
+
+It is the widest screen in the program, because it is the only one that is both
+a list of runs and a handle on the conversation graph behind them. `s r d a` act
+on the run under the cursor — stop, resume, delegate, and the `tmux attach`
+line. `c b u U g f t` act on its thread: list conversations, open the branches
+of one, undo and redo, go to a numbered branch, fork it, retry the run. `T`
+opens that work's agent-to-agent traffic, which is the only way to answer what a
+group of agents are saying to each other rather than merely watching them spend
+money. `→←`, `space` and `E` move around the tree itself.
+
+Resuming carries the harness with it, since a session id belongs to the harness
+that issued it. The same verbs reach the keyboard as `/watch`, `/stop` and
+`/attach`, where an id prefix is enough and an ambiguous one is refused rather
+than guessed: stopping the wrong agent is not undoable.
 
 **Never being made to wait.** A prompt typed mid-turn is queued and sent when the
 turn ends, rather than refused — the old behaviour left it in a blocked box,
@@ -266,27 +364,74 @@ Typing `/` opens a completion popup — `Tab` completes, `↑↓` choose — and
 arguments are completed too, so `/harness ` offers the three spellings rather
 than expecting them to be remembered.
 
+There are forty-seven of them, and one table in `cli/src/tui/command.rs` is both
+the help text and the completion list, so the two cannot disagree.
+
+**The conversation itself**
+
 | | |
 |---|---|
-| `/harness <name>` | switch harness mid-session |
-| `/model <name>` | set the model; no argument restores the default |
+| `/harness <name>` | claude, opencode or agy — takes effect next turn |
+| `/login [name]` | sign in to a harness; no argument means the one this conversation is on |
+| `/model <name>` | set the model; no argument restores the harness default |
+| `/mode [name]` | plan, ask, edits or auto; no argument cycles, which is what Tab does |
 | `/thinking` · `/details` | show or hide reasoning, and what tools returned |
-| `/new` · `/resume <id>` · `/sessions` | move between conversations — and `/new` is how you leave the main chat |
+| `/config [key] [value]` | preferences that outlive the session |
+| `/new [kind]` | a fresh conversation, or a new schedule, goal, hook or task |
+| `/sessions` · `/resume <id>` | conversations you can pick up, and picking one up |
 | `/main` · `/main <instruction>` | go into the main chat · send it one instruction and stay where you are |
-| `/delegate <prompt>` | run it in the background, same as `Ctrl-B` |
-| `/watch <id>` · `/stop <id>` · `/attach <id>` | act on one agent, by id prefix |
-| `/todo <title>` · `/done <id>` | write to the team's board |
-| `/agents` · `/team` | the panels, same as `Ctrl-A` and `Ctrl-G` |
-| `/clear` | start over where you are standing — the screen empties and the next message carries no context; `Ctrl-G l` empties the screen only |
+| `/clear` | empty the screen and start the next message with no context behind it |
 | `/help` · `/exit` | |
 
+**Where the work happens**
+
+| | |
+|---|---|
+| `/add-dir [where]` | pick a folder this session can work in and `@` |
+| `/root [add\|rm]` | the directories this session works in |
+| `/project [add]` | the repositories an instruction with no path resolves against |
+
+**Agents**
+
+| | |
+|---|---|
+| `/delegate <prompt>` | run it in the background, same as `Ctrl-B` |
+| `/agents` | the fleet |
+| `/watch <id>` · `/stop <id>` · `/attach <id>` | act on one agent, by id prefix |
+| `/heartbeat <id> [off]` | reap it if it goes silent — for runs left alone for hours |
+
+**Standing work**
+
+| | |
+|---|---|
+| `/schedules` · `/schedule <name>` | cron-triggered runs, and one of them |
+| `/goals` · `/goal <name>` | looping objectives, and one of them |
+| `/hooks` · `/hook <name>` | webhook rules, and one of them |
+| `/run <name>` · `/pause <name>` · `/unpause <name>` | fire one now · stop it firing · arm it again |
+
+**Memory, board and housekeeping**
+
+| | |
+|---|---|
+| `/memory [query]` · `/remember <s> \| <p> \| <o>` · `/forget <name>` | what Jod knows, one new fact, one dropped node |
+| `/tasks` · `/todo <title>` · `/done <task-id>` | the board, one task on it, one finished |
+| `/team` · `/activity` | the roster · what happened while you were away |
+| `/jobs` · `/reload` | background shells · restart the console into the jod now on disk |
+| `/update` · `/upgrade` | rebuild and install the newest patch · download the newest release |
+
 Two rules keep the set honest. **A command exists only if Jod can do it**: there
-is no `/compact` or `/undo`, because a command that silently does nothing is
-worse than one that is absent — an unknown `/word` is named back rather than
-sent to the agent as a prompt. And **switching harness starts a fresh
+is no `/compact`, `/undo`, `/share` or `/themes`, because a command that
+silently does nothing is worse than one that is absent — an unknown `/word` is
+named back rather than sent to the agent as a prompt, and a test names those
+four and fails if any appears. And **switching harness starts a fresh
 conversation**, because a session id belongs to the harness that issued it;
 carrying it across would try to resume a conversation the new harness has never
 heard of.
+
+Arguments are completed too, and the lists come from live state rather than a
+constant: `/stop` offers only agents that could actually be stopped, `/model`
+offers what this harness said it accepts, `/schedule` and `/goal` offer what
+exists by name. Retyping a name off the screen above is not a user interface.
 
 Parsing and completion are pure functions over a string, so the whole of "what
 did the user ask for" is tested without a terminal.
@@ -297,24 +442,31 @@ Written down so the gap is a decision rather than an oversight. Nothing here is
 stubbed: a command Jod cannot honour is absent, and an unknown `/word` is named
 back rather than quietly accepted.
 
-**Buildable today — nothing is in the way but the work:**
+**Since closed.** Four rows of this table have been built and are listed here
+rather than deleted, because a gap that closed is the evidence that the rest are
+work rather than excuses:
+
+| Was missing | Where it landed |
+|---|---|
+| `@file` references | `cli/src/tui/mention.rs` — an inline picker, ranked and highlighted live, over the session's roots rather than the process's working directory. |
+| Compose in `$EDITOR` | `Ctrl-G e`, not a slash command. It needs the terminal, so only the main loop can lend it. |
+| Leader keys | `Ctrl-G` opens the menu and one more letter lands anywhere. It covers all nine numbered workspaces plus six verbs. |
+| Model listing | `opencode models` and `agy models` are asked and parsed; Claude Code has no such subcommand, so its list is the static catalogue in `core/src/harness/models.rs`. The list is an aid, not a gate — an unlisted name still passes through. |
+
+**Still buildable — nothing is in the way but the work:**
 
 | Missing | What it needs |
 |---|---|
 | `/export` | The transcript is already in SQLite; this is a formatter. |
-| `/editor` | Compose in `$EDITOR`, read the file back into the input. |
-| `@file` references | Fuzzy-find a path and inline its content into the prompt. |
-| `ctrl+p` palette | The completion popup generalised past `/`. |
-| Leader keys (`ctrl+x …`) | A second keymap layer; today every binding is a bare chord. |
-| `/models` listing | No harness lists its models through Jod — `jod models` does not exist, so `/model` can set a name but not offer one. |
-| `/themes` | Colours are constants in `ui.rs`. |
+| A general command palette | The completion popup generalised past `/`. `Ctrl-P` is no longer free — it adds a directory — so this needs a key as well as the work. |
+| `/themes` | Colours are deliberately the terminal's own eight, so that Jod reads on someone else's box. A theme system means giving that up first. |
 
-**Half-built:** `/sessions` opens the agents panel and tells you to
-`/resume <id>`; it is not yet a picker you can arrow through. The id it shows
-does now work — `/resume` takes a prefix of either the agent id on screen or
-the harness's own conversation id and resolves it. It refuses an ambiguous
-prefix, and refuses an agent that has never reported a conversation, because
-resuming that would silently start a fresh one instead of continuing anything.
+**Half-built:** `/sessions` opens the fleet and tells you to `/resume <id>`; it
+is not yet a picker you can arrow through. The id it shows does work — `/resume`
+takes a prefix of either the agent id on screen or the harness's own
+conversation id and resolves it. It refuses an ambiguous prefix, and refuses an
+agent that has never reported a conversation, because resuming that would
+silently start a fresh one instead of continuing anything.
 
 **Blocked on something Jod does not have:**
 
@@ -380,14 +532,62 @@ PRAGMA foreign_keys = ON;
 
 ### What it holds
 
+Around forty tables now, migrated forward in place. The ones worth knowing by
+name, grouped by what they answer:
+
+**What ran**
+
 - **`events`** — every agent event, append-only, unique on `(run_id, seq)` so a
   replayed stream cannot duplicate history.
 - **`runs`** — one row per delegation, so a restarted process still knows what
   it launched.
-- **`tasks`** — contended state, claimed with a single guarded `UPDATE`. Zero
-  rows changed means you lost the race. Never a read then a write.
-- **`facts`** — what Jod knows.
+- **`works`** · **`delegations`** · **`cascaded_stops`** — the tree above a run:
+  which work it belongs to, who delegated it, and what stopping a manager
+  reached.
+- **`conversations`** · **`conversation_roots`** · **`compactions`** — the
+  transcript DAG, the directories each thread may work in, and what was folded
+  away.
+
+**What Jod knows**
+
+- **`facts`** — subject, predicate, object, bitemporal and scoped.
+- **`entities`** · **`relations`** · **`entity_community`** — the graph over
+  those facts. Derived and rebuildable, which is why deleting it costs nothing.
 - **`tombstones`** — proof that a deletion happened, after the fact is gone.
+
+**What is contended**
+
+- **`tasks`** — claimed with a single guarded `UPDATE`. Zero rows changed means
+  you lost the race. Never a read then a write.
+- **`leases`** — worktrees an agent has claimed, so two agents do not edit one
+  checkout.
+- **`team_members`** · **`team_messages`** — the roster and the bus.
+- **`delivery_ledger`** · **`pending_deliveries`** — what has been handed to an
+  agent, so nothing is delivered twice or lost on a failed spawn.
+
+**What fires on its own**
+
+- **`schedules`** · **`schedule_fires`** — cron rules and every firing.
+- **`goals`** — looping objectives and their iterations.
+- **`webhook_rules`** · **`webhook_deliveries`** — inbound GitHub events.
+- **`monitors`** · **`monitor_checks`** — one row per schedule, answering
+  whether a firing should become an agent run at all.
+- **`heartbeats`** — what reaps a run that has gone silent.
+
+**Everything else**
+
+- **`cards`** — questions waiting for a human, which is what the rail draws.
+- **`grants`** — standing permission, so a tool approved once is not asked
+  about again.
+- **`secrets`** · **`settings`** — values an agent may request by name, and
+  preferences that outlive a session.
+- **`projects`** · **`project_resolutions`** · **`pull_requests`** — the
+  repository catalog, how a pathless instruction was resolved, and PR state.
+- **`discovered_commands`** — slash commands and skills found under a root or in
+  the user's own config, so the palette offers what a repo already defines.
+- **`channel_sessions`** — a Telegram chat's place in a conversation, which has
+  to outlive the process that answered the last message.
+- **`migrations`** — which of the above have been applied.
 
 ### How memory behaves
 
@@ -529,6 +729,13 @@ across harnesses: an asker on Claude Code and an answerer on OpenCode exchange a
 question and a reply, sharing one thread id, with the reply one hop deeper than
 what it answers.
 
+Those six are one part of a larger surface. `jod mcp` serves thirty-two tools in
+all — delegating and stopping agents, reading and writing memory, creating
+schedules and goals, claiming and releasing worktrees, switching project,
+raising a card for a human and requesting a secret by name. Access is
+fail-closed: `--access` decides how much of Jod the agent on the other end may
+reach, and an unset flag gets the read-only set rather than the full one.
+
 **The sender is the run, never an argument.** Jod's MCP server resolves its own
 process group against `runs.pgid` — the server is a child of the harness, which
 sits in the run's group — so identity is something the model cannot argue its
@@ -585,8 +792,14 @@ make it load-bearing before it has to be.
 5. ~~Browser access for agents — Camoufox, headless, verified~~ **done**
    (awaiting Webshare ISP credentials to fix the egress IP →
    [`browser.md`](browser.md))
-6. A2A inbox/outbox + `jod-mcp` server
-7. Scheduled work: a digest, and recurring delegations
+6. ~~A2A inbox/outbox + MCP server~~ **done** — `core/src/mcp.rs`, served by
+   `jod mcp`, which exposes thirty-two tools across delegation, memory,
+   schedules, projects, worktrees and the message bus. Access is fail-closed:
+   an unset `--access` flag gets the read-only set.
+7. ~~Scheduled work: recurring delegations~~ **done** — `schedules` fire on
+   cron, `goals` loop until they are met, and the ticker drives both.
+   `monitors` decide whether a firing should become a run at all. There is no
+   digest yet; that is the part of this line still outstanding.
 8. ~~HTTP API for mobile and web clients~~ **done** — `api/`, with the
    tactical HUD in `apps/web` as its first consumer
 9. **iOS client: `jod tui` in your pocket** — `apps/ios`, **the current goal**.
@@ -629,10 +842,18 @@ Three things fall out of the hardware, and they decide the whole design:
 
 **What "the same as the TUI" means, precisely.** The transcript vocabulary, the
 resume cursor that threads turns into one conversation, the busy guard, the
-twelve slash commands and their completion list, the live tool output, the
-agents and team panels, and the status line are the same behaviour — ported from
+completion list, the live tool output, the agents and team panels, and the
+status line are the same behaviour — ported from
 `cli/src/tui/{app,command,mod}.rs` and held there by tests that assert what the
 Rust ones assert, case for case.
+
+It is not the same *surface*, and the gap has widened. The phone carries twelve
+slash commands against the console's forty-seven, and it is the twelve that read
+or steer one conversation: harness, model, thinking, details, new, sessions,
+resume, agents, team, clear, help, exit. Everything the console grew since —
+schedules, goals, hooks, grants, roots, projects, dictation, the rail — either
+needs a process group on the box or needs a keyboard, and a phone has neither.
+A phone watches the work and answers it; it does not administer it.
 
 What is deliberately *not* ported is the machinery that only makes sense on a
 terminal, and in each case the *rule* crossed over while the *mechanism* did

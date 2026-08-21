@@ -1,28 +1,17 @@
-//! `jod-run` — one supervisor per agent run.
+//! `jod-run` — one supervisor per agent run. Started detached by Jod with one
+//! argument: the path to the run's `spawn.json`.
 //!
-//! This is the process that replaced tmux. Jod starts it detached, in its own
-//! session, with a single argument: the path to the run's `spawn.json`. From
-//! then on it is the only thing holding the harness's output, and it puts that
-//! output where every client can reach it — the run's rows in `jod.db`.
+//! A separate program for two reasons. It **outlives whoever started it** — a
+//! thread inside `jod` would lose the harness's stdout pipe when that process
+//! exited. And it is the **single writer** of a run's events, so `(run_id, seq)`
+//! is dense and ordered without coordination.
 //!
-//! Two properties are the whole reason it exists as a separate program:
+//! Every ending is recorded — failed to start, unparseable, killed — because a
+//! run that stops being mentioned looks exactly like one that succeeded.
 //!
-//! - **It outlives whoever started it.** A thread inside `jod` cannot; the
-//!   harness's stdout pipe would break the moment that process exited, and the
-//!   agent would die with the terminal that launched it.
-//! - **It is the single writer of a run's events.** Sequence numbers come from
-//!   one counter in one process, so `(run_id, seq)` is dense and ordered
-//!   without any coordination.
-//!
-//! It reports failure loudly. A run that could not start, could not be parsed,
-//! or was killed all end with a terminal event and a recorded status, because a
-//! run that simply stops being mentioned looks exactly like one that succeeded.
-//!
-//! It is also the only process that ever holds a secret's value. It reads the
-//! value out of its owner-only file, puts it in the child's environment, and
-//! scrubs it back out of everything the child prints — see [`inject`]. That
-//! works only because this one process sits on both sides of the harness at
-//! once; nothing upstream of it, and nothing downstream, sees the value at all.
+//! It is the only process that holds a secret's *value*: it reads the file, puts
+//! the value in the child's environment, and scrubs it from everything the child
+//! prints ([`inject`]). Nothing upstream or downstream ever sees it.
 
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -45,19 +34,15 @@ use tokio::sync::mpsc;
 /// How long a harness gets to exit after being asked, before it is made to.
 const KILL_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// How much of the harness's output is kept in memory to explain a failure.
-///
-/// Enough to hold the prose a harness prints on its way out, and far too few
-/// to be a second transcript. The events are the transcript; this is a window.
+/// Harness output kept in memory to explain a failure. A window, not a second
+/// transcript — the events are the transcript.
 const TAIL_LINES: usize = 40;
 
 /// `0.1.0 (f4e4c72 2026-08-13)` — release, commit, commit date.
 ///
-/// The same string, built the same way, that `jod --version` answers with:
-/// `CARGO_PKG_VERSION` from the workspace, then the two variables
-/// `build.rs` stamps on. The two binaries ship in one tarball and are looked
-/// up as siblings, so they have to name a build identically or the answer is
-/// worse than useless. → `cli/src/version.rs`
+/// Built the same way as `jod --version`: the two binaries ship in one tarball
+/// and are looked up as siblings, so they must name a build identically.
+/// → `cli/src/version.rs`
 const LONG_VERSION: &str = concat!(
     env!("CARGO_PKG_VERSION"),
     " (",
@@ -67,11 +52,7 @@ const LONG_VERSION: &str = concat!(
     ")"
 );
 
-/// What `--help` prints.
-///
-/// Short on purpose. This is not a program anybody drives by hand — Jod writes
-/// the plan and starts the process — so the useful thing to say is what the one
-/// argument is and where it comes from, not a flag table.
+/// What `--help` prints. Short because nobody drives this by hand.
 const USAGE: &str = "\
 jod-run — supervises one agent run and writes its events into SQLite.
 
@@ -115,24 +96,12 @@ async fn main() -> std::process::ExitCode {
     }
 }
 
-/// What the first argument means.
+/// What the first argument means. Without this, `jod-run --version` tried to
+/// *open* the flag as a file.
 ///
-/// The bug this exists for: there was no such question. The first argument was
-/// turned straight into a `PathBuf` and handed to `std::fs::read`, so
-/// `jod-run --version` answered `reading "--version": No such file or
-/// directory` and exited 1 — the binary tried to *open* the flag.
-///
-/// Deliberately not a parser. `jod-run` is spawned by
-/// `core::runner::launch`, which hands it exactly one argument: an absolute
-/// path to the run's `spawn.json`. An absolute path cannot begin with `-`, so
-/// looking at the first argument and recognising four exact spellings changes
-/// nothing about any invocation that exists, while a real argument parser
-/// would have opinions about unknown flags, `--`, and repeated arguments that
-/// this program has never had. Everything that is not one of the four is still
-/// a path, including how it fails.
-///
-/// The four spellings are the ones `jod` accepts, because someone who learned
-/// them from the sibling binary will type them here.
+/// Not a parser: the only real caller passes one absolute path, which cannot
+/// begin with `-`. Four exact spellings — the ones `jod` accepts — and
+/// everything else is still a path.
 enum Invocation {
     Plan(PathBuf),
     Version,
@@ -173,22 +142,10 @@ async fn run(plan_path: &PathBuf) -> Result<(), String> {
     let child = Command::new(&plan.program)
         .args(&plan.args)
         .current_dir(&plan.cwd)
-        // Stamp *this* run's id over whatever was inherited, before anything
-        // else in the environment is applied.
-        //
-        // The supervisor is the only process that knows, without being told,
-        // which run it is supervising — that is its whole job. Everything below
-        // it inherits this: the harness, and the Jod MCP server the harness
-        // starts. So an agent's tools resolve the right identity even on a
-        // harness with no per-run config document to carry one.
-        //
-        // Without it the variable simply flowed down the spawn chain. On the
-        // path that opens a work the supervisor's own parent is the
-        // orchestrator's MCP server, so its run id reached every descendant,
-        // and `identify` — correctly — refused to act for a server whose
-        // environment named one run while its process group named another.
-        // Clearing it in the config writers was necessary and not sufficient:
-        // it stops Jod *writing* a stale id, and this stops one *arriving*.
+        // Stamp *this* run's id over whatever was inherited, before the rest of
+        // the environment. Otherwise a parent's run id flows down the spawn
+        // chain and `identify` refuses to act for a server whose environment
+        // and process group name different runs.
         .env(jod_core::mcp_config::RUN_ID_ENV, &plan.run_id)
         .envs(plan.env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
         .envs(injected.iter().map(|(k, v)| (k.as_str(), v.as_str())))
@@ -364,26 +321,15 @@ async fn run(plan_path: &PathBuf) -> Result<(), String> {
     Ok(())
 }
 
-/// Say so when a run finished having written nothing where it was pointed.
+/// Say so when a run finished having written nothing where it was pointed —
+/// otherwise a green check hides files landing in the user's home directory.
 ///
-/// The failure this exists for is silent in both directions: the agent believed
-/// it had succeeded, the run's row agreed, the fleet showed a green check — and
-/// every file it produced was in the user's home directory, while the directory
-/// they had added stayed empty. Nothing anywhere would ever have told them.
+/// The workspace is read at the end, not from the plan, so a worktree claimed
+/// mid-run counts. A card rather than a status change, because the run really
+/// did complete; it just landed nowhere anybody asked for.
 ///
-/// The workspace is the run's own working directory *plus* whatever its
-/// conversation declares now, read at the end rather than taken from the plan
-/// so that a worktree the agent claimed mid-run counts as somewhere it was
-/// meant to write.
-///
-/// A card rather than a status change, and the distinction is the honest one:
-/// the run really did complete. What it did not do is land anywhere anybody
-/// asked for, and that is a thing to tell a person, not a way to relabel an
-/// exit code.
-///
-/// Every failure here is a line on stderr. A run whose work is already durably
-/// recorded must not be reported as broken because a warning about it could not
-/// be filed.
+/// Failures here only reach stderr: a run already durably recorded must not be
+/// reported broken because a warning about it would not file.
 fn note_writes_outside_the_workspace(store: &Store, plan: &SpawnPlan, wrote: &[PathBuf]) {
     let conversation = match store.conversation_for_run(&plan.run_id) {
         Ok(Some(id)) => id,
@@ -465,23 +411,15 @@ const SHOWN_PATHS: usize = 8;
 
 /// Turn the plan's secret *names* into environment pairs.
 ///
-/// This is the only place in Jod that reads a secret's value, and it is the
-/// only place that can be: the plan on disk names secrets, the database records
-/// what exists, and the value itself lives in a `0600` file that
-/// [`read_secret_value`] refuses to open if its mode has widened. The pairs
-/// returned here go straight into the child's environment and into the
-/// scrubber, and nowhere else.
+/// The only place in Jod that reads a secret's value. The pairs go into the
+/// child's environment and the scrubber, nowhere else.
 ///
-/// Applied *after* `plan.env`, so a secret always beats a plain variable of the
-/// same name. The alternative — last writer wins by list order — would make
-/// whether a credential arrived depend on the order two unrelated pieces of
-/// code appended to a vector.
+/// Applied *after* `plan.env` so a secret always beats a plain variable of the
+/// same name, rather than letting append order decide.
 ///
-/// **A name that will not resolve is not fatal.** A missing key blocks one
-/// test, not a session: the run proceeds without the variable, the reason is
-/// recorded as an event and in `supervisor.log`, and the agent is expected to
-/// end *blocked* rather than invent a credential. Killing the run here would
-/// instead lose everything it had already been asked to do.
+/// **An unresolvable name is not fatal.** The run proceeds without the
+/// variable and is expected to end *blocked* rather than invent a credential;
+/// killing it here would lose everything already done.
 fn inject(store: &Store, plan: &SpawnPlan, writer: &mut EventWriter) -> Vec<(String, String)> {
     let mut resolved = Vec::new();
     for name in &plan.secrets {
@@ -615,34 +553,20 @@ impl EventWriter {
         self.record_in_conversation(&envelope);
     }
 
-    /// Fold one event into the transcript of the conversation this run belongs
-    /// to — the table `jod main` prints.
+    /// Fold one event into the conversation's transcript — the table
+    /// `jod main` prints.
     ///
-    /// **Here because this is the process that cannot miss it**, the same
-    /// argument as [`set_session`](EventWriter::set_session) and the same bug
-    /// underneath. Until now the only writer of `messages` was
-    /// `core::service::record_in_conversation`, running inside whatever process
-    /// launched the run. That process is routinely gone long before the run is:
-    /// `jod main` without `--wait` returns as soon as the instruction is handed
-    /// over, and a session opened through `open_work` is launched by Jod's own
-    /// MCP server, which exits when its harness closes stdin.
+    /// **Here because this is the process that cannot miss it.** A launcher
+    /// routinely exits long before the run does, and the loss was silent: the
+    /// work happened and was paid for, but was never written down.
     ///
-    /// The loss was silent and total in the worst case. Nothing was marked
-    /// failed, the run really did the work, and the reply really was paid for —
-    /// it was simply never written down. `jod watch` kept showing the whole turn
-    /// because it reads `events`, which this process has always written, so the
-    /// two views of one run disagreed with no error anywhere to explain it.
+    /// Two writers are safe because `append_envelopes` is idempotent on
+    /// `(run_id, seq)`, so an attached launcher appending the same envelope
+    /// writes nothing.
     ///
-    /// Writing it from here does not make Jod's own consumer wrong or
-    /// redundant: a launcher that is still attached appends the same envelope,
-    /// and `append_envelopes` is idempotent on `(run_id, seq)`, so the second
-    /// writer of an event writes nothing. That guard is the reason two writers
-    /// are safe, and it is deliberately in the write rather than in anyone's
-    /// discipline.
-    ///
-    /// Nothing here fails the run. A transcript is a side effect of a run, and
-    /// a run whose work is already durably recorded must not be taken down
-    /// because a projection of it would not insert.
+    /// Nothing here fails the run. A transcript is a projection of a run, and a
+    /// run already durably recorded must not be taken down because its
+    /// projection would not insert.
     fn record_in_conversation(&mut self, envelope: &AgentEnvelope) {
         // The cheap pure predicate first, exactly as `record_in_conversation`
         // does: `Delta`, `Progress` and `Raw` are as frequent as the harness is
@@ -672,24 +596,10 @@ impl EventWriter {
 
     /// Record the harness's session id on the run **and on its conversation**.
     ///
-    /// The conversation half used to be somewhere else entirely, and that is
-    /// why it was missing. `set_conversation_session` had exactly one caller:
-    /// the drain task inside whatever process launched the run. So the session
-    /// id only ever landed if the launcher outlived the turn — and for a
-    /// session opened through `open_work` the launcher is Jod's own MCP
-    /// server, which exits when the harness closes stdin, which is roughly
-    /// when the turn ends.
-    ///
-    /// The consequence was total rather than cosmetic: `resume_for` found
-    /// nothing, so the session could not be resumed, so a work's session could
-    /// not be spoken to again — no mail, no card answer, no second turn. On
-    /// every harness; OpenCode was merely where it was noticed, because
-    /// Claude Code's per-run config masked the related identity problem.
-    ///
-    /// It belongs here because the supervisor is the process that cannot miss
-    /// it. It already owns "what actually happened", it already writes every
-    /// event durably, and it outlives the launcher by construction — that is
-    /// the whole reason a run is a detached process group.
+    /// Here because the supervisor outlives the launcher by construction. When
+    /// the conversation half lived in the launcher's drain task, the id only
+    /// landed if that process outlived the turn — and when it did not,
+    /// `resume_for` found nothing, so the thread could never take another turn.
     fn set_session(&self, session_id: &str) {
         if let Err(e) = self.store.set_run_session(&self.run_id, session_id) {
             eprintln!("jod-run: could not record the session id: {e}");
@@ -714,25 +624,16 @@ impl EventWriter {
 
     /// Drop a conversation's session pointer once the harness has disowned it.
     ///
-    /// The exact inverse of [`set_session`](EventWriter::set_session), and here
-    /// for the same reason: this is the process that cannot miss it. Without it
-    /// the pointer is permanent — `resume_for` keeps answering with a dead id,
-    /// every turn is launched as `--resume <gone>`, and the harness refuses
-    /// before it starts. That is not a run that failed; it is a thread that can
-    /// never take another turn. Three consecutive turns died this way on the
-    /// developer's own box, each in under a second, each naming the same id.
+    /// The inverse of [`set_session`](EventWriter::set_session). Without it the
+    /// dead id is permanent: every turn launches as `--resume <gone>` and the
+    /// harness refuses before it starts.
     ///
     /// **Only when the rejected id is the one the row still holds.** A turn
-    /// that raced a handoff — or a straggling supervisor reporting on a session
-    /// the thread has already moved off — would otherwise clear a *live*
-    /// pointer and cost the very continuity this exists to protect. A mismatch
-    /// is left alone deliberately: there is nothing here to repair.
+    /// racing a handoff would otherwise clear a *live* pointer.
     ///
-    /// Clearing it is enough on its own. A conversation with no session id is
-    /// the ordinary "not on a harness yet" state, which `resume_for` answers
-    /// `Fresh` for and which the caller replays its own transcript into — so
-    /// the next turn carries the thread's history rather than starting
-    /// amnesiac.
+    /// Clearing is enough: no session id is the ordinary "not on a harness yet"
+    /// state, which `resume_for` answers `Fresh` for and the caller replays the
+    /// transcript into.
     fn clear_session(&self, rejected: &str) {
         let conversation = match self.store.conversation_for_run(&self.run_id) {
             Ok(Some(id)) => id,

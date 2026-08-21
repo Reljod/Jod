@@ -10,10 +10,12 @@ skill that owns it.
 **Jod** is Reljod's autonomous agent — a duplicate of how he plans, decides, and
 executes, to be delegated to like a competent chief of staff.
 
-- **`core/` `supervisor/` `cli/` `api/`** — Jod the program, resident on a VPS.
-  It delegates tasks to agent harnesses (Claude Code, OpenCode, AGY), one
+- **`core/` `supervisor/` `cli/` `api/` `voice/`** — Jod the program, resident on
+  a VPS. It delegates tasks to agent harnesses (Claude Code, OpenCode, AGY), one
   supervised process group each, normalises their output into one event stream,
   and keeps runs and memory in one SQLite file. Jod never does the work itself.
+  `voice/` is a crate of its own rather than a CLI module so the console keeps
+  building on a headless box — nothing in the others links an audio backend.
   → [design](docs/jod-system.md), [settings](docs/harness-config.md),
   [HTTP API](docs/jod-api.md)
 - **`.agents/skills/` + `agents/`** — the portable toolkit: skills and subagents
