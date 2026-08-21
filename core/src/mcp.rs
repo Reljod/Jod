@@ -1136,6 +1136,14 @@ impl Server {
             .as_ref()
             .and_then(|s| s.stalled_runs().ok())
             .unwrap_or_default();
+        // The main chat's turns and every manager's. Both leave `completed`
+        // rows with session ids and neither is an engineer, so without this the
+        // roster's one recommendation is to hand the work back to whoever was
+        // handing it out.
+        let routers = store
+            .as_ref()
+            .and_then(|s| s.router_run_ids().ok())
+            .unwrap_or_default();
         let now_ms = chrono::Utc::now().timestamp_millis();
 
         let keep = |a: &&crate::service::AgentSummary| {
@@ -1155,8 +1163,13 @@ impl Server {
         // exits when its turn ends, so an engineer sitting there with nothing to
         // do is a `completed` row, not a `running` one — and it needs a session
         // id, because that is the thing being resumed.
+        // A router is never free *to be given work*: continuing main's own
+        // last turn, or a manager's, gives the instruction to the conversation
+        // whose job is to give it to somebody else.
         let is_free = |a: &crate::service::AgentSummary| {
-            a.status == AgentStatus::Completed && a.session_id.is_some()
+            a.status == AgentStatus::Completed
+                && a.session_id.is_some()
+                && !routers.contains(&a.id)
         };
 
         let matching = agents.iter().filter(keep).count();
@@ -6084,6 +6097,59 @@ mod tests {
                 !said.contains("not the main chat's to call"),
                 "a manager or an engineer must still be able to open work: {said}"
             );
+        }
+
+        /// The roster must not offer a router as the agent to continue.
+        ///
+        /// Main and a manager both spend a turn deciding who does the work and
+        /// then exit, leaving `completed` rows with session ids — which is
+        /// exactly what "free" meant. So `list_agents` answered a manager
+        /// looking for an engineer with main's own last turn, saying it
+        /// "already holds this checkout" and to "prefer it for any instruction
+        /// here". Seen repeatedly in one session, and declined every time only
+        /// because the model reasoned past its own tool.
+        #[tokio::test]
+        async fn the_roster_does_not_offer_main_or_a_manager_as_an_engineer() {
+            let dir = format!("/tmp/jod-roster-{}", std::process::id());
+            let (store, project) = with_project(&dir);
+            let main = store
+                .main_conversation(HarnessKind::ClaudeCode, "/tmp")
+                .unwrap();
+            let (manager, _) = store
+                .manager_conversation(&project.id, HarnessKind::ClaudeCode)
+                .unwrap();
+
+            // A finished turn each, with a session to resume — the shape that
+            // used to read as an idle engineer.
+            for (conversation, run) in [(&main, "run-main"), (&manager, "run-manager")] {
+                run_in(&store, conversation, run);
+                finished_run(&store, run, run, Some(&format!("{run}-session")));
+            }
+
+            let routers = store.router_run_ids().unwrap();
+            assert!(routers.contains("run-main"), "main's own turn is a router");
+            assert!(routers.contains("run-manager"), "so is a manager's");
+
+            let server = Server::new(Jod::with_store(store))
+                .with_access(ToolAccess::Delegate)
+                .for_run("run-manager");
+            let answer = call(&server, "list_agents", json!({ "limit": 20 })).await;
+            let said = said(&answer);
+
+            assert!(
+                !said.contains("`run-main` is free"),
+                "main is not an engineer to hand work to: {said}"
+            );
+            assert!(
+                !said.contains("`run-manager` is free"),
+                "and neither is a manager: {said}"
+            );
+            assert!(
+                said.contains("nothing to reuse") || said.contains("nothing free"),
+                "with no engineer at all, the honest answer is that there is none: {said}"
+            );
+
+            std::fs::remove_dir_all(&dir).ok();
         }
 
         /// Two checkouts whose directories share a name are still each

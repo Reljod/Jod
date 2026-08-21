@@ -2264,6 +2264,39 @@ impl Store {
     /// run goes on. A run that has written nothing yet is absent rather than
     /// present-and-empty: it has no conversation, so it has no project, and the
     /// two are the same fact.
+    /// Runs that belong to the main chat or to a project manager.
+    ///
+    /// These are the fleet's routers, and a router is not an engineer. Both
+    /// spend their turn deciding who does the work and then exit, so both leave
+    /// `completed` rows with session ids — which is exactly what `list_agents`
+    /// calls free. It offered main's own last turn as the agent to continue,
+    /// with "it already holds this checkout, so it starts where a new session
+    /// would have to start over", and said to prefer it for any instruction.
+    ///
+    /// Observed repeatedly in one session's transcript: *"`list_agents`
+    /// repeatedly recommended reusing them via `continue_agent`; that advice
+    /// was correctly declined every time — they are not workers."* It survived
+    /// only because a careful model kept refusing it. Taking a manager's advice
+    /// here would hand a project's work to the conversation whose job is to
+    /// hand out work.
+    ///
+    /// One query for the whole fleet, like [`Store::run_contexts`] beside it: a
+    /// router calls this before every routing decision.
+    pub fn router_run_ids(&self) -> Result<std::collections::HashSet<String>> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT m.run_id
+               FROM messages m
+               JOIN conversations c ON c.id = m.conversation_id
+              WHERE m.run_id IS NOT NULL
+                AND (COALESCE(c.pinned, 0) = 1
+                     OR c.id IN (SELECT manager_conversation_id FROM projects
+                                  WHERE manager_conversation_id IS NOT NULL))",
+        )?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        Ok(rows.collect::<std::result::Result<std::collections::HashSet<_>, _>>()?)
+    }
+
     pub fn run_contexts(&self) -> Result<HashMap<String, RunContext>> {
         let conn = self.conn.lock().expect("store lock poisoned");
         let mut stmt = conn.prepare(
