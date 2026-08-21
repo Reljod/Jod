@@ -72,7 +72,7 @@ width from 20 to 120.
 
 ## What this pass fixed
 
-Thirty changes, each with a test that fails without it. Driven by running the
+Thirty-one changes, each with a test that fails without it. Driven by running the
 console against real harnesses under a throwaway `JOD_HOME`, on four projects,
 and then re-run end to end on an empty install.
 
@@ -148,6 +148,21 @@ nobody presses.
   migration `0025` repairs the consoles that have already compacted — verified
   on the live store, where four stranded items were then delivered in one tick.
 - **The `(deleted)` binary.** See above; found while chasing the same log.
+
+**A decision that was made and never enforced.**
+
+- **`continue_agent` accepted a stalled run.** Reljod's decision was that a
+  stalled session is marked and surfaced, never killed, and that the router
+  treats it as **not-continuable** — say so, start a fresh session beside it,
+  and leave the wedged one for him to stop. Both preambles say it. Nothing
+  checked. Found by wedging alpha's real engineer — live process group,
+  heartbeat silent for forty minutes, the daemon maintaining the mark — and
+  giving alpha another instruction: the manager called `continue_agent` on the
+  stalled run and the tool allowed it. It does not resume the stuck process; it
+  starts a *second* one on the same session, leaving the wedged one running and
+  unnoticed, which is the state the mark exists to end. Refused at the boundary
+  now, on the precedent set in the same file for `open_work` from main:
+  *"prompt wording is not enforcement"*.
 
 **The chain of command.**
 
