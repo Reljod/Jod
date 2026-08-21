@@ -1472,6 +1472,39 @@ impl Server {
         if let Some(refusal) = refusal_to_continue(&run_id, agent.status) {
             return Err(ToolError::Refused(refusal));
         }
+        // A stalled run is refused here, not merely discouraged in a preamble.
+        //
+        // Reljod's decision was that a stalled session is *marked and surfaced,
+        // never killed*, and that the router "treats it as not-continuable" —
+        // say so, start a fresh session beside it, and leave the wedged one for
+        // him to stop. Both preambles say it. Nothing enforced it, and the
+        // precedent for what to do about that is in this same file: `open_work`
+        // from the main chat is refused at the boundary because "prompt wording
+        // is not enforcement".
+        //
+        // Observed by wedging a real engineer and giving its project another
+        // instruction: the manager called `continue_agent` on the stalled run
+        // and the tool allowed it. That does not resume the stuck process — it
+        // starts a *second* one on the same session — so the wedged one is left
+        // running and unnoticed, which is the state the mark exists to end.
+        //
+        // Best effort: a store that cannot answer leaves the call alone rather
+        // than refusing work because a heartbeat could not be read.
+        let stalled = self
+            .store()
+            .ok()
+            .and_then(|s| s.stalled_runs().ok())
+            .unwrap_or_default();
+        if let Some(since) = stalled.get(&run_id) {
+            let silent = chrono::Utc::now()
+                .timestamp_millis()
+                .saturating_sub(*since)
+                .max(0);
+            return Err(ToolError::Refused(format!(
+                "run `{run_id}` is stalled — it has said nothing for {}, and it is still                  running, so continuing it would start a second agent on the same session                  and leave the wedged one going. Open a fresh session beside it with                  `open_work`, and leave this one for Reljod to stop.",
+                crate::heartbeat::human_ms(silent)
+            )));
+        }
         let Some(session) = agent.session_id.clone() else {
             return Err(ToolError::Refused(format!(
                 "run `{run_id}` never reported a session id, so there is no context to continue; \
@@ -6096,6 +6129,76 @@ mod tests {
             assert!(
                 !said.contains("not the main chat's to call"),
                 "a manager or an engineer must still be able to open work: {said}"
+            );
+        }
+
+        /// A stalled run is refused by the tool, not merely discouraged.
+        ///
+        /// Reljod's decision was that a stalled session is marked and surfaced,
+        /// never killed, and that the router treats it as not-continuable: say
+        /// so, start a fresh session beside it, and leave the wedged one for
+        /// him to stop. Both preambles say it, and nothing enforced it.
+        ///
+        /// Found by wedging a real engineer and giving its project another
+        /// instruction: the manager called `continue_agent` on the stalled run
+        /// and the tool allowed it. That does not resume the stuck process — it
+        /// starts a second one on the same session — so the wedged one is left
+        /// running and unnoticed, which is the state the mark exists to end.
+        #[tokio::test]
+        async fn continuing_a_stalled_run_is_refused_and_names_what_to_do_instead() {
+            let store = Arc::new(Store::in_memory().unwrap());
+            let c = store
+                .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
+                .unwrap()
+                .id;
+            run_in(&store, &c, "run-wedged");
+            finished_run(&store, "run-wedged", "engineer", Some("a-session"));
+
+            let server = Server::new(Jod::with_store(store.clone()))
+                .with_access(ToolAccess::Delegate)
+                .for_run("run-caller");
+
+            // Healthy first, so the refusal below is a change and not a
+            // constant. It may still fail for want of a supervisor, so this
+            // asserts on the *reason*.
+            let healthy = said(
+                &call(
+                    &server,
+                    "continue_agent",
+                    json!({ "run_id": "run-wedged", "prompt": "carry on" }),
+                )
+                .await,
+            );
+            assert!(
+                !healthy.contains("is stalled"),
+                "nothing is stalled yet: {healthy}"
+            );
+
+            let now = chrono::Utc::now().timestamp_millis();
+            let mut hb = crate::heartbeat::Heartbeat::starting(
+                "run-wedged",
+                crate::heartbeat::Watching::Run,
+                now,
+            );
+            hb.stalled_since_ms = Some(now - 35 * 60 * 1000);
+            store.watch_run(&hb).unwrap();
+
+            let said = said(
+                &call(
+                    &server,
+                    "continue_agent",
+                    json!({ "run_id": "run-wedged", "prompt": "carry on" }),
+                )
+                .await,
+            );
+            assert!(said.contains("is stalled"), "the tool refuses it: {said}");
+            assert!(
+                said.contains("open_work"),
+                "and names the way forward: {said}"
+            );
+            assert!(
+                said.contains("Reljod"),
+                "and leaves the wedged one to him, per the decision: {said}"
             );
         }
 
