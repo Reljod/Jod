@@ -6782,7 +6782,11 @@ fn refresh_workspaces(jod: &Arc<Jod>, app: &mut App) {
     // now arms a heartbeat, so without a daemon the fleet would draw every
     // wedged agent as healthy — which is precisely the state the mark was added
     // to end, quietly restored by a daemon nobody started.
-    if !app.said_nothing_is_sweeping && data::watched_but_unswept(jod, app.now_ms) {
+    // Read every tick, not only until it has been said once: the fleet keeps
+    // showing it for as long as it is true, and a one-shot flag cannot answer
+    // "is it still true" for a screen opened later.
+    app.nothing_is_sweeping = data::watched_but_unswept(jod, app.now_ms);
+    if !app.said_nothing_is_sweeping && app.nothing_is_sweeping {
         app.said_nothing_is_sweeping = true;
         app.push(Entry::Notice(
             "nothing is watching these sessions for stalls — start `jod daemon`, \

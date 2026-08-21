@@ -555,6 +555,15 @@ pub struct App {
     /// notice without this flag would be a line a second — which is not a
     /// warning, it is the feed being destroyed.
     pub said_nothing_is_sweeping: bool,
+    /// Whether sessions are being watched for stalls and nothing is sweeping.
+    ///
+    /// The transcript notice above says it once, which is right for a feed and
+    /// wrong for the fleet: the condition lasts until somebody starts the
+    /// daemon, and the fleet is the screen where its consequence shows — every
+    /// wedged agent drawn as healthy, because the mark that would say otherwise
+    /// is never written. So the fleet reads this every tick and keeps saying
+    /// it, and a person arriving at that screen an hour later is told too.
+    pub nothing_is_sweeping: bool,
     /// Which entry of the slash-command popup is highlighted. Meaningless when
     /// there is no popup, and clamped every time the input changes.
     pub suggestion: usize,
@@ -1261,6 +1270,7 @@ impl App {
             liveness: None,
             tick: 0,
             said_nothing_is_sweeping: false,
+            nothing_is_sweeping: false,
             suggestion: 0,
             team: None,
             members: Vec::new(),

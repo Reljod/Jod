@@ -1497,7 +1497,7 @@ pub fn watched_but_unswept(jod: &Arc<Jod>, now_ms: i64) -> bool {
     let Some(store) = jod.store() else {
         return false;
     };
-    let watching = store.heartbeats().map(|h| !h.is_empty()).unwrap_or(false);
+    let watching = store.any_heartbeat().unwrap_or(false);
     if !watching {
         return false;
     }

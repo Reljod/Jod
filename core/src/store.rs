@@ -2320,6 +2320,18 @@ impl Store {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
+    /// Whether anything at all is being watched.
+    ///
+    /// The console asks this on every tick to decide whether to say that no
+    /// daemon is sweeping, and the honest answer needs one row, not all of
+    /// them. Reading the whole table to call `is_empty` on it grew with every
+    /// run the machine had ever started.
+    pub fn any_heartbeat(&self) -> Result<bool> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        let mut stmt = conn.prepare("SELECT 1 FROM heartbeats LIMIT 1")?;
+        Ok(stmt.exists([])?)
+    }
+
     /// One run's heartbeat, or `None` if it is not being watched.
     pub fn heartbeat(&self, run_id: &str) -> Result<Option<Heartbeat>> {
         let conn = self.conn.lock().expect("store lock poisoned");

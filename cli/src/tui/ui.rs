@@ -3746,10 +3746,18 @@ fn draw_tree(f: &mut Frame, app: &App, area: Rect) {
     // card once on the agent that raised it and again on the project above it,
     // and the title would say twice the number the tree can show.
     let blocked: usize = rows.iter().filter(|n| n.depth == 0).map(|n| n.blocked).sum();
-    let title = if blocked > 0 {
-        format!(" fleet · {blocked} blocked ")
-    } else {
-        " fleet ".to_string()
+    // Both facts, because they are about different things and the second one
+    // changes how much the first is worth. Without a daemon nothing marks a
+    // stall, so every wedged agent on this screen draws as healthy — and the
+    // screen saying nothing about that is what let the fleet fill up with hung
+    // sessions nobody noticed. The transcript says it once when the console
+    // starts; this says it for as long as it is true, on the screen where it
+    // matters.
+    let title = match (blocked, app.nothing_is_sweeping) {
+        (0, false) => " fleet ".to_string(),
+        (0, true) => " fleet · no stall watch · jod daemon ".to_string(),
+        (n, false) => format!(" fleet · {n} blocked "),
+        (n, true) => format!(" fleet · {n} blocked · no stall watch · jod daemon "),
     };
     f.render_widget(
         List::new(items).block(
@@ -11856,6 +11864,36 @@ mod tests {
                 "row {at} is `{label}`, and the ▸ must be on it, not above it:\n{frame}",
             );
         }
+    }
+
+    /// The fleet says when nothing is marking stalls.
+    ///
+    /// Every session arms a heartbeat, and only `jod daemon` sweeps them. With
+    /// no daemon no stall is ever marked, so this screen draws every wedged
+    /// agent as healthy — the state the mark exists to end, quietly restored by
+    /// a daemon nobody started. The console said so once into the transcript,
+    /// which the person who opens the fleet an hour later never sees.
+    #[test]
+    fn the_fleet_says_when_no_daemon_is_watching_for_stalls() {
+        let mut a = two_works();
+        a.reconcile();
+
+        let quiet = rendered(&a, 150, 30);
+        assert!(
+            !quiet.contains("no stall watch"),
+            "nothing is claimed while a daemon is sweeping:\n{quiet}"
+        );
+
+        a.nothing_is_sweeping = true;
+        let warned = rendered(&a, 150, 30);
+        assert!(
+            warned.contains("no stall watch"),
+            "the fleet says the mark is not being written:\n{warned}"
+        );
+        assert!(
+            warned.contains("jod daemon"),
+            "and names the remedy, since the warning is useless without it:\n{warned}"
+        );
     }
 
     /// A collapsed project whose engineer is wedged must not spin.
