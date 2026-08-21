@@ -1686,7 +1686,8 @@ fn draw_splash(f: &mut Frame, app: &App, area: Rect) -> (usize, Rect) {
     // screen and the list comes out cut in half. While the popup is open the
     // input drops back to the bottom of the column and the wordmark keeps the
     // space above it: a logo that moves beats a list that is truncated.
-    let anchored = !crate::tui::command::completions(&app.input, app).is_empty();
+    let anchored = !app.completions_dismissed
+        && !crate::tui::command::completions(&app.input, app).is_empty();
 
     // Big lettering is the first thing to go. Below its width it would be
     // truncated mid-glyph, which reads as a broken screen rather than a logo.
@@ -2732,6 +2733,11 @@ fn two_ends(left: &str, right: &str, width: u16, colour: Color) -> Line<'static>
 /// screen, and a list that grows downwards would be clipped exactly when it is
 /// longest.
 fn draw_completions(f: &mut Frame, app: &App, input: Rect) {
+    // Escape put it away for this line. The popup is derived from the input, so
+    // there is nothing to close — this is the closing.
+    if app.completions_dismissed {
+        return;
+    }
     if app.workspace != Workspace::Chat {
         return;
     }

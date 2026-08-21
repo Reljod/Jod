@@ -564,6 +564,14 @@ pub struct App {
     /// is never written. So the fleet reads this every tick and keeps saying
     /// it, and a person arriving at that screen an hour later is told too.
     pub nothing_is_sweeping: bool,
+    /// Whether Escape has put the slash-command popup away for this line.
+    ///
+    /// The popup is derived from the input rather than stored, so there was
+    /// nothing for Escape to close and it fell through to `back()` — leaving
+    /// the list up with no key that dismissed it and its own header offering
+    /// none. Cleared the moment the line changes, because the next keystroke is
+    /// a new question about what to complete.
+    pub completions_dismissed: bool,
     /// Which entry of the slash-command popup is highlighted. Meaningless when
     /// there is no popup, and clamped every time the input changes.
     pub suggestion: usize,
@@ -1271,6 +1279,7 @@ impl App {
             tick: 0,
             said_nothing_is_sweeping: false,
             nothing_is_sweeping: false,
+            completions_dismissed: false,
             suggestion: 0,
             team: None,
             members: Vec::new(),
@@ -2684,6 +2693,9 @@ impl App {
     pub fn insert(&mut self, c: char) {
         self.input.insert(self.cursor, c);
         self.cursor += c.len_utf8();
+        // A changed line is a new question about what to complete, so an
+        // Escape that put the popup away does not also silence the next word.
+        self.completions_dismissed = false;
     }
 
     pub fn backspace(&mut self) {

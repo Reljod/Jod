@@ -5624,8 +5624,19 @@ fn on_chat_key(
 
     // While the completion popup is up it owns Tab and the arrows, and Enter
     // finishes the word rather than sending a half-typed command.
-    let suggestions = command::completions(&app.input, app);
+    let suggestions = if app.completions_dismissed {
+        Vec::new()
+    } else {
+        command::completions(&app.input, app)
+    };
     if !suggestions.is_empty() {
+        // Escape closes the popup and nothing else. It used to fall through to
+        // `back()`, which scrolls the transcript — so the list stayed up, no
+        // key dismissed it, and its own header offered none.
+        if key.code == KeyCode::Esc {
+            app.completions_dismissed = true;
+            return None;
+        }
         app.clamp_suggestion(suggestions.len());
         match key.code {
             KeyCode::Tab => {
@@ -6053,16 +6064,22 @@ fn apply_slash(app: &mut App, slash: command::Slash) -> Option<Action> {
             app::Resolved::Verbatim(raw) => {
                 app.resume = Resume::Session(raw.clone());
                 app.session = Some(raw.clone());
-                // Say when it matched nothing on screen. A typo is otherwise
-                // indistinguishable from a real resume until the harness
-                // rejects it several seconds later.
-                if app.agents.is_empty() {
-                    app.push(Entry::Notice(format!("continuing {raw}")));
+                // Say, always, that this matched nothing on screen. A typo is
+                // otherwise indistinguishable from a real resume until the
+                // harness rejects it several seconds later — and an empty fleet
+                // is the case where that is *most* likely, not least: there is
+                // nothing it could have matched. Saying only "continuing
+                // bogus-id-123" there read as success.
+                app.push(Entry::Notice(if app.agents.is_empty() {
+                    format!(
+                        "continuing {raw} — nothing is running here to match it against, \
+                         so it is passed on to the harness as typed"
+                    )
                 } else {
-                    app.push(Entry::Notice(format!(
+                    format!(
                         "continuing {raw} — not one of the agents listed, passing it on as typed"
-                    )));
-                }
+                    )
+                }));
                 return Some(Action::NewThread);
             }
             app::Resolved::NoSession(agent) => {
@@ -14719,6 +14736,33 @@ mod tests {
         let mut app = app_on(harness);
         app.discovered = vec![found("create-pr", jod_core::commands::Kind::Command, harness)];
         app
+    }
+
+    /// Escape puts the palette away, and typing brings it back.
+    ///
+    /// The popup is derived from the input rather than stored, so there was
+    /// nothing for Escape to close: it fell through to `back()`, the list
+    /// stayed up, and its own header — `Tab completes · ↑↓ choose` — offered no
+    /// key that dismissed it. The only way out was to edit the line.
+    #[test]
+    fn escape_puts_the_command_palette_away_without_touching_the_line() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.input = "/mo".into();
+        app.cursor = app.input.len();
+        assert!(
+            !command::completions(&app.input, &app).is_empty(),
+            "the premise: `/mo` offers something",
+        );
+
+        press(&mut app, KeyCode::Esc);
+        assert!(app.completions_dismissed, "Escape closed it");
+        assert_eq!(app.input, "/mo", "and left what was typed alone");
+
+        // The next keystroke is a new question about what to complete, so the
+        // dismissal must not outlive the line it was about.
+        press(&mut app, KeyCode::Char('d'));
+        assert!(!app.completions_dismissed, "typing asks again");
+        assert_eq!(app.input, "/mod");
     }
 
     /// The gap this closes: the palette was a hardcoded enum, so a repository's
