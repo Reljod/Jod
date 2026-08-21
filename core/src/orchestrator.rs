@@ -23,16 +23,13 @@
 //! is refused by the same code that would refuse it from a webhook payload.
 //!
 //! **That confinement covers Jod's verbs and not the session.**
-//! [`ToolAccess::Orchestrate`] decides which `mcp__jod__*` tools the MCP server
-//! offers and nothing else; the harness keeps its own. Measured with the flags
-//! this file builds, the main chat's session comes up holding 58 tools, of
-//! which 26 are the harness's — a shell, file editors, a web fetcher, its own
-//! sub-agent spawner — and Jod asked for none of them and cannot take them
-//! away. `--allowedTools` grants without denying. So the sentences above are
-//! true of everything the orchestrator does *to Jod* and are not a claim about
-//! what it can do to the machine. See `docs/harness-support.md`, "Tools are not
-//! a sandbox either", for the transcripts and for the one mechanism that does
-//! withhold.
+//! [`ToolAccess::Orchestrate`] decides which `mcp__jod__*` tools the server
+//! offers and nothing else; the harness keeps its own. Measured: the main
+//! chat's session comes up holding 58 tools, 26 of them the harness's — a
+//! shell, file editors, a web fetcher — which Jod never asked for and cannot
+//! take away, because `--allowedTools` grants without denying. So this is a
+//! claim about what the orchestrator can do *to Jod*, not to the machine. See
+//! `docs/harness-support.md`, "Tools are not a sandbox either".
 //!
 //! ## Non-blocking, which is the whole point
 //!
@@ -146,34 +143,25 @@ pub fn should_compact(
 ///
 /// ## The branch that used to be missing
 ///
-/// This opened with "you do not do the work" and then offered nothing but ways
-/// to hand something over, so every instruction bought an agent. The failure
-/// that made the case: a console on a fresh store was asked "what does the
-/// acronym A2A stand for in this project? answer in one line", spawned a child
-/// called `a2a-acronym-lookup`, polled `list_agents` waiting for it, and after
-/// 42 seconds and 39 cents said "Still working — the lookup agent is
-/// mid-search." Reljod never got the answer. It needed no repository, and the
-/// chat knew it.
+/// This offered nothing but ways to hand something over, so every instruction
+/// bought an agent. Asked "what does A2A stand for in this project? answer in
+/// one line", a console spawned a child, polled `list_agents`, and after 42
+/// seconds and 39 cents said "Still working". The answer needed no repository
+/// and the chat knew it.
 ///
-/// The old rule was written against a real failure — a main chat that starts
-/// reading a checkout stops being a main chat — and it over-reached into
-/// questions that touch no checkout at all. So the size of the task picks the
-/// branch, and answering is the first one considered. Everything past it is
-/// unchanged: the moment an instruction needs a checkout, a tool beyond recall,
-/// or anything still running when the turn ends, the routing below is exactly
-/// what it always was.
+/// The old rule was written against a real failure — a main chat that reads a
+/// checkout stops being a main chat — and over-reached into questions touching
+/// no checkout. So the size of the task picks the branch and answering is
+/// considered first. The moment an instruction needs a checkout, a tool beyond
+/// recall, or anything still running at the end of the turn, the routing below
+/// is what it always was.
 ///
-/// This is the shape `docs/spec-ceo-and-managers` settles on for main — "it
-/// routes and it answers", and "main may route and may run repo-less one-shots"
-/// — brought forward on its own, without the manager tier that spec adds around
-/// it.
+/// This is `docs/spec-ceo-and-managers`' shape for main — "it routes and it
+/// answers" — brought forward without the manager tier around it.
 ///
-/// It fixes instructions that never needed a child. It does **not** fix the
-/// separate hole the same live run exposed: main delegating and then wanting
-/// the result back, with no way for a child to report and no instruction about
-/// what to do meanwhile, so the model reaches for a `sleep` loop against the
-/// "Non-blocking, which is the whole point" rule at the top of this file. That
-/// one is still open.
+/// It does **not** fix the separate hole the same run exposed: main delegating
+/// and wanting the result back, with no way for a child to report, so the model
+/// reaches for a `sleep` loop against the non-blocking rule above. Still open.
 pub fn orchestrator_preamble() -> &'static str {
     "You are Jod's main chat: Reljod's orchestrator. You route, and you \
      answer.\n\n\
@@ -715,35 +703,29 @@ pub struct Handed {
 
 /// Give an instruction to the pinned main chat.
 ///
-/// **Every way into the main chat comes through here.** `jod main`, the TUI's
-/// `/main`, and the Telegram bridge all call this one function, because "which
-/// conversation, which tools, which permission mode" is a set of decisions with
-/// four bugs already behind it, and a second copy would be a second place for
-/// the fifth to hide. It lives in `core` rather than in the CLI for exactly that
-/// reason: the bridge is here, and a bridge that could not reach this function
-/// would have had to grow its own version of it.
+/// **Every way into the main chat comes through here** — `jod main`, the TUI's
+/// `/main`, and the Telegram bridge — because "which conversation, which tools,
+/// which permission mode" has four bugs behind it already
+/// (`tests/e2e/main-chat/REPORT.md`) and a second copy would be a second place
+/// for the fifth to hide. In `core` rather than the CLI because the bridge is
+/// here too.
 ///
-/// `carried` is prior context the harness has no session for: after `/harness`,
-/// the pin moves to a conversation the target has never seen, so the summary of
-/// what came before has to travel in the framing or it is lost. `None` on every
-/// ordinary turn, where the harness's own session is holding the thread — and
-/// `None` from the Telegram bridge, which has no thread state of its own: a
-/// switch happens in the TUI, which holds the summary and passes it on its own
-/// next turn.
+/// `carried` is prior context the harness has no session for: after `/harness`
+/// the pin moves to a conversation the target has never seen, so the summary
+/// travels in the framing or it is lost. `None` on every ordinary turn, and
+/// `None` from the bridge, which holds no thread state of its own.
 ///
-/// `run_name` is the other thing a caller varies, and it is cosmetic — the name
-/// a run answers to in `jod ls`. The console passes `main`; the bridge passes the
-/// chat's [`crate::telegram::session_key`] so a listing says which phone chat
-/// started a run. Everything load-bearing is fixed here.
+/// `run_name` is cosmetic — the name a run answers to in `jod ls`. The console
+/// passes `main`; the bridge passes the chat's
+/// [`crate::telegram::session_key`] so a listing says which phone chat started
+/// it. Everything load-bearing is fixed here.
 ///
-/// `permission` is the operator's chosen mode, and it used to be a constant.
-/// **That constant was the top of the chain that made `auto` a lie.** The
-/// console showed `auto`, this function span the orchestrator up in
-/// `accept_edits` anyway, its MCP server took the same ceiling, and `open_work`
-/// capped every background session against it — so work delegated from a chat
-/// the operator had put in `auto` ran two levels down in a mode where headless
-/// Claude Code has nobody to ask, and refused `git init`. Three hard-coded
-/// values in series, each defensible alone.
+/// `permission` is the operator's chosen mode, and it used to be a constant —
+/// **the top of the chain that made `auto` a lie.** The console showed `auto`,
+/// this span the orchestrator up in `accept_edits` anyway, its MCP server took
+/// that ceiling, and `open_work` capped every background session against it. So
+/// work delegated from an `auto` chat ran two levels down in a mode where
+/// headless Claude Code has nobody to ask, and refused `git init`.
 pub async fn hand_to_orchestrator(
     jod: &Jod,
     instruction: &str,
@@ -814,22 +796,17 @@ pub async fn hand_to_orchestrator(
                 model: None,
                 // The operator's mode, floored at `AcceptEdits`.
                 //
-                // **The floor, not the value, is the part with a bug behind
-                // it.** Plan mode refuses every mutation — including the MCP
-                // tool calls that *are* this run's entire job. Caught by
-                // running it: the orchestrator dutifully called
-                // `schedule_list`, `list_agents` and `recall`, then reached for
-                // `ExitPlanMode`, could not find it, and wrote a plan file
-                // instead of arming the schedule it had been asked for. So a
-                // mode below `AcceptEdits` would not make the chat cautious, it
-                // would make it inert while still appearing to work.
+                // **The floor is the part with a bug behind it.** Plan mode
+                // refuses every mutation, including the MCP calls that *are*
+                // this run's job: caught live, the orchestrator called
+                // `schedule_list`, reached for `ExitPlanMode`, and wrote a plan
+                // file instead of arming the schedule. Below `AcceptEdits` the
+                // chat is not cautious, it is inert while appearing to work.
                 //
-                // Above the floor it passes straight through, which is the fix:
-                // a console in `auto` now hands its work to sessions in `auto`.
-                // Its confinement is `ToolAccess` either way — the mutations
-                // that matter here are Jod's own verbs, already scoped by the
-                // access level, and the permission axis bounds what it may do
-                // to the *machine*.
+                // Above the floor it passes straight through, so a console in
+                // `auto` hands its work to sessions in `auto`. Confinement is
+                // `ToolAccess` either way; the permission axis bounds what it
+                // may do to the *machine*.
                 permission: at_least_acting(permission),
                 // Asked against `kind` — the harness this spawn actually
                 // launches — and not bare, because the pinned conversation is
@@ -1041,19 +1018,15 @@ pub fn prepare_work(store: &Store, opening: &Opening) -> Result<Prepared> {
         // The same roots and secrets the preamble describes, actually handed
         // to the run.
         //
-        // These were fetched above and used only to write the prose. So the
-        // brief told the agent that `$STRIPE_API_KEY` existed and nothing ever
-        // put it in the environment, and it named directories no `--add-dir`
-        // ever granted. Every construction site in the workspace ended
-        // `..SpawnRequest::default()`, so the supervisor's injection and
-        // redaction — both tested, both correct — were being handed an empty
-        // list on every real run.
+        // These were fetched above and used only to write the prose, so the
+        // brief named a `$STRIPE_API_KEY` nothing put in the environment and
+        // directories no `--add-dir` granted. Every construction site ended
+        // `..SpawnRequest::default()`, handing the supervisor's injection and
+        // redaction an empty list on every real run.
         //
-        // Worth stating because the failure was invisible in the worst way: a
-        // run told to print a secret printed nothing, and "the value appears
+        // The failure was invisible in the worst way: "the value appears
         // nowhere in the database" passed *trivially*, because no value had
-        // ever been near it. A green check that is green for the wrong reason
-        // is the one thing this repo keeps producing.
+        // ever been near it.
         //
         // Names only, never values — the supervisor resolves them at exec.
         roots: roots.iter().map(|r| r.path.clone()).collect(),

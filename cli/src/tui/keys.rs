@@ -8,119 +8,79 @@
 //!
 //! **The way out is always printed. The verbs are printed as far as they fit.**
 //!
-//! The rule used to be that every one of a screen's verbs had to be on the bar,
-//! because the same letter deliberately means different things on different
-//! screens — `a` attaches in the fleet and answers an escalation in goals — so
-//! a verb that was not printed would be a trap rather than a shortcut.
+//! The old rule — every verb on the bar — was already false when written.
+//! `ui::two_ends` reserved room for verbs and dropped the right-hand half,
+//! which is the way out: at eighty columns, chat, fleet and memory all stopped
+//! saying `Esc back · ? keys`. Every render test used a hundred and fifty
+//! columns, so nothing saw it.
 //!
-//! That rule was already false when it was written down. `ui::two_ends`
-//! reserved room for the verbs and dropped the right-hand half when none was
-//! left, and the right-hand half is the way out: at eighty columns, chat, fleet
-//! and memory all stopped saying `Esc back · ? keys`. Every render test in the
-//! suite used a hundred and fifty columns, so nothing ever saw it.
-//!
-//! The argument order was simply backwards. Being stranded is the trap the
-//! condition was written against; a terse bar is not. So the exit is reserved
-//! first, `keybar` spends whatever is left, and it drops **whole** verbs —
-//! half a chord teaches a key that does not exist — saying `? more` when it
-//! does, so a short bar reads as short rather than as complete. `?` then opens
-//! the overlay, which lists the screen's own verbs before anything else.
+//! The argument order was backwards: being stranded is the trap, a terse bar is
+//! not. So the exit is reserved first and `keybar` spends the rest, dropping
+//! **whole** verbs — half a chord teaches a key that does not exist — and
+//! saying `? more` when it drops any.
 //!
 //! ## Where a new verb goes in its table
 //!
-//! The budget drops from the end, so the order of a table decides what a narrow
-//! terminal loses. Order every screen's verbs:
+//! The budget drops from the end, so a table's order decides what a narrow
+//! terminal loses:
 //!
 //! 1. `⏎` — the primary action, always first.
-//! 2. Verbs **unique to this screen**, most important first. Where two are
-//!    equally important, prefer the one whose letter means something *else* on
-//!    another screen: `a` attaches here and answers an escalation in goals, and
-//!    printing only one half of that pair teaches a habit the other screen
-//!    breaks. That is a tie-break and not a rule — importance wins. `s stop`
-//!    stays above `r resume` on the fleet even though `r` is the collided
-//!    letter, because stopping a run matters more than the tidiness does.
+//! 2. Verbs **unique to this screen**, most important first. Where two tie,
+//!    prefer the one whose letter means something else elsewhere: `a` attaches
+//!    here and answers an escalation in goals, and printing one half of that
+//!    pair teaches a habit the other screen breaks. A tie-break, not a rule —
+//!    `s stop` still outranks `r resume` on the fleet.
 //! 3. Verbs that also appear in [`SPINE`].
 //!
-//! The point is that the bar should print what only this screen can teach you.
-//! `n`, `e`, `x` and `/` mean the same thing on all ten screens and have their
-//! own section in the overlay, so losing them off the bar costs nothing — the
-//! meaning transfers. `a answer` exists on exactly one screen and can be
-//! learned nowhere else, so it must outrank `e edit` even though `e` was typed
-//! into the table first.
+//! The bar should print what only this screen can teach. `n`, `e`, `x` and `/`
+//! mean the same everywhere and have their own overlay section, so losing them
+//! costs nothing.
 //!
-//! This is why the rule is an ordering and not a special case: the budget then
-//! drops the cheapest thing available by construction, on every screen and
-//! every screen added later.
-//! `no_verb_the_spine_already_teaches_sits_above_one_only_this_screen_has`
-//! keeps it that way.
-//!
-//! Only step 3 is enforced by a test, deliberately. An attempt to pin step 2's
-//! tie-break — "a collided letter must be printed on every screen that defines
-//! it, or on none" — was written, run, and deleted: the fleet has thirteen
-//! verbs, room for five at eighty columns, and seven collided letters among
-//! them (`r a c u g f t`). No ordering satisfies it, so the guarantee could only
-//! have been met by deleting verbs. A weaker form — collided letters first
-//! within step 2 — was also tried and also deleted, because it demanded
-//! `r resume` outrank `s stop` on the fleet, which is the tie-break overruling
-//! importance rather than settling it. What survives is the part that is both
-//! true and checkable; the rest is judgement, and is written down as judgement.
+//! Only step 3 is enforced, deliberately. Pinning step 2's tie-break was tried
+//! and deleted: the fleet has thirteen verbs, room for five at eighty columns,
+//! and seven collided letters among them, so no ordering satisfies it. What
+//! survives is the part that is both true and checkable.
 //!
 //! ## Why the verbs are on Ctrl, and why six letters are missing from them
 //!
-//! The verbs were briefly on Alt, to get out of the way of a multiplexer that
-//! takes Ctrl chords before this process ever sees them — tmux's default prefix
-//! is `Ctrl-B`, which was Jod's delegate key, so the binding never arrived.
+//! The verbs were briefly on Alt, to dodge a multiplexer that takes Ctrl chords
+//! before this process sees them. That fixed the wrong half: on macOS, Option
+//! does not send Alt unless the terminal is specially configured, so the
+//! terminal eats the keypress to type `å`. A binding nobody can press is worse
+//! than one a multiplexer eats, because the second has a workaround.
 //!
-//! That fixed the wrong half of the problem. On macOS, Option does not send Alt
-//! at all unless the terminal is specially told to — iTerm2's "Esc+" for the
-//! left Option key, Terminal.app's "Use Option as Meta key" — and without it
-//! the terminal eats the keypress to type `å`. So the chords did not merely
-//! collide, they could not be typed. A binding nobody can press is worse than
-//! one a multiplexer eats, because the second at least has a workaround.
-//!
-//! The verbs are therefore Ctrl again, minus the letters something else is
-//! already holding. tmux here is prefixed on `Ctrl-A`, with `Ctrl-H/J/K/L` for
-//! panes and `Ctrl-S` for sessions; the terminal has always owned `Ctrl-Q` and
-//! `Ctrl-Z`, and `Ctrl-I`/`Ctrl-M` are Tab and Enter. Take those away, then
-//! readline's `Ctrl-C/D/E/U/W`, and eleven letters are left:
-//! **B F G N O P R T V X Y**.
+//! So the verbs are Ctrl again, minus what something else holds. tmux here is
+//! prefixed on `Ctrl-A` with `Ctrl-H/J/K/L` for panes and `Ctrl-S` for
+//! sessions; the terminal owns `Ctrl-Q` and `Ctrl-Z`; `Ctrl-I`/`Ctrl-M` are Tab
+//! and Enter. Take those and readline's `Ctrl-C/D/E/U/W`, and eleven letters
+//! are left: **B F G N O P R T V X Y**.
 //!
 //! ## Eighteen verbs, eleven letters
 //!
-//! They do not fit, so which verb keeps a chord is decided by what a chord is
-//! *for*. The chat box turns every bare key into text, so a chord buys exactly
-//! one thing: a verb you can reach **without stopping the sentence you are
-//! typing, or looking away from the run you are watching**. Delegate the line,
-//! stop the run, copy the reply, show the reasoning, answer the rail, start
-//! dictating. Those get the letters.
+//! They do not fit, so what keeps a chord is decided by what a chord is *for*.
+//! The chat box turns every bare key into text, so a chord buys one thing: a
+//! verb reachable **without stopping the sentence you are typing or looking
+//! away from the run you are watching**. Delegate, stop, yank, show reasoning,
+//! answer the rail, dictate. Those get the letters.
 //!
 //! Everything else is a *destination*, and destinations go behind the leader:
-//! `Ctrl-G` opens the menu, one more letter lands you anywhere. That is not a
-//! consolation prize for the verbs that lost the draw — it is the job the menu
-//! was built for, and it now covers all nine screens rather than the seven that
-//! happened to have no chord. `Ctrl-F` is the one destination that kept one,
-//! because the fleet is where a delegated run goes and `Ctrl-B` `Ctrl-F` is a
-//! single thought.
+//! `Ctrl-G` opens the menu and one more letter lands you anywhere, covering all
+//! nine screens. `Ctrl-F` is the one destination that kept a chord, because the
+//! fleet is where a delegated run goes and `Ctrl-B` `Ctrl-F` is one thought.
 //!
-//! **The eleven are now spent.** `Ctrl-V` was held back so the next verb would
-//! have somewhere to land that is not someone else's key, and dictation took it
-//! within the week — which is the argument for having kept it, not against.
-//! The projects panel arrived in the same batch and went to `Ctrl-G d`, because
-//! `Ctrl-D` is quit.
+//! **The eleven are now spent.** `Ctrl-V` was held back for the next verb and
+//! dictation took it within the week, which is the argument for having kept it.
+//! So the next verb has no letter at all, and that is a decision to make
+//! deliberately rather than by taking `Ctrl-L` back off tmux: either it is a
+//! destination and goes behind the leader, or something holding a letter is
+//! demoted. The menu is the pressure valve.
 //!
-//! So the next verb after this one has no letter at all, and that is the
-//! decision to make deliberately rather than by taking `Ctrl-L` back off tmux:
-//! either it is a destination and goes behind the leader, or something already
-//! holding a letter is demoted to make room. The menu is the pressure valve and
-//! it has nine free letters left.
-//!
-//! What did **not** move is the handful of Ctrl chords the terminal itself has
-//! taught everyone: `Ctrl-C`/`Ctrl-D` quit, `Ctrl-U` clears the line, `Ctrl-W`
-//! deletes a word, `Ctrl-A`/`Ctrl-E` go to the ends of it. Moving those would
-//! break muscle memory that predates Jod by forty years to solve a problem
-//! nobody has — no multiplexer steals them, because every shell needs them.
-//! `Ctrl-A` is the one that costs anything under a prefix-on-`Ctrl-A` tmux, and
-//! what it costs is a second press rather than the binding.
+//! What did **not** move is what the terminal itself taught everyone:
+//! `Ctrl-C`/`Ctrl-D` quit, `Ctrl-U` clears the line, `Ctrl-W` deletes a word,
+//! `Ctrl-A`/`Ctrl-E` go to its ends. Moving forty years of muscle memory would
+//! solve a problem nobody has — no multiplexer steals them, because every shell
+//! needs them. Under a prefix-on-`Ctrl-A` tmux, `Ctrl-A` costs a second press
+//! rather than the binding.
 //!
 //! `no_verb_sits_on_a_chord_a_multiplexer_takes` is what keeps the six letters
 //! clear, and it exempts those readline rows by name rather than by pattern —
@@ -192,31 +152,19 @@ pub const GLOBAL: &[Key] = &[
     // written. See [`RAIL`].
     k("Ctrl-R", "show or hide the rail"),
     k("Ctrl-N", "the rail's next card"),
-    // The side panel, which is where the projects, the sessions, the mode, the
-    // harness, the spend and the context left are drawn — a large fraction of
-    // what the program knows, behind one key.
+    // The side panel: projects, sessions, mode, harness, spend and context
+    // left — a sixth of the program behind one key. It used to be advertised
+    // only on the panel's own bottom border, which you can read only after
+    // finding the key.
     //
-    // It is written down here because until now it was written down *only* on
-    // the panel's own bottom border (`Shift-Tab closes`), which you can read
-    // only once you have already found the key. An overlay that calls itself
-    // the whole keymap and omits the way into a sixth of the program sends the
-    // reader to the source, which is where this key was in fact found.
-    //
-    // Not caught by the drift net either, and that is why the row carries its
-    // own test in `ui`: `is_chord` recognises a Ctrl or Alt prefix, and this
-    // arrives as `BackTab` carrying neither, so nothing replays it.
+    // The drift net cannot see it — `is_chord` wants a Ctrl or Alt prefix and
+    // this arrives as `BackTab` — so the row carries its own test in `ui`.
     k("Shift-Tab", "show or hide the side panel"),
     k("Ctrl-P", "add a directory to work in"),
-    // A switch, not a button: it stays on, and everything said streams into
-    // the box until it is switched off. Saying "go ahead" sends, "stop
-    // listening" switches off — the keyboard is optional once it is on, which
-    // is the point.
-    //
-    // This is what the spare letter was being kept for, and `v` is the one it
-    // would have asked for anyway. It is also the clearest case yet of the rule
-    // above: dictation is *only* useful without stopping what you are doing.
-    // The projects panel that arrived beside it is a destination and went to
-    // `Ctrl-G d` — `Ctrl-D` is quit and there was no letter left to give it.
+    // A switch, not a button: it stays on and everything said streams into the
+    // box until switched off, so the keyboard is optional once it is on. The
+    // clearest case of the rule above — dictation is *only* useful without
+    // stopping what you are doing.
     k("Ctrl-V", "listen, and keep listening"),
     k("Ctrl-Y", "copy the last reply"),
     k("Ctrl-B", "delegate the typed line"),
@@ -224,23 +172,14 @@ pub const GLOBAL: &[Key] = &[
     k("Ctrl-T", "show or hide reasoning"),
     k("Ctrl-O", "show or hide tool output"),
     k("Ctrl-↑↓", "scroll the transcript"),
-    // One row for the pair, for the same reason `uU` above is one row.
+    // One row for the pair. The `?` overlay promises to be complete at 100×30
+    // and had grown one line past that, so a verb with its inverse gives up a
+    // row without giving up a verb — both still fire and both are advertised.
     //
-    // The `?` overlay promises to be complete at 100×30, and this branch and
-    // `main` each added chords to it — the rail's two, the picker, search,
-    // yank, and background shells — which together cost it one line more than
-    // it had. Something had to give, and a verb with its inverse gives up a
-    // row without giving up a verb: both keys still fire and both are still
-    // advertised.
-    //
-    // This pair rather than another because start-of-line and end-of-line are
-    // read as one idea by anyone who already knows them from a shell, and
-    // guessed as a pair by anyone who does not.
-    // All four spellings, because all four are dispatched. `press_of` splits on
-    // `/` and carries the modifier along, so this one row still advertises
-    // Ctrl-A, Ctrl-E, Ctrl-Home and Ctrl-End — and the drift net, which replays
-    // every printed label as a real keypress, is what caught the version of
-    // this that quietly dropped Home and End while still answering them.
+    // All four spellings, because all four are dispatched: `press_of` splits on
+    // `/` and carries the modifier along. The drift net, which replays every
+    // printed label as a keypress, caught the version that quietly dropped Home
+    // and End while still answering them.
     k("Ctrl-A/E/Home/End", "start / end of the line"),
     k("Ctrl-U", "clear the input line"),
     k("Ctrl-W", "delete the previous word"),

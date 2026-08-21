@@ -7,16 +7,13 @@
 //!
 //! # Transport: long polling, not a webhook
 //!
-//! Telegram offers both. A webhook is fewer moving parts *if* you already have
-//! what it needs, and Jod does not: `setWebhook` requires a public HTTPS URL
-//! with a certificate Telegram will accept, and Jod's box is a personal VPS
-//! behind NAT with no certificate and no reverse proxy in front of it. Getting
-//! a webhook working means acquiring a domain, a certificate, a renewal cron
-//! and an inbound port — four new failure modes, each of which fails *silently*
-//! by simply never delivering a message.
+//! A webhook needs a public HTTPS URL with a certificate Telegram accepts, and
+//! Jod's box is a personal VPS behind NAT with neither. Getting there means a
+//! domain, a certificate, a renewal cron and an inbound port — four failure
+//! modes that each fail *silently*, by never delivering a message.
 //!
 //! `getUpdates` needs an outbound TCP connection and nothing else, which is
-//! exactly what a NATed box has. The costs are real and handled here:
+//! what a NATed box has. The costs are real and handled here:
 //!
 //! - **Only one poller may run per token.** A second one makes Telegram return
 //!   409 `Conflict` to *both*, so the failure is mutual rather than
@@ -34,15 +31,13 @@
 //! # Crate: raw JSON over `reqwest`
 //!
 //! Jod sends three Bot API methods — `getUpdates`, `sendMessage`,
-//! `editMessageText` — and reads four object shapes. `teloxide` is the obvious
-//! choice and the wrong one here: it brings a dispatcher, a dialogue state
-//! machine, `dptree` and derive macros to build a bot framework, and Jod
-//! already *has* the framework ([`crate::service::Jod`]). `frankenstein` is
-//! lighter but still generates the whole API surface. Both wrap the same
-//! `reqwest` call this module makes directly, and Jod ships as a single static
-//! binary onto a VPS, where every transitive crate is weight in the image and
-//! another thing to audit. `rustls` rather than the system OpenSSL for the same
-//! reason.
+//! `editMessageText` — and reads four object shapes. `teloxide` brings a
+//! dispatcher, a dialogue state machine and derive macros to build a bot
+//! framework, and Jod already *has* the framework
+//! ([`crate::service::Jod`]); `frankenstein` still generates the whole API
+//! surface. Both wrap the same `reqwest` call made directly here, and every
+//! transitive crate is weight in the image and another thing to audit.
+//! `rustls` rather than system OpenSSL for the same reason.
 //!
 //! # The phone is a seat at the main chat, not a chat of its own
 //!
@@ -54,18 +49,15 @@
 //! it is there in `jod main`; say something at the desk and the phone picks up
 //! from it.
 //!
-//! That is the second version of this. The first gave every chat its own
-//! conversation and kept a per-chat harness session in `channel_sessions`, which
-//! felt continuous on the phone and meant the main chat heard nothing that was
-//! ever said to it from outside a terminal. → [why](../../../docs/decisions.md)
+//! The first version gave every chat its own conversation and a per-chat
+//! session in `channel_sessions`, which felt continuous on the phone and meant
+//! the main chat heard nothing said to it from outside a terminal.
+//! → [why](../../../docs/decisions.md)
 //!
-//! The resume cursor therefore lives on the conversation row, not here, and it
-//! survives a restart because the row does. (An earlier version kept it in a
-//! `HashMap` on the bridge; the symptom was a daemon restart silently starting
-//! every chat over — you carried on typing and the agent had forgotten the
-//! morning, with nothing on screen to say why.) `channel_sessions` records
-//! which conversation a chat's turns landed in and which session its last turn
-//! ran on — the audit trail, no longer the lookup.
+//! So the resume cursor lives on the conversation row and survives a restart
+//! because the row does. (Kept in a `HashMap` on the bridge, a daemon restart
+//! silently started every chat over, with nothing on screen to say why.)
+//! `channel_sessions` is now the audit trail rather than the lookup.
 //!
 //! Starting over is something you ask for, with `/new` or `/clear`, and because
 //! there is one chat those clear it for every surface — which the reply says
@@ -1176,21 +1168,18 @@ pub const POLL_TIMEOUT_S: u64 = 50;
 ///
 /// Untested here on purpose: exercising it needs a live bot token, and the
 /// charter forbids inventing one or standing up a fake that would turn a green
-/// suite into a claim about code that was never run. Everything this type does
-/// beyond the HTTP call itself lives in the pure functions above, which are
-/// tested.
+/// suite into a claim about code that never ran. Everything beyond the HTTP
+/// call lives in the pure functions above, which are tested.
 ///
-/// **This is the only thing in Jod that needs an HTTPS client**, and therefore
-/// the only reason the tree contains a TLS stack at all — `reqwest` pulls
-/// `rustls`, which pulls `aws-lc-rs`, which pulls a million lines of vendored C
-/// in `aws-lc-sys`. That is a large price for one caller, so it is behind a
-/// feature: `--no-default-features` builds a Jod with no TLS in it whatsoever.
+/// **The only thing in Jod that needs an HTTPS client**, and so the only reason
+/// the tree carries a TLS stack — `reqwest` → `rustls` → `aws-lc-rs` → a
+/// million lines of vendored C. A large price for one caller, so it sits behind
+/// a feature: `--no-default-features` builds a Jod with no TLS at all.
 ///
-/// The alternative considered and rejected was swapping the crypto provider for
-/// `ring` via `rustls-no-provider`. It is smaller, but it requires installing a
-/// default provider at startup, and forgetting that is a *runtime panic on the
-/// first TLS call* — in a daemon meant to run unattended for weeks. Trading a
-/// 3am panic for a shorter build is the wrong way round.
+/// Swapping the provider for `ring` via `rustls-no-provider` is smaller but
+/// requires installing a default provider at startup, and forgetting that is a
+/// *runtime panic on the first TLS call* in a daemon meant to run unattended
+/// for weeks.
 #[cfg(feature = "telegram")]
 pub struct HttpBot {
     client: reqwest::Client,
@@ -1502,31 +1491,24 @@ impl<B: BotApi + 'static> Bridge<B> {
 
     /// Send something Jod owes somebody, with the ledger bracketing the send.
     ///
-    /// **Not every outbound message is an obligation, and treating them alike
-    /// would make the ledger useless.** Two are owed and go through here: the
-    /// answer a run produced, and the refusal when a run could not be started.
-    /// Both are the failure `ledger`'s header names — *"the run finished, the
-    /// store says `done`, and the person it was for heard nothing"* — and both
-    /// represent something the person cannot get back by asking again, because
-    /// the work has already happened.
+    /// **Not every outbound message is an obligation.** Two are, and go through
+    /// here: the answer a run produced, and the refusal when a run could not
+    /// start. Both are what `ledger`'s header names, and neither can be got
+    /// back by asking again, because the work has already happened.
     ///
-    /// Three deliberately do not: the progress bubble, which is edited in place
-    /// and superseded seconds later; the completion edit, which is the same
-    /// bubble; and command replies, which have no run behind them and can be
-    /// had again by retyping the command. Redelivering any of those after a
-    /// restart would put yesterday's `⏳ working, 2m` in front of somebody,
-    /// which is the archaeology [`ledger::STALE_AFTER_MS`] exists to prevent.
+    /// Three deliberately do not: the progress bubble and its completion edit,
+    /// superseded seconds later, and command replies, which have no run behind
+    /// them and can be had again by retyping. Redelivering those after a
+    /// restart puts yesterday's `⏳ working, 2m` in front of somebody.
     ///
-    /// The order is the guarantee and it is the whole reason this wrapper
-    /// exists: the row is written **before** the transport is touched, because
-    /// the crash the ledger is for happens between the two. A row written after
-    /// a successful send records only the sends that succeeded.
+    /// **The order is the guarantee.** The row is written *before* the
+    /// transport is touched, because the crash the ledger exists for happens
+    /// between the two; a row written after a successful send records only the
+    /// sends that succeeded.
     ///
-    /// `run_id` ties the row to the run it reports, which is what makes the
-    /// ledger answer the question its header poses: the store says a run is
-    /// `done`, so did the person it was for ever hear about it? Without the
-    /// join that is two tables and a guess. `None` for the refusal, because
-    /// there is no run — that is what is being reported.
+    /// `run_id` ties the row to the run it reports, which is what lets the
+    /// ledger answer "the store says `done` — did the person hear about it?"
+    /// `None` for the refusal, where there is no run to name.
     async fn deliver_owed(
         &self,
         key: &str,
@@ -1615,23 +1597,18 @@ impl<B: BotApi + 'static> Bridge<B> {
 
     /// Send anything a previous Jod died owing, before taking any new work.
     ///
-    /// Here rather than in `Daemon::persistent`, and the difference is not
-    /// cosmetic. `jod daemon` and `jod telegram serve` are separate processes;
-    /// the daemon holds no transport. `Store::sweep_recoverable` **claims as it
-    /// reads** — it rewrites the owner in the same transaction that selects the
-    /// row — so a sweep in a process that cannot send would take every orphaned
-    /// row, fail to deliver any of them, and then be *alive*, which makes every
-    /// later sweep correctly skip those rows for as long as that process runs.
-    /// It would turn recoverable messages into permanently stranded ones and
-    /// leave the ledger asserting that somebody is answerable for them. The
-    /// sweep belongs in the process holding the transport, which is this one.
+    /// Here rather than in `Daemon::persistent`, which holds no transport.
+    /// `Store::sweep_recoverable` **claims as it reads**, so a sweep in a
+    /// process that cannot send would take every orphaned row, deliver none,
+    /// and then stay *alive* — making every later sweep correctly skip those
+    /// rows for as long as it runs. Recoverable messages would become
+    /// permanently stranded ones. The sweep belongs where the transport is.
     ///
-    /// Before the poll loop, not beside it: a message owed since yesterday
-    /// should go out ahead of whatever arrived this second.
+    /// Before the poll loop, not beside it: a message owed since yesterday goes
+    /// out ahead of whatever arrived this second.
     ///
-    /// Nothing here is fatal. A ledger that cannot be read is a reason to get on
-    /// with answering people, not a reason to refuse to start — the same call
-    /// `Daemon::persistent` makes about a history it cannot rehydrate.
+    /// Nothing here is fatal — an unreadable ledger is a reason to get on with
+    /// answering people, not to refuse to start.
     async fn redeliver_owed(&self) {
         let Some(store) = self.jod.store() else {
             return;

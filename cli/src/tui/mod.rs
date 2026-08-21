@@ -1067,10 +1067,8 @@ fn replay(live: &[jod_core::conversation::Message], show_thinking: bool) -> Vec<
 /// Hand one typed line to the main chat.
 ///
 /// Goes through [`crate::hand_to_orchestrator`] — the same call `jod main` and
-/// the Telegram bridge make — rather than a TUI-shaped copy. Which
-/// conversation, which tools and which permission mode have four bugs behind
-/// them already (`tests/e2e/main-chat/REPORT.md`); a second copy would be a
-/// second place for the fifth to hide.
+/// the Telegram bridge make — rather than a TUI-shaped copy, for the reason
+/// that function's own doc gives.
 ///
 /// Deliberately not `watch()`, which clears the transcript before replaying and
 /// would wipe the conversation once per message. Here the run is watched in

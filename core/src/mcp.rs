@@ -2358,10 +2358,9 @@ impl Server {
         }
 
         // Inherited, not chosen here. Asking for `accept_edits` and capping it
-        // reads as a safe default and is not: a main chat the operator put in
-        // `auto` opened its background work one level down, where headless
-        // Claude Code has nobody to ask and refuses every mutation. The mode on
-        // the status bar never reached the process doing the work.
+        // reads as a safe default and is not — this was one link in the chain
+        // `orchestrator::hand_to_orchestrator` describes, which made the
+        // console's `auto` a lie two levels down.
         //
         // The ceiling *is* the operator's answer, arriving from the run that
         // owns this server — see [`crate::mcp_config::server_args`]. An
