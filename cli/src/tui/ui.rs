@@ -2062,12 +2062,26 @@ fn draw_projects(f: &mut Frame, app: &App, area: Rect) -> PanelHits {
             // four repositories reads as "you have no repositories", and its
             // remedy tells you to add one you already have. Pressing Ctrl-P
             // twice was enough to produce it.
+            // Both fitted, like the row above them. The count line was added
+            // without a `cut` and lost its last three characters at *every*
+            // width — `… catalogued — Ctr` — which dropped the keystroke the
+            // sentence exists to name. The same pass added "ellipsise rather
+            // than clip" for the empty states two panes over, and this was the
+            // one line that missed its own rule.
             None if app.projects.is_empty() => Line::from(Span::styled(
-                format!(" ▸ nothing set — {CATALOG_REMEDY}"),
+                cut(&format!(" ▸ nothing set — {CATALOG_REMEDY}"), inner),
                 fg(MUTED),
             )),
+            // Short enough to survive a thirty-two column panel, which is what
+            // this box is at every terminal width. "None set" is not repeated
+            // here because the box's own title already says it — what the line
+            // is for is the two facts the title cannot carry: that there *are*
+            // projects, and the key that shows them.
             None => Line::from(Span::styled(
-                format!(" ▸ none set · {} catalogued — Ctrl-P", app.projects.len()),
+                cut(
+                    &format!(" ▸ {} catalogued · Ctrl-P", app.projects.len()),
+                    inner,
+                ),
                 fg(MUTED),
             )),
         };
@@ -3571,16 +3585,26 @@ fn filter_line(app: &App) -> Option<Line<'static>> {
     // A filter that is open but empty hides nothing, so it says so rather than
     // claiming a match count that is really the whole list.
     let what = if list.filtering() {
-        // Rows, less the ones a filter cannot exclude. The fleet's pinned chat
-        // is always in `row_ids` and never a match, so counting rows there
-        // claimed one more hit than the filter had actually found.
-        let unfilterable = usize::from(app.workspace == Workspace::Fleet);
-        format!(
-            "   ▸ filter · {} match",
+        // Count the rows the pane is actually drawing.
+        //
+        // On the fleet with a tree — which is every fleet now — the rows are
+        // the forest's, and `row_ids` answers with the *flat agent list* plus a
+        // sentinel. The two collections are unrelated, so the number was
+        // arbitrary: filtering for a word plainly present on four rows reported
+        // `0 match` beside them. `tree_rows` is what `draw_tree` walks, and the
+        // filter has already been applied to it, so nothing has to be
+        // subtracted back off.
+        let matched = if app.workspace == Workspace::Fleet && app.has_tree() {
+            app.tree_rows().len()
+        } else {
+            // The flat list keeps its correction: its pinned row is a sentinel
+            // that is always present and never a match.
+            let unfilterable = usize::from(app.workspace == Workspace::Fleet);
             app.row_ids(app.workspace)
                 .len()
                 .saturating_sub(unfilterable)
-        )
+        };
+        format!("   ▸ filter · {matched} match")
     } else {
         "   ▸ type to filter".to_string()
     };
@@ -8042,6 +8066,14 @@ mod tests {
             !screen.contains("nothing set"),
             "and does not claim to have none:\n{screen}"
         );
+        // And it fits. Written without a `cut`, this line lost its last three
+        // characters at every width — `… catalogued · Ctr` — which dropped the
+        // keystroke the sentence exists to name, on the one screen that tells
+        // you how to reach your projects.
+        assert!(
+            screen.contains("Ctrl-P"),
+            "the keystroke it names has to survive the width:\n{screen}"
+        );
 
         // A genuinely empty catalog keeps the sentence that fits it, remedy and
         // all — that case is the one `/project add` is the answer to.
@@ -12162,6 +12194,15 @@ mod tests {
         assert!(frame.contains("⏎ inserts"), "the picker is drawn:\n{frame}");
     }
 
+    /// A filter on the fleet says so, on the tree as well as the flat list.
+    ///
+    /// The flat list has drawn this line since it had one; the tree never did.
+    /// Once the fleet always had a tree, filtering hid rows — whole projects,
+    /// and `★ jod` — with nothing anywhere saying a filter was on, so the
+    /// screen read as a fleet that had lost them. The count has to be about
+    /// those rows too: it was reading the flat *agent* list while the pane drew
+    /// tree nodes, so it reported `0 match` beside rows plainly on screen.
+    #[test]
     fn a_filtered_tree_says_it_is_filtered() {
         let mut a = two_works();
         a.reconcile();
@@ -12182,6 +12223,23 @@ mod tests {
         assert!(
             frame.contains("match"),
             "and how much it is hiding:\n{frame}"
+        );
+        // The number has to be about the rows on screen. It counted
+        // `row_ids(Fleet)` — the flat *agent* list plus a sentinel — while the
+        // pane drew tree nodes, two unrelated collections. With no agents and a
+        // filter matching several rows that arithmetic reports `0 match` beside
+        // them, which is what a person actually saw.
+        assert!(
+            a.agents.is_empty(),
+            "the premise: the flat list is empty while the tree is not",
+        );
+        assert!(
+            !frame.contains("0 match"),
+            "rows are plainly on screen, so the count cannot be zero:\n{frame}"
+        );
+        assert!(
+            frame.contains(&format!("{} match", a.tree_rows().len())),
+            "it counts the rows the pane draws:\n{frame}"
         );
     }
 
