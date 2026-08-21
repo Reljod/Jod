@@ -42,7 +42,7 @@ use jod_core::team::{Scope, TeamTask};
 use jod_core::webhook::{Delivery as StoredDelivery, DeliveryStatus, Rule};
 use jod_core::Jod;
 
-use super::app::short_duration;
+use super::app::{short_duration, Current};
 use super::traffic;
 use super::traffic::Watching;
 use super::workspace::Workspace;
@@ -1361,7 +1361,9 @@ pub fn projects(jod: &Arc<Jod>) -> Vec<Project> {
 /// project itself, because the two answers differ in exactly the case that
 /// matters: the project is the same either way, and only the log knows whether
 /// he said it or whether it merely carried.
-pub fn current_project(jod: &Arc<Jod>, conversation: Option<&str>) -> Option<(String, How)> {
+/// The id travels with the name because the name is not unique — see
+/// [`super::app::Current`], and the panel bug that came of dropping it.
+pub fn current_project(jod: &Arc<Jod>, conversation: Option<&str>) -> Option<Current> {
     let store = jod.store()?;
     let id = conversation?;
     let project = store.current_project(id).ok().flatten()?;
@@ -1372,7 +1374,11 @@ pub fn current_project(jod: &Arc<Jod>, conversation: Option<&str>) -> Option<(St
         // No log line means nobody has resolved anything on this conversation
         // — it was set directly, which is a human act.
         .unwrap_or(How::Human);
-    Some((project.name, how))
+    Some(Current {
+        id: project.id,
+        name: project.name,
+        how,
+    })
 }
 
 // ---- searching the transcript -------------------------------------------

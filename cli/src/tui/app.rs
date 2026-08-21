@@ -378,6 +378,26 @@ pub fn short_duration(ms: i64) -> String {
     }
 }
 
+/// Which project the conversation on screen is about, and how that was decided.
+///
+/// The **id** is here because the name is not unique and the catalog knows it:
+/// two checkouts called `api` are two rows, and `/project untrack api` already
+/// refuses to guess between them. The panel used to mark the current project by
+/// comparing names, so both rows got the `▸` and the box said two different
+/// repositories were the one the next sentence would land in — which is the one
+/// question it exists to answer.
+///
+/// The `how` is carried rather than dropped because it is the whole point of
+/// showing this: a project he *named* needs no attention, and one that merely
+/// carried over is the one worth a glance before an agent starts working in the
+/// wrong repository.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Current {
+    pub id: String,
+    pub name: String,
+    pub how: How,
+}
+
 pub struct App {
     pub transcript: Vec<Entry>,
     pub input: String,
@@ -599,12 +619,7 @@ pub struct App {
     pub projects: Vec<Project>,
     /// Which project the conversation on screen is about, and how that was
     /// decided.
-    ///
-    /// The `how` is carried rather than dropped because it is the whole point
-    /// of showing this: a project he *named* needs no attention, and one that
-    /// merely carried over is the one worth a glance before an agent starts
-    /// working in the wrong repository.
-    pub current_project: Option<(String, How)>,
+    pub current_project: Option<Current>,
     /// Whether the catalog section of the panel is expanded.
     ///
     /// Open by default and collapsible, rather than hidden by default: the
@@ -612,6 +627,21 @@ pub struct App {
     /// dictated sentence will land in without asking. A twenty-project catalog
     /// would eat the panel, though, which is what the collapse is for.
     pub projects_open: bool,
+    /// Whether the catalog has the keyboard, so its bare keys are its own.
+    ///
+    /// The same arrangement the rail has, and for the same reason: the chat box
+    /// turns every bare key into text, so a catalog with a chord per verb would
+    /// spend letters the keymap does not have. `Ctrl-P` hands it the keyboard,
+    /// the keybar says so while it holds it, and `Esc` gives it back with the
+    /// typed line untouched.
+    pub panel_focused: bool,
+    /// The project the catalog's cursor is on, by id.
+    ///
+    /// By id rather than by row, because the catalog reorders underneath the
+    /// cursor: the current project is drawn first whatever the store's order is,
+    /// and the tick rewrites the rest by recency. A row index would move the
+    /// cursor to a different repository without anybody pressing anything.
+    pub project_selected: Option<String>,
 
     // ---- dictation -------------------------------------------------------
     /// What the microphone is doing, if anything.
@@ -1198,6 +1228,8 @@ impl App {
             // nothing — the point is to know where a dictated sentence lands
             // without having to ask.
             projects_open: true,
+            panel_focused: false,
+            project_selected: None,
             dictation: Dictation::Off,
             dictated: Vec::new(),
             stop_listening_requested: false,
@@ -1288,6 +1320,113 @@ impl App {
     /// to show, which is every session started before works existed.
     pub fn has_tree(&self) -> bool {
         !self.forest.is_empty()
+    }
+
+    // ---- the project catalog ---------------------------------------------
+
+    /// The catalog in the order the panel draws it.
+    ///
+    /// The current project leads whatever the store's order is, because the one
+    /// fact the box exists to show — which repository a dictated sentence lands
+    /// in — must not be scrolled out of it by a catalog longer than the box is
+    /// tall. Everything else keeps the store's recency order.
+    ///
+    /// One function rather than one per caller: the renderer draws these rows,
+    /// the cursor steps over them and a click resolves against them, and three
+    /// copies of the sort is how a click comes to open the row above the one
+    /// under the pointer.
+    pub fn catalog(&self) -> Vec<&Project> {
+        let current = self.current_project.as_ref();
+        let mut rows: Vec<&Project> = self.projects.iter().collect();
+        rows.sort_by_key(|p| current.map(|c| p.id != c.id).unwrap_or(true));
+        rows
+    }
+
+    /// The project the catalog's cursor is on, or the first row when it is on
+    /// nothing — a focused list with no cursor has no obvious thing to do.
+    pub fn selected_project(&self) -> Option<&Project> {
+        let rows = self.catalog();
+        match &self.project_selected {
+            Some(id) => rows
+                .iter()
+                .find(|p| &p.id == id)
+                .or_else(|| rows.first())
+                .copied(),
+            None => rows.first().copied(),
+        }
+    }
+
+    /// Where the cursor sits in the drawn order, so the renderer can window
+    /// around it and `step` can move it.
+    pub fn project_index(&self) -> usize {
+        let rows = self.catalog();
+        self.project_selected
+            .as_ref()
+            .and_then(|id| rows.iter().position(|p| &p.id == id))
+            .unwrap_or(0)
+    }
+
+    /// Move the catalog's cursor, stopping at both ends.
+    ///
+    /// Clamped rather than wrapping, unlike the rail's `Ctrl-N`: this is a
+    /// cursor being driven by the arrows, and arrows that wrap read as the list
+    /// having jumped.
+    pub fn step_project(&mut self, delta: isize) {
+        let ids: Vec<String> = self.catalog().iter().map(|p| p.id.clone()).collect();
+        if ids.is_empty() {
+            self.project_selected = None;
+            return;
+        }
+        let at = self.project_index() as isize;
+        let landed = (at + delta).clamp(0, ids.len() as isize - 1) as usize;
+        self.project_selected = Some(ids[landed].clone());
+    }
+
+    /// Give the catalog the keyboard, opening whatever it takes to make it
+    /// visible first.
+    ///
+    /// Opening rather than toggling the boxes around it, for the reason the
+    /// projects key already had: a key whose promise is *show me the projects*
+    /// must mean that from either state, and a shut panel is the state every
+    /// user starts in.
+    pub fn focus_catalog(&mut self) {
+        self.panel = true;
+        self.projects_open = true;
+        self.panel_focused = true;
+        // Two things cannot hold the bare keys at once. The router checks the
+        // rail first, so a rail left focused would swallow every key meant for
+        // the catalog and the catalog would look inert.
+        self.rail.focused = false;
+        if self.project_selected.is_none() {
+            self.project_selected = self.catalog().first().map(|p| p.id.clone());
+        }
+    }
+
+    /// Hand the keyboard back and put the catalog away — what the same key
+    /// pressed twice means, and what `Esc` means once.
+    ///
+    /// The panel itself is left alone. It holds the sessions and the context bar
+    /// as well, and a key that reached in to collapse one box has no business
+    /// taking the other two off screen; `Shift-Tab` is the one that owns the
+    /// whole panel.
+    pub fn close_catalog(&mut self) {
+        self.panel_focused = false;
+        self.projects_open = false;
+    }
+
+    /// Keep the catalog's cursor on a project that still exists.
+    ///
+    /// Untracking one from the fleet, or another session archiving it, leaves
+    /// the cursor naming a row nothing draws — and then `⏎` opens nothing and
+    /// says nothing, which reads as a broken key.
+    pub fn reconcile_catalog(&mut self) {
+        let Some(id) = self.project_selected.clone() else {
+            return;
+        };
+        if self.projects.iter().any(|p| p.id == id) {
+            return;
+        }
+        self.project_selected = self.catalog().first().map(|p| p.id.clone());
     }
 
     // ---- the decision rail ----------------------------------------------

@@ -670,7 +670,7 @@ pub const HELP: &[(&str, &str)] = &[
     ),
     (
         "/root [add|rm]",
-        "the directories this session works in (Ctrl-P picks one)",
+        "the directories this session works in (Ctrl-G d picks one)",
     ),
     (
         "/project [add|untrack]",

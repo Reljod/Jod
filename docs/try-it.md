@@ -136,7 +136,7 @@ jod root ls
 ```
 
 In the TUI the same thing is `/add-dir`, which opens the fuzzy directory picker
-(`Ctrl-P` is the chord for it). The picker walks the directory `jod` was launched
+(`Ctrl-G d` is the key for it). The picker walks the directory `jod` was launched
 in — so to reach a tree outside it, name where to start:
 
 ```
@@ -247,7 +247,9 @@ rate-limited so ten messages become one turn carrying ten rather than ten turns.
 |---|---|
 | `Esc` | interrupt the turn, keep the session — the conversation survives |
 | `@` | mention a file across every root |
-| `Ctrl-P` | pick a directory to add as a root (`/add-dir`, or `/add-dir <where>` to browse elsewhere) |
+| `Ctrl-G d` | pick a directory to add as a root (`/add-dir`, or `/add-dir <where>` to browse elsewhere) |
+| `Ctrl-P` | the projects catalog in the side panel — press again to put it away |
+| `Ctrl-N` | the decision rail — press again to put it away |
 | `Ctrl-G /` | search every transcript, including compacted turns |
 | `Ctrl-Y` | copy the last reply, or its code block without the fences |
 | `Ctrl-G` | which-key |
