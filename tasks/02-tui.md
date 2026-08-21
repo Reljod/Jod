@@ -259,6 +259,35 @@ project with the first still running and asserts the number of held leases.
 | 14 | CJK near the wrap column | wraps losslessly | lost three characters | **fail — T1** |
 | 15 | A pane of nothing but emoji | wraps losslessly | 16 of 20 shown, rest wrapped out of view | inconclusive |
 
+## T4. `←` out of a manager moves the screen but keeps the composer
+Status: **open — needs a decision from Reljod** · Severity: low · Owner: —
+
+`←` on an empty line in a manager calls `leave_manager`
+(`cli/src/tui/mod.rs`), whose own comment says "a manager is something to
+leave … the way back has to be the one key that already means *out*". What it
+does is reveal the manager's row on the fleet and go to the fleet screen. It
+does not unbind the conversation — so pressing `Esc` from there lands you back
+in the manager's chat, and the next thing you type goes to that project.
+
+Both readings are defensible, which is why this is a decision:
+
+- **`←` means "show me where I am in the fleet".** Then the behaviour is right
+  and the word *leave* in the comment is what is wrong.
+- **`←` means "stop being in this manager".** Then the arm should return
+  `Action::EnterMain` as well, so backing out of the fleet lands in main —
+  which is what the same comment calls "home".
+
+**This was invisible until this pass and is now merely wrong.** The composer's
+box is titled `you → beta · manager`, so the state is on screen either way; the
+trap of typing a main instruction into a project without knowing is gone. That
+is why it is filed rather than fixed — the danger is handled, and the remaining
+question is what the key should mean.
+
+Check: press `←` then `Esc` in a manager and assert what `app.conversation`
+holds, whichever answer is chosen.
+
+---
+
 ## Scenarios run — second pass
 
 Four projects, real harnesses, a throwaway `JOD_HOME`, then the whole thing
