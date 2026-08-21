@@ -382,6 +382,19 @@ pub async fn hand_to_manager(
 /// memory — which is why the brief tells it to look at `list_agents` first
 /// rather than assuming it remembers what is running.
 ///
+/// **Reuse is decided on availability, not on subject.** The brief used to say
+/// to continue "an agent already doing this", which reads as a topical test: a
+/// manager applying it opens a cold session the moment an instruction changes
+/// subject, even with an engineer of this project sitting idle beside it. That
+/// is the wrong trade. The idle engineer already holds the repository — its
+/// layout, its conventions, what it shipped an hour ago — and a fresh session
+/// has to rebuild all of it from the checkout, which is both slow and a source
+/// of decisions the previous session had already made better. So the rule is
+/// the plain one: free engineer takes the instruction, whatever it is about,
+/// and a second session is for when everybody is busy, stalled, or absent.
+/// `list_agents` answers that question directly in `idle` and `reuse` — see
+/// [`crate::mcp`] — so the manager is reading a field rather than judging.
+///
 /// Takes the project's name because a manager that has to work out which
 /// repository it owns can get that wrong, and everything it does afterwards
 /// inherits the mistake.
@@ -398,23 +411,44 @@ pub fn manager_preamble(project: &str) -> String {
          **Call `list_agents` with `project: \"{project}\"` first, every \
          time.** That is the decision that matters most, and you cannot \
          remember the answer between instructions — you are resumed for each \
-         one. What you are looking for:\n\
-         - An agent already doing this. `continue_agent` beats starting a cold \
-           one that has to rebuild the context.\n\
-         - An agent that is **stalled**. `stalled_for_ms` says so, and a \
-           stalled agent *cannot be continued* — it is still `running` because \
-           it is, but it has produced nothing for that long and it will not \
-           answer you. Say so out loud, start a fresh session beside it, and \
-           leave the stalled one alone. Stopping it is Reljod's call, not \
-           yours. `busy` is the field that means working-and-not-stuck.\n\
-         - Nothing relevant. Then open something new.\n\n\
+         one.\n\n\
+         **Then hand the instruction to an engineer who is free, whatever it \
+         is about.** The call tells you who that is: every agent carries \
+         `free`, the page lists their run ids in `idle` newest first, and \
+         `reuse` says in one sentence what to do. Do not work it out from \
+         `status` yourself — `busy: false` is *not* the same as free, because a \
+         stalled agent is not busy either. An engineer \
+         of this project who is not busy is your answer for *any* instruction \
+         about {project}, not only for one that carries on what it was last \
+         doing. It already holds the repository in its head: it knows the \
+         layout, the conventions, what it just shipped and why. A cold session \
+         has to buy all of that again, and it buys it wrong at least some of \
+         the time. Continue the newest free one with `continue_agent`.\n\n\
+         Do not open a second session beside a free one because the new \
+         instruction looks like a different subject. Different subject, same \
+         repository, same engineer.\n\n\
+         The three cases where you open something new instead:\n\
+         - **Every engineer is busy.** `busy: true` means working and not \
+           stuck, and interrupting it would cost you the turn it is in the \
+           middle of. Open a second session beside it.\n\
+         - **The only free-looking one is stalled.** `stalled_for_ms` says so, \
+           and a stalled agent *cannot be continued* — it is still `running` \
+           because it is, but it has produced nothing for that long and it will \
+           not answer you. Say so out loud, start a fresh session beside it, \
+           and leave the stalled one alone. Stopping it is Reljod's call, not \
+           yours.\n\
+         - **There is no engineer at all.** First instruction about this \
+           repository, or the last one was killed. Then `open_work`.\n\n\
+         Two work streams that genuinely have to run at the same time are a \
+         reason to open a second session. Two instructions arriving one after \
+         the other are not.\n\n\
          Your tools:\n\
          - `list_agents`, scoped to {project}, before anything else.\n\
-         - `continue_agent` when the instruction carries on what a run is \
-           already doing.\n\
-         - `open_work` when the intent is new and touches the repository. This \
-           is the usual answer for anything about code, and unlike main you \
-           may call it.\n\
+         - `continue_agent` for anything a free engineer can take, which is \
+           most things. Read `reuse` in the `list_agents` answer — it names the \
+           run to continue when there is one.\n\
+         - `open_work` when nobody is free, or nobody exists. Unlike main you \
+           may call it, but it is the second answer, not the first.\n\
          - `delegate` for a one-shot that needs no board — a lookup, a check, \
            a script.\n\
          - `stop_agent` for something you started that should not be running.\n\

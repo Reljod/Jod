@@ -169,12 +169,19 @@ pub fn catalogue() -> Vec<Tool> {
                  is above zero, ask again with a bigger `limit` to see the rest. Check this \
                  before delegating: continuing a warm agent that already has the context beats \
                  starting a cold one that has to rediscover it.\n\n\
+                 **`reuse` is the answer to that in one sentence, and `idle` is the list of run \
+                 ids behind it, newest first.** Read those rather than working availability out \
+                 of `status`. Prefer a free agent for a new instruction even when the subject \
+                 has changed: it already holds the checkout, and what it knows about the \
+                 repository is worth more than the instruction matching what it was last \
+                 doing.\n\n\
                  One exception, and it is the important one: an agent with `stalled_for_ms` \
                  set **cannot be continued**. It is wedged — still `running`, because it is, \
                  but it has produced nothing for that long and it will not answer you. Say so, \
                  start a fresh session beside it, and leave the stalled one for Reljod to stop. \
-                 `busy` is the field that means what `status: running` used to: working, and \
-                 not stuck.\n\n\
+                 This is why `busy: false` is not the test for availability and `free` is: a \
+                 stalled agent is not busy either. `busy` means what `status: running` used to \
+                 — working, and not stuck.\n\n\
                  Each agent also says which `project` it is on and which `work` it belongs to. \
                  Group by those rather than by `cwd` — a session holding a worktree lease has \
                  the worktree as its cwd, not the checkout, so two agents on one repository \
@@ -1144,6 +1151,14 @@ impl Server {
             }
         };
 
+        // Idle, in the only sense `continue_agent` will accept. A run's process
+        // exits when its turn ends, so an engineer sitting there with nothing to
+        // do is a `completed` row, not a `running` one — and it needs a session
+        // id, because that is the thing being resumed.
+        let is_free = |a: &crate::service::AgentSummary| {
+            a.status == AgentStatus::Completed && a.session_id.is_some()
+        };
+
         let matching = agents.iter().filter(keep).count();
         let views: Vec<AgentView> = agents
             .iter()
@@ -1170,9 +1185,51 @@ impl Server {
                     work: context.and_then(|c| c.work.as_deref()),
                     stalled_for_ms,
                     busy: a.status == AgentStatus::Running && stalled_for_ms.is_none(),
+                    free: is_free(a),
                 }
             })
             .collect();
+
+        // Computed over everything the filter matched rather than over the page,
+        // because a free engineer that fell off the end of `limit` is still the
+        // right answer and its run id is all `continue_agent` needs.
+        let idle: Vec<&str> = agents
+            .iter()
+            .filter(keep)
+            .filter(|a| is_free(a))
+            .map(|a| a.id.as_str())
+            .collect();
+        // Stalled counted separately from busy, because they lead to the same
+        // tool call for opposite reasons and saying "busy" about a wedged run
+        // would be telling the caller to wait for something that is not coming.
+        let stalled_here = agents
+            .iter()
+            .filter(keep)
+            .filter(|a| a.status == AgentStatus::Running && stalled.contains_key(&a.id))
+            .count();
+        let busy_here = agents
+            .iter()
+            .filter(keep)
+            .filter(|a| a.status == AgentStatus::Running && !stalled.contains_key(&a.id))
+            .count();
+        let reuse = match (idle.first(), busy_here, stalled_here) {
+            (Some(run_id), _, _) => format!(
+                "`{run_id}` is free. Continue it with `continue_agent` — it already holds this \
+                 checkout, so it starts where a new session would have to start over. Prefer it \
+                 for any instruction here, including one on a different subject."
+            ),
+            (None, 0, 0) => "nothing to reuse — no agent here has a session to resume. Open a new \
+                             one."
+                .to_string(),
+            (None, busy, 0) => format!(
+                "nothing free — {busy} still working. Opening a second session beside them is the \
+                 right call only if this genuinely has to run at the same time."
+            ),
+            (None, busy, wedged) => format!(
+                "nothing free — {busy} working and {wedged} stalled. A stalled agent cannot be \
+                 continued; leave it alone and open a new session beside it."
+            ),
+        };
 
         // How many there were to choose from. The database is the authority on
         // that — this process only ever reads back the newest few hundred runs,
@@ -1191,6 +1248,8 @@ impl Server {
             agents: views,
             total,
             hidden,
+            idle,
+            reuse,
             // Spelled out as well as counted. The caller is a model deciding
             // whether it has seen every agent it might reuse, and a bare number
             // does not say what to do about it.
@@ -3414,6 +3473,23 @@ struct AgentPage<'a> {
     total: usize,
     /// How many `limit` left out. Zero when the page is everything.
     hidden: usize,
+    /// Run ids that can take a new instruction right now — see
+    /// [`AgentView::free`]. Newest first, so the head is the one to prefer.
+    ///
+    /// Here because a manager's whole first decision is this list, and it was
+    /// previously left to be derived from `status`, `stalled_for_ms` and
+    /// `session_id` together. Two of those three are traps: `busy` is false for
+    /// a *stalled* agent as well as for an idle one, and an agent with no
+    /// session id cannot be continued however idle it looks. A caller
+    /// recomputing that every time is a caller that will eventually get it
+    /// wrong and open a cold session beside a perfectly good engineer.
+    idle: Vec<&'a str>,
+    /// The plain answer to "who should this instruction go to".
+    ///
+    /// A sentence rather than a field, because the answer is a choice between
+    /// two different tool calls and the reason for the choice is the half that
+    /// keeps being lost.
+    reuse: String,
     /// What to do about `hidden`, when there is anything to do. Absent
     /// otherwise, so its presence alone is the signal.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -3459,6 +3535,16 @@ struct AgentView<'a> {
     /// came apart the moment a stall could be marked, and every reader
     /// recomputing the difference is a reader that can get it wrong.
     busy: bool,
+    /// Able to take a new instruction this moment.
+    ///
+    /// Not the negation of `busy`. A stalled agent is not busy and is not free
+    /// either — `continue_agent` will reach a session that has stopped
+    /// answering — and neither is one that never reported a session id, which
+    /// `continue_agent` refuses outright. So this is the narrow thing it says
+    /// it is: a run that finished its last turn cleanly and still has a session
+    /// to resume. That is what an idle engineer looks like in this system,
+    /// because a run's process exits when its turn ends.
+    free: bool,
 }
 
 /// The spelling `parse_permission` reads back. Delegated rather than repeated:
@@ -5622,6 +5708,210 @@ mod tests {
                 })
                 .unwrap();
             pgid
+        }
+
+        /// An engineer that finished its last turn — which is what an idle one
+        /// looks like here, because a run's process exits when its turn ends.
+        ///
+        /// `session` is a parameter rather than always present because the two
+        /// cases are genuinely different: a completed run with a session id can
+        /// be continued, and one without cannot, however free it looks.
+        fn finished_run(store: &Store, run_id: &str, name: &str, session: Option<&str>) {
+            let summary = crate::service::AgentSummary {
+                id: run_id.into(),
+                name: name.into(),
+                harness: HarnessKind::ClaudeCode,
+                harness_label: "claude-code".into(),
+                status: crate::service::AgentStatus::Completed,
+                cwd: "/tmp".into(),
+                model: None,
+                permission: PermissionPolicy::AcceptEdits,
+                pid: None,
+                pgid: None,
+                process_alive: false,
+                watch_command: crate::service::watch_command(run_id),
+                created_at_ms: 0,
+                session_id: session.map(str::to_string),
+                usage: Default::default(),
+                event_count: 0,
+                last_message: None,
+            };
+            store
+                .save_run(&crate::store::StoredRun {
+                    id: run_id.into(),
+                    name: name.into(),
+                    harness: "claude-code".into(),
+                    status: "completed".into(),
+                    cwd: "/tmp".into(),
+                    session_id: session.map(str::to_string),
+                    pid: None,
+                    pgid: None,
+                    created_at_ms: 0,
+                    summary: serde_json::to_value(&summary).unwrap(),
+                })
+                .unwrap();
+        }
+
+        /// The whole of a manager's first decision, answered by the tool rather
+        /// than derived by the model.
+        ///
+        /// A manager is resumed for each instruction and has to re-establish
+        /// who is around every time, so the cheaper this is to read the more
+        /// reliably it happens. Reljod's rule is availability, not subject: an
+        /// engineer of this project that is free takes the next instruction
+        /// whatever it is about, because it already holds the checkout.
+        #[tokio::test]
+        async fn an_idle_engineer_is_named_as_the_one_to_reuse() {
+            let store = Arc::new(Store::in_memory().unwrap());
+            let c = store
+                .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
+                .unwrap()
+                .id;
+            store.append_prompt(&c, "run-1", "build the game").unwrap();
+            finished_run(&store, "run-1", "engineer", Some("sess-1"));
+
+            let server = Server::new(Jod::with_store(store)).with_access(ToolAccess::ReadOnly);
+            let page: Value =
+                serde_json::from_str(&said(&call(&server, "list_agents", json!({})).await))
+                    .unwrap();
+
+            assert_eq!(page["agents"][0]["free"], json!(true), "{page}");
+            assert_eq!(page["idle"], json!(["run-1"]), "{page}");
+            let reuse = page["reuse"].as_str().unwrap();
+            assert!(reuse.contains("run-1"), "{page}");
+            assert!(
+                reuse.contains("continue_agent"),
+                "the answer has to name the tool call, not just the run: {page}"
+            );
+        }
+
+        /// The trap this field exists to close. `busy` is false for a stalled
+        /// agent *and* for an idle one, so a manager deriving availability from
+        /// it would try to continue a session that has stopped answering.
+        #[tokio::test]
+        async fn a_stalled_agent_is_not_free_however_unbusy_it_looks() {
+            let store = Arc::new(Store::in_memory().unwrap());
+            let c = store
+                .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
+                .unwrap()
+                .id;
+            store.append_prompt(&c, "run-1", "build the game").unwrap();
+            let pgid = running_run(&store, "run-1", "engineer");
+            let now = chrono::Utc::now().timestamp_millis();
+            store
+                .watch_run(&crate::heartbeat::Heartbeat::starting(
+                    "run-1",
+                    crate::heartbeat::Watching::Run,
+                    now,
+                ))
+                .unwrap();
+            store
+                .record_beat(&crate::heartbeat::Beat {
+                    run_id: "run-1".into(),
+                    last_seq: -1,
+                    last_progress_ms: now - 60_000,
+                    last_beat_ms: now,
+                    stalled_since_ms: Some(now - 60_000),
+                })
+                .unwrap();
+
+            let server = Server::new(Jod::with_store(store)).with_access(ToolAccess::ReadOnly);
+            let page: Value =
+                serde_json::from_str(&said(&call(&server, "list_agents", json!({})).await))
+                    .unwrap();
+            kill_group(pgid);
+
+            assert_eq!(page["agents"][0]["busy"], json!(false), "{page}");
+            assert_eq!(
+                page["agents"][0]["free"],
+                json!(false),
+                "not busy is not the same as free: {page}"
+            );
+            assert_eq!(page["idle"], json!([]), "{page}");
+            assert!(
+                page["reuse"].as_str().unwrap().contains("stalled"),
+                "a wedged agent has to be named as wedged, not counted as busy: {page}"
+            );
+        }
+
+        /// `continue_agent` refuses a run that never reported a session id, so
+        /// offering one for reuse would be routing an instruction into a
+        /// refusal.
+        #[tokio::test]
+        async fn an_agent_with_no_session_to_resume_is_not_offered_for_reuse() {
+            let store = Arc::new(Store::in_memory().unwrap());
+            let c = store
+                .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
+                .unwrap()
+                .id;
+            store.append_prompt(&c, "run-1", "build the game").unwrap();
+            finished_run(&store, "run-1", "engineer", None);
+
+            let server = Server::new(Jod::with_store(store)).with_access(ToolAccess::ReadOnly);
+            let page: Value =
+                serde_json::from_str(&said(&call(&server, "list_agents", json!({})).await))
+                    .unwrap();
+
+            assert_eq!(page["agents"][0]["free"], json!(false), "{page}");
+            assert_eq!(page["idle"], json!([]), "{page}");
+        }
+
+        /// And the case that genuinely does call for a second session.
+        #[tokio::test]
+        async fn a_project_whose_only_engineer_is_working_says_nothing_is_free() {
+            let store = Arc::new(Store::in_memory().unwrap());
+            let c = store
+                .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
+                .unwrap()
+                .id;
+            store.append_prompt(&c, "run-1", "build the game").unwrap();
+            let pgid = running_run(&store, "run-1", "engineer");
+
+            let server = Server::new(Jod::with_store(store)).with_access(ToolAccess::ReadOnly);
+            let page: Value =
+                serde_json::from_str(&said(&call(&server, "list_agents", json!({})).await))
+                    .unwrap();
+            kill_group(pgid);
+
+            assert_eq!(page["agents"][0]["busy"], json!(true), "{page}");
+            assert_eq!(page["agents"][0]["free"], json!(false), "{page}");
+            assert_eq!(page["idle"], json!([]), "{page}");
+            let reuse = page["reuse"].as_str().unwrap();
+            assert!(reuse.contains("nothing free"), "{page}");
+            assert!(
+                !reuse.contains("stalled"),
+                "a healthy busy agent must not be reported as wedged: {page}"
+            );
+        }
+
+        /// Reuse is decided on availability, not on subject. The brief used to
+        /// say to continue "an agent already doing this", which a manager reads
+        /// as a topical test — and so opens a cold session the moment an
+        /// instruction changes subject, with an idle engineer sitting beside it
+        /// holding the whole repository in its head.
+        #[test]
+        fn a_managers_brief_sends_a_new_instruction_to_whoever_is_free() {
+            let said = crate::orchestrator::manager_preamble("tetris");
+
+            assert!(
+                said.contains("free"),
+                "the brief has to name availability as the test: {said}"
+            );
+            assert!(
+                said.contains("`idle`") && said.contains("`reuse`"),
+                "and point at the fields that answer it: {said}"
+            );
+            assert!(
+                !said.contains("An agent already doing this"),
+                "the topical rule is the thing being replaced: {said}"
+            );
+            let continues = said.find("`continue_agent`").expect("continue_agent named");
+            let opens = said.find("`open_work`").expect("open_work named");
+            assert!(
+                continues < opens,
+                "reuse has to be offered before opening something new, because the \
+                 first tool a model reads is the one it reaches for: {said}"
+            );
         }
 
         /// Check 12. A name that matches nothing refuses and lists what is

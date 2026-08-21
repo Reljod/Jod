@@ -391,14 +391,18 @@ impl Store {
             // costs a model call per row is a tree nobody can afford to leave
             // open.
             let mut stmt = conn.prepare(
-                "SELECT m.conversation_id, m.text, m.tool_name FROM messages m
+                "SELECT m.conversation_id, m.text, m.tool_name, m.role FROM messages m
                    JOIN (SELECT conversation_id, MAX(id) AS id FROM messages
                           GROUP BY conversation_id) last ON last.id = m.id",
             )?;
             let rows = stmt.query_map([], |r| {
                 let text: String = r.get(1)?;
                 let tool: Option<String> = r.get(2)?;
-                Ok((r.get::<_, String>(0)?, summarise(&text, tool.as_deref())))
+                let role: String = r.get(3)?;
+                Ok((
+                    r.get::<_, String>(0)?,
+                    summarise(&role, &text, tool.as_deref()),
+                ))
             })?;
             for row in rows {
                 let (id, summary) = row?;
@@ -449,7 +453,7 @@ impl Store {
             // summary would give every one of them the same line.
             let mut stmt = conn.prepare(
                 "SELECT m.conversation_id, r.id, r.name, r.status,
-                        last.text, last.tool_name
+                        last.text, last.tool_name, last.role
                    FROM runs r
                    JOIN (SELECT DISTINCT conversation_id, run_id FROM messages
                           WHERE run_id IS NOT NULL) m ON m.run_id = r.id
@@ -462,11 +466,12 @@ impl Store {
             let rows = stmt.query_map([], |r| {
                 let text: String = r.get(4)?;
                 let tool: Option<String> = r.get(5)?;
+                let role: String = r.get(6)?;
                 Ok(RawRun {
                     conversation_id: r.get(0)?,
                     id: r.get(1)?,
                     label: r.get(2)?,
-                    summary: summarise(&text, tool.as_deref()),
+                    summary: summarise(&role, &text, tool.as_deref()),
                     status: r.get(3)?,
                 })
             })?;
@@ -612,14 +617,29 @@ impl Store {
 
 /// The one line a node shows: what was last said, or which tool was last
 /// called.
-fn summarise(text: &str, tool: Option<&str>) -> String {
+///
+/// `role` is here for one case that used to be indistinguishable from a dead
+/// row. When the newest message in a scope is the *instruction* — role `user` —
+/// nothing has answered it yet, and printing it plainly makes the row read as
+/// an agent sitting there ignoring what it was handed. That is exactly what a
+/// resuming session looks like for its first couple of minutes: `claude
+/// --resume` on a large transcript can take minutes to load before it emits a
+/// token, and for the whole of that window the run's newest message is the
+/// prompt. Marking it `starting…` says the true thing — handed this, has not
+/// spoken yet — and keeps the instruction visible so the row still says what
+/// the agent is about to do.
+fn summarise(role: &str, text: &str, tool: Option<&str>) -> String {
     if let Some(tool) = tool {
         if !tool.is_empty() {
             return format!("{tool}…");
         }
     }
     let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    flat.chars().take(80).collect()
+    let flat: String = flat.chars().take(80).collect();
+    match role {
+        "user" => format!("starting… {flat}"),
+        _ => flat,
+    }
 }
 
 #[cfg(test)]
@@ -881,6 +901,50 @@ mod tests {
         let nodes = s.forest().unwrap();
         let run = nodes.iter().find(|n| n.kind == NodeKind::Run).unwrap();
         assert_eq!(run.summary, "Bash…");
+    }
+
+    /// A run that has been handed an instruction and has not answered yet says
+    /// so, instead of echoing the instruction back as though it were output.
+    ///
+    /// This is the state a resumed session sits in for its first minutes:
+    /// `claude --resume` on a large transcript loads the whole thing before it
+    /// emits a token, and for the whole of that window the newest message under
+    /// the run is the prompt. Rendered plainly, the row is indistinguishable
+    /// from an agent ignoring what it was given, which is how a working engineer
+    /// gets read as dead and restarted.
+    #[test]
+    fn a_run_that_has_not_answered_its_instruction_yet_says_it_is_starting() {
+        let s = store();
+        let work = s.create_work("port the parser").unwrap();
+        let lead = session(&s, &work.id, None, "lead");
+        s.save_run(&StoredRun {
+            id: "run-1".into(),
+            name: "run run-1".into(),
+            harness: "claude-code".into(),
+            status: "running".into(),
+            cwd: "/tmp".into(),
+            session_id: Some("sess-1".into()),
+            pid: None,
+            pgid: None,
+            created_at_ms: 1,
+            summary: serde_json::json!({}),
+        })
+        .unwrap();
+        s.append_prompt(&lead, "run-1", "add the opponent cars").unwrap();
+
+        let nodes = s.forest().unwrap();
+        let run = nodes.iter().find(|n| n.kind == NodeKind::Run).unwrap();
+        assert_eq!(run.summary, "starting… add the opponent cars");
+
+        // And it stops saying so the moment it speaks.
+        s.append_message(
+            &lead,
+            NewMessage::new(Role::Assistant, "right, one car is not a race").from_run("run-1"),
+        )
+        .unwrap();
+        let nodes = s.forest().unwrap();
+        let run = nodes.iter().find(|n| n.kind == NodeKind::Run).unwrap();
+        assert_eq!(run.summary, "right, one car is not a race");
     }
 
     #[test]
