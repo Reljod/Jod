@@ -77,14 +77,7 @@ export function TrajectoryView({ store, transport, selectedId }: Props) {
         <div className="tj-controls">
           <span className="tj-title">TRAJECTORY</span>
         </div>
-        <p className="empty">
-          Select an agent to read its session.
-          <br />
-          <span className="hint">
-            Every turn the model took, in order — the ask, the reasoning, each call and
-            what came back.
-          </span>
-        </p>
+        <p className="empty">Select a session to read it.</p>
       </div>
     );
   }
@@ -102,8 +95,7 @@ export function TrajectoryView({ store, transport, selectedId }: Props) {
         <span className={`tj-stat st-${s.status}`}>{s.status.toUpperCase()}</span>
 
         <span className="tj-metrics">
-          <b>{trajectory.turns}</b> {plural(trajectory.turns, "turn")} ·{" "}
-          <b>{trajectory.toolCalls}</b> {plural(trajectory.toolCalls, "call")} ·{" "}
+          <b>{trajectory.turns}</b>t · <b>{trajectory.toolCalls}</b>c ·{" "}
           <b>{formatDuration(trajectory.durationMs)}</b>
         </span>
 
@@ -122,7 +114,7 @@ export function TrajectoryView({ store, transport, selectedId }: Props) {
 
         <input
           className="tj-search"
-          placeholder="Search this session"
+          placeholder="Search"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           aria-label="Search this session"
@@ -131,27 +123,27 @@ export function TrajectoryView({ store, transport, selectedId }: Props) {
 
       <Band trajectory={trajectory} />
 
-      <div className="tj-notes">
-        {feed.loading && <span className="tj-note">loading history…</span>}
-        {feed.error && <span className="tj-note bad">history unavailable — {feed.error}</span>}
-        {/* Never silently truncated: a transcript that begins at turn six reads
-            as a run that began at turn six. */}
-        {trajectory.dropped > 0 && (
-          <span className="tj-note warn">
-            {trajectory.dropped} earlier event{trajectory.dropped === 1 ? "" : "s"} not retained
-          </span>
-        )}
-        {!feed.prompt && !feed.loading && (
-          <span className="tj-note" title="A run's prompt lives in the transcript store, not the event stream">
-            opening prompt unavailable
-          </span>
-        )}
-        {query !== "" && (
-          <span className="tj-note">
-            {rows.length} of {trajectory.rows.length} rows match
-          </span>
-        )}
-      </div>
+      {/* Only rendered when it has something to say. An always-present strip of
+          status text is four lines of chrome above a transcript that is the
+          reason anybody opened this view. Truncation still gets a line — a
+          transcript that begins at turn six reads as a run that began at turn
+          six, and that must never be silent. */}
+      {(feed.loading || feed.error || trajectory.dropped > 0 || query !== "") && (
+        <div className="tj-notes">
+          {feed.loading && <span className="tj-note">loading…</span>}
+          {feed.error && <span className="tj-note bad">history unavailable — {feed.error}</span>}
+          {trajectory.dropped > 0 && (
+            <span className="tj-note warn">
+              {trajectory.dropped} earlier event{trajectory.dropped === 1 ? "" : "s"} not retained
+            </span>
+          )}
+          {query !== "" && (
+            <span className="tj-note">
+              {rows.length}/{trajectory.rows.length}
+            </span>
+          )}
+        </div>
+      )}
 
       <div className="tj-rows">
         {groups.map((group) => (
@@ -249,8 +241,6 @@ function Row({
     </div>
   );
 }
-
-const plural = (n: number, word: string) => (n === 1 ? word : `${word}s`);
 
 /** Short enough for a dense row, precise enough to compare two calls. */
 export function formatDuration(ms: number): string {

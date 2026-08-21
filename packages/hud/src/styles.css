@@ -48,9 +48,17 @@ button { cursor: pointer; background: none; border: none; }
 
 /* ── shell ──────────────────────────────────────────────────────────────── */
 
+/* The `minmax(0, 1fr)` column is load-bearing, here and on every other
+   rows-only grid in this file. A grid declared with `grid-template-rows` alone
+   gets an implicit `auto` column, and `auto` sizes to its content's *max*
+   width — so the whole shell grew to whatever its widest row wanted and hung
+   the right-hand side of the page off the edge of the window. Naming the track
+   is what makes each row obey the viewport and hand the shrinking down to the
+   panels, which already know how to ellipsise. */
 .app {
   height: 100%;
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   grid-template-rows: 46px minmax(0, 1fr) 208px;
 }
 
@@ -58,6 +66,7 @@ button { cursor: pointer; background: none; border: none; }
   display: grid;
   grid-template-columns: 300px minmax(0, 1fr) 344px;
   min-height: 0;
+  min-width: 0;
   border-top: 1px solid var(--line);
   border-bottom: 1px solid var(--line);
 }
@@ -104,15 +113,22 @@ button { cursor: pointer; background: none; border: none; }
 
 /* ── topbar ─────────────────────────────────────────────────────────────── */
 
+/* `min-width: 0` on the row and on the items that carry text is what keeps this
+   from setting a floor on the page's width. Without it a flex item refuses to
+   shrink below its content, the header stays as wide as its longest form, and
+   the grid columns beside it — including the right-hand rail — get pushed off
+   the edge of the window. The header was clipping the fleet panel. */
 .topbar {
   display: flex;
   align-items: center;
-  gap: 18px;
-  padding: 0 14px;
+  gap: 14px;
+  padding: 0 12px;
+  min-width: 0;
+  overflow: hidden;
   background: linear-gradient(180deg, rgba(8, 20, 34, 0.96), rgba(4, 10, 18, 0.9));
 }
 
-.brand { display: flex; align-items: baseline; gap: 7px; }
+.brand { display: flex; align-items: baseline; gap: 7px; flex: none; }
 /* An SVG has no baseline of its own, so the row's baseline alignment would drop
    the mascot's box on the text baseline and hang the whole head below the
    wordmark. It centres against the row instead. The glow is warm rather than
@@ -221,14 +237,15 @@ button { cursor: pointer; background: none; border: none; }
   display: flex;
   align-items: center;
   gap: 7px;
+  min-width: 0;
   font-size: 10px;
   letter-spacing: 0.12em;
   padding: 3px 9px;
   border: 1px solid var(--line);
   color: var(--text-dim);
 }
-.link .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--steel); }
-.link .via { color: rgba(127, 155, 179, 0.55); margin-left: 4px; }
+.link .dot { width: 6px; height: 6px; border-radius: 50%; flex: none; background: var(--steel); }
+.link .origin { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .link-live { color: var(--mint); border-color: rgba(77, 255, 195, 0.3); }
 .link-live .dot { background: var(--mint); box-shadow: 0 0 8px var(--mint); animation: blip 2.4s infinite; }
 .link-simulated { color: var(--amber); border-color: rgba(255, 181, 71, 0.3); }
@@ -291,13 +308,13 @@ button { cursor: pointer; background: none; border: none; }
 
 @keyframes blip { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }
 
-.tallies { display: flex; gap: 2px; margin-left: auto; }
+.tallies { display: flex; gap: 2px; margin-left: auto; flex: none; }
 .tally {
   display: flex;
   flex-direction: column;
   align-items: center;
-  min-width: 58px;
-  padding: 2px 8px;
+  min-width: 54px;
+  padding: 2px 7px;
   border-left: 1px solid var(--line-soft);
 }
 .tally-value { font-size: 15px; font-weight: 700; line-height: 1.1; }
@@ -308,18 +325,7 @@ button { cursor: pointer; background: none; border: none; }
 .tone-mute .tally-value { color: var(--steel); }
 .tone-warn .tally-value { color: var(--amber); }
 
-.harnesses { display: flex; gap: 5px; }
-.hz {
-  font-size: 9px;
-  padding: 2px 6px;
-  border: 1px solid var(--line-soft);
-  color: var(--text-dim);
-  letter-spacing: 0.08em;
-}
-.hz.on { color: var(--mint); border-color: rgba(77, 255, 195, 0.28); }
-.hz.off { opacity: 0.4; text-decoration: line-through; }
-
-.topbar-actions { display: flex; align-items: center; gap: 8px; }
+.topbar-actions { display: flex; align-items: center; gap: 8px; flex: none; }
 .topbar-actions button {
   font-size: 9px;
   letter-spacing: 0.14em;
@@ -398,7 +404,7 @@ button { cursor: pointer; background: none; border: none; }
 
 /* ── timeline ───────────────────────────────────────────────────────────── */
 
-.viewswitch { display: flex; gap: 1px; }
+.viewswitch { display: flex; gap: 1px; flex: none; }
 .viewswitch button {
   font-size: 9px;
   letter-spacing: 0.16em;
@@ -408,7 +414,7 @@ button { cursor: pointer; background: none; border: none; }
 }
 .viewswitch button.on { color: var(--cyan); border-color: rgba(53, 224, 255, 0.4); background: rgba(53, 224, 255, 0.07); }
 
-.timeline { display: flex; flex-direction: column; min-width: 0; background: #04070d; }
+.timeline { display: flex; flex-direction: column; min-width: 0; min-height: 0; background: #04070d; }
 .tl-controls {
   display: flex;
   align-items: center;
@@ -426,7 +432,7 @@ button { cursor: pointer; background: none; border: none; }
 .tl-controls button.on { color: var(--cyan); border-color: rgba(53, 224, 255, 0.36); }
 .tl-hidden { margin-left: auto; font-size: 9px; color: var(--amber); }
 
-.tl-scroll { flex: 1; overflow: auto; position: relative; }
+.tl-scroll { flex: 1; min-height: 0; overflow: auto; position: relative; }
 
 .tl-grid { stroke: rgba(53, 224, 255, 0.07); stroke-width: 1; }
 .tl-tick { fill: rgba(122, 148, 173, 0.6); font-size: 8px; font-family: var(--mono); }
@@ -463,7 +469,19 @@ button { cursor: pointer; background: none; border: none; }
    a fault, steel is inert. The badge column is fixed-width on purpose — a
    transcript is scanned down its left edge, and a ragged one cannot be. */
 
-.trajectory { display: flex; flex-direction: column; min-width: 0; background: #04070d; }
+/* `min-height: 0` and `overflow: hidden` are what make the transcript scroll.
+   A grid item's default `min-height: auto` refuses to shrink below its content,
+   so without them a long transcript grew the column past the viewport and the
+   `overflow-y: auto` on `.tj-rows` never had a bounded height to scroll inside —
+   the page just got taller with no scrollbar anywhere useful. */
+.trajectory {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: #04070d;
+}
 
 .tj-controls {
   display: flex;
@@ -472,6 +490,8 @@ button { cursor: pointer; background: none; border: none; }
   padding: 6px 10px;
   border-bottom: 1px solid var(--line);
   flex: none;
+  min-width: 0;
+  overflow: hidden;
 }
 .tj-title { font-size: 10px; letter-spacing: 0.18em; color: var(--cyan); }
 .tj-name { font-size: 11px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -495,6 +515,7 @@ button { cursor: pointer; background: none; border: none; }
 
 .tj-search {
   width: 190px;
+  min-width: 70px;
   padding: 3px 8px;
   background: var(--bg-raise);
   border: 1px solid var(--line);
@@ -531,7 +552,7 @@ button { cursor: pointer; background: none; border: none; }
 
 /* the transcript */
 
-.tj-rows { flex: 1; overflow-y: auto; padding-bottom: 20px; }
+.tj-rows { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding-bottom: 20px; }
 
 /* The turn rule is the structure of an agentic loop made visible: everything
    between two rules is one model invocation and the calls it fired. */
@@ -617,33 +638,169 @@ button { cursor: pointer; background: none; border: none; }
   overflow-y: auto;
 }
 
-/* ── roster ─────────────────────────────────────────────────────────────── */
+/* ── sessions ───────────────────────────────────────────────────────────── */
 
-.roster { border-right: 1px solid var(--line); }
-.roster-list { overflow-y: auto; flex: 1; }
+/* A row is three things: alive or not, what it is called, where it works.
+   Everything else is in the detail panel, which is the one for a session you
+   have actually chosen. */
 
-.roster-row {
-  display: block;
-  width: 100%;
-  text-align: left;
-  padding: 8px 11px;
-  border: none;
+.sessions { border-right: 1px solid var(--line); }
+.session-list { overflow-y: auto; flex: 1; min-height: 0; }
+
+.session-row {
+  display: flex;
+  align-items: stretch;
   border-bottom: 1px solid var(--line-soft);
   border-left: 2px solid transparent;
   transition: background 0.14s;
 }
-.roster-row:hover { background: rgba(53, 224, 255, 0.05); }
-.roster-row.sel { background: rgba(53, 224, 255, 0.09); border-left-color: var(--cyan); }
-.roster-row.st-running { border-left-color: rgba(53, 224, 255, 0.5); }
-.roster-row.st-failed { border-left-color: var(--red); }
-.roster-row.st-completed { border-left-color: rgba(77, 255, 195, 0.35); }
-.roster-row.st-killed { border-left-color: var(--steel); }
-.roster-row.sel.st-failed { border-left-color: var(--red); }
+.session-row:hover { background: rgba(53, 224, 255, 0.045); }
+.session-row.sel { background: rgba(53, 224, 255, 0.085); border-left-color: var(--cyan); }
+.session-row.picked { background: rgba(53, 224, 255, 0.07); }
 
-.rr-top { display: flex; align-items: center; gap: 6px; margin-bottom: 3px; }
-.rr-name { font-size: 12px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.rr-top .warn { color: var(--red); font-style: normal; font-size: 11px; }
-.rr-top .sess { color: var(--amber); font-style: normal; font-size: 9px; }
+.session-open {
+  display: block;
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+  padding: 7px 11px 7px 2px;
+}
+
+.sr-top { display: flex; align-items: center; gap: 7px; }
+.sr-name {
+  font-size: 12px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.st-completed .sr-name, .st-killed .sr-name { color: rgba(219, 238, 255, 0.6); }
+.sr-top .warn { color: var(--red); font-style: normal; font-size: 10px; margin-left: auto; }
+
+/* The whole status readout: one dot. Cyan and pulsing means working. */
+.state {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex: none;
+  background: var(--steel);
+}
+.state.st-running { background: var(--cyan); }
+.state.st-running.live { box-shadow: 0 0 7px var(--cyan); animation: blip 2s infinite; }
+.state.st-completed { background: rgba(77, 255, 195, 0.55); }
+.state.st-failed { background: var(--red); }
+.state.st-killed { background: rgba(122, 148, 173, 0.5); }
+
+.sr-bot {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  margin-top: 2px;
+  padding-left: 13px;
+  font-size: 9px;
+  color: rgba(127, 155, 179, 0.75);
+}
+.sr-bot .hxq { margin-left: auto; flex: none; letter-spacing: 0.08em; }
+
+/* ── selecting, in both lists ───────────────────────────────────────────── */
+
+/* Its own target, never the row's: reading a session and arming its deletion
+   are different intents, and one click area for both makes every read one
+   mis-aim from a delete. */
+.pick {
+  flex: none;
+  width: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+.pick i {
+  width: 10px;
+  height: 10px;
+  border: 1px solid var(--steel);
+  border-radius: 2px;
+  display: block;
+}
+.session-row:hover .pick,
+.fleet-row:hover .pick,
+.session-row.picked .pick,
+.fleet-row.picked .pick { opacity: 1; }
+.pick:hover i { border-color: var(--cyan); }
+.picked .pick i { background: var(--cyan); border-color: var(--cyan); }
+
+/* Absent until something is selected — see `SelectionBar`. */
+.selbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  padding: 6px 10px;
+  border-top: 1px solid var(--line);
+  background: rgba(10, 22, 36, 0.94);
+}
+.selcount {
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  color: var(--cyan);
+  margin-right: auto;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.selbar button {
+  font-size: 8.5px;
+  letter-spacing: 0.12em;
+  padding: 3px 8px;
+  border: 1px solid var(--line);
+  color: var(--text-dim);
+  transition: all 0.15s;
+}
+.selbar button:not(:disabled):hover { color: var(--cyan); border-color: var(--cyan); }
+.selbar .danger { color: var(--red); border-color: rgba(255, 77, 94, 0.4); }
+.selbar .danger:not(:disabled):hover { background: rgba(255, 77, 94, 0.12); border-color: var(--red); }
+.selbar button:disabled { opacity: 0.3; cursor: not-allowed; }
+
+/* ── confirming a delete ────────────────────────────────────────────────── */
+
+.confirm {
+  width: min(460px, 92vw);
+  background: var(--bg-raise);
+  border: 1px solid rgba(255, 77, 94, 0.35);
+  box-shadow: 0 0 60px rgba(255, 77, 94, 0.07), 0 24px 70px rgba(0, 0, 0, 0.6);
+  padding: 18px 20px 20px;
+}
+.confirm h2 { margin: 0 0 10px; font-size: 11px; letter-spacing: 0.2em; color: var(--red); }
+.confirm .what { margin: 0 0 8px; font-size: 13px; color: var(--text); }
+.confirm .note { margin: 0 0 8px; font-size: 10.5px; line-height: 1.55; color: var(--text-dim); }
+.confirm .notice {
+  margin: 10px 0 0;
+  padding: 8px 10px;
+  font-size: 10.5px;
+  line-height: 1.6;
+  color: var(--amber);
+  background: rgba(255, 181, 71, 0.07);
+  border-left: 2px solid rgba(255, 181, 71, 0.5);
+}
+.confirm-actions { display: flex; gap: 8px; margin-top: 16px; }
+.confirm-actions button {
+  flex: 1;
+  padding: 9px;
+  font-size: 10px;
+  letter-spacing: 0.16em;
+  border: 1px solid var(--line);
+  color: var(--text-dim);
+  transition: all 0.15s;
+}
+.confirm-actions button:not(:disabled):hover { color: var(--cyan); border-color: var(--cyan); }
+.confirm-actions .danger { color: var(--red); border-color: rgba(255, 77, 94, 0.5); }
+.confirm-actions .danger:not(:disabled):hover {
+  background: rgba(255, 77, 94, 0.12);
+  border-color: var(--red);
+  color: var(--red);
+}
+.confirm-actions button:disabled { opacity: 0.35; cursor: not-allowed; }
 
 .hx {
   font-style: normal;
@@ -658,7 +815,6 @@ button { cursor: pointer; background: none; border: none; }
 .hx-open_code { color: var(--mint); }
 .hx-agy { color: var(--violet); }
 
-.rr-mid { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 3px; }
 .phase { font-size: 9px; letter-spacing: 0.12em; color: var(--text-dim); }
 .ph-acting { color: var(--cyan); }
 .ph-thinking { color: var(--text-dim); }
@@ -671,60 +827,80 @@ button { cursor: pointer; background: none; border: none; }
 .spark rect.past { fill: rgba(122, 148, 173, 0.7); }
 .spark rect.off { fill: rgba(53, 224, 255, 0.13); }
 
-.rr-bot { display: flex; justify-content: space-between; gap: 8px; font-size: 9px; color: var(--text-dim); }
 .cwd { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.nums { flex: none; color: rgba(255, 181, 71, 0.8); }
-.rr-msg {
-  display: block;
-  margin-top: 5px;
-  font-size: 10px;
-  line-height: 1.45;
-  color: rgba(219, 238, 255, 0.62);
-  border-left: 1px solid var(--line);
-  padding-left: 7px;
-}
 
-/* ── dossier ────────────────────────────────────────────────────────────── */
+/* ── fleet and detail ───────────────────────────────────────────────────── */
 
-/* The right-hand column: the fleet over the dossier.
-   The fleet takes the top half and the dossier the rest, both scrolling
-   independently — a forty-run fleet must not push the dossier off-screen, and
+/* The right-hand column: the fleet over the detail panel.
+   The fleet takes the top half and the detail the rest, both scrolling
+   independently — a forty-run fleet must not push the detail off-screen, and
    a long transcript must not push the fleet off it. */
+/* The single column track is not decoration. A grid with only `grid-template-
+   rows` gets an implicit `auto` column, which sizes to its widest content —
+   here, the longest label in the fleet tree. The rail was rendering 488px wide
+   inside a 344px slot and pushing its own right-hand edge past the window, so
+   the fleet and the detail panel were both clipped by roughly a third. Naming
+   the track as `minmax(0, 1fr)` is what makes it obey the column it sits in;
+   `min-width: 0` is what then lets the panels' ellipsis rules take effect. */
 .right-rail {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
   min-height: 0;
+  min-width: 0;
   border-left: 1px solid var(--line);
 }
+.right-rail > .panel { min-width: 0; }
 
-.fleet { overflow-y: auto; border-bottom: 1px solid var(--line); }
-.fleet h2 .badge { font-size: 8px; padding: 2px 6px; border: 1px solid currentColor; letter-spacing: 0.1em; }
-.fleet h2 .badge.st-running { margin-left: auto; }
+/* The panel scrolls its tree, not itself: the selection bar is pinned at the
+   foot, and a bar that scrolls away is a bar you cannot reach when you have
+   selected enough rows to need it. */
+.fleet { border-bottom: 1px solid var(--line); }
 
-.fleet-tree { list-style: none; margin: 0; padding: 4px 0; }
+.fleet-tree { list-style: none; margin: 0; padding: 4px 0; flex: 1; overflow-y: auto; min-height: 0; }
 
 .fleet-row {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding-right: 10px;
   height: 22px;
   font-size: 11px;
   color: var(--text-dim);
-  cursor: pointer;
   border-left: 2px solid transparent;
 }
-.fleet-row:hover { background: var(--bg-hover, rgba(255, 255, 255, 0.04)); }
+.fleet-row:hover { background: rgba(53, 224, 255, 0.045); }
 .fleet-row.selected { border-left-color: var(--cyan); color: var(--text); }
 .fleet-row.live { color: var(--text); }
+.fleet-row.picked { background: rgba(53, 224, 255, 0.07); }
 
 /* A work is the heading of its subtree, so it reads heavier than its rows. */
 .fleet-row.k-work { color: var(--text); letter-spacing: 0.04em; }
 .fleet-row.k-session { font-style: italic; }
 
-.fleet-row .twisty { width: 9px; color: var(--steel); flex: none; font-size: 9px; }
+.fleet-row .twisty {
+  width: 12px;
+  flex: none;
+  color: var(--steel);
+  font-size: 9px;
+  line-height: 1;
+}
+.fleet-row .twisty:disabled { cursor: default; }
+.fleet-row .twisty:not(:disabled):hover { color: var(--cyan); }
 
-.fleet-row .dot { width: 6px; height: 6px; flex: none; background: var(--steel); }
+.fleet-open {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  text-align: left;
+  padding-right: 10px;
+  color: inherit;
+  font-size: inherit;
+}
+.fleet-open:disabled { cursor: default; }
+
+.fleet-row .dot { width: 5px; height: 5px; flex: none; background: var(--steel); }
 .fleet-row .dot.k-work { background: var(--cyan); }
 .fleet-row .dot.k-session { background: var(--mint); border-radius: 50%; }
 .fleet-row.live .dot { background: var(--cyan); box-shadow: 0 0 6px var(--cyan); }
@@ -734,6 +910,25 @@ button { cursor: pointer; background: none; border: none; }
 .fleet-row .badge { margin-left: auto; flex: none; font-size: 8px; letter-spacing: 0.08em; }
 .badge.st-blocked { color: var(--red); }
 .badge.st-cards { color: var(--text-dim); }
+
+/* The count of what is running, beside a panel's title. */
+.panel h2 .live-count {
+  margin-left: auto;
+  font-size: 9px;
+  color: var(--cyan);
+}
+.panel h2 .live-count + .count { margin-left: 0; }
+.panel h2 .live-count::before {
+  content: "";
+  display: inline-block;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--cyan);
+  margin-right: 5px;
+  vertical-align: middle;
+  animation: blip 2s infinite;
+}
 
 .dossier { overflow-y: auto; }
 .dossier h2 .badge {
@@ -748,7 +943,15 @@ button { cursor: pointer; background: none; border: none; }
 .badge.st-failed { color: var(--red); }
 .badge.st-killed { color: var(--steel); }
 
-.dz-name { display: flex; align-items: center; gap: 8px; padding: 11px 12px 4px; font-size: 15px; }
+.dz-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 11px 12px 4px;
+  font-size: 14px;
+  min-width: 0;
+}
+.dz-name span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dz-phase {
   display: flex;
   align-items: center;

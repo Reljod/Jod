@@ -78,6 +78,20 @@ export function isHotContention(link: Link): boolean {
   return link.weight >= 1;
 }
 
+export interface DisplayOptions {
+  /**
+   * Plot only the sessions that are running.
+   *
+   * What the tactical view asks for. The graph is a picture of *now* — heat,
+   * phase, contention over a shared directory — and every one of those is zero
+   * for a finished run, so a fleet with four live agents and three hundred
+   * completed ones drew four moving nodes in a field of three hundred inert
+   * ones. The history is not lost; it is in the sessions list, the fleet tree
+   * and the timeline, which are the surfaces that are about the past.
+   */
+  onlyRunning?: boolean;
+}
+
 /**
  * Which agents actually get drawn, most important first.
  *
@@ -86,18 +100,32 @@ export function isHotContention(link: Link): boolean {
  * that says less than twenty well-placed ones, so the graph takes a budget and
  * the UI states plainly how many it left out — a silent truncation would read
  * as "this is the whole fleet".
+ *
+ * `hidden` counts everything left out, whether by the budget or by
+ * `onlyRunning`. One number, because the caller draws one chip, and because a
+ * filter whose effect is not counted is a filter that looks like a bug.
  */
-export function rankForDisplay(world: World, limit: number): {
+export function rankForDisplay(
+  world: World,
+  limit: number,
+  options: DisplayOptions = {},
+): {
   visible: string[];
   hidden: number;
 } {
   const nodes: AgentNode[] = [];
+  let excluded = 0;
   for (const id of world.order) {
     const n = world.agents.get(id);
-    if (n) nodes.push(n);
+    if (!n) continue;
+    if (options.onlyRunning && n.summary.status !== "running") {
+      excluded += 1;
+      continue;
+    }
+    nodes.push(n);
   }
   if (nodes.length <= limit) {
-    return { visible: nodes.map((n) => n.summary.id), hidden: 0 };
+    return { visible: nodes.map((n) => n.summary.id), hidden: excluded };
   }
 
   const score = (n: AgentNode): number => {
@@ -110,7 +138,7 @@ export function rankForDisplay(world: World, limit: number): {
   const sorted = [...nodes].sort((a, b) => score(b) - score(a));
   return {
     visible: sorted.slice(0, limit).map((n) => n.summary.id),
-    hidden: sorted.length - limit,
+    hidden: sorted.length - limit + excluded,
   };
 }
 

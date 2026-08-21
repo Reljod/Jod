@@ -22,6 +22,46 @@ export type LinkState =
   | { phase: "simulated"; reason: string }
   | { phase: "lost"; reason: string; retryInMs: number };
 
+/** One git worktree a work delete would leave on disk, and how it stands. */
+export interface WorkLease {
+  worktree_path: string;
+  branch: string;
+  dirty: boolean;
+  merged: boolean;
+  missing: boolean;
+}
+
+/** What deleting a work would take, counted before anything is taken. */
+export interface WorkDoomed {
+  work_id: string;
+  title: string;
+  sessions: number;
+  transcripts: number;
+  unanswered_cards: number;
+  mail: number;
+  /** Runs that lose their last transcript. Their rows and costs are kept. */
+  orphaned_runs: number;
+  leases: WorkLease[];
+}
+
+/**
+ * The answer to a work delete, whichever way it went.
+ *
+ * `deleted` is the only thing that says which. A caller must never infer it
+ * from the presence of `doomed`, which is populated either way — on a refusal
+ * it is the confirmation dialog's contents.
+ */
+export interface WorkDeletion {
+  deleted: boolean;
+  /** One sentence, safe to show verbatim. */
+  detail: string;
+  doomed: WorkDoomed;
+  /** Paths left on disk. Never removed: a branch may hold uncommitted work. */
+  worktrees_left?: string[];
+  /** When the armed confirmation expires, on a refusal. */
+  confirm_before_ms?: number;
+}
+
 export interface TransportHandlers {
   /** One normalised agent event. The HUD's entire animation is driven by these. */
   onEnvelope(envelope: AgentEnvelope): void;
@@ -44,6 +84,32 @@ export interface Transport {
   stop(): void;
   spawn(request: SpawnRequest): Promise<AgentSummary | null>;
   kill(agentId: string): Promise<void>;
+  /**
+   * Forget a finished run — its row and its events.
+   *
+   * Deliberately not `kill` with a flag. Killing ends a run and keeps the
+   * record; this removes the record, and the API refuses while the run is still
+   * alive rather than stopping it on the caller's behalf. A UI offering "stop
+   * and delete" makes both calls, in that order, and can say which one failed.
+   */
+  deleteRun(agentId: string): Promise<void>;
+  /**
+   * Remove a session and its thread.
+   *
+   * Refused for the pinned main chat and for any session that belongs to a
+   * work — delete the work instead. Both refusals arrive as a thrown error
+   * carrying the server's own sentence, which already says what to do.
+   */
+  deleteConversation(conversationId: string): Promise<void>;
+  /**
+   * Remove a work and every session in it.
+   *
+   * Two-step when the work holds git worktrees: the first call resolves to a
+   * {@link WorkDeletion} with `deleted: false` and everything the delete would
+   * take, and repeating the call inside the window goes through. That is the
+   * server's protocol, not a convention invented here — see `docs/jod-api.md`.
+   */
+  deleteWork(workId: string): Promise<WorkDeletion>;
   /**
    * Backfill. `sinceSeq` is an *exclusive* cursor, and `seq` starts at 0 —
    * so passing 0 skips the `started` event, which is the one carrying

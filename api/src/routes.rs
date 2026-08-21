@@ -417,6 +417,32 @@ pub async fn kill_agent(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Delete a finished run: its row, its events, and the daemon's memory of it.
+///
+/// A different verb to [`kill_agent`], on a different path, because they are
+/// different asks. `DELETE /v1/agents/{id}` ends a run and keeps the record —
+/// it is how you stop something. This removes the record, and it refuses a run
+/// that is still going rather than quietly stopping it first: a client that
+/// meant "stop and forget" can say so in two calls, and one that hit the wrong
+/// row gets a refusal instead of a dead agent.
+/// → [`jod_core::service::Jod::forget_agent`]
+pub async fn delete_run(
+    State(state): State<AppState>,
+    Extension(identity): Extension<Identity>,
+    Path(id): Path<String>,
+) -> ApiResult<impl IntoResponse> {
+    if let Err(e) = identity.require(Scope::Write) {
+        audit_write(&state, &identity, "delete_run", Some(&id), "refused_scope");
+        return Err(e);
+    }
+    state.jod.forget_agent(&id).await.map_err(|e| {
+        audit_write(&state, &identity, "delete_run", Some(&id), "failed");
+        ApiError::from(e)
+    })?;
+    audit_write(&state, &identity, "delete_run", Some(&id), "ok");
+    Ok(StatusCode::NO_CONTENT)
+}
+
 fn location(agent: &AgentSummary) -> [(axum::http::HeaderName, String); 1] {
     [(
         axum::http::header::LOCATION,

@@ -190,6 +190,49 @@ pub async fn get_messages(
     store.thread(&id).map(Json).map_err(internal)
 }
 
+// ─── deleting one ────────────────────────────────────────────────────────────
+
+/// Remove a conversation and everything hanging off it.
+///
+/// Two refusals come straight from
+/// [`jod_core::store::Store::delete_conversation`] and are not softened here:
+/// the pinned main chat cannot be deleted, and neither can a conversation that
+/// belongs to a work — deleting the *work* is the sanctioned way to remove
+/// those, so that a tree cannot be left pointing at a session that is gone.
+/// Both arrive as `JodError::Invalid` and become a 400 whose detail is core's
+/// own sentence, which already explains what to do instead.
+pub async fn delete_conversation(
+    State(state): State<AppState>,
+    Extension(identity): Extension<Identity>,
+    Path(id): Path<String>,
+) -> ApiResult<impl IntoResponse> {
+    if let Err(e) = identity.require(Scope::Write) {
+        audit_write(
+            &state,
+            &identity,
+            "delete_conversation",
+            Some(&id),
+            "refused_scope",
+        );
+        return Err(e);
+    }
+    let store = require_store(&state)?;
+
+    // Core answers "no conversation `x`" with the same `Invalid` it uses for a
+    // refusal, and the two deserve different statuses: a missing row is a 404,
+    // a refusal is a 400. Looking first is what tells them apart.
+    if store.conversation(&id).map_err(internal)?.is_none() {
+        return Err(ApiError::NotFound(format!("no conversation {id}")));
+    }
+
+    store.delete_conversation(&id).map_err(|e| {
+        audit_write(&state, &identity, "delete_conversation", Some(&id), "failed");
+        ApiError::from(e)
+    })?;
+    audit_write(&state, &identity, "delete_conversation", Some(&id), "ok");
+    Ok(StatusCode::NO_CONTENT)
+}
+
 // ─── the write ───────────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]

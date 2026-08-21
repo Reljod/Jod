@@ -135,6 +135,7 @@ All JSON, all under `/v1`. Errors are
 | `POST` | `/v1/agents` | `write` | Delegate a prompt. Returns the agent. |
 | `GET` | `/v1/agents/{id}` | `read` | One agent. |
 | `DELETE` | `/v1/agents/{id}` | `write` | Stop it, the commands it ran, and every run below it. Main stops alone. |
+| `DELETE` | `/v1/runs/{id}` | `write` | Forget a finished run: its row and its events. Refuses while it is running. |
 | `GET` | `/v1/agents/{id}/events` | `read` | History, `?after_seq=&limit=`. |
 | `GET` | `/v1/agents/{id}/stream` | `read` | SSE: that agent, live, resumable. |
 | `GET` | `/v1/events` | `read` | SSE: every agent, for a dashboard. |
@@ -156,7 +157,9 @@ All JSON, all under `/v1`. Errors are
 | `GET` | `/v1/conversations/main` | `read` | The pinned main chat and its thread. |
 | `POST` | `/v1/conversations/main/messages` | `write` | Give the main chat an instruction. |
 | `GET` | `/v1/conversations/{id}` | `read` | One conversation. |
+| `DELETE` | `/v1/conversations/{id}` | `write` | Remove it and its thread. Refuses main, and any session inside a work. |
 | `GET` | `/v1/conversations/{id}/messages` | `read` | Its thread, oldest first. |
+| `DELETE` | `/v1/works/{id}` | `write` | Remove a work and every session in it. Refuses once when it holds worktrees; repeat to confirm. |
 | `POST` | `/v1/session` | bearer | Trade a token for a browser cookie. |
 | `DELETE` | `/v1/session` | any | Sign this browser out. |
 
@@ -312,6 +315,38 @@ never reported how it ended.
 
 There is no `PATCH`. An agent is not editable; it is spawned, watched, and
 stopped.
+
+### Deleting, which is not killing
+
+Stopping a run and forgetting one are different asks, so they are different
+paths. `DELETE /v1/agents/{id}` ends a run and keeps the record.
+`DELETE /v1/runs/{id}` removes the record — the row and the events — and
+**refuses while the run is alive**. It does not stop it first. The row carries
+the process group id, and it is the last thing that knows how to reach the
+harness, so deleting it would leave an agent running with nothing left that
+could kill it. A caller that means "stop it and forget it" says so in two calls.
+
+Two other things can be removed, and between them they cover every row of the
+fleet tree:
+
+- `DELETE /v1/conversations/{id}` removes a session and its thread. It refuses
+  the pinned main chat, and it refuses any conversation that belongs to a work.
+  Those are core's refusals, not the API's, and neither may be widened into a
+  flag: a session cut out of a tree leaves siblings naming it as a parent and
+  cards carrying its work.
+- `DELETE /v1/works/{id}` is the way to remove those, and it takes the whole
+  work. When the work holds git worktrees the first call answers **409** with
+  everything the delete would take — sessions, transcripts, cards, and each
+  worktree with whether it is dirty or unmerged — and arms a confirmation.
+  Repeating the same request inside the window goes through and answers 200.
+  The body carries `deleted`, so a client never has to infer the outcome from
+  the status alone. There is no `?force=true`: the refusal exists because a
+  worktree can hold uncommitted work, and a flag that skips it is the same
+  delete with the warning switched off.
+
+Worktrees themselves are never removed. Jod's records are cheap to recreate and
+a branch with uncommitted work on it is not, so the paths come back in
+`worktrees_left` rather than going quietly.
 
 ## Security
 

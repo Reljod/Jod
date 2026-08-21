@@ -1815,6 +1815,46 @@ impl Store {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
+    /// Forget one run: its row and the events it emitted.
+    ///
+    /// Returns false when there was no such run, so a caller deleting a list
+    /// can say how many it actually removed rather than assuming.
+    ///
+    /// A **running** run is refused rather than removed. Deleting the row would
+    /// not stop the process group behind it, and the pgid on that row is the
+    /// only remaining way to reach it — the delete would leave a harness alive
+    /// with nothing left that knows how to kill it. Stop it first, then delete.
+    ///
+    /// The transcript is deliberately left alone. A conversation's messages are
+    /// the record of what was said, and they outlive the process that said it;
+    /// removing a run's history here would take the answer along with the
+    /// bookkeeping. `heartbeats` and `resumptions` hang off `runs(id)` with
+    /// `ON DELETE CASCADE` and go on their own. `events` has no foreign key —
+    /// `run_id` is a plain column — so it is taken by hand.
+    pub fn delete_run(&self, run_id: &str) -> Result<bool> {
+        self.write(|tx| {
+            let status: Option<String> = tx
+                .query_row(
+                    "SELECT status FROM runs WHERE id = ?1",
+                    params![run_id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let Some(status) = status else {
+                return Ok(false);
+            };
+            if status == crate::AgentStatus::Running.as_str() {
+                return Err(JodError::Invalid(format!(
+                    "run `{run_id}` is still running: stop it before deleting it, or the \
+                     process group outlives the only row that knows its pgid"
+                )));
+            }
+            tx.execute("DELETE FROM events WHERE run_id = ?1", params![run_id])?;
+            tx.execute("DELETE FROM runs WHERE id = ?1", params![run_id])?;
+            Ok(true)
+        })
+    }
+
     // ---- what a stop reaches -------------------------------------------
     //
     // A fleet is a tree, and stopping a branch of it stops the branch. These
@@ -4992,6 +5032,77 @@ mod tests {
         s.save_run(&run("new", "agy", 2)).unwrap();
         let ids: Vec<String> = s.runs(10).unwrap().into_iter().map(|r| r.id).collect();
         assert_eq!(ids, vec!["new", "old"]);
+    }
+
+    // ---- deleting a run -------------------------------------------------
+
+    #[test]
+    fn deleting_a_finished_run_takes_its_events_with_it() {
+        let s = store();
+        s.save_run(&run("gone", "agy", 1)).unwrap();
+        s.save_run(&run("kept", "agy", 2)).unwrap();
+        s.append_event(&envelope("gone", 0, "mine")).unwrap();
+        s.append_event(&envelope("kept", 0, "theirs")).unwrap();
+        s.set_run_status("gone", "completed").unwrap();
+
+        assert!(s.delete_run("gone").unwrap());
+        assert!(s.run("gone").unwrap().is_none());
+        assert!(
+            s.events("gone").unwrap().is_empty(),
+            "the events outlived the run they belong to"
+        );
+
+        // The neighbour is untouched — a delete is one run, not a sweep.
+        assert!(s.run("kept").unwrap().is_some());
+        assert_eq!(s.events("kept").unwrap().len(), 1);
+    }
+
+    /// Deleting the row does not stop the process group, and the row is where
+    /// its pgid lives. Refusing is what keeps a harness reachable.
+    #[test]
+    fn deleting_a_running_run_is_refused() {
+        let s = store();
+        s.save_run(&run("live", "agy", 1)).unwrap();
+        let err = s.delete_run("live").unwrap_err().to_string();
+        assert!(err.contains("still running"), "unexpected refusal: {err}");
+        assert!(s.run("live").unwrap().is_some());
+    }
+
+    #[test]
+    fn deleting_a_run_that_is_not_there_says_so_rather_than_failing() {
+        let s = store();
+        assert!(!s.delete_run("never-existed").unwrap());
+    }
+
+    /// The transcript is the record of what was said; the run is bookkeeping
+    /// about the process that said it. Deleting one must not take the other.
+    #[test]
+    fn deleting_a_run_leaves_the_transcript_alone() {
+        let s = store();
+        s.save_run(&run("r", "agy", 1)).unwrap();
+        s.set_run_status("r", "completed").unwrap();
+        let convo = s
+            .new_conversation(HarnessKind::Agy, "/tmp", None)
+            .unwrap();
+        let msg = s
+            .append_message(
+                &convo.id,
+                crate::conversation::NewMessage {
+                    role: crate::conversation::Role::User,
+                    text: "do the thing".into(),
+                    tool_name: None,
+                    tool_input: None,
+                    run_id: Some("r".into()),
+                    run_seq: Some(0),
+                },
+            )
+            .unwrap();
+
+        s.delete_run("r").unwrap();
+
+        let kept = s.thread(&convo.id).unwrap();
+        assert_eq!(kept.len(), 1, "the message went with the run");
+        assert_eq!(kept[0].id, msg);
     }
 
     // ---- heartbeats -----------------------------------------------------

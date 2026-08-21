@@ -1285,6 +1285,56 @@ impl Jod {
         Ok(())
     }
 
+    /// Delete one finished run — the row, its events, and this process's
+    /// memory of it.
+    ///
+    /// The counterpart to [`Jod::kill_agent`], and a different verb on purpose:
+    /// killing ends a run and leaves the record, this removes the record. A
+    /// caller clearing out a session list wants both, in that order.
+    ///
+    /// Refuses a run that is still going. [`Store::delete_run`] states why —
+    /// the row carries the pgid, so dropping it strands the process group — and
+    /// the check is repeated here for the run this process holds in memory but
+    /// has not yet written a terminal status for.
+    ///
+    /// The in-memory record is dropped **after** the store call succeeds. The
+    /// other order would forget a run the refusal then kept, leaving a live
+    /// harness invisible to the surface that is supposed to show it.
+    pub async fn forget_agent(&self, id: &str) -> Result<()> {
+        let in_memory_status = self
+            .state
+            .read()
+            .await
+            .agents
+            .get(id)
+            .map(|r| r.summary.status);
+        if in_memory_status == Some(AgentStatus::Running) {
+            return Err(JodError::Invalid(format!(
+                "run `{id}` is still running: stop it before deleting it"
+            )));
+        }
+
+        match &self.store {
+            Some(store) => {
+                // A run this process holds but never stored is not an error to
+                // report: the caller asked for it to be gone, and it is.
+                if !store.delete_run(id)? && in_memory_status.is_none() {
+                    return Err(JodError::UnknownAgent(id.to_string()));
+                }
+            }
+            None if in_memory_status.is_none() => {
+                return Err(JodError::UnknownAgent(id.to_string()));
+            }
+            None => {}
+        }
+
+        let mut guard = self.state.write().await;
+        guard.agents.remove(id);
+        guard.order.retain(|held| held != id);
+        guard.conversations.remove(id);
+        Ok(())
+    }
+
     /// Signal one run's process group and mark the row, with no walk.
     ///
     /// Reads the pgid from memory and falls back to the stored column, for the
