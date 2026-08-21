@@ -1,23 +1,19 @@
 //! A work: one intent, spanning several conversations.
 //!
-//! A work is a **group, not a new kind of session**. Nothing in Jod learns a
-//! second session type; a project-session is an ordinary conversation with a
-//! work attached, and the fleet tree is a self-join over what already exists.
-//! That is the decision this whole module hangs off — it is why works could be
-//! added without touching how a conversation runs.
+//! A work is a **group, not a new kind of session**. A project-session is an
+//! ordinary conversation with a work attached, and the fleet tree is a self-
+//! join over what already exists — which is why works could be added without
+//! touching how a conversation runs.
 //!
 //! ## When a work is over
 //!
-//! *Done* is not a judgement call. A work opens with at least one task — the
-//! instruction itself if nothing finer is known — and is [`State::Closed`]
-//! when every task on its board is complete. The board is the existing `tasks`
-//! table, because claiming there is already one atomic statement and that
-//! statement is the reason two agents racing produce one winner.
+//! *Done* is not a judgement call. A work opens with at least one task and is
+//! [`State::Closed`] when every task on its board is complete. The board is the
+//! existing `tasks` table, whose claim is already one atomic statement.
 //!
-//! [`State::Finishing`] is tasks done but sessions still running. It exists
-//! because "the work is over" and "it is safe to act on the work" are
-//! different questions, and only one of them can be answered by counting
-//! tasks.
+//! [`State::Finishing`] is tasks done but sessions still running: "the work is
+//! over" and "it is safe to act on the work" are different questions, and only
+//! one is answered by counting tasks.
 
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -756,19 +752,17 @@ impl Store {
             // question it was asked must not be told the asker does not exist,
             // and the first session may well be the one asking.
             crate::team::insert_human_member_in(tx, Scope::Work, &id, at)?;
-            // And the orchestrator, on the same terms and for the same reason.
-            // A work is opened by the main chat, and its first session is
-            // usually running an instruction the chat is waiting on the answer
-            // to — so the chat has to be addressable from inside the work.
-            // Measured before it was written: a session told to report back
-            // called `send_message` to `main`, and the message was recorded
-            // undeliverable with "`main` is not a member of this work".
+            // And the orchestrator, on the same terms. A work is opened by the
+            // main chat, and its first session is usually running an
+            // instruction the chat is waiting on — so the chat has to be
+            // addressable from inside the work. Measured: a session told to
+            // report back got "`main` is not a member of this work".
             //
             // Read inside the transaction rather than passed in, because
-            // `create_work` has callers that are nowhere near the pinned chat.
-            // A work opened before anybody has ever typed into `jod main` gets
-            // no row at all: an address that leads to a conversation which does
-            // not exist is worse than an absent one.
+            // `create_work` has callers nowhere near the pinned chat. A work
+            // opened before anybody has typed into `jod main` gets no row: an
+            // address leading to a conversation that does not exist is worse
+            // than an absent one.
             let main: Option<(String, Option<String>)> = tx
                 .query_row(
                     "SELECT id, harness FROM conversations WHERE pinned = 1",
@@ -882,16 +876,13 @@ impl Store {
 
     /// Open the throwaway conversation the titler runs in.
     ///
-    /// Deliberately attached to no work: a conversation that belongs to a work
-    /// cannot be deleted on its own — that is what keeps a session from being
-    /// cut out of a tree still pointing at it — and the titler's whole life is
-    /// to be deleted.
+    /// Attached to no work: a conversation belonging to one cannot be deleted
+    /// on its own, and the titler's whole life is to be deleted.
     ///
-    /// So the work it is for is recorded in its **title** instead. That is not
-    /// decoration: the process that starts a titler may not outlive it, and
-    /// then the only thing that can settle the titler is a later sweep with
-    /// nothing in memory. Everything that sweep needs — which work, which run —
-    /// has to be in a row somebody else wrote. The title is that row.
+    /// So the work it is for is recorded in its **title**. The process that
+    /// starts a titler may not outlive it, and then only a later sweep with
+    /// nothing in memory can settle it — so everything that sweep needs has to
+    /// be in a row somebody else wrote.
     pub fn open_titler(&self, work_id: &str, harness: HarnessKind) -> Result<Conversation> {
         let cwd = crate::paths::jod_home().to_string_lossy().to_string();
         let conversation = self.new_conversation(harness, &cwd, None)?;
@@ -964,15 +955,13 @@ impl Store {
 
     /// What a titler said, read back from the durable event log.
     ///
-    /// **Not from the conversation's messages**, and that is the whole point.
-    /// A run's `messages` are written by whichever Jod process is following it;
-    /// its `events` are written by the supervisor, which is a separate process
-    /// that outlives the launcher by design. A titler settled after its
-    /// launcher has gone has events and may have no messages at all.
+    /// **Not from the conversation's messages.** A run's `messages` are written
+    /// by whichever Jod process is following it; its `events` are written by
+    /// the supervisor, which outlives the launcher by design. A titler settled
+    /// after its launcher has gone has events and may have no messages at all.
     ///
     /// Both the prose and the final answer are taken, because harnesses differ
-    /// about which one carries a short reply, and [`Titling::parse`] is happy
-    /// to be handed more than it needs.
+    /// about which carries a short reply.
     pub fn titler_output(&self, run_id: &str) -> Result<String> {
         let mut said = String::new();
         for envelope in self.events(run_id)? {
@@ -1429,26 +1418,19 @@ impl Store {
 
     /// Delete a work and every session attached to it, in one transaction.
     ///
-    /// The transaction is the point: a half-deleted tree — sessions gone, work
-    /// still listing them; cards orphaned from the conversation that raised
-    /// them — is not a state anything downstream knows how to render, and it is
-    /// reached by exactly the crash this prevents.
+    /// The transaction is the point: a half-deleted tree is not a state
+    /// anything downstream knows how to render, and it is reached by exactly
+    /// the crash this prevents.
     ///
     /// Refuses the first time while the work holds a worktree, per D8. What it
-    /// never does, at any stage and with any confirmation, is remove a worktree
-    /// or a branch: Jod's records are cheap to recreate and a branch with
-    /// uncommitted work on it is not — and the moment of deleting a session's
-    /// history is exactly the moment nobody is left to remember what was on it.
+    /// never does, at any stage, is remove a worktree or a branch: Jod's
+    /// records are cheap to recreate and a branch with uncommitted work is not.
     ///
-    /// The refusal both **returns** a [`Confirmation`] and **arms** one in the
-    /// database, because the two callers are shaped differently. The TUI holds
-    /// the returned value between two keystrokes; `jod work delete` is two
-    /// processes with nothing to hold, so the armed one answers for it. Either
-    /// way it is the same command, typed again, inside
+    /// The refusal both **returns** a [`Confirmation`] and **arms** one,
+    /// because the callers are shaped differently — the TUI holds the value
+    /// between two keystrokes; `jod work delete` is two processes with nothing
+    /// to hold. Either way it is the same command, typed again, inside
     /// [`CONFIRMATION_TTL_MS`], against an unchanged lease set.
-    ///
-    /// Kept in `settings` rather than its own table only because this epic's
-    /// schema is already migrated; it is short-lived and cleared on use.
     pub fn delete_work(&self, work_id: &str, confirmation: Option<&Confirmation>) -> Result<Deletion> {
         let doomed = self.work_deletion_preview(work_id)?;
         let now = now_ms();
@@ -1587,16 +1569,13 @@ impl Store {
 
     /// Runs whose last transcript would go with this work.
     ///
-    /// The doomed conversations are exactly the ones `delete_work` removes:
-    /// this work's, minus a pinned one, which is detached instead and kept. A
-    /// run counts only when every message it ever wrote is in that set, so a
-    /// run that also spoke into the main chat, or into a second work, is not
-    /// reported as a loss — it still has somewhere to be read from.
+    /// The doomed conversations are the ones `delete_work` removes. A run
+    /// counts only when every message it wrote is in that set, so a run that
+    /// also spoke into the main chat still has somewhere to be read from.
     ///
-    /// `IS NOT` rather than `<>` in the second half on purpose: a conversation
-    /// that belongs to no work has a null `work_id`, and `<>` would answer
-    /// null for it, which would drop a surviving transcript out of the check
-    /// and over-report the losses.
+    /// `IS NOT` rather than `<>`: a conversation belonging to no work has a
+    /// null `work_id`, and `<>` would answer null for it, dropping a surviving
+    /// transcript out of the check.
     fn runs_losing_their_last_transcript(&self, work_id: &str) -> Result<usize> {
         let conn = self.conn.lock().expect("store lock poisoned");
         let n: i64 = conn.query_row(

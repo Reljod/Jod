@@ -1,16 +1,14 @@
 //! What the workspaces show, as plain data.
 //!
-//! These are *view models*, not the store's types. The TUI renders a schedule
-//! as a name, a human gloss, two timestamps and a seven-cell outcome strip; the
-//! store holds a cron expression and a table of fires. Keeping the seam here
-//! means the screens can be built and tested against fixtures, and the loaders
-//! below can be filled in without any screen changing shape.
+//! *View models*, not the store's types: the TUI renders a schedule as a name,
+//! a gloss, two timestamps and an outcome strip, while the store holds a cron
+//! expression and a table of fires. The seam lets screens be tested against
+//! fixtures.
 //!
-//! Every loader reads the store and swallows its own errors: a locked database
-//! must cost one stale frame, never the session. Where the store cannot answer
-//! yet the field is left empty and the gap is named in a comment, because a
-//! screen with no rows says so in words rather than showing an empty box — an
-//! honest empty state beats an invented one.
+//! Every loader swallows its own errors: a locked database must cost one stale
+//! frame, never the session. Where the store cannot answer yet the field is
+//! left empty and the gap named, because an honest empty state beats an
+//! invented one.
 
 // A few states below are only reachable from fixtures the screens are tested
 // against, so the compiler cannot see them being built. Removing them to
@@ -489,16 +487,12 @@ pub struct ActivityItem {
 
 /// A cron expression as a phrase a person can check at a glance.
 ///
-/// This belongs in `jod_core::schedule`, beside `next_fire` — the two are
-/// halves of the same question, and the CLI's `jod schedules` table wants it as
-/// much as this screen does. It lives here only because that module is being
-/// changed by another track; move it when that lands.
+/// Belongs in `jod_core::schedule` beside `next_fire`; it lives here only
+/// because that module is being changed by another track.
 ///
 /// Deliberately narrow. It glosses the shapes people actually write and hands
 /// back the raw expression for everything else, because a *wrong* gloss is
-/// worse than none: the expression is what decides when an agent runs
-/// unattended, and a table that quietly mistranslates it is a table you cannot
-/// use to check anything.
+/// worse than none — the expression decides when an agent runs unattended.
 pub fn gloss(cron: &str) -> String {
     describe(cron).unwrap_or_else(|| cron.to_string())
 }
@@ -619,20 +613,14 @@ fn now_ms() -> i64 {
 
 /// Every memory node, most-connected first, with its edges already joined.
 ///
-/// The list, and every node's degree, come from `Store::memory_nodes` — one
-/// query over `entities` counting `relations` in both directions. That is the
-/// authority on what Jod knows: an earlier draft of this walked outwards from
-/// the subjects the TUI could name, which meant anything `/remember` wrote
-/// about a subject nothing else mentioned was invisible — the common case for
-/// a person's own notes, and precisely the wrong thing for a memory browser to
-/// hide.
+/// The list and each degree come from `Store::memory_nodes`, which is the
+/// authority on what Jod knows. An earlier draft walked outwards from subjects
+/// the TUI could name, so anything `/remember` wrote about a subject nothing
+/// else mentioned was invisible — the common case for a person's own notes.
 ///
-/// The graph says what exists and how it is connected; it cannot say *why* any
-/// of it is believed. `entities` has no origin and no source, and its `kind`
-/// column reads `thing` for every row it interns. So the facts are read too,
-/// and they supply the three things the screen shows that structure alone
-/// cannot: what kind of memory a node is, how far it is to be trusted, and
-/// where it came from.
+/// The graph says what exists and how it connects; it cannot say *why* any of
+/// it is believed. So the facts are read too, supplying what structure cannot:
+/// what kind of memory a node is, how far to trust it, and where it came from.
 pub fn memory(jod: &Arc<Jod>) -> Vec<MemoryNode> {
     match jod.store() {
         Some(store) => memory_from(store),
@@ -648,15 +636,13 @@ fn memory_from(store: &Store) -> Vec<MemoryNode> {
         .collect();
 
     // Facts for every listed node, and for the subjects that assert one — a
-    // node that is only ever an object has no facts of its own, and the fact
-    // that named it belongs to whatever points at it.
+    // node that is only ever an object has no facts of its own.
     //
     // One indexed lookup per name, which is the cost worth naming: `facts` is
-    // indexed on `(scope, subject)`, so `facts_about` — which filters on
-    // `subject` alone — cannot use it and scans. At this cap that is fine and
-    // on a large store it will not be. The fix is a bulk `facts_for(&[names])`
-    // beside `memory_nodes`, or `memory_nodes` returning the newest fact's
-    // origin as a column, at which point this loader is two queries total.
+    // indexed on `(scope, subject)`, so `facts_about` filters on `subject`
+    // alone and scans. Fine at this cap, not on a large store. The fix is a
+    // bulk `facts_for(&[names])` or `memory_nodes` returning the newest fact's
+    // origin as a column.
     let mut wanted: Vec<String> = listed.iter().map(|n| n.name.clone()).collect();
     for edge in edges.values().flatten().filter(|e| !e.outgoing) {
         wanted.push(edge.other.clone());
@@ -1248,16 +1234,14 @@ fn day(at_ms: i64) -> String {
 
 /// What happened while nobody was looking.
 ///
-/// Built from the three tables that other processes write — schedule fires,
-/// webhook deliveries, and the goal loop's episodic facts — which is why this
-/// screen exists at all: none of it happened in this process, so no in-memory
-/// copy could ever be authoritative. Runs are deliberately absent: a cron fire
-/// already names the run it started, and the fleet screen is where a run you
-/// started yourself is watched.
+/// Built from the three tables other processes write, which is why the screen
+/// exists: none of it happened here, so no in-memory copy could be
+/// authoritative. Runs are absent — a cron fire already names the run it
+/// started.
 ///
 /// TODO: `Store::mark_activity_read(id)` and a table to hold it. Every item
-/// below reads as read, so the `u` filter shows nothing — unread is a *per
-/// person* fact about an event, and there is nowhere to put it yet.
+/// reads as read, so the `u` filter shows nothing — unread is a *per person*
+/// fact and there is nowhere to put it.
 pub fn activity(jod: &Arc<Jod>) -> Vec<ActivityItem> {
     match jod.store() {
         Some(store) => activity_from(store),
@@ -1301,14 +1285,11 @@ fn activity_from(store: &Store) -> Vec<ActivityItem> {
 /// The task board, promoted out of the team panel into a screen of its own.
 ///
 /// With no team joined this is every team's board, because the screen is *the*
-/// board rather than one team's panel — the team panel is the thing that is
-/// scoped to one team.
+/// board; the team panel is the thing scoped to one team.
 ///
-/// TODO: `jod_core::team::TeamTask` carries an id, a title, an owner and a
-/// status and nothing else. Four columns of this screen are waiting on it: the
-/// run doing the task, the task's age (there is no created-at), its runnable
-/// check, and the blocked-by/blocks pair. Each shows as empty rather than as a
-/// guess.
+/// TODO: `TeamTask` carries an id, title, owner and status and nothing else.
+/// Four columns wait on it — the run doing the task, its age, its runnable
+/// check, and the blocked-by pair. Each shows empty rather than as a guess.
 pub fn tasks(jod: &Arc<Jod>, team: Option<&str>) -> Vec<TaskRow> {
     let Some(store) = jod.store() else {
         return Vec::new();
@@ -1416,15 +1397,13 @@ pub fn search(jod: &Arc<Jod>, query: &str, limit: usize) -> Vec<Hit> {
 
 // ---- the fleet tree -----------------------------------------------------
 
-/// The forest, with closed works after the live ones, and the set of works
-/// that are closed.
+/// The forest, with closed works after the live ones, and the set that is
+/// closed.
 ///
-/// Two queries rather than one sort. `works()` orders by recency, so closed and
-/// live are interleaved, and E5.S3b wants the archives below — asking core
-/// twice with its own [`Filter`] gets that from core's own semantics instead of
-/// re-ordering its output here. It also answers "which of these is an archive"
-/// exactly, which a [`Node`] cannot: it carries no state, and inferring one
-/// from a label would be guessing.
+/// Two queries rather than one sort: `works()` orders by recency, so asking
+/// core twice with its own [`Filter`] gets the archives-below ordering from
+/// core's semantics. It also answers "which of these is an archive" exactly,
+/// which a [`Node`] cannot.
 ///
 /// `show_closed` off is the cheaper path *and* the default, because a tree that
 /// opens as a list of everything ever done is one people stop reading.
@@ -1446,18 +1425,15 @@ pub fn forest(jod: &Arc<Jod>, show_closed: bool) -> (Vec<Node>, HashSet<NodeId>)
     (nodes, closed)
 }
 
-/// One scope's agent-to-agent traffic, and the bounds it is running against.
+/// One scope's agent-to-agent traffic, and the bounds it runs against.
 ///
-/// Five reads rather than one, and deliberately: `traffic` is the log,
-/// `bounds_for` and `messages_used` are the budget the bus itself enforces,
-/// `thread_state` is per thread because G4.S3 pauses a thread and never a work,
-/// and `mail_held` is the only thing that knows a queued message is waiting for
-/// a work that has already closed. Every one of them is an indexed read over a
-/// table bounded by one work's conversation, on the same tick the fleet already
+/// Five reads rather than one, deliberately: the log, the budget the bus
+/// enforces, the per-thread state (G4.S3 pauses a thread and never a work), and
+/// the one thing that knows a queued message waits for a closed work. Each is
+/// an indexed read over one work's conversations, on the tick the fleet already
 /// refreshes on.
 ///
-/// A store error leaves the field as it is loaded so far rather than taking the
-/// UI down, like every other loader here.
+/// A store error leaves the field as loaded so far, like every loader here.
 pub fn traffic(jod: &Arc<Jod>, watching: Option<&Watching>) -> traffic::Log {
     let (Some(store), Some(watching)) = (jod.store(), watching) else {
         return traffic::Log::default();
