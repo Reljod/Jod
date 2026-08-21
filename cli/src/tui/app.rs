@@ -1,9 +1,7 @@
 //! The TUI's state, and every decision it makes.
 //!
-//! Deliberately free of rendering and of I/O: everything here is a pure
-//! transformation of state, so the behaviour that is easy to get subtly wrong —
-//! cursor movement, scrollback, which turn a message belongs to — is testable
-//! without a terminal.
+//! Free of rendering and I/O: everything here is a pure transformation of
+//! state, so what is easy to get subtly wrong is testable without a terminal.
 
 use std::cmp::Reverse;
 
@@ -57,30 +55,25 @@ pub enum Entry {
     ToolOut { text: String, failed: bool },
     /// A run finished: the summary line.
     Done { text: String, failed: bool },
-    /// Something Jod itself wants to say *because you asked it something* —
-    /// the roots list, a confirmation, an error.
+    /// Something Jod says *because you asked it something* — the roots list, a
+    /// confirmation, an error.
     ///
-    /// The renderer treats this as output, which is what separates it from
-    /// [`Entry::Hint`]: a session holding one of these has answered a question
-    /// and must not be painted over by the splash.
+    /// The renderer treats this as output, which separates it from
+    /// [`Entry::Hint`]: a session holding one has answered a question and must
+    /// not be painted over by the splash.
     Notice(String),
-    /// Something Jod says on its own account, before anyone has asked
-    /// anything: the startup keymap line, and `/new`'s "new conversation".
+    /// Something Jod says on its own account, before anyone has asked: the
+    /// startup keymap line, and `/new`'s "new conversation".
     ///
-    /// Its own variant rather than a `Notice` because `ui::fresh` has to tell
-    /// the two apart, and the only other ways to do that are to sniff the
-    /// notice's text or to carry a "has the user run anything" flag beside the
-    /// transcript that every producer must remember to set. Both can be got
-    /// wrong silently; a variant cannot — the entry either was pushed as a
-    /// hint or it was not.
+    /// Its own variant because `ui::fresh` has to tell the two apart, and the
+    /// alternatives — sniffing the text, or a flag every producer must remember
+    /// to set — can both be got wrong silently.
     Hint(String),
-    /// A file edit, as a diff rather than as a one-line summary.
+    /// A file edit, as a diff rather than a one-line summary.
     ///
-    /// Its own entry rather than a decorated `Tool`, because it is the one tool
-    /// call whose *arguments* are the interesting part. Everything else is
-    /// summarised to one line on purpose; an edit summarised to one line is the
-    /// difference between watching an agent work and being able to trust it
-    /// afterwards.
+    /// Its own entry because it is the one tool call whose *arguments* are the
+    /// interesting part. An edit summarised to one line is the difference
+    /// between watching an agent work and being able to trust it afterwards.
     Diff(diff::Edit),
     /// The agent's plan, updating in place.
     ///
@@ -91,12 +84,10 @@ pub enum Entry {
     Raw(String),
     /// `Ctrl-B` sent work off to a background agent.
     ///
-    /// Not a `Notice`, and the distinction is the whole point. Delegation is
-    /// the one key that spends money unattended, and its old confirmation was
-    /// a single notice — invisible on a cold session, and a line at the bottom
-    /// of the status bar otherwise. It gets a block of its own naming all
-    /// three things you would want to check afterwards: which agent, what it
-    /// was told, and which directory it was pointed at.
+    /// Not a `Notice`: delegation is the one key that spends money unattended,
+    /// and its old confirmation was invisible on a cold session. It gets a
+    /// block naming the three things you would check afterwards — which agent,
+    /// what it was told, and which directory.
     Delegated {
         id: String,
         prompt: String,
@@ -128,9 +119,8 @@ pub enum Overlay {
     /// Offered when an update has installed a new binary: restart into it now,
     /// or stay on the build this process started with.
     ///
-    /// Its own overlay rather than an [`Overlay::Confirm`], because that one
-    /// is titled "this cannot be undone" and means it. Reloading is neither
-    /// destructive nor irreversible, and a question that borrows a warning it
+    /// Its own overlay rather than [`Overlay::Confirm`], which is titled "this
+    /// cannot be undone" and means it. A question that borrows a warning it
     /// does not need teaches people to ignore the warning.
     ConfirmReload,
     /// Tier 1 of the form ladder: one value, typed on a line where the keybar
@@ -145,12 +135,11 @@ pub enum Overlay {
     },
     /// A credential being collected for a `Secret` card.
     ///
-    /// Deliberately **not** an `Overlay::Prompt`. A prompt's `value` is an
-    /// ordinary `String` that the renderer echoes and that `accept_prompt`
-    /// hands around as text — both correct for a schedule's name and both
-    /// disqualifying for a token. This variant masks its field, keeps the value
-    /// in a [`Typed`] that cannot print itself, and moves rather than copies it
-    /// on the way out. See `secret.rs` for the full rule.
+    /// Deliberately **not** an `Overlay::Prompt`: that echoes its field and
+    /// hands the value around as text — right for a schedule's name,
+    /// disqualifying for a token. This masks the field, keeps the value in a
+    /// [`Typed`] that cannot print itself, and moves rather than copies it. See
+    /// `secret.rs`.
     Secret {
         /// The card this answers, carried rather than read off the rail's
         /// cursor for the reason [`PromptIntent::AnswerCard`] gives.
@@ -189,21 +178,17 @@ pub enum PromptIntent {
     /// Go to one specific abandoned branch, named by the `#id` printed beside
     /// it.
     ///
-    /// The redo key takes the newest tip, which covers undo-then-changed-my-mind
-    /// — the only case most people ever have. This is for the rest: three or
-    /// more branches set aside, and the one you want is not the last one you
-    /// left. Without it those branches are listed, numbered, and unreachable,
-    /// which is a worse state than not listing them at all.
+    /// The redo key takes the newest tip, which covers undo-then-changed-my-
+    /// mind. This is for the rest: three or more branches set aside, and the
+    /// one you want is not the last. Without it they are listed, numbered and
+    /// unreachable.
     Branch,
     /// Answer a card in prose rather than by picking one of its options.
     ///
-    /// Carries the card id rather than reading it off the rail's cursor, which
-    /// is the one place here that departs from the "an overlay owns the
-    /// keyboard, so the selection cannot have moved" rule that `confirmed` and
-    /// [`PromptIntent::Branch`] rely on. It has to: the rail re-queries on the
-    /// tick *underneath* the prompt, so an answer that landed on whatever card
-    /// had sorted to the cursor by the time `⏎` was pressed would be an answer
-    /// given to the wrong agent.
+    /// Carries the card id rather than reading the rail's cursor — the one
+    /// place here that departs from "an overlay owns the keyboard, so the
+    /// selection cannot have moved". It has to: the rail re-queries on the tick
+    /// *underneath* the prompt, so an answer could land on the wrong agent.
     AnswerCard(i64),
 }
 
@@ -217,24 +202,20 @@ impl Overlay {
 ///
 /// ## The microphone is a switch, not a button
 ///
-/// `Ctrl-V` turns listening on and it stays on. Everything said while it is on
-/// streams into the composer, sentence by sentence, and `⏎` is replaced by
-/// saying so — "go ahead", "sige". The point is coding with your hands
-/// somewhere else entirely.
+/// `Ctrl-V` turns listening on and it stays on. Everything said streams into
+/// the composer sentence by sentence, and `⏎` is replaced by saying so. The
+/// point is coding with your hands somewhere else.
 ///
-/// Two things follow from that, and both are why this is a state rather than a
-/// boolean:
+/// Two things follow, and both are why this is a state rather than a boolean:
 ///
 /// * **It has to be obvious that it is on.** A microphone nobody remembers
-///   switching on is a microphone in a room having a different conversation,
-///   so the state carries what it needs to say so on every frame.
-/// * **Utterances overlap.** A sentence is transcribed while the next one is
-///   being spoken, so "listening" and "transcribing" are not exclusive —
-///   `pending` counts what is in flight rather than replacing the state.
+/// switching on is one in a room having a different conversation.
+/// * **Utterances overlap.** A sentence is transcribed while the next is
+///   spoken,
+/// so `pending` counts what is in flight rather than replacing the state.
 ///
-/// A hold-to-talk key was never available anyway: terminals report key
-/// *presses*, and releases arrive only under the kitty keyboard protocol,
-/// which most terminals and every plain SSH session lack.
+/// Hold-to-talk was never available: terminals report key *presses*, and
+/// releases arrive only under the kitty protocol.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Dictation {
     Off,
@@ -300,17 +281,17 @@ impl Dictation {
 /// thing a static "working…" cannot do.
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
-/// Evidence that a turn is still working, gathered from whichever harness
-/// event proves it — a long turn can sit silent for more than one reason, and
-/// the spinner alone cannot tell the reader which.
+/// Evidence that a turn is still working, from whichever harness event proves
+/// it — a long turn can sit silent for more than one reason, and the spinner
+/// cannot say which.
 ///
-/// Two kinds, so far. Reasoning: `AgentEvent::Progress` ticks while the model
-/// thinks with nothing else on the wire yet. Generation: `AgentEvent::Delta`
-/// fragments while a long assistant message is being written — a message with
-/// several `tool_use` blocks can take minutes to produce with no `Thinking` or
-/// `Progress` event in between, because the model is not reasoning in that
-/// window, it is emitting. Nothing about this type needs renaming to add a
-/// third: the field is "the latest evidence", not "the token count".
+/// Two kinds so far. Reasoning: `Progress` ticks while the model thinks with
+/// nothing else on the wire. Generation: `Delta` fragments while a long message
+/// is written — several `tool_use` blocks can take minutes with no `Thinking`
+/// in between, because the model is emitting rather than reasoning.
+///
+/// The field is "the latest evidence", not "the token count", so a third needs
+/// no renaming.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Liveness {
     /// A running reasoning-token count. Set, never incremented — the event
@@ -325,13 +306,13 @@ pub enum Liveness {
 }
 
 impl Liveness {
-    /// How this reads on the status line, or nothing if the reader has asked
-    /// not to see it.
+    /// How this reads on the status line, or nothing if the reader asked not to
+    /// see it.
     ///
-    /// `show_thinking` is passed in rather than read off `App` so each
-    /// variant can answer independently — a generation signal is the model
-    /// producing the answer it was asked for, not the reasoning behind it, so
-    /// hiding reasoning must not also hide that.
+    /// `show_thinking` is passed in rather than read off `App` so each variant
+    /// answers independently — a generation signal is the model producing the
+    /// answer, not the reasoning behind it, so hiding reasoning must not hide
+    /// that.
     fn describe(self, show_thinking: bool) -> Option<String> {
         match self {
             Liveness::Thinking(tokens) => {
@@ -407,19 +388,15 @@ pub struct App {
     pub busy: bool,
     /// The run a stop has been asked for and not yet heard back about.
     ///
-    /// Stopping is not instant — the signal goes out, the harness winds down,
-    /// and its own ending arrives afterwards — so there is a gap between the
-    /// keypress and the end of the turn. Without a word for that gap the status
-    /// bar had only `working` and `ready` to choose from, and it said `working`
-    /// with the elapsed counter stopped: a frozen clock, which reads as a hung
-    /// program rather than as a stop in progress.
+    /// Stopping is not instant, so there is a gap between the keypress and the
+    /// end of the turn. Without a word for it the status bar said `working`
+    /// with the elapsed counter stopped — a frozen clock, which reads as a hung
+    /// program.
     ///
-    /// It also decides how the turn is written down. The ending of a run that
-    /// was killed arrives as an error, because to anything reading an exit
-    /// status that is what a signal is; rendered as-is it printed a red
-    /// `✗ failed` directly beneath the `✓ done · interrupted` this file had
-    /// just written, two verdicts on one turn that disagreed. A deliberate stop
-    /// is not a failure.
+    /// It also decides how the turn is written down. A killed run's ending
+    /// arrives as an error, and rendered as-is it printed a red `✗ failed`
+    /// beneath the green `✓ done · interrupted` for the same turn. A deliberate
+    /// stop is not a failure.
     pub interrupting: Option<String>,
     pub agents: Vec<AgentLine>,
     /// Prompts typed while the watched conversation was still working. They are
@@ -444,14 +421,12 @@ pub struct App {
     pub now_ms: i64,
     /// When the turn on screen started, for the elapsed counter.
     pub turn_started_ms: Option<i64>,
-    /// The latest [`Liveness`] evidence for the turn on screen, or `None`
-    /// before any has arrived.
+    /// The latest [`Liveness`] evidence for the turn on screen.
     ///
-    /// Only ever overwritten by newer evidence, never incremented or
-    /// animated: if the harness stops producing it, this stops changing, and
-    /// a status line built on it freezes exactly the way a genuinely wedged
-    /// run should. Cleared at the start and end of every turn so evidence
-    /// from a previous think can never bleed into the next one.
+    /// Only ever overwritten by newer evidence, never animated: if the harness
+    /// stops producing it, this stops changing, and the status line freezes
+    /// exactly the way a genuinely wedged run should. Cleared at both ends of
+    /// every turn.
     pub liveness: Option<Liveness>,
     /// Ticks since start, which is all the spinner needs.
     pub tick: u64,
@@ -488,48 +463,40 @@ pub struct App {
     /// How much the next turn may do without asking.
     ///
     /// On the app rather than only on `Options`, because it has to be
-    /// changeable *while you are talking*: the mode you want depends on what
-    /// you are about to ask for, and a setting fixed at launch means quitting
-    /// the program to change your mind. Read at every spawn, so a change takes
-    /// effect on the next turn and never mid-run.
+    /// changeable
+    /// *while you are talking*. Read at every spawn, so a change takes effect on the
+    /// next turn and never mid-run.
     pub mode: PermissionPolicy,
     /// Whether the right-hand panel is showing. Shift-Tab opens and closes it.
     pub panel: bool,
     /// Tokens the watched conversation is carrying, as best the harness has
-    /// reported them.
+    /// reported.
     ///
-    /// "As best" is the honest framing: this is the last turn's input plus
-    /// cache reads, which is what a harness reports and what actually occupies
-    /// the window. It is an estimate and the screen must say so rather than
-    /// print a precise-looking number nobody can check.
+    /// "As best" is the honest framing: the last turn's input plus cache reads.
+    /// It is an estimate and the screen must say so rather than print a
+    /// precise-looking number nobody can check.
     pub context_tokens: u64,
-    /// Shell jobs this console started and is not watching — an update
-    /// building in the background, and whatever joins it later.
+    /// Shell jobs this console started and is not watching.
     ///
-    /// Distinct from `agents`, which is the fleet: an agent is a harness with
-    /// a transcript, and a job is a subprocess with output. Both are "things
-    /// running that you are not looking at", and a console that can start one
-    /// without offering a way to see it is asking to be trusted about work it
-    /// never shows.
+    /// Distinct from `agents`: an agent is a harness with a transcript, a job
+    /// is a subprocess with output. Both are "things running that you are not
+    /// looking at", and a console that starts one without offering a way to see
+    /// it is asking to be trusted about work it never shows.
     pub jobs: Vec<Job>,
     /// The directory `jod tui` was launched in.
     ///
-    /// Where every turn's harness process starts, and — see
-    /// [`super::ensure_launch_root`] — the first root of the conversation on
-    /// screen, so `@` searches the repository you are standing in rather than
-    /// telling you to go and pick one.
+    /// Where every turn's harness process starts, and the first root of the
+    /// conversation on screen — so `@` searches the repository you are standing
+    /// in.
     ///
     /// Empty in fixtures that do not care, which is what the header band reads
     /// to decide whether it has a directory worth printing.
     pub cwd: PathBuf,
 
-    // ---- the decision rail, and the `@` picker --------------------------
-    /// The conversation the rail and the `@` picker belong to.
-    ///
-    /// Kept here rather than derived at each use because both need it and
-    /// neither may do I/O: the loop works it out — the conversation the chat
-    /// box is bound to, or the pinned main chat when it is bound to nothing —
-    /// and writes it down.
+    // The conversation the rail and the `@` picker belong to.
+    //
+    // Kept here rather than derived at each use because both need it and
+    // neither may do I/O: the loop works it out and writes it down.
     pub conversation: Option<String>,
     /// The cards the rail is showing, already filtered and ordered by the
     /// store. Refreshed on the tick, off the render path, so `draw()` stays a
@@ -560,17 +527,15 @@ pub struct App {
     /// Which project the conversation on screen is about, and how that was
     /// decided.
     ///
-    /// The `how` is carried rather than dropped because it is the whole point
-    /// of showing this: a project he *named* needs no attention, and one that
-    /// merely carried over is the one worth a glance before an agent starts
-    /// working in the wrong repository.
+    /// The `how` is the point of showing this: a project he *named* needs no
+    /// attention, and one that merely carried over is worth a glance before an
+    /// agent starts working in the wrong repository.
     pub current_project: Option<(String, How)>,
     /// Whether the catalog section of the panel is expanded.
     ///
-    /// Open by default and collapsible, rather than hidden by default: the
-    /// point of putting it on screen is that he can see which repository a
-    /// dictated sentence will land in without asking. A twenty-project catalog
-    /// would eat the panel, though, which is what the collapse is for.
+    /// Open by default and collapsible: the point of putting it on screen is
+    /// seeing which repository a dictated sentence lands in. A twenty-project
+    /// catalog would eat the panel, which is what the collapse is for.
     pub projects_open: bool,
 
     // ---- dictation -------------------------------------------------------
@@ -599,14 +564,11 @@ pub struct App {
     pub closed_works: HashSet<NodeId>,
     pub tree: TreeState,
 
-    // ---- the traffic log ------------------------------------------------
-    /// Which scope's bus the traffic screen is reading, or `None` before one
-    /// has been opened from the tree.
-    ///
-    /// The *request*, kept apart from the loaded [`traffic::Log`] on purpose:
-    /// the log is rebuilt from the store on every tick, so a scope stored only
-    /// on the data would be forgotten by the first refresh after opening the
-    /// screen.
+    // Which scope's bus the traffic screen is reading.
+    //
+    // The *request*, kept apart from the loaded [`traffic::Log`]: the log is
+    // rebuilt from the store every tick, so a scope stored only on the data
+    // would be forgotten by the first refresh.
     pub traffic_of: Option<traffic::Watching>,
     /// That scope's messages, refreshed on the tick like every other list.
     pub traffic: traffic::Log,
@@ -660,19 +622,17 @@ impl Job {
 /// Where the context bar turns from information into advice.
 ///
 /// Compaction is cheap and losing a conversation to a hard context error is
-/// not, so the recommendation comes well before the wall. Claude Code compacts
-/// around here too, for the same reason: the summary is better when there is
-/// still room to write it.
+/// not, so the recommendation comes well before the wall — and the summary is
+/// better when there is still room to write it.
 pub const COMPACT_AT: f64 = 0.75;
 
 /// The window to measure `context_tokens` against.
 ///
-/// A single number for every harness and model, which is a deliberate
-/// simplification: Jod cannot know the real limit — it varies by model, the
-/// harness does not report it, and guessing per model would be a table that is
-/// wrong the week a model ships. What the bar is for is "am I near the point
-/// where I should compact", and a fixed generous denominator answers that
-/// honestly as long as the screen calls it an estimate.
+/// One number for every harness and model, deliberately: Jod cannot know the
+/// real limit, and guessing per model would be a table that is wrong the week a
+/// model ships. The bar answers "am I near the point where I should compact",
+/// which a fixed generous denominator does honestly as long as the screen calls
+/// it an estimate.
 pub const CONTEXT_WINDOW: u64 = 200_000;
 
 /// What every run the main chat spawns for itself is named.
@@ -684,11 +644,10 @@ pub const ORCHESTRATOR: &str = "main";
 
 /// The row id the pinned chat occupies in the fleet list.
 ///
-/// Deliberately not a uuid, because it is not a run: it stands for the
-/// conversation, which outlives every run underneath it. Nothing can collide
-/// with it — every real row id is a uuid — and [`App::selected_agent`]
-/// therefore answers `None` on it, which is the correct answer to "which agent
-/// is selected" when the answer is "none, the chat is".
+/// Not a uuid, because it is not a run: it stands for the conversation, which
+/// outlives every run underneath it. Nothing can collide with it, and
+/// [`App::selected_agent`] therefore answers `None` — the correct answer when
+/// the chat is what is selected.
 pub const MAIN_ROW: &str = "main";
 
 /// The pinned chat as one fleet row.
@@ -734,12 +693,11 @@ pub struct AgentLine {
     pub created_at_ms: i64,
     /// The directory the run was launched in.
     ///
-    /// Carried onto the row because it is the one fact that distinguishes a
-    /// run that did the work from a run that did the work *somewhere else*.
-    /// The store has recorded it since the first migration and the summary has
-    /// always carried it; it was dropped here, so no screen could show it, and
-    /// a delegated run that wrote its whole output outside every declared root
-    /// looked identical to one that had not.
+    /// The one fact distinguishing a run that did the work from one that did it
+    /// *somewhere else*. The store has recorded it since the first migration; it was
+    /// dropped here, so no screen could show it, and a delegated run that wrote
+    /// its whole output outside every declared root looked identical to one
+    /// that had not.
     pub cwd: String,
     pub cost_usd: Option<f64>,
     /// The last thing it said, which is the only summary an unattended run
@@ -747,16 +705,14 @@ pub struct AgentLine {
     pub last: Option<String>,
     /// Whether the message this run owed somebody actually reached them.
     ///
-    /// On the row rather than behind a key, and that distinction is the whole
-    /// feature. The ledger could always answer "did that reply arrive" — but
-    /// only if asked, and you have to already suspect a problem to ask. "The
-    /// run says completed" is precisely the state in which nobody suspects
-    /// anything, so an answer available on request is an answer nobody gets.
+    /// On the row rather than behind a key, and that is the feature. The ledger
+    /// could always answer if asked — but you have to already suspect a problem
+    /// to ask, and "the run says completed" is precisely the state where nobody
+    /// does.
     ///
-    /// [`Verdict::Nothing`] for the great majority of runs, which owed nobody
-    /// a message at all. Deliberately not the same as `Fine`: saying
-    /// "delivered" about a message that never existed is how a reader learns
-    /// to distrust the good news.
+    /// [`Verdict::Nothing`] for the majority, which owed nobody a message.
+    /// Deliberately not `Fine`: saying "delivered" about a message that never
+    /// existed is how a reader learns to distrust the good news.
     pub delivery: Verdict,
 }
 
@@ -767,11 +723,10 @@ impl AgentLine {
 
     /// A turn of the main chat rather than work the main chat delegated.
     ///
-    /// By name, which is the only signal a run carries. An agent someone
-    /// deliberately names `main` would be folded into the pinned row — the cost
-    /// of not adding a column to every run to record what one row needs, and
-    /// visible rather than silent, since the row it folds into says how many
-    /// turns it counted.
+    /// By name, the only signal a run carries. An agent someone deliberately
+    /// names `main` is folded into the pinned row — the cost of not adding a
+    /// column to every run to record what one row needs, and visible rather
+    /// than silent.
     pub fn is_orchestrator(&self) -> bool {
         self.name == ORCHESTRATOR
     }
@@ -1022,19 +977,16 @@ impl App {
 
     /// The visible tree rows, in the order they are drawn.
     ///
-    /// The filter comes from the fleet screen's own `ListState`, not from a
-    /// second one on `TreeState`. `/` is already wired there, on every list
-    /// screen, with its own `Esc` and its own line under the box — a private
-    /// copy would have been a filter the key never reached, which is exactly
-    /// what it was until a render test caught it.
+    /// The filter comes from the fleet screen's own `ListState`, not a second
+    /// one on `TreeState`. A private copy would have been a filter the key
+    /// never reached, which is what it was until a render test caught it.
     ///
-    /// The pinned chat comes first, always, exactly as [`App::row_ids`] puts it
-    /// first in the flat list — and *outside* that filter rather than inside it,
-    /// because `/` narrows the fleet, and the one row that is not part of the
-    /// fleet is also the row you most need when a filter has emptied the screen.
+    /// The pinned chat comes first, always, and *outside* the filter: `/`
+    /// narrows the fleet, and the one row that is not part of the fleet is also
+    /// the row you most need when a filter has emptied the screen.
     ///
-    /// Empty when there is no tree, so the cursor is not parked on a row of a
-    /// screen that is not being drawn.
+    /// Empty when there is no tree, so the cursor is not parked on a screen
+    /// that is not being drawn.
     pub fn tree_rows(&self) -> Vec<NodeId> {
         if !self.has_tree() {
             return Vec::new();
@@ -1115,11 +1067,9 @@ impl App {
     /// Re-derive the popup from the line as it now stands, closing it if the
     /// text no longer supports one.
     ///
-    /// Derived rather than tracked, because every edit key would otherwise have
-    /// to remember to keep the popup in step — and the one that forgot would
-    /// leave a popup ranking a query the line no longer contains. The rule is
-    /// that a mention runs from its `@` to the cursor and holds no whitespace;
-    /// backspacing over the `@`, or moving the cursor before it, ends it.
+    /// Derived rather than tracked, because the edit key that forgot would
+    /// leave a popup ranking a query the line no longer contains. A mention
+    /// runs from its `@` to the cursor and holds no whitespace.
     pub fn sync_mention(&mut self) {
         let Some(popup) = &self.mention else {
             return;
@@ -1183,14 +1133,13 @@ impl App {
 
     /// Move to the next permission mode, and say what happened.
     ///
-    /// Returns the notice rather than pushing it, so the caller decides where
-    /// it goes — the same call serves the chat transcript and the status line.
+    /// Returns the notice rather than pushing it, so the same call serves the
+    /// chat transcript and the status line.
     ///
-    /// Two clocks, and the wording has to be honest about both: Jod's own MCP
-    /// tools are checked per call and change immediately, while the harness's
-    /// native tools are bounded by the `--permission-mode` flag chosen when the
-    /// process was spawned. A turn already in flight keeps the mode it started
-    /// in; there is no way to tell a running harness otherwise.
+    /// Two clocks, and the wording has to be honest about both: Jod's own tools
+    /// are checked per call and change immediately, while the harness's native
+    /// tools are bounded by the flag chosen at spawn. A turn in flight keeps
+    /// the mode it started in.
     pub fn cycle_mode(&mut self) -> String {
         self.mode = self.mode.next();
         let when = if self.busy {
@@ -1201,23 +1150,18 @@ impl App {
         format!("mode: {}{when}", self.mode.label())
     }
 
-    /// Why this model name will not work here, when the harness's own list is
-    /// able to say so.
+    /// Why this model name will not work here, when the harness's own list can
+    /// say so.
     ///
-    /// `None` means "no objection", and it covers two different things on
-    /// purpose. Either the name is on the list, or there is no list to check it
-    /// against — the binary is missing, `models` failed, the answer has not
-    /// arrived yet, or it belongs to a harness that has since been swapped out.
-    /// Only a loaded list for the harness we are actually on can convict a
-    /// name, because "not in a list I could not read" is not a fact about the
-    /// name.
+    /// `None` covers two things: the name is on the list, or there is no list
+    /// to check against. Only a loaded list for the harness we are on can
+    /// convict a name, because "not in a list I could not read" is not a fact
+    /// about the name.
     ///
-    /// This exists because the harness's own complaint is useless. A name
+    /// This exists because the harness's own complaint is useless: a name
     /// OpenCode does not have makes its server answer `UnknownError: Unexpected
-    /// server error. Check server logs for details.`, which names neither the
-    /// model nor the problem, and Jod printed it verbatim. Reljod asked main
-    /// "what's the weather today" and got that, twice, with no way to tell from
-    /// the screen that a model name set some days earlier was the reason.
+    /// server error`, which names neither the model nor the problem, and Jod
+    /// printed it verbatim.
     pub fn model_objection(&self, name: &str) -> Option<String> {
         if self.models_for != Some(self.harness) || self.models.is_empty() {
             return None;
@@ -1251,12 +1195,10 @@ impl App {
 
     /// A turn has started on `run`: watch it, and say the conversation is busy.
     ///
-    /// One function because there are two ways in — a line typed into the main
-    /// chat, which goes to the orchestrator, and a line typed into any other
-    /// conversation, which goes straight to a harness — and they must leave the
-    /// app in the same state. Nothing enforced that before, so a fixture could
-    /// assemble a "mid-turn" app by hand and be believed while the state a real
-    /// turn produces drifted away from it.
+    /// One function because there are two ways in — the main chat and any other
+    /// conversation — and they must leave the app in the same state. Nothing
+    /// enforced that, so a fixture could assemble a "mid-turn" app by hand and
+    /// be believed.
     pub fn begin_turn(&mut self, run: impl Into<String>, at_ms: i64) {
         self.watching = Some(run.into());
         self.busy = true;
@@ -1373,9 +1315,8 @@ impl App {
     ///
     /// In place, and *where it already was*. A harness rewrites its todo list
     /// once per item finished, so appending would put fifteen near-identical
-    /// lists between two sentences — and moving the block to the bottom on each
-    /// revision would be a second kind of noise in place of the first. Its
-    /// position says when the agent started planning, which does not change.
+    /// lists between two sentences. Its position says when the agent started
+    /// planning.
     pub fn revise_plan(&mut self, plan: Vec<todo::Item>) {
         match self
             .transcript
@@ -1388,16 +1329,13 @@ impl App {
     }
 
     /// Whether this tool's call already has a line in the transcript, so its
-    /// result does not need to add one.
+    /// result need not add one.
     ///
-    /// Not `transcript.last()`, which is where this started: a call does not
-    /// always leave its line at the tail. An edit pushes its diff *underneath*
-    /// its line, and a plan call is folded into the plan block and pushes no
-    /// line at all — so the tail check answered "nobody announced this" for
-    /// both, and the result arm obligingly announced them a second time. A
-    /// detail-less `⚙ Edit` appeared under every diff and a `⚙ TodoWrite` under
-    /// every plan revision, and neither is distinguishable from a fresh
-    /// anonymous call: a burst of writes read as a stack of them.
+    /// Not `transcript.last()`: a call does not always leave its line at the
+    /// tail. An edit pushes its diff *underneath* its line and a plan call
+    /// pushes none, so the tail check answered "nobody announced this" for both
+    /// and the result arm announced them again — a detail-less `⚙ Edit` under
+    /// every diff.
     fn announced(&self, name: &str) -> bool {
         // The plan block is revised in place rather than re-pushed, so a todo
         // call leaves nothing near the tail to find. It is announced all the
@@ -1713,14 +1651,13 @@ impl App {
 
     /// The fleet's runs that the tree has no node for.
     ///
-    /// `Store::forest_of` reads only conversations that belong to a work, so a
-    /// run started by `delegate` never reaches the forest — by design, because
-    /// a work is what the tree is a tree *of*. These are the rows the tree
-    /// cannot draw, and the fleet shows them beside it rather than dropping
-    /// them: a run nothing on screen accounts for is a run nobody stops.
+    /// `Store::forest_of` reads only conversations belonging to a work, so a
+    /// run started by `delegate` never reaches the forest. The fleet shows them
+    /// beside it rather than dropping them: a run nothing on screen accounts
+    /// for is a run nobody stops.
     ///
-    /// Reads the same [`App::fleet_rows`] the flat list does, so the fleet's
-    /// filter and sort apply here too.
+    /// Reads the same [`App::fleet_rows`] the flat list does, so filter and
+    /// sort apply.
     pub fn loose_rows(&self) -> Vec<&AgentLine> {
         let held: std::collections::HashSet<&str> = self
             .forest
@@ -1882,11 +1819,9 @@ impl App {
     ///
     /// On a tree that is `TreeState`, not this list. Taking the list's row
     /// there was the other half of the two-cursor fault: `s` stopped a run the
-    /// highlight was nowhere near, which is worse than a key that does nothing
-    /// because it looks like it worked. A run node's id *is* the run id, which
-    /// is what these verbs take; a work is a heading and a session is a
-    /// conversation, and neither is a process, so both answer `None` and let
-    /// the caller say so.
+    /// highlight was nowhere near, which is worse than a dead key because it
+    /// looks like it worked. A work is a heading and a session is a
+    /// conversation, so both answer `None`.
     pub fn selected_agent(&self) -> Option<&AgentLine> {
         if self.has_tree() {
             let node = self.selected_node()?;
@@ -2258,20 +2193,17 @@ impl App {
                     self.reported_model = Some(m.clone());
                 }
             }
-            // The exact inverse of the arm above, and it has to be here rather
+            // The exact inverse of the arm above, and it must be here rather
             // than only in the database: this cursor is held in memory, so a
-            // console that had already advanced onto a session goes on asking
-            // for it every turn no matter what the row says. That is what three
-            // identical one-second failures in a row looked like from the
-            // outside — the same dead id, resent by the same live `App`.
+            // console that had advanted onto a session goes on asking for it
+            // whatever the row says. Three identical one-second failures in a
+            // row was the same dead id, resent by the same live `App`.
             //
-            // Only when it is *this* chat's session. A background delegation
-            // resuming something of its own is not evidence about the cursor
-            // here, and clearing on it would drop a live thread's continuity.
+            // Only when it is *this* chat's session — a background delegation
+            // resuming something of its own is not evidence about this cursor.
             //
             // `Fresh` rather than `Last`: the next turn carries the transcript
-            // Jod itself holds, which is a thing Jod can prove, where "the most
-            // recent conversation in this directory" is the harness guessing.
+            // Jod holds, which Jod can prove.
             AgentEvent::SessionLost { session_id } => {
                 if self.session.as_deref() != Some(session_id.as_str()) {
                     return;
@@ -2323,9 +2255,9 @@ impl App {
                 //
                 // A result also needs a call line above it when none was
                 // announced. OpenCode reports a fast tool as already
-                // `completed`, so no ToolCall ever arrives and the output was
-                // rendered as a bare `└ Wrote file successfully.` — an answer
-                // with its question missing.
+                // `completed`, so no ToolCall arrives and the output rendered
+                // as a bare `└ Wrote file successfully.` — an answer with its
+                // question missing.
                 let announced = self.announced(name);
                 if *is_error || !announced {
                     self.push(Entry::Tool {
@@ -2369,15 +2301,13 @@ impl App {
                     bits.push(t);
                 }
                 // A run stopped on purpose ends here too, and its ending is an
-                // error to anything reading an exit status — a signal is how it
-                // was stopped. But the interrupt already wrote what happened,
-                // so printing this one put a red `✗ failed` under the green
-                // `✓ done · interrupted` for the same turn, the transcript
-                // contradicting itself at the exact moment the reader is
-                // checking whether their stop worked.
+                // error to anything reading an exit status. But the interrupt
+                // already wrote what happened, so printing this put a red `✗
+                // failed` under the green `✓ done · interrupted` for the same
+                // turn — the transcript contradicting itself exactly when the
+                // reader is checking whether their stop worked.
                 //
-                // `apply` is only ever fed the events of the run being watched,
-                // so a stop outstanding on that run is a stop on this ending.
+                // `apply` is only fed the events of the run being watched.
                 let stopped_on_purpose = match self.watching.clone() {
                     Some(id) => self.claims_interrupt(&id),
                     None => false,
@@ -2394,32 +2324,27 @@ impl App {
             }
             // Nothing in the transcript, on purpose — a tick every few seconds
             // for nine minutes would be nine minutes of scrollback saying
-            // "still working", and PR #92 just finished scrubbing spurious
-            // entries out of exactly this transcript.
+            // "still working".
             //
-            // The evidence is *stored*, not drawn, here: `activity()` below
-            // reads `self.liveness` back for the status bar, which
-            // `cli/src/tui/ui.rs` renders. Only ever overwritten by a later
-            // tick with a count of its own — a bare tick (no count) still
-            // proves the harness is alive without erasing the last number we
-            // had — so a run that stops ticking leaves this frozen rather than
-            // this code inventing motion for it.
+            // The evidence is *stored*, not drawn: `activity()` reads
+            // `self.liveness` back for the status bar. Only ever overwritten by
+            // a later tick, and a bare tick with no count still proves the
+            // harness is alive without erasing the last number — so a run that
+            // stops ticking leaves this frozen rather than inventing motion.
             //
-            // This is reasoning silence specifically — see [`Liveness`] for
-            // generation silence, right below.
+            // This is reasoning silence; see [`Liveness`] for generation
+            // silence.
             AgentEvent::Progress { thinking_tokens } => {
                 if let Some(t) = thinking_tokens {
                     self.liveness = Some(Liveness::Thinking(*t));
                 }
             }
-            // Generation silence: a long assistant message — often several
-            // `tool_use` blocks in a row, each one's arguments streamed as its
-            // own run of these — with no `Thinking`/`Progress` event in
-            // between, because the model is not reasoning in that window, it
-            // is emitting. Also kept out of the transcript, for the same
-            // reason as `Progress` above: one `Delta` per token-ish fragment
-            // would flood it, and the complete block still lands there once,
-            // as its own `Message`/`ToolCall`, when it finishes.
+            // Generation silence: a long assistant message with no
+            // `Thinking`/`Progress` in between, because the model is emitting
+            // rather than reasoning. Kept out of the transcript for
+            // `Progress`'s reason — one `Delta` per fragment would flood it,
+            // and the complete block lands there once as its own
+            // `Message`/`ToolCall`.
             AgentEvent::Delta { .. } => {
                 self.liveness = Some(Liveness::Generating);
             }
@@ -2483,11 +2408,9 @@ impl App {
 
     /// The one-line summary shown in the status bar.
     ///
-    /// Two halves, and they are separate functions because the chat header
-    /// prints them on two lines — who is answering above what he is doing about
-    /// it. Splitting this string back apart at a `·` would be a second place
-    /// that has to know the shape of the first, and the two would drift the
-    /// moment either half grew a field.
+    /// Two halves, as separate functions because the chat header prints them on
+    /// two lines. Splitting the string back apart at a `·` would be a second
+    /// place that has to know the shape of the first.
     pub fn status(&self) -> String {
         format!("{} · {}", self.identity(), self.activity())
     }
@@ -2528,13 +2451,10 @@ impl App {
             "ready".into()
         }];
         // The one thing on the wire during a long, silent turn — see
-        // [`Liveness`]. Shown only while genuinely mid-turn (not while a stop
-        // is already winding one down) and only once some evidence has
-        // actually arrived, so a harness that never sends any leaves this
-        // exactly as quiet as before. Each variant decides for itself whether
-        // `show_thinking` hides it — today's only variant is reasoning, which
-        // is "the same information as `Thinking`, counted rather than quoted"
-        // (see `cli/src/render.rs`) and so follows the same flag.
+        // [`Liveness`]. Shown only while genuinely mid-turn and only once
+        // evidence has arrived, so a harness that sends none leaves this as
+        // quiet as before. Each variant decides whether `show_thinking` hides
+        // it.
         if self.busy && self.interrupting.is_none() {
             if let Some(note) = self.liveness.and_then(|l| l.describe(self.show_thinking)) {
                 parts.push(note);
