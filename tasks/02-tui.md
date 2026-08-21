@@ -72,7 +72,7 @@ width from 20 to 120.
 
 ## What this pass fixed
 
-Twenty-four changes, each with a test that fails without it. Driven by running the
+Thirty changes, each with a test that fails without it. Driven by running the
 console against real harnesses under a throwaway `JOD_HOME`, on four projects,
 and then re-run end to end on an empty install.
 
@@ -203,6 +203,29 @@ nobody presses.
   CLI; the catalog panel qualifies a shared name with its parent directory.
 - **Untracking offered an undo that refused to run** — `jod project restore web`
   against two `web`s, with "Name the one you mean exactly" as the advice.
+
+**The catalog, and the smaller things a person meets at a terminal.**
+
+- **A checkout that had been deleted looked exactly like a healthy one.** The
+  panel is where a project is chosen, and choosing one whose directory is gone
+  routes an instruction into a directory that cannot be entered — surfacing as
+  the supervisor reporting `could not start ".../claude": No such file or
+  directory`, which reads as the harness missing from the machine.
+  `Project::path_trouble` had said so since it was written and `jod project ls`
+  prints the whole sentence; this screen printed the name. It says
+  `· missing` now.
+- **A popup merged into the transcript's border.** Both the `@` picker and the
+  `/` palette were anchored so their bottom border landed on the transcript's,
+  and `Clear` covers only the popup's width, so the two joined into
+  `└───└──popup──┘───┘`.
+- **An empty state clipped into a different sentence** — "nothing remembered
+  yet — /remember writes on" at a hundred columns. Wrong, and grammatical, so
+  nothing about it looks truncated.
+- **`/root` printed `ro`**, two letters nothing on screen explained, and the one
+  fact on the line worth reading. `jod root ls` already spells it out.
+- **A missing argument was answered with a synopsis**, `usage: /heartbeat <id>
+  [off]` — the only telegraphic refusal in a console where every other one is a
+  sentence.
 
 **The console.**
 
