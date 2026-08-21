@@ -557,7 +557,7 @@ fn write_settings(run_id: &str) -> crate::error::Result<Option<std::path::PathBu
     // The running executable, not a name on PATH — the same argument
     // `mcp_config` makes: a daemon started from a build directory must point
     // its children at *that* binary.
-    let exe = std::env::current_exe()?;
+    let exe = crate::paths::own_exe()?;
     // Its own connection, opened for one read. `args()` has no store — it is
     // handed a request, not a process — and threading one through every caller
     // to save a read on a path taken once per spawn would be the more invasive
