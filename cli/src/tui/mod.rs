@@ -6831,6 +6831,19 @@ fn refresh_workspaces(jod: &Arc<Jod>, app: &mut App) {
     // reorders the catalog, and the current project changes underneath this
     // console whenever the orchestrator resolves an instruction.
     app.projects = data::projects(jod);
+    // Which of them can still be worked in. One `stat` per catalogued project
+    // per tick, which is a handful of syscalls — and the alternative is a
+    // catalog that lists a deleted checkout exactly like a healthy one, then
+    // routes an instruction into it and fails in the supervisor with the
+    // operating system's complaint about the working directory blamed on the
+    // harness binary. `jod project ls` has said so for a while; this screen
+    // did not.
+    app.broken_projects = app
+        .projects
+        .iter()
+        .filter(|p| p.path_trouble().is_some())
+        .map(|p| p.id.clone())
+        .collect();
     app.current_project = data::current_project(jod, app.conversation.as_deref());
     // ...and that reordering is what the catalog's cursor has to survive. A row
     // untracked from the fleet, or archived by another session, leaves the

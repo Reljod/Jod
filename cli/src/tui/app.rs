@@ -564,6 +564,13 @@ pub struct App {
     /// is never written. So the fleet reads this every tick and keeps saying
     /// it, and a person arriving at that screen an hour later is told too.
     pub nothing_is_sweeping: bool,
+    /// Catalogued projects whose directory is not usable, by id.
+    ///
+    /// `Project::path_trouble` looks at the disk, and `draw` is a pure function
+    /// of state, so the answer is taken on the tick and read here. Only the ids
+    /// are kept: the panel has thirty columns and prints a word, while the
+    /// sentence explaining it belongs to `jod project ls`, which has the room.
+    pub broken_projects: std::collections::HashSet<String>,
     /// Whether Escape has put the slash-command popup away for this line.
     ///
     /// The popup is derived from the input rather than stored, so there was
@@ -1279,6 +1286,7 @@ impl App {
             tick: 0,
             said_nothing_is_sweeping: false,
             nothing_is_sweeping: false,
+            broken_projects: std::collections::HashSet::new(),
             completions_dismissed: false,
             suggestion: 0,
             team: None,

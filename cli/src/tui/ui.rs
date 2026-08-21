@@ -2157,24 +2157,38 @@ fn draw_projects(f: &mut Frame, app: &App, area: Rect) -> PanelHits {
                 (false, true) => bold(GOOD),
                 (false, false) => fg(AGENT),
             };
+            // A checkout that is not there any more. Said on the row because
+            // this panel is where a project is chosen, and choosing this one
+            // routes an instruction into a directory that cannot be entered —
+            // which surfaces as the supervisor blaming the harness binary for
+            // the operating system refusing the working directory. `jod project
+            // ls` prints the whole sentence; thirty columns get the word.
+            let missing = app.broken_projects.contains(&p.id);
             // The qualifier is drawn muted and after the name, so a catalog
             // with no clashes in it reads exactly as it did.
-            let qualifier = shared
-                .contains(p.name.as_str())
-                .then(|| {
-                    p.path
-                        .parent()
-                        .and_then(|parent| parent.file_name())
-                        .map(|dir| format!(" in {}", dir.to_string_lossy()))
-                })
-                .flatten()
-                .unwrap_or_default();
+            let qualifier = if missing {
+                " · missing".to_string()
+            } else {
+                shared
+                    .contains(p.name.as_str())
+                    .then(|| {
+                        p.path
+                            .parent()
+                            .and_then(|parent| parent.file_name())
+                            .map(|dir| format!(" in {}", dir.to_string_lossy()))
+                    })
+                    .flatten()
+                    .unwrap_or_default()
+            };
             let room = inner.saturating_sub(3);
             let name = cut(&p.name, room.saturating_sub(qualifier.chars().count()));
             Line::from(vec![
                 Span::styled(marker, fg(if is_current { GOOD } else { MUTED })),
                 Span::styled(name, style),
-                Span::styled(cut(&qualifier, room), fg(MUTED)),
+                Span::styled(
+                    cut(&qualifier, room),
+                    fg(if missing { BAD } else { MUTED }),
+                ),
             ])
         })
         .collect();
@@ -8036,6 +8050,32 @@ mod tests {
         let screen = rendered(&empty, 140, 30);
         assert!(screen.contains("nothing set"), "{screen}");
         assert!(screen.contains(CATALOG_REMEDY), "{screen}");
+    }
+
+    /// A catalogued checkout that is not there any more says so.
+    ///
+    /// The panel is where a project is chosen, and choosing one whose directory
+    /// has been deleted or renamed routes an instruction into a directory that
+    /// cannot be entered. It does not fail politely: the supervisor reports the
+    /// operating system refusing the working directory as
+    /// `could not start ".../claude": No such file or directory`, which reads
+    /// as the harness being missing from the machine. `jod project ls` has
+    /// explained this for a while; this screen listed it like any other row.
+    #[test]
+    fn a_project_whose_directory_is_gone_is_marked_on_the_panel() {
+        let mut a = with_catalog(&["alpha", "gone"], None);
+        a.projects_open = true;
+        a.broken_projects = ["gone".to_string()].into_iter().collect();
+
+        let screen = rendered(&a, 140, 30);
+        assert!(
+            screen.contains("gone · missing"),
+            "the row says the checkout is not there:\n{screen}"
+        );
+        assert!(
+            screen.lines().any(|l| l.contains("alpha") && !l.contains("missing")),
+            "and a healthy project is left exactly as it was:\n{screen}"
+        );
     }
 
     /// Two checkouts whose directories share a name are two rows, and the
