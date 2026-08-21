@@ -1083,7 +1083,7 @@ fn enter_conversation(
     match store.live_window(id) {
         Ok(live) if at_launch && live.is_empty() => {}
         Ok(live) => {
-            for entry in replay(&live, app.show_thinking) {
+            for entry in replay(&live, what, app.show_thinking) {
                 app.push(entry);
             }
         }
@@ -1094,7 +1094,7 @@ fn enter_conversation(
     app.scroll_to_bottom();
 }
 
-/// The main chat's live window as transcript entries.
+/// A conversation's live window as transcript entries.
 ///
 /// Pure, so what the screen shows on entering is testable without a service.
 ///
@@ -1102,38 +1102,125 @@ fn enter_conversation(
 /// sent, which is the honest thing to put on screen. A message compacted out of
 /// it is still on disk and deliberately not here — showing it would suggest the
 /// model can see something it cannot.
-fn replay(live: &[jod_core::conversation::Message], show_thinking: bool) -> Vec<Entry> {
-    use jod_core::conversation::Role;
+///
+/// Every role gets the entry the live stream would have given it, and that is
+/// the whole point of the arms below. A stored tool call is a *truncated
+/// rendering of its arguments* — `{"command":"mkdir -p …","description":"…"}` —
+/// and a stored result is the harness's JSON content array. Replayed as
+/// `Entry::Agent` they were painted as the agent's own prose, so a conversation
+/// that folded its steps away while it ran came back on re-entry as pages of
+/// JSON that `Ctrl-O` had no say over: `hidden` folds `Tool` and `ToolOut`, and
+/// those entries were no longer either one. Classifying here is what makes
+/// reading a chat back the same act as watching it happen.
+fn replay(
+    live: &[jod_core::conversation::Message],
+    what: &str,
+    show_thinking: bool,
+) -> Vec<Entry> {
+    use jod_core::conversation::{Message, Role};
     if live.is_empty() {
-        return vec![Entry::Notice(
-            "the main chat — nothing said yet. Type an instruction; it decides who does the work."
-                .into(),
-        )];
+        return vec![Entry::Notice(format!(
+            "{what} — nothing said yet. Type an instruction; it decides who does the work."
+        ))];
     }
-    let mut entries: Vec<Entry> = live
+    let mut entries: Vec<Entry> = Vec::new();
+    for message in live
         .iter()
         .filter(|message| show_thinking || message.role != Role::Thinking)
-        .map(|message| match message.role {
-            Role::User => Entry::You(message.text.clone()),
+    {
+        match message.role {
+            Role::User => entries.push(Entry::You(message.text.clone())),
             // Reasoning replays as reasoning. Folded into `Agent` it was
             // rendered as the chat's own words, so re-entering the chat turned
             // a model muttering to itself into something it had said to you —
             // and the same text read differently live and on the way back.
-            Role::Thinking => Entry::Thinking(message.text.clone()),
-            _ => Entry::Agent(message.text.clone()),
-        })
-        .collect();
+            Role::Thinking => entries.push(Entry::Thinking(message.text.clone())),
+            Role::Assistant => entries.push(Entry::Agent(message.text.clone())),
+            // A runner error or a note Jod injected. It is not the agent
+            // speaking, and `apply` already gives the same event a notice.
+            Role::System => entries.push(Entry::Notice(message.text.clone())),
+            Role::ToolCall => replay_call(&mut entries, message),
+            Role::ToolResult => replay_result(&mut entries, message),
+        }
+    }
     // The count is the live window's, not the conversation's, and the line says
     // "live" so the two are not confused: a chat with a hundred messages and
     // four live ones is a chat that was compacted, not one that lost anything.
     entries.push(Entry::Notice(format!(
-        "the main chat · {} in the live window — /new leaves it",
+        "{what} · {} in the live window — /new leaves it",
         match live.len() {
             1 => "1 message".to_string(),
             n => format!("{n} messages"),
         }
     )));
-    entries
+    return entries;
+
+    /// One stored tool call, as the same entries `AgentEvent::ToolCall` makes.
+    fn replay_call(entries: &mut Vec<Entry>, message: &Message) {
+        // A harness that named no tool still called one, and `⚙ tool · <args>`
+        // is a step a reader can fold. Dropping the message instead would lose
+        // a call the live view had shown.
+        let name = message.tool_name.clone().unwrap_or_else(|| "tool".into());
+        // A todo call *is* the plan block and gets no line of its own, exactly
+        // as while it ran — otherwise a turn that revised its plan a dozen
+        // times replays as a dozen `⚙ TodoWrite` rows.
+        if let Some(plan) = message
+            .tool_input
+            .as_ref()
+            .and_then(|i| todo::from_tool(&name, i))
+        {
+            if !app::replace_plan(entries, &plan) {
+                entries.push(Entry::Plan(plan));
+            }
+            return;
+        }
+        entries.push(Entry::Tool {
+            name: name.clone(),
+            detail: message.tool_input.as_ref().and_then(app::tool_detail),
+            failed: false,
+        });
+        if let Some(edit) = message
+            .tool_input
+            .as_ref()
+            .and_then(|i| diff::from_tool(&name, i))
+        {
+            entries.push(Entry::Diff(edit));
+        }
+    }
+
+    /// One stored tool result, as the same entries `AgentEvent::ToolResult` makes.
+    ///
+    /// Unlike the live arm this pushes the output whether or not details are
+    /// on. Live, that setting decides what is *recorded*, because an event not
+    /// kept then is gone; here the entry already exists on disk, so `hidden`
+    /// can decide what is drawn and `Ctrl-O` still has something to open.
+    fn replay_result(entries: &mut Vec<Entry>, message: &Message) {
+        // `0006_conversations` has no column for it, so the flag rides along in
+        // `tool_input` — see `Message::tool_input`.
+        let failed = message
+            .tool_input
+            .as_ref()
+            .and_then(|i| i.get("is_error"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        let name = message.tool_name.clone().unwrap_or_else(|| "tool".into());
+        // A result needs a call line above it when none was announced: a fast
+        // OpenCode tool reports only its completion, and a bare `└ Wrote file
+        // successfully.` is an answer with its question missing.
+        if failed || !app::announced_in(entries, &name) {
+            entries.push(Entry::Tool {
+                name,
+                detail: None,
+                failed,
+            });
+        }
+        if !message.text.trim().is_empty() {
+            entries.push(Entry::ToolOut {
+                text: app::first_lines(&message.text, 6),
+                failed,
+            });
+        }
+    }
 }
 
 /// Hand one typed line to the main chat.
@@ -7347,7 +7434,7 @@ mod tests {
         let id = s.main_conversation(HarnessKind::ClaudeCode, "/tmp").unwrap();
 
         // Empty: a sentence saying so, not a blank screen.
-        let empty = replay(&s.live_window(&id).unwrap(), true);
+        let empty = replay(&s.live_window(&id).unwrap(), "the main chat", true);
         assert!(
             matches!(&empty[..], [Entry::Notice(n)] if n.contains("nothing said yet")),
             "{empty:?}"
@@ -7358,7 +7445,7 @@ mod tests {
         s.append_message(&id, NewMessage::new(Role::Assistant, "started an agent"))
             .unwrap();
 
-        let entries = replay(&s.live_window(&id).unwrap(), true);
+        let entries = replay(&s.live_window(&id).unwrap(), "the main chat", true);
         // Your turns read as yours and the chat's as the chat's — a replay that
         // flattened both to prose would be a transcript of nobody.
         assert!(matches!(&entries[0], Entry::You(t) if t == "count the rust files"));
@@ -7385,13 +7472,13 @@ mod tests {
             .unwrap();
         let live = s.live_window(&id).unwrap();
 
-        let shown = replay(&live, true);
+        let shown = replay(&live, "the main chat", true);
         assert!(
             matches!(&shown[1], Entry::Thinking(t) if t == "two ways to do this"),
             "{shown:?}"
         );
 
-        let hidden = replay(&live, false);
+        let hidden = replay(&live, "the main chat", false);
         assert!(
             !hidden.iter().any(|e| matches!(e, Entry::Thinking(_))),
             "{hidden:?}"
@@ -7403,6 +7490,172 @@ mod tests {
         assert!(
             matches!(hidden.last(), Some(Entry::Notice(n)) if n.contains("3 messages")),
             "{hidden:?}"
+        );
+    }
+
+    /// A stored tool call, the way a harness leaves one behind.
+    fn call(name: &str, input: serde_json::Value) -> jod_core::conversation::NewMessage {
+        use jod_core::conversation::{NewMessage, Role};
+        NewMessage {
+            // What the store keeps: a truncated rendering of the arguments,
+            // which is the JSON that used to be painted as the chat's prose.
+            text: input.to_string(),
+            tool_name: Some(name.to_string()),
+            tool_input: Some(input),
+            ..NewMessage::new(Role::ToolCall, "")
+        }
+    }
+
+    /// A stored tool result. The error flag rides in `tool_input`, because
+    /// `0006_conversations` has no column for it.
+    fn result(name: &str, text: &str, failed: bool) -> jod_core::conversation::NewMessage {
+        use jod_core::conversation::{NewMessage, Role};
+        NewMessage {
+            tool_name: Some(name.to_string()),
+            tool_input: failed.then(|| serde_json::json!({ "is_error": true })),
+            ..NewMessage::new(Role::ToolResult, text)
+        }
+    }
+
+    /// The bug as Reljod met it: open the console, and the chat you were in
+    /// yesterday comes back as pages of `{"command":"mkdir -p …"}` and raw `ls`
+    /// output, with `Ctrl-O` unable to do anything about it.
+    ///
+    /// The steps are the same steps whether you are watching them happen or
+    /// reading them back, so they have to arrive as the same entries. `hidden`
+    /// folds `Tool` and `ToolOut` and nothing else — replayed as `Agent`, this
+    /// JSON was not a step the transcript could fold, it was the chat talking.
+    #[test]
+    fn a_replayed_tool_call_is_a_step_and_not_the_chats_own_words() {
+        use jod_core::conversation::{NewMessage, Role};
+        let s = store();
+        let id = s.main_conversation(HarnessKind::ClaudeCode, "/tmp").unwrap();
+        s.append_message(&id, NewMessage::new(Role::User, "make the folder"))
+            .unwrap();
+        s.append_message(
+            &id,
+            call("Bash", serde_json::json!({ "command": "mkdir -p racing-3d" })),
+        )
+        .unwrap();
+        s.append_message(&id, result("Bash", "total 0\ndrwxr-xr-x  2 staff", false))
+            .unwrap();
+        s.append_message(&id, NewMessage::new(Role::Assistant, "made it"))
+            .unwrap();
+
+        let entries = replay(&s.live_window(&id).unwrap(), "the main chat", true);
+        assert!(
+            matches!(&entries[1], Entry::Tool { name, detail, failed: false }
+                if name == "Bash" && detail.as_deref() == Some("mkdir -p racing-3d")),
+            "the call reads as `⚙ Bash · mkdir -p racing-3d`: {entries:?}"
+        );
+        assert!(
+            matches!(&entries[2], Entry::ToolOut { text, failed: false } if text.starts_with("total 0")),
+            "and its output as output: {entries:?}"
+        );
+        assert!(
+            !entries
+                .iter()
+                .any(|e| matches!(e, Entry::Agent(t) if t.contains("mkdir"))),
+            "and nowhere as the chat's own prose: {entries:?}"
+        );
+
+        // The fold is the point of classifying them, so assert the fold and
+        // not only the entry: a `Tool` line that still drew would have fixed
+        // the colour of the noise and left the noise.
+        let mut app = App::new(HarnessKind::ClaudeCode, None, Resume::Fresh);
+        for entry in entries {
+            app.push(entry);
+        }
+        let shown = |a: &App| (0..a.transcript.len()).filter(|i| !a.hidden(*i)).count();
+        let quiet = shown(&app);
+        app.expand_details = true;
+        assert!(
+            shown(&app) > quiet,
+            "and Ctrl-O brings the steps back that entering the chat folded away"
+        );
+    }
+
+    /// The same rule the live stream keeps: a failure is why the answer is
+    /// about to be wrong, so it survives the fold. A transcript that hid the
+    /// one step that went wrong would be worse than one that hid nothing.
+    #[test]
+    fn a_replayed_failure_is_never_folded() {
+        let s = store();
+        let id = s.main_conversation(HarnessKind::ClaudeCode, "/tmp").unwrap();
+        s.append_message(&id, call("Bash", serde_json::json!({ "command": "ls /nope" })))
+            .unwrap();
+        s.append_message(&id, result("Bash", "No such file or directory", true))
+            .unwrap();
+
+        let entries = replay(&s.live_window(&id).unwrap(), "the main chat", true);
+        let mut app = App::new(HarnessKind::ClaudeCode, None, Resume::Fresh);
+        for entry in entries {
+            app.push(entry);
+        }
+        let out = app
+            .transcript
+            .iter()
+            .position(|e| matches!(e, Entry::ToolOut { failed: true, .. }))
+            .expect("the failure is in the transcript");
+        assert!(!app.hidden(out), "and on the screen: {:?}", app.transcript);
+    }
+
+    /// A plan replays as the plan block, not as a stack of `⚙ TodoWrite` rows.
+    ///
+    /// Every revision is its own stored call, so the arm that folds them into
+    /// one block has to run on the way back too — a turn that ticked off five
+    /// items otherwise returns as five identical lists.
+    #[test]
+    fn a_replayed_plan_is_one_block_however_often_it_was_revised() {
+        let s = store();
+        let id = s.main_conversation(HarnessKind::ClaudeCode, "/tmp").unwrap();
+        for status in ["pending", "in_progress", "completed"] {
+            s.append_message(
+                &id,
+                call(
+                    "TodoWrite",
+                    serde_json::json!({ "todos": [{ "content": "scaffold", "status": status }] }),
+                ),
+            )
+            .unwrap();
+        }
+
+        let entries = replay(&s.live_window(&id).unwrap(), "the main chat", true);
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|e| matches!(e, Entry::Plan(_)))
+                .count(),
+            1,
+            "one block: {entries:?}"
+        );
+        assert!(
+            !entries.iter().any(|e| matches!(e, Entry::Tool { .. })),
+            "and no `⚙ TodoWrite` beside it: {entries:?}"
+        );
+    }
+
+    /// A manager's transcript must not sign off as the main chat.
+    ///
+    /// `enter_conversation` serves both, and the footer naming the wrong one is
+    /// how you end up typing into tetris's manager believing you are in the
+    /// chat that routes work — the one distinction the whole screen turns on.
+    #[test]
+    fn the_footer_names_the_conversation_it_is_actually_under() {
+        use jod_core::conversation::{NewMessage, Role};
+        let s = store();
+        let id = s
+            .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
+            .unwrap()
+            .id;
+        s.append_message(&id, NewMessage::new(Role::User, "scaffold it"))
+            .unwrap();
+
+        let entries = replay(&s.live_window(&id).unwrap(), "racing-3d's manager", true);
+        assert!(
+            matches!(entries.last(), Some(Entry::Notice(n))
+                if n.starts_with("racing-3d's manager ·") && !n.contains("main chat")),
+            "{entries:?}"
         );
     }
 
