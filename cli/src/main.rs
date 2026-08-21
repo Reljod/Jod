@@ -1,7 +1,7 @@
 //! `jod` — the command line over the agent harnesses.
 //!
 //! Jod does not answer prompts. It hands them to a harness (Claude Code,
-//! OpenCode, AGY), runs that harness inside its own tmux session, and turns the
+//! OpenCode, AGY) under a detached `jod-run` supervisor, and turns the
 //! harness's output into one event stream that every command here renders.
 
 mod approve;
@@ -130,16 +130,15 @@ enum Command {
     },
     /// Sign in to a harness, through the harness's own sign-in flow.
     ///
-    /// Jod holds no credentials of its own and reads none of the harness's.
-    /// What it does is run the right command with the terminal attached, so
-    /// the account lands where the harness Jod spawns will actually look for
-    /// it — which is the failure this command exists for. Signing in through
-    /// a shell alias that sets `CLAUDE_CONFIG_DIR` puts the account in a
-    /// directory Jod never sees, and every run then dies with an
-    /// authentication error against an account nobody logged in to.
+    /// Jod holds no credentials and reads none of the harness's. It runs the
+    /// right command with the terminal attached, so the account lands where the
+    /// harness Jod spawns will look for it. Signing in through a shell alias
+    /// that sets `CLAUDE_CONFIG_DIR` puts it somewhere Jod never sees, and
+    /// every run then dies authenticating against an account nobody logged in
+    /// to.
     ///
-    /// With no harness named it works through all of them, skipping any that
-    /// is already signed in.
+    /// With no harness named it works through all of them, skipping any already
+    /// signed in.
     Login {
         /// Which harness: `claude-code`, `open-code`, `agy`.
         harness: Option<String>,
@@ -166,21 +165,17 @@ enum Command {
     },
     /// Stop an agent and every agent working under it.
     ///
-    /// The signal goes to the agent's process group, so the harness and every
-    /// process still in that group — a `Bash` call, a compiler, a test run —
-    /// go with it.
+    /// The signal goes to the agent's process group, so the harness and
+    /// everything still in it — a `Bash` call, a compiler, a test run — go too.
     ///
-    /// An agent this one delegated to is not in that group, because every run
-    /// leads a session of its own, so Jod walks down to it and stops it
-    /// separately. That goes all the way down: stopping a manager stops its
-    /// workers, and stops theirs. A fleet is a tree, and a worker whose manager
-    /// has been stopped is working on something nobody is waiting for.
+    /// A delegated agent leads a session of its own and is outside that group,
+    /// so Jod walks down and stops it separately, all the way to the bottom: a
+    /// worker whose manager has been stopped is working on something nobody is
+    /// waiting for.
     ///
-    /// The main chat is the exception. Stopping it stops the chat and nothing
-    /// else, because main hands work out rather than owning any of it.
-    ///
-    /// Continuing a stopped agent starts its workers again, each in its own
-    /// session. `jod ls` lists the runs still going.
+    /// The main chat is the exception and stops alone, because it hands work
+    /// out rather than owning any. Continuing a stopped agent starts its
+    /// workers again.
     Kill { id: String },
     /// Counts and total spend across all agents.
     Report {
@@ -1611,13 +1606,11 @@ impl From<ProvenanceArg> for Provenance {
 /// How much an agent may do to the *machine*, parsed by core rather than
 /// re-declared here.
 ///
-/// This used to be a `ValueEnum` listing the levels a second time, and it
-/// drifted exactly as the note on `parse_access_arg` below predicts its
-/// neighbour would. A fourth mode was added to `PermissionPolicy` and this copy
-/// never heard about it: `--permission plan` was not something you could ask
-/// for, and the default stayed on the old `ask` after the real default had
-/// moved to `auto`. So every `jod run` went out asking for an approval nobody
-/// was there to give, and reported back that it was waiting for one.
+/// This was a `ValueEnum` listing the levels a second time, and it drifted: a
+/// fourth `PermissionPolicy` mode never reached the copy, so `--permission plan`
+/// could not be asked for and the default stayed `ask` after the real one moved
+/// to `auto`. Every `jod run` then waited for an approval nobody was there to
+/// give.
 ///
 /// One parser, in core, accepting every spelling — including the harnesses' own
 /// (`manual`, `auto`, `bypass_permissions`).
@@ -1782,29 +1775,19 @@ async fn main() -> Result<()> {
             };
             // Where the session *lives*, not where the command was typed.
             //
-            // A resumed run in the wrong directory is not a cosmetic mistake.
             // OpenCode resolves its project from `--dir` and scopes sessions to
-            // it, and `--session <id>` naming a session from another project
-            // does not error — **it hangs, silently, for ever**. Measured:
-            // `opencode run --format json --dir <other> --session <id> "…"`
-            // emitted nothing at all on either stream and was still running
-            // when killed at 90 seconds, while the identical command with the
-            // session's own `--dir` answered in under a second. That is what
-            // made a resumed OpenCode run in the parity suite produce one bare
-            // `finished` event and never terminate — the directory, not the
-            // session id, which was correct all along.
+            // it. `--session <id>` naming a session from another project does
+            // not error — **it hangs, silently, for ever**. Measured at 90
+            // seconds of nothing on either stream, against under a second with
+            // the session's own `--dir`.
             //
-            // Jod knows the answer, so it uses it. An explicit `--cwd` still
-            // wins: somebody who names a directory means it, and being told
-            // where their session lives is [`continuing_conversation`]'s job
-            // rather than this one's.
+            // An explicit `--cwd` still wins: somebody who names a directory
+            // means it.
             //
-            // A fresh run has no session to look up, and that is the case this
-            // used to get wrong. It fell through to `$HOME`, so `jod run` typed
-            // inside a repository started somewhere the caller was not — the
-            // same fault `jod main` had, in the command people reach for most.
-            // The launch directory is the answer there, exactly as it is for
-            // the console: nothing else in the invocation says where.
+            // A fresh run has no session to look up and used to fall through to
+            // `$HOME`, so `jod run` typed inside a repository started somewhere
+            // the caller was not. The launch directory is the answer, as it is
+            // for the console.
             let cwd = match (cwd, jod.store()) {
                 (Some(given), _) => given,
                 (None, Some(store)) => {
@@ -2294,15 +2277,12 @@ async fn main() -> Result<()> {
                         // Where this member's session lives, not where the wake
                         // was typed and not `$HOME`.
                         //
-                        // Every wake is a resume, so this is the case
-                        // [`session_cwd`] exists for: a resumed session handed
-                        // the wrong directory is not a cosmetic mistake, and on
-                        // OpenCode it hangs for ever rather than failing. It
-                        // used to answer `$HOME` for every member, which was
-                        // consistently wrong and only survived by being
-                        // consistent — the member had been started in `$HOME`
-                        // too. `--cwd` still wins, and the launch directory is
-                        // the fallback for a session Jod has never seen.
+                        // Every wake is a resume, which is what [`session_cwd`]
+                        // exists for: on OpenCode the wrong directory hangs for
+                        // ever rather than failing. Answering `$HOME` for every
+                        // member survived only by being consistently wrong.
+                        // `--cwd` still wins; the launch directory is the
+                        // fallback for a session Jod has never seen.
                         let resume = Resume::Session(order.session_id.clone());
                         let where_it_lives = match &cwd {
                             Some(given) => given.clone(),
@@ -3361,23 +3341,17 @@ fn project_command(jod: &Jod, what: ProjectCommand) -> Result<()> {
 
 /// The lines `jod project current` prints for one conversation.
 ///
-/// Built as strings and returned rather than printed where they are made, so
-/// the check can read the answer instead of trusting that something was
-/// written to a terminal.
+/// Returned as strings rather than printed, so the check can read the answer.
 ///
-/// The vocabulary is the `project_current` tool's, deliberately: `how` and
-/// `reason` mean here exactly what they mean there, because a CLI and a tool
-/// that disagree about what "current" is would send two people debugging the
-/// same routing decision to two different answers.
+/// The vocabulary is the `project_current` tool's: a CLI and a tool that
+/// disagree about what "current" means send two people debugging one routing
+/// decision to two different answers.
 ///
-/// The line that earns this command its place is `settled by`. Project
-/// resolution is not a label the conversation carries around — `settle_project`
-/// runs on every instruction *before* the model turn and decides which project
-/// the instruction lands on. Only an utterance naming exactly one catalogued
-/// project writes a row; one that names two writes nothing at all and leaves
-/// the conversation where it was. So the instruction shown here is the one that
-/// put this chat on this project, which is not always the last thing that was
-/// typed, and its timestamp is how you tell the difference.
+/// `settled by` is the line that earns this command its place. `settle_project`
+/// runs before every model turn, and only an utterance naming exactly one
+/// catalogued project writes a row — one naming two writes nothing. So the
+/// instruction shown is the one that put this chat on this project, which is
+/// not always the last thing typed; the timestamp is how you tell.
 fn current_project_report(store: &Store, conversation_id: &str, now_ms: i64) -> Result<Vec<String>> {
     // Named rather than left as an eight-character id. "Current" is per
     // conversation, so an answer that does not say whose project it is showing
@@ -3612,16 +3586,13 @@ fn resolve_conversation(store: &Store, typed: &str) -> Result<String> {
 
 /// Resolve a typed run-id prefix against the runs Jod knows about.
 ///
-/// Every surface *shows* an eight-character id — `jod ls`, `jod main`, the run
-/// summary printed after a spawn — and `jod watch` and `jod kill` then demanded
-/// the full uuid. `jod main` printed ``jod watch 1f0fc870`` as a hint and that
-/// hint did not work, which is the kind of detail that teaches someone the tool
-/// is lying to them.
+/// Every surface *shows* an eight-character id, and `jod watch`/`jod kill` then
+/// demanded the full uuid — so `jod main` printed a `jod watch 1f0fc870` hint
+/// that did not work.
 ///
-/// Ambiguity is refused rather than guessed, for the same reason as
-/// [`resolve_conversation`]: `jod kill` on the wrong agent is not undoable.
-/// An exact match wins outright, so a full uuid never has to be disambiguated
-/// against itself.
+/// Ambiguity is refused rather than guessed, as in [`resolve_conversation`]:
+/// `jod kill` on the wrong agent is not undoable. An exact match wins outright,
+/// so a full uuid is never disambiguated against itself.
 async fn resolve_run(jod: &Jod, typed: &str) -> Result<String> {
     if jod.agent(typed).await.is_ok() {
         return Ok(typed.to_string());
@@ -4061,30 +4032,21 @@ async fn telegram_command(jod: std::sync::Arc<Jod>, what: TelegramCommand) -> Re
             println!("\n\x1b[2m(these updates are now acknowledged and will not reach `serve`)\x1b[0m");
         }
         TelegramCommand::Serve { cwd, harness } => {
-            // `from_parts` rather than `from_env`, purely so the token comes
-            // from the same lookup `whoami` uses. Routing one of the two
-            // through the alias and not the other is how this first shipped,
-            // and the symptom was `whoami` proving the token while `serve`
-            // insisted it was unset.
+            // `from_parts` rather than `from_env`, so the token comes from the
+            // same lookup `whoami` uses — routing only one through the alias is
+            // how `whoami` proved a token that `serve` called unset.
             //
-            // Everything else `from_env` does is kept, including the refusal
-            // of an empty allowlist at startup rather than at the first
-            // message: a bot that silently answers nobody looks exactly like
-            // a bot with a bad token.
+            // Everything else `from_env` does is kept, including refusing an
+            // empty allowlist at startup rather than at the first message: a
+            // bot that silently answers nobody looks like one with a bad token.
             //
-            // **The directory is `$HOME`, on purpose: this is the one entry
-            // point that keeps it.**
-            //
-            // Every other command here now starts where it was typed, because
-            // the person typing it is standing in the directory they mean. The
-            // bridge is the exception: it runs until it is stopped, and the
-            // messages it answers arrive later from a phone, from somebody who
-            // is not standing anywhere. Tying its runs to whichever terminal
-            // happened to start it would make the answer depend on a fact
-            // nobody can see afterwards, and if it is ever put behind a service
-            // manager the launch directory is `/`, which is worse than the home
-            // directory rather than better. `--cwd` is how you place its runs,
-            // and its own help text says so.
+            // **The directory is `$HOME`, on purpose — the one entry point that
+            // keeps it.** Every other command starts where it was typed,
+            // because the person typing is standing where they mean. The bridge
+            // runs until stopped and answers messages from a phone, so tying it
+            // to whichever terminal started it makes the answer depend on a
+            // fact nobody can see later — and behind a service manager the
+            // launch directory is `/`. `--cwd` is how you place its runs.
             let mut config = Config::from_parts(
                 Some(telegram_token()?),
                 std::env::var("JOD_TELEGRAM_ALLOWED_USERS").ok(),
@@ -4663,21 +4625,18 @@ fn require_supervisor(jod: &Jod) -> Result<()> {
 
 /// The roots and secret names a `jod run` should carry into its request.
 ///
-/// Both are properties of the *thread*, not of the command line, so a run that
-/// continues a conversation inherits what that conversation was given — exactly
-/// as [`jod_core::service::prefer_conversation_settings`] does for the model and
-/// the permission. Without this the two features are storage and nothing else:
-/// `jod root add` records a directory no harness is ever granted, and
-/// `jod secret set` records a name no run is ever given.
+/// Both are properties of the *thread*, not the command line, so a run
+/// continuing a conversation inherits what that conversation was given — as
+/// [`jod_core::service::prefer_conversation_settings`] does for the model.
+/// Without this, `jod root add` records a directory no harness is granted and
+/// `jod secret set` a name no run is given.
 ///
-/// **Names, never values.** The list handed over is what the supervisor
-/// resolves at exec, out of a file only its owner can read. A value in this
-/// process would be a value in `spawn.json`, in `ps`, and in whatever logs the
-/// launcher writes.
+/// **Names, never values.** The supervisor resolves them at exec from a file
+/// only its owner can read. A value here would be a value in `spawn.json`, in
+/// `ps`, and in the launcher's logs.
 ///
-/// A fresh run has no conversation yet and therefore no roots — but it does get
-/// the global secrets, because "every session on this box" is what global
-/// means. Anything narrower would need a thread to be narrow *about*.
+/// A fresh run has no conversation and therefore no roots, but does get the
+/// global secrets — "every session on this box" is what global means.
 fn grants_for_run(
     store: &Store,
     resume: &Resume,
@@ -4706,29 +4665,21 @@ fn grants_for_run(
 /// Where the console works when `--cwd` said nothing: the directory it was
 /// launched in.
 ///
-/// Not [`jod_core::service::default_cwd`], which answers `$HOME`, and the
-/// difference is not cosmetic. A console is opened *inside* something — you
-/// `cd` to a repository and type `jod tui` — so the home directory is almost
-/// never the answer, and it was the wrong one in three places at once: every
-/// turn's harness process started in `$HOME`, the band now printing the
-/// directory would have printed `~`, and [`crate::tui::ensure_launch_root`]
-/// would have handed the conversation the whole home directory to search.
+/// Not [`jod_core::service::default_cwd`], which answers `$HOME`. A console is
+/// opened *inside* something — you `cd` to a repository and type `jod tui` — so
+/// `$HOME` was wrong in three places at once: the harness started there, the
+/// band printed `~`, and [`crate::tui::ensure_launch_root`] handed the
+/// conversation the whole home directory to search.
 ///
-/// `$HOME` remains the fallback for the case that has no launched-in
-/// directory at all — a working directory that has been deleted out from under
-/// the process, which is where `current_dir` fails.
+/// `$HOME` stays the fallback for having no launched-in directory at all, which
+/// is where `current_dir` fails.
 ///
-/// This is every entry point a person types at a terminal: the console, `jod
-/// main`, `jod chat`, `jod run` and `jod team start`. All of them are opened
-/// *inside* something, and all of them used to answer `$HOME`.
+/// Used by every entry point a person types: the console, `jod main`,
+/// `jod chat`, `jod run` and `jod team start`.
 ///
-/// Two commands deliberately do not use it, and both have a better answer than
-/// "here". A run being resumed belongs in the directory its session lives in —
-/// see [`session_cwd`], which looks that up, and which `jod run` and `jod team
-/// wake` consult before falling back to this. And `jod telegram serve` outlives
-/// the terminal that started it, so `$HOME` stays its default; the directory a
-/// bridge was launched from says nothing about a message that arrives from a
-/// phone two days later.
+/// Two commands have a better answer than "here". A resumed run belongs where
+/// its session lives — see [`session_cwd`]. And `jod telegram serve` outlives
+/// its terminal, so `$HOME` stays its default.
 fn console_cwd(given: Option<PathBuf>) -> PathBuf {
     given
         .or_else(|| std::env::current_dir().ok())

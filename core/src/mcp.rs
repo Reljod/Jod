@@ -2,20 +2,17 @@
 //! being Jod's mind.
 //!
 //! Jod has no model client and never will. What it has is *effects*:
-//! delegating, scheduling, remembering, saying what is running. MCP is the
-//! mechanism both Claude Code (`--mcp-config`) and OpenCode (`opencode mcp
-//! add`) already speak for reaching effects, so exposing Jod's own verbs over
-//! it gives one harness run that thinks *and* acts — with Jod supplying the
-//! tools and the harness supplying every judgement. The charter holds exactly:
-//! Jod owns the effects, the harness owns the reasoning.
+//! delegating, scheduling, remembering, saying what is running. Exposing them
+//! over MCP — which Claude Code and OpenCode already speak — gives one run that
+//! thinks *and* acts, Jod owning the effects and the harness the reasoning.
 //!
-//! The wire format is JSON-RPC 2.0, one object per line, over stdin and stdout.
-//! Three methods carry the whole surface — `initialize`, `tools/list`,
-//! `tools/call` — which is why there is no SDK in this file: the dependency
-//! would be bigger than the protocol it hides.
+//! JSON-RPC 2.0, one object per line, over stdin and stdout. Three methods
+//! carry the whole surface — `initialize`, `tools/list`, `tools/call` — which
+//! is why there is no SDK here: the dependency would be bigger than the
+//! protocol it hides.
 //!
-//! Two rules hold everywhere below, and both exist because the caller is a
-//! language model that may have just read something hostile:
+//! Two rules hold everywhere below, because the caller is a language model that
+//! may have just read something hostile:
 //!
 //! 1. **No tool can raise its own permissions.** [`Tool::delegate`]'s
 //!    permission is capped at the ceiling this server was started with — the
@@ -81,19 +78,16 @@ const ASK_POLL: std::time::Duration = std::time::Duration::from_millis(500);
 /// How long a **blocking** [`Tool::ask_question`] holds its run waiting for a
 /// person, when the caller does not say.
 ///
-/// Five minutes rather than `ask`'s two, because the two waits are on different
-/// things: `ask` waits for a peer that Jod itself will wake within a tick, and
-/// this waits for Reljod to look at the rail. Long enough to cover somebody
-/// finishing a sentence and turning to the screen; short enough that a question
-/// asked while nobody is at the desk costs one wait rather than a night of a
-/// model context and a tmux session held open.
+/// Five minutes rather than `ask`'s two: `ask` waits for a peer Jod will wake
+/// within a tick, this waits for Reljod to look at the rail. Long enough to
+/// finish a sentence and turn to the screen; short enough that asking while
+/// nobody is at the desk costs one wait rather than a night of held context.
 ///
-/// **There is deliberately no way to wait without a deadline.** The same rule
-/// A5 states for the bus holds here for the same reason: an agent that can wait
-/// for ever is an agent that hangs when the thing it waits for never comes, and
-/// a human who has gone to bed is exactly that. When the deadline passes the
-/// card stays open — giving up waiting is not withdrawing the question — and
-/// the answer reaches the run later, through the ordinary delivery path.
+/// **There is deliberately no way to wait without a deadline** (A5). An agent
+/// that can wait for ever hangs when the thing it waits for never comes, and a
+/// human who has gone to bed is exactly that. The card stays open when the
+/// deadline passes — giving up waiting is not withdrawing the question — and
+/// the answer reaches the run later through the ordinary delivery path.
 pub const CARD_ANSWER_DEADLINE_SECS: i64 = 300;
 
 /// The longest wait a caller may ask for. A cap rather than a default, because
@@ -361,18 +355,17 @@ pub fn catalogue() -> Vec<Tool> {
         },
         // ---- the rail -----------------------------------------------------
         //
-        // The three tools D2 names, and the reason the rail is the same on all
-        // three harnesses instead of a Claude Code feature reimplemented twice.
+        // The three tools D2 names, which is why the rail is the same on all
+        // three harnesses rather than a Claude Code feature reimplemented.
         //
         // All three sit at `read_only`, which looks wrong for something that
-        // writes and is not. A card spends no money, starts no process and
-        // costs no peer a turn — it is a sentence addressed to Reljod, and the
-        // most confined agent on the box is precisely the one whose choices
-        // most need to be visible enough to overrule. Gating emission behind
-        // `delegate` would leave the rail empty for it.
+        // writes and is not: a card spends no money, starts no process and
+        // costs no peer a turn. The most confined agent is exactly the one
+        // whose choices most need to be visible enough to overrule, and gating
+        // this behind `delegate` would leave its rail empty.
         //
-        // Note again what appears in no schema below: a conversation. A card
-        // belongs to whoever raised it, and that comes from the run — see
+        // Note what appears in no schema below: a conversation. A card belongs
+        // to whoever raised it, which comes from the run — see
         // [`Server::raiser`].
         Tool {
             name: "record_decision",
@@ -781,20 +774,17 @@ pub fn permits(ceiling: PermissionPolicy, requested: PermissionPolicy) -> bool {
 /// Why a run cannot be given a follow-up, when it cannot.
 ///
 /// A run's status is the only record of whether its session ended at the end of
-/// a sentence or in the middle of one. `killed` and `failed` both mean the
-/// harness stopped part-way through: the transcript being resumed breaks off
-/// wherever the process happened to be, and the model picks it up believing
-/// that half-finished state is its own last turn. Worse, it looks like success
-/// from outside — a new run appears, it is `running`, and nothing anywhere says
-/// the thing it is continuing was stopped on purpose.
+/// a sentence or the middle of one. `killed` and `failed` both mean part-way
+/// through: the resumed transcript breaks off wherever the process stopped and
+/// the model picks that up as its own last turn. Worse, it looks like success —
+/// a new run appears, `running`, and nothing says what it continues was stopped
+/// on purpose.
 ///
-/// Refused at the tool boundary for the same reason the permission ceiling is
-/// refused there: this is the last point at which the caller still has somewhere
-/// useful to go, and `delegate` and `open_work` are that somewhere.
+/// Refused at the tool boundary, where the caller still has somewhere useful to
+/// go: `delegate` and `open_work`.
 ///
 /// Every status is written out rather than caught by a wildcard, so a fifth one
-/// added later has to be decided on here instead of quietly inheriting whichever
-/// answer the wildcard gave.
+/// must be decided here rather than inheriting the wildcard's answer.
 fn refusal_to_continue(run_id: &str, status: AgentStatus) -> Option<String> {
     match status {
         // The ordinary target of a follow-up, and the run a second instruction
@@ -1701,22 +1691,18 @@ impl Server {
                 body: opt_str(args, "why").unwrap_or_default(),
                 options,
                 source: Some(Source::Mcp),
-                // Keyed on the **choice and the subject**, not on the prose,
-                // and the choice leads. Both halves are deliberate.
+                // Keyed on the **choice and the subject**, not the prose, with
+                // the choice first.
                 //
-                // The subject is in it because an agent that records the same
-                // decision twice — a retried turn, a rewritten `why` — should
-                // produce one row: `read_only` is a wide door and a full rail
-                // is an unread rail.
+                // The subject, so a decision recorded twice — a retried turn, a
+                // rewritten `why` — produces one row. `read_only` is a wide
+                // door and a full rail is an unread rail.
                 //
-                // The choice is in it, and first, because a decision that was
-                // *reconsidered* is not a repeat. Keyed on the subject alone,
-                // "chat DB → postgres" would be swallowed by the earlier "chat
-                // DB → sqlite" and the rail would show a choice that is no
-                // longer in force, which is worse than either a duplicate or a
-                // missing card. It leads so that the truncation `dedupe_key`
-                // applies can only ever cost the subject's tail, never the part
-                // that changes when an agent changes its mind.
+                // The choice, because a decision *reconsidered* is not a
+                // repeat: on the subject alone, "chat DB → postgres" would be
+                // swallowed by the earlier "chat DB → sqlite" and the rail
+                // would show a choice no longer in force. It leads so
+                // `dedupe_key`'s truncation can only cost the subject's tail.
                 dedupe_key: Some(dedupe_key(
                     CardKind::Decision,
                     &format!("{chosen} for {title}"),
@@ -2372,20 +2358,16 @@ impl Server {
             ));
         }
 
-        // Inherited, not chosen here. This used to ask for `accept_edits`
-        // outright and cap it, which reads as a safe default and is not one: a
-        // main chat the operator had put in `auto` opened all of its background
-        // work one level down, in a mode where headless Claude Code has nobody
-        // to ask and refuses `git init`, `pnpm -v` and every other mutation.
-        // The mode on the status bar never reached the process doing the work,
-        // and the run reported the refusals as its own failures.
+        // Inherited, not chosen here. Asking for `accept_edits` and capping it
+        // reads as a safe default and is not: a main chat the operator put in
+        // `auto` opened its background work one level down, where headless
+        // Claude Code has nobody to ask and refuses every mutation. The mode on
+        // the status bar never reached the process doing the work.
         //
-        // The ceiling *is* the operator's answer. It arrives from the run that
-        // owns this server — see [`crate::mcp_config::server_args`] — so
-        // inheriting it carries `auto` down to the child and still stops a
-        // server started deliberately low from handing out more than it holds.
-        // An explicit argument overrides it, capped the same way `delegate`'s
-        // is, so a caller may ask for *less* without asking anybody.
+        // The ceiling *is* the operator's answer, arriving from the run that
+        // owns this server — see [`crate::mcp_config::server_args`]. An
+        // explicit argument overrides it, capped as `delegate`'s is, so a
+        // caller may ask for *less* without asking anybody.
         let permission = self.permission_arg(args, self.max_permission)?;
         let mut opening = crate::orchestrator::Opening::new(instruction, checkout)
             .on(harness)
@@ -2771,21 +2753,16 @@ impl CanWrite {
 /// Whether the session calling `claim_worktree` can write in the worktree it
 /// has just been handed.
 ///
-/// **Not a probe, deliberately.** Writing a file into the worktree and removing
-/// it again is the obvious implementation and it is worse than nothing here:
-/// Jod created that directory itself, moments earlier, from this very process,
-/// so the probe answers "can Jod write here" — which was never in doubt — and
-/// answers it "yes" in precisely the case where the session cannot. Measured on
-/// the run that prompted this: the harness was refused the worktree, and a probe
-/// from a Jod-shaped process on the same directory succeeded immediately. A
-/// check that cannot fail is worse than no check, because it is quoted as
-/// evidence.
+/// **Not a probe, deliberately.** Writing a file and removing it answers "can
+/// Jod write here", which was never in doubt — and answers "yes" in exactly the
+/// case where the session cannot. Measured: the harness was refused the
+/// worktree while a Jod-shaped probe on the same directory succeeded. A check
+/// that cannot fail is worse than none, because it gets quoted as evidence.
 ///
-/// What it reads instead is `runs/<id>/spawn.json`, the record of the argument
-/// list and working directory the process was actually launched with. That file
-/// is written before the supervisor starts anything and is never edited, so it
-/// says what the harness got rather than what Jod's tables say it should have
-/// got — and the gap between those two is the whole of the bug being reported.
+/// It reads `runs/<id>/spawn.json` instead — the argument list and working
+/// directory the process was actually launched with, written before the
+/// supervisor starts and never edited. That says what the harness got rather
+/// than what Jod's tables say it should have, and the gap is the bug.
 fn can_write(run_id: &str, worktree: &std::path::Path) -> CanWrite {
     let path = crate::paths::spawn_path(run_id);
     let plan: crate::runner::SpawnPlan = match std::fs::read(&path) {
@@ -2843,27 +2820,22 @@ pub enum Identity {
 
 /// Work out which run this MCP server belongs to.
 ///
-/// **Read this before simplifying it.** The obvious version of this function
-/// takes the run id as an argument, and that version is wrong in a way that is
-/// invisible until it matters: sender identity is the one thing an agent must
-/// not be able to choose, and an argument — or a flag, or an environment
-/// variable it can reach — is only as trustworthy as whatever set it. A model
-/// that can write its own `from` can send as anyone on the team.
+/// **Read this before simplifying it.** Taking the run id as an argument is the
+/// obvious version and it is wrong: sender identity is the one thing an agent
+/// must not be able to choose, and an argument, flag or reachable environment
+/// variable is only as trustworthy as whatever set it. A model that can write
+/// its own `from` can send as anyone on the team.
 ///
-/// So the authority here is the **process group**, and nothing else is. The
-/// supervisor `setsid`s itself into its own session and leads that group; the
-/// harness runs in it, and so does every MCP server the harness starts. A
-/// process cannot move itself into another session's group — that is a kernel
-/// rule, not a convention — so the group id *is* the run, and no amount of
-/// arguing changes which group a process is in.
+/// So the authority is the **process group** and nothing else. The supervisor
+/// leads its own session; the harness and every MCP server it starts run in it.
+/// A process cannot move itself into another session's group — a kernel rule,
+/// not a convention — so the group id *is* the run.
 ///
-/// [`crate::mcp_config::RUN_ID_ENV`] is **enrichment, never authority**. It is
-/// pinned by whatever launched the run, before the model existed, and it is
-/// useful for exactly one case: a group the store has no row for. Where both
-/// answer and they **disagree**, this returns [`Identity::Disputed`] and every
-/// tool that needs a sender refuses. Quietly preferring either one would turn a
-/// misconfiguration — or an attempt at one — into a wrong answer that keeps
-/// working, which is the failure mode worth spending a refusal on.
+/// [`crate::mcp_config::RUN_ID_ENV`] is **enrichment, never authority**, useful
+/// for one case: a group the store has no row for. Where the two **disagree**
+/// this returns [`Identity::Disputed`] and every tool needing a sender refuses.
+/// Quietly preferring either turns a misconfiguration — or an attempt at one —
+/// into a wrong answer that keeps working.
 pub fn identify(store: &Store, claimed: Option<&str>) -> Identity {
     // SAFETY: `getpgrp` takes no arguments, touches no memory and cannot fail.
     let pgid = unsafe { libc::getpgrp() };
@@ -5147,18 +5119,15 @@ mod tests {
     /// **The check for this change.** A session that cannot write to the
     /// worktree it just claimed is told so, by name, in the answer it acts on.
     ///
-    /// This is not a test that writing works — whether a work session can ever
-    /// write to a claimed worktree is finding O1, it is still open, and closing
-    /// it is a decision rather than a patch. This is a test that the failure is
-    /// *visible*. The run that prompted it claimed a worktree, wrote nothing,
-    /// committed nothing and finished `done` with no error recorded anywhere;
-    /// the only way anyone found out was by opening the worktree afterwards and
-    /// seeing one `README.md` and one `init` commit.
+    /// Not a test that writing works — whether a work session can ever write to
+    /// a claimed worktree is finding O1 and still open. This tests that the
+    /// failure is *visible*. The run that prompted it claimed a worktree, wrote
+    /// nothing, and finished `done` with no error recorded anywhere.
     ///
     /// The arrangement below is the real one, not one built to fail: the
-    /// session is launched with the checkout granted and nothing else, which is
-    /// exactly what `prepare_work` does, and the worktree is then cut somewhere
-    /// else entirely under `JOD_HOME`.
+    /// session is launched with the checkout granted and nothing else, exactly
+    /// as `prepare_work` does, and the worktree is cut elsewhere under
+    /// `JOD_HOME`.
     #[test]
     fn a_session_that_cannot_write_to_its_claimed_worktree_is_told_so() {
         let Some(on) = on_a_repo("mcp-unwritable") else {

@@ -323,21 +323,16 @@ impl Wrapped {
 /// Breaks `typed` into rows that fit a field `field` columns wide, with the
 /// caret sitting before character `cursor`.
 ///
-/// Rows are filled by column, not by character. A Japanese ideograph or an
-/// emoji paints two columns, so a row of thirty-two characters can paint
-/// thirty-six columns; the box is only as wide as it is, and the paragraph
-/// clips whatever runs past its border. That clipping is silent, which is how
-/// a line ending in `FFFF` came back reading `F` at forty columns. Counting
-/// the columns each character costs puts the break where the terminal is
-/// going to put it anyway.
+/// Rows are filled by column, not by character, because a wide glyph paints two
+/// columns and the paragraph clips silently past its border — which is how a
+/// line ending in `FFFF` came back reading `F` at forty columns.
 ///
 /// A character whose second cell would land past the edge starts the next row
-/// rather than being half drawn. A combining accent costs no column of its
-/// own, so it never starts a row and stays with the letter it belongs to.
+/// rather than being half drawn. A combining accent costs no column, so it
+/// stays with the letter it belongs to.
 ///
-/// The caret has its own term because it sits one past the last character:
-/// type exactly to the end of a row and the caret belongs on the next one,
-/// which has to exist before it can be drawn there.
+/// The caret has its own term because it sits one past the last character: type
+/// exactly to the end of a row and the next row has to exist first.
 fn wrap_composer(typed: &[char], field: usize, cursor: usize) -> Wrapped {
     let mut starts = vec![0usize];
     let mut caret = (0usize, 0usize);
@@ -1243,19 +1238,14 @@ const BANNER_WIDTH: u16 = 6 + 1 + 6 + 1 + 6 + 1 + 2 + 1 + 6 + 1 + 6;
 /// decoration rather than state.
 ///
 /// Palette indices rather than the sixteen named colours, because orange is not
-/// one of the sixteen: `LightRed` is what a terminal calls a brighter red, and
-/// an orange head with red highlights needs two warms that are actually
-/// different hues. These are the xterm-256 slots, the one extension every
-/// terminal anybody runs a TUI in has had for twenty years.
+/// one of the sixteen and an orange head with red highlights needs two warms
+/// that are genuinely different hues. xterm-256 is the one extension every
+/// terminal has had for twenty years.
 ///
-/// The head is *filled* rather than outlined, which is what lets the eyes and
-/// teeth be white: they sit on a painted orange face rather than on the
-/// terminal's own background, so they read on a light theme as well as a dark
-/// one. The cost is paid under `NO_COLOR`, where the fill flattens to one
-/// silhouette — so every feature is cut with a half-block as well as coloured.
-/// The crown crenellates, the pupils, nose and fangs are notches out of an
-/// otherwise solid head, and the chin is a row of points: with the colour off
-/// the drawing is still a spiky head over a small body.
+/// The head is *filled* rather than outlined, so the eyes and teeth sit on a
+/// painted face and read on a light theme as well as a dark one. The cost is
+/// paid under `NO_COLOR`, where the fill flattens — so every feature is also
+/// cut with a half-block, leaving a spiky head over a small body.
 const MANE: Color = Color::Indexed(208);
 const SPIKE: Color = Color::Indexed(196);
 const FACE: Color = Color::Indexed(215);
@@ -1297,29 +1287,22 @@ impl Pose {
 /// Jod's mascot: a small green lion, sitting, under a spiky mane several sizes
 /// too big for it.
 ///
-/// Drawn in the same block characters as the wordmark so the two read as one
-/// lockup rather than as clip-art dropped beside a logo. Only block elements
-/// appear in the art — box-drawing and geometric-shape codepoints are East
-/// Asian Ambiguous, and a terminal that renders one of them double-width would
-/// tear a hole in a picture whose rows all have to be the same width.
+/// Block elements only — box-drawing and geometric-shape codepoints are East
+/// Asian Ambiguous, and a terminal rendering one double-width would tear a hole
+/// in a picture whose rows must all be the same width.
 ///
-/// **Four rows, against the wordmark's five.** The lion is the companion mark
-/// and the lettering is the name, so the lion is the smaller of the two: at any
-/// larger it stops standing *beside* the word and starts standing *over* it. A
-/// row of the terminal is worth two columns, so four rows is a drawing eight
-/// units tall — enough for a crown, a pair of eyes, a muzzle and a body, and
-/// nothing spare. Every feature below is therefore one row or half of one.
+/// **Four rows, against the wordmark's five**, so the companion mark stands
+/// beside the name rather than over it. That leaves room for a crown, eyes, a
+/// muzzle and a body and nothing spare.
 ///
-/// The mane alternates a tall red spike with a short orange one, because a
-/// single row of even points reads as a saw blade and it is the *ragged* edge
-/// that reads as fur. The eyes are three columns wide out of eleven — far too
-/// big for a real lion, which is the entire point — and the body is a green nub
-/// with a tail, because a body drawn to scale reads as a lion and a body drawn
-/// far too small reads as a cub, which is the one of the two that is cute.
+/// The mane alternates a tall red spike with a short orange one, because an
+/// even row of points reads as a saw blade and the ragged edge is what reads as
+/// fur. The eyes are far too big and the body far too small on purpose: that is
+/// the difference between a lion and a cub.
 ///
-/// The twelfth column is blank in every pose: it is where the scratching paw
-/// goes, and a grid that grew a column when the paw came out would shove the
-/// wordmark sideways four times a second.
+/// The twelfth column is blank in every pose — it is where the scratching paw
+/// goes, and a grid that grew a column would shove the wordmark sideways four
+/// times a second.
 const SITTING: Pose = Pose {
     art: &[
         "█▄█▄█▄█▄█▄█ ",
@@ -1453,20 +1436,15 @@ fn mascot_spans(art: &'static str, stencil: &str, into: &mut Vec<Span<'static>>)
 
 /// Which drawing of the mascot this tick gets.
 ///
-/// The mascot is the only thing on a fresh screen that can say the fleet is
-/// working, so it earns its place twice: while anything is running it scratches
-/// at the itch, and otherwise it sits, blinks, and roars once every twelve
-/// seconds. Ticks are quarter-seconds, so every number below is one.
+/// While anything runs it scratches; otherwise it sits, blinks, and roars every
+/// twelve seconds. Ticks are quarter-seconds, so every number below is one.
 ///
-/// Deliberately a pure function of the tick rather than a stored pose index.
-/// The splash is not always on screen, and an index that advanced on render
-/// would freeze mid-scratch the moment you opened a workspace and pick up from
-/// there minutes later.
+/// A pure function of the tick rather than a stored pose index: the splash is
+/// not always on screen, and an index advanced on render would freeze
+/// mid-scratch and resume there minutes later.
 ///
-/// This costs nothing the TUI was not already paying: `event_loop` redraws on
-/// every tick regardless, for the spinner and the elapsed clock, and ratatui
-/// diffs the frame it built against the last one — so the ten seconds the
-/// mascot spends sitting perfectly still write no bytes to the terminal at all.
+/// Costs nothing extra — `event_loop` already redraws every tick for the
+/// spinner, and ratatui diffs frames, so a still mascot writes no bytes.
 fn mascot_pose(app: &App) -> &'static Pose {
     if app.busy || app.running() > 0 {
         return match app.tick % 8 {
@@ -1485,15 +1463,13 @@ fn mascot_pose(app: &App) -> &'static Pose {
 /// The lion standing to the left of `letters`, or `None` if the two will not
 /// fit side by side in `width`.
 ///
-/// Beside rather than above, because stacking them costs the height of both and
-/// this screen has an input box to seat underneath. Side by side the whole
-/// lockup is only as tall as the taller half, which is the lettering.
+/// Beside rather than above, because stacking costs the height of both and this
+/// screen has an input box to seat underneath.
 ///
-/// The two are aligned on a shared ground line rather than centred on each
-/// other: the lion has feet and the letters have a baseline, and a lion floated
-/// half a row off the bottom reads as a sticker rather than as something
-/// standing next to a word. The lettering takes the middle of whatever is left,
-/// which matters only in the narrow fallback where it is a single line.
+/// Aligned on a shared ground line rather than centred on each other: the lion
+/// has feet and the letters have a baseline, and a lion floated half a row off
+/// the bottom reads as a sticker rather than as something standing beside a
+/// word.
 fn lockup(pose: &'static Pose, letters: &[String], width: u16) -> Option<Vec<Line<'static>>> {
     let letters_wide = letters.iter().map(|l| l.chars().count()).max().unwrap_or(0) as u16;
     if width < pose.width() + LOCKUP_GAP + letters_wide {
@@ -1586,21 +1562,15 @@ fn splash_where(app: &App, width: usize) -> Option<String> {
 
 /// Whether this counts as a new session for rendering.
 ///
-/// It cannot be "the transcript is empty": `event_loop` pushes a hint at
-/// startup and `/new` pushes "new conversation", so the transcript is never
-/// literally empty and the splash would never appear at all. Nor can it be
-/// "nothing but notices" — that was the first attempt, and it swallowed every
-/// command whose whole answer is notices (`/root`, `/config`, `/sessions`, the
-/// delegation confirmation, most errors): the splash kept the column and
-/// painted over real output, so a cold session's first command rendered as
-/// nothing at all.
+/// Not "the transcript is empty" — startup and `/new` both push a line, so the
+/// splash would never appear. Not "nothing but notices" either: that swallowed
+/// every command whose whole answer is notices (`/root`, `/config`,
+/// `/sessions`), painting the splash over real output.
 ///
 /// So the test is "nothing but [`Entry::Hint`]" — the lines Jod prints on its
-/// own account. That is true at startup, true again after `/new`, and false
-/// the instant *anything* answers something the user did. Watching another run
-/// is excluded outright: that transcript belongs to somebody else's
-/// conversation, and its emptiness says the run has not spoken yet, not that
-/// you are starting fresh.
+/// own account. True at startup and after `/new`, false the instant anything
+/// answers something the user did. Watching another run is excluded: that
+/// transcript's emptiness means the run has not spoken yet.
 fn fresh(app: &App) -> bool {
     app.watching.is_none()
         && !app
@@ -1738,18 +1708,14 @@ const HEADER_FITS: u16 = 48;
 /// build you launched, who is answering, what he is doing about it, and where.
 /// Returns what is left of `area` underneath it.
 ///
-/// The mascot used to live on the splash alone, which put it on screen exactly
-/// while nothing was happening and took it away the moment work started — the
-/// one time a mascot has something to say. Over the transcript it stays for the
-/// whole session and scratches through every turn, so the work on screen reads
-/// as *his*: the lion is the one at the keyboard rather than a sticker on the
-/// welcome screen. The activity line sits directly under his chin for the same
-/// reason — a spinner belongs to a character, not to a chrome row.
+/// On the splash alone, the mascot appeared exactly while nothing was happening
+/// and vanished the moment work started. Over the transcript it stays for the
+/// whole session, so the work reads as *his*. The activity line sits under his
+/// chin for the same reason: a spinner belongs to a character, not a chrome row.
 ///
-/// The status bar states the same two facts on one row, and the overlap is
-/// deliberate rather than an oversight. The band is the first thing a short
-/// terminal drops; the bar is the row that is always there, on every workspace.
-/// Chrome that can vanish must never be the only place a fact is stated.
+/// The status bar repeats the same two facts deliberately. The band is the
+/// first thing a short terminal drops; the bar is always there. Chrome that can
+/// vanish must never be the only place a fact is stated.
 fn draw_header(f: &mut Frame, app: &App, area: Rect) -> Rect {
     if area.height < HEADER_SEATS || area.width < HEADER_FITS {
         return area;
@@ -2285,11 +2251,10 @@ fn draw_keybar(f: &mut Frame, app: &App, area: Rect) {
 /// press a key to see is one you will be wrong about exactly when it matters.
 /// What the status row says about the microphone.
 ///
-/// The microphone stays on for as long as it is wanted, which makes *forgetting
-/// it is on* the failure this line exists to prevent — a live microphone in a
-/// room having a different conversation. So it is unmissable, it says how long,
-/// and it moves: the meter tracks what is being heard right now, which is the
-/// only part that distinguishes a working microphone from a dead one.
+/// The microphone stays on until switched off, so *forgetting it is on* — a
+/// live microphone in a room having a different conversation — is the failure
+/// this prevents. Unmissable, it says how long, and the meter moves: that last
+/// part is the only thing distinguishing a working microphone from a dead one.
 fn dictation_badge(app: &App) -> Option<String> {
     let Dictation::Listening {
         since_ms,
@@ -2415,31 +2380,22 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
 /// Two strings on one row: **the right one is reserved first** and the left
 /// gets what is left over.
 ///
-/// Regression, and the argument order was the whole bug. This used to measure
-/// the left half and drop the right half whole when the rest would not fit —
-/// so at 80 columns, an entirely ordinary terminal, Chat, Fleet and Memory
-/// printed their verbs and stopped saying how to leave. `keys.rs` states the
-/// condition it broke: a screen whose way out is not printed is a trap rather
-/// than a shortcut.
+/// The argument order was the whole bug. Measuring the left half first and
+/// dropping the right half whole meant that at 80 columns — an ordinary
+/// terminal — Chat, Fleet and Memory printed their verbs and stopped saying how
+/// to leave.
 ///
-/// The invariant is therefore the exit, and the verb list is best-effort. A
-/// screen showing three of its five verbs is merely terse; a screen with no way
-/// out is a screen you have to kill the terminal to leave. The left half is
-/// elided rather than truncated, because `keys::keybar` budgets its own text
-/// and a half-word cut mid-chord teaches a key that does not exist.
+/// So the exit is the invariant and the verb list is best-effort: a terse
+/// screen is fine, a screen you must kill the terminal to leave is not. The
+/// left half is elided rather than truncated, because a half-word cut mid-chord
+/// teaches a key that does not exist.
 ///
-/// **`keys::verb_budget` mirrors the arithmetic below** — `width - right - 3`,
-/// one space of margin at each end and one between the halves. Two files have
-/// to agree on those three columns: widen the padding here and the keybar hands
-/// back a string this function then elides *whole*, so a screen loses all its
-/// verbs rather than one.
-///
-/// `two_ends_accepts_a_left_half_of_exactly_the_budgeted_width` is what fails
-/// if they drift: it asks `keys::verb_budget` for the number and builds a left
-/// half of exactly that width. Rendering a real keybar does not catch it —
-/// `keys::keybar` drops whole verbs, so it almost always lands a few columns
-/// under its budget and quietly absorbs the disagreement until the one screen
-/// whose verbs happen to end on the boundary.
+/// **`keys::verb_budget` mirrors the arithmetic below** — `width - right - 3`.
+/// Widen the padding here and the keybar hands back a string this elides
+/// *whole*, losing every verb rather than one.
+/// `two_ends_accepts_a_left_half_of_exactly_the_budgeted_width` catches the
+/// drift; rendering a real keybar does not, because it usually lands a few
+/// columns under budget and absorbs the disagreement.
 fn two_ends(left: &str, right: &str, width: u16, colour: Color) -> Line<'static> {
     let width = width as usize;
     let left_len = left.chars().count();
@@ -2810,14 +2766,14 @@ fn draw_confirm_reload(f: &mut Frame) {
 /// Three things distinguish it from [`draw_prompt`], and each is a rule from
 /// `secret.rs` made visible:
 ///
-/// - the field shows `secret::masked`, never the characters — a shoulder, a
-///   screen share and a recorded terminal are all ordinary, and this is the
-///   one part of the flow a user cannot undo afterwards;
+/// - the field shows `secret::masked`, never the characters — a shoulder or a
+///   recorded terminal is ordinary, and this is the one part of the flow a user
+///   cannot undo afterwards;
 /// - the destination is printed *above* the field, because the moment to learn
-///   where a production token is going is before pasting it, not after;
-/// - the border is `WARN` rather than `USER`, so the one overlay in this
-///   program that must not be typed into absent-mindedly does not look like
-///   the one that asks for a schedule's name.
+///   where a production token is going is before pasting it;
+/// - the border is `WARN` rather than `USER`, so the one overlay that must not
+///   be typed into absent-mindedly does not look like the one asking for a
+///   schedule's name.
 fn draw_secret(f: &mut Frame, name: &str, scope: jod_core::secrets::Scope, value: &secret::Typed) {
     let destination = secret::destination(name, scope);
     let mut lines: Vec<Line> = vec![Line::from("")];
@@ -2940,15 +2896,11 @@ fn draw_which_key(f: &mut Frame, app: &App) {
 /// focused screen's verbs sends you to the source.
 ///
 /// **It spills into columns rather than off the bottom.** Fleet's keymap is 46
-/// rows; `centred` clamps a panel to the terminal, so at 80×30 it drew the
-/// first 28 and dropped the rest — the whole `anywhere` section — with nothing
-/// on screen to say so. The screen's own verbs survived only because
-/// `keys::keymap` happens to put them first, which made a discoverability
-/// preference silently load-bearing for correctness. It is a preference again:
-/// the layout below shows everything that fits in as many columns as the window
-/// affords, and *counts what it still cannot show* rather than dropping it
-/// quietly. Help that lies about being complete is worse than no help, because
-/// you stop looking.
+/// rows, and `centred` clamps to the terminal — so at 80×30 it drew 28 and
+/// dropped the whole `anywhere` section silently, the screen's own verbs
+/// surviving only because `keys::keymap` happens to list them first. So the
+/// layout uses as many columns as the window affords and *counts* what it still
+/// cannot show. Help that lies about being complete is worse than none.
 fn draw_keymap(f: &mut Frame, app: &App) {
     // Whichever layer actually has the keyboard, for the reason the overlay is
     // screen-first at all: help that omits what is in force sends you to the
@@ -3860,25 +3812,18 @@ fn main_detail(app: &App, width: u16) -> Vec<Line<'static>> {
 
 /// A row's variable text and its trailing marker, fitted together.
 ///
-/// **The marker is the invariant; the text is best-effort.** This is the
-/// `two_ends` ruling one level down. Markers used to be pushed and left for the
-/// widget to clip — `← on scr` at eighty columns, a bare `← ` at 150, `← whe`
-/// on the graph trail, and worst `← n` for `← needs you`. Dropping them whole
-/// fixed the lie but kept the priority backwards: `← needs you` then vanished
-/// exactly when a line ran long, which is precisely when something worth
-/// saying had happened. A marker whose entire job is to say a person is
-/// required cannot be the half that yields.
+/// **The marker is the invariant; the text is best-effort** — `two_ends` one
+/// level down. Left to the widget, markers clipped into lies: `← n` for
+/// `← needs you`. Dropping them whole fixed the lie but kept the priority
+/// backwards, so `← needs you` vanished exactly when a line ran long, which is
+/// when something worth saying had happened.
 ///
-/// So the marker's width is reserved first, and the text is `cut` to what
-/// remains. `cut` rather than a silent clip because it *says* it cut: content
-/// that shrinks visibly is honest, where a marker that disappears tells you
-/// nothing. That asymmetry is the whole reason the two halves are treated
-/// differently.
+/// So the marker's width is reserved first and the text is `cut` to what
+/// remains. `cut` rather than a silent clip because it *says* it cut.
 ///
-/// The one exception is a row too narrow to hold both: below `LEAST_TEXT` the
-/// marker is dropped instead, because a row that is all marker and no name has
-/// stopped saying *which* run it is talking about, and the marker's meaning
-/// depends on knowing that.
+/// The exception is a row too narrow for both: below `LEAST_TEXT` the marker
+/// goes instead, because a row that is all marker and no name has stopped
+/// saying which run it is about.
 fn fit_row(used: usize, text: &str, marker: &str, room: usize) -> (String, bool) {
     let for_text = room.saturating_sub(used);
     let marker_len = marker.chars().count();
@@ -3896,23 +3841,18 @@ const LEAST_TEXT: usize = 12;
 /// The delivery gutter: one cell at the far left of a fleet row, saying that
 /// the reply this run owed somebody never arrived, or may have arrived twice.
 ///
-/// **In the gutter, and blank on almost every row.** A run started from the TUI
-/// reports into the transcript you are already reading and owes nobody
-/// anything, so `Verdict::Nothing` is the common case and gets a space — the
-/// same argument that keeps the compaction hint quiet until it is worth having.
-/// A marker on every row is a marker nobody reads, and this one has to survive
-/// being the only thing on the screen that is wrong.
+/// **Blank on almost every row.** A run started from the TUI owes nobody
+/// anything, so `Verdict::Nothing` gets a space: a marker on every row is a
+/// marker nobody reads, and this one must survive being the only wrong thing on
+/// screen.
 ///
-/// Left gutter rather than appended after the name, for two reasons the row
-/// itself proves. There is no room at the end: at the design width the master
-/// pane gives the name ten cells and is already cutting it. And a fixed column
-/// at the start is where a scan begins — the precedent is the activity feed's
-/// unread dot, four hundred lines below.
+/// Left gutter rather than after the name, because there is no room at the end
+/// — the master pane already cuts the name to ten cells — and a fixed column at
+/// the start is where a scan begins.
 ///
-/// The glyph comes from `Verdict`, never from a match written here: a second
-/// surface inventing its own marks is how two screens come to disagree about
-/// what `✗` means. `marks_a_row` decides *whether* to draw, and it is narrower
-/// than `is_trouble` on purpose — a reply still in flight is not yet news.
+/// The glyph comes from `Verdict`, never a match written here, or two screens
+/// come to disagree about what `✗` means. `marks_a_row` decides *whether* to
+/// draw and is narrower than `is_trouble`: a reply in flight is not yet news.
 fn delivery_gutter(verdict: super::delivery::Verdict) -> Span<'static> {
     if !verdict.marks_a_row() {
         return Span::raw(" ");
@@ -5106,21 +5046,16 @@ fn page<'a>(ws: Workspace, app: &App, lines: Vec<Line<'a>>, width: u16) -> Parag
 /// A `·`-joined verb list, cut back to **whole verbs** so it fits inside a box
 /// `width` cells wide.
 ///
-/// Regression, same family as the keybar's and worse for being invisible at the
-/// design size. `keys::footer(Fleet)` is 58 cells and the master pane is 46 at
-/// 100 columns, so the fleet's bottom border read `… r resume · d d` — `d d` is
-/// a key that does not exist. It was fine at 80, where the pane is full width
-/// because `split` has not engaged, and fine again at 150 where the pane is
-/// wide enough; the broken band is roughly 92 to 140, which brackets the
-/// stated design width. A clipped title is cosmetic. A clipped *keymap* teaches
-/// a chord nobody can press.
+/// Same family as the keybar's regression and worse for being invisible at the
+/// design size: `keys::footer(Fleet)` is 58 cells against a 46-cell pane at 100
+/// columns, so the border read `… r resume · d d` — a key that does not exist.
+/// Fine at 80 and at 150; broken roughly 92 to 140, which brackets the design
+/// width. A clipped title is cosmetic; a clipped keymap teaches a dead chord.
 ///
-/// No `? more` marker here, unlike `keys::keybar`. The footer is by
-/// construction a repeat of the first few verbs already printed on the bar two
-/// rows below, so nothing it drops is only taught here, and a second marker two
-/// rows from the first is noise. That is also why the fitting lives in `ui`
-/// rather than in `keys`: with no marker to append this is only "make text fit
-/// a box", which is a rendering concern and not a keymap one.
+/// No `? more` marker, unlike `keys::keybar`: the footer repeats verbs already
+/// on the bar two rows below, so nothing it drops is taught only here. That is
+/// also why the fitting lives in `ui` — with no marker to append this is just
+/// making text fit a box.
 fn fit_verbs(text: &str, width: u16) -> String {
     // The two border cells the title is drawn between.
     let room = (width as usize).saturating_sub(2);
@@ -6295,29 +6230,22 @@ mod tests {
 
     /// T1: a line with a double-width character in it lost text at the wrap.
     ///
-    /// The composer used to fill each row with a fixed number of characters
-    /// and assume that number of columns had been used. A Japanese ideograph
-    /// or an emoji paints two columns, so a row of thirty-two characters could
-    /// paint thirty-six columns into a field thirty-two wide. The paragraph
-    /// clipped the overflow at the border and the characters that fell off
-    /// were simply gone: at forty columns `FFFF` came back as `F`.
+    /// The composer filled rows by character count and assumed that many
+    /// columns were used, so thirty-two wide characters painted thirty-six
+    /// columns into a field of thirty-two and the overflow was clipped away: at
+    /// forty columns `FFFF` came back as `F`.
     ///
-    /// Read off the painted cells rather than off any length the code
-    /// computes, because a computed length is the thing that was wrong.
+    /// Read off the painted cells, not any computed length — a computed length
+    /// is what was wrong.
     ///
-    /// Five cases. The first is the straddling one, the worst version, where
-    /// the wide character's second cell falls past the edge and the character
-    /// vanishes whole. The next two are the lines from the report. The last
-    /// two are the twins that already wrapped correctly — the emoji line and
-    /// the plain ASCII line — and they are here so that a fix cannot pass by
-    /// breaking every line earlier than it needs to.
+    /// Five cases: the straddling one, the two lines from the report, and two
+    /// that already wrapped correctly, so a fix cannot pass by wrapping
+    /// everything early.
     ///
-    /// Each case is checked twice over. Every character has to survive
-    /// somewhere in the box, which is what the bug broke; and the box has to
-    /// use the number of rows the text actually needs, which is what stops a
-    /// fix wrapping harder to be safe. Spaces are dropped from the first
-    /// comparison because a row is padded out to the right border with blanks,
-    /// and a blank there cannot be told apart from a space someone typed.
+    /// Each is checked twice: every character survives somewhere in the box,
+    /// and the box uses the rows the text actually needs — the second is what
+    /// stops a fix wrapping harder to be safe. Spaces are dropped from the
+    /// first comparison, since padding blanks cannot be told from typed ones.
     #[test]
     fn a_wide_character_at_the_wrap_keeps_every_character() {
         // At forty columns the field is thirty-two, so each of these needs two
