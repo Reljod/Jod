@@ -91,6 +91,13 @@ pub enum Action {
     /// model, and Jod has no model client — so the first half is a *run* on the
     /// harness being left. See [`begin_crossing`].
     SwitchHarness(HarnessKind),
+    /// Summarise this conversation and carry on from the summary, on the same
+    /// harness.
+    ///
+    /// The same shape as [`Action::SwitchHarness`] and for the same reason: a
+    /// summary needs a model and Jod has no model client, so the first half is a
+    /// run. See [`begin_compaction`].
+    Compact,
     /// Write a setting down on the conversation it belongs to.
     ///
     /// The model and the permission mode are not properties of this process, and
@@ -378,8 +385,31 @@ struct Thread {
     /// is carrying it. Leaving it set would re-send a summary the model is
     /// already looking at.
     carried: Option<String>,
-    /// A harness switch waiting on the run that is writing its summary.
-    switching: Option<PendingSwitch>,
+    /// A switch or a compaction waiting on the run that is writing its summary.
+    summarising: Option<PendingSummary>,
+    /// The orchestrator said the main chat is due for compaction, and this turn
+    /// has not finished yet.
+    ///
+    /// A flag rather than a compaction started on the spot, because the answer
+    /// to `compaction_due` arrives *with* a reply the user is about to read and
+    /// the harness is still mid-turn. Compacting under a running turn would
+    /// summarise a thread that is still being written into. So it waits for the
+    /// turn to end, which is the natural break the trigger was describing
+    /// anyway.
+    compaction_owed: bool,
+    /// Whether the run on screen is one this chat box started.
+    ///
+    /// `/watch` puts somebody else's agent on screen and the context bar then
+    /// reads *its* usage, because that is the run being applied. Nothing is
+    /// wrong with that until a full bar starts doing something: the automatic
+    /// compaction would fire on a conversation the user is reading rather than
+    /// talking into, and compact a running agent's thread out from under it.
+    ///
+    /// Cleared by `/watch`, set again by the next turn typed here. It gates the
+    /// automatic pass only — `/compact` still acts on whatever is on screen,
+    /// the way `/harness` does, because a person typing it can see what they
+    /// are pointing at.
+    watching_own_turn: bool,
     /// Settings chosen before there was a conversation to write them on.
     ///
     /// A conversation is minted by the first *run*, so `/model opus` typed into
@@ -454,15 +484,47 @@ pub enum Setting {
     Mode(PermissionPolicy),
 }
 
-/// A harness switch that has spawned its summariser and is waiting for it.
+/// Something that has spawned a summariser and is waiting for it.
+///
+/// One kind of pending work rather than two, because a switch and a compaction
+/// are the same wait: a detached run is writing prose, the chat box is held
+/// busy, and what finishes when it ends is decided by [`Summarising`].
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct PendingSwitch {
-    to: HarnessKind,
-    /// The run asked to write the summary. The switch completes when this run
-    /// finishes, and only for this run.
+struct PendingSummary {
+    intent: Summarising,
+    /// The run asked to write the summary. It completes when this run finishes,
+    /// and only for this run.
     run: String,
-    /// The conversation being handed over.
+    /// The conversation being summarised.
     conversation: String,
+}
+
+/// What a summary is being written for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Summarising {
+    /// Hand the thread to another harness, and continue there.
+    Handover(HarnessKind),
+    /// Stay on this harness and continue from the summary, so the next turn
+    /// resumes nothing and the context starts over.
+    Compaction {
+        /// Whether a person typed `/compact`, or the context bar reached the
+        /// point where it would have nagged.
+        ///
+        /// Only the wording depends on it, and that is worth a field: a line
+        /// that says "compacting" out of nowhere reads as a fault when nobody
+        /// asked for it, and reads as an echo when somebody did.
+        asked: bool,
+    },
+}
+
+impl Summarising {
+    /// What the run is called in the fleet, and in "already …" refusals.
+    fn label(&self) -> String {
+        match self {
+            Summarising::Handover(to) => format!("summarise for {}", to.id()),
+            Summarising::Compaction { .. } => "summarise to compact".to_string(),
+        }
+    }
 }
 
 /// What `/harness <kind>` turns out to mean, decided before anything is spawned.
@@ -834,7 +896,7 @@ async fn event_loop(
                     app.apply(&envelope.event);
                 }
                 let switching = thread
-                    .switching
+                    .summarising
                     .as_ref()
                     .is_some_and(|s| s.run == envelope.agent_id);
                 if finished {
@@ -843,27 +905,27 @@ async fn event_loop(
                     refresh_workspaces(&jod, &mut app);
                     app.reconcile();
                     if switching {
-                        // The other half of `/harness`. It is not `announce`d as
-                        // a finished delegation, because from the user's side
-                        // this was never an agent they started — it is the
-                        // switch they asked for, arriving.
-                        let pending = thread.switching.take().expect("just checked");
+                        // The other half of `/harness` and of `/compact`. It is
+                        // not `announce`d as a finished delegation, because from
+                        // the user's side this was never an agent they started —
+                        // it is the thing they asked for, arriving.
+                        let pending = thread.summarising.take().expect("just checked");
                         let summary = match jod.events_since(&pending.run, None).await {
                             Ok(events) => said(&events),
                             Err(e) => {
                                 app.push(Entry::Notice(format!(
-                                    "could not read the summary back, so nothing was handed \
-                                     over: {e}"
+                                    "could not read the summary back, so nothing was \
+                                     changed: {e}"
                                 )));
                                 String::new()
                             }
                         };
                         match jod.store() {
                             Some(store) => {
-                                finish_crossing(store, &mut app, &mut thread, &pending, &summary)
+                                finish_summary(store, &mut app, &mut thread, &pending, &summary)
                             }
                             None => app.push(Entry::Notice(
-                                "the database went away mid-switch, so nothing was handed over"
+                                "the database went away mid-summary, so nothing was changed"
                                     .into(),
                             )),
                         }
@@ -877,6 +939,15 @@ async fn event_loop(
                         // all without losing what was typed over it.
                         if let Some(next) = app.next_queued() {
                             perform(&jod, &mut app, &opts, &mut thread, Action::Send(next)).await;
+                        } else {
+                            // Nothing waiting, so the screen is genuinely idle:
+                            // the natural break a compaction wants. Nothing is
+                            // mid-thought, and the usage the harness just
+                            // reported is the freshest reading of how full the
+                            // window is. After the queue rather than before it,
+                            // so a compaction cannot start underneath a prompt
+                            // that is about to be sent.
+                            maybe_compact(&jod, &mut app, &opts, &mut thread).await;
                         }
                     } else {
                         announce(&mut app, &envelope.agent_id);
@@ -1337,10 +1408,14 @@ async fn orchestrate(
             // holding the context itself; re-sending it every turn would hand
             // the model a summary of the conversation it is already in.
             thread.carried = None;
-            if let Some((reason, chars)) = handed.compaction_due {
-                app.push(Entry::Notice(format!(
-                    "the main chat is due for compaction ({reason}) — {chars} chars live"
-                )));
+            // Noted rather than announced. This used to print "the main chat is
+            // due for compaction (size) — 128400 chars live", which told the
+            // user about a problem and left them to fix it with a command that
+            // did not exist. It is now a trigger: the compaction runs itself
+            // once this turn is over, which is the natural break the `idle`
+            // reason was describing in the first place.
+            if handed.compaction_due.is_some() {
+                thread.compaction_owed = true;
             }
             // Re-asserted from the thing that just did the writing rather than
             // assumed still correct: `hand_to_orchestrator` resolves the pinned
@@ -1354,6 +1429,8 @@ async fn orchestrate(
             // Anything chosen before the first turn now has a conversation to
             // be written on.
             flush_pending(jod, app, thread, &handed.agent.id);
+            // Ours, so the context bar is reading this chat's window again.
+            thread.watching_own_turn = true;
             app.push(Entry::Routing(format!(
                 "→ {} · handed to the orchestrator — it decides where this goes",
                 short(&handed.agent.id)
@@ -1470,6 +1547,7 @@ async fn perform(
             }
         }
         Action::SwitchHarness(to) => begin_crossing(jod, app, opts, thread, to).await,
+        Action::Compact => begin_compaction(jod, app, opts, thread, true).await,
         Action::NewThread => {
             thread.conversation = None;
             thread.carried = None;
@@ -1589,6 +1667,10 @@ async fn perform(
         Action::Watch(id) => {
             thread.conversation = None;
             thread.carried = None;
+            // Somebody else's run from here, so the context bar is reading
+            // their window and the automatic compaction must keep its hands off
+            // it. See `Thread::watching_own_turn`.
+            thread.watching_own_turn = false;
             watch(jod, app, id).await
         }
         Action::Attach(id) => match jod.agent(&id).await {
@@ -2048,6 +2130,13 @@ const SUMMARISE_RECORD: &str = "Below is the record of a conversation. \
 /// Why the compaction happened, for the row `Store::compact` writes.
 const CROSSING: &str = "harness switch";
 
+/// The same, for a compaction that stayed on the harness it was already on.
+///
+/// Two words rather than one shared "compaction", because the `compactions`
+/// table is the record of why a thread got shorter and "a switch did it" and "it
+/// was getting long" are different answers to that.
+const COMPACTED: &str = "compact";
+
 /// The conversation the chat box is talking into.
 ///
 /// Explicit after a handoff, because the conversation a handoff mints has no run
@@ -2078,29 +2167,41 @@ fn crossing(store: Option<&Store>, app: &App, thread: &Thread, to: HarnessKind) 
     let Some(store) = store else {
         return Crossing::Bare;
     };
-    let Some(conversation) = current_conversation(store, app, thread) else {
-        return Crossing::Bare;
-    };
-    // Nothing live is not an error and not a summary: it is a conversation that
-    // has said nothing, and summarising it would spend a model call to produce
-    // the word "nothing".
-    match store.live_window(&conversation) {
-        Ok(live) if live.is_empty() => return Crossing::Bare,
-        Err(_) => return Crossing::Bare,
-        Ok(_) => {}
-    }
-    Crossing::Summarise {
-        // A harness with a session of its own is holding the conversation and
-        // can be asked about it directly. One resuming nothing has never seen
-        // this thread — it would summarise an empty context and say so — so the
-        // record has to travel in the prompt. That is the case immediately
-        // after a previous switch, which is exactly when it would be missed.
-        material: match app.resume {
-            Resume::Fresh => store.handoff_text(&conversation).ok(),
-            _ => None,
+    match summarisable(store, app, thread) {
+        Some((conversation, material)) => Crossing::Summarise {
+            conversation,
+            material,
         },
-        conversation,
+        None => Crossing::Bare,
     }
+}
+
+/// The thread a summariser would be asked about, and the record it has to be
+/// handed when it cannot read its own.
+///
+/// `None` when there is nothing to summarise: no conversation on screen, or one
+/// that has said nothing. Nothing live is not an error and not a summary — it is
+/// a conversation that has said nothing, and summarising it would spend a model
+/// call to produce the word "nothing".
+///
+/// Shared by `/harness` and `/compact` because it is the same question. The two
+/// differ in what they do with the answer, not in how they find it.
+fn summarisable(store: &Store, app: &App, thread: &Thread) -> Option<(String, Option<String>)> {
+    let conversation = current_conversation(store, app, thread)?;
+    match store.live_window(&conversation) {
+        Ok(live) if !live.is_empty() => {}
+        _ => return None,
+    }
+    // A harness with a session of its own is holding the conversation and can be
+    // asked about it directly. One resuming nothing has never seen this thread —
+    // it would summarise an empty context and say so — so the record has to
+    // travel in the prompt. That is the case immediately after a previous switch
+    // or compaction, which is exactly when it would be missed.
+    let material = match app.resume {
+        Resume::Fresh => store.handoff_text(&conversation).ok(),
+        _ => None,
+    };
+    Some((conversation, material))
 }
 
 /// What to say about a target that cannot be handed structure, if it is one.
@@ -2141,14 +2242,7 @@ async fn begin_crossing(
     thread: &mut Thread,
     to: HarnessKind,
 ) {
-    // One at a time. A second `/harness` while the first summariser is still
-    // running would overwrite the pending switch, and the abandoned run would
-    // then finish into a switch nobody is waiting for.
-    if let Some(under_way) = &thread.switching {
-        app.push(Entry::Notice(format!(
-            "already handing this conversation to {} — wait for the summary",
-            under_way.to.label()
-        )));
+    if already_summarising(app, thread) {
         return;
     }
     let store = jod.store();
@@ -2178,65 +2272,230 @@ async fn begin_crossing(
             if let Some(warning) = store.and_then(|s| lossy_warning(s, &conversation, to)) {
                 app.push(Entry::Notice(warning));
             }
-            let prompt = match &material {
-                Some(record) => format!("{SUMMARISE_RECORD}\n\n{record}"),
-                None => SUMMARISE.to_string(),
-            };
-            let request = SpawnRequest {
-                name: format!("summarise for {}", to.id()),
-                // The harness being *left*: it is the one holding the
-                // conversation, and asking the new one to summarise a thread it
-                // has never seen is the bug this whole flow exists to fix.
-                harness: app.harness,
-                prompt,
-                system: None,
-                cwd: opts.cwd.clone(),
-                model: app.model.clone(),
-                // Reading and writing prose, nothing else. A summariser that
-                // stopped to ask permission would hang a switch nobody is
-                // watching the prompt of.
-                permission: bounded(opts.ceiling(), PermissionPolicy::Bypass),
-                // With a session, it summarises what it is already holding;
-                // without one, the record came in the prompt.
-                resume: match material {
-                    Some(_) => Resume::Fresh,
-                    None => app.resume.clone(),
-                },
-                // No Jod verbs. This run answers a question, it does not act.
-                tools: None,
-                ..SpawnRequest::default()
-            };
-            // Detached: its prompt is a request to summarise, and recording that
-            // in the conversation being handed over would put "summarise this"
-            // into the transcript a moment before compacting it — and index it
-            // for search as though somebody had said it.
-            match jod.spawn_agent_in(request, RunConversation::Detached).await {
-                Ok(agent) => {
-                    thread.switching = Some(PendingSwitch {
-                        to,
-                        run: agent.id.clone(),
-                        conversation,
-                    });
-                    // Busy so a turn typed now queues instead of racing the
-                    // switch onto whichever harness wins.
-                    app.busy = true;
-                    app.turn_started_ms = Some(app.now_ms);
-                    app.push(Entry::Notice(format!(
-                        "summarising this conversation on {} before handing it to {}…",
-                        app.harness.label(),
-                        to.label()
-                    )));
-                    app.scroll_to_bottom();
-                }
-                Err(e) => app.push(Entry::Notice(format!(
-                    "could not start the summary, so nothing was handed over: {e}"
-                ))),
+            let started = spawn_summariser(
+                jod,
+                app,
+                opts,
+                thread,
+                Summarising::Handover(to),
+                conversation,
+                material,
+            )
+            .await;
+            if started {
+                app.push(Entry::Notice(format!(
+                    "summarising this conversation on {} before handing it to {}…",
+                    app.harness.label(),
+                    to.label()
+                )));
+                app.scroll_to_bottom();
             }
         }
     }
 }
 
-/// Complete a switch whose summariser has finished.
+/// Whether a summariser is already running, saying so if it is.
+///
+/// One at a time. A second `/harness` or `/compact` while the first summariser
+/// is still running would overwrite the pending work, and the abandoned run
+/// would then finish into something nobody is waiting for.
+fn already_summarising(app: &mut App, thread: &Thread) -> bool {
+    let Some(under_way) = &thread.summarising else {
+        return false;
+    };
+    let what = match under_way.intent {
+        Summarising::Handover(to) => format!("handing this conversation to {}", to.label()),
+        Summarising::Compaction { .. } => "compacting this conversation".to_string(),
+    };
+    app.push(Entry::Notice(format!(
+        "already {what} — wait for the summary"
+    )));
+    true
+}
+
+/// Put the harness on screen to work writing a summary of the thread it is
+/// holding, and record what that summary is for.
+///
+/// Answers whether the run actually started. The caller says what it is about to
+/// happen *after* that answer, so a spawn that failed is never announced as one
+/// that worked.
+///
+/// The whole reason this is a spawned run rather than an `await` inside
+/// `perform` is that a model writing several paragraphs takes long enough to
+/// freeze the interface, keys included. It finishes in [`finish_summary`].
+async fn spawn_summariser(
+    jod: &Arc<Jod>,
+    app: &mut App,
+    opts: &Options,
+    thread: &mut Thread,
+    intent: Summarising,
+    conversation: String,
+    material: Option<String>,
+) -> bool {
+    let prompt = match &material {
+        Some(record) => format!("{SUMMARISE_RECORD}\n\n{record}"),
+        None => SUMMARISE.to_string(),
+    };
+    let request = SpawnRequest {
+        name: intent.label(),
+        // The harness holding the conversation. For a switch that is the one
+        // being *left* — asking the new one to summarise a thread it has never
+        // seen is the bug this whole flow exists to fix — and for a compaction
+        // there is only the one.
+        harness: app.harness,
+        prompt,
+        system: None,
+        cwd: opts.cwd.clone(),
+        model: app.model.clone(),
+        // Reading and writing prose, nothing else. A summariser that stopped to
+        // ask permission would hang a switch nobody is watching the prompt of.
+        permission: bounded(opts.ceiling(), PermissionPolicy::Bypass),
+        // With a session, it summarises what it is already holding; without one,
+        // the record came in the prompt.
+        resume: match material {
+            Some(_) => Resume::Fresh,
+            None => app.resume.clone(),
+        },
+        // No Jod verbs. This run answers a question, it does not act.
+        tools: None,
+        ..SpawnRequest::default()
+    };
+    // Detached: its prompt is a request to summarise, and recording that in the
+    // conversation being summarised would put "summarise this" into the
+    // transcript a moment before compacting it — and index it for search as
+    // though somebody had said it.
+    match jod.spawn_agent_in(request, RunConversation::Detached).await {
+        Ok(agent) => {
+            thread.summarising = Some(PendingSummary {
+                intent,
+                run: agent.id.clone(),
+                conversation,
+            });
+            // Busy so a turn typed now queues instead of racing the summary onto
+            // whichever thread wins.
+            app.busy = true;
+            app.turn_started_ms = Some(app.now_ms);
+            true
+        }
+        Err(e) => {
+            app.push(Entry::Notice(format!(
+                "could not start the summary, so nothing was changed: {e}"
+            )));
+            false
+        }
+    }
+}
+
+/// Start a compaction: summarise this conversation so the next turn can carry on
+/// from the summary instead of resuming everything said so far.
+///
+/// `asked` separates `/compact` from the automatic pass. Only the wording
+/// depends on it; both do exactly the same thing, which is the point — the
+/// automatic one is not a lesser version that skips something.
+async fn begin_compaction(
+    jod: &Arc<Jod>,
+    app: &mut App,
+    opts: &Options,
+    thread: &mut Thread,
+    asked: bool,
+) {
+    if already_summarising(app, thread) {
+        return;
+    }
+    // No database means no thread to compact. Said plainly rather than
+    // pretended: `/clear` is the command that shortens a context without one.
+    let Some(store) = jod.store() else {
+        if asked {
+            app.push(Entry::Notice(
+                "no database, so there is no conversation to compact — `/clear` drops the \
+                 context instead"
+                    .into(),
+            ));
+        }
+        return;
+    };
+    let Some((conversation, material)) = summarisable(store.as_ref(), app, thread) else {
+        if asked {
+            app.push(Entry::Notice(
+                "nothing has been said yet, so there is nothing to compact".into(),
+            ));
+        }
+        return;
+    };
+    let intent = Summarising::Compaction { asked };
+    if !spawn_summariser(jod, app, opts, thread, intent, conversation, material).await {
+        // A spawn that fails costs no model call, but a spawn that keeps
+        // failing would put "could not start the summary" on screen after every
+        // turn for the rest of the session.
+        stop_compacting_on_its_own(app, intent);
+        return;
+    }
+    app.push(Entry::Notice(if asked {
+        "summarising this conversation so it can carry on from the summary…".to_string()
+    } else {
+        // Says why it is happening. A line that announces itself with no cause
+        // reads as a fault, and this one is a routine housekeeping pass the
+        // user is being told about rather than asked about.
+        format!(
+            "the context is {}% full — compacting so the next turn starts smaller…",
+            (app.context_fraction() * 100.0).round() as u64
+        )
+    }));
+    app.scroll_to_bottom();
+}
+
+/// Compact without being asked, when the context has filled far enough to be
+/// worth it.
+///
+/// This is what the context bar's `⚠ compact recommended` used to be. Advice
+/// nobody could act on was the worst of both endings: it told the user a problem
+/// existed and left them to solve it with a command that did not exist. Since
+/// the summary can now be written and carried, the honest reading of the
+/// threshold is "do it", not "consider it".
+///
+/// Two triggers, one action. [`App::should_compact`] watches what the *harness*
+/// is holding, which is what runs into a context limit; `compaction_owed`
+/// carries the orchestrator's own verdict about the main chat, which is
+/// measured on Jod's live window and fires on a long idle as well as on size.
+/// Either one is reason enough.
+async fn maybe_compact(jod: &Arc<Jod>, app: &mut App, opts: &Options, thread: &mut Thread) {
+    if !compaction_is_due(app, thread) {
+        return;
+    }
+    thread.compaction_owed = false;
+    begin_compaction(jod, app, opts, thread, false).await;
+}
+
+/// Whether to compact without being asked.
+///
+/// Pure and separate from doing it, because the interesting part is this one and
+/// it is the part that must not misfire: an automatic pass spends a model call,
+/// and a predicate that answers yes one time too many spends one after every
+/// turn for the rest of the session.
+fn compaction_is_due(app: &App, thread: &Thread) -> bool {
+    // Given up on after a failure. See `App::auto_compact`.
+    if !app.auto_compact {
+        return false;
+    }
+    // Never a thread this chat box is only reading. See
+    // `Thread::watching_own_turn`.
+    if !thread.watching_own_turn {
+        return false;
+    }
+    // Either trigger is reason enough. `should_compact` watches what the
+    // harness is holding, which is what runs into a context limit;
+    // `compaction_owed` carries the orchestrator's verdict about the main chat,
+    // measured on Jod's own live window and fired on a long idle as well as on
+    // size.
+    if !thread.compaction_owed && !app.should_compact() {
+        return false;
+    }
+    // Never on top of something. A second summariser would overwrite the first,
+    // and one started mid-turn would summarise a thread still being written to.
+    thread.summarising.is_none() && !app.busy
+}
+
+/// Complete whatever a finished summariser was writing for.
 ///
 /// Takes the summary as text rather than reading it out of a run, so the part
 /// with the decisions in it is testable without a harness: what happens when the
@@ -2245,27 +2504,74 @@ async fn begin_crossing(
 /// Every failure path leaves the app exactly where it was. A half-completed
 /// switch — new harness, no context — is strictly worse than one that did not
 /// happen, because the conversation is still there and the user no longer has a
-/// way back to it.
+/// way back to it. The same goes for a compaction: a thread pointed at a fresh
+/// session with no summary behind it has simply lost its context.
+fn finish_summary(
+    store: &Store,
+    app: &mut App,
+    thread: &mut Thread,
+    pending: &PendingSummary,
+    said: &str,
+) {
+    let summary = said.trim();
+    // Not fabricated, not defaulted, not "(no summary)". The store treats an
+    // empty summary as an error precisely so a thread cannot be compacted into
+    // nothing; inventing a placeholder here would walk straight through that
+    // guard.
+    if summary.is_empty() {
+        app.push(Entry::Notice(match pending.intent {
+            Summarising::Handover(_) => format!(
+                "the summary came back empty, so nothing was handed over — still on {}",
+                app.harness.label()
+            ),
+            Summarising::Compaction { .. } => {
+                "the summary came back empty, so nothing was compacted — the conversation \
+                 carries on as it was"
+                    .to_string()
+            }
+        }));
+        stop_compacting_on_its_own(app, pending.intent);
+        return;
+    }
+    match pending.intent {
+        Summarising::Handover(to) => {
+            finish_crossing(store, app, thread, &pending.conversation, to, summary)
+        }
+        Summarising::Compaction { .. } => {
+            if !finish_compaction(store, app, thread, &pending.conversation, summary) {
+                stop_compacting_on_its_own(app, pending.intent);
+            }
+        }
+    }
+}
+
+/// Give up on automatic compaction for the rest of the session.
+///
+/// Called when a compaction nobody asked for fails. The threshold that started
+/// it is met on every turn once it is crossed, so a failure that repeats is a
+/// model call after every turn forever — see [`App::auto_compact`]. A person
+/// who typed `/compact` gets the failure and nothing else: they can decide
+/// whether to try again, which is not a loop.
+fn stop_compacting_on_its_own(app: &mut App, intent: Summarising) {
+    if !matches!(intent, Summarising::Compaction { asked: false }) || !app.auto_compact {
+        return;
+    }
+    app.auto_compact = false;
+    app.push(Entry::Notice(
+        "not going to keep trying that on its own — type /compact when you want another go".into(),
+    ));
+}
+
+/// Move the app onto the harness a finished handover was for.
 fn finish_crossing(
     store: &Store,
     app: &mut App,
     thread: &mut Thread,
-    pending: &PendingSwitch,
-    said: &str,
+    conversation: &str,
+    to: HarnessKind,
+    summary: &str,
 ) {
-    let summary = said.trim();
-    // Not fabricated, not defaulted, not "(no summary)". `Store::switch_harness`
-    // treats an empty summary as an error precisely so a thread cannot be
-    // compacted into nothing; inventing a placeholder here would walk straight
-    // through that guard.
-    if summary.is_empty() {
-        app.push(Entry::Notice(format!(
-            "the summary came back empty, so nothing was handed over — still on {}",
-            app.harness.label()
-        )));
-        return;
-    }
-    let switch = match store.switch_harness(&pending.conversation, pending.to, summary, CROSSING) {
+    let switch = match store.switch_harness(conversation, to, summary, CROSSING) {
         Ok(switch) => switch,
         Err(e) => {
             app.push(Entry::Notice(format!(
@@ -2280,7 +2586,6 @@ fn finish_crossing(
     // `Store::handoff_text`.
     let carried = store.handoff_text(&switch.conversation.id).ok();
     let compaction = switch.compaction.clone();
-    let to = pending.to;
     point_at(app, thread, to, Some(&switch.conversation.id), carried);
     app.push(Entry::Notice(format!(
         "handed over to {} — a new conversation carrying the summary, {}",
@@ -2294,6 +2599,67 @@ fn finish_crossing(
         }
     )));
     app.scroll_to_bottom();
+}
+
+/// Carry the thread on from its summary, on the harness it is already on.
+///
+/// The counterpart of [`finish_crossing`], and deliberately the smaller of the
+/// two: nothing about the harness changes, so the model, the model list and the
+/// running spend all still apply. What changes is that the next turn resumes
+/// nothing — which is the entire point, since resuming the long session is what
+/// filled the window.
+/// Answers whether it worked, so an automatic pass that failed can stop trying.
+fn finish_compaction(
+    store: &Store,
+    app: &mut App,
+    thread: &mut Thread,
+    conversation: &str,
+    summary: &str,
+) -> bool {
+    let carried = match store.continue_as_new(conversation, summary, COMPACTED) {
+        Ok(carried) => carried,
+        Err(e) => {
+            app.push(Entry::Notice(format!(
+                "could not compact, so the conversation carries on as it was: {e}"
+            )));
+            return false;
+        }
+    };
+    // The summary reaches the next turn through the *prompt*, because the
+    // continuation has no session to be resumed into. See `Store::handoff_text`.
+    let text = store.handoff_text(&carried.conversation.id).ok();
+    let compaction = carried.compaction.clone();
+    point_at_continuation(app, thread, &carried.conversation.id, text);
+    app.push(Entry::Notice(format!(
+        "compacted — {} chars of conversation became {}, and the next turn starts from the \
+         summary. Nothing was deleted; the earlier turns are still searchable.",
+        compaction.before_chars, compaction.after_chars
+    )));
+    app.scroll_to_bottom();
+    true
+}
+
+/// Point the app at the thread that continues this one after a compaction.
+///
+/// Deliberately narrower than [`point_at`]: the harness has not changed, so
+/// dropping the model or the spend the way a switch does would be undoing
+/// choices nothing invalidated.
+fn point_at_continuation(
+    app: &mut App,
+    thread: &mut Thread,
+    conversation: &str,
+    carried: Option<String>,
+) {
+    // The session is the thing being left behind. Everything else here follows
+    // from that.
+    app.resume = Resume::Fresh;
+    app.session = None;
+    // The new session is holding nothing yet and the bar has to say so —
+    // otherwise the next automatic pass reads a number left over from the thread
+    // that was just compacted away and fires again immediately.
+    app.context_tokens = 0;
+    thread.conversation = Some(conversation.to_string());
+    thread.carried = carried;
 }
 
 /// Point the app at another harness, and at the conversation it is now talking
@@ -2327,6 +2693,12 @@ fn point_at(
     // Spend belongs to the conversation being left. Carrying it over showed
     // `$0.11` next to AGY, which had charged nothing.
     app.cost_usd = 0.0;
+    // And so does the context reading, for the same reason. It is the last turn
+    // as the *old* harness reported it, and the new one is holding nothing yet.
+    // Left standing it would put a full bar over an empty session — and now that
+    // a full bar starts a compaction, it would start one against a thread with a
+    // single seeded turn in it.
+    app.context_tokens = 0;
     thread.conversation = conversation.map(str::to_string);
     thread.carried = carried;
     // Set only when the offer actually landed in the box: `offer_models`
@@ -5758,6 +6130,9 @@ fn apply_slash(app: &mut App, slash: command::Slash) -> Option<Action> {
             ));
             return Some(Action::Clear);
         }
+        // The opposite trade to `/clear`: that one drops the context for free,
+        // this one keeps it for the price of a model call.
+        Slash::Compact => return Some(Action::Compact),
         Slash::Update { check } => return Some(Action::Update { check }),
         Slash::Upgrade { check } => return Some(Action::Upgrade { check }),
         Slash::Jobs => app.overlay = Overlay::Jobs,
@@ -6289,6 +6664,9 @@ async fn send_turn(
                     // first moment anything chosen before it can be written
                     // down.
                     flush_pending(jod, app, thread, &id);
+                    // Ours, so the context bar is reading this chat's window
+                    // again and the automatic compaction may act on it.
+                    thread.watching_own_turn = true;
                     app.begin_turn(id, app.now_ms);
                     app.push(Entry::You(prompt));
                     app.scroll_to_bottom();
@@ -7575,9 +7953,9 @@ mod tests {
         )
     }
 
-    fn pending(thread: &Thread, to: HarnessKind) -> PendingSwitch {
-        PendingSwitch {
-            to,
+    fn pending(thread: &Thread, intent: Summarising) -> PendingSummary {
+        PendingSummary {
+            intent,
             run: "run-summariser".into(),
             conversation: thread.conversation.clone().expect("a bound conversation"),
         }
@@ -7592,8 +7970,8 @@ mod tests {
         let (mut app, mut thread) = talking_into(&s, HarnessKind::ClaudeCode);
         let was = thread.conversation.clone().unwrap();
 
-        let switch = pending(&thread, HarnessKind::OpenCode);
-        finish_crossing(
+        let switch = pending(&thread, Summarising::Handover(HarnessKind::OpenCode));
+        finish_summary(
             &s,
             &mut app,
             &mut thread,
@@ -7631,8 +8009,8 @@ mod tests {
             .conversation
             .clone()
             .expect("a conversation to leave");
-        let switch = pending(&thread, HarnessKind::OpenCode);
-        finish_crossing(
+        let switch = pending(&thread, Summarising::Handover(HarnessKind::OpenCode));
+        finish_summary(
             &s,
             &mut app,
             &mut thread,
@@ -7688,8 +8066,8 @@ mod tests {
         let (mut app, mut thread) = talking_into(&s, HarnessKind::ClaudeCode);
         let was = thread.conversation.clone().unwrap();
 
-        let switch = pending(&thread, HarnessKind::OpenCode);
-        finish_crossing(&s, &mut app, &mut thread, &switch, "   \n  ");
+        let switch = pending(&thread, Summarising::Handover(HarnessKind::OpenCode));
+        finish_summary(&s, &mut app, &mut thread, &switch, "   \n  ");
 
         assert_eq!(app.harness, HarnessKind::ClaudeCode, "still where it was");
         assert_eq!(app.session.as_deref(), Some("session-1"), "still resumable");
@@ -7767,6 +8145,197 @@ mod tests {
         };
         let material = material.expect("nothing to resume, so the record travels");
         assert!(material.contains("port the parser"));
+    }
+
+    // ---- compacting ------------------------------------------------------
+
+    /// The whole point of `/compact`: end up on a thread the harness will not
+    /// resume, holding what the old one said. The number on the context bar has
+    /// to come down with it — it is the reading that started this, and a stale
+    /// one would start the next compaction immediately.
+    #[test]
+    fn compacting_lands_on_a_continuation_the_next_turn_will_not_resume() {
+        let s = store();
+        let (mut app, mut thread) = talking_into(&s, HarnessKind::ClaudeCode);
+        let was = thread.conversation.clone().unwrap();
+        app.context_tokens = 180_000;
+        app.cost_usd = 0.42;
+        app.model = Some("opus".into());
+
+        let job = pending(&thread, Summarising::Compaction { asked: true });
+        finish_summary(
+            &s,
+            &mut app,
+            &mut thread,
+            &job,
+            "the parser is ported; tests are green",
+        );
+
+        assert_eq!(
+            app.harness,
+            HarnessKind::ClaudeCode,
+            "staying put is what makes it a compaction rather than a switch"
+        );
+        assert_eq!(app.resume, Resume::Fresh, "the long session is left behind");
+        assert_eq!(app.session, None);
+        assert_eq!(app.context_tokens, 0, "the new session holds nothing yet");
+        // The harness did not change, so nothing about it is invalidated. A
+        // switch drops these; a compaction has no reason to.
+        assert_eq!(app.model.as_deref(), Some("opus"));
+        assert_eq!(app.cost_usd, 0.42, "the spend is the same conversation's");
+
+        let now = thread.conversation.clone().expect("bound to the new one");
+        assert_ne!(now, was, "a new thread, not the old one relabelled");
+        let landed = s.conversation(&now).unwrap().unwrap();
+        assert_eq!(landed.harness_kind(), Some(HarnessKind::ClaudeCode));
+        assert_eq!(landed.forked_from.as_deref(), Some(was.as_str()));
+
+        // The summary is in it, visibly, and reaches the next turn's prompt
+        // because there is no session to resume it into.
+        let live = s.live_window(&now).unwrap();
+        assert_eq!(live.len(), 1, "the thread became one turn: {live:?}");
+        assert!(live[0].text.contains("the parser is ported"));
+        let carried = thread.carried.clone().expect("context for the first turn");
+        assert!(carried.contains("the parser is ported"), "{carried}");
+
+        // Compacted, not deleted. The turns the summary stands in for are still
+        // rows, and still findable — that is what makes an early compaction a
+        // cost rather than a loss.
+        assert_eq!(s.thread(&was).unwrap().len(), 2);
+        assert!(
+            s.search_messages("port the parser", 10)
+                .unwrap()
+                .iter()
+                .any(|hit| hit.message.text == "port the parser"),
+            "the compacted turn is still searchable"
+        );
+    }
+
+    /// The failure that matters most, and the same one a switch has: a thread
+    /// pointed at a fresh session with no summary behind it has simply lost its
+    /// context. Nothing is invented to fill the gap.
+    ///
+    /// And an automatic pass that failed stops being automatic. The threshold
+    /// that started it is met on every turn once it is crossed, so a failure
+    /// that repeats is a model call after every turn forever.
+    #[test]
+    fn an_empty_summary_leaves_the_conversation_alone_and_stops_the_automatic_pass() {
+        let s = store();
+        let (mut app, mut thread) = talking_into(&s, HarnessKind::ClaudeCode);
+        let was = thread.conversation.clone().unwrap();
+
+        let job = pending(&thread, Summarising::Compaction { asked: false });
+        finish_summary(&s, &mut app, &mut thread, &job, "  \n ");
+
+        assert_eq!(app.resume, Resume::Session("session-1".into()));
+        assert_eq!(thread.conversation.as_deref(), Some(was.as_str()));
+        assert_eq!(thread.carried, None);
+        assert_eq!(s.conversations(10).unwrap().len(), 1, "nothing was minted");
+        assert_eq!(s.live_window(&was).unwrap().len(), 2, "nothing compacted");
+        assert!(!app.auto_compact, "it will not keep trying on its own");
+        assert!(
+            app.transcript
+                .iter()
+                .any(|e| matches!(e, Entry::Notice(n) if n.contains("/compact"))),
+            "and it says the command is still there: {:?}",
+            app.transcript
+        );
+    }
+
+    /// A person asking is not a loop, so a `/compact` that failed leaves the
+    /// automatic pass exactly as it was.
+    #[test]
+    fn a_compaction_somebody_asked_for_does_not_switch_the_automatic_one_off() {
+        let s = store();
+        let (mut app, mut thread) = talking_into(&s, HarnessKind::ClaudeCode);
+
+        let job = pending(&thread, Summarising::Compaction { asked: true });
+        finish_summary(&s, &mut app, &mut thread, &job, "");
+
+        assert!(app.auto_compact);
+    }
+
+    /// Two triggers, one action — and a long list of moments where firing would
+    /// be wrong. Each `false` below is a model call not spent.
+    #[test]
+    fn compacting_on_its_own_waits_for_a_reason_and_for_the_screen_to_be_idle() {
+        use super::app::{COMPACT_AT, CONTEXT_WINDOW};
+        let ours = || Thread {
+            watching_own_turn: true,
+            ..Thread::default()
+        };
+        let idle = ours();
+
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        assert!(!compaction_is_due(&app, &idle), "an empty window is no reason");
+
+        // What the harness is holding.
+        app.context_tokens = (CONTEXT_WINDOW as f64 * COMPACT_AT) as u64;
+        assert!(compaction_is_due(&app, &idle));
+
+        // ...and the orchestrator's own verdict on the main chat, which fires on
+        // a long idle as well as on size and is measured somewhere else
+        // entirely.
+        let owed = Thread {
+            compaction_owed: true,
+            ..ours()
+        };
+        let quiet = app_on(HarnessKind::ClaudeCode);
+        assert!(compaction_is_due(&quiet, &owed));
+
+        // Mid-turn: it would summarise a thread still being written to.
+        let mut busy = app_on(HarnessKind::ClaudeCode);
+        busy.context_tokens = CONTEXT_WINDOW;
+        busy.busy = true;
+        assert!(!compaction_is_due(&busy, &idle));
+
+        // Already summarising: a second one would overwrite the first.
+        let under_way = Thread {
+            summarising: Some(PendingSummary {
+                intent: Summarising::Handover(HarnessKind::OpenCode),
+                run: "run-1".into(),
+                conversation: "c-1".into(),
+            }),
+            ..ours()
+        };
+        assert!(!compaction_is_due(&app, &under_way));
+
+        // Somebody else's run on screen. The bar is reading their window, and
+        // compacting it would take a running agent's thread out from under it.
+        assert!(!compaction_is_due(&app, &Thread::default()));
+
+        // Given up on after a failure. `/compact` still works; this does not.
+        let mut off = app_on(HarnessKind::ClaudeCode);
+        off.context_tokens = CONTEXT_WINDOW;
+        off.auto_compact = false;
+        assert!(!compaction_is_due(&off, &owed));
+    }
+
+    /// It used to print "the main chat is due for compaction (size) — 128400
+    /// chars live", which named a problem and left the reader to fix it with a
+    /// command that did not exist. It is a trigger now, not a line.
+    #[test]
+    fn the_main_chat_being_due_for_compaction_is_recorded_rather_than_announced() {
+        let mut thread = Thread {
+            watching_own_turn: true,
+            ..Thread::default()
+        };
+        let app = app_on(HarnessKind::ClaudeCode);
+        assert!(!compaction_is_due(&app, &thread), "nothing said so yet");
+
+        thread.compaction_owed = true;
+        assert!(compaction_is_due(&app, &thread));
+    }
+
+    /// `/compact` reaches the same flow `/harness` does, and for the same
+    /// reason: a summary needs a model, and Jod has none.
+    #[test]
+    fn the_compact_command_asks_for_a_compaction() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        assert_eq!(
+            apply_slash(&mut app, command::Slash::Compact),
+            Some(Action::Compact)
+        );
     }
 
     /// The binding is Jod's conversation, not the harness's session, and it does

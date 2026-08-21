@@ -1415,15 +1415,110 @@ impl Store {
                 to.label()
             )));
         }
+        self.carry_forward(
+            conversation_id,
+            &source,
+            Carrying::Switch(to),
+            summary,
+            reason,
+        )
+    }
+
+    /// Compact a thread forward: summarise what it has said, and continue it as
+    /// a *new* conversation on the same harness, seeded with that summary.
+    ///
+    /// This is what a `/compact` in a UI should call, and the reason it mints a
+    /// conversation rather than only writing a `compactions` row is the part
+    /// worth being clear about.
+    ///
+    /// [`Store::compact`] narrows what *Jod* replays. It does nothing at all to
+    /// the harness, which is holding its own transcript and is resumed into it
+    /// every turn — so a compaction that only wrote to the database would leave
+    /// the context bar exactly where it was and the next turn exactly as
+    /// expensive. The only way to shorten what the harness is looking at is to
+    /// stop resuming that session and start a new one with the summary in its
+    /// prompt. That is a new conversation, for the same reason
+    /// [`Store::switch_harness`] mints one: the old row's `session_id` still
+    /// names a live transcript, and overwriting it would strand it.
+    ///
+    /// So this is [`Store::switch_harness`] with the destination held still.
+    /// Same three writes, same guards, same pin-follows-the-thread rule; see
+    /// [`Carrying`].
+    ///
+    /// # Why the caller supplies the summary
+    ///
+    /// The same reason as everywhere else in this module: Jod has no model
+    /// client. The text comes from a harness run asked to write it. A live
+    /// thread with an empty summary is an error, not a silent truncation.
+    ///
+    /// A conversation with nothing live is refused rather than replaced by an
+    /// empty copy of itself — there is no context to shorten, so the honest
+    /// answer is "nothing to compact" rather than a second empty thread.
+    pub fn continue_as_new(
+        &self,
+        conversation_id: &str,
+        summary: &str,
+        reason: &str,
+    ) -> Result<ContinuedThread> {
+        let source = self
+            .conversation(conversation_id)?
+            .ok_or_else(|| JodError::Invalid(format!("no conversation `{conversation_id}`")))?;
+        let carried =
+            self.carry_forward(conversation_id, &source, Carrying::Compaction, summary, reason)?;
+        Ok(ContinuedThread {
+            conversation: carried.conversation,
+            compaction: carried
+                .compaction
+                .expect("a compaction refuses a thread with nothing live"),
+        })
+    }
+
+    /// Compact a thread and open its continuation — the shared body of
+    /// [`Store::switch_harness`] and [`Store::continue_as_new`].
+    ///
+    /// One implementation because they are one operation. What differs is the
+    /// harness the new row lands on and the words a reader sees, and both of
+    /// those come out of [`Carrying`].
+    fn carry_forward(
+        &self,
+        conversation_id: &str,
+        source: &Conversation,
+        carrying: Carrying,
+        summary: &str,
+        reason: &str,
+    ) -> Result<HarnessSwitch> {
+        let from_label = source
+            .harness_kind()
+            .map(|k| k.label().to_string())
+            .unwrap_or_else(|| source.harness.clone());
+        let to = match carrying {
+            Carrying::Switch(to) => to,
+            // Staying put still needs a harness Jod recognises: there is
+            // nothing to fall back to when the whole point is to land where the
+            // thread already was.
+            Carrying::Compaction => source.harness_kind().ok_or_else(|| {
+                JodError::Invalid(format!(
+                    "conversation `{conversation_id}` is on `{}`, which Jod does not \
+                     recognise, so there is no harness to continue it on",
+                    source.harness
+                ))
+            })?,
+        };
 
         let live = self.live_window(conversation_id)?;
         if !live.is_empty() && summary.trim().is_empty() {
-            return Err(JodError::Invalid(format!(
-                "handing {} live messages to {} needs a summary, and Jod has no \
-                 model to write one — run one and pass what it said",
-                live.len(),
-                to.label()
-            )));
+            let n = live.len();
+            return Err(JodError::Invalid(match carrying {
+                Carrying::Switch(_) => format!(
+                    "handing {n} live messages to {} needs a summary, and Jod has no \
+                     model to write one — run one and pass what it said",
+                    to.label()
+                ),
+                Carrying::Compaction => format!(
+                    "compacting {n} live messages needs a summary, and Jod has no \
+                     model to write one — run one and pass what it said"
+                ),
+            }));
         }
 
         // Compacted first and in its own transaction, because `write` takes the
@@ -1443,17 +1538,25 @@ impl Store {
             )?),
             // Nothing said yet. Switching harness before the first turn is the
             // most ordinary moment to do it, so it is not an error — there is
-            // simply nothing to carry.
-            _ => None,
+            // simply nothing to carry. Compacting it is a different matter:
+            // there is no context to shorten, and minting an empty thread to
+            // replace an empty thread would only look like it worked.
+            _ => match carrying {
+                Carrying::Switch(_) => None,
+                Carrying::Compaction => {
+                    return Err(JodError::Invalid(format!(
+                        "conversation `{conversation_id}` has nothing live to compact"
+                    )))
+                }
+            },
         };
 
         let new_id = uuid::Uuid::new_v4().to_string();
         let at = now_ms();
-        let from_label = source
-            .harness_kind()
-            .map(|k| k.label().to_string())
-            .unwrap_or_else(|| source.harness.clone());
-        let title = handoff_title(&source.title, to);
+        let title = match carrying {
+            Carrying::Switch(to) => handoff_title(&source.title, to),
+            Carrying::Compaction => compacted_title(&source.title),
+        };
         self.write(|tx| {
             tx.execute(
                 "INSERT INTO conversations
@@ -1525,12 +1628,16 @@ impl Store {
         // seed is the one thing this conversation actually contains; it should
         // be something you can see.
         if !summary.trim().is_empty() {
+            let heading = match carrying {
+                Carrying::Switch(_) => format!("context handed over from {from_label}"),
+                // Named for what it is rather than where it came from: the
+                // harness has not changed, so "handed over from Claude Code"
+                // while still on Claude Code would read as a bug.
+                Carrying::Compaction => "the conversation so far, compacted".to_string(),
+            };
             self.append_message(
                 &new_id,
-                NewMessage::new(
-                    Role::System,
-                    framed(&format!("context handed over from {from_label}"), summary),
-                ),
+                NewMessage::new(Role::System, framed(&heading, summary)),
             )?;
         }
 
@@ -1545,6 +1652,38 @@ impl Store {
             carrier: self.handoff(&new_id, to)?,
         })
     }
+}
+
+/// What a carry-forward is for.
+///
+/// Both cases compact a thread and open its continuation seeded with the
+/// summary. They differ in one thing — whether the continuation lands on a
+/// different harness — and in the words a reader is shown. Keeping them as one
+/// operation with two names is deliberate: the tricky parts are the loss guard,
+/// the two-transaction ordering and the pin following the thread, and a second
+/// copy of those is a second place for them to go wrong.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Carrying {
+    /// To the harness named, which must not be the one the thread is on.
+    Switch(HarnessKind),
+    /// To a fresh session on the same harness, to shorten what it is holding.
+    Compaction,
+}
+
+/// The result of compacting a thread forward — what continues it, and what the
+/// summary replaced.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ContinuedThread {
+    /// The continuation, on the same harness, with no session of its own yet.
+    /// [`Store::resume_for`] therefore answers [`crate::harness::Resume::Fresh`]
+    /// for it — which is the whole point. The harness starts over with the
+    /// summary in its prompt instead of resuming a transcript that had grown
+    /// too long, and earns a session id the moment that run reports one.
+    pub conversation: Conversation,
+    /// What the earlier thread was compressed into. Never absent: a
+    /// conversation with nothing live is refused rather than compacted into an
+    /// empty copy of itself.
+    pub compaction: Compaction,
 }
 
 /// The result of moving a thread to another harness — what it became, what it
@@ -2137,6 +2276,23 @@ fn handoff_title(source: &str, to: HarnessKind) -> String {
         format!("handed to {label}")
     } else {
         format!("{source} → {label}")
+    }
+}
+
+/// What the continuation of a compacted thread is called.
+///
+/// The subject has not changed — it is the same work with its earlier turns
+/// summarised — so the title keeps it and says what happened once. Once,
+/// because a long chat gets compacted repeatedly and the alternative is a row
+/// in `/sessions` reading "the parser (compacted) (compacted) (compacted)".
+fn compacted_title(source: &str) -> String {
+    const MARK: &str = " (compacted)";
+    if source.is_empty() {
+        "compacted".to_string()
+    } else if source.ends_with(MARK) {
+        source.to_string()
+    } else {
+        format!("{source}{MARK}")
     }
 }
 
@@ -3930,5 +4086,162 @@ mod tests {
 
         s.switch_harness(&id, HarnessKind::OpenCode, "everything", "harness")
             .unwrap();
+    }
+
+    // ---- compacting a thread forward -------------------------------------
+
+    /// The point of the whole operation: the continuation holds one turn — the
+    /// summary — so the next run resumes nothing and starts small. A
+    /// `compactions` row on its own would have left the harness resuming the
+    /// same long transcript it always did.
+    #[test]
+    fn compacting_forward_continues_the_thread_on_the_same_harness() {
+        let s = store();
+        let (id, _) = conversation_with(&s, &["port the parser", "ported, tests green"]);
+
+        let carried = s
+            .continue_as_new(&id, "the parser is ported", "context")
+            .unwrap();
+
+        assert_ne!(carried.conversation.id, id, "a new thread, not a rewrite");
+        assert_eq!(
+            carried.conversation.harness_kind(),
+            Some(HarnessKind::ClaudeCode),
+            "the harness does not change — that is what makes it a compaction"
+        );
+        assert_eq!(carried.conversation.cwd, "/tmp/work");
+        assert_eq!(
+            carried.conversation.session_id, None,
+            "no session, so the next run starts fresh with the summary in its prompt"
+        );
+        assert_eq!(
+            s.resume_for(&carried.conversation.id, HarnessKind::ClaudeCode)
+                .unwrap(),
+            Resume::Fresh
+        );
+
+        let live = texts(&s.live_window(&carried.conversation.id).unwrap());
+        assert_eq!(live.len(), 1, "the whole thread became one turn: {live:?}");
+        assert!(live[0].contains("the parser is ported"));
+        assert!(
+            !live[0].contains("handed over"),
+            "nothing was handed anywhere — it stayed put: {live:?}"
+        );
+    }
+
+    /// Compacted, not truncated. The originals keep their rows, stay
+    /// searchable, and the compaction says what it cost.
+    #[test]
+    fn compacting_forward_leaves_the_originals_on_disk_and_findable() {
+        let s = store();
+        let (id, ids) = conversation_with(&s, &["the long question", "the long answer"]);
+
+        let carried = s.continue_as_new(&id, "short", "context").unwrap();
+
+        assert_eq!(carried.compaction.conversation_id, id, "on the source");
+        assert_eq!(carried.compaction.summary, "short");
+        assert_eq!(carried.compaction.after_chars, "short".len() as i64);
+        assert!(s.live_window(&id).unwrap().is_empty());
+        assert_eq!(s.thread(&id).unwrap().len(), 2, "nothing deleted");
+        assert_eq!(s.search_messages("question", 10).unwrap().len(), 1);
+        // The same shared DAG a switch leaves behind: one more row pointing
+        // into it, no messages copied.
+        assert_eq!(carried.conversation.forked_from.as_deref(), Some(id.as_str()));
+        assert_eq!(carried.conversation.forked_at_id, Some(ids[1]));
+    }
+
+    /// The pin is what makes a conversation *the* main chat, and
+    /// `main_conversation` is get-or-create on it. A pin left on the thread
+    /// that was just compacted away would send the next turn back into it and
+    /// strand the summary in a chat nobody opens again.
+    #[test]
+    fn the_pin_follows_a_compaction_forward() {
+        let s = store();
+        let main = s
+            .main_conversation(HarnessKind::ClaudeCode, "/tmp/work")
+            .unwrap();
+        for text in ["one", "two"] {
+            s.append_message(&main, NewMessage::user(text)).unwrap();
+        }
+
+        let carried = s
+            .continue_as_new(&main, "one and two happened", "context")
+            .unwrap();
+
+        assert_eq!(
+            s.pinned_conversation().unwrap().as_deref(),
+            Some(carried.conversation.id.as_str())
+        );
+        assert_eq!(
+            s.main_conversation(HarnessKind::ClaudeCode, "/tmp/work")
+                .unwrap(),
+            carried.conversation.id,
+            "the next turn goes into the continuation, not the thread behind it"
+        );
+    }
+
+    /// Jod has no model client, so the summary can only come from a caller that
+    /// has one. Compacting a thread into nothing is how you lose it.
+    #[test]
+    fn compacting_forward_with_no_summary_is_refused() {
+        let s = store();
+        let (id, _) = conversation_with(&s, &["one", "two"]);
+
+        let err = s.continue_as_new(&id, "   ", "context");
+        assert!(matches!(err, Err(JodError::Invalid(_))), "got {err:?}");
+
+        assert_eq!(s.conversations(10).unwrap().len(), 1, "nothing was minted");
+        assert_eq!(s.live_window(&id).unwrap().len(), 2, "nothing compacted");
+        assert!(s.compactions(&id).unwrap().is_empty());
+    }
+
+    /// A switch before the first turn is ordinary and carries nothing. A
+    /// *compaction* before the first turn has no context to shorten, so minting
+    /// an empty thread to replace an empty thread would only look like it
+    /// worked.
+    #[test]
+    fn compacting_a_thread_with_nothing_live_is_refused() {
+        let s = store();
+        let c = s
+            .new_conversation(HarnessKind::ClaudeCode, "/tmp/work", None)
+            .unwrap();
+
+        let err = s.continue_as_new(&c.id, "nothing yet", "context");
+        assert!(matches!(err, Err(JodError::Invalid(_))), "got {err:?}");
+        assert_eq!(s.conversations(10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn compacting_a_conversation_that_does_not_exist_is_refused() {
+        let s = store();
+        let err = s.continue_as_new("ghost", "nothing", "context");
+        assert!(matches!(err, Err(JodError::Invalid(_))), "got {err:?}");
+        assert!(s.conversations(10).unwrap().is_empty());
+    }
+
+    /// Taking the whole thread is the entire operation, so the runaway-loss
+    /// guard must exempt it — exactly as it does for a handoff.
+    #[test]
+    fn compacting_forward_may_take_the_whole_thread() {
+        let s = store();
+        let (id, ids) = conversation_with(&s, &["one", "two"]);
+
+        let refused = s.compact(&id, ids[0], ids[1], "everything", "automatic");
+        assert!(matches!(refused, Err(JodError::Invalid(_))), "got {refused:?}");
+
+        s.continue_as_new(&id, "everything", "context").unwrap();
+    }
+
+    /// A long chat is compacted over and over, so the mark is applied once. Ten
+    /// compactions must not produce a row in `/sessions` that is nine
+    /// parenthetical asides and a subject.
+    #[test]
+    fn the_compacted_mark_lands_on_a_title_once_however_often_it_is_compacted() {
+        assert_eq!(compacted_title("the parser"), "the parser (compacted)");
+        assert_eq!(
+            compacted_title("the parser (compacted)"),
+            "the parser (compacted)"
+        );
+        assert_eq!(compacted_title(""), "compacted");
     }
 }

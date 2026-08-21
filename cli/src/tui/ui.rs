@@ -2330,16 +2330,20 @@ fn draw_context(f: &mut Frame, app: &App, area: Rect) {
         )),
         Line::from(""),
     ];
-    // `⚠` as well as the colour, so the advice survives NO_COLOR — it is the
-    // one line in this box that asks you to do something.
-    if app.should_compact() {
-        lines.push(Line::from(Span::styled(
-            " ⚠ compact recommended",
-            bold(WARN),
-        )));
-    } else {
-        lines.push(Line::from(Span::styled(" room to keep going", fg(MUTED))));
-    }
+    // What happens, not what is recommended. This line used to read `⚠ compact
+    // recommended` while nothing in the console could compact anything — advice
+    // pointing at a command that did not exist. Past the threshold the console
+    // now does it itself at the end of the turn, so the line says so.
+    //
+    // `⚠` as well as the colour, so it survives NO_COLOR — it is the one line in
+    // this box that reports something about to happen.
+    lines.push(match (app.should_compact(), app.auto_compact) {
+        (false, _) => Line::from(Span::styled(" room to keep going", fg(MUTED))),
+        (true, true) => Line::from(Span::styled(" ⚠ compacting when the turn ends", bold(WARN))),
+        // Automatic compaction gave up earlier in this session, so the honest
+        // line is the old one: it is yours to do, and now there is a command.
+        (true, false) => Line::from(Span::styled(" ⚠ type /compact to compact", bold(WARN))),
+    });
 
     f.render_widget(
         Paragraph::new(lines).block(
@@ -2560,20 +2564,26 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         badge.push_str(&said);
     }
     // The panel holds the context bar, but the panel is shut most of the time
-    // and advice nobody can see is not advice — so the recommendation itself
-    // rides the one row that is always on screen.
+    // and something about to happen unannounced is worse than advice nobody can
+    // see — so it rides the one row that is always on screen.
     //
-    // It says "(estimate)" because the panel's hedging does not come with it.
-    // `CONTEXT_WINDOW` is one assumed figure for every model, so on a model with
-    // a larger window this badge lights up long before the conversation is
-    // really full. A bare `⚠ compact` reads as a fact about this chat and gets
-    // people to throw away context they still had room for; the word is what
-    // `CONTEXT_WINDOW`'s own doc comment promises the screen would say.
+    // It still says "(estimate)", and the word earns its place more now than it
+    // did as advice. `CONTEXT_WINDOW` is one assumed figure for every model, so
+    // on a model with a larger window this lights up long before the
+    // conversation is really full — and what follows is no longer a suggestion
+    // the user can ignore but a model call the console makes on its own. The
+    // hedge is what keeps that honest. What makes it an acceptable trade is that
+    // compacting deletes nothing: the earlier turns stay searchable and the
+    // thread behind the summary is still in `/sessions`.
     if app.should_compact() {
         if !badge.is_empty() {
             badge.push_str(" · ");
         }
-        badge.push_str("⚠ compact (estimate)");
+        badge.push_str(if app.auto_compact {
+            "⚠ compacting (estimate)"
+        } else {
+            "⚠ compact (estimate)"
+        });
     }
     // Endings that arrive while you are away have to survive until you look.
     if app.unread() > 0 {
@@ -8212,10 +8222,10 @@ mod tests {
     }
 
     /// Compaction is cheap and losing a conversation to a hard context error is
-    /// not, so the advice arrives before the wall — and not a moment earlier,
-    /// or it is noise.
+    /// not, so it happens before the wall — and not a moment earlier, or it is
+    /// spending a model call on nothing.
     #[test]
-    fn the_context_box_recommends_compaction_past_the_threshold_and_not_before() {
+    fn the_context_box_says_it_will_compact_past_the_threshold_and_not_before() {
         use super::super::app::{COMPACT_AT, CONTEXT_WINDOW};
         let mut a = app();
         a.panel = true;
@@ -8226,11 +8236,32 @@ mod tests {
 
         a.context_tokens = (CONTEXT_WINDOW as f64 * COMPACT_AT) as u64;
         let screen = rendered(&a, 140, 24);
-        assert!(screen.contains("⚠ compact recommended"), "{screen}");
+        assert!(screen.contains("⚠ compacting when the turn ends"), "{screen}");
     }
 
-    /// The panel is shut most of the time, and advice nobody can see is not
-    /// advice — so the recommendation itself rides the row that is always on.
+    /// The line reports what is about to happen, so when nothing is about to
+    /// happen it must stop saying so. Automatic compaction gives up after a
+    /// failure — see `App::auto_compact` — and from then on the honest reading
+    /// is the old one: it is yours to do.
+    #[test]
+    fn the_context_box_asks_for_the_command_once_it_has_stopped_compacting_on_its_own() {
+        use super::super::app::CONTEXT_WINDOW;
+        let mut a = app();
+        a.panel = true;
+        a.context_tokens = CONTEXT_WINDOW;
+        a.auto_compact = false;
+
+        let screen = rendered(&a, 140, 24);
+        assert!(screen.contains("/compact"), "{screen}");
+        assert!(
+            !screen.contains("compacting when the turn ends"),
+            "it is not going to:\n{screen}"
+        );
+    }
+
+    /// The panel is shut most of the time, and a model call nobody can see
+    /// coming is worse than advice nobody can see — so it rides the row that is
+    /// always on.
     #[test]
     fn the_compaction_advice_reaches_the_status_bar_with_the_panel_shut() {
         use super::super::app::CONTEXT_WINDOW;
@@ -8252,10 +8283,12 @@ mod tests {
     ///
     /// `CONTEXT_WINDOW` is 200,000 for every model, so on a model with a
     /// million-token window this badge lights up at about 15% of the real
-    /// capacity. Someone who reads a bare `⚠ compact` as a fact compacts a
-    /// conversation with five sixths of its room left and loses context they
-    /// never had to lose. Calling it an estimate is the condition
-    /// `CONTEXT_WINDOW`'s own doc comment sets for keeping one fixed number.
+    /// capacity — and what follows it is now a model call the console makes on
+    /// its own rather than a suggestion the user can ignore. That makes the
+    /// hedge matter more, not less: a bare `⚠ compacting` claims the
+    /// conversation is full when five sixths of the room is left. Calling it an
+    /// estimate is the condition `CONTEXT_WINDOW`'s own doc comment sets for
+    /// keeping one fixed number.
     #[test]
     fn the_status_bar_calls_the_compaction_advice_an_estimate() {
         use super::super::app::CONTEXT_WINDOW;
