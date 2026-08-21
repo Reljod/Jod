@@ -2200,12 +2200,9 @@ fn meter(level: f32, speaking: bool) -> String {
     out
 }
 
-/// The status bar: where you are on the left, what is waiting on the right.
-///
-/// The permission mode leads it on every screen. What the next turn may do
-/// without asking changes while you are talking, and a setting you have to
-/// press a key to see is one you will be wrong about exactly when it matters.
-fn draw_status(f: &mut Frame, app: &App, area: Rect) {
+/// The permission mode leads it on every screen: what the next turn may do
+/// without asking changes while you are talking, and a setting you must press a
+/// key to see is one you will be wrong about when it matters.
     if area.height == 0 {
         return;
     }

@@ -2646,11 +2646,8 @@ fn grant_command(jod: &Jod, what: GrantCommand) -> Result<()> {
     Ok(())
 }
 
-/// Carry out a `jod card …` subcommand.
-///
-/// Everything goes through the same [`jod_core::cards::Query`] the terminal
-/// rail uses, so a card listed on a phone is the card on the screen at home,
-/// sorted the same way.
+/// Goes through the same [`jod_core::cards::Query`] the rail uses, so a card
+/// listed on a phone is the card on the screen at home.
 fn card_command(jod: &Jod, what: CardCommand) -> Result<()> {
     use jod_core::cards::{Query, Sort};
     let store = jod.store().context("this command needs the database")?;
@@ -4172,12 +4169,9 @@ fn ledger_command(jod: &Jod, what: LedgerCommand) -> Result<()> {
     Ok(())
 }
 
-/// Carry out a `jod schedule …` subcommand.
-///
-/// Every path goes through the store rather than spawning anything: a schedule
-/// is armed by writing a row, and the tick is what fires it. Even `run` only
-/// brings the next instant forward, so a hand-started run picks up the same
-/// overlap policy and fire record as a timed one.
+/// Arms by writing a row; the tick is what fires it. Even `run` only brings the
+/// next instant forward, so a hand-started run keeps the same overlap policy
+/// and fire record as a timed one.
 fn schedule_command(jod: &Jod, what: ScheduleCommand) -> Result<()> {
     let store = jod.store().context("this command needs the database")?;
     let now = chrono::Utc::now().timestamp_millis();
@@ -4479,10 +4473,8 @@ fn login(named: Option<&str>, force: bool) -> Result<()> {
     Ok(())
 }
 
-/// Refuse to start an agent when nothing could supervise it.
-///
-/// `jod-run` is what holds a run's output once the caller walks away; without
-/// it a spawn would fail later and less clearly, after the run had a name.
+/// `jod-run` holds a run's output once the caller walks away; without it a
+/// spawn fails later and less clearly, after the run has a name.
 fn require_supervisor(jod: &Jod) -> Result<()> {
     if !jod.supervisor_available() {
         bail!(

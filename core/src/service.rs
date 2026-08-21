@@ -281,15 +281,7 @@ fn settle_cwd(store: &Store, req: &mut SpawnRequest, binding: &RunConversation) 
     }
 }
 
-/// Resolve the conversation a run belongs to, and open it with the prompt that
-/// started it.
-///
-/// `None` means "record nothing", which is an ordinary ending rather than a
-/// failure. The run happens either way — see [`record_in_conversation`] for why
-/// that direction is never reversed.
-///
-/// Returns the row, not just its id, because [`Jod::spawn_agent_in`] reads the
-/// model and the mode off it before launching anything.
+/// `None` means record nothing — an ordinary ending, not a failure.
 fn open_conversation(
     store: &Store,
     req: &SpawnRequest,

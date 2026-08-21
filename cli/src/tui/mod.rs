@@ -1449,12 +1449,10 @@ fn reveal_catalog(app: &mut App) {
     app.projects_open = true;
 }
 
-/// Run one store verb, say what it did, and re-read the screens.
-///
-/// The refresh is the point: a row still saying `armed` after `p` reads as a
-/// dead key, and the tick that would correct it is up to four seconds away.
-/// Errors come back as a sentence rather than a `Result`, so a locked database
-/// costs a notice and not the session.
+/// Re-reading the screens is the point: a row still saying `armed` after `p`
+/// reads as a dead key, and the tick that would correct it is four seconds
+/// away. Errors come back as a sentence, so a locked database costs a notice
+/// and not the session.
 fn on_store(jod: &Arc<Jod>, app: &mut App, verb: impl FnOnce(&Store) -> String) {
     let said = match jod.store() {
         Some(store) => verb(store),
@@ -1977,12 +1975,10 @@ fn delete_hook(store: &Store, name: &str) -> String {
     }
 }
 
-/// Write a credential, answer its card with a *name*, and say what happened.
-///
 /// The card is answered with `secret::stored_summary`, which becomes the
 /// agent's delivery — so it must not contain, hint at, or measure the value. A
-/// failed write does **not** answer the card, which would take the request out
-/// of the rail and leave the run blocked.
+/// failed write does **not** answer the card, which would leave the run
+/// blocked.
 fn stored_secret(
     store: &Store,
     card: i64,
@@ -2023,8 +2019,6 @@ fn answered_card(store: &Store, id: i64, chosen: Option<&str>, answer: Option<&s
     }
 }
 
-/// Destroy everything Jod believes about one subject.
-///
 /// `Store::forget` takes a triple and a memory row is a *subject*, so every
 /// predicate is forgotten in turn. The bare name survives without edges,
 /// because `facts` cascades into `relations` but not `entities` — said out
