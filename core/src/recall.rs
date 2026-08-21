@@ -1,14 +1,12 @@
 //! Reading memory back into a run.
 //!
-//! [`consolidate`](crate::consolidate) gave `facts` a writer. This module gives
-//! it a *reader* — the half without which the whole thing is a notebook nobody
-//! opens. Until now every path was one-way: `remember` wrote, `recall` was an
-//! MCP tool an agent had to think to call, and nothing put what Jod knows in
-//! front of a model that had not asked. So Jod took notes and never learned
-//! from them.
+//! [`consolidate`](crate::consolidate) gave `facts` a writer; this is the
+//! *reader*, without which the whole thing is a notebook nobody opens. Before
+//! it, `recall` was an MCP tool an agent had to think to call, so nothing put
+//! what Jod knows in front of a model that had not asked.
 //!
-//! Four constraints shape everything here, and each one is a decision rather
-//! than a preference:
+//! Four constraints shape everything here, each a decision rather than a
+//! preference:
 //!
 //! - **It is a system prompt, never a turn.** The output goes in
 //!   [`SpawnRequest::system`], which exists because framing folded into the
@@ -48,25 +46,20 @@
 //! - **Ranking cannot tell "true" from "was true"**
 //!   ([`experiments/FINDINGS.md`] §1). Superseded versions outranked the
 //!   current one 35–54% of the time for every flat retriever, because an
-//!   outdated fact is a near-perfect lexical match for a question about the
-//!   current one. Relevance and truth are separate mechanisms and have to stay
-//!   separate: BM25 says what is *relevant*, and [`resolve_conflicts`] plus
-//!   [`admissible`] say what is *true*. Nothing done to the ranker substitutes
-//!   for the second one.
+//!   outdated fact is a near-perfect lexical match for a question about its
+//!   replacement. So BM25 says what is *relevant* and [`resolve_conflicts`]
+//!   plus [`admissible`] say what is *true*; nothing done to the ranker
+//!   substitutes for the second.
 //! - **The second hop gets reserved slots and never displaces the first
-//!   round** ([`experiments/FINDINGS.md`] §3). Merging the two rounds into one
-//!   ranked list — which is what this module did first — measured multi-hop
-//!   0.00 → 0.67 bought at current-value 0.73 → 0.48, a net loss. Same
-//!   mechanism, same parameters; only the merge policy differed. So the two
-//!   rounds are filled from separate allowances: [`MAX_DIRECT_FACTS`] and
+//!   round** (§3). Merging the two into one ranked list measured multi-hop
+//!   0.00 → 0.67 bought at current-value 0.73 → 0.48, a net loss — same
+//!   mechanism, only the merge policy differed. Hence [`MAX_DIRECT_FACTS`] and
 //!   [`MAX_HOP_FACTS`].
-//! - **Skip temporal decay** ([`RECOMMENDATION.md`], P4). Down-weighting facts
-//!   by age destroyed long-tail recall 0.40 → 0.00 to buy less current-value
-//!   than the control plane gives for free, because decay cannot tell "old"
-//!   from "old and still true". Recency appears here only as a tiebreak *after*
-//!   trust, inside a pool that has already been filtered for validity — it
-//!   never excludes a fact for being old, and turning it into a weight would be
-//!   re-introducing exactly what was measured and rejected.
+//! - **Skip temporal decay** ([`RECOMMENDATION.md`], P4). Down-weighting by age
+//!   destroyed long-tail recall 0.40 → 0.00, because decay cannot tell "old"
+//!   from "old and still true". Recency is only a tiebreak *after* trust,
+//!   inside an already-validated pool; making it a weight would reintroduce
+//!   exactly what was measured and rejected.
 
 use std::path::Path;
 
@@ -367,35 +360,21 @@ struct Candidate {
 /// Keep one answer per question, deterministically.
 ///
 /// **The failure this closes.** `(scope, subject, predicate)` is a slot with
-/// versions — that is the data model the whole store is built on
-/// (`research/harness-agents-research/RECOMMENDATION.md`, phase 1) — but
-/// nothing enforces one *open* version per slot at write time.
-/// [`Store::supersede`] closes the old one, and it has exactly two callers:
-/// [`crate::consolidate::Consolidation::apply`] and whoever calls it by hand.
-/// `Store::remember` is a plain `INSERT`, so `jod remember` and the MCP
-/// `remember` tool both leave the previous version open. Say "reljod lives in
-/// manila" on Monday and "reljod lives in singapore" in March and the store
-/// holds both, neither closed, both matching a question about where Reljod
-/// lives.
+/// versions, but nothing enforces one *open* version per slot at write time:
+/// `Store::remember` is a plain `INSERT`, so `jod remember` and the MCP tool
+/// both leave the previous version open. "reljod lives in manila" and "reljod
+/// lives in singapore" then both sit open, both matching the same question.
 ///
-/// Without this step the preamble would state both, in whichever order BM25
-/// liked, and the model would have to guess. That guess is the single strongest
-/// result in the retrieval experiments
-/// (`research/harness-agents-research/experiments/FINDINGS.md` §1): a stale
-/// version outranked the current one 35–54% of the time, because "was true" and
-/// "is true" are textually identical and no ranker can separate them. The fix
-/// has to be deterministic code, decided here, in Rust — never left to a
-/// prompt.
+/// Without this the preamble states both in whatever order BM25 liked and the
+/// model guesses — the failure §1 measures at 35–54%. The fix has to be
+/// deterministic code here, never a prompt.
 ///
-/// **The order.** Trust first, then the later assertion. The recommendation
-/// spells the resolution as `max(valid_from)`, and this departs from a bare
-/// reading of it on purpose: [`crate::consolidate`] already refuses at *write*
-/// time to let a less-trusted origin retire a better-trusted belief
-/// ([`crate::consolidate::Reason::LessTrusted`]). Resolving by recency alone at
-/// read time would show what the write path declined to record — an agent's
-/// newer guess quietly displacing Reljod's own word — and a system whose read
-/// and write disagree about what it believes has no answer to "what do you
-/// think".
+/// **The order: trust first, then the later assertion.** The recommendation
+/// spells this `max(valid_from)`; departing from it is deliberate, because
+/// [`crate::consolidate`] already refuses at *write* time to let a less-trusted
+/// origin retire a better-trusted belief. Resolving by recency at read time
+/// would show what the write path declined to record, and a system whose read
+/// and write disagree has no answer to "what do you think".
 ///
 /// Scope is not part of the key because a recall is already inside one scope;
 /// they are hard partitions, and two scopes holding different answers is the

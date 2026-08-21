@@ -26,32 +26,26 @@
 //!
 //! ## One path here has never been run
 //!
-//! [`run_gh`] actually spawning `gh` is **not exercised by any test**, and that
-//! is deliberate rather than an oversight to be tidied up later. Exercising it
-//! end to end means opening a pull request, which is externally visible and
-//! which docs/spec-harness.md lists as stop-and-ask; it has not been authorised, so it has
-//! not been done.
+//! [`run_gh`] actually spawning `gh` is **not exercised by any test**,
+//! deliberately: doing so end to end means opening a pull request, which is
+//! externally visible and listed as stop-and-ask. It has not been authorised.
 //!
 //! What *is* held to reality either side of that gap: the argv, run verbatim
-//! against a real `gh` and confirmed accepted; the JSON it prints, pasted into
-//! the tests as fixtures rather than invented; the three failure messages it
-//! produces, captured from real runs with no host configured, with a stale
-//! token, and against a number that does not exist; and the fold from an answer
-//! into a row, through [`Store::absorb_view`] and [`Store::absorb_list`], which
-//! exist as separate functions precisely so that most of what could go wrong
-//! here needs no process. The untested seam is the dozen lines that turn an
-//! `Output` into a `String`.
+//! against a real `gh`; the JSON it prints, pasted in as fixtures rather than
+//! invented; its three failure messages, captured from real runs; and the fold
+//! into a row through [`Store::absorb_view`] and [`Store::absorb_list`], which
+//! are separate functions so most of what could go wrong needs no process. The
+//! untested seam is the dozen lines turning an `Output` into a `String`.
 //!
 //! Nobody should read the green suite as covering it.
 //!
 //! ## Absent tooling is a machine, not an error
 //!
-//! No `gh`, or a `gh` nobody has logged in, is a fact about the box. It makes
-//! the state column less useful and breaks nothing else, so it degrades to a
-//! single line on stderr and silence afterwards — see [`SaidOnce`]. A poller
-//! that complained once a minute would train its reader to ignore it, which is
-//! the failure mode that matters here, because the same stream carries the
-//! messages about credentials that do need reading.
+//! No `gh`, or a `gh` nobody has logged in, is a fact about the box: it makes
+//! the state column less useful and breaks nothing. So it degrades to one line
+//! on stderr and silence afterwards — see [`SaidOnce`]. A poller complaining
+//! once a minute trains its reader to ignore a stream that also carries the
+//! credential messages that do need reading.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

@@ -233,25 +233,14 @@ pub struct SpawnRequest {
     pub resume: Resume,
     /// Give this agent Jod's own tools, over MCP.
     ///
-    /// This is the seam the whole system turns on, so it belongs on *every*
-    /// spawn rather than on one special conversation. Jod has no model client
-    /// and never will; what it has is effects — delegating, scheduling,
-    /// remembering, listing what is running — and MCP is how a harness reaches
-    /// them. The harness supplies the judgement, Jod supplies the verbs, and
-    /// neither has to become the other.
+    /// On *every* spawn rather than one special conversation, so a scheduled
+    /// run, a goal iteration, a webhook agent and a teammate all reach the same
+    /// seam. The harness supplies the judgement, Jod supplies the verbs.
     ///
-    /// Because it lives here rather than in the orchestrator, the same seam is
-    /// available to a scheduled run, a goal iteration, a webhook-triggered
-    /// agent and a teammate. An agent that can see what else is running can
-    /// hand work sideways instead of duplicating it, which is the whole of
-    /// agent-to-agent as far as Jod needs to care.
-    ///
-    /// **The seam is universal; the level is not.** An earlier draft of this
-    /// comment said every spawn got "the same tools as the main chat", which
-    /// was wrong and would have been dangerous: the main chat is you, present,
-    /// watching. A schedule at 2am is nobody watching, and the thing you least
-    /// want unattended is an agent that can create more unattended agents.
-    /// See [`ToolAccess::unattended`].
+    /// **The seam is universal; the level is not.** The main chat is you,
+    /// present, watching. A schedule at 2am is nobody watching, and the thing
+    /// you least want unattended is an agent that can create more unattended
+    /// agents. See [`ToolAccess::unattended`].
     ///
     /// `None` means a plain agent with no access to Jod — the right default for
     /// anything untrusted, and the reason this is opt-in rather than automatic.
@@ -280,30 +269,23 @@ pub struct SpawnRequest {
     pub env: Vec<(String, String)>,
     /// A repository command to invoke, named rather than pasted.
     ///
-    /// Only OpenCode needs this, and it needs it because of a measured quirk:
-    /// alone of the three, it does *not* expand `/name` written into the
-    /// message. Given one it hands the literal text to the model, which — in
-    /// the run that found this — went looking with `ls` and `cat`, happened to
-    /// find the file in the working directory, and answered correctly. Right
-    /// answer, wrong mechanism, and it would have failed the moment the command
-    /// lived anywhere else. `opencode run --command <name>` resolves it
-    /// properly, in one step.
+    /// Only OpenCode needs this: alone of the three it does *not* expand
+    /// `/name` written into the message, handing the literal text to the model
+    /// instead. The run that found this went looking with `ls` and `cat`, found
+    /// the file by luck, and answered correctly — right answer, wrong
+    /// mechanism. `opencode run --command <name>` resolves it in one step.
     ///
-    /// Claude Code and AGY leave this `None` and put `/name` in the prompt,
-    /// which they expand themselves. So this is not a general "run a command"
-    /// verb — it is one harness's spelling of a thing the other two say in the
-    /// prompt, and [`crate::commands::Discovered::invoke`] is what decides
-    /// which spelling a given command gets.
+    /// Claude Code and AGY leave this `None` and expand `/name` themselves, so
+    /// this is one harness's spelling rather than a general "run a command"
+    /// verb. [`crate::commands::Discovered::invoke`] picks the spelling.
     ///
-    /// **With a command set, `prompt` is the command's *arguments*, not a
-    /// message.** Measured: `--command jodargs "hello world"` reached the
-    /// command as `$ARGUMENTS` = `["hello world"]`. That matters beside
-    /// [`system`](Self::system) — a harness that answers `false` to
-    /// [`Harness::takes_system_prompt`] has its framing prepended to the
-    /// prompt by the runner, and under a command that framing would arrive as
-    /// argument text. Setting both on one OpenCode spawn is therefore a caller
-    /// error rather than a supported combination, and it is written down here
-    /// because nothing at the type level stops it.
+    /// **With a command set, `prompt` is the command's *arguments*.** Measured:
+    /// `--command jodargs "hello world"` arrived as `$ARGUMENTS`. That collides
+    /// with [`system`](Self::system), whose framing the runner prepends to the
+    /// prompt for any harness answering `false` to
+    /// [`Harness::takes_system_prompt`] — under a command it would arrive as
+    /// argument text. Setting both on one OpenCode spawn is a caller error;
+    /// nothing at the type level stops it.
     #[serde(default)]
     pub command: Option<String>,
     /// Names of secrets to inject, and *only* the names.
@@ -367,18 +349,13 @@ impl Default for SpawnRequest {
 /// entry point has to do: `jod run` without `--name`, `POST /v1/agents` without
 /// `"name"`, the TUI's delegate, and the `delegate` MCP tool.
 ///
-/// It lives here because it was written four times — once in `cli/src/main.rs`,
-/// once in `api/src/routes.rs`, once privately in `core/src/mcp.rs`, and once
-/// more in `cli/examples/screens.rs` — each with a comment promising it matched
-/// the others. It did, but only because nobody had touched it yet. The activity
-/// feed made the same promise across two files and had already broken it. An
-/// agent should be called the same thing whether it was started from a terminal,
-/// a phone or another agent, and that is a property worth having the compiler
-/// keep rather than a comment.
+/// Here because it was written four times, each copy carrying a comment
+/// promising it matched the others — a property worth having the compiler keep
+/// rather than a comment.
 ///
-/// Five words, because a name is a label in a list and not a summary. The 48
-/// character bound is on *characters* rather than bytes: a prompt is whatever
-/// the user typed, and slicing bytes through a multi-byte character panics.
+/// Five words, because a name is a label in a list and not a summary. The
+/// 48-character bound counts *characters*: slicing bytes through a multi-byte
+/// character panics.
 pub fn default_name(prompt: &str) -> String {
     let name = prompt
         .split_whitespace()

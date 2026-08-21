@@ -1441,17 +1441,14 @@ impl Store {
     /// history is exactly the moment nobody is left to remember what was on it.
     ///
     /// The refusal both **returns** a [`Confirmation`] and **arms** one in the
-    /// database, because the two callers are shaped differently and D8 has to
-    /// hold for both. The TUI holds the returned value between two keystrokes
-    /// of one process; `jod work delete` is two processes and has nothing to
-    /// hold, so the second command presents nothing and the armed one answers
-    /// for it. Neither weakens the rule: it is still the same command, typed
-    /// again, inside [`CONFIRMATION_TTL_MS`], against a lease set that has not
-    /// changed in between.
+    /// database, because the two callers are shaped differently. The TUI holds
+    /// the returned value between two keystrokes; `jod work delete` is two
+    /// processes with nothing to hold, so the armed one answers for it. Either
+    /// way it is the same command, typed again, inside
+    /// [`CONFIRMATION_TTL_MS`], against an unchanged lease set.
     ///
-    /// It is kept in `settings` rather than in a table of its own only because
-    /// the schema for this epic is already migrated; it is short-lived, keyed
-    /// by work, and cleared the moment it is used.
+    /// Kept in `settings` rather than its own table only because this epic's
+    /// schema is already migrated; it is short-lived and cleared on use.
     pub fn delete_work(&self, work_id: &str, confirmation: Option<&Confirmation>) -> Result<Deletion> {
         let doomed = self.work_deletion_preview(work_id)?;
         let now = now_ms();

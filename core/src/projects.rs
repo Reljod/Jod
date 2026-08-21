@@ -5,36 +5,29 @@
 //!
 //! ## Why the two nouns Jod already had are not enough
 //!
-//! A [`crate::works::Work`] is one intent and it *closes*. A
-//! [`crate::roots::Root`] is a directory one conversation may read and it dies
-//! with the session. Both are the right shape for "what is happening right
-//! now" and the wrong shape for "which repository is he talking about", which
-//! is a question whose answer outlives every session that ever asked it.
-//!
-//! So a project is the checkout itself: the thing said out loud, the thing
-//! still there next month.
+//! A [`crate::works::Work`] is one intent and it *closes*; a
+//! [`crate::roots::Root`] dies with its session. Both are right for "what is
+//! happening now" and wrong for "which repository is he talking about", whose
+//! answer outlives every session that asks it. So a project is the checkout
+//! itself.
 //!
 //! ## Sticky, because speech is not self-contained
 //!
-//! Dictation drops most of the context typing would have carried. "Let's fix
-//! this" names nothing at all, and demanding it did would reintroduce exactly
-//! the friction voice was meant to remove. So the current project is *sticky*:
-//! it persists on the conversation until something changes it, and a message
-//! that names no project simply inherits it.
+//! "Let's fix this" names nothing, and demanding that it did would reintroduce
+//! the friction voice was meant to remove. So the current project persists on
+//! the conversation until something changes it.
 //!
-//! The cost of stickiness is that it is silently wrong in precisely the case
-//! it is most useful, so every resolution is recorded with *how* it was
-//! reached — see [`How`]. A guess nobody can see is a guess nobody can
-//! correct, which is the same rule the router already lives under.
+//! Stickiness is silently wrong in exactly the case it is most useful, so every
+//! resolution records *how* it was reached — see [`How`]. A guess nobody can
+//! see is a guess nobody can correct.
 //!
 //! ## Matching is done here, not by the model
 //!
 //! [`resolve`] is ordinary string matching over names, aliases and path
-//! basenames, and it deliberately runs *before* the orchestrator is asked
-//! anything. When Reljod says a project's name, that is not a judgement call
-//! and it should not cost a model round-trip, be susceptible to a prompt, or
-//! vary between two identical instructions. The model is asked only when this
-//! finds nothing — which is the case that genuinely needs judgement.
+//! basenames, running *before* the orchestrator is asked anything. Saying a
+//! project's name is not a judgement call, and it should not cost a round-trip,
+//! be susceptible to a prompt, or vary between identical instructions. The
+//! model is asked only when this finds nothing.
 
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
