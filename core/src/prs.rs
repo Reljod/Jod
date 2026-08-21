@@ -1,51 +1,40 @@
 //! Pull requests a run opened.
 //!
-//! Detected two ways, on purpose. The event stream gives *immediacy* — a URL
-//! appears the moment the agent prints it — and polling gives *authority*,
-//! because only the forge knows whether it is still open. Neither alone is
-//! enough: the stream cannot tell you it was merged an hour later, and polling
-//! alone would leave the fleet blank for as long as the poll interval.
+//! Detected two ways. The event stream gives *immediacy* — a URL the moment the
+//! agent prints it — and polling gives *authority*, because only the forge
+//! knows whether it is still open. Neither alone is enough.
 //!
-//! Jod shows and opens. It never merges — that is `merge_pr.sh`'s job and the
-//! charter is explicit that a script decides what merges unread.
+//! Jod shows and opens. It never merges — that is `merge_pr.sh`'s job.
 //!
-//! ## Two detectors, and what each one is for
+//! ## Two detectors
 //!
-//! **The stream** is parsed for URLs. It is the only thing that is instant: the
-//! moment `gh pr create` prints a URL into a tool result, the fleet can show it.
-//! It knows nothing else — a URL is not a status — so a row starts
-//! [`State::Unknown`] and stays that way until somebody asks the forge.
+//! **The stream** is parsed for URLs and knows nothing else, so a row starts
+//! [`State::Unknown`] until somebody asks the forge.
 //!
-//! **The poll** asks the forge. It is the only thing with authority: a pull
-//! request merged an hour after the session ended produces no event anywhere,
-//! and nothing but a question to GitHub will ever discover it. It also
-//! *discovers* — `gh pr list --head <branch>` finds a pull request opened by
-//! hand, or by an agent whose output nobody parsed, which is why
-//! [`Source::Poll`] exists as a way of first hearing about one rather than only
-//! as a way of refreshing.
+//! **The poll** asks the forge. It also *discovers*: `gh pr list --head
+//! <branch>` finds a pull request opened by hand, which is why [`Source::Poll`]
+//! is a way of first hearing about one rather than only of refreshing.
 //!
 //! ## One path here has never been run
 //!
 //! [`run_gh`] actually spawning `gh` is **not exercised by any test**,
-//! deliberately: doing so end to end means opening a pull request, which is
-//! externally visible and listed as stop-and-ask. It has not been authorised.
+//! deliberately: doing so means opening a pull request, which is externally
+//! visible and listed as stop-and-ask.
 //!
-//! What *is* held to reality either side of that gap: the argv, run verbatim
-//! against a real `gh`; the JSON it prints, pasted in as fixtures rather than
-//! invented; its three failure messages, captured from real runs; and the fold
-//! into a row through [`Store::absorb_view`] and [`Store::absorb_list`], which
-//! are separate functions so most of what could go wrong needs no process. The
-//! untested seam is the dozen lines turning an `Output` into a `String`.
+//! What *is* held to reality either side: the argv, run verbatim against a real
+//! `gh`; the JSON it prints, pasted in as fixtures; its three failure messages,
+//! captured from real runs; and the fold into a row, which is separate
+//! functions so most of what could go wrong needs no process. The untested seam
+//! is the dozen lines turning an `Output` into a `String`.
 //!
 //! Nobody should read the green suite as covering it.
 //!
 //! ## Absent tooling is a machine, not an error
 //!
-//! No `gh`, or a `gh` nobody has logged in, is a fact about the box: it makes
-//! the state column less useful and breaks nothing. So it degrades to one line
-//! on stderr and silence afterwards — see [`SaidOnce`]. A poller complaining
-//! once a minute trains its reader to ignore a stream that also carries the
-//! credential messages that do need reading.
+//! No `gh` is a fact about the box: it makes the state column less useful and
+//! breaks nothing. So it degrades to one line on stderr and silence — a poller
+//! complaining once a minute trains its reader to ignore a stream that also
+//! carries the credential messages that do need reading.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -398,21 +387,19 @@ fn lease_for_branch(tx: &rusqlite::Transaction<'_>, branch: &str) -> Result<Opti
 }
 
 impl Store {
-    /// Write down a pull request, or fold what is now known into the row that
-    /// is already there.
+    /// Write down a pull request, or fold what is now known into the row
+    /// already there.
     ///
-    /// The merge is the whole of this method, and it exists because the two
-    /// detectors disagree by design. A sighting in the stream carries
-    /// [`State::Unknown`] and no title; a poll carries both. Whichever arrives
-    /// second must not undo the other, so:
+    /// The merge is the whole method, because the two detectors disagree by
+    /// design: a stream sighting carries [`State::Unknown`] and no title, a
+    /// poll carries both. Whichever arrives second must not undo the other, so:
     ///
     /// - `state` is never overwritten *with* `Unknown` — not knowing is not
-    ///   news, and a stream re-sighting after a poll would otherwise blank a
-    ///   perfectly good "merged".
-    /// - a title, branch or number that is already there survives an empty one.
+    ///   news, and a re-sighting would otherwise blank a good "merged".
+    /// - a title, branch or number already there survives an empty one.
     /// - `source` and `detected_at_ms` record the *first* time Jod heard about
-    ///   it and never move. That is what makes "the stream found this one and
-    ///   the poll found that one" answerable weeks later.
+    ///   it and never move, which is what makes "the stream found this one"
+    ///   answerable weeks later.
     pub fn record_pull_request(&self, new: NewPullRequest) -> Result<PullRequest> {
         let at = now_ms();
         self.write(|tx| {
@@ -1254,16 +1241,14 @@ impl Store {
 
 /// What Jod says to a session when auto-PR is on and its work looks finished.
 ///
-/// An instruction to the agent rather than a `gh pr create` Jod runs itself,
-/// and that is the design rather than a shortcut. The charter's rule is that a
-/// pull request carries evidence — real output, diff-derived deltas — and the
-/// `create-pr` skill is what produces it. Jod shelling out to `gh pr create`
-/// with a title and an empty body would open exactly the pull request that rule
-/// exists to prevent, and it would do it from the one process that never saw
-/// the work happen. The session has the context; it is asked to use the skill.
+/// An instruction to the agent rather than a `gh pr create` Jod runs itself.
+/// The charter's rule is that a pull request carries evidence, and the `create-
+/// pr` skill produces it — Jod shelling out with an empty body would open
+/// exactly the pull request that rule prevents, from the one process that never
+/// saw the work.
 ///
-/// **Integration point** for whoever owns delivery: this is the text to inject
-/// at a turn boundary once [`Store::auto_pr`] is on and the board is empty.
+/// **Integration point**: this is the text to inject at a turn boundary once
+/// [`Store::auto_pr`] is on and the board is empty.
 pub fn auto_pr_instruction(branch: &str, base: &str) -> String {
     format!(
         "Your work on `{branch}` looks finished. Open a pull request against `{base}` by \

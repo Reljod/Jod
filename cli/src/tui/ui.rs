@@ -2654,13 +2654,12 @@ fn draw_confirm_reload(f: &mut Frame) {
 /// a rule from `secret.rs` made visible:
 ///
 /// - the field shows `secret::masked`, never the characters — this is the one
-///   part
-/// of the flow a user cannot undo afterwards;
+///   part of the flow a user cannot undo afterwards;
 /// - the destination is printed *above* the field, because the moment to learn
-/// where a production token is going is before pasting it;
+///   where a production token is going is before pasting it;
 /// - the border is `WARN` rather than `USER`, so the one overlay that must not
-///   be
-/// typed into absent-mindedly does not look like the one asking for a name.
+///   be typed into absent-mindedly does not look like the one asking for a
+///   name.
 fn draw_secret(f: &mut Frame, name: &str, scope: jod_core::secrets::Scope, value: &secret::Typed) {
     let destination = secret::destination(name, scope);
     let mut lines: Vec<Line> = vec![Line::from("")];

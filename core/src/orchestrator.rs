@@ -30,11 +30,11 @@
 //! ## Context, and the two clocks that bound it
 //!
 //! - **Size.** Past a threshold the transcript costs more than it is worth. The
-//! obvious trigger and the less useful one.
+//!   obvious trigger and the less useful one.
 //! - **Your silence.** A conversation untouched for a day has moved on, and the
-//! moment to summarise is *before* the next thing starts. Measured from
-//! `last_human_ms`, because six agents writing overnight is not you being
-//! present.
+//!   moment to summarise is *before* the next thing starts. Measured from
+//!   `last_human_ms`, because six agents writing overnight is not you being
+//!   present.
 //!
 //! Compaction is a delegated run too, for the same reason routing is.
 

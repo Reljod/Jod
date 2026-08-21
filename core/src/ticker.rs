@@ -17,11 +17,10 @@
 //! no stable conversation to address. Two rules for whoever does it:
 //!
 //! - **`claim_wake` is not `plan_injection`.** One rate-limits across ticks,
-//!   the
-//! other declines only mid-turn. Folded together, an idle member getting one
-//! message per tick gets one turn per tick.
+//!   the other declines only mid-turn. Folded together, an idle member getting
+//!   one message per tick gets one turn per tick.
 //! - **The drain and the queue must settle together.** Two rows settled in two
-//! statements disagree the first time a process dies between them.
+//!   statements disagree the first time a process dies between them.
 
 use std::sync::Arc;
 
@@ -990,8 +989,7 @@ impl Ticker {
     /// which is what makes it *memory* rather than a job queue:
     ///
     /// - **`pursuing`** — the brief, superseded each iteration, so bitemporal
-    ///   validity
-    /// answers "what did it think it was doing last month".
+    ///   validity answers "what did it think it was doing last month".
     /// - **`current-run`** — likewise superseded.
     /// - **`iteration`** — appended, never superseded. The episodic record.
     ///
@@ -1243,19 +1241,17 @@ impl Ticker {
     /// What turns the bus from something a human operates into something that
     /// runs.
     ///
-    /// **The judgement is not here.** [`team::wake_order`] decides who may be woken;
-    /// this gives it a caller that is not a person.
+    /// **The judgement is not here.** [`team::wake_order`] decides who may be
+    /// woken; this gives it a caller that is not a person.
     ///
     /// Three properties, each an otherwise invisible bug:
     ///
     /// - **One wake per interval per member.** Ten messages become one turn
-    ///   carrying
-    /// ten. A cost control and a coherence one.
+    ///   carrying ten. A cost control and a coherence one.
     /// - **Nothing waits for a run.** The run reports through the database
     ///   either way.
     /// - **Undeliverable mail says so on itself.** A member with no session is
-    ///   left
-    /// asleep, and the mail is annotated.
+    ///   left asleep, and the mail is annotated.
     pub async fn tick_mail(&self, now_ms: i64) -> Result<TickReport> {
         let Some(store) = self.jod.store().cloned() else {
             return Ok(TickReport::default());
@@ -1557,10 +1553,10 @@ impl Ticker {
 
     /// Say to each idle session whatever has been queued for it.
     ///
-    /// **The missing half of E2.S7.** [`Store::plan_injection`] was built, tested and
-    /// called by nothing, so a card answered from the rail sat queued for ever
-    /// while the rail said *queued*. The queue was never missing; the caller
-    /// was.
+    /// **The missing half of E2.S7.** [`Store::plan_injection`] was built,
+    /// tested and called by nothing, so a card answered from the rail sat
+    /// queued for ever while the rail said *queued*. The queue was never
+    /// missing; the caller was.
     ///
     /// Shaped like [`Ticker::tick_mail`] — the two answer the same question
     /// about a conversation and a member:
@@ -1568,11 +1564,9 @@ impl Ticker {
     /// - **The judgement is not here.** `plan_injection` decides whether to
     ///   speak.
     /// - **Nothing settles until the spawn works**, so a failure leaves the
-    ///   answers
-    /// queued rather than delivered to a run that never started.
+    ///   answers queued rather than delivered to a run that never started.
     /// - **A session with no harness session is left alone**: a fresh context
-    ///   answers
-    /// having forgotten the work the card was about.
+    ///   answers having forgotten the work the card was about.
     ///
     /// Injected into the conversation the answers belong to. A fresh one would
     /// fork Jod's record, and the transcript the human is reading would stop

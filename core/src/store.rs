@@ -7,14 +7,12 @@
 //! engines with real concurrent processes. Three results drive the code:
 //!
 //! - **SQLite was fastest and the only engine that never lost a write.**
-//!   Postgres
-//! silently discarded 47% of contended updates on its obvious path, LanceDB
-//! 51%, Qdrant 46% — all reporting zero errors.
+//!   Postgres silently discarded 47% of contended updates on its obvious path,
+//!   LanceDB 51%, Qdrant 46% — all reporting zero errors.
 //! - **`BEGIN IMMEDIATE` is mandatory for writes**; deferred transactions
-//!   collide,
-//! a 98% failure rate. Every write goes through [`Store::write`].
+//!   collide, a 98% failure rate. Every write goes through [`Store::write`].
 //! - **Never hold a write transaction across a model call.** Nothing here opens
-//! one that outlives a single function call.
+//!   one that outlives a single function call.
 //!
 //! Markdown stays the source of truth for prose; this is an index over it and
 //! can be deleted and rebuilt.

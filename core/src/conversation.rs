@@ -8,12 +8,12 @@
 //! a branched conversation, and they are not interchangeable:
 //!
 //! - **Copy a prefix into a new container.** Claude Code writes a new `.jsonl`;
-//! OpenCode's `fork` deep-copies rows. Cheap to read, and it records no parent
-//! edge — you cannot render "‹ 2/3 ›" from it, because nothing knows the two
-//! branches are siblings.
+//!   OpenCode's `fork` deep-copies rows. Cheap to read, and it records no
+//!   parent edge — you cannot render "‹ 2/3 ›" from it, because nothing knows
+//!   the two branches are siblings.
 //! - **One shared DAG with a moving head pointer.** ChatGPT's `current_node`,
-//! git's `HEAD`. Every reader must linearise by walking parents, and in
-//! exchange nothing is lost.
+//!   git's `HEAD`. Every reader must linearise by walking parents, and in
+//!   exchange nothing is lost.
 //!
 //! This implements the second. A fork mints a *conversation row* whose head
 //! points at an existing message and copies nothing, so a sibling pager is a
@@ -184,16 +184,14 @@ impl NewMessage {
     ///
     /// - `Progress` is a contentless liveness tick, belonging in a status line.
     /// - `Delta` is a fragment of a block that reappears complete as the
-    /// `Message`/`ToolCall` this already maps — keeping both would replay the
-    /// first harness's streaming pace into the second.
+    ///   `Message`/`ToolCall` this already maps — keeping both would replay the
+    ///   first harness's streaming pace into the second.
     /// - `Started` is metadata: the session id and model belong on the
-    ///   conversation
-    /// row.
+    ///   conversation row.
     /// - `Finished.text` is always a repeat of the last `Message`.
     /// - `Raw` is unclassified. The event log keeps it so a harness upgrade
-    ///   degrades
-    /// to "shown verbatim", but a transcript meant for another harness is the
-    /// one place it does not belong.
+    ///   degrades to "shown verbatim", but a transcript meant for another
+    ///   harness is the one place it does not belong.
     pub fn from_event(event: &AgentEvent) -> Option<NewMessage> {
         match event {
             AgentEvent::Message { text } => Some(NewMessage::new(Role::Assistant, text.clone())),
@@ -482,12 +480,10 @@ impl Store {
     /// Two refusals, neither of which may be widened into a flag:
     ///
     /// - **The pinned main chat.** Deleting it frees nothing and loses the
-    ///   thread
-    /// every other was opened from.
+    ///   thread every other was opened from.
     /// - **Any conversation belonging to a work.** Deleting the *work* is the
-    ///   only
-    /// sanctioned route, so a session cannot be cut out of a tree pointing at
-    /// it.
+    ///   only sanctioned route, so a session cannot be cut out of a tree
+    ///   pointing at it.
     ///
     /// Messages, cards, roots, delegations and queued deliveries all cascade.
     pub fn delete_conversation(&self, id: &str) -> Result<()> {

@@ -472,8 +472,10 @@ impl Store {
     ///
     /// - **A turn is in flight** — the rule the module exists for. The running
     ///   prompt was assembled before any of this arrived, so splicing it in
-    ///   answers a question the agent has moved past. It waits; nothing is lost.
-    /// - **Nothing is queued.** Waking an agent to tell it nothing burns a turn.
+    ///   answers a question the agent has moved past. It waits; nothing is
+    ///   lost.
+    /// - **Nothing is queued.** Waking an agent to tell it nothing burns a
+    ///   turn.
     ///
     /// Everything queued goes into **one** injection, for the reason the module
     /// header gives.

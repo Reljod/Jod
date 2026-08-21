@@ -687,8 +687,8 @@ pub fn all_documented_chords() -> Vec<String> {
 ///   `Ctrl-A` and `Ctrl-Home` — not `Ctrl-A` and a bare `Home`.
 ///
 /// An empty result means the label is not pressable, which the drift test
-/// treats as a bug in the label rather than as a row to skip. Silently
-/// skipping is how a table drifts.
+/// treats as a bug in the label rather than as a row to skip. Silently skipping
+/// is how a table drifts.
 #[cfg(test)]
 pub fn press_of(label: &str) -> Vec<(KeyCode, KeyModifiers)> {
     let mut presses = Vec::new();

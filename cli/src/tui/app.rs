@@ -209,10 +209,10 @@ impl Overlay {
 /// Two things follow, and both are why this is a state rather than a boolean:
 ///
 /// * **It has to be obvious that it is on.** A microphone nobody remembers
-/// switching on is one in a room having a different conversation.
+///   switching on is one in a room having a different conversation.
 /// * **Utterances overlap.** A sentence is transcribed while the next is
-///   spoken,
-/// so `pending` counts what is in flight rather than replacing the state.
+///   spoken, so `pending` counts what is in flight rather than replacing the
+///   state.
 ///
 /// Hold-to-talk was never available: terminals report key *presses*, and
 /// releases arrive only under the kitty protocol.

@@ -170,13 +170,12 @@ pub const REPLY_PROTOCOL: &str = "To answer any of the messages above, call \
 ///
 /// - **Nothing is waiting.** Waking an agent to tell it nothing burns a turn.
 /// - **The member is not idle.** A busy member reads its inbox next turn
-///   anyway,
-/// and resuming mid-turn would fork it.
+///   anyway, and resuming mid-turn would fork it.
 /// - **It is shutting down or has failed.** Waking would undo the request.
 /// - **There is no session to resume** — the important one. Spawning without
-///   one
-/// starts a *fresh* context, so the member answers having forgotten everything.
-/// Staying asleep holding visible unread mail is better than amnesia.
+///   one starts a *fresh* context, so the member answers having forgotten
+///   everything. Staying asleep holding visible unread mail is better than
+///   amnesia.
 pub fn wake_order(member: &Member, pending: &[Message]) -> Option<WakeOrder> {
     if pending.is_empty() || member.status != MemberStatus::Ready {
         return None;

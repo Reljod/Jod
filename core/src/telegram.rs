@@ -14,13 +14,12 @@
 //! The costs are real and handled here:
 //!
 //! - **Only one poller may run per token.** A second makes Telegram return 409
-//!   to
-//!   *both*, so [`BotError::Conflict`] is fatal: retrying through it keeps the
-//! other poller broken too.
+//!   to *both*, so [`BotError::Conflict`] is fatal: retrying through it keeps
+//!   the other poller broken too.
 //! - **The offset is the acknowledgement.** Advancing before the work is done
-//! loses a message on a crash; advancing after re-runs it. Jod advances
-//!   *before* dispatch, because re-running an unbounded agent turn is worse than
-//! dropping it — the sender is in the chat and can send again.
+//!   loses a message on a crash; advancing after re-runs it. Jod advances
+//!   *before* dispatch, because re-running an unbounded agent turn is worse
+//!   than dropping it — the sender is in the chat and can send again.
 //!
 //! # Crate: raw JSON over `reqwest`
 //!
@@ -530,18 +529,15 @@ const FRESH_START: &str = "🆕 Fresh start. The main chat begins its next messa
 ///
 /// - **The whole first word decides.** `/newsletter` is not `/new`.
 /// - **Leading whitespace means it is not a command**, so a prompt can always
-///   be
-/// forced through.
+///   be forced through.
 /// - **A bare `/` is a typo.**
 /// - **A first word containing a second `/` is a path.** "/usr/bin/foo is
-///   missing"
-/// is a sentence about a machine. This costs something — `/new/thing` reaches
-/// the agent — and is still right on a phone, where paths are pasted
-/// constantly.
+///   missing" is a sentence about a machine. This costs something —
+///   `/new/thing` reaches the agent — and is still right on a phone, where
+///   paths are pasted constantly.
 /// - **Anything else beginning with `/` is reported, never forwarded.** A
-///   mistyped
-/// command reaching a harness arrives as a *prompt*, and a prompt here starts a
-/// process that can run a shell.
+///   mistyped command reaching a harness arrives as a *prompt*, and a prompt
+///   here starts a process that can run a shell.
 ///
 /// One rule the TUI does not need: Telegram appends `@thebotsname` in a group.
 pub fn parse_command(text: &str) -> Option<Command> {

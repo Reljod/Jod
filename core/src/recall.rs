@@ -1,65 +1,40 @@
 //! Reading memory back into a run.
 //!
 //! [`consolidate`](crate::consolidate) gave `facts` a writer; this is the
-//! *reader*, without which the whole thing is a notebook nobody opens. Before
-//! it, `recall` was an MCP tool an agent had to think to call, so nothing put
-//! what Jod knows in front of a model that had not asked.
+//! *reader*, without which the whole thing is a notebook nobody opens.
 //!
-//! Four constraints shape everything here, each a decision rather than a
-//! preference:
+//! Four constraints shape everything here:
 //!
-//! - **It is a system prompt, never a turn.** The output goes in
-//!   [`SpawnRequest::system`], which exists because framing folded into the
-//!   prompt became the opening *user* message of the main chat — `jod main`
-//!   opened on a screen of instructions-to-itself instead of the sentence
-//!   Reljod typed. Memory is addressed to the model; it is not something
-//!   anybody said, and it must not appear in a transcript a person reads back.
-//! - **Untrusted material is never injected.** A fact whose [`Origin`] is
-//!   [`Origin::Untrusted`] came from a page, an email or a stranger's pull
-//!   request. Putting it in a system prompt is prompt injection with a database
-//!   in the middle: the attacker writes once and steers every later run. The
-//!   filter is applied twice on purpose — the store's queries exclude it, and
-//!   [`admissible`] excludes it again — for the same reason
-//!   [`ToolAccess::capped_for`](crate::harness::ToolAccess::capped_for) is
-//!   applied at the point of use rather than trusted to the row.
-//! - **The selection is bounded.** A preamble is paid on *every* turn of every
-//!   run, so an unbounded one is a recurring bill and a distraction the model
-//!   has to read past to reach the question. See [`MAX_PREAMBLE_CHARS`].
-//! - **Recall may not fail a run.** Every store error here becomes "no
-//!   preamble" rather than an error the caller has to handle. Hermes'
-//!   lesson (`research/hermes-parity-2026/REPORT.md` §3.2) was a memory side
-//!   effect suppressing the user's own reply; a retrieval that can break a
-//!   conversation is worse than one that occasionally forgets.
+//! - **It is a system prompt, never a turn.** Framing folded into the prompt
+//!   became the opening *user* message of the main chat, so `jod main` opened
+//!   on a screen of instructions-to-itself. Memory is addressed to the model
+//!   and must not appear in a transcript a person reads back.
+//! - **Untrusted material is never injected.** A fact from a page or a
+//!   stranger's pull request in a system prompt is prompt injection with a
+//!   database in the middle: the attacker writes once and steers every later
+//!   run. Filtered twice, at the query and at [`admissible`].
+//! - **The selection is bounded.** A preamble is paid on *every* turn, so an
+//!   unbounded one is a recurring bill. See [`MAX_PREAMBLE_CHARS`].
+//! - **Recall may not fail a run.** Every store error becomes "no preamble": a
+//!   memory side effect once suppressed the user's own reply (`research/hermes-
+//!   parity-2026/REPORT.md` §3.2).
 //!
-//! Nothing here builds a second memory system. The candidates come from
-//! [`Store::recall_in`] (BM25 over currently-believed facts, partitioned by
-//! scope) and [`Store::recall_expanded`] (the same text hit, plus one graph
-//! hop), which is exactly what an agent calling the `recall` and `related`
-//! tools would get. The only thing this module adds is *choosing without being
-//! asked*.
+//! Nothing here builds a second memory system — the candidates are exactly what
+//! an agent calling `recall` and `related` would get. What this adds is
+//! *choosing without being asked*.
 //!
-//! ## What the retrieval research settled, and what this owes it
+//! ## What the retrieval research settled
 //!
-//! Three results out of `research/harness-agents-research/` shape the selection
-//! directly, and two of them cost this module a rewrite:
-//!
-//! - **Ranking cannot tell "true" from "was true"**
-//!   ([`experiments/FINDINGS.md`] §1). Superseded versions outranked the
-//!   current one 35–54% of the time for every flat retriever, because an
-//!   outdated fact is a near-perfect lexical match for a question about its
-//!   replacement. So BM25 says what is *relevant* and [`resolve_conflicts`]
-//!   plus [`admissible`] say what is *true*; nothing done to the ranker
-//!   substitutes for the second.
-//! - **The second hop gets reserved slots and never displaces the first
-//!   round** (§3). Merging the two into one ranked list measured multi-hop
-//!   0.00 → 0.67 bought at current-value 0.73 → 0.48, a net loss — same
-//!   mechanism, only the merge policy differed. Hence [`MAX_DIRECT_FACTS`] and
-//!   [`MAX_HOP_FACTS`].
+//! - **Ranking cannot tell "true" from "was true"** (§1). Superseded versions
+//!   outranked the current one 35–54% of the time, because an outdated fact is
+//!   a near-perfect lexical match for a question about its replacement. So BM25
+//!   says what is *relevant* and [`resolve_conflicts`] says what is *true*.
+//! - **The second hop gets reserved slots** (§3). Merging the two rounds
+//!   measured multi-hop 0.00 → 0.67 bought at current-value 0.73 → 0.48, a net
+//!   loss. Hence [`MAX_DIRECT_FACTS`] and [`MAX_HOP_FACTS`].
 //! - **Skip temporal decay** ([`RECOMMENDATION.md`], P4). Down-weighting by age
 //!   destroyed long-tail recall 0.40 → 0.00, because decay cannot tell "old"
-//!   from "old and still true". Recency is only a tiebreak *after* trust,
-//!   inside an already-validated pool; making it a weight would reintroduce
-//!   exactly what was measured and rejected.
+//!   from "old and still true". Recency is only a tiebreak after trust.
 
 use std::path::Path;
 
