@@ -2903,7 +2903,11 @@ impl App {
     /// keyed by the conversation it stands for — see [`NodeId::manager`] — so
     /// the answer is here, and a second query would be a slower way to learn
     /// what the screen already knows.
-    fn is_manager_conversation(&self, conversation_id: &str) -> bool {
+    ///
+    /// Public because the key handler asks it too: `←` on an empty line backs
+    /// out of a manager and is the cursor everywhere else, and this is what
+    /// tells the two apart.
+    pub fn is_manager_conversation(&self, conversation_id: &str) -> bool {
         self.forest
             .iter()
             .any(|n| n.id == NodeId::manager(conversation_id))
