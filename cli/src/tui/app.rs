@@ -822,7 +822,7 @@ pub enum Resolved {
 /// Harnesses name things differently, so the common keys are tried in order of
 /// how much they tell a reader, and anything unrecognised falls back to compact
 /// JSON rather than being dropped.
-fn tool_detail(input: &serde_json::Value) -> Option<String> {
+pub(super) fn tool_detail(input: &serde_json::Value) -> Option<String> {
     // Compared with case and underscores ignored, so `file_path`, `filePath`
     // and `FilePath` all match one entry. The harnesses genuinely disagree
     // here: AGY names its parameters `TargetFile` and `DirectoryPath`, and
@@ -951,7 +951,7 @@ pub fn since(now_ms: i64, at_ms: Option<i64>) -> String {
 }
 
 /// Keep the first `n` lines of tool output, saying how much was left.
-fn first_lines(s: &str, n: usize) -> String {
+pub(super) fn first_lines(s: &str, n: usize) -> String {
     let lines: Vec<&str> = s.lines().collect();
     if lines.len() <= n {
         return s.trim_end().to_string();
@@ -981,6 +981,52 @@ fn failed(entry: &Entry) -> bool {
         entry,
         Entry::Tool { failed: true, .. } | Entry::ToolOut { failed: true, .. }
     )
+}
+
+/// Whether this tool's call already has a line among `entries`, so its result
+/// does not need to add one.
+///
+/// A free function rather than a method because the live stream and the replay
+/// of a stored conversation both have to answer it, and they hold their entries
+/// in different places. Two copies of this rule is how the two views drift.
+///
+/// Not `entries.last()`, which is where this started: a call does not always
+/// leave its line at the tail. An edit pushes its diff *underneath* its line,
+/// and a plan call is folded into the plan block and pushes no line at all — so
+/// the tail check answered "nobody announced this" for both, and the result arm
+/// obligingly announced them a second time. A detail-less `⚙ Edit` appeared
+/// under every diff and a `⚙ TodoWrite` under every plan revision, and neither
+/// is distinguishable from a fresh anonymous call: a burst of writes read as a
+/// stack of them.
+pub(super) fn announced_in(entries: &[Entry], name: &str) -> bool {
+    // The plan block is revised in place rather than re-pushed, so a todo call
+    // leaves nothing near the tail to find. It is announced all the same — by
+    // the block itself.
+    if todo::names_a_plan(name) && entries.iter().any(|e| matches!(e, Entry::Plan(_))) {
+        return true;
+    }
+    entries
+        .iter()
+        .rev()
+        // Step over what the call pushed *below* its own line.
+        .find(|e| !matches!(e, Entry::Diff(_)))
+        .is_some_and(|e| matches!(e, Entry::Tool { name: n, .. } if n == name))
+}
+
+/// Put a revised plan into the block already among `entries`, reporting whether
+/// there was one. `false` means the caller still has to add it.
+///
+/// Split this way so the live stream keeps its scroll-aware `push` while replay
+/// appends directly, without either of them owning a second copy of the
+/// one-block-per-turn rule.
+pub(super) fn replace_plan(entries: &mut [Entry], plan: &[todo::Item]) -> bool {
+    match entries.iter_mut().rfind(|e| matches!(e, Entry::Plan(_))) {
+        Some(existing) => {
+            *existing = Entry::Plan(plan.to_vec());
+            true
+        }
+        None => false,
+    }
 }
 
 impl App {
@@ -1426,40 +1472,15 @@ impl App {
     /// revision would be a second kind of noise in place of the first. Its
     /// position says when the agent started planning, which does not change.
     pub fn revise_plan(&mut self, plan: Vec<todo::Item>) {
-        match self
-            .transcript
-            .iter_mut()
-            .rfind(|e| matches!(e, Entry::Plan(_)))
-        {
-            Some(existing) => *existing = Entry::Plan(plan),
-            None => self.push(Entry::Plan(plan)),
+        if !replace_plan(&mut self.transcript, &plan) {
+            self.push(Entry::Plan(plan));
         }
     }
 
     /// Whether this tool's call already has a line in the transcript, so its
-    /// result does not need to add one.
-    ///
-    /// Not `transcript.last()`, which is where this started: a call does not
-    /// always leave its line at the tail. An edit pushes its diff *underneath*
-    /// its line, and a plan call is folded into the plan block and pushes no
-    /// line at all — so the tail check answered "nobody announced this" for
-    /// both, and the result arm obligingly announced them a second time. A
-    /// detail-less `⚙ Edit` appeared under every diff and a `⚙ TodoWrite` under
-    /// every plan revision, and neither is distinguishable from a fresh
-    /// anonymous call: a burst of writes read as a stack of them.
+    /// result does not need to add one. See [`announced_in`] for the rule.
     fn announced(&self, name: &str) -> bool {
-        // The plan block is revised in place rather than re-pushed, so a todo
-        // call leaves nothing near the tail to find. It is announced all the
-        // same — by the block itself.
-        if todo::names_a_plan(name) && self.transcript.iter().any(|e| matches!(e, Entry::Plan(_))) {
-            return true;
-        }
-        self.transcript
-            .iter()
-            .rev()
-            // Step over what the call pushed *below* its own line.
-            .find(|e| !matches!(e, Entry::Diff(_)))
-            .is_some_and(|e| matches!(e, Entry::Tool { name: n, .. } if n == name))
+        announced_in(&self.transcript, name)
     }
 
     pub fn push(&mut self, entry: Entry) {
