@@ -72,7 +72,7 @@ width from 20 to 120.
 
 ## What this pass fixed
 
-Twenty-two changes, each with a test that fails without it. Driven by running the
+Twenty-four changes, each with a test that fails without it. Driven by running the
 console against real harnesses under a throwaway `JOD_HOME`, on four projects,
 and then re-run end to end on an empty install.
 
@@ -102,6 +102,37 @@ and then re-run end to end on an empty install.
   binding to main so the reply can be watched here. Harmless from main, and a
   silent move when typed inside a manager. The promise was corrected rather than
   the behaviour, because watching the answer is the point of the command.
+
+**One fault, four times over: when a conversation is superseded, what points at it is left behind.**
+
+Main compacts itself when its context fills. `continue_as_new` opens a fresh
+conversation and moves the pin onto it — correctly; the alternative strands the
+summary. Four other things named the old conversation and none of them moved.
+
+| What pointed at it | What broke |
+|---|---|
+| `conversations.pinned` | already handled |
+| `team_members.conversation_id` | mail to `main` stranded for ever |
+| `projects.manager_conversation_id` | a manager's harness switch silently undone |
+| `conversations.parent_conversation_id` | **Reljod's rail emptied** |
+
+The last one is the worst, and it **undid a fix made earlier in this same
+pass**. Hanging a manager under main is what makes its answers reach the rail;
+that was fixed, verified live — 0 cards to 2 — and then compaction reached
+around it. Observed an hour later as a fleet reading `alpha [3 cards]` and
+`gamma [8 cards]` beside a rail reading "nothing waiting — no agent has asked
+anything". After the fix and its backfill, the same store read `rail · 14 open`.
+
+All four now move in the one transaction that moves the pin. Migrations `0025`
+and `0026` repair the stores that have already compacted, which is every store
+that has been up long enough.
+
+**The lesson is narrower than "test your fixes" and worth stating exactly.** Fix
+2 was verified, live, and was genuinely correct when verified. It was still
+wrong within the hour, because a *scheduled background operation* reached around
+it. Verifying a change at the moment you make it does not tell you it survives
+the system's own housekeeping — and the housekeeping here runs on a timer
+nobody presses.
 
 **Two more the daemon found, which nothing in the console showed.**
 
