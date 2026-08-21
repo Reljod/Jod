@@ -1481,11 +1481,37 @@ impl Store {
             crate::projects::How::Human,
             &format!("this is {}'s manager", project.name),
         )?;
+        // Hang it under the main chat, which is the edge the rail reads.
+        //
+        // Both preambles promise Reljod that a manager answers onto his rail —
+        // `ask_manager` returns "It will raise a card on your rail", and the
+        // manager is told a card "cascades up to his rail and is the only way
+        // your answer reaches him". None of that was true. Cards cascade along
+        // `parent_conversation_id` (`Store::cards_in`, `subtree_cte`), an
+        // engineer is hung under its manager by `open_work`, and the manager
+        // was hung under nothing — so the chain reached one link short of the
+        // person it exists to report to. Main's rail said "nothing waiting"
+        // while the work sat finished on a rail nobody opens.
+        //
+        // Safe to do even though everything then hangs under main, because
+        // `Jod::cascade_stop` already exempts the pinned conversation by name
+        // and says why: stopping the chat you are typing into must not stop the
+        // machine. This makes the data say what that comment already assumed.
+        let main = self.pinned_conversation()?;
         self.write(|tx| {
             tx.execute(
                 "UPDATE projects SET manager_conversation_id = ?2 WHERE id = ?1",
                 rusqlite::params![project.id, created.id],
             )?;
+            // Only when there *is* a main chat. A manager created before one
+            // exists keeps a null parent rather than pointing at nothing, and
+            // the next one created will hang correctly.
+            if let Some(main) = &main {
+                tx.execute(
+                    "UPDATE conversations SET parent_conversation_id = ?2 WHERE id = ?1",
+                    rusqlite::params![created.id, main],
+                )?;
+            }
             Ok(())
         })?;
         Ok((created.id, true))
@@ -2387,6 +2413,72 @@ mod tests {
 
             std::fs::remove_dir_all(&dir).ok();
             std::fs::remove_dir_all(format!("{dir}-2")).ok();
+        }
+
+        /// The promise both preambles make, held to by the data.
+        ///
+        /// `ask_manager` tells Reljod "It will raise a card on your rail", and
+        /// the manager preamble tells the manager a card "cascades up to his
+        /// rail and is the only way your answer reaches him". Neither was true:
+        /// cards cascade along `parent_conversation_id`, and a manager was
+        /// created with none — so main's rail read "nothing waiting" while a
+        /// finished piece of work sat on a rail nobody opens.
+        ///
+        /// Driven through `cards` rather than by reading the column, because
+        /// the column being set is not the claim — the claim is that the card
+        /// arrives.
+        #[test]
+        fn a_managers_card_reaches_the_main_chats_rail() {
+            use crate::cards::{NewCard, Query};
+
+            let s = store();
+            let dir = format!("/tmp/jod-mc-{}-rail", std::process::id());
+            let project = catalogued_at(&s, &dir, "tetris");
+            let main = s.main_conversation(HarnessKind::ClaudeCode, "/tmp").unwrap();
+
+            let (manager, _) = s
+                .manager_conversation(&project.id, HarnessKind::ClaudeCode)
+                .unwrap();
+            s.raise_card(NewCard {
+                conversation_id: manager.clone(),
+                title: "the README edit is done".into(),
+                ..NewCard::default()
+            })
+            .unwrap();
+
+            let rail = s
+                .cards(&Query {
+                    subtree_of: Some(main.clone()),
+                    ..Query::default()
+                })
+                .unwrap();
+            assert!(
+                rail.iter().any(|c| c.title == "the README edit is done"),
+                "main's rail must carry what its manager raised: {:?}",
+                rail.iter().map(|c| &c.title).collect::<Vec<_>>(),
+            );
+
+            // And the cascade stays one-way: a manager must not be handed
+            // Reljod's own questions, which would be an answer landing on the
+            // wrong agent.
+            s.raise_card(NewCard {
+                conversation_id: main,
+                title: "a question for Reljod".into(),
+                ..NewCard::default()
+            })
+            .unwrap();
+            let below = s
+                .cards(&Query {
+                    subtree_of: Some(manager),
+                    ..Query::default()
+                })
+                .unwrap();
+            assert!(
+                !below.iter().any(|c| c.title == "a question for Reljod"),
+                "the cascade runs upward only",
+            );
+
+            std::fs::remove_dir_all(&dir).ok();
         }
 
         /// A manager knows which project it owns from the moment it exists, so
