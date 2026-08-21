@@ -245,6 +245,15 @@ Three notes on method, because each changed an outcome.
   field passed while the screen was visibly wrong.
 - **A fix was written and reverted** rather than weakening the test it broke.
   See T2.
+- **Three times a hand-built fixture said something false**, and the repo's own
+  index already warns about this — "an unfaithful fixture produced a false
+  failure". Twice a row inserted straight into `runs` was invisible to the code
+  under test because its `summary` was not what `AgentSummary` serialises to
+  (`"harness": "ClaudeCode"` where the real writer emits `"claude_code"`), and
+  once a test drove `Store::compact`, which compacts in place, while the console
+  actually runs `continue_as_new`, which does not. Each looked like a finding
+  for a few minutes. **Build the fixture with the writer the product uses**, or
+  the test is about the fixture.
 
 ---
 
@@ -295,6 +304,17 @@ makes every overlay two rows shorter, and that breaks a guarantee this repo
 documents and tests: `keys.rs` promises the keymap is *complete* at 100x30, held
 by `the_keymap_overlay_is_complete_at_the_design_size`. Two rows of chrome cost
 two bindings, so the two cannot both hold at that size.
+
+The same question decides a second symptom, which is why they are one finding
+rather than two: on an empty console the splash's caption line shows either side
+of the overlay, cut mid-word —
+
+```
+jod · a│  Ctrl-N       the cards — and away again          │y screen
+```
+
+Structured content behind a modal reads fine; a sentence sliced in half reads as
+a rendering fault. Whatever answers "what may an overlay cover" answers both.
 
 Three ways out, none of them obviously right:
 
@@ -391,6 +411,28 @@ Check: press `←` then `Esc` in a manager and assert what `app.conversation`
 holds, whichever answer is chosen.
 
 ---
+
+## What a daemon left running found
+
+Nothing, which is the point of recording it. Before the compaction fixes the
+daemon emitted a stranded-message line **every tick, indefinitely**. After them
+a fifteen-minute run produced three lines in total: the run count it reloaded,
+a note that this `JOD_HOME` is not the installation harnesses should point at,
+and one `[jod/prs]` line saying the scratch repositories have no git remote.
+All three are correct and none repeats.
+
+Two things were checked against the running daemon rather than against the
+store alone:
+
+- **The stall sweep marks and does not kill.** A run was given a real, live
+  process group and a heartbeat silent for forty-five minutes. The sweep marked
+  it within ten seconds and **left `runs.status` as `running`** — which is
+  Change 1b's whole point, and had not been observed end to end before.
+- **Rehydrating on every fleet refresh is affordable.** The console re-reads the
+  store now, because a manager's engineer is started in another process. On a
+  store seeded to 1500 runs it costs **2.0% CPU**, the same as on a store of 51:
+  `rehydrate` is bounded at 200 rows and skips what it already holds, so the
+  cost does not grow with the machine's history.
 
 ## Scenarios run — second pass
 
