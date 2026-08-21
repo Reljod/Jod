@@ -64,6 +64,16 @@ pub enum Entry {
     /// [`Entry::Hint`]: a session holding one of these has answered a question
     /// and must not be painted over by the splash.
     Notice(String),
+    /// Where a typed line was sent — the hand-off to the orchestrator, and the
+    /// id of the run now carrying it.
+    ///
+    /// Its own variant rather than a [`Entry::Notice`] because it answers a
+    /// question with a short shelf life. While the turn is in flight it is the
+    /// only thing on screen saying the message went anywhere at all; once the
+    /// reply is under it, it is a plumbing detail repeated at every turn. A
+    /// notice cannot be told apart from a warning, and warnings must not be
+    /// swept up with it.
+    Routing(String),
     /// Something Jod says on its own account, before anyone has asked
     /// anything: the startup keymap line, and `/new`'s "new conversation".
     ///
@@ -390,6 +400,15 @@ pub struct App {
     /// Whether tool output is shown. On by default: the reason to watch a
     /// harness work is to see what it is doing.
     pub show_details: bool,
+    /// Whether the plumbing of turns that have already finished is drawn.
+    ///
+    /// Off by default, and that is the whole point. A tool call, what it
+    /// returned and the line saying where a message was routed are worth
+    /// watching while they happen, and are clutter the moment the answer is
+    /// in — a transcript you scroll back through should read as the
+    /// conversation, not as a log of every step that produced it. `Ctrl-O`
+    /// turns the steps back on when you want to audit them.
+    pub expand_details: bool,
     /// The screen you are on. Chat is home, and everything else is somewhere
     /// you go *from* it.
     pub workspace: Workspace,
@@ -936,6 +955,26 @@ fn first_lines(s: &str, n: usize) -> String {
     )
 }
 
+/// Whether an entry is a step rather than the conversation.
+///
+/// The three kinds of line that say *how* an answer was produced. They are the
+/// point of watching a run and the noise of reading one back, which is why they
+/// are the only entries the transcript ever folds away.
+fn is_plumbing(entry: &Entry) -> bool {
+    matches!(
+        entry,
+        Entry::Tool { .. } | Entry::ToolOut { .. } | Entry::Routing(_)
+    )
+}
+
+/// Whether a step is reporting something that went wrong.
+fn failed(entry: &Entry) -> bool {
+    matches!(
+        entry,
+        Entry::Tool { failed: true, .. } | Entry::ToolOut { failed: true, .. }
+    )
+}
+
 impl App {
     pub fn new(harness: HarnessKind, model: Option<String>, resume: Resume) -> App {
         App {
@@ -953,6 +992,7 @@ impl App {
             cost_usd: 0.0,
             show_thinking: true,
             show_details: true,
+            expand_details: false,
             workspace: Workspace::Chat,
             back_stack: Vec::new(),
             lists: vec![ListState::default(); Workspace::ALL.len()],
@@ -2242,6 +2282,52 @@ impl App {
         self.scroll == 0
     }
 
+    // ---- what the transcript shows ---------------------------------------
+
+    /// Where the turn on screen begins, or `None` when nothing is running.
+    ///
+    /// The last ending is the boundary: everything below it belongs to the turn
+    /// in flight, and everything above it is history. Once the run stops there
+    /// is no live turn at all, which is what makes the steps of a finished turn
+    /// fold themselves away without anything having to go back and mark them.
+    pub fn live_from(&self) -> Option<usize> {
+        if !self.busy {
+            return None;
+        }
+        Some(
+            self.transcript
+                .iter()
+                .rposition(|e| matches!(e, Entry::Done { .. }))
+                .map_or(0, |i| i + 1),
+        )
+    }
+
+    /// Whether the entry at `i` is left out of the drawn transcript.
+    ///
+    /// Only ever plumbing: a tool call, what a tool returned, the line naming
+    /// where a message was routed. Prose, plans, diffs and endings are the
+    /// conversation itself and are always drawn.
+    pub fn hidden(&self, i: usize) -> bool {
+        let Some(entry) = self.transcript.get(i) else {
+            return false;
+        };
+        // A failure is the reason the answer is about to be wrong, so it stays
+        // on screen under every setting — the same rule that already decides a
+        // failed tool result is recorded whether or not details are on.
+        if !is_plumbing(entry) || failed(entry) {
+            return false;
+        }
+        if self.expand_details {
+            return false;
+        }
+        // Details off means the steps are not shown even while they happen;
+        // details on shows the turn in flight and nothing older.
+        if !self.show_details {
+            return true;
+        }
+        self.live_from().is_none_or(|start| i < start)
+    }
+
     // ---- agent events --------------------------------------------------
 
     /// Fold one event from the harness into the transcript.
@@ -3203,6 +3289,103 @@ mod tests {
             a.transcript[1],
             Entry::ToolOut { failed: true, .. }
         ));
+    }
+
+    /// One turn, run to completion: the user's line, the hand-off, a tool call
+    /// and its output, some prose, and the ending.
+    fn one_finished_turn() -> App {
+        let mut a = app();
+        a.push(Entry::You("what is the progress of zuma?".into()));
+        a.push(Entry::Routing("→ 16b9a192 · handed to the orchestrator".into()));
+        a.begin_turn("run-1", 0);
+        a.apply(&AgentEvent::ToolCall {
+            name: "project_switch".into(),
+            input: Some(serde_json::json!({"project": "zuma"})),
+        });
+        a.apply(&AgentEvent::ToolResult {
+            name: "project_switch".into(),
+            summary: Some("switched".into()),
+            is_error: false,
+        });
+        a.apply(&AgentEvent::Message {
+            text: "Zuma is on its third milestone.".into(),
+        });
+        a
+    }
+
+    /// Which entries the transcript would draw, by their debug shape.
+    fn shown(a: &App) -> Vec<&Entry> {
+        a.transcript
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| !a.hidden(*i))
+            .map(|(_, e)| e)
+            .collect()
+    }
+
+    /// Watching a run is watching it work, so nothing is folded while it is
+    /// still going.
+    #[test]
+    fn the_steps_of_the_turn_in_flight_are_shown() {
+        let a = one_finished_turn();
+        assert!(a.busy, "the fixture is mid-turn");
+        assert_eq!(shown(&a).len(), a.transcript.len(), "nothing folded yet");
+    }
+
+    /// The point of the whole slice: once the answer is in, the steps that
+    /// produced it stop being the transcript.
+    #[test]
+    fn the_steps_fold_away_when_the_turn_ends() {
+        let mut a = one_finished_turn();
+        a.apply(&AgentEvent::Finished {
+            text: None,
+            exit_code: Some(0),
+            is_error: false,
+            usage: Usage::default(),
+        });
+        let left = shown(&a);
+        assert!(
+            left.iter().all(|e| !matches!(
+                e,
+                Entry::Tool { .. } | Entry::ToolOut { .. } | Entry::Routing(_)
+            )),
+            "a step survived the ending: {left:?}"
+        );
+        assert_eq!(left.len(), 3, "the question, the answer and the ending");
+    }
+
+    /// And `Ctrl-O` brings them back, which is what makes folding them safe.
+    #[test]
+    fn ctrl_o_unfolds_the_steps_of_a_finished_turn() {
+        let mut a = one_finished_turn();
+        a.busy = false;
+        a.expand_details = true;
+        assert_eq!(shown(&a).len(), a.transcript.len(), "all of it, again");
+    }
+
+    /// Details off is about the steps, not about the failures. A tool that
+    /// failed is the reason the answer is about to be wrong.
+    #[test]
+    fn a_failed_step_is_never_folded() {
+        let mut a = app();
+        a.show_details = false;
+        a.apply(&AgentEvent::ToolResult {
+            name: "Bash".into(),
+            summary: Some("command not found".into()),
+            is_error: true,
+        });
+        assert_eq!(shown(&a).len(), 2, "the failed call and what it said");
+    }
+
+    /// With details off the steps are not shown even as they happen — which is
+    /// the difference between that setting and the fold.
+    #[test]
+    fn details_off_hides_the_call_line_while_it_runs() {
+        let mut a = one_finished_turn();
+        a.show_details = false;
+        assert!(a.busy);
+        let left = shown(&a);
+        assert_eq!(left.len(), 2, "the question and the answer: {left:?}");
     }
 
     #[test]

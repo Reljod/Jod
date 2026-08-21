@@ -222,7 +222,10 @@ pub const GLOBAL: &[Key] = &[
     k("Ctrl-B", "delegate the typed line"),
     k("Ctrl-X", "stop the run being watched"),
     k("Ctrl-T", "show or hide reasoning"),
-    k("Ctrl-O", "show or hide tool output"),
+    // The steps of the turn being watched are streamed by `/details`; this key
+    // is about the ones already over, which the transcript folds away so that
+    // scrolling back reads as the conversation rather than as a log.
+    k("Ctrl-O", "show or hide the steps taken"),
     k("Ctrl-↑↓", "scroll the transcript"),
     // One row for the pair, for the same reason `uU` above is one row.
     //

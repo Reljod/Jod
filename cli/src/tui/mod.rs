@@ -1180,7 +1180,7 @@ async fn orchestrate(
             // Anything chosen before the first turn now has a conversation to
             // be written on.
             flush_pending(jod, app, thread, &handed.agent.id);
-            app.push(Entry::Notice(format!(
+            app.push(Entry::Routing(format!(
                 "→ {} · handed to the orchestrator — it decides where this goes",
                 short(&handed.agent.id)
             )));
@@ -2830,12 +2830,16 @@ fn on_chord(app: &mut App, key: KeyEvent) -> Option<Option<Action>> {
             )));
             handled(None)
         }
+        // Unfold the steps of every turn already finished, and fold them away
+        // again. It used to turn `show_details` on and off, which is what
+        // `/details` is for and is the setting this now reads: `/details`
+        // decides whether the steps of the turn *in flight* are streamed at
+        // all, and this key decides whether the ones already over can be read
+        // back. Nothing is said about the toggle — the transcript growing or
+        // shrinking under the cursor is the answer, and a notice announcing a
+        // view change would be one more line of the noise being removed.
         KeyCode::Char('o') if either => {
-            app.show_details = !app.show_details;
-            app.push(Entry::Notice(format!(
-                "tool output {}",
-                if app.show_details { "shown" } else { "hidden" }
-            )));
+            app.expand_details = !app.expand_details;
             handled(None)
         }
         // Dictation. A toggle rather than a hold, because a terminal cannot

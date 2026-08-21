@@ -23,7 +23,7 @@ use jod_core::team::MemberStatus;
 use jod_core::PermissionPolicy;
 
 use super::app::{
-    absolute, short_duration, since, until, App, Dictation, Entry, JobState, Overlay,
+    absolute, plural, short_duration, since, until, App, Dictation, Entry, JobState, Overlay,
 };
 use super::data::{Outcome, Source};
 use super::diff;
@@ -5255,9 +5255,21 @@ pub(super) fn run_glyph(status: &str) -> &'static str {
 fn draw_transcript(f: &mut Frame, app: &App, area: Rect) -> usize {
     let width = area.width.saturating_sub(2).max(1);
     let mut lines: Vec<Line> = Vec::new();
-    for entry in &app.transcript {
+    // A run of folded steps is replaced by one line saying how many there were
+    // and which key brings them back, so a transcript never quietly loses
+    // something. The count is of entries rather than of drawn lines: what the
+    // reader is choosing to open is a number of steps, not a number of rows.
+    let mut folded = 0usize;
+    for (i, entry) in app.transcript.iter().enumerate() {
+        if app.hidden(i) {
+            folded += 1;
+            continue;
+        }
+        lines.extend(fold_marker(app, folded, width));
+        folded = 0;
         lines.extend(render(entry, width));
     }
+    lines.extend(fold_marker(app, folded, width));
 
     let viewport = area.height.saturating_sub(2).max(1) as usize;
     // `scroll` counts up from the bottom, but Paragraph scrolls down from the
@@ -5293,6 +5305,28 @@ fn draw_transcript(f: &mut Frame, app: &App, area: Rect) -> usize {
         area,
     );
     viewport
+}
+
+/// The single line standing in for `folded` steps that were not drawn.
+///
+/// Nothing at all when details are off: that setting is the answer to "I do not
+/// want to see the steps", and a row per turn saying how many steps there were
+/// is still seeing them. With details on the steps were on screen a moment ago
+/// and folding them without a word would read as the transcript losing them, so
+/// the line stays and names the key that opens it.
+fn fold_marker(app: &App, folded: usize, width: u16) -> Vec<Line<'static>> {
+    if folded == 0 || !app.show_details || app.expand_details {
+        return vec![];
+    }
+    let style = fg(MUTED);
+    let body = cut(
+        &format!("{} · Ctrl-O", plural(folded, "step")),
+        width.saturating_sub(2).max(1) as usize,
+    );
+    vec![Line::from(vec![
+        Span::styled("⋯ ", style),
+        Span::styled(body, style),
+    ])]
 }
 
 /// One transcript entry as styled lines, already wrapped to `width`.
@@ -5340,6 +5374,9 @@ fn render(entry: &Entry, width: u16) -> Vec<Line<'static>> {
         // A hint reads exactly like a notice — the difference between them is
         // about which entries the splash may cover, not about how they look.
         Entry::Notice(t) | Entry::Hint(t) => ("• ", fg(WARN), t.clone()),
+        // Reads as a notice, because while it is on screen it is one. What
+        // separates it is only that it folds away with the other steps.
+        Entry::Routing(t) => ("• ", fg(WARN), t.clone()),
         Entry::Raw(t) => ("", fg(MUTED), t.clone()),
     };
 
@@ -6567,6 +6604,83 @@ mod tests {
         let mut a = app();
         a.agents = vec![agent_line("bbb22222", "audit the deps", "running")];
         assert!(rendered(&a, 100, 12).contains("1 in background"));
+    }
+
+    // ---- folding the steps away ----
+
+    /// One finished turn: a question, the hand-off, a tool call and what it
+    /// returned, the answer, and the ending.
+    fn a_turn_with_steps() -> App {
+        let mut a = app();
+        a.push(Entry::You("what is the progress of zuma?".into()));
+        a.push(Entry::Routing(
+            "→ 16b9a192 · handed to the orchestrator".into(),
+        ));
+        a.push(Entry::Tool {
+            name: "project_switch".into(),
+            detail: Some("{\"project\":\"zuma\"}".into()),
+            failed: false,
+        });
+        a.push(Entry::ToolOut {
+            text: "switched to zuma".into(),
+            failed: false,
+        });
+        a.push(Entry::Agent("Zuma is on its third milestone.".into()));
+        a.push(Entry::Done {
+            text: "12s".into(),
+            failed: false,
+        });
+        a
+    }
+
+    /// What the change is for. Scrolling back through a day of work should read
+    /// as the conversation, not as a log of the calls that produced it.
+    #[test]
+    fn the_steps_of_a_finished_turn_are_folded_into_one_line() {
+        let a = a_turn_with_steps();
+        let screen = rendered(&a, 100, 24);
+        assert!(!screen.contains("project_switch"), "{screen}");
+        assert!(!screen.contains("switched to zuma"), "{screen}");
+        assert!(!screen.contains("handed to the orchestrator"), "{screen}");
+        assert!(screen.contains("Zuma is on its third"), "the answer:\n{screen}");
+        assert!(
+            screen.contains("3 steps · Ctrl-O"),
+            "and how to read them back:\n{screen}"
+        );
+    }
+
+    /// The steps are still on screen while they are happening, which is most of
+    /// why anyone sits in front of a harness at all.
+    #[test]
+    fn the_steps_of_the_turn_in_flight_stay_on_screen() {
+        let mut a = a_turn_with_steps();
+        a.transcript.pop();
+        a.busy = true;
+        let screen = rendered(&a, 100, 24);
+        assert!(screen.contains("project_switch"), "{screen}");
+        assert!(!screen.contains("Ctrl-O"), "nothing folded yet:\n{screen}");
+    }
+
+    #[test]
+    fn ctrl_o_brings_the_folded_steps_back() {
+        let mut a = a_turn_with_steps();
+        a.expand_details = true;
+        let screen = rendered(&a, 100, 24);
+        assert!(screen.contains("project_switch"), "{screen}");
+        assert!(screen.contains("handed to the orchestrator"), "{screen}");
+        assert!(!screen.contains("steps · Ctrl-O"), "no marker:\n{screen}");
+    }
+
+    /// Details off is the stronger setting: not the steps, and not a line
+    /// saying how many there were either.
+    #[test]
+    fn with_details_off_not_even_the_fold_marker_is_drawn() {
+        let mut a = a_turn_with_steps();
+        a.show_details = false;
+        let screen = rendered(&a, 100, 24);
+        assert!(!screen.contains("project_switch"), "{screen}");
+        assert!(!screen.contains("Ctrl-O"), "{screen}");
+        assert!(screen.contains("Zuma is on its third"), "{screen}");
     }
 
     // ---- the new-session splash ----
@@ -10165,6 +10279,10 @@ mod tests {
     #[test]
     fn a_tool_that_is_not_an_edit_still_renders_as_one_line() {
         let mut a = app();
+        // Mid-turn, which is when a call line is on screen at all: the steps of
+        // a turn already over are folded away, and this test is about the shape
+        // of the line rather than about when it is drawn.
+        a.begin_turn("run-1", 0);
         a.apply(&jod_core::AgentEvent::ToolCall {
             name: "Bash".into(),
             input: Some(serde_json::json!({ "command": "cargo test" })),
