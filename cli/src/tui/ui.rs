@@ -3678,6 +3678,21 @@ fn draw_tree(f: &mut Frame, app: &App, area: Rect) {
                 format!(" ⏸ stalled {}", jod_core::heartbeat::human_ms(silent_for)),
                 BAD,
             )),
+            // A group row whose subtree holds a stalled run says so instead of
+            // spinning. The fleet is read collapsed, and the spinner is the
+            // strongest "this is fine" signal on the screen: a project drawing
+            // one while its only engineer had been wedged for half an hour was
+            // the original bug, one level up from where it was fixed. It takes
+            // the row's whole mark rather than sitting beside the spinner,
+            // because "working, and also stalled" is not a state.
+            (None, _, None) if node.stalled > 0 => Some((
+                if node.stalled == 1 {
+                    " ⏸ stalled".to_string()
+                } else {
+                    format!(" ⏸ {} stalled", node.stalled)
+                },
+                BAD,
+            )),
             (None, true, _) => Some((format!(" {}", app.spinner()), WARN)),
             (None, false, Some(status)) => {
                 Some((format!(" {}", run_glyph(status)), status_colour(status)))
@@ -11371,6 +11386,7 @@ mod tests {
             stalled_for_ms: None,
             cards: 0,
             blocked: 0,
+            stalled: 0,
             colour: "cyan".into(),
             branch: None,
             worktree: None,
@@ -11840,6 +11856,59 @@ mod tests {
                 "row {at} is `{label}`, and the ▸ must be on it, not above it:\n{frame}",
             );
         }
+    }
+
+    /// A collapsed project whose engineer is wedged must not spin.
+    ///
+    /// The fleet is read collapsed. A spinner is the strongest "this is fine"
+    /// signal the screen has, and a project drew one while its only agent had
+    /// been silent for thirty-seven minutes — the exact picture the stall mark
+    /// was added to prevent, one level above where it was fixed.
+    #[test]
+    fn a_collapsed_project_says_stalled_rather_than_spinning() {
+        use jod_core::tree::{Node, NodeId, NodeKind};
+
+        let mut a = app();
+        a.forest = vec![Node {
+            id: NodeId::project("p"),
+            parent: None,
+            kind: NodeKind::Project,
+            depth: 0,
+            label: "web".into(),
+            summary: String::new(),
+            // Truthfully running — its wedged engineer has not exited — which
+            // is precisely why `running` alone must not decide the mark.
+            running: true,
+            status: None,
+            stalled_for_ms: None,
+            cards: 0,
+            blocked: 0,
+            stalled: 1,
+            colour: "cyan".into(),
+            branch: None,
+            worktree: None,
+            expanded: false,
+            has_children: true,
+        }];
+        a.go(Workspace::Fleet);
+        a.reconcile();
+
+        let frame = rendered(&a, 150, 30);
+        // The fleet pane's cell, not the detail pane beside it — both name the
+        // project, and only one of them is the row being tested.
+        let row = frame
+            .lines()
+            .filter_map(|l| l.split('│').nth(1))
+            .find(|cell| cell.contains("web"))
+            .expect("the project is drawn in the fleet pane")
+            .to_string();
+        assert!(row.contains("stalled"), "the row says so: {row}");
+        assert!(
+            !["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+                .iter()
+                .any(|frame| row.contains(frame)),
+            "and does not also spin: {row}"
+        );
     }
 
     /// The fleet is the agents somebody delegated, not Jod's own errands.

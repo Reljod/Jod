@@ -128,6 +128,16 @@ pub struct Node {
     pub cards: usize,
     /// Open cards in the subtree that are blocking.
     pub blocked: usize,
+    /// Runs stalled anywhere in this node's subtree, including this row itself.
+    ///
+    /// Rolled up the way `cards` is, and for the same reason: the fleet is read
+    /// **collapsed**. `stalled_for_ms` is deliberately a fact about one process
+    /// and null on every group row, which left a project whose only engineer
+    /// had been wedged for half an hour drawing the spinner — the strongest
+    /// "this is fine" signal on the screen, on exactly the case the stall mark
+    /// was added to catch. The badge was there; you had to already suspect
+    /// something to expand far enough to see it.
+    pub stalled: usize,
     /// The owning work's colour, for tinting the row.
     pub colour: String,
     /// The branch the work's held worktree is on, if it has claimed one.
@@ -234,11 +244,21 @@ fn push_runs(
     parent: &NodeId,
     depth: usize,
     colour: &str,
-) -> bool {
+) -> (bool, usize) {
     let mut any_running = false;
+    let mut stalled_here = 0usize;
     for run in from.runs.remove(conversation_id).unwrap_or_default() {
         let running = run.status == "running";
         any_running |= running;
+        // Only for a run that still claims to be running. A finished run's
+        // leftover mark, if a sweep has not yet retired the row, would draw a
+        // badge on something that has already stopped.
+        let stalled_for_ms = from
+            .stalled
+            .get(&run.id)
+            .filter(|_| running)
+            .map(|since| from.now_ms.saturating_sub(*since).max(0));
+        stalled_here += usize::from(stalled_for_ms.is_some());
         out.push(Node {
             id: NodeId::run(&run.id),
             parent: Some(parent.clone()),
@@ -250,14 +270,13 @@ fn push_runs(
             // Only for a run that still claims to be running. A finished run's
             // leftover mark, if a sweep has not yet retired the row, would draw
             // a badge on something that has already stopped.
-            stalled_for_ms: from
-                .stalled
-                .get(&run.id)
-                .filter(|_| running)
-                .map(|since| from.now_ms.saturating_sub(*since).max(0)),
+            stalled_for_ms: stalled_for_ms,
             status: Some(run.status),
             cards: 0,
             blocked: 0,
+            // Its own stall counts, so the roll-up above it is a plain sum
+            // rather than a special case for the row that holds the fact.
+            stalled: usize::from(stalled_for_ms.is_some()),
             colour: colour.to_string(),
             // A run inherits nothing: the worktree belongs to the work
             // above it, and the row that names it is the one that holds it.
@@ -267,7 +286,7 @@ fn push_runs(
             has_children: false,
         });
     }
-    any_running
+    (any_running, stalled_here)
 }
 
 /// Whether any run wrote into this conversation, without draining them.
@@ -288,6 +307,18 @@ fn holds_runs(from: &Flatten<'_>, conversation_id: &str) -> bool {
 /// Returns the work's own cards, blocked cards and whether anything under it is
 /// running, so a project row can add them up the same way a work adds up its
 /// sessions.
+/// What one work contributed to the project above it.
+///
+/// A tuple of three had already outgrown being readable at the call site, and
+/// the stall count is a fourth thing that must not be silently swapped with the
+/// card count next to it.
+struct WorkRoll {
+    cards: usize,
+    blocked: usize,
+    stalled: usize,
+    running: bool,
+}
+
 fn push_work(
     out: &mut Vec<Node>,
     work: &Work,
@@ -299,7 +330,7 @@ fn push_work(
     // rather than holding one of its own, and the session row is what the tree
     // usually shows once `condense` has folded the work away.
     lease: Option<&crate::leases::Lease>,
-) -> (usize, usize, bool) {
+) -> WorkRoll {
     let branch = lease.map(|l| l.branch.clone());
     let worktree = lease.map(|l| l.worktree_path.to_string_lossy().into_owned());
     let own = from.sessions.remove(&work.id).unwrap_or_default();
@@ -334,6 +365,7 @@ fn push_work(
         stalled_for_ms: None,
         cards: 0,
         blocked: 0,
+        stalled: 0,
         colour: work.colour.clone(),
         branch: branch.clone(),
         worktree: worktree.clone(),
@@ -356,6 +388,7 @@ fn push_work(
 
     let mut work_cards = 0usize;
     let mut work_blocked = 0usize;
+    let mut work_stalled = 0usize;
     let mut work_running = false;
     while let Some((session, depth, session_parent)) = stack.pop() {
         if let Some(kids) = children.get(&Some(session.id.clone())) {
@@ -387,13 +420,15 @@ fn push_work(
             stalled_for_ms: None,
             cards: session.cards,
             blocked: session.blocked,
+            stalled: 0,
             colour: work.colour.clone(),
             branch: branch.clone(),
             worktree: worktree.clone(),
             expanded: true,
             has_children,
         });
-        work_running |= push_runs(
+        let session_node = out.len() - 1;
+        let (session_running, session_stalled) = push_runs(
             out,
             from,
             &session.id,
@@ -401,15 +436,24 @@ fn push_work(
             depth + 1,
             &work.colour,
         );
+        work_running |= session_running;
+        work_stalled += session_stalled;
+        out[session_node].stalled = session_stalled;
     }
     // Cards cascade upward only, so the work's counts are its sessions' — which
     // is what makes the tree say where the questions are without being
     // expanded.
     out[work_node].cards = work_cards;
     out[work_node].blocked = work_blocked;
+    out[work_node].stalled = work_stalled;
     let running = work_running && work.state != State::Closed;
     out[work_node].running = running;
-    (work_cards, work_blocked, running)
+    WorkRoll {
+        cards: work_cards,
+        blocked: work_blocked,
+        stalled: work_stalled,
+        running,
+    }
 }
 
 /// One run under a session.
@@ -645,6 +689,7 @@ impl Store {
                 stalled_for_ms: None,
                 cards: main_cards,
                 blocked: main_blocked,
+                stalled: 0,
                 colour: "cyan".to_string(),
                 // Jod routes; it does not check anything out.
                 branch: None,
@@ -652,8 +697,10 @@ impl Store {
                 expanded: true,
                 has_children: holds_runs(&from, main),
             });
-            let running = push_runs(&mut out, &mut from, main, &id, 1, "cyan");
+            let (running, stalled_below) =
+                push_runs(&mut out, &mut from, main, &id, 1, "cyan");
             out[main_node].running = running;
+            out[main_node].stalled = stalled_below;
         }
 
         for project_id in order {
@@ -703,6 +750,7 @@ impl Store {
                 stalled_for_ms: None,
                 cards: 0,
                 blocked: 0,
+                stalled: 0,
                 colour: project.colour.clone(),
                 // A project row is the checkout itself, never a worktree of it.
                 branch: None,
@@ -713,6 +761,7 @@ impl Store {
 
             let mut project_cards = 0usize;
             let mut project_blocked = 0usize;
+            let mut project_stalled = 0usize;
             let mut project_running = false;
 
             // The manager first, then the works. First because it is the row
@@ -742,6 +791,7 @@ impl Store {
                     stalled_for_ms: None,
                     cards: manager_cards,
                     blocked: manager_blocked,
+                    stalled: 0,
                     colour: project.colour.clone(),
                     // A manager decides; its engineers hold the worktrees.
                     branch: None,
@@ -749,17 +799,19 @@ impl Store {
                     expanded: true,
                     has_children: holds_runs(&from, manager),
                 });
-                let running =
+                let (running, stalled_below) =
                     push_runs(&mut out, &mut from, manager, &id, 2, &project.colour);
                 out[manager_node].running = running;
+                out[manager_node].stalled = stalled_below;
                 project_cards += manager_cards;
                 project_blocked += manager_blocked;
+                project_stalled += stalled_below;
                 project_running |= running;
             }
 
             for work in by_project.remove(&project.id).unwrap_or_default() {
                 let held = leases.get(&work.id);
-                let (cards, blocked, running) = push_work(
+                let roll = push_work(
                     &mut out,
                     &work,
                     &mut from,
@@ -767,12 +819,14 @@ impl Store {
                     Some(NodeId::project(&project.id)),
                     held,
                 );
-                project_cards += cards;
-                project_blocked += blocked;
-                project_running |= running;
+                project_cards += roll.cards;
+                project_blocked += roll.blocked;
+                project_stalled += roll.stalled;
+                project_running |= roll.running;
             }
             out[project_node].cards = project_cards;
             out[project_node].blocked = project_blocked;
+            out[project_node].stalled = project_stalled;
             out[project_node].running = project_running;
         }
 
@@ -1141,6 +1195,62 @@ mod tests {
         assert!(store().forest().unwrap().is_empty());
     }
 
+    /// A stall is visible on a collapsed fleet, which is the fleet people read.
+    ///
+    /// `stalled_for_ms` is deliberately a fact about one process and null on
+    /// every group row. The consequence, found by seeding a wedged engineer and
+    /// looking: the project above it drew a **spinner** — the strongest "this
+    /// is fine" signal on the screen — while its only agent had been silent for
+    /// thirty-seven minutes. The badge existed; you had to already suspect
+    /// something to expand far enough to see it. So the count rolls up the way
+    /// open cards already do.
+    #[test]
+    fn a_stalled_run_is_counted_all_the_way_up_to_its_project() {
+        use crate::heartbeat::{Heartbeat, Watching};
+        use crate::projects::NewProject;
+
+        let s = store();
+        let dir = format!("/tmp/jod-stall-rollup-{}", std::process::id());
+        std::fs::create_dir_all(&dir).unwrap();
+        let project = s.add_project(NewProject::at(&dir)).unwrap();
+        let work = s.create_work_in("port the parser", Some(&project.id)).unwrap();
+        s.set_work_title(&work.id, "the parser").unwrap();
+        let lead = session(&s, &work.id, None, "lead");
+        run_for(&s, &lead, "run-wedged", "running");
+
+        let count = |nodes: &[Node], kind: NodeKind| {
+            nodes.iter().find(|n| n.kind == kind).map(|n| n.stalled)
+        };
+
+        // Healthy first, so the assertion below is a change and not a constant.
+        let healthy = s.forest().unwrap();
+        assert_eq!(count(&healthy, NodeKind::Project), Some(0));
+        assert_eq!(count(&healthy, NodeKind::Run), Some(0));
+
+        let now = chrono::Utc::now().timestamp_millis();
+        let mut hb = Heartbeat::starting("run-wedged", Watching::Run, now);
+        hb.stalled_since_ms = Some(now - 37 * 60 * 1000);
+        s.watch_run(&hb).unwrap();
+
+        let nodes = s.forest().unwrap();
+        assert_eq!(count(&nodes, NodeKind::Run), Some(1), "the run holds the fact");
+        assert_eq!(count(&nodes, NodeKind::Session), Some(1));
+        assert_eq!(count(&nodes, NodeKind::Work), Some(1));
+        assert_eq!(
+            count(&nodes, NodeKind::Project),
+            Some(1),
+            "and the row a collapsed fleet shows carries it: {nodes:?}",
+        );
+
+        // The duration stays where it belongs — a group row says *that*
+        // something is wedged, not how long, because two wedged runs have two
+        // answers and the row has one line.
+        let project_row = nodes.iter().find(|n| n.kind == NodeKind::Project).unwrap();
+        assert_eq!(project_row.stalled_for_ms, None);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// The shape the fleet screen renders: a work, the sessions under it, and
     /// the runs under those — each one directly below the row that owns it.
     #[test]
@@ -1416,6 +1526,7 @@ mod tests {
                 stalled_for_ms: None,
                 cards: 2,
                 blocked: 1,
+                stalled: 0,
                 colour: "cyan".into(),
                 branch: None,
                 worktree: None,
@@ -1434,6 +1545,7 @@ mod tests {
                 stalled_for_ms: None,
                 cards: 0,
                 blocked: 0,
+                stalled: 0,
                 colour: "cyan".into(),
                 branch: None,
                 worktree: None,
@@ -1860,6 +1972,7 @@ mod tests {
             stalled_for_ms: Some(45 * 60_000),
             cards: 0,
             blocked: 0,
+            stalled: 0,
             colour: "cyan".into(),
             // A run inherits nothing: the worktree belongs to the work
             // above it, and the row that names it is the one that holds it.
