@@ -72,9 +72,36 @@ width from 20 to 120.
 
 ## What this pass fixed
 
-Seventeen changes, each with a test that fails without it. Driven by running the
+Twenty changes, each with a test that fails without it. Driven by running the
 console against real harnesses under a throwaway `JOD_HOME`, on four projects,
 and then re-run end to end on an empty install.
+
+**Three found by running the fleet rather than reading it, and the worst of the pass.**
+
+- **You could not stop an agent a manager started.** `Jod::agents` reads an
+  in-process map; `rehydrate` filled it once at launch and was never called
+  again. Every engineer a manager hires is spawned by an MCP server in another
+  process, so those runs were in the tree — built from SQL — and absent from the
+  agent list, which is not. `App::selected_agent` resolves a session row through
+  that list, so it answered `None` for a row visibly spinning and **every** run
+  verb refused: `s`, `r`, `a`, `d` and the thread keys. In the manager design
+  that is nearly the whole fleet, and a runaway agent could not be stopped from
+  the screen built to stop it. Proved with the store as referee: same row, same
+  running run, `s` before → "nothing running on it", `s` after → "killed after
+  6s", and the run gone from the running list.
+- **Every agent lost its Jod tools after an upgrade.** `std::env::current_exe`
+  reads `/proc/self/exe`, and once that file is replaced Linux returns the old
+  path with ` (deleted)` appended. It went straight into each agent's MCP config
+  as the command to run: `command: ".../jod (deleted)"`, which nothing can
+  execute. `/update` and `/upgrade` replace the binary while the console keeps
+  running, so this is the ordinary upgrade path — and it hits anyone running
+  from a checkout they rebuild, which is how it was found. Filed as T5 is the
+  half that remains: the console says nothing when it happens.
+- **`/main <instruction>` moved the chat and promised not to.** Its help said
+  "send it one instruction and stay where you are"; `orchestrate` re-asserts the
+  binding to main so the reply can be watched here. Harmless from main, and a
+  silent move when typed inside a manager. The promise was corrected rather than
+  the behaviour, because watching the answer is the point of the command.
 
 **The chain of command.**
 
@@ -172,6 +199,37 @@ Three notes on method, because each changed an outcome.
   field passed while the screen was visibly wrong.
 - **A fix was written and reverted** rather than weakening the test it broke.
   See T2.
+
+---
+
+## T5. A session with no Jod tools looks exactly like one that has them
+Status: **open — a feature, not a fix** · Severity: medium · Owner: —
+
+Found while chasing the `(deleted)` bug below. When the `jod` MCP server fails
+to start, the agent keeps its model and loses every Jod tool — `ask_manager`,
+`open_work`, `list_agents`, the lot. It can still hold a conversation, so it
+answers normally and sounds fine. Main spent two turns explaining, correctly and
+entirely on its own initiative, that it could not route anything:
+
+> Separately, it's moot right now: the Jod MCP server dropped a couple of turns
+> ago, so `open_work`, `ask_manager` and the rest are all unavailable until it
+> reconnects.
+
+**Nothing on any screen said so.** The status bar, the fleet and the rail all
+looked ordinary. The only reason anybody knew is that the model volunteered it,
+and a less forthcoming one would have left the console silently unable to
+delegate.
+
+The cause behind *that* instance is fixed — see the note below — but the
+invisibility is the general problem, and any MCP failure reproduces it.
+
+What it needs: the supervisor sees the harness's stderr, which is where a
+failed MCP server says so. A run whose `jod` server did not start should raise a
+card and mark its row, the way a stall does. Worth doing at the same time as
+whatever answers "how do we know an agent is healthy" generally.
+
+Check: start a run with a deliberately broken `jod` command in its `mcp.json`
+and assert a card is raised naming the run.
 
 ---
 
