@@ -17,12 +17,13 @@ use super::data::{
 use super::delivery::Verdict;
 use super::graph::GraphView;
 use super::diff;
-use super::fleet::{main_id, TreeState};
+use super::fleet::{is_loose, loose_id, main_id, TreeState};
 use super::todo;
 use super::mention::Mention;
 use super::picker::Picker;
 use super::rail::RailState;
 use super::secret::Typed;
+use super::sessions::Browser;
 use super::traffic;
 use super::workspace::{matches, ListState, Workspace};
 use jod_core::cards::Card;
@@ -191,6 +192,14 @@ pub enum Overlay {
         /// store. Empty until the first keystroke has been searched for.
         hits: Vec<Hit>,
     },
+    /// Every conversation you could go back into, as a list with a cursor.
+    ///
+    /// An overlay for the same reason [`Overlay::Search`] is one: it is a way
+    /// *to* somewhere. The fleet lists runs and the chat is one conversation,
+    /// so neither of them is the place to keep this — and until it existed,
+    /// getting back into an old session from either screen meant already
+    /// knowing its id. See [`super::sessions::Browser`].
+    Sessions(Browser),
 }
 
 /// What a tier-1 prompt is collecting.
@@ -1216,6 +1225,12 @@ impl App {
     /// because `/` narrows the fleet, and the one row that is not part of the
     /// fleet is also the row you most need when a filter has emptied the screen.
     ///
+    /// The loose runs come last, because that is where they are drawn: the
+    /// pane below the tree is part of the same column and part of the same
+    /// cursor, so `↓` off the bottom of the tree walks into it and `↑` walks
+    /// back out. Any other arrangement makes the lower pane a place you can see
+    /// and not go — see [`fleet::loose_id`].
+    ///
     /// Empty when there is no tree, so the cursor is not parked on a row of a
     /// screen that is not being drawn.
     pub fn tree_rows(&self) -> Vec<NodeId> {
@@ -1227,7 +1242,23 @@ impl App {
                 self.tree
                     .row_ids(&self.forest, &self.closed_works, self.tree_filter()),
             )
+            .chain(self.loose_rows().iter().map(|a| loose_id(&a.id)))
             .collect()
+    }
+
+    /// Where the cursor is within the pane below the tree, if it is in there.
+    ///
+    /// An index rather than the row itself, because the renderer needs it to
+    /// scroll that pane — a cursor on the twentieth loose run has to bring the
+    /// twentieth loose run on screen, and a pane that always drew its first
+    /// three rows would let the selection walk off the bottom of a box that
+    /// never moved.
+    pub fn loose_selected(&self) -> Option<usize> {
+        let id = self.tree.selected.as_ref()?;
+        if !is_loose(id) {
+            return None;
+        }
+        self.loose_rows().iter().position(|a| a.id == id.id)
     }
 
     /// Whether the tree's cursor is on the pinned chat rather than on a node.
@@ -2064,6 +2095,13 @@ impl App {
     /// the caller say so.
     pub fn selected_agent(&self) -> Option<&AgentLine> {
         if self.has_tree() {
+            // A row in the pane below the tree is a run like any other — it is
+            // only *drawn* apart because the forest has no node for it. Read
+            // before `selected_node`, which answers `None` for a sentinel and
+            // would leave every verb on that pane silent.
+            if let Some(id) = self.tree.selected.as_ref().filter(|id| is_loose(id)) {
+                return self.agents.iter().find(|a| a.id == id.id);
+            }
             let node = self.selected_node()?;
             if node.kind != NodeKind::Run {
                 return None;

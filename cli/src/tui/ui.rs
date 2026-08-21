@@ -36,6 +36,7 @@ use super::mention;
 use super::picker;
 use super::rail;
 use super::secret;
+use super::sessions;
 use super::text;
 use super::traffic;
 use super::workspace::Workspace;
@@ -2256,6 +2257,10 @@ fn draw_keybar(f: &mut Frame, app: &App, area: Rect) {
             "searching every transcript · ⏎ opens the conversation".to_string(),
             "Esc closes",
         ),
+        Overlay::Sessions(_) => (
+            "type to narrow · ↑↓ choose · ⏎ carries on with it".to_string(),
+            "Esc closes",
+        ),
         // The rail is checked before the screen's own filter and before the
         // screen's own verbs, because while it has the keyboard the screen's
         // verbs are *not* in force — printing `s stop` beside a rail where `x`
@@ -2584,7 +2589,92 @@ fn draw_overlay(f: &mut Frame, app: &App) {
             selected,
             hits,
         } => draw_search(f, query, *selected, hits),
+        Overlay::Sessions(browser) => draw_session_list(f, browser, app.now_ms),
     }
+}
+
+/// Every conversation you could go back into, with a cursor on it.
+///
+/// Shaped like [`draw_search`] on purpose — a typed line, a blank, then rows —
+/// because the two are the same gesture aimed at different things, and a user
+/// who has learned one should not have to learn the other. What differs is the
+/// footer verb: search *opens* a conversation to read, and this *carries on*
+/// with one.
+fn draw_session_list(f: &mut Frame, browser: &sessions::Browser, now_ms: i64) {
+    /// The widest a title is allowed to get. Past this the extra characters buy
+    /// nothing — two threads that are still indistinguishable at fifty
+    /// characters are two threads you tell apart by their age, not their name —
+    /// and the detail column drifts further right on every wider terminal.
+    const TITLE: usize = 50;
+    /// The badge column: a glyph, up to two digits of abandoned count, and a
+    /// space. Wide enough that the count never pushes the title right.
+    const BADGE: usize = 4;
+    let screen = f.area();
+    let rows = browser.visible();
+    let width = screen.width.saturating_sub(8).clamp(40, 110);
+    let height = (rows.len() as u16 + 6)
+        .min(screen.height.saturating_sub(2))
+        .max(6);
+    let panel = centred(screen, width, height);
+    let room = width.saturating_sub(4) as usize;
+
+    let mut lines: Vec<Line> = vec![
+        Line::from(vec![
+            Span::styled("  ▸ ".to_string(), fg(USER)),
+            Span::styled(browser.query.clone(), fg(AGENT)),
+            Span::styled("▏".to_string(), fg(USER)),
+        ]),
+        Line::from(""),
+    ];
+    // Three states, not two. A list nobody has answered for yet is not an empty
+    // one, and saying "no conversations" while the loop is still fetching them
+    // would be a sentence that is false for one frame and unforgettable.
+    if !browser.loaded {
+        lines.push(Line::from(Span::styled("  …".to_string(), fg(MUTED))));
+    } else if browser.rows.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  no conversations yet — every run starts one".to_string(),
+            fg(MUTED),
+        )));
+    } else if rows.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  no conversation matches".to_string(),
+            fg(MUTED),
+        )));
+    }
+    // Cut and pad the title to the *same* width, and one that does not depend
+    // on the row: cutting to one number and padding to another lets a long
+    // title push the harness and the message count off their column.
+    //
+    let for_title = room
+        .saturating_sub(sessions::SessionRow::DETAIL + BADGE + 2)
+        .clamp(8, TITLE);
+    let room_for = height.saturating_sub(5) as usize;
+    let first = window_start(browser.selected, room_for.max(1), rows.len());
+    for (at, row) in rows.iter().enumerate().skip(first).take(room_for.max(1)) {
+        let here = at == browser.selected;
+        lines.push(Line::from(vec![
+            Span::styled(if here { "▸ " } else { "  " }.to_string(), bold(USER)),
+            Span::styled(format!("{:<BADGE$}", row.badge()), fg(MUTED)),
+            Span::styled(
+                format!("{:<for_title$}", cut(&row.title, for_title)),
+                if here { bold(AGENT) } else { fg(AGENT) },
+            ),
+            Span::styled(row.detail(now_ms), fg(MUTED)),
+        ]));
+    }
+
+    f.render_widget(Clear, panel);
+    f.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(fg(USER))
+                .title(" every conversation ")
+                .title_bottom(" ⏎ carries on with it · ↑↓ choose · Esc closes "),
+        ),
+        panel,
+    );
 }
 
 /// The background shells this console started.
@@ -2897,6 +2987,7 @@ fn draw_which_key(f: &mut Frame, app: &App) {
         // are now reachable at all — a route nothing prints is a route nobody
         // takes. See `on_which_key`.
         rows.push(("j".into(), "jobs        background shells".into()));
+        rows.push(("r".into(), "resume      any past conversation".into()));
         rows.push(("u".into(), "unread      the oldest thing unread".into()));
         rows.push(("l".into(), "clear       empty the screen only".into()));
         rows.push(("d".into(), "projects    show or hide the catalog".into()));
@@ -3243,7 +3334,19 @@ fn draw_tree(f: &mut Frame, app: &App, area: Rect) {
         .map(|at| &app.forest[at])
         .collect();
     let ids = app.tree_rows();
-    let selected = app.tree.index(&ids);
+    // `tree_rows` runs past the forest: the loose pane's rows are on the end of
+    // it, because both panes share one cursor. So the highlight is only this
+    // pane's while the cursor is still inside it, and when it is not, the tree
+    // stays parked on its own last row rather than scrolling to a position it
+    // does not have.
+    let cursor = app.tree.index(&ids);
+    let mine = rows.len() + 1;
+    let in_tree = cursor < mine;
+    let selected = if in_tree {
+        cursor
+    } else {
+        mine.saturating_sub(1)
+    };
     let width = area.width.saturating_sub(2) as usize;
     // The guides go plain when the terminal says it cannot draw the alphabet.
     // `NO_COLOR` is the closest signal Jod has to "this terminal is minimal",
@@ -3260,10 +3363,10 @@ fn draw_tree(f: &mut Frame, app: &App, area: Rect) {
     // below it reads its node at `at - 1`. This ordering and `tree_rows`' have
     // to agree, or the cursor lands one row off its own highlight — the same
     // trap the flat list documents, and the same reason it is said twice.
-    let (start, height) = window(area, selected, rows.len() + 1);
+    let (start, height) = window(area, selected, mine);
     let mut items: Vec<ListItem> = Vec::new();
-    for at in start..(start + height).min(rows.len() + 1) {
-        let here = at == selected;
+    for at in start..(start + height).min(mine) {
+        let here = in_tree && at == selected;
         if at == 0 {
             items.push(ListItem::new(Line::from(main_line(
                 app,
@@ -3411,6 +3514,32 @@ fn draw_tree_detail(f: &mut Frame, app: &App, area: Rect) {
         );
         return;
     }
+    // A run from the pane below the tree gets the pane the flat list gives it,
+    // footer and all. `selected_node` answers `None` for it — it is a sentinel,
+    // not a node — so without this the detail pane read "nothing selected"
+    // beside a row that is plainly highlighted, and offered none of the verbs
+    // the row actually answers.
+    if let Some(a) = app
+        .loose_selected()
+        .and_then(|_| app.selected_agent())
+    {
+        f.render_widget(
+            Paragraph::new(agent_detail(app, a, area.width))
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(fg(MUTED))
+                        .title(" run ")
+                        .title_bottom(fit_verbs(
+                            " ⏎ watch · s stop · r resume · a attach ",
+                            area.width,
+                        )),
+                )
+                .wrap(Wrap { trim: false }),
+            area,
+        );
+        return;
+    }
     let mut lines: Vec<Line> = Vec::new();
     match app.selected_node() {
         Some(node) => {
@@ -3534,8 +3663,13 @@ fn fleet_row<'a>(
     if show_id {
         spans.push(Span::styled(format!("{:<9}", short(&a.id)), fg(MUTED)));
     }
+    // A trailing space of its own, because `completed` is exactly nine
+    // characters and the padding then adds none: beside a seven-character age
+    // the two columns ran together as `completed206h26m`, which is one word
+    // that is not a word. Every other column here is followed by a space for
+    // the same reason.
     spans.push(Span::styled(
-        format!("{:<9}", a.status),
+        format!("{:<9} ", a.status),
         fg(status_colour(&a.status)),
     ));
     spans.push(Span::styled(format!("{age:>7} "), fg(MUTED)));
@@ -3569,15 +3703,37 @@ fn loose_height(area: Rect, runs: usize) -> u16 {
 }
 
 /// The runs that belong to no work, drawn under the tree that cannot hold them.
+///
+/// Shares the tree's cursor rather than keeping one of its own: `App::tree_rows`
+/// puts these rows after the forest's, so walking off the bottom of the tree
+/// arrives here. `here` is where that cursor is within this pane, and `None`
+/// means it is still up in the tree.
 fn draw_loose(f: &mut Frame, app: &App, area: Rect, runs: &[&super::AgentLine]) {
     let inner = area.width.saturating_sub(2) as usize;
     let show_id = inner >= 35;
     let show_harness = inner >= 31;
     let room = area.height.saturating_sub(2) as usize;
+    let here = app.loose_selected();
+    // Scrolled to the cursor rather than always to the top. The pane is three
+    // or four rows tall and there can be forty runs in it, so a fixed window
+    // would let the selection walk off the bottom of a box that never moved —
+    // which looks exactly like a cursor that has stopped responding.
+    let first = window_start(here.unwrap_or(0), room.max(1), runs.len());
     let items: Vec<ListItem> = runs
         .iter()
+        .enumerate()
+        .skip(first)
         .take(room)
-        .map(|a| ListItem::new(fleet_row(app, a, false, inner, show_id, show_harness)))
+        .map(|(at, a)| {
+            ListItem::new(fleet_row(
+                app,
+                a,
+                here == Some(at),
+                inner,
+                show_id,
+                show_harness,
+            ))
+        })
         .collect();
     // The count is in the title rather than on a row of its own, because the
     // pane is small enough that a row spent saying "3 more" is a row not
@@ -3587,11 +3743,15 @@ fn draw_loose(f: &mut Frame, app: &App, area: Rect, runs: &[&super::AgentLine]) 
     } else {
         format!(" loose · {} ", runs.len())
     };
+    // The border brightens when the cursor is in here, because two stacked
+    // panes with one cursor between them need to say which of them has it —
+    // the highlighted row alone is easy to miss in a three-row box.
+    let border = if here.is_some() { USER } else { MUTED };
     f.render_widget(
         List::new(items).block(
             Block::default()
                 .borders(Borders::ALL)
-                .border_style(fg(MUTED))
+                .border_style(fg(border))
                 .title(title)
                 .title_bottom(fit_verbs(" in no work — jod ls ", area.width)),
         ),
@@ -3707,67 +3867,7 @@ fn draw_fleet(f: &mut Frame, app: &App, area: Rect) {
     }
     let lines = match app.selected_agent() {
         None => vec![Line::from(Span::styled(" nothing selected", fg(MUTED)))],
-        Some(a) => {
-            let mut lines = vec![
-                Line::from(Span::styled(format!(" {}", a.name), bold(AGENT))),
-                Line::from(Span::styled(format!(" {}", a.id), fg(MUTED))),
-                Line::from(""),
-                field("harness", &a.harness),
-                field(
-                    "status",
-                    // The master column is 48 cells at the design width, so
-                    // the inline `← on screen` marker is the first thing
-                    // *dropped* — whole, by `fit_row`, never clipped to
-                    // `← on scr`. This pane is where it is always said, which
-                    // is why dropping it there costs nothing above 90 columns.
-                    &if app.watching.as_deref() == Some(a.id.as_str()) {
-                        format!("{} · on screen", a.status)
-                    } else {
-                        a.status.clone()
-                    },
-                ),
-                field(
-                    "started",
-                    &super::app::short_duration(app.now_ms.saturating_sub(a.created_at_ms)),
-                ),
-                field(
-                    "session",
-                    a.session.as_deref().unwrap_or("none reported yet"),
-                ),
-                // Above the spend on purpose: the question this pane is most
-                // often opened with is "did that do what I asked", and a run
-                // launched somewhere other than where you meant answers it
-                // before the cost does.
-                field(
-                    "in",
-                    if a.cwd.is_empty() {
-                        "not recorded"
-                    } else {
-                        &a.cwd
-                    },
-                ),
-                field(
-                    "spend",
-                    &a.cost_usd
-                        .map(|c| format!("${c:.2}"))
-                        .unwrap_or_else(|| "—".into()),
-                ),
-                Line::from(""),
-            ];
-            match &a.last {
-                Some(text) => {
-                    lines.push(Line::from(Span::styled(" last", fg(MUTED))));
-                    for chunk in wrap(text, right.width.saturating_sub(4) as usize, 2) {
-                        lines.push(Line::from(Span::styled(format!("   {chunk}"), fg(AGENT))));
-                    }
-                }
-                None => lines.push(Line::from(Span::styled(
-                    "it has not said anything yet",
-                    fg(MUTED),
-                ))),
-            }
-            lines
-        }
+        Some(a) => agent_detail(app, a, right.width),
     };
     f.render_widget(
         Paragraph::new(lines).block(
@@ -3782,6 +3882,73 @@ fn draw_fleet(f: &mut Frame, app: &App, area: Rect) {
         ),
         right,
     );
+}
+
+/// One run, as the detail pane beside the fleet describes it.
+///
+/// Shared rather than copied for the same reason [`fleet_row`] is: this pane is
+/// drawn for a run picked off the flat list, and now for a run picked out of
+/// the loose pane under the tree. A run that reads one way on one screen and
+/// another way on the other is a run you have to look at twice.
+fn agent_detail(app: &App, a: &super::AgentLine, width: u16) -> Vec<Line<'static>> {
+    let mut lines = vec![
+        Line::from(Span::styled(format!(" {}", a.name), bold(AGENT))),
+        Line::from(Span::styled(format!(" {}", a.id), fg(MUTED))),
+        Line::from(""),
+        field("harness", &a.harness),
+        field(
+            "status",
+            // The master column is 48 cells at the design width, so the inline
+            // `← on screen` marker is the first thing *dropped* — whole, by
+            // `fit_row`, never clipped to `← on scr`. This pane is where it is
+            // always said, which is why dropping it there costs nothing above
+            // 90 columns.
+            &if app.watching.as_deref() == Some(a.id.as_str()) {
+                format!("{} · on screen", a.status)
+            } else {
+                a.status.clone()
+            },
+        ),
+        field(
+            "started",
+            &super::app::short_duration(app.now_ms.saturating_sub(a.created_at_ms)),
+        ),
+        field(
+            "session",
+            a.session.as_deref().unwrap_or("none reported yet"),
+        ),
+        // Above the spend on purpose: the question this pane is most often
+        // opened with is "did that do what I asked", and a run launched
+        // somewhere other than where you meant answers it before the cost does.
+        field(
+            "in",
+            if a.cwd.is_empty() {
+                "not recorded"
+            } else {
+                &a.cwd
+            },
+        ),
+        field(
+            "spend",
+            &a.cost_usd
+                .map(|c| format!("${c:.2}"))
+                .unwrap_or_else(|| "—".into()),
+        ),
+        Line::from(""),
+    ];
+    match &a.last {
+        Some(text) => {
+            lines.push(Line::from(Span::styled(" last", fg(MUTED))));
+            for chunk in wrap(text, width.saturating_sub(4) as usize, 2) {
+                lines.push(Line::from(Span::styled(format!("   {chunk}"), fg(AGENT))));
+            }
+        }
+        None => lines.push(Line::from(Span::styled(
+            "it has not said anything yet",
+            fg(MUTED),
+        ))),
+    }
+    lines
 }
 
 /// The pinned chat's row, in the fleet's own columns.
@@ -10542,6 +10709,76 @@ mod tests {
         assert!(frame.contains("compacted turns included"), "{frame}");
     }
 
+    // ---- the session list ----
+
+    fn session_row(title: &str, abandoned: usize) -> sessions::SessionRow {
+        sessions::SessionRow {
+            id: format!("conv-{title}"),
+            short: "conv-abc".into(),
+            title: title.into(),
+            harness: "claude".into(),
+            model: None,
+            session_id: Some("sess-abc".into()),
+            messages: 4,
+            updated_at_ms: 0,
+            forked_from: None,
+            abandoned,
+        }
+    }
+
+    /// A row has to say enough to be chosen off: what the thread was about,
+    /// which harness it is on, and whether there is abandoned work in it.
+    #[test]
+    fn the_session_list_names_every_conversation_and_marks_the_cursor() {
+        let mut a = app();
+        a.now_ms = 60_000;
+        a.overlay = Overlay::Sessions(sessions::Browser {
+            rows: vec![session_row("port the parser", 2), session_row("the deploy", 0)],
+            loaded: true,
+            selected: 1,
+            ..Default::default()
+        });
+        let frame = rendered(&a, 120, 24);
+        assert!(frame.contains("port the parser"), "{frame}");
+        assert!(frame.contains("the deploy"), "{frame}");
+        assert!(frame.contains("⚑2"), "the abandoned count rides with the flag: {frame}");
+        assert!(frame.contains("carries on with it"), "{frame}");
+    }
+
+    /// "Nothing loaded yet" and "no conversations" would draw the same empty
+    /// box, and only the second of them has a sentence that is true.
+    #[test]
+    fn an_empty_session_list_says_so_only_once_it_has_been_answered() {
+        let mut a = app();
+        a.overlay = Overlay::Sessions(sessions::Browser::default());
+        let waiting = rendered(&a, 120, 24);
+        assert!(!waiting.contains("no conversations yet"), "{waiting}");
+
+        a.overlay = Overlay::Sessions(sessions::Browser {
+            loaded: true,
+            ..Default::default()
+        });
+        let answered = rendered(&a, 120, 24);
+        assert!(answered.contains("no conversations yet"), "{answered}");
+    }
+
+    /// A filter that matches nothing is a different message from an empty
+    /// store: one of them means "type less", the other means "there is nothing
+    /// here at all".
+    #[test]
+    fn a_session_filter_that_matches_nothing_says_that_rather_than_nothing() {
+        let mut a = app();
+        a.overlay = Overlay::Sessions(sessions::Browser {
+            rows: vec![session_row("port the parser", 0)],
+            loaded: true,
+            query: "zzz".into(),
+            ..Default::default()
+        });
+        let frame = rendered(&a, 120, 24);
+        assert!(frame.contains("no conversation matches"), "{frame}");
+        assert!(!frame.contains("no conversations yet"), "{frame}");
+    }
+
     // ---- the fleet tree ----
 
     fn tree_node(
@@ -10856,6 +11093,42 @@ mod tests {
         assert!(
             frame.contains("hello-agent"),
             "and it is named, not just numbered:\n{frame}"
+        );
+    }
+
+    /// The pane was drawn and could not be reached: no row in it was ever
+    /// highlighted, so the cursor keys stopped at the last node of the tree and
+    /// the detail pane beside it said "nothing selected" whatever you pressed.
+    #[test]
+    fn the_cursor_reaches_the_loose_pane_and_the_detail_pane_follows_it() {
+        let mut a = two_works();
+        a.agents = vec![agent_line("de1e6a7e", "hello-agent", "running")];
+        a.reconcile();
+        assert!(a.has_tree());
+        assert_eq!(a.loose_rows().len(), 1, "one run with no node");
+
+        let before = rendered(&a, 150, 30);
+        assert!(
+            !before.contains("▸ ● de1e6a7e") && !before.contains("▸ ⠋ de1e6a7e"),
+            "the cursor starts in the tree:\n{before}"
+        );
+
+        let rows = a.tree_rows();
+        a.tree.last(&rows);
+        let frame = rendered(&a, 150, 30);
+
+        assert_eq!(a.loose_selected(), Some(0), "End lands in the lower pane");
+        assert!(
+            frame.contains("hello-agent"),
+            "the run is named in the detail pane:\n{frame}"
+        );
+        assert!(
+            frame.contains("⏎ watch"),
+            "and the pane offers the verbs the row answers:\n{frame}"
+        );
+        assert!(
+            !frame.contains("nothing selected"),
+            "a highlighted row is not nothing:\n{frame}"
         );
     }
 

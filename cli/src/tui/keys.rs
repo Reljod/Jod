@@ -270,8 +270,8 @@ const CHAT: &[Key] = &[
 ///
 /// `c` says **conversations** rather than "threads" because the two are
 /// different things here and the screen's own prose already draws the line:
-/// `c` lists conversations ("no conversations yet — every run starts one"),
-/// while `b` "opens the branches of the selected run's thread". A bar reading
+/// `c` opens the list of conversations and `⏎` on one carries on with it, while
+/// `b` "opens the branches of the selected run's thread". A bar reading
 /// `c threads · b branches` would say `b` drills into what `c` lists, which is
 /// not what either key does.
 ///
