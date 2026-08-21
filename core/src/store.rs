@@ -1394,6 +1394,25 @@ const MIGRATIONS: &[(&str, &str)] = &[
       WHERE resumed_at_ms IS NULL;
     "#,
     ),
+    (
+    "0020_a_stalled_session_is_marked",
+    r#"
+    -- When a watched run went quiet, or NULL while it is healthy.
+    --
+    -- Deliberately not a new `runs.status`. That column is written by the
+    -- supervisor, which is a separate process, and a value it never writes
+    -- would drift the first time the two disagreed — a run marked `stalled`
+    -- here and `running` there, with no way to tell which was stale. Keeping
+    -- the mark on the heartbeat makes it a *derived fact* owned by the one
+    -- process that sweeps, and `Store::stalled_runs` is how everything else
+    -- reads it.
+    --
+    -- Holds the moment of the run's last event rather than the moment a sweep
+    -- noticed, so the same stall reports the same age however late or often the
+    -- daemon looked.
+    ALTER TABLE heartbeats ADD COLUMN stalled_since_ms INTEGER;
+    "#,
+    ),
 ];
 
 /// Who asserted a fact. Kept out of the fact's text so that content Jod
@@ -1988,20 +2007,26 @@ impl Store {
     /// The cursor fields are reset on re-registration. A new window measured
     /// against progress observed under the old one would be measuring two
     /// different promises at once.
+    ///
+    /// The stall mark resets with them, for the same reason: re-registering is
+    /// somebody saying "watch this from now", and carrying a mark across that
+    /// would leave a run flagged under a window it was never judged by.
     pub fn watch_run(&self, hb: &Heartbeat) -> Result<()> {
         self.write(|tx| {
             tx.execute(
                 "INSERT INTO heartbeats
                    (run_id, goal_name, started_at_ms, stall_ms, max_lifetime_ms,
-                    last_seq, last_progress_ms, last_beat_ms, beats)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                    last_seq, last_progress_ms, last_beat_ms, beats,
+                    stalled_since_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
                  ON CONFLICT(run_id) DO UPDATE SET
                    goal_name = excluded.goal_name,
                    stall_ms = excluded.stall_ms,
                    max_lifetime_ms = excluded.max_lifetime_ms,
                    last_seq = excluded.last_seq,
                    last_progress_ms = excluded.last_progress_ms,
-                   last_beat_ms = excluded.last_beat_ms",
+                   last_beat_ms = excluded.last_beat_ms,
+                   stalled_since_ms = excluded.stalled_since_ms",
                 params![
                     hb.run_id,
                     hb.watching.goal_name(),
@@ -2012,10 +2037,27 @@ impl Store {
                     hb.last_progress_ms,
                     hb.last_beat_ms,
                     hb.beats,
+                    hb.stalled_since_ms,
                 ],
             )?;
             Ok(())
         })
+    }
+
+    /// Every run currently marked stalled, and when each went quiet.
+    ///
+    /// A map rather than a list because every caller is joining it against rows
+    /// it already has — the fleet tree against its runs, `list_agents` against
+    /// its agents — and a list would make each of those a scan per row on a
+    /// screen that repaints on a tick.
+    pub fn stalled_runs(&self) -> Result<HashMap<String, i64>> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT run_id, stalled_since_ms
+               FROM heartbeats WHERE stalled_since_ms IS NOT NULL",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+        Ok(rows.collect::<std::result::Result<HashMap<_, _>, _>>()?)
     }
 
     /// Every run currently being watched, oldest beat first.
@@ -2027,7 +2069,8 @@ impl Store {
         let conn = self.conn.lock().expect("store lock poisoned");
         let mut stmt = conn.prepare(
             "SELECT run_id, goal_name, started_at_ms, stall_ms, max_lifetime_ms,
-                    last_seq, last_progress_ms, last_beat_ms, beats
+                    last_seq, last_progress_ms, last_beat_ms, beats,
+                    stalled_since_ms
                FROM heartbeats ORDER BY last_beat_ms ASC",
         )?;
         let rows = stmt.query_map([], heartbeat_from_row)?;
@@ -2040,7 +2083,8 @@ impl Store {
         Ok(conn
             .query_row(
                 "SELECT run_id, goal_name, started_at_ms, stall_ms, max_lifetime_ms,
-                        last_seq, last_progress_ms, last_beat_ms, beats
+                        last_seq, last_progress_ms, last_beat_ms, beats,
+                        stalled_since_ms
                    FROM heartbeats WHERE run_id = ?1",
                 params![run_id],
                 heartbeat_from_row,
@@ -2072,13 +2116,15 @@ impl Store {
                     SET last_seq = ?2,
                         last_progress_ms = ?3,
                         last_beat_ms = ?4,
+                        stalled_since_ms = ?5,
                         beats = beats + 1
                   WHERE run_id = ?1",
                 params![
                     beat.run_id,
                     beat.last_seq,
                     beat.last_progress_ms,
-                    beat.last_beat_ms
+                    beat.last_beat_ms,
+                    beat.stalled_since_ms
                 ],
             )?;
             Ok(())
@@ -4111,6 +4157,7 @@ fn heartbeat_from_row(r: &rusqlite::Row) -> rusqlite::Result<Heartbeat> {
         last_progress_ms: r.get(6)?,
         last_beat_ms: r.get(7)?,
         beats: r.get(8)?,
+        stalled_since_ms: r.get(9)?,
     })
 }
 

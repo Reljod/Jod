@@ -397,6 +397,7 @@ mod tests {
             summary: String::new(),
             running: false,
             status: None,
+            stalled_for_ms: None,
             cards: 0,
             blocked: 0,
             colour: "cyan".into(),

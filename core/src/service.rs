@@ -18,6 +18,7 @@ use crate::conversation::{Conversation, NewMessage};
 use crate::error::{JodError, Result};
 use crate::event::{AgentEnvelope, AgentEvent, Usage};
 use crate::harness::{HarnessKind, PermissionPolicy, Resume, SpawnRequest, ToolAccess};
+use crate::heartbeat::{Heartbeat, Watching};
 use crate::store::{Store, StoredRun};
 use crate::workdir::Workdir;
 use crate::{paths, proc, recall, runner, workdir};
@@ -1152,6 +1153,31 @@ impl Jod {
             record.summary.process_alive = true;
             record.summary.clone()
         };
+
+        // Watch it. Here rather than in each caller, because `delegate`,
+        // `open_work`, `continue_agent`, work sessions and team starts must all
+        // get one, and arming it per caller is how exactly one of them silently
+        // misses out — which is the state this replaces: three arming sites,
+        // none of them on the path the orchestrator actually spawns through.
+        //
+        // *After* the launch succeeded. A heartbeat for a run that never
+        // started is a row watching nothing, and the foreign-key cascade only
+        // cleans up rows whose run exists. The early return on a failed launch
+        // above is what keeps that true.
+        //
+        // Never fatal. A run that is working is worth more than the promise to
+        // notice if it stops, so a store that refused the row is logged and the
+        // spawn stands.
+        {
+            let hb = Heartbeat::starting(
+                &id,
+                Watching::Run,
+                chrono::Utc::now().timestamp_millis(),
+            );
+            if let Err(e) = store.watch_run(&hb) {
+                eprintln!("[jod] could not watch {id}: {e}");
+            }
+        }
 
         // Persist metadata so a run remains inspectable after the app closes.
         let meta = paths::meta_path(&id);
@@ -3280,6 +3306,167 @@ mod tests {
             .expect("the spawning task must not panic")
             .expect("the queued spawn must eventually succeed");
         assert!(third.pid.is_some(), "the queued run must actually launch");
+    }
+
+    // ---- every spawn is watched -------------------------------------------
+
+    /// Stand up a fake `claude` and a fake `jod-run` under the env overrides
+    /// discovery already supports, so a test exercises the real launch path
+    /// rather than asserting that a config value was read.
+    ///
+    /// The supervisor stand-in holds its group open for two seconds, standing in
+    /// for a harness doing work.
+    fn fake_binaries(dir: &std::path::Path) -> (PathBuf, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let claude_bin = dir.join("claude");
+        std::fs::write(&claude_bin, "#!/bin/sh\nexit 0\n").unwrap();
+        let supervisor_bin = dir.join("jod-run");
+        std::fs::write(&supervisor_bin, "#!/bin/sh\nsleep 2\n").unwrap();
+        std::fs::set_permissions(&claude_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&supervisor_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        (claude_bin, supervisor_bin)
+    }
+
+    /// Check 1. Every session the orchestrator starts is watched, without any
+    /// caller having to remember to ask.
+    ///
+    /// This is the gap the whole change exists to close. Before it, exactly
+    /// three places armed a heartbeat — `jod run --watch`, a keypress in the
+    /// TUI, and a goal iteration — and none of them is on the path `delegate`,
+    /// `open_work` or `continue_agent` take. So every session the fleet
+    /// actually consists of ran unwatched, and a wedged one stayed `running`
+    /// for ever with nothing on any screen saying so.
+    ///
+    /// Asserted at `spawn_agent_in` rather than at each caller, because that is
+    /// the claim: one seam, so no future caller can be added without one.
+    #[tokio::test]
+    async fn every_spawn_is_watched_without_the_caller_asking() {
+        let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = scratch("watched");
+        let (claude_bin, supervisor_bin) = fake_binaries(&dir);
+
+        let saved_home = std::env::var("JOD_HOME").ok();
+        let saved_claude = std::env::var("JOD_CLAUDE_BIN").ok();
+        let saved_supervisor = std::env::var("JOD_SUPERVISOR_BIN").ok();
+        std::env::set_var("JOD_HOME", &dir);
+        std::env::set_var("JOD_CLAUDE_BIN", &claude_bin);
+        std::env::set_var("JOD_SUPERVISOR_BIN", &supervisor_bin);
+
+        // File-backed, because `runner::launch` hands the supervisor a database
+        // path and an in-memory store has none.
+        let store = std::sync::Arc::new(Store::open(&dir.join("jod.db")).unwrap());
+        let spawned = Jod::with_store(store.clone())
+            .spawn_agent(request("do the thing"))
+            .await;
+
+        macro_rules! restore_env {
+            () => {
+                match saved_home.clone() {
+                    Some(v) => std::env::set_var("JOD_HOME", v),
+                    None => std::env::remove_var("JOD_HOME"),
+                }
+                match saved_claude.clone() {
+                    Some(v) => std::env::set_var("JOD_CLAUDE_BIN", v),
+                    None => std::env::remove_var("JOD_CLAUDE_BIN"),
+                }
+                match saved_supervisor.clone() {
+                    Some(v) => std::env::set_var("JOD_SUPERVISOR_BIN", v),
+                    None => std::env::remove_var("JOD_SUPERVISOR_BIN"),
+                }
+            };
+        }
+
+        let agent = match spawned {
+            Ok(a) => a,
+            Err(e) => {
+                restore_env!();
+                panic!("the spawn must launch against the fake binaries: {e:?}");
+            }
+        };
+        let watched = store.heartbeat(&agent.id);
+        let all = store.heartbeats();
+        if let Some(pgid) = agent.pgid {
+            unsafe { libc::kill(-(pgid as i32), libc::SIGKILL) };
+        }
+        restore_env!();
+
+        let watched = watched
+            .unwrap()
+            .expect("a spawned run must be watched without anyone asking for it");
+        assert_eq!(
+            watched.watching,
+            Watching::Run,
+            "a session is watched as a session, not as a goal iteration — the \
+             difference is whether a stall reaps it"
+        );
+        assert_eq!(watched.run_id, agent.id);
+        assert_eq!(
+            watched.stalled_since_ms, None,
+            "a run that has just started has not been silent yet"
+        );
+        assert_eq!(all.unwrap().len(), 1, "one spawn, one heartbeat");
+    }
+
+    /// Check 2. A heartbeat for a run that never started is a row watching
+    /// nothing, and the foreign-key cascade only cleans up rows whose run
+    /// exists — so arming one before the launch would leak a row per failed
+    /// spawn, and every sweep afterwards would probe a pgid that never was.
+    ///
+    /// The launch is made to fail *after* the run row is written, which is the
+    /// case worth pinning: the row exists and looks like somewhere to hang a
+    /// heartbeat, and the ordering is the only thing that stops it.
+    #[tokio::test]
+    async fn a_spawn_that_never_started_is_not_watched() {
+        let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = scratch("unwatched");
+        let (claude_bin, supervisor_bin) = fake_binaries(&dir);
+
+        let saved_home = std::env::var("JOD_HOME").ok();
+        let saved_claude = std::env::var("JOD_CLAUDE_BIN").ok();
+        let saved_supervisor = std::env::var("JOD_SUPERVISOR_BIN").ok();
+        std::env::set_var("JOD_HOME", &dir);
+        std::env::set_var("JOD_CLAUDE_BIN", &claude_bin);
+        std::env::set_var("JOD_SUPERVISOR_BIN", &supervisor_bin);
+
+        // In-memory on purpose. The harness and the supervisor both resolve, so
+        // the spawn gets all the way past recording its run — and then
+        // `runner::launch` asks for a database path to hand the supervisor,
+        // finds none, and fails. A real failure on the real path, rather than a
+        // missing binary that would have failed before anything was written.
+        let store = std::sync::Arc::new(Store::in_memory().unwrap());
+        let spawned = Jod::with_store(store.clone())
+            .spawn_agent(request("do the thing"))
+            .await;
+
+        let runs = store.runs(10);
+        let watched = store.heartbeats();
+
+        match saved_home {
+            Some(v) => std::env::set_var("JOD_HOME", v),
+            None => std::env::remove_var("JOD_HOME"),
+        }
+        match saved_claude {
+            Some(v) => std::env::set_var("JOD_CLAUDE_BIN", v),
+            None => std::env::remove_var("JOD_CLAUDE_BIN"),
+        }
+        match saved_supervisor {
+            Some(v) => std::env::set_var("JOD_SUPERVISOR_BIN", v),
+            None => std::env::remove_var("JOD_SUPERVISOR_BIN"),
+        }
+
+        assert!(spawned.is_err(), "this spawn was supposed to fail: {spawned:?}");
+        let runs = runs.unwrap();
+        assert_eq!(
+            runs.len(),
+            1,
+            "the attempt should still be recorded — that is what makes the \
+             ordering worth pinning"
+        );
+        assert_eq!(runs[0].status, "failed");
+        assert!(
+            watched.unwrap().is_empty(),
+            "a run that never started must not be watched"
+        );
     }
 
     // ---- runs populate conversations --------------------------------------

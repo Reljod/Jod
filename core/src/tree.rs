@@ -78,6 +78,15 @@ pub struct Node {
     /// no status of their own: a work's state lives in `works.state` and a
     /// session is a conversation, not a process.
     pub status: Option<String>,
+    /// How long this run has been silent, or `None` if it is healthy.
+    ///
+    /// A duration rather than the stored instant, so a renderer does not need a
+    /// clock — and so every surface drawing this forest agrees on the age
+    /// instead of each subtracting its own `now`.
+    ///
+    /// Null on works and sessions. A stall is a fact about a process, and a
+    /// session is a conversation.
+    pub stalled_for_ms: Option<i64>,
     /// Open cards anywhere in this node's subtree, so the tree says where the
     /// questions are without being expanded.
     pub cards: usize,
@@ -108,7 +117,13 @@ pub fn render(nodes: &[Node]) -> String {
             out.push_str("  ");
         }
         out.push_str(&node.label);
-        if node.running {
+        // Before `[running]`, and instead of it. A stalled run *is* still
+        // running — that is the entire problem — so drawing both would put the
+        // reassuring word next to the alarming one and let the eye take the
+        // wrong one.
+        if let Some(silent_for) = node.stalled_for_ms {
+            out.push_str(&format!(" [stalled {}]", crate::heartbeat::human_ms(silent_for)));
+        } else if node.running {
             out.push_str(" [running]");
         }
         if node.blocked > 0 {
@@ -163,6 +178,12 @@ impl Store {
         if works.is_empty() {
             return Ok(Vec::new());
         }
+
+        // One read for the whole forest, joined in memory against the runs
+        // below. The alternative is a lookup per run node, on the screen most
+        // likely to be open while forty runs are going.
+        let stalled = self.stalled_runs()?;
+        let now_ms = chrono::Utc::now().timestamp_millis();
 
         let mut cards: HashMap<String, (usize, usize)> = HashMap::new();
         let mut sessions: HashMap<String, Vec<RawSession>> = HashMap::new();
@@ -308,6 +329,7 @@ impl Store {
                 summary: work.summary.clone(),
                 running: false,
                 status: None,
+                stalled_for_ms: None,
                 cards: 0,
                 blocked: 0,
                 colour: work.colour.clone(),
@@ -359,6 +381,7 @@ impl Store {
                     summary: session.summary.clone(),
                     running: session.running,
                     status: None,
+                    stalled_for_ms: None,
                     cards: session.cards,
                     blocked: session.blocked,
                     colour: work.colour.clone(),
@@ -374,6 +397,14 @@ impl Store {
                         label: run.label,
                         summary: run.summary,
                         running: run.status == "running",
+                        // Only for a run that still claims to be running. A
+                        // finished run's leftover mark, if a sweep has not yet
+                        // retired the row, would draw a badge on something that
+                        // has already stopped.
+                        stalled_for_ms: stalled
+                            .get(&run.id)
+                            .filter(|_| run.status == "running")
+                            .map(|since| now_ms.saturating_sub(*since).max(0)),
                         status: Some(run.status),
                         cards: 0,
                         blocked: 0,
@@ -679,6 +710,7 @@ mod tests {
                 summary: String::new(),
                 running: false,
                 status: None,
+                stalled_for_ms: None,
                 cards: 2,
                 blocked: 1,
                 colour: "cyan".into(),
@@ -694,6 +726,7 @@ mod tests {
                 summary: String::new(),
                 running: true,
                 status: None,
+                stalled_for_ms: None,
                 cards: 0,
                 blocked: 0,
                 colour: "cyan".into(),
@@ -702,5 +735,35 @@ mod tests {
             },
         ];
         assert_eq!(render(&nodes), "the parser [1 blocked]\n  lead [running]\n");
+    }
+
+    /// A stalled run must not also read as running. It *is* still running —
+    /// that is the whole problem — so a row carrying both words would put the
+    /// reassuring one next to the alarming one and let the eye take the wrong
+    /// one. The badge replaces it rather than joining it.
+    #[test]
+    fn a_stalled_run_says_so_instead_of_saying_running() {
+        let nodes = vec![Node {
+            id: NodeId::run("r"),
+            parent: None,
+            kind: NodeKind::Run,
+            depth: 0,
+            label: "engineer".into(),
+            summary: String::new(),
+            running: true,
+            status: Some("running".into()),
+            stalled_for_ms: Some(45 * 60_000),
+            cards: 0,
+            blocked: 0,
+            colour: "cyan".into(),
+            expanded: true,
+            has_children: false,
+        }];
+        let drawn = render(&nodes);
+        assert_eq!(drawn, "engineer [stalled 45m]\n");
+        assert!(
+            !drawn.contains("[running]"),
+            "a spinner that keeps spinning on a wedged agent is the bug: {drawn}"
+        );
     }
 }

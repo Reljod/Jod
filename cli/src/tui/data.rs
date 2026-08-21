@@ -1446,6 +1446,32 @@ pub fn forest(jod: &Arc<Jod>, show_closed: bool) -> (Vec<Node>, HashSet<NodeId>)
     (nodes, closed)
 }
 
+/// Whether sessions are being watched by nothing.
+///
+/// Every spawn now arms a heartbeat, but the sweep that acts on one runs only
+/// inside `jod daemon`. Without it nothing is ever marked stalled, and the
+/// fleet draws every wedged agent as healthy — the exact failure the mark was
+/// added to fix, restored by a daemon nobody started.
+///
+/// Both halves are required. With nothing being watched there is no promise to
+/// break, and saying "start the daemon" to somebody with an empty fleet is
+/// noise that teaches them to ignore the message when it matters.
+pub fn watched_but_unswept(jod: &Arc<Jod>, now_ms: i64) -> bool {
+    let Some(store) = jod.store() else {
+        return false;
+    };
+    let watching = store.heartbeats().map(|h| !h.is_empty()).unwrap_or(false);
+    if !watching {
+        return false;
+    }
+    let last = store
+        .setting(jod_core::ticker::SWEPT_AT_KEY)
+        .ok()
+        .flatten()
+        .and_then(|v| v.parse::<i64>().ok());
+    jod_core::ticker::sweep_is_stale(last, now_ms)
+}
+
 /// One scope's agent-to-agent traffic, and the bounds it is running against.
 ///
 /// Five reads rather than one, and deliberately: `traffic` is the log,

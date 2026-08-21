@@ -56,7 +56,10 @@ use std::sync::Arc;
 
 use crate::error::Result;
 use crate::harness::{HarnessKind, PermissionPolicy, Resume, SpawnRequest};
-use crate::heartbeat::{self, Beat, Heartbeat, Observed, SweepReport, Verdict, Watching};
+use crate::cards::{CardKind, Importance, NewCard, Source};
+use crate::heartbeat::{
+    self, Beat, Heartbeat, Observed, Response, SweepReport, Verdict, Watching,
+};
 use crate::monitor::{self, LocalProbes, Observation, Probes};
 use crate::schedule::{self, Fire, FireOutcome, Goal, Misfire, Overlap, Schedule};
 use crate::service::{AgentStatus, Jod, RunConversation};
@@ -199,6 +202,40 @@ const PRUNE_EVERY_MS: i64 = 60 * 60 * 1_000;
 /// because a field would reset on every restart and turn "hourly" into "every
 /// startup".
 const PRUNED_AT_KEY: &str = "ledger.pruned_at_ms";
+
+/// When the heartbeat sweep last ran.
+///
+/// Stamped on every sweep, so a process that is not the daemon can tell whether
+/// anything is actually watching. This matters now in a way it did not before:
+/// every spawn arms a heartbeat, but the sweep only runs inside `jod daemon`,
+/// and a heartbeat nothing sweeps is a promise that quietly does not hold. The
+/// fleet would show every wedged agent as healthy and never say why.
+///
+/// In `settings` rather than in the [`Ticker`], because the reader is a
+/// different process.
+pub const SWEPT_AT_KEY: &str = "heartbeats.swept_at_ms";
+
+/// How long the fleet keeps believing in a sweep it has not seen.
+///
+/// Three ticks. One is far too tight — a sweep that ran a shade over a minute
+/// ago is a healthy daemon on a busy box, and warning about it would train the
+/// reader to ignore the warning, which is worse than not having one.
+pub const SWEEP_STALE_AFTER_MS: i64 = 3 * 60 * 1_000;
+
+/// Whether anything is sweeping heartbeats, given when one last ran.
+///
+/// `None` means no sweep has ever run against this database, which is the
+/// ordinary state of a machine where nobody has started the daemon — and the
+/// case the warning most needs to catch.
+pub fn sweep_is_stale(last_sweep_ms: Option<i64>, now_ms: i64) -> bool {
+    match last_sweep_ms {
+        None => true,
+        // Saturating, so a clock that went backwards reads as "recent" rather
+        // than as an enormous gap. A restored snapshot must not make the fleet
+        // announce that the daemon is down when it is running fine.
+        Some(last) => now_ms.saturating_sub(last) > SWEEP_STALE_AFTER_MS,
+    }
+}
 
 /// How often GitHub is asked about pull requests. See
 /// [`Ticker::tick_pull_requests`].
@@ -1028,10 +1065,33 @@ impl Ticker {
             };
 
             let verdict = heartbeat::decide(&hb, &observed, now_ms);
+            let response = heartbeat::respond(&hb, &verdict);
 
-            if !verdict.retires() {
+            if response.keeps_watching() {
+                // Counted off the verdict, not the response. A run that had
+                // been marked and has just come back produces `Clear` rather
+                // than `Beat`, and it is still a run that did something this
+                // tick — reading the response here would report it as idle.
                 if matches!(verdict, Verdict::Beating { .. }) {
                     report.beating += 1;
+                }
+                match response {
+                    // The first tick that marks a run is the only one that says
+                    // anything. `hb.stalled_since_ms` is still what the *stored*
+                    // row said, so this is a transition test, not a state test,
+                    // and the fiftieth tick of the same stall is silent.
+                    Response::Mark if !hb.is_stalled() => {
+                        report.marked += 1;
+                        self.record_verdict(&store, &hb, &verdict);
+                        self.raise_stalled_card(&store, &hb, &verdict);
+                    }
+                    Response::Clear => {
+                        // Coming back is worth recording too, or the memory
+                        // scope keeps a stall that has since resolved and
+                        // nothing ever says it did.
+                        self.note(&store, &hb, "recovered", "went quiet and came back");
+                    }
+                    _ => {}
                 }
                 store.record_beat(&Beat::after(&hb, &verdict, now_ms))?;
                 continue;
@@ -1041,11 +1101,11 @@ impl Ticker {
             // leaves the explanation rather than the bookkeeping.
             self.record_verdict(&store, &hb, &verdict);
 
-            if verdict.fails_the_run() {
-                if verdict.terminates() {
+            if let Response::Reap { terminate } = response {
+                if terminate {
                     report.stopped += 1;
                 }
-                if let Err(e) = self.jod.fail_agent(&hb.run_id, verdict.terminates()).await {
+                if let Err(e) = self.jod.fail_agent(&hb.run_id, terminate).await {
                     // Logged into memory rather than returned: see above.
                     self.note(
                         &store,
@@ -1059,7 +1119,59 @@ impl Ticker {
             store.unwatch_run(&hb.run_id)?;
             report.retired += 1;
         }
+
+        // Stamped even when nothing was watched. "The sweep ran and there was
+        // nothing to do" and "nothing has swept in three hours" are different
+        // facts, and only stamping on a non-empty pass would make an idle fleet
+        // indistinguishable from a dead daemon.
+        if let Err(e) = store.set_setting(SWEPT_AT_KEY, &now_ms.to_string()) {
+            eprintln!("[jod] could not record the heartbeat sweep: {e}");
+        }
         Ok(report)
+    }
+
+    /// Put a stalled session on the rail, once.
+    ///
+    /// Never fatal, for the reason the note is not: a sweep that cannot raise a
+    /// card has still marked the row, and the fleet tree reads the mark rather
+    /// than the card.
+    ///
+    /// A run that stalled before writing its first message has no conversation
+    /// to raise a card against, and gets the mark without the card. That is the
+    /// honest outcome — the rail is organised by conversation, and inventing one
+    /// to hang a notice on would put a thread in the tree that never existed.
+    fn raise_stalled_card(&self, store: &Store, hb: &Heartbeat, verdict: &Verdict) {
+        let Ok(Some(conversation_id)) = store.conversation_for_run(&hb.run_id) else {
+            return;
+        };
+        if let Err(e) = store.raise_card(NewCard {
+            conversation_id,
+            run_id: Some(hb.run_id.clone()),
+            kind: Some(CardKind::Question),
+            importance: Some(Importance::Normal),
+            // Not blocking. A blocking card says a run cannot continue past
+            // this question; this one says a run has stopped continuing on its
+            // own, and nothing is waiting on the answer.
+            blocking: false,
+            title: format!(
+                "{} looks stuck",
+                hb.run_id.chars().take(8).collect::<String>()
+            ),
+            body: format!(
+                "{}. It has not been stopped — it is still running, and still \
+                 holding whatever it was working in. Stop it, or leave it and \
+                 start a fresh session beside it.",
+                verdict.detail()
+            ),
+            // The backstop under the transition test above. If a daemon
+            // restarts mid-stall and re-reads a row it has already marked, the
+            // key is what stops a second card for the same stall.
+            dedupe_key: Some(format!("stalled:{}", hb.run_id)),
+            source: Some(Source::Jod),
+            ..Default::default()
+        }) {
+            eprintln!("[jod] stalled card for {} failed: {e}", hb.run_id);
+        }
     }
 
     /// Write down why a heartbeat retired.
@@ -4069,27 +4181,199 @@ mod tests {
                 .id()
         }
 
+        /// A conversation holding one message from this run, so a card raised
+        /// about the run has somewhere to land.
+        fn conversation_for(store: &Store, run_id: &str) -> String {
+            use crate::conversation::{NewMessage, Role};
+            let c = store
+                .new_conversation(crate::harness::HarnessKind::ClaudeCode, "/tmp", None)
+                .unwrap();
+            store
+                .append_message(
+                    &c.id,
+                    NewMessage::new(Role::Assistant, "starting").from_run(run_id),
+                )
+                .unwrap();
+            c.id
+        }
+
+        /// Stop a group the test started, so a failing assertion does not leave
+        /// a `sleep 300` behind on the box for five minutes.
+        fn kill_group(pgid: u32) {
+            unsafe { libc::kill(-(pgid as i32), libc::SIGKILL) };
+            let mut status: libc::c_int = 0;
+            unsafe { libc::waitpid(pgid as i32, &mut status, 0) };
+        }
+
         /// Silent past its window, and alive — the case the module exists for,
         /// and the one nothing else in Jod can detect.
+        ///
+        /// **This used to assert the opposite**, under the name
+        /// `a_stalled_run_is_stopped_marked_failed_and_unwatched`. Reljod chose
+        /// mark-and-surface for a session he is watching: killing it destroys a
+        /// transcript and possibly a checkout mid-edit, to fix something he can
+        /// see and decide about himself. The reap is not gone — it is still
+        /// what a *goal* iteration gets, which the test below this one holds.
         #[tokio::test]
-        async fn a_stalled_run_is_stopped_marked_failed_and_unwatched() {
+        async fn a_stalled_session_is_marked_and_left_running() {
+            let store = Arc::new(Store::in_memory().unwrap());
+            let pgid = a_living_group();
+            store.save_run(&stored("r1", "running", Some(pgid))).unwrap();
+            conversation_for(&store, "r1");
+
+            let now = 10_000_000_000;
+            let quiet_since = now - heartbeat::DEFAULT_STALL_MS - 1;
+            store
+                .watch_run(&Heartbeat::starting("r1", Watching::Run, quiet_since))
+                .unwrap();
+
+            let report = ticker_over(&store).tick_heartbeats(now).await.unwrap();
+
+            assert_eq!(report.checked, 1);
+            assert_eq!(report.marked, 1, "it should have been marked");
+            assert_eq!(report.stopped, 0, "and it must not have been stopped");
+            assert_eq!(report.retired, 0, "nor stopped being watched");
+            assert_eq!(
+                store.run("r1").unwrap().unwrap().status,
+                "running",
+                "a session Reljod is watching keeps its status; only the mark is new"
+            );
+
+            // The mark is on the row, and says when it went quiet rather than
+            // when the sweep happened to look.
+            let hb = store.heartbeat("r1").unwrap().expect("still watched");
+            assert_eq!(hb.stalled_since_ms, Some(quiet_since));
+            assert_eq!(store.stalled_runs().unwrap().get("r1"), Some(&quiet_since));
+
+            // And the process is still there. This is the assertion that would
+            // have failed before the split, and the whole point of the change:
+            // `WNOHANG` returning 0 means the child has not exited at all.
+            let mut status: libc::c_int = 0;
+            let reaped = unsafe { libc::waitpid(pgid as i32, &mut status, libc::WNOHANG) };
+            assert_eq!(reaped, 0, "the sweep killed a session it was only meant to mark");
+
+            let why = store.facts_about("run/r1").unwrap();
+            assert!(
+                why.iter().any(|f| f.predicate == "stalled"),
+                "nothing recorded that the run went quiet: {why:?}"
+            );
+
+            kill_group(pgid);
+        }
+
+        /// Check 6. One card on the first stalled tick, and none on the second
+        /// — a sweep runs every tick, and a rail that gained a card a minute for
+        /// one wedged agent would be unreadable by lunchtime.
+        #[tokio::test]
+        async fn a_stall_raises_one_card_however_many_times_it_is_swept() {
+            let store = Arc::new(Store::in_memory().unwrap());
+            let pgid = a_living_group();
+            store.save_run(&stored("r1", "running", Some(pgid))).unwrap();
+            let conversation = conversation_for(&store, "r1");
+
+            let now = 10_000_000_000;
+            store
+                .watch_run(&Heartbeat::starting(
+                    "r1",
+                    Watching::Run,
+                    now - heartbeat::DEFAULT_STALL_MS - 1,
+                ))
+                .unwrap();
+
+            let ticker = ticker_over(&store);
+            let first = ticker.tick_heartbeats(now).await.unwrap();
+            let second = ticker.tick_heartbeats(now + 60_000).await.unwrap();
+
+            assert_eq!(first.marked, 1);
+            assert_eq!(second.marked, 0, "the second sweep marked it all over again");
+
+            let cards = store
+                .cards(&crate::cards::Query {
+                    conversation_id: Some(conversation),
+                    ..Default::default()
+                })
+                .unwrap();
+            assert_eq!(cards.len(), 1, "one stall, one card: {cards:?}");
+            assert!(!cards[0].blocking, "nothing is waiting on an answer to this");
+            assert!(
+                cards[0].title.contains("stuck"),
+                "the card must say what it is about: {}",
+                cards[0].title
+            );
+
+            kill_group(pgid);
+        }
+
+        /// Check 5, end to end. It went quiet and came back; that is not a
+        /// failure and it must stop looking like one.
+        #[tokio::test]
+        async fn a_marked_session_that_speaks_again_is_unmarked() {
+            let store = Arc::new(Store::in_memory().unwrap());
+            let pgid = a_living_group();
+            store.save_run(&stored("r1", "running", Some(pgid))).unwrap();
+            conversation_for(&store, "r1");
+
+            let now = 10_000_000_000;
+            store
+                .watch_run(&Heartbeat::starting(
+                    "r1",
+                    Watching::Run,
+                    now - heartbeat::DEFAULT_STALL_MS - 1,
+                ))
+                .unwrap();
+
+            let ticker = ticker_over(&store);
+            ticker.tick_heartbeats(now).await.unwrap();
+            assert!(store.heartbeat("r1").unwrap().unwrap().is_stalled());
+
+            store
+                .append_event(&crate::event::AgentEnvelope {
+                    agent_id: "r1".into(),
+                    at_ms: now,
+                    seq: 0,
+                    event: crate::event::AgentEvent::Message { text: "back".into() },
+                })
+                .unwrap();
+            let report = ticker.tick_heartbeats(now + 1_000).await.unwrap();
+
+            assert_eq!(report.beating, 1);
+            assert_eq!(
+                store.heartbeat("r1").unwrap().unwrap().stalled_since_ms,
+                None,
+                "the mark stayed on a run that is plainly working"
+            );
+            assert!(store.stalled_runs().unwrap().is_empty());
+
+            kill_group(pgid);
+        }
+
+        /// Check 4, end to end, and the regression guard on the split. A goal
+        /// iteration that wedges blocks its goal's loop for ever and nothing
+        /// else will ever notice, so it is still reaped.
+        #[tokio::test]
+        async fn a_stalled_goal_iteration_is_still_stopped_failed_and_unwatched() {
             let store = Arc::new(Store::in_memory().unwrap());
             let pgid = a_living_group();
             store.save_run(&stored("r1", "running", Some(pgid))).unwrap();
 
             let now = 10_000_000_000;
-            let hb = Heartbeat::starting("r1", Watching::Run, now - heartbeat::DEFAULT_STALL_MS - 1);
+            let hb = Heartbeat::starting(
+                "r1",
+                Watching::Goal("green-ci".into()),
+                now - heartbeat::DEFAULT_STALL_MS - 1,
+            );
             store.watch_run(&hb).unwrap();
 
             let report = ticker_over(&store).tick_heartbeats(now).await.unwrap();
 
             assert_eq!(report.checked, 1);
-            assert_eq!(report.stopped, 1, "a stalled run must actually be stopped");
+            assert_eq!(report.stopped, 1, "a stalled goal iteration must be stopped");
+            assert_eq!(report.marked, 0, "a goal is reaped, not marked");
             assert_eq!(report.retired, 1);
             assert_eq!(
                 store.run("r1").unwrap().unwrap().status,
                 "failed",
-                "a wedged run must stop claiming to be running"
+                "a wedged iteration must stop claiming to be running"
             );
             assert!(
                 store.heartbeat("r1").unwrap().is_none(),
