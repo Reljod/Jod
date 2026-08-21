@@ -257,6 +257,40 @@ Three notes on method, because each changed an outcome.
 
 ---
 
+## T6. The composer breaks words in half rather than wrapping at spaces
+Status: **open — deliberately not attempted** · Severity: low · Owner: —
+
+At any width, a prompt longer than one line splits mid-word:
+
+```
+› please refactor the authentication middleware so that it validates tokens before t
+  ouching the database
+```
+
+`wrap_composer` (`cli/src/tui/ui.rs`) counts columns and breaks at the field
+edge. Word wrapping means backing up to the last space before that edge, which
+is a dozen lines of change.
+
+**Left alone on purpose, and the reason is the point.** This is the same
+function as [T1](#t1-text-is-lost-when-a-double-width-character-sits-near-the-wrap-column)
+— the one place in this repo that has already lost characters at a wrap column,
+where the fix's own note records that a passing case differed from a failing one
+only by which character landed in the clipped column. The caret position is
+computed in the same pass and feeds the `@` picker's anchor, so a word-wrap
+change moves both. The payoff is that a sentence being typed looks tidier.
+
+That is a bad trade to make in passing. It is a fine trade to make deliberately,
+and whoever does has a good spec waiting: the property test
+`the_wrapped_rows_rejoin_to_what_was_typed_at_every_width` already asserts the
+rows rejoin to exactly what was typed, for ASCII, CJK and emoji at every width
+from 20 to 120. Keep the space at the end of the line it broke after, hard-break
+any token longer than the field, and that test stays honest.
+
+Check: the existing property test, plus one asserting no row ends mid-token when
+a space was available.
+
+---
+
 ## T5. A session with no Jod tools looks exactly like one that has them
 Status: **open — a feature, not a fix** · Severity: medium · Owner: —
 
