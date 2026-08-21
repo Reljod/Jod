@@ -5734,11 +5734,17 @@ fn draw_transcript(f: &mut Frame, app: &App, area: Rect) -> usize {
 
     // Naming what is on screen matters once several agents exist: a transcript
     // that could belong to any of them is a transcript you cannot trust.
+    // The run being watched names the transcript; failing that, the
+    // conversation the composer is bound to does. A manager is entered and then
+    // has no run of its own until it is given one, so the run-based name left
+    // it titled plainly `jod` — the one screen where knowing which project you
+    // are typing into matters most.
     let watching = app
         .watching
         .as_deref()
         .and_then(|id| app.agents.iter().find(|a| a.id == id))
         .map(|a| format!(" jod · {} ", a.name))
+        .or_else(|| app.where_you_are().map(|where_| format!(" jod · {where_} ")))
         .unwrap_or_else(|| " jod ".to_string());
     let title = if app.following() {
         watching
@@ -6137,13 +6143,23 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
     }
     // The box stays live while an agent works — a prompt typed now is queued,
     // not refused — so it keeps its colour and says what will happen instead.
+    // Where this line is going, on the box it is typed into. Only for main and
+    // for a manager: an ordinary session is already named by the transcript
+    // above it, while those two look identical from the chair and differ in
+    // what typing does — main routes across every project, a manager acts
+    // inside exactly one. What is queued or in flight wins the title when there
+    // is something to say about it, because that is the newer fact.
+    let bound = app
+        .where_you_are()
+        .map(|where_| format!(" you → {where_} "))
+        .unwrap_or_else(|| " you ".to_string());
     let title = match (app.busy, app.queued.len()) {
         (_, n) if n > 0 => format!(" you · {n} queued "),
         (true, _) => format!(
             " you · sends after this turn{} ",
             app.elapsed().map(|t| format!(" ({t})")).unwrap_or_default()
         ),
-        _ => " you ".to_string(),
+        _ => bound,
     };
     let block = Block::default()
         .borders(Borders::ALL)

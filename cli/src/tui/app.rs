@@ -3229,6 +3229,52 @@ impl App {
             .iter()
             .any(|n| n.id == NodeId::manager(conversation_id))
     }
+
+    /// Which conversation the composer is about to send to, in words.
+    ///
+    /// Every one of these looks the same from the chair. The banner, the
+    /// composer's prompt and the status bar are identical in the main chat and
+    /// in any manager, and the transcript is titled after the *run* being
+    /// watched — so a manager, which is entered and then sits there with no run
+    /// of its own, was titled plainly `jod`. Walk away, come back, and there is
+    /// nothing on screen that says whether the next thing typed routes across
+    /// every project or lands in one of them.
+    ///
+    /// That is worth a word in the title because the mistake it prevents is
+    /// silent: an instruction meant for main, typed into beta's manager, is not
+    /// refused — it is carried out, in beta.
+    ///
+    /// `None` when the answer would be noise: no conversation bound yet, or an
+    /// ordinary session, which the run's own name already covers.
+    pub fn where_you_are(&self) -> Option<String> {
+        let conversation = self.conversation.as_deref()?;
+        if self
+            .forest
+            .iter()
+            .any(|n| n.id == NodeId::main(conversation))
+        {
+            return Some("main".to_string());
+        }
+        if !self.is_manager_conversation(conversation) {
+            return None;
+        }
+        // Named after its project rather than "manager", because "manager" is
+        // the answer to a question nobody asked — there is one per project and
+        // which project is the whole point.
+        let project = self
+            .projects
+            .iter()
+            .find(|p| p.manager_conversation_id.as_deref() == Some(conversation))
+            .map(|p| p.name.clone());
+        Some(match project {
+            Some(name) => format!("{name} · manager"),
+            // The forest says it is a manager and the catalog does not say
+            // whose. Saying "a manager" is still worth more than saying
+            // nothing, because the thing being prevented is thinking you are
+            // in main.
+            None => "a project manager".to_string(),
+        })
+    }
 }
 
 #[cfg(test)]
@@ -3287,6 +3333,72 @@ mod tests {
             expanded: false,
             has_children: false,
         }
+    }
+
+    // ---- which conversation the composer is pointed at ----
+
+    /// Main and a manager are the same picture, and typing does different
+    /// things in them. An instruction meant for main, typed into beta's
+    /// manager, is not refused — it is carried out, in beta — so the screen has
+    /// to say which one is under the cursor before the Enter, not after.
+    #[test]
+    fn the_screen_says_whether_you_are_in_main_or_in_a_managers_chat() {
+        use jod_core::projects::{Project, State};
+
+        let main_node = |conversation: &str| Node {
+            id: NodeId::main(conversation),
+            parent: None,
+            kind: NodeKind::Main,
+            depth: 0,
+            label: "jod".into(),
+            summary: String::new(),
+            running: false,
+            status: None,
+            stalled_for_ms: None,
+            cards: 0,
+            blocked: 0,
+            colour: String::new(),
+            branch: None,
+            worktree: None,
+            expanded: true,
+            has_children: false,
+        };
+
+        let mut a = app();
+        a.forest = vec![main_node("c-main"), manager_node("c-alpha")];
+        a.projects = vec![Project {
+            id: "p-alpha".into(),
+            name: "alpha".into(),
+            path: "/tmp/alpha".into(),
+            remote: None,
+            aliases: Vec::new(),
+            state: State::Active,
+            colour: String::new(),
+            notes: String::new(),
+            created_at_ms: 0,
+            last_touched_ms: 0,
+            manager_conversation_id: Some("c-alpha".into()),
+        }];
+
+        a.conversation = Some("c-main".into());
+        assert_eq!(a.where_you_are().as_deref(), Some("main"));
+
+        a.conversation = Some("c-alpha".into());
+        assert_eq!(
+            a.where_you_are().as_deref(),
+            Some("alpha · manager"),
+            "named after its project, because which project is the whole point",
+        );
+
+        // An ordinary session says nothing: the run's own name already titles
+        // the transcript, and a second label would be noise.
+        a.conversation = Some("c-someone-else".into());
+        assert_eq!(a.where_you_are(), None);
+
+        // Nothing bound yet is not "main" — saying so would be a claim about
+        // where an Enter lands that nothing has decided.
+        a.conversation = None;
+        assert_eq!(a.where_you_are(), None);
     }
 
     // ---- notices raised off the chat screen ----
