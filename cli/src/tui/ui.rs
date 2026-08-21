@@ -46,15 +46,14 @@ const BAD: Color = Color::Red;
 const GOOD: Color = Color::Green;
 const WARN: Color = Color::Yellow;
 
-/// `NO_COLOR` is not optional: software that adds ANSI colour by default has to
-/// check for it. Read once rather than per span, because `draw()` may not do
-/// I/O.
+/// `NO_COLOR` is not optional for software that adds ANSI colour by default.
+/// Read once rather than per span, because `draw()` may not do I/O.
 static COLOURLESS: LazyLock<bool> =
     LazyLock::new(|| std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty()));
 
-/// A foreground colour, or nothing at all when the user asked for nothing at
-/// all. Every call site still has a glyph, so `NO_COLOR` loses decoration and
-/// never information.
+/// A foreground colour, or nothing when the user asked for nothing. Every call
+/// site still has a glyph, so `NO_COLOR` loses decoration and never
+/// information.
 fn fg(colour: Color) -> Style {
     if *COLOURLESS {
         Style::default()
@@ -69,9 +68,9 @@ fn bold(colour: Color) -> Style {
 
 /// The widest a chat column is allowed to get.
 ///
-/// Prose stops being readable past a hundred columns, and Jod is run full-
-/// screen on 200-column terminals. Tables are the opposite — a workspace wants
-/// every column it can get — so the cap is chat's alone.
+/// Prose stops being readable past a hundred columns and Jod is run full-screen
+/// on 200-column terminals. Tables want every column they can get, so the cap
+/// is chat's alone.
 const MEASURE: u16 = 96;
 
 /// The side gutter. One column reads as a rendering slip; two reads as a margin.
@@ -82,13 +81,12 @@ const GUTTER: u16 = 2;
 const PANEL: u16 = 34;
 const PANEL_BESIDE: u16 = 88;
 
-/// What one frame put where, for events that arrive as screen coordinates
-/// rather than keys.
+/// What one frame put where, for events that arrive as screen coordinates.
 ///
-/// A click carries a column and a row, so something has to say which card was
-/// under it: the frame that drew it, rather than a second copy of the layout
-/// arithmetic. The rail moves between a left column and a bottom panel with the
-/// terminal's width, and two places computing that is how they disagree.
+/// A click carries a column and a row, so the frame that drew a card says which
+/// one was under it. The rail moves between a left column and a bottom panel
+/// with the terminal's width, and two places computing that is how they
+/// disagree.
 #[derive(Debug, Clone, Default)]
 pub struct Painted {
     /// How many transcript lines one page holds.
@@ -100,7 +98,7 @@ pub struct Painted {
 #[derive(Debug, Clone, Default)]
 pub struct RailHits {
     /// The whole rail, so a wheel event can tell it from the chat beside it.
-    /// `None` when the rail is not on screen at all.
+    /// `None` when the rail is not on screen.
     pub area: Option<Rect>,
     /// One entry per collapsed card the stack drew.
     pub cards: Vec<CardHit>,
@@ -184,13 +182,12 @@ pub fn draw(f: &mut Frame, app: &App) -> Painted {
     // The two bars stay flush with the screen edge: they are chrome, and an
     // inset chrome row reads as content that has lost its border.
     let (body, side) = beside(app, pad(rows[0]));
-    // The rail comes off the left before the chat/workspace branch, because it
-    // is drawn beside both: a card can arrive while you are reading the fleet.
+    // Off the left before the chat/workspace branch, because it is drawn beside
+    // both: a card can arrive while you are reading the fleet.
     let (rail, body) = rail_beside(app, body);
 
-    // The completion popup is positioned against the input box, which is no
-    // longer at a fixed place — the splash moves it — so the rect travels back
-    // out rather than being recomputed from the layout.
+    // The completion popup is positioned against the input box, which the
+    // splash moves, so the rect travels back out rather than being recomputed.
     let mut input = Rect::new(0, 0, 0, 0);
     let height = if app.workspace == Workspace::Chat {
         let column = measure(body);
@@ -199,9 +196,9 @@ pub fn draw(f: &mut Frame, app: &App) -> Painted {
             input = box_;
             height
         } else {
-            // The mascot goes on before the conversation is laid out and takes
-            // its rows off the top — a band drawn over an already-measured
-            // viewport would hide the last lines of the conversation.
+            // Before the conversation is laid out, taking its rows off the top:
+            // a band drawn over an already-measured viewport would hide the
+            // last lines.
             let column = draw_header(f, app, column);
             let parts = Layout::default()
                 .direction(Direction::Vertical)
@@ -243,10 +240,8 @@ pub fn draw(f: &mut Frame, app: &App) -> Painted {
 
 // ---- layout ------------------------------------------------------------
 
-/// Insets an area by the gutter and one row at the top.
-///
-/// Skipped whole on a small terminal: at forty columns the margin costs more
-/// than the breathing room buys.
+/// Insets an area by the gutter and one row at the top. Skipped whole on a
+/// small terminal, where at forty columns the margin costs more than it buys.
 fn pad(area: Rect) -> Rect {
     if area.width < 40 || area.height < 6 {
         return area;
@@ -274,13 +269,12 @@ fn measure(area: Rect) -> Rect {
 /// The tallest the composer gets: rows of text, before its two borders.
 ///
 /// It grows instead of scrolling sideways, so the cap only stops a pasted essay
-/// from taking the whole screen. Six rows is around five hundred characters at
-/// the measure; past it the box scrolls a line at a time to keep the caret in
-/// view.
+/// from taking the whole screen. Past six rows the box scrolls a line at a time
+/// to keep the caret in view.
 const COMPOSER_ROWS: u16 = 6;
 
 /// The columns a composer `width` wide has left for text, once its borders and
-/// its caret have been paid for.
+/// caret have been paid for.
 fn composer_field(width: u16) -> usize {
     let inner = width.saturating_sub(2).max(1) as usize;
     let gutter = if inner >= CARET.chars().count() + 8 {
@@ -291,11 +285,10 @@ fn composer_field(width: u16) -> usize {
     inner.saturating_sub(gutter).max(1)
 }
 
-/// How the composer breaks what was typed into rows, and where the caret lands
-/// once it has.
+/// How the composer breaks what was typed into rows, and where the caret lands.
 struct Wrapped {
     /// The character index each row begins at. Never empty: there is always a
-    /// first row, even when nothing has been typed into it.
+    /// first row, even when nothing has been typed.
     starts: Vec<usize>,
     /// The row the caret sits on, and how many columns into that row it is.
     caret: (usize, usize),
@@ -366,10 +359,9 @@ fn composer(app: &App, column: Rect) -> u16 {
     (lines as u16 + 2).clamp(3, COMPOSER_ROWS + 2).min(room)
 }
 
-/// Splits the panel off the right of the body, or says it will not fit.
-///
-/// Below `PANEL_BESIDE` there is no honest side-by-side. The caller floats the
-/// panel over the body instead, so Shift-Tab always does something visible.
+/// Splits the panel off the right of the body, or says it will not fit. Below
+/// `PANEL_BESIDE` there is no honest side-by-side, so the caller floats the
+/// panel over the body and Shift-Tab always does something visible.
 fn beside(app: &App, area: Rect) -> (Rect, Option<Rect>) {
     if !app.panel || area.width < PANEL_BESIDE {
         return (area, None);
@@ -391,8 +383,7 @@ fn beside(app: &App, area: Rect) -> (Rect, Option<Rect>) {
 /// The rail's width while showing two-line cards.
 ///
 /// Thirty-four rather than thirty: at thirty, `answered, queued` truncated to
-/// `answered, queue…`, which is the one fact on the card the reader most needs
-/// whole.
+/// `answered, queue…`, the one fact the reader most needs whole.
 const RAIL: u16 = 34;
 
 /// ...and while one card is expanded. Wider because an expanded card carries a
@@ -400,9 +391,8 @@ const RAIL: u16 = 34;
 const RAIL_WIDE: u16 = 58;
 
 /// The narrowest body that can hold the rail *beside* the content. Below it,
-/// taking thirty columns off an eighty-column terminal leaves neither a
-/// readable rail nor a readable chat, so it lies along the bottom — see
-/// [`rail_below`].
+/// thirty columns off an eighty-column terminal leaves neither a readable rail
+/// nor a readable chat, so it lies along the bottom — see [`rail_below`].
 const RAIL_BESIDE: u16 = 84;
 
 /// How many rows the rail gets along the bottom.
@@ -420,7 +410,6 @@ const RAIL_BELOW_MIN: u16 = 6;
 const CARD_HEIGHT: u16 = 4;
 
 /// How many rows the bottom rail gets on a terminal too narrow for a column.
-///
 /// Tall enough to read, except where the summary would be the better answer:
 /// nothing raised, or a body so short that halving it leaves neither part
 /// legible.
@@ -428,9 +417,8 @@ fn rail_below(app: &App, area: Rect) -> u16 {
     if app.cards.is_empty() {
         return 1;
     }
-    // Never past half the body, for the same reason the column never passes
-    // half the width: a panel bigger than what it sits beside has stopped
-    // being a panel.
+    // Never past half the body: a panel bigger than what it sits beside has
+    // stopped being a panel.
     let room = area.height / 2;
     if room < RAIL_BELOW_MIN {
         return 1;
@@ -451,14 +439,14 @@ fn rail_beside(app: &App, area: Rect) -> (Option<Rect>, Rect) {
         return (None, area);
     }
     let want = if app.rail.expanded { RAIL_WIDE } else { RAIL };
-    // Never past half the body. A sidebar wider than what it sits beside has
-    // stopped being a sidebar, and the expanded card is the case that would do
-    // it — fifty-eight columns is most of a hundred-column terminal.
+    // Never past half the body, for the same reason. The expanded card is the
+    // case that would do it — fifty-eight columns is most of a hundred-column
+    // terminal.
     let width = want.min(area.width / 2);
     if area.width < RAIL_BESIDE || width < RAIL || area.height < 4 {
         // Below the chat rather than above it: it sits directly over the keybar
-        // that names the keys for answering, and the composer stays where the
-        // hands already are.
+        // that names the answering keys, and the composer stays where the hands
+        // already are.
         let rows = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Min(1), Constraint::Length(rail_below(app, area))])
@@ -469,8 +457,8 @@ fn rail_beside(app: &App, area: Rect) -> (Option<Rect>, Rect) {
         .direction(Direction::Horizontal)
         .constraints([Constraint::Length(width), Constraint::Min(20)])
         .split(area);
-    // One column of air between the rail and what it sits beside, so a card's
-    // border does not touch the chat's first character.
+    // One column of air, so a card's border does not touch the chat's first
+    // character.
     let body = Rect {
         x: halves[1].x + 1,
         width: halves[1].width.saturating_sub(1),
@@ -499,10 +487,10 @@ fn draw_rail(f: &mut Frame, app: &App, area: Rect) -> RailHits {
 
 /// The rail with a single row to say it in.
 ///
-/// What is left when even the bottom panel will not fit. It owes the reader two
-/// things — that something is blocked, and the key that opens the rail — and
-/// must not pretend to be the rail, hence a glyph and a sentence rather than a
-/// squeezed card.
+/// What is left when even the bottom panel will not fit. It owes the reader
+/// that something is blocked and the key that opens the rail, and must not
+/// pretend to be the rail — hence a glyph and a sentence rather than a squeezed
+/// card.
 fn draw_rail_summary(f: &mut Frame, app: &App, area: Rect) {
     let blocking = app.cards.iter().any(|c| c.blocking && c.is_open());
     let text = rail::summary(&app.cards);
@@ -525,22 +513,22 @@ fn draw_rail_stack(f: &mut Frame, app: &App, area: Rect, hits: &mut RailHits) {
     let ids = app.card_ids();
     let selected = app.rail.index(&ids);
 
-    // The sort and the two filters are printed whenever they are in force, and
-    // whenever the rail has the keyboard. A stack silently showing a subset is
-    // a stack whose missing card reads as a card that was never raised.
+    // The sort and the two filters are printed whenever they are in force. A
+    // stack silently showing a subset is a stack whose missing card reads as
+    // one that was never raised.
     let filter = rail_filter_line(app);
     let settled = rail_settings(app).is_some();
     // How many cards fit under a header of a given height. Five at most,
-    // however tall the terminal is — see [`rail::VISIBLE`].
+    // however tall the terminal — see [`rail::VISIBLE`].
     let fits = |head: u16| {
         let room = area.height.saturating_sub(head.min(area.height));
         (room / CARD_HEIGHT).max(1).min(rail::VISIBLE as u16) as usize
     };
     let plain = 1 + settled as u16 + filter.iter().count() as u16;
     // Measured twice, because the line saying which cards are on screen is
-    // drawn only when some are not — and drawing it takes a row off the stack,
-    // which decides whether some are not. It cannot oscillate: a stack that
-    // overflows the shorter list overflows the taller one too.
+    // drawn only when some are not, and drawing it takes a row off the stack.
+    // It cannot oscillate: a stack that overflows the shorter list overflows
+    // the taller one too.
     let crowded = app.cards.len() > fits(plain + !settled as u16);
     let used = (plain + (crowded && !settled) as u16).min(area.height);
 
@@ -602,7 +590,7 @@ fn draw_rail_stack(f: &mut Frame, app: &App, area: Rect, hits: &mut RailHits) {
             .border_style(card_border(card))
             // The cursor rides the top border rather than a column of its own:
             // thirty-two columns has none to spare, and a marker inside the box
-            // would cost every card two cells of title to mark one card.
+            // would cost every card two cells of title to mark one.
             .title(if here { " ▸ " } else { "" });
         f.render_widget(
             Paragraph::new(card_lines(
@@ -621,7 +609,7 @@ fn draw_rail_stack(f: &mut Frame, app: &App, area: Rect, hits: &mut RailHits) {
 ///
 /// `cascading` decides whether the second line names the session. With the
 /// subtree scope on, the rail holds cards from all over the fleet and
-/// provenance is what stops "answer the top one" being a coin flip. Narrowed to
+/// provenance is what stops "answer the top one" being a coin flip; narrowed to
 /// one conversation it would spend a third of the line saying what every card
 /// shares.
 fn card_lines(card: &Card, width: usize, here: bool, cascading: bool) -> Vec<Line<'static>> {
@@ -636,8 +624,8 @@ fn card_lines(card: &Card, width: usize, here: bool, cascading: bool) -> Vec<Lin
         ),
     ]);
 
-    // The session leads the line when cascading, ahead of the id: which agent
-    // is asking outranks which card number it is.
+    // The session leads the line when cascading: which agent is asking outranks
+    // which card number it is.
     let stamp = if cascading {
         match rail::work_tag(card) {
             Some(work) => format!("{work}/{} ", rail::raised_by(card)),
@@ -649,16 +637,15 @@ fn card_lines(card: &Card, width: usize, here: bool, cascading: bool) -> Vec<Lin
     let mut spans = vec![Span::styled(stamp.clone(), fg(MUTED))];
     let mut used = stamp.chars().count();
     // The literal word, beside the coloured border. Colour is never the only
-    // channel in this program, and on the one card that stopped a run that
-    // rule is not a nicety.
+    // channel in this program, and on the one card that stopped a run that is
+    // not a nicety.
     if card.blocking {
         spans.push(Span::styled(format!("{} ", rail::BLOCKED), bold(BAD)));
         used += rail::BLOCKED.chars().count() + 1;
     }
     let mut tail: Vec<String> = Vec::new();
     // First, ahead of the kind, because it is the fact a reader of an answered
-    // card needs: `status` is what the human did, `delivery` is whether the
-    // agent has heard. Last in the line is where a narrow rail truncates.
+    // card needs. Last in the line is where a narrow rail truncates.
     if let Some(note) = rail::delivery_note(card) {
         tail.push(note.to_string());
     }
@@ -696,7 +683,7 @@ fn rail_header(app: &App) -> Line<'static> {
         fg(MUTED),
     ));
     // The scope rides the always-drawn header rather than the settings line,
-    // which appears only when something is non-default. A rail narrowed to one
+    // which appears only when something is non-default: a rail narrowed to one
     // conversation and a fleet that has gone quiet look identical.
     spans.push(Span::styled(
         if app.rail.cascade {
@@ -718,9 +705,9 @@ fn rail_header(app: &App) -> Line<'static> {
 /// Which slice of the stack is on screen, when it is not all of it.
 ///
 /// Not decoration: five cards drawn out of twelve with nothing saying so is
-/// seven cards that read as never having been raised. It shares the settings
-/// line when that is already drawn, and takes one of its own otherwise, because
-/// the cap is one the reader never chose.
+/// seven that read as never having been raised. It shares the settings line
+/// when that is already drawn and takes one of its own otherwise, because the
+/// cap is one the reader never chose.
 fn rail_window(app: &App, first: usize, shown: usize) -> Option<Line<'static>> {
     let settings = rail_settings(app);
     if shown == 0 || shown >= app.cards.len() {
@@ -825,8 +812,8 @@ fn draw_card(f: &mut Frame, app: &App, card: &Card, area: Rect, hits: &mut RailH
         for said in secret::destination(name, scope) {
             lines.push(Line::from(Span::styled(format!("   {said}"), fg(MUTED))));
         }
-        // Once it is stored the card carries a name and a scope and nothing
-        // else — `card.answer` holds `secret::stored_summary`, never a value.
+        // Once stored the card carries a name and a scope and nothing else —
+        // `card.answer` holds `secret::stored_summary`, never a value.
         if card.status == Status::Open {
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
@@ -846,10 +833,10 @@ fn draw_card(f: &mut Frame, app: &App, card: &Card, area: Rect, hits: &mut RailH
         )));
         for (at, option) in card.options.iter().take(9).enumerate() {
             let picked = card.chosen.as_deref() == Some(option.as_str());
-            // Which line of the card this option went on. Turned into a screen
-            // row once every line's wrapped height is known — a long body
-            // pushes the options down by more rows than it has lines, so a
-            // pointer trusting the line number would answer the wrong option.
+            // Which line of the card this option went on, turned into a screen
+            // row once every line's wrapped height is known: a long body pushes
+            // the options down by more rows than it has lines, so a pointer
+            // trusting the line number would answer the wrong option.
             chosen_rows.push((lines.len(), at));
             lines.push(Line::from(vec![
                 Span::styled(format!("   {} ", at + 1), bold(USER)),
@@ -876,8 +863,8 @@ fn draw_card(f: &mut Frame, app: &App, card: &Card, area: Rect, hits: &mut RailH
     lines.push(Line::from(""));
     lines.push(rule(area.width as usize));
     // Provenance. "Which agent asked me this" is the first thing a blocking
-    // card provokes somebody to ask, and an answer landing on the wrong session
-    // is the failure it prevents.
+    // card provokes, and an answer landing on the wrong session is the failure
+    // it prevents.
     lines.push(detail(
         "raised by",
         &card
@@ -902,22 +889,22 @@ fn draw_card(f: &mut Frame, app: &App, card: &Card, area: Rect, hits: &mut RailH
         deep += rows_for(line, inner);
     }
     let pane = area.height.saturating_sub(2) as usize;
-    // How much of the card is below the pane, which is what stops the wheel at
-    // the last line rather than at a screenful of nothing.
+    // How much of the card is below the pane, which stops the wheel at the last
+    // line rather than at a screenful of nothing.
     let past = deep.saturating_sub(pane);
     let scroll = (app.rail.scroll as usize).min(past);
 
     hits.expanded = Some(card.id);
-    // The title row, which is the top border. Clicking it puts the card back in
-    // the stack — the only way out of an expanded card that does not need a
-    // keyboard, which is the whole point on a phone.
+    // The title row is the top border. Clicking it puts the card back in the
+    // stack — the only way out of an expanded card that does not need a
+    // keyboard.
     hits.back = Some(area.y);
     hits.past = past as u16;
     for (line, at) in chosen_rows {
         let Some(top) = tops.get(line) else { continue };
-        // Off the top or off the bottom because of the scroll: not on screen,
-        // so not clickable. A hit recorded for a row the reader cannot see
-        // would answer the card from a click meant for whatever is there now.
+        // Off the top or bottom because of the scroll, so not clickable. A hit
+        // recorded for a row the reader cannot see would answer the card from a
+        // click meant for whatever is there now.
         let Some(offset) = top.checked_sub(scroll) else {
             continue;
         };
@@ -938,10 +925,9 @@ fn draw_card(f: &mut Frame, app: &App, card: &Card, area: Rect, hits: &mut RailH
         .border_style(card_border(card))
         .title(format!(" ◂ card #{} ", card.id))
         .title_bottom(fit_verbs(&keys::rail_footer(), area.width));
-    // Wrapped, because the state sentence is the longest line and the one that
-    // must not be clipped: cut at fifty columns, "answered, queued — the agent
-    // is told at the" reads as a promise about now. `trim: false` keeps the
-    // indentation.
+    // Wrapped, because the state sentence is the longest line and must not be
+    // clipped: cut at fifty columns, "answered, queued — the agent is told at
+    // the" reads as a promise about now.
     f.render_widget(
         Paragraph::new(lines)
             .block(block)
@@ -953,7 +939,7 @@ fn draw_card(f: &mut Frame, app: &App, card: &Card, area: Rect, hits: &mut RailH
 
 /// How many rows one built line takes once the pane wraps it to `width`. The
 /// same greedy break the pane does, so the answer is the row the pointer is
-/// actually over. An empty line still costs a row.
+/// actually over.
 fn rows_for(line: &Line, width: usize) -> usize {
     let text: String = line.spans.iter().map(|span| span.content.as_ref()).collect();
     if text.trim().is_empty() {
@@ -1010,8 +996,8 @@ fn card_border(card: &Card) -> Style {
         Importance::High => bold(card_colour(card)),
         Importance::Normal => fg(card_colour(card)),
         // Dimmed rather than tinted. The glyph still says which kind it is, and
-        // a low-importance card's whole job is to be there without competing
-        // with the one above it.
+        // a low-importance card's job is to be there without competing with the
+        // one above.
         Importance::Low => fg(MUTED),
     }
 }
@@ -1021,9 +1007,9 @@ fn card_border(card: &Card) -> Style {
 /// The mention popup, drawn under the `@` that opened it.
 ///
 /// Under the cursor rather than in a corner, because the point of an inline
-/// picker is never leaving the sentence — which is also why Jod ranks in-
-/// process rather than shelling out to `fzf`, which owns a whole terminal. See
-/// decision D1.
+/// picker is never leaving the sentence — which is also why Jod ranks
+/// in-process rather than shelling out to `fzf`, which owns a whole terminal.
+/// See decision D1.
 fn draw_mention(f: &mut Frame, app: &App, input: Rect) {
     let Some(popup) = &app.mention else {
         return;
@@ -1033,9 +1019,9 @@ fn draw_mention(f: &mut Frame, app: &App, input: Rect) {
     }
 
     let w = 56u16.min(input.width);
-    // The borders eat a column either side, and what is left is what a row has
-    // to fit into. Known before the rows are built, because each row is fitted
-    // to it rather than clipped by the widget afterwards.
+    // The borders eat a column either side. Known before the rows are built,
+    // because each row is fitted to it rather than clipped by the widget
+    // afterwards.
     let inner = w.saturating_sub(2) as usize;
 
     // Zero roots is a message, not an empty list: an empty list reads as "no
@@ -1063,11 +1049,10 @@ fn draw_mention(f: &mut Frame, app: &App, input: Rect) {
     let h = ((rows.len() + 2) as u16)
         .min(input.y.saturating_sub(1))
         .max(3);
-    // Anchored on the `@` and pulled back inside the box: a popup hanging off
-    // the right edge is drawn over nothing. The column is the one the `@` is
-    // drawn in, not how far into the prompt it is — those part company once the
-    // line wraps. It comes off the same wrapper the box uses, so the two cannot
-    // disagree.
+    // Anchored on the `@` and pulled back inside the box, since a popup hanging
+    // off the right edge is drawn over nothing. The column is the one the `@`
+    // is drawn in, not how far into the prompt it is — those part company once
+    // the line wraps — and it comes off the same wrapper the box uses.
     let typed: Vec<char> = app.input.chars().collect();
     let at = app.input[..popup.at.min(app.input.len())].chars().count();
     let col = wrap_composer(&typed, composer_field(input.width), at).caret.1 as u16;
@@ -1122,8 +1107,7 @@ fn mention_line(row: &mention::Row, here: bool, width: usize) -> Line<'static> {
         spans.push(Span::styled(qualified, fg(MUTED)));
     }
     // The label is not elided: it says which repository the row came from, and
-    // a row that cannot say that is worse than a short one. It is short by
-    // construction anyway — a root's own name.
+    // a row that cannot say that is worse than a short one.
     let fitted = text::elide_left(&row.path, width.saturating_sub(spent));
     if fitted.is_elided() {
         spans.push(Span::styled(text::ELLIPSIS.to_string(), fg(MUTED)));
@@ -1160,10 +1144,9 @@ fn mention_line(row: &mention::Row, here: bool, width: usize) -> Line<'static> {
 
 // ---- the splash --------------------------------------------------------
 
-/// One letter of the wordmark, six columns wide and five rows tall.
-///
-/// Assembled from per-letter blocks rather than five 37-column literals, so a
-/// glyph can be fixed without recounting the spaces either side of it.
+/// One letter of the wordmark, six columns wide and five rows tall. Assembled
+/// from per-letter blocks rather than five 37-column literals, so a glyph can
+/// be fixed without recounting the spaces either side of it.
 type Glyph = [&'static str; 5];
 
 const BIG_J: Glyph = ["    ██", "    ██", "    ██", "██  ██", " ████ "];
@@ -1218,7 +1201,7 @@ struct Pose {
 
 impl Pose {
     /// Every row is this wide — a test holds it — so row zero can answer for
-    /// all of them.
+    /// all.
     fn width(&self) -> u16 {
         self.art[0].chars().count() as u16
     }
@@ -1263,10 +1246,8 @@ const SITTING: Pose = Pose {
 };
 
 /// Eyes shut. At this size a closed eye has nowhere to put a lid, so the whites
-/// and the pupils simply go and the face closes over them — which is what a
-/// blink looks like once a head is four rows tall. Two ticks out of forty-eight
-/// is half a second: long enough to see, short enough not to look like the
-/// mascot has fallen asleep.
+/// and pupils simply go. Two ticks out of forty-eight is half a second: long
+/// enough to see, short enough not to look asleep.
 const BLINKING: Pose = Pose {
     art: &[
         "█▄█▄█▄█▄█▄█ ",
@@ -1282,9 +1263,8 @@ const BLINKING: Pose = Pose {
     ],
 };
 
-/// Mid-roar: the mane puffs — every notch in the crown fills in, so the head
-/// gains half a row of height without gaining a row of grid — the eyes screw
-/// shut, and the muzzle opens onto a dark throat with a fang at each side.
+/// Mid-roar: every notch in the crown fills in, so the head gains half a row of
+/// height without gaining a row of grid.
 const ROARING: Pose = Pose {
     art: &[
         "███████████ ",
@@ -1300,9 +1280,8 @@ const ROARING: Pose = Pose {
     ],
 };
 
-/// Scratching an itch, paw down at the jaw, with the eye on that side screwed
-/// shut — the squint is what says the paw belongs to this lion rather than
-/// being a shape parked next to it.
+/// Scratching an itch, paw down at the jaw. The squint is what says the paw
+/// belongs to this lion rather than being a shape parked next to it.
 const SCRATCH_LOW: Pose = Pose {
     art: &[
         "█▄█▄█▄█▄█▄█ ",
@@ -1319,7 +1298,7 @@ const SCRATCH_LOW: Pose = Pose {
 };
 
 /// The same scratch, paw up at the cheek. Alternating the two is the whole
-/// animation: one row of travel is all a scratch needs to read as motion.
+/// animation.
 const SCRATCH_HIGH: Pose = Pose {
     art: &[
         "█▄█▄█▄█▄█▄█ ",
@@ -1341,8 +1320,8 @@ fn ink(key: char) -> Style {
         'f' => bold(MANE),
         'r' => bold(SPIKE),
         'c' => bold(FACE),
-        // The nose is the mane's orange against the face's lighter one, which is
-        // the only pair here that has to hold at one cell of separation.
+        // The nose is the mane's orange against the face's lighter one, the
+        // only pair here that has to hold at one cell of separation.
         'n' => bold(MANE),
         'w' => bold(EYE),
         'y' => fg(PUPIL),
@@ -1354,10 +1333,9 @@ fn ink(key: char) -> Style {
 
 /// Colour one row of art through its stencil, one span per run of a colour.
 ///
-/// Spans borrow out of the `'static` art rather than building strings. Runs
-/// rather than a span per cell because a span costs a style write, and thirteen
-/// per row times twelve rows times four frames a second is a lot of escape
-/// sequences.
+/// Spans borrow out of the `'static` art rather than building strings, and runs
+/// rather than a span per cell because a span costs a style write — thirteen
+/// per row times twelve rows times four frames a second.
 fn mascot_spans(art: &'static str, stencil: &str, into: &mut Vec<Span<'static>>) {
     // The ink key this run is drawn in, and the byte it started at.
     let mut run: Option<(char, usize)> = None;
@@ -1429,7 +1407,7 @@ fn lockup(pose: &'static Pose, letters: &[String], width: u16) -> Option<Vec<Lin
                 }
                 spans.push(Span::raw(" ".repeat(LOCKUP_GAP as usize)));
                 // Padded to full width even where there is no letter, because
-                // the caller centres one line at a time — rows of different
+                // the caller centres one line at a time and rows of different
                 // lengths would leave the crown offset from the chin.
                 let text = row
                     .checked_sub(letters_top)
@@ -1460,9 +1438,9 @@ fn banner() -> Vec<String> {
 
 /// The line under the wordmark, in the longest form that fits.
 ///
-/// It always contains the program's name, because on a fresh session the title
-/// bar is not on screen and a full-screen program that never says what it is is
-/// one you have to remember launching.
+/// It always contains the program's name: on a fresh session the title bar is
+/// not on screen, and a full-screen program that never says what it is is one
+/// you have to remember launching.
 fn caption(width: usize) -> &'static str {
     const LINES: [&str; 3] = [
         "jod · an orchestrator, not a chat window · Ctrl-G opens every screen",
@@ -1476,10 +1454,8 @@ fn caption(width: usize) -> &'static str {
 }
 
 /// The launch directory as the splash prints it, or `None` when there is none
-/// or no room.
-///
-/// Shares [`under_home`] and [`fit_path`] with the header band, so the two
-/// cannot disagree about how a path is written.
+/// or no room. Shares [`under_home`] and [`fit_path`] with the header band, so
+/// the two cannot disagree about how a path is written.
 fn splash_where(app: &App, width: usize) -> Option<String> {
     if app.cwd.as_os_str().is_empty() {
         return None;
@@ -1488,8 +1464,8 @@ fn splash_where(app: &App, width: usize) -> Option<String> {
         &app.cwd,
         std::env::var_os("HOME").map(PathBuf::from).as_deref(),
     );
-    // Nothing worth centring under a wordmark. The caption above it makes the
-    // same call by having a shortest form and then giving up.
+    // Nothing worth centring under a wordmark. The caption above makes the same
+    // call by having a shortest form and then giving up.
     (width >= 12).then(|| format!("▪ {}", fit_path(&shown, width.saturating_sub(2))))
 }
 
@@ -1512,8 +1488,8 @@ fn fresh(app: &App) -> bool {
 /// The new-session screen: the wordmark, large and centred, with the input box
 /// under it. Returns the viewport height and where the input box ended up.
 fn draw_splash(f: &mut Frame, app: &App, area: Rect) -> (usize, Rect) {
-    // Too short for a wordmark and a box both: the input wins, because a screen
-    // with no way to type into it is not a screen.
+    // Too short for both: the input wins, because a screen with no way to type
+    // into it is not a screen.
     if area.height < 6 {
         draw_input(f, app, area);
         return (1, area);
@@ -1532,10 +1508,9 @@ fn draw_splash(f: &mut Frame, app: &App, area: Rect) -> (usize, Rect) {
     // The mark, in the largest form the screen can seat: lion beside block
     // lettering, then lettering alone, then lion beside a plain "Jod AI", then
     // that name by itself. The mascot goes before the lettering at every rung,
-    // because the lettering says which program you launched.
-    //
-    // The six rows a lockup must leave are the caption, a row of air and the
-    // three-row input box.
+    // because the lettering says which program you launched. The six rows a
+    // lockup must leave are the caption, a row of air and the three-row input
+    // box.
     let pose = mascot_pose(app);
     let seats = |rows: &Vec<Line>| area.height >= rows.len() as u16 + 6;
     let lettering = || -> Vec<Line<'static>> {
@@ -1563,7 +1538,7 @@ fn draw_splash(f: &mut Frame, app: &App, area: Rect) -> (usize, Rect) {
     // The header band says the same and is not on screen yet: the splash is by
     // definition the state where nothing has been said, which is exactly when
     // "which repository is this pointed at" is worth knowing. Dropped first on
-    // a short terminal, because the wordmark says which program you launched.
+    // a short terminal.
     if area.height >= head.len() as u16 + 5 {
         if let Some(here) = splash_where(app, area.width as usize) {
             head.push(Line::from(Span::styled(here, fg(MUTED))));
@@ -1572,8 +1547,8 @@ fn draw_splash(f: &mut Frame, app: &App, area: Rect) -> (usize, Rect) {
 
     let head_height = head.len() as u16;
 
-    // The box is the same shape here as it is under a conversation: the column's
-    // width, and as many rows as what has been typed needs.
+    // The same shape here as under a conversation: the column's width, and as
+    // many rows as what has been typed needs.
     let tall = composer(app, area);
     let (top, box_) = if anchored {
         let parts = Layout::default()
@@ -1613,14 +1588,13 @@ fn draw_splash(f: &mut Frame, app: &App, area: Rect) -> (usize, Rect) {
 
 // ---- the chat header ----------------------------------------------------
 
-/// Rows the header band costs: the mascot's four, and one of air under it so
-/// the transcript's top border does not land on the lion's paws.
+/// Rows the header band costs: the mascot's four, and one of air so the
+/// transcript's top border does not land on the lion's paws.
 const HEADER: u16 = 5;
 
 /// The shortest chat column that seats the band and still leaves a conversation
 /// worth reading: the band, the three-row input box, and eight rows of
-/// transcript. Under that the lion goes — the same order of sacrifice the
-/// splash makes.
+/// transcript. Under that the lion goes.
 const HEADER_SEATS: u16 = HEADER + 3 + 8;
 
 /// ...and the narrowest. Fourteen of those columns are the lion and its gap,
@@ -1656,8 +1630,7 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) -> Rect {
 /// Four rows of drawing, up to four of text. A session that knows where it is
 /// standing fills the last with the directory; one that does not leaves it
 /// blank — the spare row *under* the last line rather than above the first,
-/// because here the lion stands on the transcript's border, which is this
-/// block's ground line.
+/// because the lion stands on the transcript's border.
 fn header_lines(app: &App, width: u16) -> Vec<Line<'static>> {
     let pose = mascot_pose(app);
     let room = width.saturating_sub(pose.width() + LOCKUP_GAP) as usize;
@@ -1666,10 +1639,9 @@ fn header_lines(app: &App, width: u16) -> Vec<Line<'static>> {
         header_who(app, room),
         header_doing(app, room),
     ];
-    // The fourth row is the lion's body, and nothing was written beside it. The
-    // directory goes there because it is the one fact on this band a person
-    // cannot work out from the conversation: which repository the next turn
-    // runs in.
+    // The fourth row is the lion's body. The directory goes there because it is
+    // the one fact on this band a person cannot work out from the conversation:
+    // which repository the next turn runs in.
     if let Some(where_) = header_where(app, room) {
         text.push(where_);
     }
@@ -1691,7 +1663,7 @@ fn header_lines(app: &App, width: u16) -> Vec<Line<'static>> {
 /// The version is here because this is the only line that survives a thousand
 /// rows of scrollback, and "which build am I looking at" is the first question
 /// asked of a program that just did something surprising. Dropped whole rather
-/// than elided — half a version number is worse than none.
+/// than elided.
 fn header_name(room: usize) -> Vec<Span<'static>> {
     const NAME: &str = "Jod AI";
     let version = concat!(" v", env!("CARGO_PKG_VERSION"));
@@ -1708,16 +1680,15 @@ fn header_who(app: &App, room: usize) -> Vec<Span<'static>> {
 }
 
 /// Line three: what he is doing about it, in the colour the status bar gives
-/// the same fact — amber while a turn is running, quiet once it is not.
+/// the same fact.
 fn header_doing(app: &App, room: usize) -> Vec<Span<'static>> {
     let colour = if app.busy { WARN } else { MUTED };
     vec![Span::styled(cut(&app.activity(), room), fg(colour))]
 }
 
 /// Line four: where he is working — the launch directory, which is also the
-/// root `@` searches and where every turn's harness starts. `None` in a fixture
-/// that was never given one, so the band stays three lines rather than printing
-/// a blank row beside the lion.
+/// root `@` searches. `None` in a fixture that was never given one, so the band
+/// stays three lines rather than printing a blank row beside the lion.
 ///
 /// The glyph rather than a word: `in ~/Developer/Jod` spends three scarce
 /// columns saying what a folder mark says for one.
@@ -1735,10 +1706,8 @@ fn header_where(app: &App, room: usize) -> Option<Vec<Span<'static>>> {
     )])
 }
 
-/// A path under the home directory, written with a `~`.
-///
-/// `home` is passed in so the rule can be tested without the suite depending on
-/// whose machine it runs on. `None` means there is no home to be under.
+/// A path under the home directory, written with a `~`. `home` is passed in so
+/// the rule can be tested without depending on whose machine it runs on.
 fn under_home(path: &Path, home: Option<&Path>) -> String {
     match home.and_then(|home| path.strip_prefix(home).ok()) {
         // The home directory itself, rather than `~/`.
@@ -1752,8 +1721,7 @@ fn under_home(path: &Path, home: Option<&Path>) -> String {
 ///
 /// The opposite end from [`cut`], and that is the point: what identifies a
 /// directory is its last two components, so truncating the ordinary way turns
-/// `~/Developer/Repositories/Projects/Jod` into `~/Developer/Repositor…` —
-/// every column spent on the part every repository shares.
+/// `~/Developer/Repositories/Projects/Jod` into `~/Developer/Repositor…`.
 fn fit_path(path: &str, room: usize) -> String {
     let len = path.chars().count();
     if len <= room {
@@ -1773,9 +1741,9 @@ fn fit_path(path: &str, room: usize) -> String {
 /// for the recommendation.
 const CONTEXT_HEIGHT: u16 = 7;
 
-/// Sessions above, context below — the two questions a panel that costs a
-/// third of the screen has to be worth answering: what else is running, and how
-/// much of the window this conversation has eaten.
+/// Sessions above, context below — the two questions a panel costing a third of
+/// the screen has to be worth answering: what else is running, and how much of
+/// the window this conversation has eaten.
 fn draw_panel(f: &mut Frame, app: &App, area: Rect) {
     let parts = Layout::default()
         .direction(Direction::Vertical)
@@ -1794,8 +1762,7 @@ fn draw_panel(f: &mut Frame, app: &App, area: Rect) {
 ///
 /// Collapsed it is one line plus its border, which still answers *which project
 /// am I in*. Expanded it grows with the catalog but never past a third of the
-/// panel: the sessions below are how a running fleet is watched, and a twenty-
-/// project catalog must not push them off.
+/// panel: the sessions below are how a running fleet is watched.
 fn projects_height(app: &App, available: u16) -> u16 {
     if available < 12 {
         // No honest room for a third box. The current project still reaches the
@@ -1820,8 +1787,9 @@ pub(super) const CATALOG_REMEDY: &str = "/project add";
 /// The catalog, with the project this conversation is about marked.
 ///
 /// The mark is the point of the box. Everything else is a list of directories;
-/// *which one a dictated sentence lands in* is worth a permanent corner, because
-/// the alternative is finding out when an agent edits the wrong repository.
+/// *which one a dictated sentence lands in* is worth a permanent corner,
+/// because the alternative is finding out when an agent edits the wrong
+/// repository.
 fn draw_projects(f: &mut Frame, app: &App, area: Rect) {
     if area.height == 0 {
         return;
@@ -1870,8 +1838,7 @@ fn draw_projects(f: &mut Frame, app: &App, area: Rect) {
     }
 
     // The current project first regardless of recency, because the one fact
-    // this box exists to show must not be scrolled out of it by a catalog
-    // longer than the box is tall.
+    // this box exists to show must not be scrolled out of it.
     let mut rows: Vec<&jod_core::projects::Project> = app.projects.iter().collect();
     rows.sort_by_key(|p| current.map(|(name, _)| &p.name != name).unwrap_or(true));
 
@@ -2032,8 +1999,8 @@ fn draw_context(f: &mut Frame, app: &App, area: Rect) {
     );
 }
 
-/// Tokens as a short human number — `104k` — because the exact figure is not
-/// knowable and printing it to the unit would claim that it is.
+/// Tokens as a short human number, because the exact figure is not knowable and
+/// printing it to the unit would claim that it is.
 fn tokens(n: u64) -> String {
     if n >= 1_000 {
         format!("{}k", n / 1_000)
@@ -2054,7 +2021,7 @@ fn mode_span(mode: PermissionPolicy) -> Span<'static> {
 
 /// A circle that fills as the mode lets more through, so the four are ordered
 /// by shape and not only hue. Plan is the only mode that cannot change
-/// anything, and it gets the hollow glyph.
+/// anything.
 fn mode_glyph(mode: PermissionPolicy) -> &'static str {
     if !mode.may_act() {
         return "○";
@@ -2066,9 +2033,9 @@ fn mode_glyph(mode: PermissionPolicy) -> &'static str {
     }
 }
 
-/// Green for the mode that cannot break anything, red for the one that
-/// approves everything unattended — the word is always printed beside it, so
-/// the colour is emphasis rather than the message.
+/// Green for the mode that cannot break anything, red for the one that approves
+/// everything unattended. The word is always printed beside it, so the colour
+/// is emphasis rather than the message.
 fn mode_colour(mode: PermissionPolicy) -> Color {
     match mode {
         PermissionPolicy::Plan => GOOD,
@@ -2091,7 +2058,7 @@ fn draw_keybar(f: &mut Frame, app: &App, area: Rect) {
     }
     let ws = app.workspace;
     let (left, right) = match &app.overlay {
-        // The leader's own spelling comes from `keys`, not from a literal here:
+        // The leader's own spelling comes from `keys`, not a literal here:
         // these two lines named the chord in prose, so the drift net could not
         // see them and they went on teaching `Ctrl-K` after the keymap moved.
         Overlay::WhichKey => (keys::which_key_hint(false), "Esc cancels"),
@@ -2112,8 +2079,7 @@ fn draw_keybar(f: &mut Frame, app: &App, area: Rect) {
         ),
         // Named for what they do rather than borrowing the prompt's wording:
         // "accepts" is the wrong verb for a credential, where the question is
-        // what enter is about to commit you to and whether escape really throws
-        // it away.
+        // what enter is about to commit you to.
         Overlay::Secret { .. } => (
             "typing is hidden · ⏎ stores it outside every repo".to_string(),
             "Esc discards it",
@@ -2126,10 +2092,10 @@ fn draw_keybar(f: &mut Frame, app: &App, area: Rect) {
             "searching every transcript · ⏎ opens the conversation".to_string(),
             "Esc closes",
         ),
-        // The rail is checked before the screen's own filter and verbs, because
-        // while it has the keyboard those verbs are *not* in force — printing
-        // `s stop` beside a rail where `x` dismisses teaches a key that does
-        // something else.
+        // The rail is checked before the screen's own verbs, because while it
+        // has the keyboard those verbs are *not* in force — printing `s stop`
+        // beside a rail where `x` dismisses teaches a key that does something
+        // else.
         Overlay::None if app.rail.focused && app.rail.shown && app.rail.editing_filter => (
             "typing searches the rail".to_string(),
             "⏎ keeps it · Esc clears it",
@@ -2152,8 +2118,8 @@ fn draw_keybar(f: &mut Frame, app: &App, area: Rect) {
 /// What the status row says about the microphone.
 ///
 /// The microphone stays on until switched off, so *forgetting it is on* is the
-/// failure this prevents. Unmissable, it says how long, and the meter moves —
-/// the only thing distinguishing a working microphone from a dead one.
+/// failure this prevents. It says how long, and the meter moves — the only
+/// thing distinguishing a working microphone from a dead one.
 fn dictation_badge(app: &App) -> Option<String> {
     let Dictation::Listening {
         since_ms,
@@ -2215,8 +2181,7 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     };
     let mut badge = String::new();
     // First, and unconditionally. A live microphone is the one state on this
-    // row where not knowing has a cost outside the program, so it goes ahead
-    // of every other badge and never competes for the space.
+    // row where not knowing has a cost outside the program.
     if let Some(said) = dictation_badge(app) {
         badge.push_str(&said);
     }
@@ -2241,9 +2206,8 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         }
         badge.push_str(&format!("⚑ {} unread", app.unread()));
     }
-    // A shell building in the background is invisible by construction — that
-    // is what backgrounding it means — so the always-on row is the only place
-    // it can be seen without being looked for.
+    // A shell building in the background is invisible by construction, so the
+    // always-on row is the only place it can be seen without being looked for.
     if app.running_jobs() > 0 {
         if !badge.is_empty() {
             badge.push_str(" · ");
@@ -2296,8 +2260,8 @@ fn two_ends(left: &str, right: &str, width: u16, colour: Color) -> Line<'static>
     let left_len = left.chars().count();
     let right_len = right.chars().count();
 
-    // One space of margin at each end; at least one more between the halves, so
-    // they can never run together — `1 queuedCtrl-X stop` reads as neither.
+    // One space of margin at each end and at least one more between the halves,
+    // so they can never run together.
     let show_right = right_len + 2 <= width;
     let room_for_left = if show_right {
         width.saturating_sub(right_len + 3)
@@ -2350,9 +2314,8 @@ fn draw_completions(f: &mut Frame, app: &App, input: Rect) {
     // what left `no argument restores` one letter short on a 200-column
     // terminal.
     let want = text::panel_width([TAB_COMPLETES]).max(widest_name + widest_hint + 8);
-    // The popup is anchored to the input box's left edge, so the room is what
-    // lies to the right of it — never more, or it would be drawn off the
-    // buffer.
+    // Anchored to the input box's left edge, so the room is what lies to the
+    // right of it — never more, or it would be drawn off the buffer.
     let room = f.area().width.saturating_sub(input.x).max(1);
     let w = (want as u16).min(room).max(24.min(room));
     // Whatever is left for the hint once the mark, the name column and the
@@ -2388,8 +2351,8 @@ fn draw_completions(f: &mut Frame, app: &App, input: Rect) {
                 ("  ", Style::default())
             };
             // The label, not the line: the row has to read as the command it
-            // stands for, which for `/main <instruction>` is not what
-            // accepting it types.
+            // stands for, which for `/main <instruction>` is not what accepting
+            // it types.
             let name = &c.label;
             let pad = " ".repeat(widest_name.saturating_sub(name.chars().count()) + 2);
             ListItem::new(Line::from(vec![
@@ -2494,7 +2457,7 @@ fn draw_jobs(f: &mut Frame, app: &App) {
 /// Each row says **which conversation** the turn is in, because a line of prose
 /// with no home is not something you can decide to open. `messages_fts` covers
 /// compacted messages, so this reaches turns that have fallen out of every
-/// context window — most of the reason to have it.
+/// context window.
 fn draw_search(f: &mut Frame, query: &str, selected: usize, hits: &[crate::tui::data::Hit]) {
     let screen = f.area();
     let width = screen.width.saturating_sub(8).min(110).max(40);
@@ -2555,8 +2518,8 @@ fn draw_search(f: &mut Frame, query: &str, selected: usize, hits: &[crate::tui::
 /// The big half of the one picker.
 ///
 /// Rows are drawn by [`mention_line`], the same function the inline popup uses,
-/// so the highlighting is identical in both. That shared call is what makes
-/// "one picker at two sizes" true in the rendering as well as the matcher.
+/// so "one picker at two sizes" is true in the rendering as well as the
+/// matcher.
 fn draw_picker(f: &mut Frame, p: &picker::Picker) {
     const TITLE: &str = " a directory to work in ";
     const FOOTER: &str = " ⏎ adds it read-only · ↑↓ choose · Esc cancels ";
@@ -2564,9 +2527,9 @@ fn draw_picker(f: &mut Frame, p: &picker::Picker) {
     let screen = f.area();
     let base = p.base.display().to_string();
     // Wide enough for the header and both border titles. The old fixed
-    // `.min(96)` held on a 260-column terminal too, so `…/tui-dogfood-
-    // tetris/tetris` came out as `…/tui-dogfood-tetr` — a different directory,
-    // with nothing to say text was missing.
+    // `.min(96)` held on a 260-column terminal too, so
+    // `…/tui-dogfood-tetris/tetris` came out as `…/tui-dogfood-tetr` — a
+    // different directory, with nothing to say text was missing.
     let want =
         text::panel_width([format!("{LABEL}{base}").as_str(), TITLE, FOOTER]).max(96) as u16;
     let width = want.clamp(40, screen.width.saturating_sub(8).max(40));
@@ -2670,8 +2633,8 @@ fn draw_secret(f: &mut Frame, name: &str, scope: jod_core::secrets::Scope, value
     lines.push(Line::from(""));
     lines.push(Line::from(vec![
         Span::styled(format!("  {name} ▸ "), fg(WARN)),
-        // The dots are the whole point: they prove the keystrokes are landing
-        // without saying what they were.
+        // The dots prove the keystrokes are landing without saying what they
+        // were.
         Span::styled(secret::masked(value), fg(AGENT)),
         Span::styled("▏", fg(USER)),
     ]));
@@ -2735,8 +2698,8 @@ fn draw_which_key(f: &mut Frame, app: &App) {
         ));
         rows.push(("e".into(), "editor      the input in $EDITOR".into()));
         // The verbs that lost their chord. Drawn rather than left to the keymap
-        // overlay because this menu is the only place they are reachable at all
-        // — a route nothing prints is a route nobody takes.
+        // overlay because this menu is the only place they are reachable at
+        // all.
         rows.push(("j".into(), "jobs        background shells".into()));
         rows.push(("u".into(), "unread      the oldest thing unread".into()));
         rows.push(("l".into(), "clear       empty the screen only".into()));
@@ -2788,10 +2751,9 @@ fn draw_which_key(f: &mut Frame, app: &App) {
 /// layout uses as many columns as the window affords and *counts* what it still
 /// cannot show. Help that lies about being complete is worse than none.
 fn draw_keymap(f: &mut Frame, app: &App) {
-    // Whichever layer actually has the keyboard, for the reason the overlay is
-    // screen-first at all: help that omits what is in force sends you to the
-    // source, and help that lists what is *not* in force teaches a key that
-    // does something else.
+    // Whichever layer actually has the keyboard: help that omits what is in
+    // force sends you to the source, and help that lists what is *not* in force
+    // teaches a key that does something else.
     let sections = if app.rail.focused && app.rail.shown {
         keys::rail_keymap()
     } else {
@@ -2836,7 +2798,7 @@ fn draw_keymap(f: &mut Frame, app: &App) {
     let affordable = ((screen.width.saturating_sub(2)) as usize / column.max(1)).max(1);
     // The blank line between sections is the cheapest thing on this panel — a
     // heading already separates them — so a map that does not fit drops
-    // separators before bindings. Same budget rule the keybar spends by.
+    // separators before bindings.
     if lines.len() > affordable * rows {
         lines = compose(false);
     }
@@ -2983,8 +2945,8 @@ fn draw_workspace(f: &mut Frame, app: &App, area: Rect) {
 /// A master/detail split, or the master alone when there is not room for both.
 ///
 /// Below 90 columns the detail pane goes first: a 40-column detail pane holds
-/// nothing worth reading, and clipping the master to make room is the anti-
-/// pattern.
+/// nothing worth reading, and clipping the master to make room is the
+/// anti-pattern.
 fn split(area: Rect) -> (Rect, Option<Rect>) {
     if area.width < 90 {
         return (area, None);
@@ -3012,7 +2974,7 @@ fn filter_line(app: &App) -> Option<Line<'static>> {
     let what = if list.filtering() {
         // Rows, less the ones a filter cannot exclude. The fleet's pinned chat
         // is always in `row_ids` and never a match, so counting rows there
-        // claimed one more hit than the filter had actually found.
+        // claimed one more hit than the filter had found.
         let unfilterable = usize::from(app.workspace == Workspace::Fleet);
         format!(
             "   ▸ filter · {} match",
@@ -3068,8 +3030,7 @@ fn draw_tree(f: &mut Frame, app: &App, area: Rect) {
     let selected = app.tree.index(&ids);
     let width = area.width.saturating_sub(2) as usize;
     // The guides go plain when the terminal says it cannot draw the alphabet.
-    // `NO_COLOR` is the closest signal Jod has to "this terminal is minimal",
-    // and it is the same one the rest of the renderer already honours.
+    // `NO_COLOR` is the closest signal Jod has to "this terminal is minimal".
     let ascii = *COLOURLESS;
 
     // The pinned chat's own columns drop in the flat list's declared order, at
@@ -3099,9 +3060,9 @@ fn draw_tree(f: &mut Frame, app: &App, area: Rect) {
         let expanded = app.tree.is_expanded(&node.id, &app.closed_works);
         let mut spans = vec![
             Span::styled(if here { "▸ " } else { "  " }.to_string(), bold(USER)),
-            // The guides describe the forest, so they are indexed into it —
-            // the pinned row sits above the tree rather than in it, and an
-            // elbow measured past it would point one row off.
+            // The guides describe the forest, so they are indexed into it — the
+            // pinned row sits above the tree rather than in it, and an elbow
+            // measured past it would point one row off.
             Span::styled(fleet::guides(&rows, at - 1, ascii), fg(MUTED)),
             Span::styled(fleet::marker(node, expanded).to_string(), fg(MUTED)),
             Span::styled(
@@ -3161,9 +3122,9 @@ fn draw_tree(f: &mut Frame, app: &App, area: Rect) {
         }
         items.push(ListItem::new(Line::from(spans)));
     }
-    // Said under the pinned row rather than instead of the tree, because the
-    // tree is no longer empty — the chat is always its first row, and "no works
-    // yet" as the only line would now be a claim the row above it contradicts.
+    // Said under the pinned row rather than instead of the tree: the chat is
+    // always its first row, so "no works yet" as the only line would be a claim
+    // the row above it contradicts.
     if rows.is_empty() {
         items.extend(empty(if app.here().filtering() {
             "  nothing matches"
@@ -3325,9 +3286,9 @@ fn fleet_row<'a>(
     if show_harness {
         spans.push(Span::styled(format!("{:<4}", code(&a.harness)), fg(MUTED)));
     }
-    // The name was clipped by the widget with nothing saying so —
-    // `port the p` at the design width. It is cut with an ellipsis
-    // now, and the marker beside it is reserved first.
+    // The name was clipped by the widget with nothing saying so — `port the p`
+    // at the design width. It is cut with an ellipsis now, and the marker
+    // beside it is reserved first.
     let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
     let marker = if watched { "  \u{2190} on screen" } else { "" };
     let (name, marked) = fit_row(used, &a.name, marker, inner);
@@ -3360,8 +3321,8 @@ fn draw_loose(f: &mut Frame, app: &App, area: Rect, runs: &[&super::AgentLine]) 
         .map(|a| ListItem::new(fleet_row(app, a, false, inner, show_id, show_harness)))
         .collect();
     // The count is in the title rather than on a row of its own, because the
-    // pane is small enough that a row spent saying "3 more" is a row not
-    // spent showing one of them.
+    // pane is small enough that a row spent saying "3 more" is a row not spent
+    // showing one.
     let title = if runs.len() > room {
         format!(" loose · {} of {} ", room, runs.len())
     } else {
@@ -3419,19 +3380,15 @@ fn draw_fleet(f: &mut Frame, app: &App, area: Rect) {
     // `row_ids` puts it there too. The two orderings have to agree, or the
     // cursor lands one row off its own highlight.
     let (first, height) = window(left, selected, rows.len() + 1);
-    // Declared drop order: detail pane → harness → id, name last.
-    //
-    // Each threshold is one higher than it was, because the delivery gutter
-    // took a cell from every row permanently. Left alone, a pane of exactly the
-    // old width would spend the line on fixed columns and leave the name
-    // nothing.
+    // Declared drop order: detail pane → harness → id, name last. Each
+    // threshold is one higher than it was, because the delivery gutter took a
+    // cell from every row permanently.
     let inner = left.width.saturating_sub(2) as usize;
     let show_id = inner >= 35;
     let show_harness = inner >= 31;
 
     // Index 0 is the pinned chat and the rest are agents, so the loop walks
-    // positions rather than the agent vector. Everything below the first row
-    // reads its agent at `i - 1`.
+    // positions rather than the agent vector.
     let mut items: Vec<ListItem> = Vec::new();
     for i in first..(first + height).min(rows.len() + 1) {
         let chosen = i == selected;
@@ -3454,12 +3411,12 @@ fn draw_fleet(f: &mut Frame, app: &App, area: Rect) {
             show_harness,
         )));
     }
-    // Said under the pinned row rather than instead of the list, because the
-    // list is no longer empty — the chat is always in it, and "no agents yet"
-    // as the only line would now be a claim the row above it contradicts.
+    // Said under the pinned row rather than instead of the list: the chat is
+    // always in it, so "no agents yet" as the only line would contradict the
+    // row above.
     if rows.is_empty() {
-        // Short enough to survive the master pane at the design width, which is
-        // 44 cells inside its border — the longer form was clipped mid-word.
+        // Short enough to survive the master pane at the design width, 44 cells
+        // inside its border — the longer form was clipped mid-word.
         items.extend(empty("  nothing delegated yet — Ctrl-B starts one"));
     }
     if let Some(line) = filter_line(app) {
@@ -3469,7 +3426,7 @@ fn draw_fleet(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(body(Workspace::Fleet, items, left.width), left);
 
     let Some(right) = right else { return };
-    // Its own pane, and its own footer: none of `s stop · r resume · a attach`
+    // Its own pane and its own footer: none of `s stop · r resume · a attach`
     // means anything to a conversation, and offering keys that quietly do
     // nothing is how a list teaches people not to trust its footer.
     if app.main_selected() {
@@ -3497,9 +3454,7 @@ fn draw_fleet(f: &mut Frame, app: &App, area: Rect) {
                     "status",
                     // The master column is 48 cells at the design width, so the
                     // inline `← on screen` marker is the first thing *dropped*
-                    // — whole, never clipped to `← on scr`. This pane always
-                    // says it, which is why dropping it costs nothing above 90
-                    // columns.
+                    // — whole, never clipped.
                     &if app.watching.as_deref() == Some(a.id.as_str()) {
                         format!("{} · on screen", a.status)
                     } else {
@@ -3515,9 +3470,8 @@ fn draw_fleet(f: &mut Frame, app: &App, area: Rect) {
                     a.session.as_deref().unwrap_or("none reported yet"),
                 ),
                 // Above the spend on purpose: the question this pane is most
-                // often opened with is "did that do what I asked", and a run
-                // launched somewhere other than where you meant answers it
-                // before the cost does.
+                // often opened with is "did that do what I asked", and where a
+                // run was launched answers it before the cost does.
                 field(
                     "in",
                     if a.cwd.is_empty() {
@@ -3568,8 +3522,7 @@ fn draw_fleet(f: &mut Frame, app: &App, area: Rect) {
 ///
 /// It borrows the agent columns rather than inventing a layout, because two
 /// column schemes in one list is two things to read. The id column carries
-/// `pinned`, and the age is time since the last instruction — how long since
-/// you said anything.
+/// `pinned`, and the age is how long since you said anything.
 fn main_line(
     app: &App,
     chosen: bool,
@@ -3622,8 +3575,7 @@ fn main_detail(app: &App, width: u16) -> Vec<Line<'static>> {
     let row = app.main_row();
     let mut lines = vec![
         Line::from(Span::styled(" main", bold(USER))),
-        // Short enough to survive the pane at the design width — 48 cells —
-        // rather than being clipped mid-sentence.
+        // Short enough to survive the pane at the design width, 48 cells.
         Line::from(Span::styled(
             " the chat Jod keeps — pinned, and it never ends",
             fg(MUTED),
@@ -3713,8 +3665,8 @@ fn delivery_gutter(verdict: super::delivery::Verdict) -> Span<'static> {
         verdict.glyph(),
         // Red for a message nobody got, amber for one somebody may hold twice:
         // the first is a loss, the second a mess. The glyphs differ too, so
-        // `NO_COLOR` loses which
-        // *kind* of trouble it is, never that there is trouble.
+        // `NO_COLOR` loses which *kind* of trouble it is, never that there is
+        // trouble.
         bold(match verdict {
             super::delivery::Verdict::Lost => BAD,
             _ => WARN,
@@ -3722,8 +3674,8 @@ fn delivery_gutter(verdict: super::delivery::Verdict) -> Span<'static> {
     )
 }
 
-/// One `name  value` row of a detail pane, indented off the border — text
-/// flush against a box edge reads as a rendering bug even when it is not.
+/// One `name value` row of a detail pane, indented off the border — text flush
+/// against a box edge reads as a rendering bug even when it is not.
 fn field(name: &str, value: &str) -> Line<'static> {
     Line::from(vec![
         Span::styled(format!(" {name:<9}"), fg(MUTED)),
@@ -3994,8 +3946,9 @@ fn neighbour_line(chosen: bool, n: &graph::Neighbour) -> Line<'static> {
 }
 
 /// Schedules in the `systemctl list-timers` shape — **when**, **next**, **in**,
-/// **last**, **ago** — plus a seven-cell outcome strip. The raw cron lives in the
-/// detail block: a column of `0 2 * * *` is one nobody can read at a glance.
+/// **last**, **ago** — plus a seven-cell outcome strip. The raw cron lives in
+/// the detail block: a column of `0 2 * * *` is one nobody can read at a
+/// glance.
 fn draw_schedules(f: &mut Frame, app: &App, area: Rect) {
     let rows = app.schedule_rows();
     let selected = app
@@ -4623,8 +4576,8 @@ fn draw_traffic_log(f: &mut Frame, app: &App, area: Rect) {
             ),
         ];
         let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
-        // A paused thread says so on its opening message: G4.S3 pauses a
-        // thread and never the work, so the marker belongs to the thread.
+        // A paused thread says so on its opening message: G4.S3 pauses a thread
+        // and never the work.
         let marker = match app.traffic.paused.get(&envelope.thread_id) {
             Some(state) if state.is_paused() && opens_thread => "  ← paused",
             _ => "",
@@ -4659,8 +4612,8 @@ fn draw_traffic_log(f: &mut Frame, app: &App, area: Rect) {
 ///
 /// G4.S5 asks for the budget to be visible *before* it is spent — the
 /// escalation card is far too late to be the first anybody hears that two
-/// agents have talked for two hundred turns. The work's colour tints the glyph;
-/// the figures are the channel that survives `NO_COLOR`.
+/// agents have talked for two hundred turns. The figures are the channel that
+/// survives `NO_COLOR`.
 fn traffic_header(app: &App, width: usize) -> Line<'static> {
     if app.traffic_of.is_none() {
         return Line::from(Span::styled("  nothing open", fg(MUTED)));
@@ -4718,14 +4671,13 @@ fn draw_traffic_detail(f: &mut Frame, app: &App, area: Rect) {
                 )),
             ];
             // The reason above the message rather than below. What a refused
-            // message *said* is the least useful thing about it — nobody read
-            // it — and burying why is how a reader concludes the row was merely
-            // slow.
+            // message *said* is the least useful thing about it, and burying
+            // why is how a reader concludes the row was merely slow.
             if let Some(trouble) = traffic::trouble(envelope, held) {
                 lines.push(Line::from(""));
                 // Wrapped like the body, and for a sharper reason: this is the
                 // sentence the whole screen exists to deliver, and a reason cut
-                // off at `is not a member o` is a reason nobody can act on.
+                // off at `is not a member o` is one nobody can act on.
                 for line in wrapped(&trouble, area.width.saturating_sub(3) as usize) {
                     lines.push(Line::from(Span::styled(format!(" {line}"), bold(BAD))));
                 }
@@ -4907,7 +4859,8 @@ fn fit_verbs(text: &str, width: u16) -> String {
         next.push(verb);
         // Measured with the padding put back, because the padding is what
         // actually occupies the border — measuring the join alone lets the two
-        // spaces overflow by exactly the amount that looks like a rendering bug.
+        // spaces overflow by exactly the amount that looks like a rendering
+        // bug.
         if format!(" {} ", next.join(" · ")).chars().count() > room {
             break;
         }
@@ -4923,8 +4876,8 @@ fn detail(name: &str, value: &str) -> Line<'static> {
     detail_in(name, value, AGENT)
 }
 
-/// The same row, with the value in a colour the caller picks — a run's state
-/// is the one that carries meaning, and red is most of how a failure is seen.
+/// The same row, with the value in a colour the caller picks — a run's state is
+/// the one that carries meaning, and red is most of how a failure is seen.
 fn detail_in(name: &str, value: &str, colour: Color) -> Line<'static> {
     Line::from(vec![
         Span::styled(format!("  {name:<10}"), fg(MUTED)),
@@ -4972,9 +4925,8 @@ fn clock(at_ms: i64) -> String {
 /// How many terminal columns a string paints.
 ///
 /// A `char` is not a column: a CJK ideograph paints two and a combining accent
-/// none, so counting characters answers a different question from the one a
-/// box's width asks. Ratatui already uses this measure when laying a line into
-/// the buffer, so asking it keeps the budget and the paint in agreement.
+/// none. Ratatui already uses this measure when laying a line into the buffer,
+/// so asking it keeps the budget and the paint in agreement.
 fn columns(s: &str) -> usize {
     Span::raw(s).width()
 }
