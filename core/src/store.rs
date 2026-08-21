@@ -1,24 +1,23 @@
 //! Durable state: one SQLite file in WAL mode.
 //!
-//! This is the layer that turns Jod from a task runner into an assistant. A
-//! process that restarts still knows which agents it launched, what they said,
-//! and what it has learned about the person it works for.
+//! The layer that turns Jod from a task runner into an assistant: a process
+//! that restarts still knows which agents it launched and what it has learned.
 //!
 //! The design comes from [`research/agent-db-2026`], which benchmarked nine
 //! engines with real concurrent processes. Three results drive the code:
 //!
 //! - **SQLite was fastest and the only engine that never lost a write.**
-//!   Postgres silently discarded 47% of contended updates on its obvious path,
-//!   LanceDB 51%, Qdrant 46% — all reporting zero errors.
+//!   Postgres
+//! silently discarded 47% of contended updates on its obvious path, LanceDB
+//! 51%, Qdrant 46% — all reporting zero errors.
 //! - **`BEGIN IMMEDIATE` is mandatory for writes**; deferred transactions
-//!   upgrade their lock late and collide, a 98% failure rate. Every write goes
-//!   through [`Store::write`].
-//! - **Never hold a write transaction across a model call.** The argument rests
-//!   on writes costing microseconds, so nothing here opens a transaction that
-//!   outlives one function call.
+//!   collide,
+//! a 98% failure rate. Every write goes through [`Store::write`].
+//! - **Never hold a write transaction across a model call.** Nothing here opens
+//! one that outlives a single function call.
 //!
-//! Markdown stays the source of truth for prose; this database is an index over
-//! it and can be deleted and rebuilt.
+//! Markdown stays the source of truth for prose; this is an index over it and
+//! can be deleted and rebuilt.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -1507,11 +1506,9 @@ pub struct Store {
     /// Write transactions cost microseconds, so one lock over one connection is
     /// cheaper than a pool and makes "one writer" explicit.
     ///
-    /// Visible to the rest of the crate because the store's surface is split
-    /// across modules — conversations, webhooks and schedules each keep their
-    /// own `impl Store` beside the feature they serve rather than growing one
-    /// file without end. Still private to the crate: nothing outside gets a
-    /// connection.
+    /// Visible to the crate because the store's surface is split across
+    /// modules, each keeping its own `impl Store` beside the feature it serves.
+    /// Nothing outside gets a connection.
     pub(crate) conn: Mutex<Connection>,
     /// Where this database lives, when it lives anywhere. A run's supervisor is
     /// a separate process and has to be told which file to write into, so the
@@ -1647,17 +1644,13 @@ impl Store {
         Ok(out)
     }
 
-    /// Events after `after`, oldest first. `None` means "I have seen nothing",
-    /// and returns the run from its very first event.
+    /// Events after `after`, oldest first. `None` means "I have seen nothing".
     ///
-    /// This is what lets a client that dropped its connection replay only the
-    /// tail: it remembers the last `seq` it saw and asks for what followed,
-    /// rather than re-fetching a transcript it already has.
+    /// Lets a client that dropped its connection replay only the tail.
     ///
-    /// The cursor is an `Option` rather than a plain number because sequences
-    /// start at 0, so no integer can mean "nothing yet". Taking `0` for that
-    /// would skip `seq` 0 — the `Started` event, the one carrying the session
-    /// id and the model — and a client would render a run that never began.
+    /// The cursor is an `Option` because sequences start at 0, so no integer
+    /// can mean "nothing yet" — taking `0` would skip the `Started` event, and
+    /// the client would render a run that never began.
     pub fn events_since(
         &self,
         run_id: &str,
@@ -1696,18 +1689,15 @@ impl Store {
     /// Insert or update the record of one delegation.
     ///
     /// Two fields resist being overwritten, because two processes write this
-    /// row and only one of them knows the truth about each.
+    /// row and only one knows the truth about each.
     ///
-    /// `pid`/`pgid` survive an update that does not carry them. The supervisor
-    /// records them once, while the launcher may keep saving summaries from an
-    /// in-memory copy that never learned them, so `COALESCE` stops a later
-    /// ignorant save erasing the launch facts.
+    /// `pid`/`pgid` survive an update that does not carry them: the launcher
+    /// may keep saving summaries from an in-memory copy that never learned
+    /// them.
     ///
-    /// **A terminal `status` is never overwritten.** A follower derives status
-    /// from events, and events cannot tell a killed run from a completed one —
-    /// both end in `Finished` with no exit code. Only the supervisor saw the
-    /// signal, which it records through the unconditional
-    /// [`Store::set_run_status`]. Without this guard a follower's later save
+    /// **A terminal `status` is never overwritten.** A follower derives status from
+    /// events, which cannot tell a killed run from a completed one. Only the
+    /// supervisor saw the signal; without this guard a follower's later save
     /// reported every killed run as `completed`.
     pub fn save_run(&self, run: &StoredRun) -> Result<()> {
         let summary = serde_json::to_string(&run.summary)?;
@@ -1823,16 +1813,12 @@ impl Store {
 
     /// Every conversation below this one, however deep.
     ///
-    /// The edge is `conversations.parent_conversation_id`, written by
-    /// `Server::record_handoff` on each `delegate`. Excludes the root itself:
-    /// a caller stopping a run has already dealt with that run, and including
-    /// it would make the walk look like it stops the thing twice.
+    /// The edge is `parent_conversation_id`, written on each `delegate`.
+    /// Excludes the root: a caller stopping a run has already dealt with it.
     ///
-    /// `UNION` rather than `UNION ALL` so a parent edge that somehow points
-    /// back up the tree ends the walk instead of running for ever. That should
-    /// be impossible — a child is created after its parent — but a recursive
-    /// query that can loop on bad data is one that hangs the process holding
-    /// the store lock, and the cost of ruling it out here is one word.
+    /// `UNION` rather than `UNION ALL`, so a parent edge that somehow points
+    /// back up ends the walk instead of hanging the process holding the store
+    /// lock.
     pub fn descendant_conversations(&self, root: &str) -> Result<Vec<String>> {
         let conn = self.conn.lock().expect("store lock poisoned");
         let mut stmt = conn.prepare(
@@ -1850,17 +1836,12 @@ impl Store {
 
     /// The runs still going in one conversation.
     ///
-    /// A conversation reaches its runs through `messages.run_id`, which is the
-    /// inverse of [`Store::conversation_for_run`] and scans for the same
-    /// reason: `messages` is indexed on `(conversation_id, id)`, so the rows
-    /// for one conversation are contiguous and the scan is over that
+    /// Reached through `messages.run_id`, which scans — but `messages` is
+    /// indexed on `(conversation_id, id)`, so the scan is over that
     /// conversation rather than the table.
     ///
-    /// A run that has not written a message yet is invisible here. That is a
-    /// real gap and it is the honest one: with no message there is no link
-    /// from the conversation to the run, so there is nothing to find. It
-    /// closes on its own within a turn, because a harness writes its first
-    /// message long before it does anything worth stopping.
+    /// A run that has not written a message yet is invisible: with no message
+    /// there is no link to find. It closes on its own within a turn.
     pub fn running_runs_in(&self, conversation_id: &str) -> Result<Vec<String>> {
         let conn = self.conn.lock().expect("store lock poisoned");
         let mut stmt = conn.prepare(
@@ -1914,17 +1895,13 @@ impl Store {
 
     /// Take ownership of one stopped run, so exactly one resume brings it back.
     ///
-    /// True means the caller won it and should launch the replacement; false
-    /// means somebody else already has, and the caller must not launch
-    /// anything. The `IS NULL` in the `WHERE` is the whole of that guarantee:
-    /// two resumes racing on the same conversation read the same pending row,
-    /// and only one `UPDATE` matches.
+    /// The `IS NULL` in the `WHERE` is the whole guarantee: two resumes racing
+    /// read the same pending row and only one `UPDATE` matches.
     ///
-    /// Claimed before the launch rather than after, because the two failures
-    /// are not the same size. A claim that is never followed by a launch costs
-    /// one worker that a person can start again by hand. A launch that is never
-    /// followed by a claim lets the next resume start a second copy, and two
-    /// agents on one piece of work will edit the same files.
+    /// Claimed before the launch, because the failures are different sizes. A
+    /// claim with no launch costs one worker somebody can restart by hand; a
+    /// launch with no claim lets the next resume start a second copy, and two
+    /// agents on one piece of work edit the same files.
     pub fn claim_cascaded_stop(&self, run_id: &str, at_ms: i64) -> Result<bool> {
         self.write(|tx| {
             let n = tx.execute(
@@ -1978,14 +1955,12 @@ impl Store {
 
     /// Start watching a run, or replace the watch it already had.
     ///
-    /// `INSERT … ON CONFLICT DO UPDATE` rather than a plain insert, because
-    /// re-registering must be how a caller *changes* a window. The alternative
-    /// — failing on a duplicate — makes "watch this run, with a longer stall
-    /// window this time" into a delete-then-insert that is not atomic.
+    /// `ON CONFLICT DO UPDATE` because re-registering must be how a caller
+    /// *changes* a window — failing on a duplicate makes that a delete-then-
+    /// insert that is not atomic.
     ///
-    /// The cursor fields are reset on re-registration. A new window measured
-    /// against progress observed under the old one would be measuring two
-    /// different promises at once.
+    /// The cursor fields reset: a new window measured against progress observed
+    /// under the old one would measure two promises at once.
     pub fn watch_run(&self, hb: &Heartbeat) -> Result<()> {
         self.write(|tx| {
             tx.execute(
@@ -2120,16 +2095,14 @@ impl Store {
 
     /// Add a member, or update the role and harness of one already there.
     ///
-    /// The team and the member together are the key. Mail is addressed to that
-    /// pair, `member_in` looks a member up by it, and a run is named
-    /// `<team>-<member>`, so neither half can be blank.
+    /// The team and the member together are the key — mail is addressed to that
+    /// pair — so neither half can be blank.
     ///
     /// The two reserved names are refused here as well as in
-    /// [`Store::join_scope`], and the gap between them was real: this is what
-    /// `jod team join` calls, so until now a person could type
-    /// `jod team join crew main` and put an agent on the roster under the
-    /// orchestrator's address. Sender identity is derived from the run so that
-    /// it cannot be claimed, and a name that can be claimed gives it all back.
+    /// [`Store::join_scope`], and the gap was real: this is what `jod team
+    /// join` calls, so a person could put an agent on the roster under the
+    /// orchestrator's address. Sender identity is derived from the run so it
+    /// cannot be claimed, and a claimable name gives that back.
     pub fn join_team(
         &self,
         team: &str,
@@ -2335,18 +2308,15 @@ impl Store {
     }
 
     /// Put a task on a team's board. Re-adding an id already on *this* board
-    /// leaves the original alone, so a retry cannot orphan work someone
-    /// already claimed.
+    /// leaves the original alone, so a retry cannot orphan claimed work.
     ///
     /// `id` is the table's primary key, though — global, not per-team — so an
-    /// id that already names a task on a *different* board cannot mean "my
-    /// board too". `ON CONFLICT(id) DO NOTHING` swallowed that insert and let
-    /// the caller print success over a write that never happened; this refuses
-    /// it, naming the board that owns the id.
+    /// id naming a task on a *different* board cannot mean "my board too". `ON
+    /// CONFLICT(id) DO NOTHING` swallowed that insert and let the caller print
+    /// success over a write that never happened.
     ///
-    /// A blank id is refused for the same reason: `claim`, `done` and
-    /// `hand over` all key on it. The board's name too, since a task has to
-    /// land somewhere `jod team show` can name.
+    /// A blank id is refused for the same reason: `claim`, `done` and `hand
+    /// over` all key on it.
     pub fn add_team_task(&self, team: &str, id: &str, title: &str) -> Result<()> {
         require_a_name("team", team)?;
         require_a_name("task", id)?;
@@ -2495,14 +2465,12 @@ impl Store {
 
     /// Recall, saying explicitly whether untrusted material may answer.
     ///
-    /// `untrusted` facts came from outside — a fetched page, an email, a Linear
-    /// comment — and are excluded by default, which is the whole point of
-    /// storing origin in its own column. Including them measured an attack
-    /// success rate of 0.17–0.25; excluding them, 0.00.
+    /// `untrusted` facts came from outside and are excluded by default, which
+    /// is the point of storing origin in its own column: including them
+    /// measured an attack success rate of 0.17–0.25, excluding them 0.00.
     ///
     /// `include_untrusted` exists for the memory browser, where the question is
-    /// "what did that page claim" rather than "what is true". A caller that
-    /// wants it has to say so at the call site, where the decision is visible.
+    /// "what did that page claim" rather than "what is true".
     pub fn recall_from(
         &self,
         scope: Option<&str>,
@@ -2547,16 +2515,12 @@ impl Store {
     /// Everything currently believed about one subject inside one scope.
     ///
     /// [`Store::facts_about`] answers "everything believed about this name",
-    /// which is right for a person and wrong for anything whose name can be
-    /// reused. A goal is exactly that: its facts are filed under
-    /// `goal/<name>` but its scope is `goal:<id>`, so a goal removed and
-    /// re-created under the same name used to be handed the dead one's record
-    /// — its `ended` verdict, its done-when fingerprint, and its pointer to a
-    /// run that belonged to something else.
+    /// which is wrong for anything whose name can be reused. A goal is exactly
+    /// that: its facts are filed under `goal/<name>` but its scope is
+    /// `goal:<id>`, so a goal removed and re-created was handed the dead one's
+    /// record.
     ///
-    /// This is also the cheaper of the two. `facts` is indexed on
-    /// `(scope, subject)`, so a read that gives both uses the index where a
-    /// read on the subject alone has to scan.
+    /// Also the cheaper of the two: `facts` is indexed on `(scope, subject)`.
     pub fn facts_about_in_scope(&self, scope: &str, subject: &str) -> Result<Vec<Fact>> {
         let conn = self.conn.lock().expect("store lock poisoned");
         let mut stmt = conn.prepare(
@@ -2659,9 +2623,9 @@ impl Store {
     /// statement in one immediate transaction.
     ///
     /// A lease alone is not enough: when a claimant dies mid-fire the next one
-    /// overwrites the lease and the original claim vanishes — 52 of 255 claims
-    /// accounted for nowhere. So displacing an expired lease **writes down that
-    /// it happened** first, which brought that to 0 of 270.
+    /// overwrites it and the original claim vanishes — 52 of 255 claims
+    /// accounted for nowhere. Displacing an expired lease **writes down that it
+    /// happened** first.
     pub fn claim_due_schedules(
         &self,
         owner: &str,
@@ -2742,19 +2706,16 @@ impl Store {
     /// Let a schedule go, arm it for its next instant, and account for how the
     /// fire went.
     ///
-    /// Failure is counted rather than merely reported: an always-failing
-    /// schedule made 288 spawn attempts in a day when nothing counted. The
-    /// count drives a backoff and, past [`BREAK_AFTER_FAILURES`], stops the
-    /// schedule. Broken is its own state rather than paused, because it says
-    /// why it stopped and resuming is a different decision.
+    /// Failure is counted rather than reported: an always-failing schedule made
+    /// 288 spawn attempts in a day when nothing counted. Past
+    /// [`BREAK_AFTER_FAILURES`] it stops. Broken is its own state rather than
+    /// paused, because it says why and resuming is a different decision.
     ///
-    /// **`spawn_failed` is only half of failure, which is why this reads the
-    /// runs too.** It covers the rare half — no process started at all. The
-    /// common half is a run that started and whose harness then died, which the
-    /// supervisor writes after the tick already let the schedule go. So each
-    /// release settles the runs started since the last one via
-    /// [`crate::schedule::settle`], with `settled_fire_id` stopping a double
-    /// count. The cost is one tick of lag.
+    /// **`spawn_failed` is only half of failure**, covering the rare case where no
+    /// process started. The common half is a run that started and whose harness
+    /// then died, written by the supervisor after the tick let the schedule go
+    /// — so each release settles the runs started since the last, with
+    /// `settled_fire_id` stopping a double count. The cost is one tick of lag.
     pub fn release_schedule(&self, id: &str, at_ms: i64, spawn_failed: bool) -> Result<()> {
         let (cron, timezone, failures, settled_fire_id) = {
             let conn = self.conn.lock().expect("store lock poisoned");
@@ -2875,15 +2836,13 @@ impl Store {
 
     /// Bring a schedule's next instant forward to now.
     ///
-    /// What "run now" means: the schedule becomes due and the ordinary tick
-    /// picks it up, rather than a second code path that spawns directly. One
-    /// firing path means the overlap policy, the failure count and the fire
-    /// record all apply to a hand-started run exactly as they do to a
-    /// timed one — a "run now" that skipped them would be the one run whose
-    /// behaviour nobody could predict.
+    /// The schedule becomes due and the ordinary tick picks it up, rather than
+    /// a second path that spawns directly. One firing path means the overlap
+    /// policy, the failure count and the fire record all apply — a "run now"
+    /// that skipped them would be the one run nobody could predict.
     ///
-    /// Refuses a schedule that is not armed. Firing something paused or broken
-    /// silently would defeat the reason it was stopped.
+    /// Refuses a schedule that is not armed: firing something paused would
+    /// defeat the reason it was stopped.
     pub fn run_schedule_now(&self, name: &str, at_ms: i64) -> Result<bool> {
         self.write(|tx| {
             let changed = tx.execute(
@@ -3016,18 +2975,15 @@ impl Store {
 
     /// Every goal a person has paused.
     ///
-    /// Pausing a goal stops new iterations, and until this existed it also
-    /// stopped Jod looking at the goal at all. [`Store::claim_due_goals`]
-    /// selects on `state = 'running'`, and that claim is the only route by
-    /// which a finished run is ever settled, so a goal paused in the middle of
-    /// an iteration went on reading `iter 0 · $0.00` beside a run that had
-    /// finished and been billed for.
+    /// Pausing stops new iterations, and it also stopped Jod looking at the
+    /// goal at all: [`Store::claim_due_goals`] selects on `state = 'running'`,
+    /// and that claim is the only route by which a finished run is settled — so
+    /// a goal paused mid-iteration read `iter 0 · $0.00` beside a run that had
+    /// been billed.
     ///
-    /// This is deliberately a separate question rather than a wider claim. A
-    /// paused goal has no next iteration, so it is never *due*, and folding it
-    /// into the due-goal query would hand it back on every tick for the rest of
-    /// its life. The caller reads this list, works out which of these goals
-    /// actually have a run in flight, and claims only those.
+    /// A separate question rather than a wider claim: a paused goal is never
+    /// *due*, so folding it in would hand it back on every tick for the rest of
+    /// its life.
     pub fn paused_goals(&self) -> Result<Vec<Goal>> {
         let conn = self.conn.lock().expect("store lock poisoned");
         let mut stmt =
@@ -3118,13 +3074,12 @@ impl Store {
 
     /// Let go of a goal without advancing it.
     ///
-    /// A claim exists to stop two processes acting on one goal *in the same
-    /// tick*, not to hold it for the life of an iteration. Holding it across
-    /// the whole run would mean the tick that should settle the finished run
-    /// cannot claim it, so the goal sits idle until the lease expires and every
-    /// iteration costs an extra lease-length of nothing happening.
+    /// A claim stops two processes acting on one goal *in the same tick*, not
+    /// for the life of an iteration. Holding it across the run would mean the
+    /// tick that should settle it cannot claim it, so the goal sits idle until
+    /// the lease expires.
     ///
-    /// What is in flight is recorded as a fact, not as a claim.
+    /// What is in flight is recorded as a fact, not a claim.
     pub fn release_goal(&self, id: &str) -> Result<()> {
         self.write(|tx| {
             tx.execute(
@@ -3184,20 +3139,14 @@ impl Store {
     /// the goal had in flight, which this deliberately does not stop.
     ///
     /// The row and the facts go together because they are one thing: a goal's
-    /// progress lives in the fact store, so deleting the row alone leaves the
-    /// episodic record with no goal to explain it — and, before reads were
-    /// scoped, left rows the next goal of that name read as its own. The scope
-    /// belongs to this goal alone, so the delete can take all of it.
-    /// `relations` cascades on `fact_id`, keeping the graph from outliving its
-    /// facts.
+    /// progress lives in the fact store, so deleting the row alone leaves an
+    /// episodic record with no goal to explain it. The scope belongs to this
+    /// goal alone, and `relations` cascades on `fact_id`.
     ///
-    /// **It does not stop the run, deliberately.** A goal's iteration is a
-    /// harness working in a real directory, `jod goal rm` asks for no
-    /// confirmation, and killing a process group mid-edit leaves half-written
-    /// files — too hard to reverse for a command whose contract is "forget this
-    /// row". So it reports the run still going and the command that stops it.
-    /// At most one iteration's cost is at stake, since a deleted goal starts no
-    /// more.
+    /// **It does not stop the run, deliberately.** Killing a process group mid-edit
+    /// leaves half-written files — too hard to reverse for a command whose
+    /// contract is "forget this row". So it reports the run and the command
+    /// that stops it.
     pub fn delete_goal(&self, name: &str) -> Result<Option<GoalForgotten>> {
         // Read before the delete. The goal's row and its facts both go away
         // below, so the in-flight run has to be read while there is still a
@@ -3219,20 +3168,16 @@ impl Store {
         }))
     }
 
-    /// The run a goal has in flight, if it has one that is still going.
+    /// The run a goal has in flight, if it has one still going.
     ///
-    /// Two lookups, because neither half answers on its own. The goal's
-    /// `current-run` fact names the run its latest iteration started, and it is
-    /// superseded every iteration, so the newest one is the only candidate. But
-    /// a fact is not retracted when the run it names ends, so it points at a
-    /// finished run just as readily as a working one. The `runs` row is what
-    /// says which of the two this is.
+    /// Two lookups, because neither answers alone. The `current-run` fact names
+    /// the run the latest iteration started, but a fact is not retracted when
+    /// that run ends — so it points at a finished run just as readily. The
+    /// `runs` row says which.
     ///
-    /// The status comes from the row rather than from a live probe of the
-    /// process group, so this reports what `jod ls` reports. A run whose
-    /// process died without saying so still reads as running in both places,
-    /// and one answer that is occasionally stale beats two answers that
-    /// disagree.
+    /// The status comes from the row rather than a live probe, so this reports
+    /// what `jod ls` reports: one answer that is occasionally stale beats two
+    /// that disagree.
     pub fn goal_run_in_flight(&self, name: &str) -> Result<Option<String>> {
         let Some(run_id) = self
             .facts_about(&format!("goal/{name}"))?
@@ -3252,16 +3197,15 @@ impl Store {
 
     /// Everything within `depth` hops of `name`, nearest first.
     ///
-    /// Undirected, because the question a person asks is "what is related to
-    /// this", which does not care which way the fact was phrased. That needs
-    /// *two* recursive terms, one per index — a single
-    /// `ON (src = node OR dst = node)` defeats both and falls back to a scan.
+    /// Undirected, because "what is related to this" does not care which way
+    /// the fact was phrased. That needs *two* recursive terms, one per index —
+    /// a single `ON (src = node OR dst = node)` defeats both and falls back to
+    /// a scan.
     ///
-    /// `at_ms` selects the instant to believe: `now` for what is true, any past
-    /// instant for what Jod believed then. The predicate sits inside the
-    /// recursive step so an edge that was not valid then is never expanded —
-    /// and because that prunes about a third of the edges, the filtered
-    /// traversal measured *faster* than the unfiltered one.
+    /// `at_ms` selects the instant to believe. The predicate sits inside the
+    /// recursive step so an edge invalid then is never expanded — and because
+    /// that prunes about a third of the edges, the filtered traversal measured
+    /// *faster*.
     pub fn neighbourhood(
         &self,
         scope: &str,
@@ -3274,20 +3218,17 @@ impl Store {
         };
         let depth = depth.clamp(1, MAX_HOPS) as i64;
         let conn = self.conn.lock().expect("store lock poisoned");
-        // Two things in this query are load-bearing, and neither is obvious.
+        // Two load-bearing things, neither obvious.
         //
         // `UNION` rather than `UNION ALL` deduplicates, so a cycle terminates
         // without a visited table.
         //
         // `CROSS JOIN` rather than `JOIN` pins the join order. A recursive CTE
-        // has no statistics, so the planner guesses — and it guesses wrong:
-        // measured, it made `relations` the outer loop matching on `scope=?`
-        // alone, which selects every row, then scanned the frontier inside it.
-        // That is a cross product per step, and it used the in-edge index for
-        // both directions, so the out-edge index was never touched at all.
-        // 2-hop over 10k edges took 903 ms. With the order pinned, the frontier
-        // drives and each step is a covering-index probe: 14 ms. Same schema,
-        // same indexes, 64x.
+        // has no statistics and the planner guesses wrong: measured, it made
+        // `relations` the outer loop matching on `scope=?` alone and scanned
+        // the frontier inside it — a cross product per step. 2-hop over 10k
+        // edges took 903 ms; with the order pinned, 14 ms. Same schema, same
+        // indexes, 64x.
         let mut stmt = conn.prepare(
             "WITH RECURSIVE reach(node, depth) AS (
                SELECT ?1, 0
@@ -3502,14 +3443,10 @@ impl Store {
     /// Every entity in a scope with how many edges it has, most connected
     /// first.
     ///
-    /// One query rather than one per node. The obvious shape — list the
-    /// entities, then count each one's edges — is N+1 round trips for a screen
-    /// that redraws four times a second, and the degree is the column that
-    /// makes the list worth reading: it is the cheapest honest answer to "is
-    /// this memory load-bearing, or did it get written once and never used".
-    ///
-    /// Degree counts both directions, because an entity nine facts *point at*
-    /// is exactly as central as one that points at nine.
+    /// One query rather than one per node: the obvious shape is N+1 round trips
+    /// for a screen that redraws four times a second. The degree is what makes
+    /// the list worth reading — the cheapest honest answer to "is this memory
+    /// load-bearing, or was it written once and never used".
     pub fn memory_nodes(&self, scope: Option<&str>, limit: usize) -> Result<Vec<MemoryNode>> {
         let conn = self.conn.lock().expect("store lock poisoned");
         let mut stmt = conn.prepare(
