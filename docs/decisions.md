@@ -3216,3 +3216,42 @@ its loader — copied out of `refresh_workspaces` and then left behind by it —
 never loaded the catalog. So every panel it has ever printed said `none yet —
 /project add <path>` on a database with a full catalog in it: the one claim the
 example makes, failing on the one box a reader would check it against.
+
+## A notice belongs to the screen that raised it
+
+The transcript is drawn on the chat screen and nowhere else, so a notice pushed
+while the cursor was on the fleet was invisible at the moment it meant something
+and still there, out of context, the next time chat was opened. Pressing `x` on
+the wrong fleet row eleven times put eleven identical paragraphs into a
+conversation that had been no part of any of it, and `c` put the whole session
+list there — forty-six rows nobody had asked the chat for.
+
+So `App::push` diverts a `Notice` or a `Hint` raised outside chat into
+`App::flash`, a box drawn over the screen that raised it and gone on its own
+after a few seconds. Nothing about it reaches the conversation.
+
+Only those two variants move. Everything else `push` carries is the harness
+talking, and that is the conversation's own record whatever screen was on
+display when it arrived — a run's output dropped after four seconds would be a
+run's output lost.
+
+Lines raised on the same animation frame are one answer and collect into one
+flash. `Action::Sessions` pushes its list a row at a time, and fifty flashes
+each replacing the last would show the fiftieth conversation and none of the
+other forty-nine. A later keypress is at least one tick away and starts a fresh
+one.
+
+It expires by time rather than by a key, and it is dropped when you leave the
+screen. Carried across, a refusal about a fleet row would hang over the memory
+list, and would be back on screen the next time the fleet was opened, which
+reads as the thing having just happened again.
+
+The cost is real and accepted: a long answer is cut to what fits over the screen
+underneath it, and the rest is a count. The alternative — a notice covering the
+fleet — is a modal with no key to dismiss it, and a fleet you cannot see is a
+fleet you cannot act on.
+
+That cost is why the session picker above is the answer to "get me back into a
+conversation" and `c` is not. `c` prints a list, and a printed list is now a
+list you have a few seconds to read. Anyone who wants to *choose* a thread has
+`Ctrl-G r`, which was built to be chosen from.

@@ -119,6 +119,41 @@ pub enum Entry {
     },
 }
 
+/// A notice raised somewhere the transcript is not on screen.
+///
+/// The transcript is drawn on the chat screen and nowhere else, so a notice
+/// pushed while the cursor is on the fleet is invisible at the moment it is
+/// meant to be read and is still there, out of context, the next time chat is
+/// opened. Pressing `x` on the wrong fleet row eleven times used to put eleven
+/// identical paragraphs in the conversation, and `c` put the whole session list
+/// there — neither of which anybody asked the chat for.
+///
+/// So a notice raised outside chat becomes one of these instead: drawn over the
+/// screen that raised it, and gone on its own after a few seconds. Nothing about
+/// it reaches the conversation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Flash {
+    /// One entry per notice line. Answers that come in lines — the session list,
+    /// a branch listing — arrive here as one `push` per line and are collected
+    /// rather than each replacing the last.
+    pub lines: Vec<String>,
+    /// When it was raised, so it can expire without anyone pressing anything.
+    pub at_ms: i64,
+    /// The animation frame it was raised on, which is how a second line of the
+    /// same answer is told apart from an unrelated later notice. Every line of
+    /// one answer is pushed between two ticks; a later keypress is at least one
+    /// tick away.
+    pub tick: u64,
+}
+
+/// How long a flash stays up: a base, plus reading time per line, capped.
+///
+/// A one-line refusal needs a glance. The session list is fifty rows and is
+/// unreadable in the four seconds that is plenty for the refusal.
+pub fn flash_ms(lines: usize) -> i64 {
+    (4_000 + 1_200 * lines as i64).min(20_000)
+}
+
 /// What is drawn over everything else, and owns the keyboard while it is.
 ///
 /// Overlays are the third layer of the navigation model: chat, workspace,
@@ -452,6 +487,11 @@ pub struct App {
     /// coming back lands where you left.
     pub lists: Vec<ListState>,
     pub overlay: Overlay,
+    /// What a keypress made outside chat has to say for itself, if anything.
+    ///
+    /// See [`Flash`]. `None` means the last one has expired or nothing has
+    /// happened yet.
+    pub flash: Option<Flash>,
     /// The local graph's focus, visit stack and neighbour cursor.
     pub graph: GraphView,
     /// True while the conversation on screen is mid-turn. Other agents may be
@@ -1178,6 +1218,7 @@ impl App {
             back_stack: Vec::new(),
             lists: vec![ListState::default(); Workspace::ALL.len()],
             overlay: Overlay::None,
+            flash: None,
             graph: GraphView::new(String::new()),
             busy: false,
             interrupting: None,
@@ -1759,6 +1800,17 @@ impl App {
     }
 
     pub fn push(&mut self, entry: Entry) {
+        // Feedback for something you did on another screen belongs on that
+        // screen. Only notices and hints are diverted: they are Jod answering a
+        // keypress, and the keypress happened where the cursor is. Everything
+        // else here is the harness talking, and that is the conversation's own
+        // record whatever screen you were looking at when it arrived.
+        if self.workspace != Workspace::Chat {
+            if let Entry::Notice(text) | Entry::Hint(text) = &entry {
+                self.notify(text.clone());
+                return;
+            }
+        }
         self.transcript.push(entry);
         // New output pulls the view back to the bottom only if it was already
         // there. Scrolling up to read something must not be undone by an agent
@@ -1767,6 +1819,28 @@ impl App {
             return;
         }
         self.scroll += 1;
+    }
+
+    /// Say one line over the current screen rather than in the conversation.
+    ///
+    /// Lines raised on the same animation frame are one answer and collect into
+    /// one flash — `Action::Sessions` pushes the session list a row at a time,
+    /// and fifty flashes each replacing the last would show only the last row.
+    /// A later keypress is at least one tick away and starts a fresh one.
+    pub fn notify(&mut self, line: String) {
+        match &mut self.flash {
+            Some(flash) if flash.tick == self.tick => {
+                flash.lines.push(line);
+                flash.at_ms = self.now_ms;
+            }
+            _ => {
+                self.flash = Some(Flash {
+                    lines: vec![line],
+                    at_ms: self.now_ms,
+                    tick: self.tick,
+                })
+            }
+        }
     }
 
     /// Take the typed line, clearing the input. `None` if there was nothing.
@@ -1876,6 +1950,11 @@ impl App {
         self.back_stack.clear();
         self.workspace = ws;
         self.overlay = Overlay::None;
+        // A flash belongs to the screen that raised it. Carrying it across would
+        // mean a refusal about a fleet row hanging over the memory list, and
+        // would put it back on screen when you returned to the fleet minutes
+        // later, which reads as the thing having just happened again.
+        self.flash = None;
         self.reconcile();
     }
 
@@ -1887,6 +1966,7 @@ impl App {
         }
         self.workspace = ws;
         self.overlay = Overlay::None;
+        self.flash = None;
         self.reconcile();
     }
 
@@ -1912,6 +1992,7 @@ impl App {
             return;
         }
         self.workspace = self.back_stack.pop().unwrap_or(Workspace::Chat);
+        self.flash = None;
         self.reconcile();
     }
 
@@ -2449,6 +2530,14 @@ impl App {
     pub fn advance(&mut self, now_ms: i64) {
         self.tick = self.tick.wrapping_add(1);
         self.now_ms = now_ms;
+        // A flash goes away by itself, which is the whole difference between it
+        // and a transcript line. Dropped from the state rather than merely left
+        // undrawn, so nothing can bring an old one back.
+        if let Some(flash) = &self.flash {
+            if now_ms.saturating_sub(flash.at_ms) >= flash_ms(flash.lines.len()) {
+                self.flash = None;
+            }
+        }
     }
 
     pub fn spinner(&self) -> &'static str {
@@ -3107,6 +3196,114 @@ mod tests {
             expanded: false,
             has_children: false,
         }
+    }
+
+    // ---- notices raised off the chat screen ----
+
+    /// The fault this exists to fix, stated as a test. Eleven presses of `x` on
+    /// the wrong fleet row put eleven identical paragraphs into a conversation
+    /// that had not been part of any of it.
+    #[test]
+    fn a_notice_raised_off_the_chat_screen_stays_off_the_conversation() {
+        let mut a = app();
+        a.go(Workspace::Fleet);
+        for _ in 0..11 {
+            a.push(Entry::Notice("`x` works on a project row".into()));
+            // A separate keypress each time, which is what a tick stands for.
+            a.advance(a.now_ms + 250);
+        }
+        assert!(a.transcript.is_empty(), "{:?}", a.transcript);
+        let flash = a.flash.expect("the last one is still on screen");
+        assert_eq!(
+            flash.lines,
+            vec!["`x` works on a project row".to_string()],
+            "one press, one line — the ten before it have gone"
+        );
+    }
+
+    /// Chat is unchanged. The transcript is on screen there, so the words are
+    /// already where they can be read and a flash would be them twice.
+    #[test]
+    fn a_notice_raised_in_chat_still_goes_into_the_conversation() {
+        let mut a = app();
+        a.push(Entry::Notice("roots: /srv/jod".into()));
+        assert_eq!(a.transcript, vec![Entry::Notice("roots: /srv/jod".into())]);
+        assert!(a.flash.is_none());
+    }
+
+    /// Only Jod's own voice moves. A harness that answers while the cursor is
+    /// on the fleet is still the conversation's record, and losing it after
+    /// four seconds would lose the run's output.
+    #[test]
+    fn what_the_harness_says_reaches_the_conversation_from_any_screen() {
+        let mut a = app();
+        a.go(Workspace::Fleet);
+        a.push(Entry::Agent("the parser is ported".into()));
+        assert_eq!(a.transcript, vec![Entry::Agent("the parser is ported".into())]);
+        assert!(a.flash.is_none());
+    }
+
+    /// `Action::Sessions` pushes its answer one row at a time. Each replacing
+    /// the last would show the fiftieth conversation and none of the other
+    /// forty-nine.
+    #[test]
+    fn every_line_of_one_answer_collects_into_one_flash() {
+        let mut a = app();
+        a.go(Workspace::Fleet);
+        for row in ["46 conversations", "a2ddcf7c  build a racing game", "b7239986  racing-3d"] {
+            a.push(Entry::Notice(row.into()));
+        }
+        let flash = a.flash.expect("a flash");
+        assert_eq!(flash.lines.len(), 3, "{:?}", flash.lines);
+        assert!(flash.lines[0].contains("46 conversations"));
+    }
+
+    /// And a later keypress is a different answer, not more of the last one.
+    #[test]
+    fn a_later_keypress_starts_a_fresh_flash() {
+        let mut a = app();
+        a.go(Workspace::Fleet);
+        a.push(Entry::Notice("sorted by newest".into()));
+        a.advance(a.now_ms + 250);
+        a.push(Entry::Notice("closed works hidden".into()));
+        assert_eq!(
+            a.flash.expect("a flash").lines,
+            vec!["closed works hidden".to_string()]
+        );
+    }
+
+    /// The whole difference between a flash and a transcript line: nobody has
+    /// to press anything to be rid of it.
+    #[test]
+    fn a_flash_goes_away_on_its_own() {
+        let mut a = app();
+        a.go(Workspace::Fleet);
+        a.push(Entry::Notice("nothing to stop".into()));
+        a.advance(a.now_ms + flash_ms(1) - 1);
+        assert!(a.flash.is_some(), "still inside its time");
+        a.advance(a.now_ms + 2);
+        assert!(a.flash.is_none(), "and gone after it");
+    }
+
+    /// A long answer is up for longer, because four seconds is a glance and the
+    /// session list is fifty rows.
+    #[test]
+    fn a_longer_answer_stays_up_for_longer() {
+        assert!(flash_ms(40) > flash_ms(1));
+        assert!(flash_ms(1_000) <= 20_000, "and never indefinitely");
+    }
+
+    /// It belongs to the screen that raised it. Carried across, a refusal about
+    /// a fleet row would hang over the memory list, and would be back on screen
+    /// the next time the fleet was opened — which reads as it happening again.
+    #[test]
+    fn leaving_the_screen_takes_the_flash_with_it() {
+        let mut a = app();
+        a.go(Workspace::Fleet);
+        a.push(Entry::Notice("nothing to stop".into()));
+        assert!(a.flash.is_some());
+        a.go(Workspace::Memory);
+        assert!(a.flash.is_none());
     }
 
     /// A heredoc body is a file, and it already has a place to be — the diff

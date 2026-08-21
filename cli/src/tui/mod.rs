@@ -8635,7 +8635,7 @@ mod tests {
         assert!(press(&mut app, KeyCode::Enter).is_none());
 
         assert_eq!(app.input, "", "the line must be consumed");
-        let last = format!("{:?}", app.transcript.last().unwrap());
+        let last = last_notice(&app);
         assert!(
             last.contains("usage"),
             "expected a usage notice, got {last}"
@@ -8724,7 +8724,7 @@ mod tests {
         apply_slash(&mut app, command::Slash::Resume("ab".into()));
 
         assert_eq!(app.resume, Resume::Fresh, "must not guess");
-        assert!(format!("{:?}", app.transcript.last().unwrap()).contains("matches 2"));
+        assert!(last_notice(&app).contains("matches 2"));
     }
 
     /// Resuming an agent that never reported a conversation would quietly start
@@ -8736,8 +8736,7 @@ mod tests {
         apply_slash(&mut app, command::Slash::Resume("abcdef12".into()));
 
         assert_eq!(app.resume, Resume::Fresh);
-        assert!(format!("{:?}", app.transcript.last().unwrap())
-            .contains("has not reported a conversation"));
+        assert!(last_notice(&app).contains("has not reported a conversation"));
     }
 
     #[test]
@@ -8855,12 +8854,9 @@ mod tests {
         assert_eq!(app.workspace, Workspace::Fleet);
         assert_eq!(app.overlay, Overlay::None);
         assert!(
-            app.transcript.iter().any(|entry| matches!(
-                entry,
-                Entry::Notice(said) if said.contains("keeps running")
-            )),
+            spoken(&app).iter().any(|said| said.contains("keeps running")),
             "the run's survival is said, not asked about: {:?}",
-            app.transcript
+            spoken(&app)
         );
     }
 
@@ -8931,7 +8927,7 @@ mod tests {
         let mut app = app_on(HarnessKind::ClaudeCode);
         app.watching = Some("abc123".into());
         assert_eq!(ctrl(&mut app, KeyCode::Char('x')), None);
-        assert!(format!("{:?}", app.transcript.last().unwrap()).contains("nothing running"));
+        assert!(last_notice(&app).contains("nothing running"));
     }
 
     /// Walking out on four background jobs without being told is the same
@@ -8944,7 +8940,7 @@ mod tests {
 
         ctrl(&mut app, KeyCode::Char('c'));
         assert!(!app.should_quit, "the first press must not leave");
-        assert!(format!("{:?}", app.transcript.last().unwrap()).contains("2 agents"));
+        assert!(last_notice(&app).contains("2 agents"));
 
         ctrl(&mut app, KeyCode::Char('c'));
         assert!(app.should_quit, "the second press goes anyway");
@@ -9027,11 +9023,9 @@ mod tests {
             select_main(&mut app);
             assert_eq!(press(&mut app, KeyCode::Char(key)), None, "`{key}`");
             assert!(
-                app.transcript
-                    .iter()
-                    .any(|e| matches!(e, Entry::Notice(n) if n.contains("not an agent"))),
+                spoken(&app).iter().any(|n| n.contains("not an agent")),
                 "`{key}` should say why: {:?}",
-                app.transcript
+                spoken(&app)
             );
         }
     }
@@ -9111,7 +9105,7 @@ mod tests {
         let mut app = panel_with_agents();
         press(&mut app, KeyCode::Down);
         assert_eq!(press(&mut app, KeyCode::Char('s')), None);
-        assert!(format!("{:?}", app.transcript.last().unwrap()).contains("nothing to stop"));
+        assert!(last_notice(&app).contains("nothing to stop"));
     }
 
     #[test]
@@ -9144,7 +9138,7 @@ mod tests {
         app.agents[0].session = None;
         press(&mut app, KeyCode::Char('r'));
         assert_eq!(app.resume, Resume::Fresh);
-        assert!(format!("{:?}", app.transcript.last().unwrap()).contains("never reported"));
+        assert!(last_notice(&app).contains("never reported"));
     }
 
     /// A run that finished is the ordinary target of `r`, and the half of this
@@ -9174,7 +9168,7 @@ mod tests {
 
         assert_eq!(press(&mut app, KeyCode::Char('r')), None);
         assert_eq!(app.resume, Resume::Fresh, "the dead session was bound");
-        let said = format!("{:?}", app.transcript.last().unwrap());
+        let said = last_notice(&app);
         assert!(said.contains("killed"), "the refusal is silent about why: {said}");
         assert!(
             said.contains("press d"),
@@ -9197,7 +9191,7 @@ mod tests {
 
         assert_eq!(press(&mut app, KeyCode::Char('r')), None);
         assert_eq!(app.resume, Resume::Fresh, "the dead session was bound");
-        assert!(format!("{:?}", app.transcript.last().unwrap()).contains("failed"));
+        assert!(last_notice(&app).contains("failed"));
     }
 
     /// The decision on its own, over all four statuses at once, so that the two
@@ -9293,7 +9287,7 @@ mod tests {
             apply_slash(&mut app, command::Slash::Stop("ab".into())),
             None
         );
-        assert!(format!("{:?}", app.transcript.last().unwrap()).contains("matches 2"));
+        assert!(last_notice(&app).contains("matches 2"));
     }
 
     #[test]
@@ -9303,7 +9297,7 @@ mod tests {
             apply_slash(&mut app, command::Slash::Watch("zz".into())),
             None
         );
-        assert!(format!("{:?}", app.transcript.last().unwrap()).contains("no agent"));
+        assert!(last_notice(&app).contains("no agent"));
     }
 
     #[test]
@@ -9868,10 +9862,12 @@ mod tests {
         press(&mut app, KeyCode::Char('/'));
         type_line(&mut app, "stop");
         assert_eq!(app.here().filter.as_deref(), Some("stop"));
+        // `spoken` and not the transcript: this screen's answers are flashes, so
+        // an empty transcript would prove nothing about whether `s` ran.
         assert!(
-            app.transcript.is_empty(),
+            spoken(&app).is_empty(),
             "nothing was stopped: {:?}",
-            app.transcript
+            spoken(&app)
         );
     }
 
@@ -9943,9 +9939,9 @@ mod tests {
         press(&mut app, KeyCode::Char('S'));
         assert_eq!(app.here().sort, 1);
         assert!(
-            format!("{:?}", app.transcript.last().unwrap()).contains("sorted by"),
+            last_notice(&app).contains("sorted by"),
             "{:?}",
-            app.transcript.last()
+            app.flash
         );
     }
 
@@ -10200,7 +10196,7 @@ mod tests {
         let mut app = app_on(HarnessKind::ClaudeCode);
         ctrl(&mut app, KeyCode::Char('g'));
         press(&mut app, KeyCode::Char('u'));
-        assert!(format!("{:?}", app.transcript.last().unwrap()).contains("nothing unread"));
+        assert!(last_notice(&app).contains("nothing unread"));
     }
 
     // ---- tasks ----
@@ -10357,9 +10353,7 @@ mod tests {
             &mut app,
             command::Slash::OpenNamed(Workspace::Schedules, "nope".into()),
         );
-        assert!(
-            format!("{:?}", app.transcript.last().unwrap()).contains("no schedules called nope")
-        );
+        assert!(last_notice(&app).contains("no schedules called nope"));
     }
 
     /// A verb the store cannot carry out yet is named, not silently ignored:
@@ -10492,13 +10486,14 @@ mod tests {
     #[test]
     fn t_on_a_schedule_prints_its_next_fire_times_without_asking_the_store() {
         let mut app = with_schedules();
-        let before = app.transcript.len();
         assert_eq!(press(&mut app, KeyCode::Char('t')), None);
-        let printed = format!("{:?}", &app.transcript[before..]);
+        // Every line of one answer collects into one flash rather than each
+        // replacing the last — the whole point of `App::notify`'s tick check.
+        let printed = format!("{:?}", app.flash);
         assert!(printed.contains("0 2 * * *"), "{printed}");
         assert_eq!(
-            app.transcript.len() - before,
-            DRY_RUN_FIRES + 1,
+            app.flash.as_ref().map(|f| f.lines.len()),
+            Some(DRY_RUN_FIRES + 1),
             "one heading and five times: {printed}"
         );
     }
@@ -10548,7 +10543,7 @@ mod tests {
     fn enter_on_a_webhook_that_has_started_no_run_says_so_rather_than_nothing() {
         let mut app = with_hooks(None);
         assert_eq!(press(&mut app, KeyCode::Enter), None);
-        let last = format!("{:?}", app.transcript.last().unwrap());
+        let last = last_notice(&app);
         assert!(last.contains("has started a run"), "{last}");
     }
 
@@ -10623,7 +10618,7 @@ mod tests {
             apply_slash(&mut app, command::Slash::Pause("nope".into())),
             None
         );
-        let last = format!("{:?}", app.transcript.last().unwrap());
+        let last = last_notice(&app);
         assert!(last.contains("no schedule or goal called nope"), "{last}");
     }
 
@@ -10637,7 +10632,7 @@ mod tests {
             apply_slash(&mut app, command::Slash::Pause("nightly-inbox".into())),
             None
         );
-        let last = format!("{:?}", app.transcript.last().unwrap());
+        let last = last_notice(&app);
         assert!(last.contains("both a schedule and a goal"), "{last}");
     }
 
@@ -11138,7 +11133,7 @@ mod tests {
         // Pressed again from the chat itself it says so, rather than clearing
         // the transcript to replay the same lines back into it.
         enter_main(&jod, &mut app, &opts, &mut thread, false).await;
-        let said = format!("{:?}", app.transcript.last().unwrap());
+        let said = last_notice(&app);
         assert!(said.contains("already in the main chat"), "{said}");
     }
 
@@ -11258,7 +11253,7 @@ mod tests {
         let action = apply_slash(&mut app, command::Slash::Model(Some("sonnet".into()))).unwrap();
         perform(&jod, &mut app, &options(), &mut thread, action).await;
 
-        let last = format!("{:?}", app.transcript.last().unwrap());
+        let last = last_notice(&app);
         assert!(last.contains("this turn only"), "{last}");
     }
 
@@ -11305,7 +11300,7 @@ mod tests {
         .await;
 
         assert_eq!(app.schedules[0].state, data::ScheduleState::Paused);
-        let last = format!("{:?}", app.transcript.last().unwrap());
+        let last = last_notice(&app);
         assert!(last.contains("paused"), "{last}");
     }
 
@@ -11485,7 +11480,7 @@ mod tests {
 
         assert_eq!(press(&mut app, KeyCode::Char('s')), None);
 
-        let said = format!("{:?}", app.transcript);
+        let said = format!("{:?}", spoken(&app));
         assert!(said.contains("nothing to stop"), "{said}");
         assert!(said.contains("r2"), "and it names the loose run: {said}");
     }
@@ -11497,10 +11492,17 @@ mod tests {
         let mut app = with_a_loose_run();
         press(&mut app, KeyCode::End);
         press(&mut app, KeyCode::Char('s'));
-        let said = format!("{:?}", app.transcript);
+        // Read through `spoken`, not the transcript. This is a *negative*
+        // assertion on a fleet key, and the fleet's answers are flashes — read
+        // off an empty transcript it would pass without the key being pressed.
+        let said = format!("{:?}", spoken(&app));
         assert!(
             !said.contains("not a run"),
             "the loose row was refused as if it were a heading: {said}"
+        );
+        assert!(
+            said.contains("nothing to stop"),
+            "and it did answer, so the check above is not vacuous: {said}"
         );
     }
 
@@ -11564,7 +11566,7 @@ mod tests {
             let mut app = on_the_tree(row.clone());
             app.agents = vec![running("r1", "run one")];
             assert_eq!(press(&mut app, KeyCode::Char('s')), None, "from {row:?}");
-            let said = format!("{:?}", app.transcript.last().unwrap());
+            let said = last_notice(&app);
             assert!(said.contains(word), "from {row:?}: {said}");
             assert!(said.contains("not a run"), "from {row:?}: {said}");
         }
@@ -11624,7 +11626,7 @@ mod tests {
         app.list_mut(Workspace::Fleet).selected = Some("r1".into());
 
         assert_eq!(press(&mut app, KeyCode::Char('s')), None);
-        let said = format!("{:?}", app.transcript.last().unwrap());
+        let said = last_notice(&app);
         assert!(said.contains("the main chat"), "{said}");
     }
 
@@ -11919,7 +11921,7 @@ mod tests {
         // repository from a keystroke aimed at one job inside it.
         app.tree.selected = Some(NodeId::work("w1"));
         assert_eq!(press(&mut app, KeyCode::Char('x')), None);
-        let said = format!("{:?}", app.transcript.last().unwrap());
+        let said = last_notice(&app);
         assert!(said.contains("project row"), "{said}");
 
         // The pinned chat is a sentinel and not a row in the forest, so
@@ -11927,7 +11929,7 @@ mod tests {
         // project row on this screen to go to.
         app.tree.selected = Some(crate::tui::fleet::main_id());
         assert_eq!(press(&mut app, KeyCode::Char('x')), None);
-        let said = format!("{:?}", app.transcript.last().unwrap());
+        let said = last_notice(&app);
         assert!(said.contains("project row"), "{said}");
     }
 
@@ -11944,7 +11946,7 @@ mod tests {
         assert!(!app.has_tree(), "this case only exists without a forest");
 
         assert_eq!(press(&mut app, KeyCode::Char('x')), None);
-        let said = format!("{:?}", app.transcript.last().unwrap());
+        let said = last_notice(&app);
         assert!(said.contains("no projects on the fleet"), "{said}");
         assert!(said.contains("/project add"), "{said}");
     }
@@ -12060,7 +12062,7 @@ mod tests {
         press(&mut app, KeyCode::Char('T'));
         assert_eq!(app.workspace, Workspace::Fleet, "nothing to open");
         assert!(app.traffic_of.is_none());
-        let said = format!("{:?}", app.transcript.last().unwrap());
+        let said = last_notice(&app);
         assert!(said.contains("no work"), "{said}");
     }
 
@@ -12074,7 +12076,7 @@ mod tests {
         assert!(!app.has_tree());
         press(&mut app, KeyCode::Char('T'));
         assert_eq!(app.workspace, Workspace::Fleet);
-        let said = format!("{:?}", app.transcript.last().unwrap());
+        let said = last_notice(&app);
         assert!(said.contains("traffic is a work's bus"), "{said}");
     }
 
@@ -12144,7 +12146,7 @@ mod tests {
 
         press(&mut app, KeyCode::Char('f'));
         assert_eq!(app.traffic_shown, traffic::Shown::Problems);
-        let said = format!("{:?}", app.transcript.last().unwrap());
+        let said = last_notice(&app);
         assert!(said.contains(traffic::Shown::Problems.label()), "{said}");
 
         for _ in 1..traffic::Shown::ALL.len() {
@@ -12171,7 +12173,7 @@ mod tests {
         app.go(Workspace::Traffic);
 
         press(&mut app, KeyCode::Enter);
-        let said = format!("{:?}", app.transcript.last().unwrap());
+        let said = last_notice(&app);
         assert!(said.contains("asker"), "{said}");
         assert!(said.contains("are you free?"), "the message itself: {said}");
         assert!(
@@ -12193,7 +12195,7 @@ mod tests {
             Action::OpenScheduleRun("nightly-inbox".into()),
         ] {
             perform(&jod, &mut app, &options(), &mut Thread::default(), action).await;
-            let last = format!("{:?}", app.transcript.last().unwrap());
+            let last = last_notice(&app);
             assert!(last.contains(NO_STORE), "{last}");
         }
         assert!(!app.should_quit, "and the session is still up");
@@ -12675,7 +12677,7 @@ mod tests {
             &mut app,
             command::Slash::Refused("mode does not take “yolo”".into()),
         );
-        let said = format!("{:?}", app.transcript.last().unwrap());
+        let said = last_notice(&app);
         assert!(said.contains("yolo"), "{said}");
         assert!(!said.contains("/help"), "{said}");
     }
@@ -12692,7 +12694,7 @@ mod tests {
             Action::Config(config::Request::List),
         )
         .await;
-        let said = format!("{:?}", app.transcript.last().unwrap());
+        let said = last_notice(&app);
         assert!(said.contains(NO_STORE), "{said}");
     }
 
@@ -13276,10 +13278,28 @@ mod tests {
     }
 
     fn last_notice(app: &App) -> String {
-        match app.transcript.last() {
-            Some(Entry::Notice(text)) => text.clone(),
-            other => panic!("expected a notice, got {other:?}"),
+        match spoken(app).pop() {
+            Some(text) => text,
+            None => panic!("expected a notice, got {:?}", app.transcript.last()),
         }
+    }
+
+    /// Everything Jod has said in its own voice, wherever it landed.
+    ///
+    /// A notice raised off the chat screen becomes a flash instead of a
+    /// transcript line — see `App::push` — so a test that reads only the
+    /// transcript asserts which container the words went into rather than
+    /// whether they were said at all. Ordered: the transcript is what was said
+    /// earlier, and the flash is what was said just now.
+    fn spoken(app: &App) -> Vec<String> {
+        app.transcript
+            .iter()
+            .filter_map(|e| match e {
+                Entry::Notice(text) | Entry::Hint(text) => Some(text.clone()),
+                _ => None,
+            })
+            .chain(app.flash.iter().flat_map(|f| f.lines.iter().cloned()))
+            .collect()
     }
 
     /// The constraint E2.S3 states outright: the way into the rail must not cost

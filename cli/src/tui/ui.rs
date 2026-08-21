@@ -293,6 +293,17 @@ pub fn draw(f: &mut Frame, app: &App) -> Painted {
     draw_completions(f, app, input);
     draw_mention(f, app, input);
     draw_overlay(f, app);
+    // After the overlay, and that ordering is load-bearing. An overlay can raise
+    // a notice without closing itself — `continue_session` refuses a thread the
+    // harness never named and leaves the session list up — so a flash drawn
+    // underneath would be a refusal nobody can see, which is the fault this
+    // whole thing exists to fix, one layer further in.
+    //
+    // Only off the chat screen. There the same words went into the transcript,
+    // which is on screen, and saying them twice is worse than saying them once.
+    if app.workspace != Workspace::Chat {
+        draw_flash(f, app, body);
+    }
     Painted {
         viewport: height,
         rail: hits,
@@ -2150,6 +2161,72 @@ fn draw_floating_panel(f: &mut Frame, app: &App, body: Rect) -> PanelHits {
     };
     f.render_widget(Clear, area);
     draw_panel(f, app, area)
+}
+
+/// How many rows of a flash are drawn before the rest becomes a count.
+///
+/// A flash floats over the screen that raised it, so it has to leave that screen
+/// usable: a fleet you cannot see is a fleet you cannot act on. Two thirds of
+/// the body at the most, and never more than twelve rows.
+fn flash_room(body: Rect) -> usize {
+    (((body.height as usize).saturating_sub(2) * 2) / 3).clamp(1, 12)
+}
+
+/// What a keypress on this screen had to say, floating over it.
+///
+/// The transcript is drawn on the chat screen and nowhere else, so this is the
+/// only place a notice raised on a workspace can be read at the moment it is
+/// about something. Anchored to the bottom, above the keybar, because that is
+/// where the eye already is after pressing a key, and because the top of every
+/// workspace is its header and its first rows.
+///
+/// It expires on its own — see [`app::Flash`] — so there is no key to dismiss it
+/// and none is advertised.
+fn draw_flash(f: &mut Frame, app: &App, body: Rect) {
+    let Some(flash) = &app.flash else {
+        return;
+    };
+    // Under this there is no room for a box *and* a screen underneath it, and a
+    // notice covering the whole screen is a modal with no way out.
+    if body.height < 6 || body.width < 24 {
+        return;
+    }
+    let inner = body.width.saturating_sub(4) as usize;
+    let room = flash_room(body);
+    // Wrapped before it is counted. Counting the notices instead would let one
+    // long sentence fill the box and report nothing as dropped.
+    let mut rows: Vec<String> = Vec::new();
+    let mut left = 0usize;
+    for (i, line) in flash.lines.iter().enumerate() {
+        if rows.len() >= room {
+            left = flash.lines.len() - i;
+            break;
+        }
+        rows.extend(wrap(line, inner, 0));
+    }
+    rows.truncate(room);
+    let height = rows.len() as u16 + 2;
+    let area = Rect {
+        x: body.x,
+        y: body.y + body.height - height,
+        width: body.width,
+        height,
+    };
+    let lines: Vec<Line> = rows
+        .into_iter()
+        .map(|row| Line::from(Span::styled(format!(" {row}"), fg(WARN))))
+        .collect();
+    let mut block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(fg(WARN))
+        .title(" notice ");
+    // Said rather than silently cut. A list that stops at twelve without saying
+    // so reads as a list of twelve.
+    if left > 0 {
+        block = block.title_bottom(format!(" … and {left} more "));
+    }
+    f.render_widget(Clear, area);
+    f.render_widget(Paragraph::new(lines).block(block), area);
 }
 
 /// Every conversation this process knows about, two rows each.
@@ -6200,6 +6277,73 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    // ---- the flash ----
+
+    fn flashing(lines: &[&str]) -> App {
+        let mut a = app();
+        a.go(Workspace::Fleet);
+        for line in lines {
+            a.push(Entry::Notice((*line).to_string()));
+        }
+        a
+    }
+
+    /// The other half of the fix. Keeping a notice out of the conversation is
+    /// only right if it is readable where it was raised — otherwise the key
+    /// silently does nothing, which is worse than the clutter.
+    #[test]
+    fn a_notice_raised_on_the_fleet_is_drawn_over_the_fleet() {
+        let a = flashing(&["untracking is a repository's, so `x` works on a project row"]);
+        let frame = rendered(&a, 120, 30);
+        assert!(frame.contains("works on a project row"), "{frame}");
+        assert!(frame.contains("notice"), "and it is labelled: {frame}");
+        assert!(
+            frame.contains("fleet"),
+            "with the screen it belongs to still under it: {frame}"
+        );
+    }
+
+    /// It has to leave the screen usable. A notice covering the fleet is a
+    /// modal with no key to dismiss it.
+    #[test]
+    fn a_long_answer_gives_most_of_the_screen_back_to_the_fleet() {
+        let rows: Vec<String> = (0..60).map(|i| format!("conversation number {i}")).collect();
+        let a = flashing(&rows.iter().map(String::as_str).collect::<Vec<_>>());
+        let frame = rendered(&a, 120, 30);
+        let over = frame.lines().filter(|l| l.contains("conversation number")).count();
+        assert!(over <= 12, "the flash took {over} rows: {frame}");
+        assert!(
+            frame.contains("more"),
+            "and a list cut short has to say so: {frame}"
+        );
+    }
+
+    /// An overlay can raise a notice and stay open — `continue_session` refuses
+    /// a thread the harness never named and leaves the session list up. Drawn
+    /// under the overlay that raised it, the refusal is invisible, which is the
+    /// original fault one layer further in.
+    #[test]
+    fn a_notice_raised_by_an_open_overlay_is_drawn_over_it() {
+        let mut a = flashing(&["a fresh fork never reported a conversation"]);
+        a.overlay = Overlay::Sessions(super::super::sessions::Browser::default());
+        let frame = rendered(&a, 120, 30);
+        assert!(frame.contains("never reported a conversation"), "{frame}");
+        assert!(
+            frame.contains("every conversation"),
+            "and the list that raised it is still readable above: {frame}"
+        );
+    }
+
+    /// On chat the same words are in the transcript, which is on screen. Drawn
+    /// again over it they would be the same sentence twice.
+    #[test]
+    fn chat_draws_no_flash() {
+        let mut a = flashing(&["nothing to stop"]);
+        a.workspace = Workspace::Chat;
+        let frame = rendered(&a, 120, 30);
+        assert!(!frame.contains("nothing to stop"), "{frame}");
     }
 
     fn member(name: &str, harness: HarnessKind, status: MemberStatus) -> Member {
