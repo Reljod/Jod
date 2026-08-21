@@ -277,7 +277,8 @@ than expecting them to be remembered.
 | `/watch <id>` · `/stop <id>` · `/attach <id>` | act on one agent, by id prefix |
 | `/todo <title>` · `/done <id>` | write to the team's board |
 | `/agents` · `/team` | the panels, same as `Ctrl-A` and `Ctrl-G` |
-| `/help` · `/clear` · `/exit` | |
+| `/clear` | start over where you are standing — the screen empties and the next message carries no context; `Ctrl-G l` empties the screen only |
+| `/help` · `/exit` | |
 
 Two rules keep the set honest. **A command exists only if Jod can do it**: there
 is no `/compact` or `/undo`, because a command that silently does nothing is
