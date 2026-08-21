@@ -2096,6 +2096,23 @@ fn draw_projects(f: &mut Frame, app: &App, area: Rect) -> PanelHits {
         projects: Vec::new(),
     };
 
+    // Names that more than one checkout answers to. Two repositories whose
+    // directories are both called `web` are catalogued under one name, and the
+    // panel drew them as two identical rows — so the one screen whose job is
+    // "which repository does the next sentence land in" could not tell you.
+    // The parent directory is what differs, and it is the shortest thing that
+    // does.
+    let shared: std::collections::HashSet<&str> = {
+        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        let mut twice: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for p in &rows {
+            if !seen.insert(p.name.as_str()) {
+                twice.insert(p.name.as_str());
+            }
+        }
+        twice
+    };
+
     let lines: Vec<Line> = visible
         .iter()
         .enumerate()
@@ -2124,9 +2141,24 @@ fn draw_projects(f: &mut Frame, app: &App, area: Rect) -> PanelHits {
                 (false, true) => bold(GOOD),
                 (false, false) => fg(AGENT),
             };
+            // The qualifier is drawn muted and after the name, so a catalog
+            // with no clashes in it reads exactly as it did.
+            let qualifier = shared
+                .contains(p.name.as_str())
+                .then(|| {
+                    p.path
+                        .parent()
+                        .and_then(|parent| parent.file_name())
+                        .map(|dir| format!(" in {}", dir.to_string_lossy()))
+                })
+                .flatten()
+                .unwrap_or_default();
+            let room = inner.saturating_sub(3);
+            let name = cut(&p.name, room.saturating_sub(qualifier.chars().count()));
             Line::from(vec![
                 Span::styled(marker, fg(if is_current { GOOD } else { MUTED })),
-                Span::styled(cut(&p.name, inner.saturating_sub(3)), style),
+                Span::styled(name, style),
+                Span::styled(cut(&qualifier, room), fg(MUTED)),
             ])
         })
         .collect();
@@ -7888,6 +7920,39 @@ mod tests {
         assert!(screen.contains("projects"), "{screen}");
         assert!(screen.contains("tetris"), "{screen}");
         assert!(screen.contains("jod"), "{screen}");
+    }
+
+    /// Two checkouts whose directories share a name are two rows, and the
+    /// panel has to say which is which.
+    ///
+    /// Found by running it: two repositories both called `web` drew as two
+    /// identical rows, on the one box whose whole job is saying which
+    /// repository the next sentence lands in. Pressing `⏎` on either entered "a
+    /// manager" with no way to know whose.
+    #[test]
+    fn two_projects_with_one_name_are_told_apart_by_where_they_are() {
+        let mut a = with_catalog(&["web", "gamma"], None);
+        a.projects_open = true;
+        let mut other = catalogued("web");
+        other.id = "web-two".into();
+        other.path = "/home/reljod/work/web".into();
+        a.projects.push(other);
+
+        let screen = rendered(&a, 140, 30);
+        assert!(
+            screen.contains("web in repo"),
+            "the first says which directory it is in:\n{screen}"
+        );
+        assert!(
+            screen.contains("web in work"),
+            "and so does the second:\n{screen}"
+        );
+        // A name nothing else shares is left exactly as it was — the qualifier
+        // is for the clash, not decoration on every row.
+        assert!(
+            screen.lines().any(|l| l.contains("gamma") && !l.contains(" in ")),
+            "an unshared name is not qualified:\n{screen}"
+        );
     }
 
     /// The one fact the box exists for.

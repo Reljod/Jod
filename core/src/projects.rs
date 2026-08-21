@@ -671,6 +671,33 @@ impl Store {
         })
     }
 
+    /// The project catalogued at exactly this path.
+    ///
+    /// `projects.path` is UNIQUE, so unlike a name this always answers with one
+    /// project or none. That is the whole reason it exists: two checkouts whose
+    /// directories share a name are catalogued under one name, and until this
+    /// there was no string that reached either of them.
+    ///
+    /// Exact, not the longest-prefix walk [`Store::project_for_path`] does. A
+    /// caller naming a path means *that* repository; a caller asking which
+    /// project some file lives under means the other function.
+    ///
+    /// Normalised on the way in, the same as it was on the way out, or a
+    /// trailing slash would miss a row that is plainly there.
+    pub fn project_at_path(&self, path: impl AsRef<Path>) -> Result<Option<Project>> {
+        let text = crate::roots::normalise(path.as_ref())
+            .to_string_lossy()
+            .into_owned();
+        let conn = self.conn.lock().expect("store lock poisoned");
+        Ok(conn
+            .query_row(
+                &format!("SELECT {PROJECT_COLUMNS} FROM projects WHERE path = ?1"),
+                params![text],
+                read_project,
+            )
+            .optional()?)
+    }
+
     pub fn project(&self, id: &str) -> Result<Option<Project>> {
         let conn = self.conn.lock().expect("store lock poisoned");
         Ok(conn

@@ -3614,6 +3614,22 @@ fn named_project(
     absent_because: &str,
     ambiguous_advice: &str,
 ) -> Result<crate::projects::Project, ToolError> {
+    // A path first, because `projects.path` is UNIQUE and a name is not.
+    //
+    // Two checkouts with the same directory name are catalogued under one name
+    // and neither can be addressed: the bare name matches both and is refused,
+    // and there is nothing else to say. Observed by running it — the router
+    // asked which `web` was meant, the answer came back, and every attempt to
+    // act on it was refused, including two that named the full path. The path
+    // is the one answer that cannot be ambiguous, so it is worth accepting from
+    // a caller that has it.
+    //
+    // Tried before the name rather than after, so a project whose *name* is a
+    // path cannot shadow the real checkout at that path.
+    let by_path = wanted.starts_with('/').then(|| store.project_at_path(wanted));
+    if let Some(Ok(Some(project))) = by_path {
+        return Ok(project);
+    }
     let found = store
         .projects_by_name(wanted)
         .map_err(|e| ToolError::Refused(format!("could not search the catalog: {e}")))?;
@@ -3642,8 +3658,14 @@ fn named_project(
                 .map(|p| format!("{} ({})", p.name, p.path.display()))
                 .collect::<Vec<_>>()
                 .join(", ");
+            // The way out is named, because without it this refusal is a dead
+            // end: the bare name is the only thing either project answers to,
+            // so a caller told "pick one" has nothing to pick *with*. A path is
+            // unique and both are printed just above.
             Err(ToolError::Refused(format!(
-                "`{wanted}` is the name of {} projects — {candidates}. {ambiguous_advice}",
+                "`{wanted}` is the name of {} projects — {candidates}. {ambiguous_advice} \
+                 Once he has said which, pass that project's full path here instead of its \
+                 name — a path names exactly one project and a shared name cannot.",
                 several.len()
             )))
         }
@@ -6062,6 +6084,55 @@ mod tests {
                 !said.contains("not the main chat's to call"),
                 "a manager or an engineer must still be able to open work: {said}"
             );
+        }
+
+        /// Two checkouts whose directories share a name are still each
+        /// reachable, because a path is.
+        ///
+        /// Found by running it. Two repositories both called `web` were
+        /// catalogued; the router correctly refused to guess and asked which
+        /// one was meant; the answer came back — and then every way of acting
+        /// on that answer was refused, including two attempts that named the
+        /// full path. The catalog printed `web, web, …` and neither `web` could
+        /// be addressed at all. A question nobody can answer is worse than one
+        /// nobody asks.
+        #[tokio::test]
+        async fn a_project_whose_name_is_shared_is_still_reachable_by_its_path() {
+            let base = format!("/tmp/jod-two-webs-{}", std::process::id());
+            let one = format!("{base}/one/web");
+            let two = format!("{base}/two/web");
+            let store = Arc::new(Store::in_memory().unwrap());
+            std::fs::create_dir_all(&one).unwrap();
+            std::fs::create_dir_all(&two).unwrap();
+            let first = store.add_project(NewProject::at(&one)).unwrap();
+            let second = store.add_project(NewProject::at(&two)).unwrap();
+            assert_eq!(first.name, second.name, "the premise: one name, two rows");
+
+            // The bare name is refused, and now says what to do about it.
+            let refusal = named_project(&store, &first.name, "", "Ask Reljod which.")
+                .expect_err("a shared name cannot resolve");
+            let ToolError::Refused(said) = refusal else {
+                panic!("a shared name is refused, not failed");
+            };
+            assert!(
+                said.contains("full path"),
+                "the refusal has to name the way out: {said}"
+            );
+
+            // And the path reaches exactly the one asked for, both ways round.
+            let got = named_project(&store, &one, "", "").expect("the first web, by path");
+            assert_eq!(got.id, first.id);
+            let got = named_project(&store, &two, "", "").expect("the second web, by path");
+            assert_eq!(got.id, second.id);
+
+            // A path nothing is catalogued at still falls through to the name
+            // branch rather than resolving to something near it.
+            assert!(
+                named_project(&store, &format!("{base}/three/web"), "", "").is_err(),
+                "an uncatalogued path is not a project",
+            );
+
+            std::fs::remove_dir_all(&base).ok();
         }
 
         /// A manager has no roots, and does not need to be told its own
