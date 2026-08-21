@@ -81,17 +81,16 @@ enum Command {
         detach: bool,
         /// Watch this run for signs of life, and reap it if it wedges.
         ///
-        /// For work measured in hours. A run that stops producing output for
-        /// longer than its stall window is stopped and marked failed by the
-        /// scheduler, rather than sitting there looking busy for ever. Needs
-        /// `jod daemon` to be running — the sweep happens on its tick.
+        /// For work measured in hours: a run silent for longer than its stall
+        /// window is stopped and marked failed rather than sitting there
+        /// looking busy. Needs `jod daemon` running — the sweep happens on its
+        /// tick.
         #[arg(long)]
         watch: bool,
         /// How long this run may go silent before it counts as stalled.
         ///
-        /// Minutes. Defaults to 20, which is deliberately generous: killing a
-        /// slow run costs work somebody waited for, while noticing a wedged one
-        /// late costs an idle process.
+        /// Minutes, defaulting to 20. Killing a slow run costs work somebody
+        /// waited for; noticing a wedged one late costs an idle process.
         #[arg(long, value_name = "MINUTES", requires = "watch")]
         stall_after: Option<i64>,
         /// Emit raw event JSON, one per line, instead of formatted output.
@@ -99,11 +98,9 @@ enum Command {
         json: bool,
         /// Hide the agent's thinking, leaving its tool calls and its answer.
         ///
-        /// Thinking is shown by default. Hidden, a run that spends a minute
-        /// deciding *not* to do something shows a gap and then an answer, and
-        /// the reasoning that produced it is the part you most needed to read.
-        /// It goes to stderr like every other progress line, so
-        /// `jod run … > out.txt` still captures the answer alone.
+        /// Shown by default: hidden, a run that spends a minute deciding *not*
+        /// to do something shows a gap and then an answer. It goes to stderr,
+        /// so `jod run … > out.txt` still captures the answer alone.
         #[arg(long)]
         no_thinking: bool,
     },
@@ -132,13 +129,10 @@ enum Command {
     ///
     /// Jod holds no credentials and reads none of the harness's. It runs the
     /// right command with the terminal attached, so the account lands where the
-    /// harness Jod spawns will look for it. Signing in through a shell alias
-    /// that sets `CLAUDE_CONFIG_DIR` puts it somewhere Jod never sees, and
-    /// every run then dies authenticating against an account nobody logged in
-    /// to.
+    /// harness Jod spawns will look for it — signing in through a shell alias
+    /// that sets `CLAUDE_CONFIG_DIR` puts it somewhere Jod never sees.
     ///
-    /// With no harness named it works through all of them, skipping any already
-    /// signed in.
+    /// With no harness named it works through all of them.
     Login {
         /// Which harness: `claude-code`, `open-code`, `agy`.
         harness: Option<String>,
@@ -148,34 +142,27 @@ enum Command {
     },
     /// Follow a running agent, or replay a finished one.
     ///
-    /// Reads the run out of the database, so it works for an agent this
-    /// process never launched — including one still running from a session
-    /// that has since been closed.
+    /// Reads the run out of the database, so it works for an agent this process
+    /// never launched — including one still running from a closed session.
     Watch {
         id: String,
         #[arg(long)]
         json: bool,
         /// Hide the agent's reasoning, leaving its tool calls and its output.
         ///
-        /// Shown by default, for the same reason as `jod run`: a replayed run
-        /// with its reasoning stripped is a list of tool calls, and a list of
-        /// tool calls does not say why.
+        /// Shown by default, as in `jod run`: a replayed run with its reasoning
+        /// stripped is a list of tool calls, and that does not say why.
         #[arg(long)]
         no_thinking: bool,
     },
     /// Stop an agent and every agent working under it.
     ///
-    /// The signal goes to the agent's process group, so the harness and
-    /// everything still in it — a `Bash` call, a compiler, a test run — go too.
-    ///
-    /// A delegated agent leads a session of its own and is outside that group,
-    /// so Jod walks down and stops it separately, all the way to the bottom: a
-    /// worker whose manager has been stopped is working on something nobody is
-    /// waiting for.
+    /// The signal goes to the process group, so the harness and everything in
+    /// it goes too. A delegated agent leads a session of its own, so Jod walks
+    /// down and stops it separately, all the way to the bottom.
     ///
     /// The main chat is the exception and stops alone, because it hands work
-    /// out rather than owning any. Continuing a stopped agent starts its
-    /// workers again.
+    /// out rather than owning any.
     Kill { id: String },
     /// Counts and total spend across all agents.
     Report {
@@ -221,10 +208,8 @@ enum Command {
     /// Read a conversation and write what it established into memory.
     ///
     /// Jod has no model client, so the reading is itself an agent run: the
-    /// material goes out as a prompt, the answer comes back as JSON lines, and
-    /// every trust decision — which scope, which origin, what may supersede
-    /// what — is made here rather than by the agent. Without this, `facts` has
-    /// no writer but a person typing `jod remember`.
+    /// material goes out as a prompt and the answer comes back as JSON lines.
+    /// Every trust decision is made here rather than by the agent.
     Consolidate {
         /// The conversation to read. A prefix of its id is enough.
         conversation: Option<String>,
@@ -256,12 +241,11 @@ enum Command {
     /// The full-screen interface: conversation, live agents, status.
     Tui {
         /// Which harness to open on. Defaults to your stored preference.
-        //
-        // The `Option` is load-bearing rather than decorative: the TUI stores a
-        // preferred harness, and can only defer to it if it can tell "not
-        // given" from "given the value that happens to be the default". Clap
-        // collapses those two the moment a flag has a `default_value`, so the
-        // flag has none and the default lives at the point of use.
+        ///
+        /// The `Option` is load-bearing: the TUI can only defer to a stored
+        /// preference if it can tell "not given" from "given the default". Clap
+        /// collapses those the moment a flag has a `default_value`, so this one
+        /// has none.
         #[arg(short = 'H', long, value_enum)]
         harness: Option<HarnessArg>,
         #[arg(short, long)]
@@ -269,10 +253,9 @@ enum Command {
         #[arg(short, long)]
         model: Option<String>,
         /// plan, ask, edits or auto. Also the ceiling Tab may not raise past.
-        //
-        // `Option` for the same reason as `--harness`, with more at stake: an
-        // explicit flag is a ceiling and saying nothing is not, so "the user
-        // said auto" and "the user said nothing" must not be one value.
+        ///
+        /// `Option` for the same reason as `--harness`, with more at stake: an
+        /// explicit flag is a ceiling and saying nothing is not.
         #[arg(short, long, value_parser = parse_permission_arg)]
         permission: Option<PermissionPolicy>,
         /// Pick up the last conversation instead of starting a new one.
@@ -282,19 +265,16 @@ enum Command {
         #[arg(long)]
         team: Option<String>,
     },
-    /// Agent teams: several agents on one job, talking to each other.
-    ///
-    /// A team can mix harnesses — a lead on Claude Code with teammates on AGY
-    /// and OpenCode — which is the thing no single harness can do.
+    /// Agent teams: several agents on one job, talking to each other. A team
+    /// can mix harnesses, which is the thing no single harness can do.
     Team {
         #[command(subcommand)]
         what: TeamCommand,
     },
     /// Run the scheduler: fire due schedules and advance goals, for ever.
     ///
-    /// This is the process that makes a schedule mean anything. Without it the
-    /// tick exists and is tested and nothing calls it, so `jod schedule ls`
-    /// describes work that will never happen. Install it with
+    /// Without it the tick exists, is tested, and nothing calls it — so `jod
+    /// schedule ls` describes work that will never happen. Install it with
     /// `deploy/jod-daemon.service`.
     Daemon {
         /// Tick once and exit, rather than staying resident. For a systemd
@@ -304,14 +284,12 @@ enum Command {
     },
     /// The main chat — the one conversation that is always there.
     ///
-    /// Send it an instruction and it decides who does the work: an agent
-    /// already running, a fresh one, a schedule, or a goal. It never does the
-    /// work itself, so it comes back to you immediately rather than when the
-    /// job is finished — which is the point, because the moment you most want
-    /// to ask for something else is while something is already running.
+    /// Send it an instruction and it decides who does the work. It never does
+    /// the work itself, so it comes back immediately rather than when the job
+    /// finishes — the moment you most want to ask for something else is while
+    /// something is running.
     ///
-    /// With no instruction it shows the chat: what you last said, what it
-    /// decided, and what that set in motion.
+    /// With no instruction it shows the chat.
     Main {
         /// What you want done. Omit to read the chat instead.
         instruction: Vec<String>,
@@ -325,11 +303,9 @@ enum Command {
         cwd: Option<PathBuf>,
         /// How much the chat and everything it delegates may do unattended.
         ///
-        /// Inherited by the sessions it opens, which is the reason it is a flag
-        /// and not a constant. Defaults to `edits` rather than to `auto`:
-        /// there is no status bar on this path to have chosen a mode, and a
-        /// command that silently ran everything unattended would be a
-        /// surprising thing for a bare `jod main` to do.
+        /// Inherited by the sessions it opens, which is why it is a flag and
+        /// not a constant. Defaults to `edits` rather than `auto`: there is no
+        /// status bar on this path to have chosen a mode.
         #[arg(short = 'p', long, value_parser = parse_permission_arg, default_value = "edits")]
         permission: PermissionPolicy,
         /// How many exchanges to show when reading the chat.
@@ -338,28 +314,26 @@ enum Command {
     },
     /// The decision rail, from the command line.
     ///
-    /// The same cards the terminal shows, answered the same way — which is the
-    /// point: a blocker raised at midnight is answerable over SSH from a phone
-    /// without opening the full-screen interface.
+    /// The same cards the terminal shows, answered the same way — so a blocker
+    /// raised at midnight is answerable over SSH from a phone.
     Card {
         #[command(subcommand)]
         what: CardCommand,
     },
     /// Standing permission: what agents may run without stopping to ask.
     ///
-    /// A grant is global and outlives the session that earned it — that is the
-    /// whole point of answering "always" to an approval card. `jod grant ls`
-    /// is the audit: everything Jod will do unattended, on one screen.
+    /// A grant is global and outlives the session that earned it. `jod grant
+    /// ls` is the audit: everything Jod will do unattended, on one screen.
     Grant {
         #[command(subcommand)]
         what: GrantCommand,
     },
-    /// Answer a harness's permission question. **Run by the harness, not by you.**
+    /// Answer a harness's permission question. **Run by the harness, not by
+    /// you.**
     ///
-    /// Claude Code's `PreToolUse` hook: the tool call arrives on stdin and the
-    /// decision leaves on stdout. Jod wires this into every run it launches; it
-    /// is documented here rather than hidden because a hook nobody can find is
-    /// a hook nobody can debug.
+    /// Claude Code's `PreToolUse` hook: the tool call arrives on stdin, the
+    /// decision leaves on stdout. Documented rather than hidden, because a hook
+    /// nobody can find is a hook nobody can debug.
     #[command(hide = true)]
     ApproveHook {
         /// Which run is asking. Baked into the hook's command line by the
@@ -374,9 +348,9 @@ enum Command {
     },
     /// The directories a conversation may work in.
     ///
-    /// A session can be pointed at several repositories at once. Exactly one of
-    /// them is ever writable — a worktree the session claimed — and the real
-    /// checkout stays beside it, readable.
+    /// A session can be pointed at several repositories. Exactly one is ever
+    /// writable — a worktree it claimed — and the real checkout stays beside
+    /// it, readable.
     Root {
         #[command(subcommand)]
         what: RootCommand,
@@ -384,19 +358,18 @@ enum Command {
     /// Credentials an agent can use and cannot read.
     ///
     /// Values live outside every repository at owner-only permissions, are
-    /// injected into the agent's environment at spawn, and are scrubbed out of
-    /// everything it prints. The agent is told a *name*, so a missing key
-    /// blocks one test rather than a session.
+    /// injected at spawn, and are scrubbed from everything the agent prints.
+    /// The agent is told a
+    /// *name*, so a missing key blocks one test rather than a session.
     Secret {
         #[command(subcommand)]
         what: SecretCommand,
     },
     /// The slash commands and skills the repositories on this box define.
     ///
-    /// Jod reimplements none of them. It finds them, says which harness's
-    /// convention each one follows, and forwards the name to a harness that can
-    /// resolve it — measured per harness in `docs/harness-support.md`, never
-    /// assumed.
+    /// Jod reimplements none of them: it finds them, says which harness's
+    /// convention each follows, and forwards the name to a harness that can
+    /// resolve it — measured per harness in `docs/harness-support.md`.
     Commands {
         #[command(subcommand)]
         what: CommandsCommand,
@@ -406,12 +379,11 @@ enum Command {
         #[command(subcommand)]
         what: WorkCommand,
     },
-    /// The repositories work happens in — the catalog an instruction that
-    /// names none is resolved against.
+    /// The repositories work happens in — the catalog an instruction that names
+    /// none is resolved against.
     ///
-    /// Worth filling once by hand: until a repository is listed, saying "let's
-    /// fix this" has nothing to resolve to and every instruction about it has
-    /// to spell the path out.
+    /// Worth filling once by hand: until a repository is listed, "let's fix
+    /// this" has nothing to resolve to.
     Project {
         #[command(subcommand)]
         what: ProjectCommand,
@@ -425,7 +397,7 @@ enum Command {
     ///
     /// A conversation here is a tree, not a line. Two of the three harnesses
     /// can fork themselves and none can hand a thread to another, so the
-    /// transcript that survives a harness switch has to be Jod's.
+    /// transcript that survives a switch has to be Jod's.
     Conv {
         #[command(subcommand)]
         what: ConvCommand,
@@ -433,9 +405,8 @@ enum Command {
     /// Work that fires on the clock.
     ///
     /// A schedule is a prompt, a cron expression and a timezone. Everything
-    /// else — what to do about a run that overran, or instants missed while
-    /// Jod was down — is policy with a default that was chosen by measuring
-    /// what happens without it.
+    /// else is policy whose default was chosen by measuring what happens
+    /// without it.
     Schedule {
         #[command(subcommand)]
         what: ScheduleCommand,
@@ -443,33 +414,30 @@ enum Command {
     /// Work that fires when GitHub says something happened.
     ///
     /// A rule is a match — source, repo, event, optional action and conditions
-    /// — and a prompt template to run when it matches. The receiver, the
-    /// signature check, the delivery ledger and the TUI's rule list were all
-    /// built before anything could *create* one, so the table stayed empty and
-    /// the whole path was unreachable. This is that missing verb.
+    /// — and a prompt template. The receiver, the signature check and the TUI's
+    /// rule list were all built before anything could *create* one, so the
+    /// table stayed empty.
     Webhook {
         #[command(subcommand)]
         what: WebhookCommand,
     },
     /// Jod on a phone.
     ///
-    /// `HttpBot`, the poller, the rate-limit backoff, the allowlist and the
-    /// refusal record were all built and tested, and `Bridge` — the piece that
-    /// joins them to Jod — was never constructed anywhere. This is that
-    /// missing entry point.
+    /// `HttpBot`, the poller, the backoff, the allowlist and the refusal record
+    /// were all built and tested, and `Bridge` — the piece joining them to Jod
+    /// — was never constructed anywhere. This is that entry point.
     Telegram {
         #[command(subcommand)]
         what: TelegramCommand,
     },
     /// Let a schedule decide for itself whether it is worth waking a model.
     ///
-    /// A monitor is a probe and a hash attached to one schedule. Unchanged
-    /// bytes suppress the run entirely; changed bytes run it with a diff in
-    /// front of the prompt. `--no-agent` inverts the deal: the script *is* the
-    /// job, its stdout is the result, and no model runs at all.
+    /// A monitor is a probe and a hash on one schedule. Unchanged bytes
+    /// suppress the run; changed bytes run it with a diff in front of the
+    /// prompt. `--no-agent` inverts the deal: the script *is* the job.
     ///
-    /// The tick has asked the monitor since it was written. Nothing could
-    /// write one — the same missing verb `jod webhook` was, one table over.
+    /// The tick has asked the monitor since it was written; nothing could write
+    /// one.
     Monitor {
         #[command(subcommand)]
         what: MonitorCommand,
@@ -477,26 +445,23 @@ enum Command {
     /// Proof of what Jod owed people, and whether they got it.
     ///
     /// A run that finished and a reply that arrived are two different facts,
-    /// and until this command the second was answerable only by opening
-    /// SQLite. The ledger has recorded it all along.
+    /// and until this command the second was answerable only by opening SQLite.
     Ledger {
         #[command(subcommand)]
         what: LedgerCommand,
     },
     /// Standing objectives, pursued until they are met.
     ///
-    /// A goal differs from a schedule in having an end: it stops when it is
-    /// satisfied, when it runs out of budget or iterations, or when it stops
-    /// making progress. That last one matters most — a loop that keeps running
-    /// while nothing changes looks exactly like a loop doing useful work.
+    /// A goal differs from a schedule in having an end: satisfied, out of
+    /// budget, or no longer making progress. That last matters most — a loop
+    /// running while nothing changes looks exactly like one doing useful work.
     Goal {
         #[command(subcommand)]
         what: GoalCommand,
     },
-    /// What Jod's memory connects to a thing.
-    ///
-    /// Recall answers "what do I know about X". This answers "what is X
-    /// connected to", which no list of facts can — it walks the graph.
+    /// What Jod's memory connects to a thing. Recall answers "what do I know
+    /// about X"; this answers "what is X connected to", which no list of facts
+    /// can.
     Related {
         /// The entity to start from.
         subject: String,
@@ -534,15 +499,12 @@ enum Command {
     },
     /// Serve Jod's own tools to a harness, as an MCP server over stdio.
     ///
-    /// This is the seam the system turns on. Jod has no model client and never
-    /// will; what it has is effects — delegating, scheduling, remembering,
-    /// saying what is running. Both Claude Code (`--mcp-config`) and OpenCode
-    /// (`opencode mcp add`) already speak MCP, so a run wired to this thinks
-    /// *and* acts in one loop, with the harness supplying every judgement.
+    /// Jod has no model client; what it has is effects — delegating,
+    /// scheduling, remembering. Both Claude Code and OpenCode already speak
+    /// MCP, so a run wired to this thinks *and* acts in one loop.
     ///
-    /// Not a command to type: stdin and stdout carry the protocol. A harness is
-    /// pointed at it by config, and `--access` says how much of Jod that
-    /// particular agent gets.
+    /// Not a command to type: stdin and stdout carry the protocol. `--access`
+    /// says how much of Jod that agent gets.
     Mcp {
         /// `install` registers this server with the harnesses *you* launch.
         /// Absent, `jod mcp` is the server itself — which is how every config
@@ -550,16 +512,13 @@ enum Command {
         #[command(subcommand)]
         cmd: Option<McpCommand>,
         /// How much of Jod the agent on the other end may reach. Fail-closed:
-        /// an unset flag gets the read-only set, never the full one.
-        /// Parsed by `jod_core::mcp::parse_access`, not by a `value_enum`, so
-        /// there is exactly one spelling of a level in the system.
+        /// an unset flag gets the read-only set.
         ///
-        /// Found the hard way. A derived enum accepts only `read-only`, while
-        /// `ToolAccess::as_str()` writes `read_only` — so the MCP config Jod
-        /// generated for a harness invoked the server with a flag the server
-        /// rejected. It exited 2, the harness reported no tools, and the agent
-        /// truthfully said Jod had none. Every layer was correct and the seam
-        /// was closed by two spellings of one word.
+        /// Parsed by `jod_core::mcp::parse_access` rather than a `value_enum`,
+        /// so there is one spelling of a level in the system. Found the hard
+        /// way — a derived enum accepts only `read-only` while `as_str()`
+        /// writes `read_only`, so the config Jod generated invoked the server
+        /// with a flag it rejected.
         #[arg(long, default_value = "read_only", value_parser = parse_access_arg)]
         access: jod_core::harness::ToolAccess,
         /// The most permissive policy `delegate` may ask for — the same ceiling
@@ -570,9 +529,8 @@ enum Command {
     /// Update this machine's Jod binaries to the newest patch release.
     ///
     /// Rebuilds from the checkout `install.sh` left behind and renames the new
-    /// binaries over the old ones, so the console can update itself while it
-    /// is running. Patch-only by default: a minor or major move would change
-    /// what the daemon and the TUI are, and is asked for explicitly with
+    /// binaries over the old, so the console can update itself while running.
+    /// Patch-only by default; a minor or major move is asked for with
     /// `--version`.
     Update {
         /// Say what an update would do, and change nothing.
@@ -588,16 +546,12 @@ enum Command {
     /// Install the newest release of this machine's Jod binaries, downloaded
     /// prebuilt.
     ///
-    /// Takes `jod-<target>.tar.gz` off the GitHub release — the artifact the
-    /// Release workflow built from that tag — checks it against the `.sha256`
-    /// published beside it, and renames the binaries into place, so the
-    /// console can upgrade itself while it is running.
+    /// Takes `jod-<target>.tar.gz` off the GitHub release, checks it against
+    /// the published `.sha256`, and renames the binaries into place.
     ///
-    /// Needs curl and tar and nothing else: no checkout, no Rust toolchain.
-    /// That is the difference from `jod update`, which rebuilds from source
-    /// and cannot run at all on a box installed from the prebuilt tarball.
-    /// Unlike `update`, this takes the newest release whatever its major and
-    /// minor — say which one you want with `--version`.
+    /// Needs curl and tar and nothing else — no checkout, no Rust toolchain,
+    /// which is the difference from `jod update`. Takes the newest release
+    /// whatever its major and minor; name one with `--version`.
     Upgrade {
         /// Say what an upgrade would do, and change nothing.
         #[arg(long)]
@@ -614,20 +568,20 @@ enum Command {
 #[derive(Subcommand)]
 enum McpCommand {
     /// Register Jod's MCP server with the harnesses on this machine, so a
-    /// session *you* start holds Jod's tools too.
+    /// session
+    /// *you* start holds Jod's tools too.
     ///
-    /// Jod already hands its own spawned runs an MCP config on the command
-    /// line. Nothing hands one to the `claude` you type in a repo, so that
-    /// session cannot schedule, delegate or remember — which reads from the
-    /// chair like the feature not existing rather than like a missing config.
+    /// Jod hands its own spawned runs an MCP config on the command line.
+    /// Nothing hands one to the `claude` you type in a repo, so that session
+    /// cannot schedule, delegate or remember.
     ///
-    /// Safe to re-run: it rewrites its own entry, leaves every other server and
-    /// setting alone, and refuses a config it cannot parse.
+    /// Safe to re-run: it rewrites its own entry, leaves every other server
+    /// alone, and refuses a config it cannot parse.
     Install {
         /// How much of Jod these sessions get. Defaults to the full set,
         /// because the session on the other end is one a person opened and is
         /// watching — the opposite of the unattended case, which is pinned to
-        /// read-only where it is spawned and cannot be widened from here.
+        /// read-only where it is spawned.
         #[arg(long, default_value = "orchestrate", value_parser = parse_access_arg)]
         access: jod_core::harness::ToolAccess,
         /// Just this harness, instead of every installed one.
@@ -704,12 +658,12 @@ enum CardCommand {
         #[arg(long)]
         json: bool,
     },
-    /// Answer it. The agent is told at the end of its current turn, never
-    /// mid-turn — see `jod card show` for whether it has heard yet.
+    /// Answer it. The agent is told at the end of its current turn, never mid-
+    /// turn — see `jod card show` for whether it has heard yet.
     ///
     /// For a secret card this asks for the value on the terminal and writes it
-    /// straight through to the secret store; it never appears in an argument,
-    /// in this database, or in the agent's context.
+    /// straight to the secret store; it never appears in an argument, in this
+    /// database, or in the agent's context.
     Answer {
         id: i64,
         /// Pick one of the card's numbered options.
@@ -792,8 +746,8 @@ enum RootCommand {
     /// Add a directory, read-only.
     ///
     /// Read-only is not a flag you can lift here: a root becomes writable only
-    /// by a session claiming a worktree, which is what keeps a run's
-    /// half-finished state off your checkout.
+    /// by a session claiming a worktree, which keeps a run's half-finished
+    /// state off your checkout.
     Add {
         path: PathBuf,
         #[arg(short, long)]
@@ -812,8 +766,8 @@ enum SecretCommand {
     /// The names a run here would be given, and nothing else about them.
     ///
     /// With no scope, the globals. With `--work`, what a session on that work
-    /// resolves — narrower scopes overriding wider ones by name, exactly as
-    /// the spawn path resolves them.
+    /// resolves — narrower scopes overriding wider ones, exactly as the spawn
+    /// path does.
     Ls {
         #[arg(short, long)]
         work: Option<String>,
@@ -825,11 +779,11 @@ enum SecretCommand {
     /// Store a value.
     ///
     /// **The value is never an argument.** Anything on a command line is
-    /// world-readable through `/proc` for as long as the process lives, and it
-    /// is in your shell history for ever afterwards. This asks for it on the
-    /// terminal with the echo off, or reads it from stdin when you pipe one in
-    /// — `printf %s "$KEY" | jod secret set NAME --global`, with `printf` and
-    /// not `echo`, because a trailing newline becomes part of the credential.
+    /// world-readable through `/proc` while the process lives, and in your
+    /// shell history for ever. This asks on the terminal with echo off, or
+    /// reads stdin — `printf %s "$KEY" | jod secret set NAME --global`, with
+    /// `printf` and not `echo`, because a trailing newline becomes part of the
+    /// credential.
     Set {
         /// A legal environment variable name: a letter or underscore, then
         /// letters, digits and underscores.
@@ -851,10 +805,8 @@ enum SecretCommand {
 
 /// Who a secret is for — asked for explicitly, every time.
 ///
-/// Deliberately without a default. The scope is the blast radius if the value
-/// leaks, and a default would make the widest choice the quiet one: `--global`
-/// hands a key to every session on the box, and that should be a thing somebody
-/// typed rather than a thing they omitted.
+/// Deliberately without a default: the scope is the blast radius if the value
+/// leaks, and a default would make the widest choice the quiet one.
 #[derive(clap::Args)]
 #[group(required = true, multiple = false)]
 struct ScopeArgs {
@@ -888,10 +840,9 @@ enum CommandsCommand {
     /// Every command and skill found under a conversation's roots and in your
     /// own config.
     ///
-    /// Rescans by default, because a listing that answered from a stale cache
-    /// would offer a command somebody deleted this morning. `--cached` reads
-    /// what was last found instead, which is what the palette does on every
-    /// keystroke.
+    /// Rescans by default, because a listing answered from a stale cache would
+    /// offer a command somebody deleted this morning. `--cached` reads what was
+    /// last found, which is what the palette does on every keystroke.
     Ls {
         /// Whose roots to scan. Defaults to the main chat's.
         #[arg(short, long)]
@@ -914,20 +865,15 @@ enum CommandsCommand {
 
 #[derive(Subcommand)]
 enum VoiceCommand {
-    /// Is dictation ready, and what would it use?
-    ///
-    /// Answers the question `Ctrl-V` would otherwise answer by failing: whether
-    /// there is a recorder, an engine and a model on this machine.
+    /// Is dictation ready, and what would it use? Answers the question `Ctrl-V`
+    /// would otherwise answer by failing.
     Check,
-    /// The models that can transcribe you, and which are downloaded.
-    ///
-    /// English-only builds are deliberately not offered — they cannot
-    /// represent Tagalog, so they would delete half of what you said.
+    /// The models that can transcribe you, and which are downloaded. English-
+    /// only builds are deliberately not offered — they cannot represent
+    /// Tagalog.
     Models,
-    /// Download a model so transcription runs on this machine.
-    ///
-    /// Nothing leaves the laptop after this: no key, no network, no
-    /// per-utterance cost.
+    /// Download a model so transcription runs on this machine. Nothing leaves
+    /// the laptop after this: no key, no network, no per-utterance cost.
     Download {
         /// Which one. Defaults to the recommended model.
         name: Option<String>,
@@ -950,10 +896,9 @@ enum ProjectCommand {
         #[arg(long)]
         json: bool,
     },
-    /// Put a repository in the catalog.
-    ///
-    /// Adding one that is already listed updates it rather than duplicating
-    /// it, so this is also how you rename a project or extend its aliases.
+    /// Put a repository in the catalog. Adding one already listed updates it
+    /// rather than duplicating it, so this is also how you rename or extend its
+    /// aliases.
     Add {
         /// The checkout. Defaults to the current directory.
         path: Option<PathBuf>,
@@ -971,11 +916,10 @@ enum ProjectCommand {
     },
     /// What a conversation is about right now, and how it got there.
     ///
-    /// The terminal twin of the `project_current` tool the orchestrator calls,
-    /// and it answers the same question the same way. Every instruction is put
-    /// through `settle_project` before the model ever sees it, so by the time
-    /// anything looks wrong the routing decision has already been made and
-    /// written down; this is how you read it back.
+    /// The terminal twin of the `project_current` tool. Every instruction goes
+    /// through `settle_project` before the model sees it, so by the time
+    /// anything looks wrong the routing decision is already made — this is how
+    /// you read it back.
     Current {
         /// Which chat. Defaults to the main chat.
         #[arg(short, long)]
@@ -984,8 +928,7 @@ enum ProjectCommand {
     /// Stop a project being inferred, without forgetting it.
     ///
     /// A paused or archived project can still be named explicitly; it just
-    /// stops competing for an offhand mention. Nothing is deleted — the point
-    /// of a catalog is to still answer "what was that repo called" later.
+    /// stops competing for an offhand mention. Nothing is deleted.
     Archive { name: String },
     /// Put an archived or paused project back in play.
     Restore { name: String },
@@ -1010,9 +953,9 @@ enum WorkCommand {
     },
     /// End it now, without waiting for its board to empty.
     ///
-    /// Closing destroys nothing — the record, the tree and the worktrees all
-    /// stay. A work whose sessions are still running becomes *finishing*
-    /// rather than closed.
+    /// Closing destroys nothing — the record, the tree and the worktrees stay.
+    /// A work whose sessions are still running becomes *finishing* rather than
+    /// closed.
     Close { id: String },
     /// Remove the work and every session in it: transcripts, cards, bus
     /// traffic. Its worktrees and branches are left exactly where they are.
@@ -1056,10 +999,8 @@ enum ConvCommand {
         #[arg(long)]
         title: Option<String>,
     },
-    /// Move the head back to an earlier message.
-    ///
-    /// Non-destructive: the abandoned tail stays on disk and stays reachable,
-    /// which is what makes this recoverable rather than a deletion.
+    /// Move the head back to an earlier message. Non-destructive: the abandoned
+    /// tail stays on disk and stays reachable.
     Revert { id: String, message: i64 },
     /// Point the head at any message sharing this conversation's root —
     /// including a branch abandoned earlier, which revert cannot reach because
@@ -1079,19 +1020,18 @@ enum ConvCommand {
         /// whoever ran the summarising agent.
         summary: String,
     },
-    /// Delete a conversation and everything it holds: its transcript, its
-    /// cards, its roots, its queued answers.
+    /// Delete a conversation and everything it holds: transcript, cards, roots,
+    /// queued answers.
     ///
-    /// Refuses two things, and both refusals are the point. The main chat is
-    /// the one conversation that is always there. And a session belonging to a
-    /// work can only go when the work does — removing one on its own would
-    /// leave a tree pointing at a session that is gone.
+    /// Refuses two things. The main chat is always there. And a session
+    /// belonging to a work can only go when the work does — removing one alone
+    /// would leave a tree pointing at a session that is gone.
     Rm { id: String },
     /// What this conversation would be handed to another harness as.
     ///
     /// Prints the carrier rather than moving anything, because seeing what
-    /// survives is the point — and for AGY the honest answer is that it
-    /// becomes prompt text.
+    /// survives is the point — and for AGY the honest answer is that it becomes
+    /// prompt text.
     Handoff {
         id: String,
         #[arg(short = 'H', long, value_enum)]
@@ -1172,8 +1112,8 @@ enum TelegramCommand {
     ///
     /// Works *before* an allowlist exists, which is the only reason it can be
     /// used to build one: `serve` refuses to start without
-    /// `JOD_TELEGRAM_ALLOWED_USERS`, and nothing else tells you the numeric id
-    /// that belongs in it. Message the bot, run this, copy the id.
+    /// `JOD_TELEGRAM_ALLOWED_USERS`, and nothing else tells you the numeric id.
+    /// Message the bot, run this, copy the id.
     Whoami,
 }
 
@@ -1307,11 +1247,10 @@ enum ScheduleCommand {
 enum GoalCommand {
     /// Every goal, with how far it has got and what it has spent.
     ///
-    /// The iteration count and the spend are what a tick has settled, not what
-    /// has been billed. An iteration that is still working is added only once a
-    /// tick settles it, so a goal can read `iter 0 · $0.00` while a run of its
-    /// own is going. Pausing the goal makes no difference to that: a run that
-    /// finishes while the goal is paused is settled by the next tick.
+    /// The iteration count and the spend are what a tick has *settled*, not
+    /// what has been billed — so a goal can read `iter 0 · $0.00` while a run
+    /// of its own is going. Pausing makes no difference: a run finishing while
+    /// paused is settled by the next tick.
     Ls {
         /// Print the stored goal rows as JSON instead of the table.
         #[arg(long)]
@@ -1348,46 +1287,39 @@ enum GoalCommand {
     },
     /// Stop starting new iterations of this goal.
     ///
-    /// It does not stop the iteration already in flight. That run carries on
-    /// working unattended, and carries on being billed, until it finishes by
-    /// itself — if you paused the goal to stop it spending, stop the run too
-    /// with `jod kill <RUN>`. What that run costs is still added to the goal:
-    /// the next tick after it finishes records the iteration and its cost,
-    /// without waiting for the goal to be resumed.
+    /// It does not stop the iteration in flight: that run carries on working
+    /// and being billed until it finishes. If you paused to stop it spending,
+    /// stop the run too with `jod kill <RUN>`. Its cost is still added to the
+    /// goal.
     Pause {
         /// The goal to pause, as `jod goal ls` names it.
         name: String,
     },
     /// Put this goal back on its schedule.
     ///
-    /// The first tick after this starts the next iteration. An iteration that
-    /// was left running when the goal was paused has already been settled by
-    /// then, so nothing about it is waiting on the resume. Resuming also clears
-    /// the no-progress counter,
-    /// so a goal that was close to being called stalled gets a full allowance
-    /// again.
+    /// The first tick after this starts the next iteration. An iteration left
+    /// running when the goal was paused has already been settled. Resuming also
+    /// clears the no-progress counter, so a goal close to being called stalled
+    /// gets a full allowance again.
     Resume {
         /// The goal to resume, as `jod goal ls` names it.
         name: String,
     },
     /// Run one iteration now.
     Run { name: String },
-    /// Forget a goal, so that nothing starts another iteration of it.
+    /// Forget a goal, so nothing starts another iteration of it.
     ///
-    /// It does not stop the iteration already in flight, for the same reason
-    /// pausing does not: that run keeps working and keeps being billed until
-    /// it finishes. What the goal learned is not deleted either. Its facts stay
-    /// in memory and `jod recall` still finds them, so removing a goal is not a
-    /// way to clear what it knows.
+    /// It does not stop the iteration in flight, for the reason pausing does
+    /// not. What the goal learned is not deleted either — its facts stay in
+    /// memory and `jod recall` still finds them.
     Rm {
         /// The goal to remove, as `jod goal ls` names it.
         name: String,
     },
     /// What this goal has done, out of its own memory.
     ///
-    /// A goal's progress lives in the fact store rather than in its columns,
-    /// under a scope keyed by its id — which nobody can be expected to type.
-    /// This is the way in.
+    /// A goal's progress lives in the fact store under a scope keyed by its id,
+    /// which nobody can be expected to type. This is the way in.
     Log {
         name: String,
         #[arg(short, long, default_value_t = 10)]
@@ -1420,12 +1352,10 @@ enum TeamCommand {
         team: String,
         /// The short slug that names this task from here on.
         ///
-        /// You invent it — nothing generates one, and it need only be unique
-        /// across the boards. It is what `jod team claim` and `jod team done`
-        /// take, what teammates call the task in messages, and
-        /// `jod team show <TEAM>` prints it back in full, which is the only
-        /// place to read one you have forgotten. Re-using an id already on a
-        /// board leaves that task exactly as it was.
+        /// You invent it, and it need only be unique across the boards. It is
+        /// what `jod team claim` and `jod team done` take, and what teammates
+        /// call the task. Re-using an id already on a board leaves that task as
+        /// it was.
         id: String,
         /// What the task is, in plain words.
         ///
@@ -1449,10 +1379,9 @@ enum TeamCommand {
         /// have to have been claimed first.
         id: String,
         /// Which team you expect to own this id. Task ids are unique across
-        /// every board, so this is optional and existing scripts calling
-        /// `done <ID>` keep working — but when it's given and the id
-        /// actually belongs to a different team (or none), the close is
-        /// refused instead of silently landing on the wrong board.
+        /// every board, so this is optional — but when given and the id belongs
+        /// to a different team, the close is refused rather than silently
+        /// landing on the wrong board.
         #[arg(short, long)]
         team: Option<String>,
     },
@@ -1530,12 +1459,9 @@ enum TeamCommand {
         /// Which team to describe, as `jod team ls` names it.
         team: String,
     },
-    /// Every team that has a member.
-    ///
-    /// Spelled `ls`, like every other listing in this CLI. It used to be
-    /// spelled `list` and still answers to that word, so anything already
-    /// written down keeps working — but `ls` is the name, and the one the
-    /// rest of the help refers to.
+    /// Every team that has a member. Spelled `ls` like every other listing
+    /// here; it still answers to `list`, so anything already written down keeps
+    /// working.
     #[command(alias = "list")]
     Ls,
 }
@@ -1603,17 +1529,16 @@ impl From<ProvenanceArg> for Provenance {
     }
 }
 
-/// How much an agent may do to the *machine*, parsed by core rather than
-/// re-declared here.
+/// How much an agent may do to the *machine*, parsed by core rather than re-
+/// declared here.
 ///
 /// This was a `ValueEnum` listing the levels a second time, and it drifted: a
-/// fourth `PermissionPolicy` mode never reached the copy, so `--permission plan`
-/// could not be asked for and the default stayed `ask` after the real one moved
-/// to `auto`. Every `jod run` then waited for an approval nobody was there to
-/// give.
+/// fourth mode never reached the copy, so `--permission plan` could not be
+/// asked for and the default stayed `ask`. Every `jod run` then waited for an
+/// approval nobody was there to give.
 ///
-/// One parser, in core, accepting every spelling — including the harnesses' own
-/// (`manual`, `auto`, `bypass_permissions`).
+/// One parser, in core, accepting every spelling — including the harnesses'
+/// own.
 fn parse_permission_arg(s: &str) -> Result<PermissionPolicy, String> {
     jod_core::mcp::parse_permission(s).ok_or_else(|| {
         let names: Vec<&str> = PermissionPolicy::ALL.iter().map(|m| m.label()).collect();
@@ -1623,14 +1548,13 @@ fn parse_permission_arg(s: &str) -> Result<PermissionPolicy, String> {
 
 /// How much of Jod itself an agent may reach over MCP.
 ///
-/// A separate axis from `PermissionPolicy`, which bounds what the agent may do to
-/// the *machine*. An agent can be trusted to edit files and still have no
-/// business arming a schedule that spends money every night at 2am.
+/// A separate axis from `PermissionPolicy`, which bounds what it may do to the
+/// *machine*: an agent can be trusted to edit files and still have no business
+/// arming a schedule that spends money nightly.
 ///
 /// Deliberately not a `ValueEnum`. The derive would define a second spelling of
-/// every level beside `ToolAccess::as_str()`, and the two drifting apart is not
-/// hypothetical — it silently disconnected Jod from every harness it had just
-/// been wired to. One parser, in core, accepting both hyphen and underscore.
+/// every level beside `ToolAccess::as_str()`, and the two drifting apart
+/// silently disconnected Jod from every harness it had just been wired to.
 fn parse_access_arg(s: &str) -> Result<jod_core::harness::ToolAccess, String> {
     jod_core::mcp::parse_access(s).ok_or_else(|| {
         format!("`{s}` is not an access level — read_only, delegate or orchestrate")
@@ -1638,16 +1562,14 @@ fn parse_access_arg(s: &str) -> Result<jod_core::harness::ToolAccess, String> {
 }
 
 /// Read `.env` into the process environment, without overriding anything the
-/// caller actually exported.
+/// caller exported.
 ///
-/// A real environment variable always wins. A file that could silently replace
-/// what an operator typed on the command line would make `JOD_TELEGRAM_TOKEN=… jod …`
-/// a lie, and the failure would look like the wrong token rather than the wrong
-/// precedence.
+/// A real environment variable always wins: a file that could replace what an
+/// operator typed would make `JOD_TELEGRAM_TOKEN=… jod …` a lie, and the
+/// failure would look like the wrong token rather than the wrong precedence.
 ///
-/// Deliberately not a dependency. The format Jod needs is `KEY=value` lines with
-/// `#` comments — `dotenvy` brings variable interpolation, multi-line values and
-/// export syntax that nothing here uses, for a file that holds two secrets.
+/// Deliberately not a dependency — `dotenvy` brings interpolation, multi-line
+/// values and export syntax for a file that holds two secrets.
 fn load_dotenv() {
     let Ok(text) = std::fs::read_to_string(".env") else {
         return;
@@ -1763,12 +1685,11 @@ async fn main() -> Result<()> {
             };
             // What this run may reach, folded in from the conversation it
             // continues — the same move `prefer_conversation_settings` makes
-            // for the model and the permission, and for the same reason: these
-            // are facts about the thread, not about the command line.
+            // for the model, and for the same reason: these are facts about the
+            // thread, not the command line.
             //
-            // Secret *names*, never values. The value is read at exec time by
-            // the supervisor, out of a file only its owner can open; nothing in
-            // this process, this argv or `spawn.json` ever holds one.
+            // Secret *names*, never values. The supervisor reads the value at
+            // exec time from a file only its owner can open.
             let (roots, secrets) = match jod.store() {
                 Some(store) => grants_for_run(store, &resume, harness.into())?,
                 None => (Vec::new(), Vec::new()),
@@ -1776,18 +1697,14 @@ async fn main() -> Result<()> {
             // Where the session *lives*, not where the command was typed.
             //
             // OpenCode resolves its project from `--dir` and scopes sessions to
-            // it. `--session <id>` naming a session from another project does
+            // it, and `--session <id>` naming another project's session does
             // not error — **it hangs, silently, for ever**. Measured at 90
-            // seconds of nothing on either stream, against under a second with
-            // the session's own `--dir`.
+            // seconds of nothing, against under a second with the session's own
+            // `--dir`.
             //
-            // An explicit `--cwd` still wins: somebody who names a directory
-            // means it.
-            //
-            // A fresh run has no session to look up and used to fall through to
-            // `$HOME`, so `jod run` typed inside a repository started somewhere
-            // the caller was not. The launch directory is the answer, as it is
-            // for the console.
+            // An explicit `--cwd` still wins. A fresh run has no session to
+            // look up and used to fall through to `$HOME`, so `jod run` typed
+            // inside a repository started somewhere the caller was not.
             let cwd = match (cwd, jod.store()) {
                 (Some(given), _) => given,
                 (None, Some(store)) => {
@@ -1820,16 +1737,13 @@ async fn main() -> Result<()> {
             let agent = jod.spawn_agent(req).await?;
 
             // The directory this run works in, recorded as somewhere it may
-            // read, the same grant the console and `jod main` make. Without it
-            // a run knows where it started and cannot name it: the roots are
-            // what `open_work` inherits a checkout from, and a conversation
-            // with none refuses to open work at all.
+            // read — the same grant the console and `jod main` make. Without it
+            // a run knows where it started and cannot name it, and a
+            // conversation with no roots refuses to open work.
             //
-            // After the spawn rather than before it, because the conversation
-            // does not exist until then — `jod run` mints one per run, and the
-            // id only comes back once the request has been through
-            // `spawn_agent`. A run bound to no conversation has nothing to
-            // grant to and is skipped.
+            // After the spawn rather than before, because the conversation does
+            // not exist until then: `jod run` mints one per run and the id only
+            // comes back once the request has been through `spawn_agent`.
             if let (Some(store), Some(conversation)) =
                 (jod.store(), jod.conversation_of(&agent.id).await)
             {
@@ -1993,14 +1907,12 @@ async fn main() -> Result<()> {
         }
 
         Command::Daemon { once } => {
-            // Here rather than inside `Daemon::run`, and the difference is not
-            // stylistic. Registration writes to `~/.claude.json` and its
-            // siblings — files this program does not own — so it must be an
-            // effect of *someone starting the daemon*, never of constructing or
-            // driving one. As a side effect of the library's run loop it also
+            // Here rather than inside `Daemon::run`, and not stylistically.
+            // Registration writes to `~/.claude.json` and its siblings — files
+            // this program does not own — so it must be an effect of *someone
+            // starting the daemon*. As a side effect of the run loop it also
             // fired from the test suite, which duly registered a `cargo test`
-            // binary from `target/debug/deps/` as the machine's MCP server.
-            // A long-running binary's entrypoint is a place tests do not reach.
+            // binary as the machine's MCP server.
             jod_core::mcp_install::ensure_registered();
             let daemon = jod_core::daemon::Daemon::persistent().await?;
             if once {
@@ -2246,7 +2158,7 @@ async fn main() -> Result<()> {
                         // the only place a member gets a session id, and
                         // without one it can never be woken — a run whose id we
                         // never recorded would be resumed into an empty
-                        // context, which is worse than staying asleep.
+                        // context.
                         if session.is_some() {
                             store.bind_member(&team, &m.name, m.agent_id.as_deref(), session.as_deref())?;
                         }
@@ -2275,14 +2187,12 @@ async fn main() -> Result<()> {
                             continue;
                         }
                         // Where this member's session lives, not where the wake
-                        // was typed and not `$HOME`.
+                        // was typed.
                         //
-                        // Every wake is a resume, which is what [`session_cwd`]
+                        // Every wake is a resume, which is what `session_cwd`
                         // exists for: on OpenCode the wrong directory hangs for
                         // ever rather than failing. Answering `$HOME` for every
                         // member survived only by being consistently wrong.
-                        // `--cwd` still wins; the launch directory is the
-                        // fallback for a session Jod has never seen.
                         let resume = Resume::Session(order.session_id.clone());
                         let where_it_lives = match &cwd {
                             Some(given) => given.clone(),
@@ -2355,14 +2265,13 @@ async fn main() -> Result<()> {
                             harness: who.harness,
                             prompt: prompt.join(" "),
                             system: None,
-                            // The repository the team is being started on. This
-                            // is a fresh session, so there is no stored
-                            // directory to look up and the one the command was
-                            // typed in is all there is to go on — and it is the
-                            // right answer, because starting a member is
-                            // something you do from the checkout they are meant
-                            // to work in. It answered `$HOME` before, which set
-                            // the directory every later `jod team wake` had to
+                            // The repository the team is being started on. A
+                            // fresh session has no stored directory to look up,
+                            // and the one the command was typed in is the right
+                            // answer anyway — starting a member is something
+                            // you do from the checkout they are meant to work
+                            // in. It answered `$HOME` before, which set the
+                            // directory every later `jod team wake` had to
                             // agree with.
                             cwd: console_cwd(cwd),
                             model: None,
@@ -2446,10 +2355,9 @@ async fn main() -> Result<()> {
 
 /// Send an instruction to the main chat, or read it.
 ///
-/// Non-blocking by default, and that is the feature rather than an
-/// optimisation: a main chat that waited for the work would be unusable
-/// exactly when you most want it. It returns as soon as the orchestrator has
-/// been *handed* the instruction.
+/// Non-blocking by default, and that is the feature: a main chat that waited
+/// for the work would be unusable exactly when you most want it. It returns as
+/// soon as the orchestrator has been *handed* the instruction.
 #[allow(clippy::too_many_arguments)]
 async fn main_chat(
     jod: &Jod,
@@ -2463,12 +2371,10 @@ async fn main_chat(
     let store = jod.store().context("this command needs the database")?;
     let kind: HarnessKind = harness.into();
     // The directory this command was typed in, not `$HOME`. `jod main` is the
-    // console's one-shot twin — you `cd` into a repository and ask for
-    // something about it — so it resolves its directory the same way `jod tui`
-    // does. It used to call `jod_core::service::default_cwd`, and the two
-    // halves of that compounded: the orchestrator's harness process started in
-    // the home directory, and the root granted below would have been the whole
-    // home directory rather than the repository.
+    // console's one-shot twin, so it resolves its directory the same way `jod
+    // tui` does. Calling `default_cwd` compounded twice over: the
+    // orchestrator's harness started in the home directory, and the root
+    // granted below would have been the whole of it.
     let cwd = console_cwd(cwd);
     let id = store.main_conversation(kind, &cwd.display().to_string())?;
     grant_launch_root(store, &id, &cwd);
@@ -2526,11 +2432,10 @@ fn live_line(event: &jod_core::AgentEvent) -> Option<String> {
         // worth waiting for.
         jod_core::AgentEvent::Thinking { text } => Some(render::thinking_block(text)),
         jod_core::AgentEvent::ToolCall { name, .. } => Some(format!("  · {name}")),
-        // `Progress` and `Delta` stay out, and that is a decision rather than an
-        // oversight. A tick's place is a status line — in a transcript it is
-        // nine minutes of scrollback saying "still working" — and a delta
-        // prints in full a moment later as the `Message` or `ToolCall` it is a
-        // fragment of. This view has no status line to put a tick on.
+        // `Progress` and `Delta` stay out. A tick's place is a status line — in
+        // a transcript it is nine minutes of scrollback saying "still working"
+        // — and a delta prints in full a moment later as the `Message` it is a
+        // fragment of. This view has no status line.
         _ => None,
     }
 }
@@ -2694,18 +2599,11 @@ fn conv_command(jod: &Jod, what: ConvCommand) -> Result<()> {
 
 // ---- the rail, the roots, the secrets and the works ----------------------
 
-/// Carry out a `jod card …` subcommand.
-///
-/// Everything here goes through the same [`jod_core::cards::Query`] the
-/// terminal rail uses, so a card listed on a phone is the card that is on the
-/// screen at home, sorted the same way. A second query builder here would drift
-/// within a week — that is the whole reason the store takes a filter rather
-/// than offering a function per caller.
 /// Standing permission, listed and edited by hand.
 ///
-/// The listing is the audit — the one screen that answers "what will Jod do
-/// here without asking me?" — so it prints every grant rather than paging, and
-/// says plainly when there are none.
+/// The listing is the audit — the one screen answering "what will Jod do here
+/// without asking me?" — so it prints every grant rather than paging, and says
+/// plainly when there are none.
 fn grant_command(jod: &Jod, what: GrantCommand) -> Result<()> {
     let store = jod.store().context("this command needs the database")?;
     match what {
@@ -2750,6 +2648,11 @@ fn grant_command(jod: &Jod, what: GrantCommand) -> Result<()> {
     Ok(())
 }
 
+/// Carry out a `jod card …` subcommand.
+///
+/// Everything goes through the same [`jod_core::cards::Query`] the terminal
+/// rail uses, so a card listed on a phone is the card on the screen at home,
+/// sorted the same way.
 fn card_command(jod: &Jod, what: CardCommand) -> Result<()> {
     use jod_core::cards::{Query, Sort};
     let store = jod.store().context("this command needs the database")?;
@@ -2938,7 +2841,7 @@ fn root_command(jod: &Jod, what: RootCommand) -> Result<()> {
 
 /// The conversation a root command acts on: the one named, or the main chat.
 ///
-/// The main chat is not created here if it is missing. `jod root ls` on a fresh
+/// The main chat is not created here if missing. `jod root ls` on a fresh
 /// machine should say there is nothing rather than mint a conversation as a
 /// side effect of looking.
 fn which_conversation(store: &Store, typed: Option<String>) -> Result<String> {
@@ -3003,14 +2906,12 @@ fn secret_command(jod: &Jod, what: SecretCommand) -> Result<()> {
 
 /// Read a credential from the terminal without echoing it, or from stdin.
 ///
-/// Two paths because both are real. At a terminal the value is typed and must
-/// not appear on screen or in the scrollback; in a script it arrives on stdin,
-/// where there is nothing to echo. What neither path is, ever, is an argument:
+/// Both paths are real: at a terminal the value must not appear on screen, and
+/// in a script it arrives on stdin. What neither is, ever, is an argument —
 /// `/proc/<pid>/cmdline` is world-readable for the life of the process, and the
-/// shell keeps a copy in its history for ever after that.
+/// shell keeps a copy in its history for ever.
 ///
-/// Read exactly as given, with only a trailing newline removed — the one the
-/// terminal adds when you press enter. Everything else is part of the value.
+/// Read exactly as given, with only the trailing newline enter adds removed.
 fn read_secret_value(prompt: &str) -> Result<String> {
     use std::io::IsTerminal;
     if !std::io::stdin().is_terminal() {
@@ -3034,12 +2935,10 @@ fn read_secret_value(prompt: &str) -> Result<String> {
 
 /// One line from the terminal with the echo off.
 ///
-/// Raw mode rather than a crate: `crossterm` is already here for the
-/// full-screen interface and this is a dozen lines against a dependency whose
-/// whole job is to turn one flag off. Raw mode is disabled on every path out,
-/// including the error ones — a terminal left raw is a terminal that stops
-/// responding to Ctrl-C, which for a command that has just failed is a worse
-/// outcome than the failure.
+/// Raw mode rather than a crate: `crossterm` is already here, and this is a
+/// dozen lines against a dependency whose whole job is turning one flag off.
+/// Raw mode is disabled on every path out, including the error ones — a
+/// terminal left raw stops responding to Ctrl-C.
 fn read_without_echo() -> Result<String> {
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     crossterm::terminal::enable_raw_mode().context("could not turn the terminal's echo off")?;
@@ -3070,12 +2969,10 @@ fn read_without_echo() -> Result<String> {
 
 /// Carry out a `jod commands …` subcommand.
 ///
-/// The first thing in Jod that calls discovery at all. `scan`, `cache_discovered`
-/// and `discovered` were written, tested, and reachable from nothing — the same
-/// shape as the webhook rules and the Telegram bridge before them, where every
-/// piece was green and the feature did not exist. This is the missing verb, and
-/// it is deliberately the whole loop: scan the disk, write the cache, read it
-/// back, so the path the palette will use is exercised rather than assumed.
+/// The first thing in Jod that calls discovery at all: `scan`,
+/// `cache_discovered` and `discovered` were written, tested, and reachable from
+/// nothing. Deliberately the whole loop — scan the disk, write the cache, read
+/// it back — so the path the palette uses is exercised rather than assumed.
 fn commands_command(jod: &Jod, what: CommandsCommand) -> Result<()> {
     let store = jod.store().context("this command needs the database")?;
     match what {
@@ -3220,16 +3117,14 @@ fn project_command(jod: &Jod, what: ProjectCommand) -> Result<()> {
     use jod_core::projects::{NewProject, State};
     let store = jod.store().context("this command needs the database")?;
 
-    // Resolving by anything it is called, rather than by an id, for the same
-    // reason the MCP tool does: these are things said out loud, and an id
-    // would mean listing the catalog first just to translate a word you have.
+    // Resolving by anything it is called rather than by an id, as the MCP tool
+    // does: these are things said out loud, and an id would mean listing the
+    // catalog just to translate a word you have.
     //
-    // A name can belong to two projects — two checkouts called `proj` under
-    // different parents both answer to `proj` — and archiving or restoring is
-    // a change to the catalog, so this refuses and lists the candidates rather
-    // than acting on one of them. There is a person at the other end of this
-    // command who can say which, which is exactly why refusing is the right
-    // answer here and the wrong one inside `settle_project`.
+    // A name can belong to two projects, and archiving is a change to the
+    // catalog, so this refuses and lists the candidates. There is a person at
+    // the other end of this command, which is why refusing is right here and
+    // wrong inside `settle_project`.
     let find = |name: &str| -> Result<jod_core::projects::Project> {
         let found = store.projects_by_name(name)?;
         match found.as_slice() {
@@ -3255,10 +3150,10 @@ fn project_command(jod: &Jod, what: ProjectCommand) -> Result<()> {
             let projects = store.projects(all)?;
             if json {
                 // The stored row, plus a live look at whether its directory is
-                // still there. `path_trouble` is not a column and so cannot be
-                // serialised off `Project`; it is added to the serialised form
-                // here instead of being cached on the struct, because the
-                // answer changes without the database being touched.
+                // still there. `path_trouble` is not a column, and it is added
+                // to the serialised form rather than cached on the struct
+                // because the answer changes without the database being
+                // touched.
                 let mut rows = serde_json::to_value(&projects)?;
                 let array = rows
                     .as_array_mut()
@@ -3279,12 +3174,11 @@ fn project_command(jod: &Jod, what: ProjectCommand) -> Result<()> {
             } else {
                 for p in &projects {
                     println!("{}", p.summary_line());
-                    // On its own line under the entry rather than folded into
-                    // it. The summary says what the project is, which is still
-                    // true and still worth reading; this says what is wrong
-                    // with it now, and it is long because it has to say what to
-                    // do about it. Left indented so a healthy catalog still
-                    // reads as one line per project.
+                    // On its own line rather than folded into the entry. The
+                    // summary says what the project is, which is still true;
+                    // this says what is wrong with it now, and is long because
+                    // it has to say what to do. Indented, so a healthy catalog
+                    // still reads as one line per project.
                     if let Some(trouble) = p.path_trouble() {
                         println!("  cannot be worked in: {trouble}");
                     }
@@ -3339,19 +3233,17 @@ fn project_command(jod: &Jod, what: ProjectCommand) -> Result<()> {
     Ok(())
 }
 
-/// The lines `jod project current` prints for one conversation.
-///
-/// Returned as strings rather than printed, so the check can read the answer.
+/// The lines `jod project current` prints for one conversation. Returned as
+/// strings, so the check can read the answer.
 ///
 /// The vocabulary is the `project_current` tool's: a CLI and a tool that
-/// disagree about what "current" means send two people debugging one routing
-/// decision to two different answers.
+/// disagree about "current" send two people debugging one decision to two
+/// answers.
 ///
-/// `settled by` is the line that earns this command its place. `settle_project`
-/// runs before every model turn, and only an utterance naming exactly one
-/// catalogued project writes a row — one naming two writes nothing. So the
-/// instruction shown is the one that put this chat on this project, which is
-/// not always the last thing typed; the timestamp is how you tell.
+/// `settled by` earns this command its place. `settle_project` runs before
+/// every model turn, and only an utterance naming exactly one catalogued
+/// project writes a row — so the instruction shown is not always the last thing
+/// typed.
 fn current_project_report(store: &Store, conversation_id: &str, now_ms: i64) -> Result<Vec<String>> {
     // Named rather than left as an eight-character id. "Current" is per
     // conversation, so an answer that does not say whose project it is showing
@@ -3566,11 +3458,9 @@ fn resolve_work(store: &Store, typed: &str) -> Result<String> {
     }
 }
 
-/// Resolve a typed id prefix against the conversations that exist.
-///
-/// An ambiguous prefix is refused rather than guessed: reverting or
-/// consolidating the wrong conversation is not undoable by the person who did
-/// it.
+/// Resolve a typed id prefix against the conversations that exist. An ambiguous
+/// prefix is refused rather than guessed: reverting the wrong conversation is
+/// not undoable by the person who did it.
 fn resolve_conversation(store: &Store, typed: &str) -> Result<String> {
     let all = store.conversations(500)?;
     let hits: Vec<_> = all.iter().filter(|c| c.id.starts_with(typed)).collect();
@@ -3586,13 +3476,11 @@ fn resolve_conversation(store: &Store, typed: &str) -> Result<String> {
 
 /// Resolve a typed run-id prefix against the runs Jod knows about.
 ///
-/// Every surface *shows* an eight-character id, and `jod watch`/`jod kill` then
-/// demanded the full uuid — so `jod main` printed a `jod watch 1f0fc870` hint
-/// that did not work.
+/// Every surface *shows* an eight-character id while `jod watch`/`jod kill`
+/// demanded the full uuid, so `jod main` printed a hint that did not work.
 ///
-/// Ambiguity is refused rather than guessed, as in [`resolve_conversation`]:
-/// `jod kill` on the wrong agent is not undoable. An exact match wins outright,
-/// so a full uuid is never disambiguated against itself.
+/// Ambiguity is refused rather than guessed. An exact match wins outright, so a
+/// full uuid is never disambiguated against itself.
 async fn resolve_run(jod: &Jod, typed: &str) -> Result<String> {
     if jod.agent(typed).await.is_ok() {
         return Ok(typed.to_string());
@@ -3608,9 +3496,8 @@ async fn resolve_run(jod: &Jod, typed: &str) -> Result<String> {
 
 /// Turn a conversation, or a run, into memory.
 ///
-/// The shape of this command follows the module it drives: Jod builds the
-/// prompt, an agent does the reading, and Jod reads the answer back under rules
-/// the agent cannot reach. So the flow is spawn → wait → parse → write, and the
+/// Jod builds the prompt, an agent does the reading, and Jod reads the answer
+/// back under rules the agent cannot reach: spawn → wait → parse → write. The
 /// only thing the caller decides is *where the material came from*, which is
 /// the one input that cannot be recovered from the text.
 async fn consolidate_command(
@@ -3675,7 +3562,7 @@ async fn consolidate_command(
 /// run.
 ///
 /// Split out from the command because "did the dry run write anything" is the
-/// question worth a test here, and a test cannot spawn an agent.
+/// question worth a test, and a test cannot spawn an agent.
 fn settle_consolidation(
     store: &Store,
     consolidation: &Consolidation,
@@ -3742,10 +3629,9 @@ fn settle_consolidation(
 
 /// What writing one extracted line would do to what Jod already believes.
 ///
-/// The same question `Consolidation::apply` asks — the current belief on this
-/// subject, predicate and scope — asked read-only, so a dry run says something
-/// more useful than "it parsed". It stops short of the trust ranking and the
-/// loss guard, which are the store's to apply and are stated as such.
+/// The same question `Consolidation::apply` asks, asked read-only, so a dry run
+/// says something more useful than "it parsed". It stops short of the trust
+/// ranking and the loss guard, which are the store's to apply.
 fn would_do(store: &Store, fact: &NewFact) -> Result<String> {
     let current = store
         .facts_about(&fact.subject)?
@@ -3775,9 +3661,8 @@ fn report_dropped(dropped: &[jod_core::consolidate::Dropped]) {
 
 /// A conversation as the text an extraction reads.
 ///
-/// Thinking is left out. It is one model's private reasoning — speculation,
-/// options weighed and dropped — and a fact extracted from it is something
-/// nobody ever asserted.
+/// Thinking is left out: it is one model's private reasoning, and a fact
+/// extracted from it is something nobody ever asserted.
 fn transcript_material(transcript: &[PortableMessage]) -> String {
     transcript
         .iter()
@@ -3802,8 +3687,8 @@ fn transcript_material(transcript: &[PortableMessage]) -> String {
 /// A run as the text an extraction reads.
 ///
 /// The prompt comes off disk rather than out of the events, because no harness
-/// reports its own prompt back — and the prompt is usually the densest thing in
-/// the run, since it is the part a person wrote.
+/// reports its own prompt back — and it is usually the densest thing in the
+/// run, since a person wrote it.
 fn run_material(run_id: &str, events: &[AgentEnvelope]) -> String {
     let mut lines = Vec::new();
     if let Ok(prompt) = std::fs::read_to_string(jod_core::paths::prompt_path(run_id)) {
@@ -3826,9 +3711,8 @@ fn run_material(run_id: &str, events: &[AgentEnvelope]) -> String {
 /// Wait for one run to finish, and return everything it said.
 ///
 /// Every assistant message, not only the last: an agent asked for JSON lines
-/// will preface them, apologise, or wrap them in a fence, and the parser passes
-/// over prose in silence anyway — so keeping the lot costs nothing and loses no
-/// facts to a stray "here you go".
+/// will preface them or wrap them in a fence, and the parser passes over prose
+/// anyway.
 async fn collect_output(
     mut events: jod_core::broadcast::Receiver<AgentEnvelope>,
     agent_id: &str,
@@ -3855,18 +3739,11 @@ async fn collect_output(
     }
 }
 
-/// Carry out a `jod schedule …` subcommand.
-///
-/// Every path here goes through the store rather than spawning anything: a
-/// schedule is armed by writing a row, and the tick is what fires it. Even
-/// `run` only brings the next instant forward, so a hand-started run picks up
-/// the same overlap policy, failure count and fire record as a timed one.
 /// Carry out a `jod webhook …` subcommand.
 ///
-/// The verbs a rule needs to exist at all. Everything downstream of a rule —
-/// the receiver, the HMAC check, the delivery ledger, the TUI's list with its
-/// enable/disable/delete keys — was already built and tested against rules that
-/// only ever existed inside test functions.
+/// The verbs a rule needs to exist at all. Everything downstream — the
+/// receiver, the HMAC check, the delivery ledger, the TUI's list — was already
+/// built and tested against rules that only existed inside test functions.
 fn webhook_command(jod: &Jod, what: WebhookCommand) -> Result<()> {
     use jod_core::webhook::{Conditions, Rule};
     let store = jod.store().context("this command needs the database")?;
@@ -3971,8 +3848,7 @@ fn set_rule_armed(store: &jod_core::store::Store, name: &str, armed: bool) -> Re
 ///
 /// `JOD_TELEGRAM_TOKEN` is canonical and always wins. `TELEGRAM_BOT_API_KEY` is
 /// accepted because it is what a person writes into a `.env` without consulting
-/// anything, and refusing it teaches nothing — the alternative is a bot that is
-/// silent for the one reason its own error message does not mention.
+/// anything, and refusing it teaches nothing.
 fn telegram_token() -> Result<String> {
     for name in ["JOD_TELEGRAM_TOKEN", "TELEGRAM_BOT_API_KEY"] {
         if let Ok(t) = std::env::var(name) {
@@ -3990,11 +3866,11 @@ async fn telegram_command(jod: std::sync::Arc<Jod>, what: TelegramCommand) -> Re
     match what {
         TelegramCommand::Whoami => {
             let bot = HttpBot::new(&telegram_token()?)?;
-            // An empty allowlist refuses everybody, which is precisely what
-            // makes this a bootstrap: every pending message becomes a Refusal
-            // carrying the id that belongs in JOD_TELEGRAM_ALLOWED_USERS.
-            // Reusing the real poller rather than curl means the ids printed
-            // here are the ids `serve` will actually compare against.
+            // An empty allowlist refuses everybody, which is what makes this a
+            // bootstrap: every pending message becomes a Refusal carrying the
+            // id that belongs in `JOD_TELEGRAM_ALLOWED_USERS`. Reusing the real
+            // poller means the ids printed are the ones `serve` will compare
+            // against.
             let poller = Poller::new(bot, Allowlist::default());
             let batch = poller
                 .poll_once()
@@ -4037,16 +3913,14 @@ async fn telegram_command(jod: std::sync::Arc<Jod>, what: TelegramCommand) -> Re
             // how `whoami` proved a token that `serve` called unset.
             //
             // Everything else `from_env` does is kept, including refusing an
-            // empty allowlist at startup rather than at the first message: a
-            // bot that silently answers nobody looks like one with a bad token.
+            // empty allowlist at startup: a bot that silently answers nobody
+            // looks like one with a bad token.
             //
-            // **The directory is `$HOME`, on purpose — the one entry point that
-            // keeps it.** Every other command starts where it was typed,
-            // because the person typing is standing where they mean. The bridge
-            // runs until stopped and answers messages from a phone, so tying it
-            // to whichever terminal started it makes the answer depend on a
-            // fact nobody can see later — and behind a service manager the
-            // launch directory is `/`. `--cwd` is how you place its runs.
+            // **The directory is `$HOME`, on purpose — the one entry point that keeps it.**
+            // The bridge runs until stopped and answers messages from a phone,
+            // so tying it to whichever terminal started it makes the answer
+            // depend on a fact nobody can see later. `--cwd` is how you place
+            // its runs.
             let mut config = Config::from_parts(
                 Some(telegram_token()?),
                 std::env::var("JOD_TELEGRAM_ALLOWED_USERS").ok(),
@@ -4229,8 +4103,7 @@ fn monitor_command(jod: &Jod, what: MonitorCommand) -> Result<()> {
 /// `jod ledger …` — the reader the delivery ledger never had.
 ///
 /// The module has recorded every owed message since it was wired, and nothing
-/// could show one. A ledger nobody can read proves things to nobody, which is a
-/// slower version of not keeping one.
+/// could show one. A ledger nobody can read proves things to nobody.
 fn ledger_command(jod: &Jod, what: LedgerCommand) -> Result<()> {
     use jod_core::ledger::DeliveryState;
     let store = jod.store().context("this command needs the database")?;
@@ -4301,6 +4174,12 @@ fn ledger_command(jod: &Jod, what: LedgerCommand) -> Result<()> {
     Ok(())
 }
 
+/// Carry out a `jod schedule …` subcommand.
+///
+/// Every path goes through the store rather than spawning anything: a schedule
+/// is armed by writing a row, and the tick is what fires it. Even `run` only
+/// brings the next instant forward, so a hand-started run picks up the same
+/// overlap policy and fire record as a timed one.
 fn schedule_command(jod: &Jod, what: ScheduleCommand) -> Result<()> {
     let store = jod.store().context("this command needs the database")?;
     let now = chrono::Utc::now().timestamp_millis();
@@ -4385,8 +4264,8 @@ fn schedule_command(jod: &Jod, what: ScheduleCommand) -> Result<()> {
             } else {
                 // A fire's outcome is decided when the run is *started*, so a
                 // run that then failed still reads `ran`. Judged alone, a
-                // schedule whose every run has failed shows a column of ticks —
-                // in the one place you look to ask whether it works. So each
+                // schedule whose every run has failed shows a column of ticks
+                // in the one place you look to ask whether it works — so each
                 // fire is paired with how its run actually ended.
                 let outcomes: Vec<(jod_core::schedule::Fire, Option<String>)> = fires
                     .into_iter()
@@ -4494,12 +4373,9 @@ fn goal_command(jod: &Jod, what: GoalCommand) -> Result<()> {
 /// What `jod goal log` prints, one line at a time.
 ///
 /// Read in the goal's own scope rather than by subject alone. The facts are
-/// filed under `goal/<name>`, but the name is not the goal: remove a goal and
-/// add another with the same name and a subject-only read hands the new one
-/// everything the old one wrote — its `ended` verdict, its done-when
-/// fingerprint, and a pointer to a run it never started. The id is the only
-/// thing that tells the two apart, and `memory_scope()` is where the id
-/// already lives.
+/// filed under `goal/<name>`, but the name is not the goal: remove one and add
+/// another with the same name, and a subject-only read hands the new one
+/// everything the old wrote. The id is the only thing that tells them apart.
 ///
 /// Separate from the command so the reading can be tested without a terminal.
 fn goal_log(store: &Store, goal: &jod_core::schedule::Goal, limit: usize) -> Result<Vec<String>> {
@@ -4524,18 +4400,12 @@ fn goal_log(store: &Store, goal: &jod_core::schedule::Goal, limit: usize) -> Res
     Ok(lines)
 }
 
-/// Refuse to start an agent when nothing could supervise it.
-///
-/// `jod-run` is what holds a run's output once the caller walks away; without
-/// it a spawn would fail later and less clearly, after the run had a name.
 /// Sign in to one harness, or to each one that needs it.
 ///
 /// Jod runs the harness's own command and stays out of the way: it never reads
-/// the credential, never stores it, and never passes it on. The value it adds
-/// is that the sign-in happens in *this* process's environment, which is the
-/// environment a run will be spawned into — so the account lands in the
-/// directory the harness will actually read, rather than in whichever profile
-/// a shell alias would have pointed at.
+/// the credential, never stores it, never passes it on. What it adds is that
+/// the sign-in happens in *this* process's environment — the one a run will be
+/// spawned into — so the account lands where the harness will actually read it.
 fn login(named: Option<&str>, force: bool) -> Result<()> {
     let targets = match named {
         Some(name) => vec![jod_core::mcp::parse_harness(name).with_context(|| {
@@ -4575,11 +4445,10 @@ fn login(named: Option<&str>, force: bool) -> Result<()> {
             continue;
         }
 
-        // The sign-in flows are interactive: they print a URL, wait for a
-        // browser, and read a code back. Started without a terminal — from a
-        // scheduled run, from the API, from a pipe — the harness would sit
-        // there holding a prompt nobody can see, which is a hang rather than a
-        // failure. Refusing is the honest version of the same outcome.
+        // The sign-in flows are interactive: they print a URL and read a code
+        // back. Started without a terminal the harness would sit holding a
+        // prompt nobody can see, which is a hang rather than a failure.
+        // Refusing is the honest version.
         if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
             bail!(
                 "signing in to {} needs a terminal — run `jod login {}` yourself, \
@@ -4612,6 +4481,10 @@ fn login(named: Option<&str>, force: bool) -> Result<()> {
     Ok(())
 }
 
+/// Refuse to start an agent when nothing could supervise it.
+///
+/// `jod-run` is what holds a run's output once the caller walks away; without
+/// it a spawn would fail later and less clearly, after the run had a name.
 fn require_supervisor(jod: &Jod) -> Result<()> {
     if !jod.supervisor_available() {
         bail!(
@@ -4625,18 +4498,16 @@ fn require_supervisor(jod: &Jod) -> Result<()> {
 
 /// The roots and secret names a `jod run` should carry into its request.
 ///
-/// Both are properties of the *thread*, not the command line, so a run
-/// continuing a conversation inherits what that conversation was given — as
-/// [`jod_core::service::prefer_conversation_settings`] does for the model.
-/// Without this, `jod root add` records a directory no harness is granted and
-/// `jod secret set` a name no run is given.
+/// Both are properties of the *thread*, not the command line, as
+/// `prefer_conversation_settings` is for the model. Without this, `jod root
+/// add` records a directory no harness is granted.
 ///
-/// **Names, never values.** The supervisor resolves them at exec from a file
-/// only its owner can read. A value here would be a value in `spawn.json`, in
-/// `ps`, and in the launcher's logs.
+/// **Names, never values.** The supervisor resolves them at exec from a file only
+/// its owner can read; a value here would be in `spawn.json`, in `ps`, and in
+/// the launcher's logs.
 ///
-/// A fresh run has no conversation and therefore no roots, but does get the
-/// global secrets — "every session on this box" is what global means.
+/// A fresh run has no conversation and so no roots, but does get the global
+/// secrets.
 fn grants_for_run(
     store: &Store,
     resume: &Resume,
@@ -4665,21 +4536,16 @@ fn grants_for_run(
 /// Where the console works when `--cwd` said nothing: the directory it was
 /// launched in.
 ///
-/// Not [`jod_core::service::default_cwd`], which answers `$HOME`. A console is
-/// opened *inside* something — you `cd` to a repository and type `jod tui` — so
-/// `$HOME` was wrong in three places at once: the harness started there, the
-/// band printed `~`, and [`crate::tui::ensure_launch_root`] handed the
+/// Not `default_cwd`, which answers `$HOME`. A console is opened *inside*
+/// something, so `$HOME` was wrong in three places at once: the harness started
+/// there, the band printed `~`, and `ensure_launch_root` handed the
 /// conversation the whole home directory to search.
 ///
-/// `$HOME` stays the fallback for having no launched-in directory at all, which
-/// is where `current_dir` fails.
+/// `$HOME` stays the fallback for having no launched-in directory, which is
+/// where `current_dir` fails.
 ///
-/// Used by every entry point a person types: the console, `jod main`,
-/// `jod chat`, `jod run` and `jod team start`.
-///
-/// Two commands have a better answer than "here". A resumed run belongs where
-/// its session lives — see [`session_cwd`]. And `jod telegram serve` outlives
-/// its terminal, so `$HOME` stays its default.
+/// Two commands have a better answer than "here": a resumed run belongs where
+/// its session lives, and `jod telegram serve` outlives its terminal.
 fn console_cwd(given: Option<PathBuf>) -> PathBuf {
     given
         .or_else(|| std::env::current_dir().ok())
@@ -4689,12 +4555,9 @@ fn console_cwd(given: Option<PathBuf>) -> PathBuf {
 /// Give a conversation the directory the command was run in, to read, and say
 /// so when it cannot be done.
 ///
-/// The grant itself lives in [`jod_core::store::Store::grant_launch_root`],
-/// which is the one place any entry point makes it — the console included.
-/// This wrapper exists only to choose where a failure is reported: on the
-/// console it is a notice in the transcript, and here it is a line on stderr.
-/// Neither stops the command, because the instruction the caller typed is still
-/// the thing they asked for.
+/// The grant lives in `Store::grant_launch_root`, the one place any entry point
+/// makes it. This wrapper only chooses where a failure is reported — a notice
+/// in the console, a line on stderr here. Neither stops the command.
 fn grant_launch_root(store: &Store, conversation: &str, cwd: &std::path::Path) {
     if let Err(e) = store.grant_launch_root(conversation, cwd) {
         eprintln!(
@@ -4708,10 +4571,8 @@ fn grant_launch_root(store: &Store, conversation: &str, cwd: &std::path::Path) {
 ///
 /// Almost always the path handed in, and the exception is worth the read: a
 /// relative `--cwd` is resolved inside `spawn_agent` against the run's declared
-/// roots, not against this process's own working directory, so the two can
-/// disagree. Granting a root the run does not work in would be a root pointing
-/// at nothing anybody asked about, which is harder to notice than no root at
-/// all. Falls back to what was asked for when the row cannot be read.
+/// roots, so the two can disagree. Granting a root the run does not work in is
+/// harder to notice than no root at all.
 fn settled_cwd(store: &Store, conversation: &str, asked_for: &std::path::Path) -> PathBuf {
     store
         .conversation(conversation)
@@ -4724,15 +4585,11 @@ fn settled_cwd(store: &Store, conversation: &str, asked_for: &std::path::Path) -
 
 /// The directory a resumed session belongs to, when Jod knows it.
 ///
-/// `None` for a fresh run, and for a session id Jod has never seen — somebody
-/// resuming a session started outside Jod, where there is nothing to look up
-/// and the caller's own directory is the only answer available.
+/// `None` for a fresh run, and for a session id Jod has never seen.
 ///
-/// Separate from [`grants_for_run`] rather than folded into it because the two
-/// answer different questions and one of them can be wrong without the other
-/// noticing: that one asks what this run may *reach*, this one asks where it
-/// must *happen*. Sharing [`continuing_conversation`] keeps them agreeing about
-/// which thread is being rejoined.
+/// Separate from [`grants_for_run`] because the two answer different questions
+/// and one can be wrong without the other noticing: that asks what a run may
+/// *reach*, this asks where it must *happen*.
 fn session_cwd(
     store: &Store,
     resume: &Resume,
@@ -4750,10 +4607,9 @@ fn session_cwd(
 
 /// Which conversation a `--continue` or `--session` run is rejoining.
 ///
-/// `jod run` binds its *transcript* to a new conversation every time
-/// ([`RunConversation::New`]), so this is not that question. It asks the other
-/// one: which existing thread is the harness being resumed into, and therefore
-/// whose roots and secrets apply.
+/// `jod run` binds its *transcript* to a new conversation every time, so this
+/// is the other question: which existing thread the harness is resumed into,
+/// and therefore whose roots and secrets apply.
 fn continuing_conversation(
     store: &Store,
     resume: &Resume,
@@ -4779,11 +4635,10 @@ fn continuing_conversation(
 
 /// One conversation, many turns.
 ///
-/// Every turn after the first resumes the harness session the previous turn
-/// reported, so context carries across turns — and every turn is recorded into
-/// the *same* Jod conversation, which is a separate thing from the harness
-/// session and outlives it. Both are needed: the session is what makes the next
-/// turn cheap, the conversation is what survives the harness being swapped.
+/// Every turn after the first resumes the session the previous turn reported,
+/// and every turn is recorded into the *same* Jod conversation. Both are
+/// needed: the session makes the next turn cheap, the conversation survives a
+/// harness swap.
 async fn chat(
     jod: std::sync::Arc<Jod>,
     harness: HarnessArg,
@@ -4845,16 +4700,13 @@ async fn chat(
             .await?;
 
         // The rest of the chat lands in the conversation the first turn opened,
-        // so `jod conv show` reads back as the conversation it was rather than
-        // as one thread per line typed.
+        // so `jod conv show` reads back as one conversation rather than a
+        // thread per line.
         //
-        // That conversation also gets the launch directory to read, the same
-        // grant the console and `jod main` make, and this is the first moment
-        // it can be made: the id does not exist until the request has been
-        // through `spawn_agent_in`. Before the turn is streamed rather than
-        // after, so a chat interrupted part-way through its first answer still
-        // leaves a chat that knows where it is. Once per chat in practice — the
-        // second turn finds the root already there and adds nothing.
+        // That conversation also gets the launch directory to read, and this is
+        // the first moment it can be granted — the id does not exist until the
+        // request has been through `spawn_agent_in`. Before the turn is
+        // streamed, so a chat interrupted part-way still knows where it is.
         if let Some(id) = jod.conversation_of(&agent.id).await {
             if let Some(store) = jod.store() {
                 grant_launch_root(store, &id, &settled_cwd(store, &id, &cwd));
@@ -4880,12 +4732,11 @@ fn read_stdin() -> std::io::Result<String> {
     Ok(s)
 }
 
-/// A short, human-recognisable name derived from the prompt's first words.
 /// Wait until every one of `pending` has finished.
 ///
 /// A team command that returned before its runs ended would leave the members
 /// marked busy for ever: the tailer lives in *this* process, so nothing would
-/// ever record that they stopped.
+/// record that they stopped.
 async fn wait_for_all(
     mut events: jod_core::broadcast::Receiver<jod_core::AgentEnvelope>,
     mut pending: std::collections::HashSet<String>,
@@ -4963,14 +4814,12 @@ mod tests {
     }
 
     /// `jod kill` stops a branch of the fleet, and the help is where a person
-    /// finds that out before they type it rather than after.
+    /// finds that out before they type it.
     ///
-    /// This is a destructive command whose reach grew, so the help has to carry
-    /// three things. What it takes: the agents working underneath, not just
-    /// this one. What it spares: the main chat, which stops alone. And how to
-    /// undo it, because a person who stops a manager by mistake needs to know
-    /// in that moment that continuing it brings the workers back, not to
-    /// discover it a day later.
+    /// A destructive command whose reach grew, so the help carries three
+    /// things: what it takes (the agents underneath), what it spares (the main
+    /// chat), and how to undo it — because somebody who stops a manager by
+    /// mistake needs to know then that continuing brings the workers back.
     #[test]
     fn the_kill_help_says_it_stops_the_agents_underneath() {
         use clap::CommandFactory;
@@ -5006,11 +4855,10 @@ mod tests {
     }
 
     /// The complaint this default answers: a run followed from a shell printed
-    /// its tool calls and none of the reasoning that chose them, so the visible
-    /// half of a run was the half that says least.
+    /// its tool calls and none of the reasoning that chose them.
     ///
-    /// Written as an inverse flag rather than a defaulted `--thinking` because
-    /// the flag a person reaches for is the one that turns the noise *off*.
+    /// An inverse flag rather than a defaulted `--thinking`, because the flag a
+    /// person reaches for is the one that turns the noise *off*.
     #[test]
     fn following_a_run_shows_its_reasoning_unless_asked_not_to() {
         use clap::Parser;
@@ -5084,11 +4932,11 @@ mod tests {
             .collect()
     }
 
-    /// **The property `jod secret set` exists to have.** Anything on a command
-    /// line is world-readable through `/proc` for the life of the process and
-    /// in the shell's history for ever afterwards, so there must be no argument
-    /// a value could be typed into — asserted, because adding one back would be
-    /// a one-line convenience with no visible symptom.
+    /// **The property `jod secret set` exists to have.** Anything on a command line is
+    /// world-readable through `/proc` and in the shell's history for ever, so
+    /// there must be no argument a value could be typed into — asserted,
+    /// because adding one back would be a one-line convenience with no visible
+    /// symptom.
     #[test]
     fn setting_a_secret_takes_no_argument_a_value_could_arrive_in() {
         let args = arg_names(&["secret", "set"]);
@@ -5171,11 +5019,10 @@ mod tests {
     ///
     /// `put_secret` writes the value to a file under `$JOD_HOME/secrets`, so a
     /// test that stores one without redirecting the variable writes a
-    /// credential file into the developer's real Jod home — which is exactly
-    /// what an orchestrator test did until this session, and it went unnoticed
-    /// because the row it asserted on lived in an in-memory database while the
-    /// file did not. `JOD_HOME` is process-wide, so the lock is what stops two
-    /// of these from landing in each other's directory.
+    /// credential file into the developer's real Jod home — which an
+    /// orchestrator test did, unnoticed, because the row it asserted on lived
+    /// in an in-memory database while the file did not. `JOD_HOME` is process-
+    /// wide, so the lock stops two of these landing in each other's directory.
     struct TempHome {
         dir: PathBuf,
         previous: Option<String>,
@@ -5234,9 +5081,8 @@ mod tests {
     }
 
     /// The bug this pins: `jod root add` and `jod secret set` both wrote rows
-    /// that no run ever read, so the two features were storage and nothing
-    /// else. It asserts the **request** — what the harness is actually handed —
-    /// because a test that read the conversation back would have gone on
+    /// no run ever read. It asserts the **request** — what the harness is
+    /// handed — because a test reading the conversation back would have gone on
     /// passing for as long as the wiring was missing.
     #[test]
     fn a_continued_run_is_handed_the_conversation_s_roots_and_secret_names() {
@@ -5321,11 +5167,9 @@ mod tests {
 
     /// **A resumed run happens where its session lives.**
     ///
-    /// Measured, not guessed: OpenCode scopes a session to the project it
-    /// resolves from `--dir`, and `--session <id>` naming a session from
-    /// another project neither errors nor starts fresh — it hangs silently for
-    /// ever. So resuming in whatever directory the command was typed in is not
-    /// a cosmetic mistake, and this is the lookup that prevents it.
+    /// Measured: OpenCode scopes a session to the project it resolves from
+    /// `--dir`, and `--session <id>` naming another project's session neither
+    /// errors nor starts fresh — it hangs silently for ever.
     #[tokio::test]
     async fn resuming_a_session_uses_the_directory_that_session_belongs_to() {
         let store = Store::in_memory().unwrap();
@@ -5446,11 +5290,11 @@ mod tests {
     }
 
     /// D8: a work with nothing on disk deletes on the *first* command, because
-    /// there is nothing to lose by it. The repeat exists to protect worktrees,
-    /// and making every delete need two commands would teach people to type it
-    /// twice without reading the first answer.
-    // `Jod::with_store` starts the task that drains the event channel, so this
-    // needs a runtime even though nothing here is awaited.
+    /// there is nothing to lose. The repeat protects worktrees, and making
+    /// every delete need two commands would teach people to type it twice
+    /// without reading the first answer.
+    ///
+    /// `Jod::with_store` starts the event-drain task, so this needs a runtime.
     #[tokio::test]
     async fn deleting_a_work_that_holds_no_worktree_goes_through_first_time() {
         let store = std::sync::Arc::new(Store::in_memory().unwrap());
@@ -5518,11 +5362,10 @@ mod tests {
         assert!(refused.contains("--conversation"), "{refused}");
     }
 
-    /// L5's check. The person this command serves is debugging why an
-    /// instruction landed on the wrong project, so the answer has to carry how
-    /// the project was resolved and not only which one it is. Both states are
-    /// asserted, because a command that only answers when there is an answer is
-    /// half a command.
+    /// L5's check. The person this serves is debugging why an instruction
+    /// landed on the wrong project, so the answer carries *how* it was resolved
+    /// and not only which one. Both states are asserted, because a command that
+    /// only answers when there is an answer is half a command.
     #[test]
     fn asking_which_project_a_chat_is_on_answers_whether_or_not_one_is_settled() {
         use clap::Parser;
@@ -5555,11 +5398,10 @@ mod tests {
         assert!(unsettled.contains("jod project ls"), "{unsettled}");
         assert!(unsettled.contains(&short_id(&chat)), "{unsettled}");
 
-        // One instruction that names a catalogued project settles it. This is
-        // the path `settle_project` takes before every model turn, so the row
-        // the report reads is the row the router actually wrote.
-        // A real directory, because a project has to be somewhere a session
-        // could actually be started.
+        // One instruction naming a catalogued project settles it — the path
+        // `settle_project` takes before every model turn, so the row the report
+        // reads is the row the router wrote. A real directory, because a
+        // project has to be somewhere a session could be started.
         let checkout = std::env::temp_dir().join(format!("jod-tetris-{}", std::process::id()));
         std::fs::create_dir_all(&checkout).unwrap();
         store
@@ -5765,15 +5607,13 @@ mod tests {
     /// Every positional argument under `jod team` says what it is.
     ///
     /// `jod team task <TEAM> <ID> [TITLE]...` shipped with three blank
-    /// `Arguments:` rows, and this is the agent board's own entry point — so
-    /// the only way to learn what an `ID` was, or where one came from, was to
-    /// read `TeamCommand`. Asserted rather than fixed once, because a tenth
-    /// subcommand written the same way would reintroduce it silently: a bare
-    /// `field: String` compiles, runs, and documents nothing.
+    /// `Arguments:` rows, so the only way to learn what an `ID` was came from
+    /// reading `TeamCommand`. Asserted rather than fixed once, because a tenth
+    /// subcommand written the same way would reintroduce it silently.
     ///
-    /// The second half is the part that keeps the text honest. `/// Id` is
-    /// non-empty and answers nothing, so a description that only echoes the
-    /// argument's own name counts as no description at all.
+    /// The second half keeps the text honest: `/// Id` is non-empty and answers
+    /// nothing, so a description echoing the argument's own name counts as
+    /// none.
     #[test]
     fn every_positional_under_team_says_what_it_is() {
         use clap::CommandFactory;
