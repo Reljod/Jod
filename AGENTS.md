@@ -115,6 +115,12 @@ A check that can't pass makes faking it the cheapest path.
   abstract vocabulary used as style. No telegraphic notes, no sentence
   fragments, and no stacking three clauses where two sentences would do.
   → [why](docs/decisions.md#a-summary-the-reader-has-to-decode-is-not-a-summary)
+- **Comments are a last resort.** Prose in code is read on every pass and paid
+  for every time. Write one only when the reason cannot be inferred from the
+  code, and then write the reason alone — one or two lines, no war story, no
+  restating what the next line does. Design reasoning belongs in `docs/`, not
+  beside the function. Say a thing once: if it is already written down, link to
+  it rather than repeating it.
 - **Subagents:** an agent definition sets no `model:` — it describes a role, and
   the caller's session picks the model.
   → [why](docs/decisions.md#an-agent-definition-that-pins-a-model-overrides-the-session-that-spawned-it)
