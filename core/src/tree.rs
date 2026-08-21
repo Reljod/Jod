@@ -1352,6 +1352,88 @@ mod tests {
         std::fs::remove_dir_all(&base).ok();
     }
 
+    /// Every row sits directly under the row it hangs from, in a forest with
+    /// one of everything in it.
+    ///
+    /// This is the invariant the renderer *reads*: the guides, the indent, and
+    /// which rows a collapsed row hides are all computed from position, not
+    /// from `parent`. `condense` now reorders to guarantee it, and nothing
+    /// asserted it in general — the closed-work bug was found only because
+    /// someone looked at the screen, and it passed a test that checked `parent`
+    /// because `parent` was right.
+    ///
+    /// Deliberately a *whole forest* rather than a case: main with its own
+    /// runs, two projects, a manager each, live and closed works, sessions
+    /// nested under sessions, and a work belonging to no repository.
+    #[test]
+    fn every_row_in_a_full_forest_is_drawn_under_its_own_parent() {
+        use crate::projects::NewProject;
+
+        let s = store();
+        let base = format!("/tmp/jod-forest-order-{}", std::process::id());
+        let mut ids = Vec::new();
+        for name in ["alpha", "beta"] {
+            let dir = format!("{base}/{name}");
+            std::fs::create_dir_all(&dir).unwrap();
+            let p = s.add_project(NewProject::at(&dir)).unwrap();
+            s.manager_conversation(&p.id, HarnessKind::ClaudeCode).unwrap();
+            ids.push(p.id);
+        }
+        s.main_conversation(HarnessKind::ClaudeCode, "/tmp").unwrap();
+
+        for (n, project) in ids.iter().enumerate() {
+            let live = s
+                .create_work_in(&format!("live work {n}"), Some(project))
+                .unwrap();
+            s.set_work_title(&live.id, &format!("live {n}")).unwrap();
+            // Sessions nested under sessions, which is where an ordering bug
+            // shows up as an elbow pointing at the wrong row.
+            let lead = session(&s, &live.id, None, "lead");
+            let child = session(&s, &live.id, Some(&lead), "worker");
+            session(&s, &live.id, Some(&child), "helper");
+            run_for(&s, &lead, &format!("run-{n}"), "running");
+
+            let done = s
+                .create_work_in(&format!("closed work {n}"), Some(project))
+                .unwrap();
+            s.set_work_title(&done.id, &format!("closed {n}")).unwrap();
+            session(&s, &done.id, None, "writer");
+            s.close_work(&done.id).unwrap();
+        }
+        // And one belonging to no repository at all.
+        let loose = s.create_work("tidy the dotfiles").unwrap();
+        s.set_work_title(&loose.id, "tidy the dotfiles").unwrap();
+        session(&s, &loose.id, None, "tidier");
+
+        let (folded, _) = s.fleet(Filter::All).unwrap();
+        let shape: Vec<(usize, &str)> = folded
+            .nodes
+            .iter()
+            .map(|n| (n.depth, n.label.as_str()))
+            .collect();
+        assert!(folded.nodes.len() > 10, "a forest worth walking: {shape:?}");
+
+        for (at, node) in folded.nodes.iter().enumerate() {
+            let Some(parent) = &node.parent else {
+                assert_eq!(node.depth, 0, "a row with no parent is top level: {shape:?}");
+                continue;
+            };
+            let above = folded.nodes[..at]
+                .iter()
+                .rev()
+                .find(|n| n.depth < node.depth)
+                .map(|n| n.id.clone());
+            assert_eq!(
+                above.as_ref(),
+                Some(parent),
+                "`{}` is drawn under the wrong row: {shape:?}",
+                node.label,
+            );
+        }
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
     /// A stall is visible on a collapsed fleet, which is the fleet people read.
     ///
     /// `stalled_for_ms` is deliberately a fact about one process and null on
