@@ -1,94 +1,34 @@
 //! What every screen says its keys are.
 //!
-//! Two places have to agree: the keybar that is always on screen, and the `?`
-//! overlay that carries the long tail. They are generated from one table here
-//! so they cannot drift.
+//! The keybar and the `?` overlay are generated from one table here so they
+//! cannot drift. Why the verbs sit on Ctrl, and which letters are left, is in
+//! `docs/jod-system.md`.
 //!
-//! ## What the bar guarantees, and what it does not
+//! **The way out is always printed; the verbs are printed as far as they fit.**
+//! The old rule — every verb on the bar — was already false when written:
+//! `ui::two_ends` reserved room for verbs and dropped the exit, so at eighty
+//! columns chat, fleet and memory all stopped saying `Esc back · ? keys`, and
+//! every render test used a hundred and fifty columns. Being stranded is the
+//! trap; a terse bar is not. So the exit is reserved first and `keybar` spends
+//! the rest, dropping **whole** verbs and saying `? more` when it drops any.
 //!
-//! **The way out is always printed. The verbs are printed as far as they fit.**
+//! **Where a new verb goes in its table.** The budget drops from the end, so
+//! order decides what a narrow terminal loses: `⏎` first, then verbs unique to
+//! this screen, then verbs that also appear in [`SPINE`]. Where two unique
+//! verbs tie, prefer the one whose letter means something else elsewhere —
+//! printing one half of such a pair teaches a habit the other screen breaks.
+//! Only the last step is enforced: pinning the tie-break was tried and deleted,
+//! because the fleet has thirteen verbs, room for five, and seven collided
+//! letters, so no ordering satisfies it.
 //!
-//! The old rule — every verb on the bar — was already false when written.
-//! `ui::two_ends` reserved room for verbs and dropped the right-hand half,
-//! which is the way out: at eighty columns, chat, fleet and memory all stopped
-//! saying `Esc back · ? keys`. Every render test used a hundred and fifty
-//! columns, so nothing saw it.
-//!
-//! The argument order was backwards: being stranded is the trap, a terse bar is
-//! not. So the exit is reserved first and `keybar` spends the rest, dropping
-//! **whole** verbs — half a chord teaches a key that does not exist — and
-//! saying `? more` when it drops any.
-//!
-//! ## Where a new verb goes in its table
-//!
-//! The budget drops from the end, so a table's order decides what a narrow
-//! terminal loses:
-//!
-//! 1. `⏎` — the primary action, always first.
-//! 2. Verbs **unique to this screen**, most important first. Where two tie,
-//!    prefer the one whose letter means something else elsewhere: `a` attaches
-//!    here and answers an escalation in goals, and printing one half of that
-//!    pair teaches a habit the other screen breaks. A tie-break, not a rule —
-//!    `s stop` still outranks `r resume` on the fleet.
-//! 3. Verbs that also appear in [`SPINE`].
-//!
-//! The bar should print what only this screen can teach. `n`, `e`, `x` and `/`
-//! mean the same everywhere and have their own overlay section, so losing them
-//! costs nothing.
-//!
-//! Only step 3 is enforced, deliberately. Pinning step 2's tie-break was tried
-//! and deleted: the fleet has thirteen verbs, room for five at eighty columns,
-//! and seven collided letters among them, so no ordering satisfies it. What
-//! survives is the part that is both true and checkable.
-//!
-//! ## Why the verbs are on Ctrl, and why six letters are missing from them
-//!
-//! The verbs were briefly on Alt, to dodge a multiplexer that takes Ctrl chords
-//! before this process sees them. That fixed the wrong half: on macOS, Option
-//! does not send Alt unless the terminal is specially configured, so the
-//! terminal eats the keypress to type `å`. A binding nobody can press is worse
-//! than one a multiplexer eats, because the second has a workaround.
-//!
-//! So the verbs are Ctrl again, minus what something else holds. tmux here is
-//! prefixed on `Ctrl-A` with `Ctrl-H/J/K/L` for panes and `Ctrl-S` for
-//! sessions; the terminal owns `Ctrl-Q` and `Ctrl-Z`; `Ctrl-I`/`Ctrl-M` are Tab
-//! and Enter. Take those and readline's `Ctrl-C/D/E/U/W`, and eleven letters
-//! are left: **B F G N O P R T V X Y**.
-//!
-//! ## Eighteen verbs, eleven letters
-//!
-//! They do not fit, so what keeps a chord is decided by what a chord is *for*.
-//! The chat box turns every bare key into text, so a chord buys one thing: a
-//! verb reachable **without stopping the sentence you are typing or looking
-//! away from the run you are watching**. Delegate, stop, yank, show reasoning,
-//! answer the rail, dictate. Those get the letters.
-//!
-//! Everything else is a *destination*, and destinations go behind the leader:
-//! `Ctrl-G` opens the menu and one more letter lands you anywhere, covering all
-//! nine screens. `Ctrl-F` is the one destination that kept a chord, because the
-//! fleet is where a delegated run goes and `Ctrl-B` `Ctrl-F` is one thought.
-//!
-//! **The eleven are now spent.** `Ctrl-V` was held back for the next verb and
-//! dictation took it within the week, which is the argument for having kept it.
-//! So the next verb has no letter at all, and that is a decision to make
-//! deliberately rather than by taking `Ctrl-L` back off tmux: either it is a
-//! destination and goes behind the leader, or something holding a letter is
-//! demoted. The menu is the pressure valve.
-//!
-//! What did **not** move is what the terminal itself taught everyone:
-//! `Ctrl-C`/`Ctrl-D` quit, `Ctrl-U` clears the line, `Ctrl-W` deletes a word,
-//! `Ctrl-A`/`Ctrl-E` go to its ends. Moving forty years of muscle memory would
-//! solve a problem nobody has — no multiplexer steals them, because every shell
-//! needs them. Under a prefix-on-`Ctrl-A` tmux, `Ctrl-A` costs a second press
-//! rather than the binding.
-//!
-//! `no_verb_sits_on_a_chord_a_multiplexer_takes` is what keeps the six letters
-//! clear, and it exempts those readline rows by name rather than by pattern —
-//! they are the terminal's convention, printed here because Jod answers them,
-//! not verbs Jod chose to put there.
+//! **The eleven letters are spent.** The next verb has no letter, and that is a
+//! decision to make deliberately rather than by taking one back off tmux:
+//! either it is a destination and goes behind the leader, or something holding
+//! a letter is demoted. `no_verb_sits_on_a_chord_a_multiplexer_takes` keeps the
+//! six taken letters clear and exempts the readline rows by name.
 
-// Only the drift net turns a printed label back into a keypress, and that is
-// test-only — the running program prints these strings and never reads them.
+// Only the drift net turns a printed label back into a keypress; the running
+// program prints these strings and never reads them.
 #[cfg(test)]
 use crossterm::event::{KeyCode, KeyModifiers};
 
@@ -123,48 +63,35 @@ pub const SPINE: &[Key] = &[
 
 /// The chords that work everywhere, including in the middle of typing.
 ///
-/// Ctrl throughout, because Alt is unpressable on a stock macOS terminal — see
-/// the module header, which also says why six Ctrl letters are missing and
-/// where the verbs that wanted them went. The Alt spelling of each of these
-/// still fires and is deliberately not printed: it costs nothing to keep for
-/// anyone who learned it, and printing it would advertise a chord that does not
-/// exist on the keyboard this is aimed at.
+/// The Alt spelling of each still fires and is deliberately not printed: it
+/// costs nothing to keep for anyone who learned it, and Option does not send
+/// Alt on a stock macOS terminal.
 ///
 /// The last four rows are readline's rather than Jod's, and are the exemption
-/// `no_verb_sits_on_a_chord_a_multiplexer_takes` names.
-///
-/// One row is not a chord at all — `Shift-Tab` — and it is here for the same
-/// reason everything else is: it works everywhere, including mid-sentence. It
-/// spends none of the eleven letters that
-/// `every_free_letter_is_spent_so_the_next_verb_is_a_decision` counts, because
-/// the terminal sends it as `BackTab` rather than as a letter.
+/// `no_verb_sits_on_a_chord_a_multiplexer_takes` names. `Shift-Tab` is not a
+/// chord at all and spends none of the eleven letters, because the terminal
+/// sends it as `BackTab`.
 pub const GLOBAL: &[Key] = &[
     // The label is load-bearing on its *length*: `draw_keymap` sizes a column
-    // from the widest row, and at 100×30 a `what` longer than 33 characters
-    // costs the `?` overlay its second column and hides twenty rows. Say the
-    // menu takes another key, in under that.
+    // from the widest row, and at 100×30 a `what` over 33 characters costs the
+    // `?` overlay its second column and hides twenty rows.
     k("Ctrl-G", "the workspace menu — then a key"),
-    // The one destination that kept a chord. See the module header.
     k("Ctrl-F", "fleet"),
-    // The rail's two chords. Both are chords rather than letters for one
-    // reason, and it is the reason E2.S3 gives: the chat box owns every bare
-    // key, so a rail verb on `c` would type a `c` into the sentence being
-    // written. See [`RAIL`].
+    // Chords rather than letters because the chat box owns every bare key, so a
+    // rail verb on `c` would type a `c` into the sentence being written. See
+    // [`RAIL`].
     k("Ctrl-R", "show or hide the rail"),
     k("Ctrl-N", "the rail's next card"),
-    // The side panel: projects, sessions, mode, harness, spend and context
-    // left — a sixth of the program behind one key. It used to be advertised
-    // only on the panel's own bottom border, which you can read only after
-    // finding the key.
+    // A sixth of the program behind one key, previously advertised only on the
+    // panel's own bottom border — which you can read only after finding the
+    // key.
     //
-    // The drift net cannot see it — `is_chord` wants a Ctrl or Alt prefix and
-    // this arrives as `BackTab` — so the row carries its own test in `ui`.
+    // The drift net cannot see it, since `is_chord` wants a Ctrl or Alt prefix,
+    // so the row carries its own test in `ui`.
     k("Shift-Tab", "show or hide the side panel"),
     k("Ctrl-P", "add a directory to work in"),
-    // A switch, not a button: it stays on and everything said streams into the
-    // box until switched off, so the keyboard is optional once it is on. The
-    // clearest case of the rule above — dictation is *only* useful without
-    // stopping what you are doing.
+    // A switch, not a button: it stays on until switched off, so the keyboard
+    // is optional once it is on.
     k("Ctrl-V", "listen, and keep listening"),
     k("Ctrl-Y", "copy the last reply"),
     k("Ctrl-B", "delegate the typed line"),
@@ -172,14 +99,9 @@ pub const GLOBAL: &[Key] = &[
     k("Ctrl-T", "show or hide reasoning"),
     k("Ctrl-O", "show or hide tool output"),
     k("Ctrl-↑↓", "scroll the transcript"),
-    // One row for the pair. The `?` overlay promises to be complete at 100×30
-    // and had grown one line past that, so a verb with its inverse gives up a
-    // row without giving up a verb — both still fire and both are advertised.
-    //
     // All four spellings, because all four are dispatched: `press_of` splits on
-    // `/` and carries the modifier along. The drift net, which replays every
-    // printed label as a keypress, caught the version that quietly dropped Home
-    // and End while still answering them.
+    // `/` and carries the modifier along. The drift net caught the version that
+    // quietly dropped Home and End while still answering them.
     k("Ctrl-A/E/Home/End", "start / end of the line"),
     k("Ctrl-U", "clear the input line"),
     k("Ctrl-W", "delete the previous word"),
@@ -194,66 +116,42 @@ const CHAT: &[Key] = &[
     k("?", "keys"),
 ];
 
-/// The fleet is the widest screen, because it is the only one that is both a
-/// list of runs and a handle on the conversation graph behind them: `s r d a`
-/// act on the run under the cursor, `c b u U g f t` act on its thread. `/` is
-/// last because it is the spine's, not the fleet's — see the module header.
+/// The fleet is the widest screen, being both a list of runs and a handle on
+/// the conversation graph behind them: `s r d a` act on the run under the
+/// cursor, `c b u U g f t` on its thread.
 ///
-/// `u` undoes and `U` puts it back. Lower case is undo on every screen that has
-/// one — memory's `u` is an undo too — because undo and redo are a verb and its
-/// inverse, and that is the one case where a habit transferring between screens
-/// does damage rather than nothing.
-///
-/// `c` says **conversations** rather than "threads" because the two are
-/// different things here and the screen's own prose already draws the line:
-/// `c` lists conversations ("no conversations yet — every run starts one"),
-/// while `b` "opens the branches of the selected run's thread". A bar reading
-/// `c threads · b branches` would say `b` drills into what `c` lists, which is
-/// not what either key does.
-///
-/// `g` is spelled `go to #` because `#` is the exact token printed beside each
-/// branch in the listing — the label names what is on screen rather than
-/// describing it.
+/// `c` says **conversations** rather than "threads" because `c` lists
+/// conversations while `b` opens the branches of one run's thread; a bar
+/// reading `c threads · b branches` would say `b` drills into what `c` lists,
+/// which is not what either key does. `g` is spelled `go to #` because `#` is
+/// the exact token printed beside each branch.
 const FLEET: &[Key] = &[
     k("⏎", "watch"),
     k("s", "stop"),
     k("r", "resume"),
     // Above `d` because `a` is the collided letter — it answers an escalation
-    // on goals, which does print it. See the ordering rule in the header.
+    // on goals. See the ordering rule in the header.
     k("a", "attach"),
     // `delegate`, word for word as the task board spells it, because it is the
-    // same `Action::Delegate` on the selected row. Two spellings of one verb
-    // read as a collision and are not one: `d` is the one letter here that
-    // transfers between screens intact, and it only does so while both screens
-    // call it the same thing. Six characters shorter is why it now survives
-    // eighty columns, but matching the board is the reason.
+    // same `Action::Delegate`. `d` is the one letter here that transfers
+    // between screens intact, and it only does so while both screens call it
+    // the same thing.
     k("d", "delegate"),
     k("c", "conversations"),
-    // The work's bus. High in the table because it is the only verb here that
-    // answers "what are these agents saying to each other", and a work whose
-    // traffic cannot be read is a work you can only watch spend money — see
-    // `tui::traffic`. Capital because `t` already retries a run on this screen.
+    // Capital because `t` already retries a run on this screen.
     k("T", "traffic"),
     k("b", "branches"),
-    // One row for the pair, the way `→←` below is one row for two arrows.
-    //
-    // Both keys still fire and both are still advertised; what changed is that
-    // they cost the `?` overlay one line instead of two. The overlay is two
-    // columns of twenty-eight rows at the design size, and the fleet's own
-    // section plus the spine plus the global chords came to exactly one line
-    // more than that when `T traffic` arrived — so a screen that had promised
-    // to be complete at 100×30 started saying `1 more — widen the window`.
-    // Undo and redo are a verb and its inverse and read as one thing anyway,
-    // which is why this pair is the one that gives way rather than a verb that
-    // would have had to be dropped.
+    // One row for the pair, the way `→←` below is one row for two arrows. Both
+    // keys still fire; they cost the `?` overlay one line instead of two, which
+    // is what kept the overlay complete at 100×30 when `T traffic` arrived.
+    // Undo and redo read as one thing anyway, so this pair gives way rather
+    // than a verb being dropped.
     k("uU", "undo / redo"),
     k("g", "go to #"),
     k("f", "fork"),
     k("t", "retry"),
     // The tree's own verbs, in force once there is a work to draw. Below the
-    // run verbs because those act on the row and these act on the shape, and
-    // the row is what people come here for; above `/` because that one is the
-    // spine's and means the same thing on every screen.
+    // run verbs because those act on the row and these act on the shape.
     k("→←", "in / out"),
     k("space", "expand / collapse"),
     k("E", "expand all"),
@@ -264,16 +162,13 @@ const FLEET: &[Key] = &[
 
 /// The traffic log, opened from the tree with `T`.
 ///
-/// `T` is capital because lower-case `t` is already *retry* on the fleet, and a
-/// letter that retried a run on one press and opened a screen on the next would
-/// be the worst kind of collision — one of the two is destructive. `E`, `C`,
-/// `U` and `S` set that pattern on this screen already: when the letter is
-/// spoken for, the verb goes to the capital rather than to an unrelated key
-/// nobody can guess.
+/// Capital because lower-case `t` is already *retry* on the fleet, and one of
+/// the two is destructive. `E`, `C`, `U` and `S` set that pattern here already:
+/// when the letter is spoken for, the verb goes to the capital rather than to
+/// an unrelated key nobody can guess.
 ///
 /// `f` is the state cycle, spelled and ordered exactly as the rail's `f` is,
-/// because G5.S5 asks for one way to narrow a list in this program rather than
-/// a second idiom for the same job. `/` and `S` are the spine's and go last.
+/// because G5.S5 asks for one way to narrow a list rather than a second idiom.
 const TRAFFIC: &[Key] = &[
     k("⏎", "the message in full"),
     k("f", "every / failed / waiting / delivered"),
@@ -310,19 +205,14 @@ const SCHEDULES: &[Key] = &[
     k("/", "filter"),
 ];
 
-/// `a answer` is fourth rather than last because it is the verb that unblocks a
-/// stuck loop and exists on no other screen, while `e` and `n` are the spine's
-/// and mean the same thing everywhere.
+/// `a answer` is fourth rather than last because it unblocks a stuck loop and
+/// exists on no other screen, while `e` and `n` are the spine's.
 ///
-/// It is also `answer` rather than `answer escalation`, and that is one decision
-/// rather than two. Ordering alone was **not** enough here — this is the only
-/// screen where it was not. At nineteen characters the full phrase did not fit
-/// eighty columns even in fourth place, so the reorder reserved a slot it could
-/// not use and dropped `e edit` for nothing: strictly fewer verbs than before.
-/// At eight it fits, and a shorter label still teaches the key, which is the
-/// whole reason for printing one. `draw_goals` already prints `needs you` in
-/// bold above the bar, so the screen says *that* a goal is stuck; the keybar
-/// only owes you the key.
+/// It is `answer` rather than `answer escalation` because at nineteen
+/// characters the full phrase did not fit eighty columns even in fourth place,
+/// so the reorder reserved a slot it could not use and dropped `e edit` for
+/// nothing. `draw_goals` already prints `needs you` above the bar, so the
+/// keybar only owes you the key.
 const GOALS: &[Key] = &[
     k("⏎", "last iteration"),
     k("r", "run now"),
@@ -363,24 +253,20 @@ const ACTIVITY: &[Key] = &[
 const TEAM: &[Key] = &[k("⏎", "mark done"), k("↑↓", "pick"), k("/", "filter")];
 
 /// The decision rail's own verbs, in force only while the rail has the
-/// keyboard — which `Ctrl-N` is what gives it, and `Esc` is what takes away.
+/// keyboard, which `Ctrl-N` gives and `Esc` takes away.
 ///
-/// **Why a focus rather than a chord per verb.** The chat input turns every
-/// bare key into text, so the rail could either have a chord for each of its
-/// eight verbs — eight more free letters, on a keymap with exactly one to spare
-/// — or one chord that hands it the keyboard. It has the second. Getting *in*
-/// is free and safe mid-sentence (`Ctrl-N` never touches `App::input`); once
-/// in, the keys are ordinary letters, and `Esc` gives the keyboard back with
-/// the typed line exactly as it was.
+/// One chord that hands over the keyboard rather than a chord per verb: the
+/// rail has eight verbs and the keymap had one letter to spare. Getting *in* is
+/// safe mid-sentence, and `Esc` gives the keyboard back with the typed line
+/// untouched.
 ///
 /// `1–9` answers the numbered option under the cursor rather than jumping to a
 /// workspace. That collision is safe precisely *because* focus is explicit: the
 /// digits mean the rail's thing only while the rail is drawn, highlighted and
-/// named on the bar, and a workspace jump is one `Esc` away.
+/// named on the bar.
 ///
-/// `t` cycles which stack is on show — open, then answered, then dismissed —
-/// which is how an answered card is toggled back into view once it has left the
-/// stack.
+/// `t` cycles which stack is on show — open, answered, dismissed — which is how
+/// an answered card is toggled back into view.
 pub const RAIL: &[Key] = &[
     k("⏎", "expand / collapse"),
     k("1–9", "answer by option"),
@@ -397,8 +283,7 @@ pub const RAIL: &[Key] = &[
 pub const RAIL_EXIT: &str = "Esc back to the chat · ? keys";
 
 /// The footer printed inside the expanded card's border. Same relationship to
-/// [`RAIL`] that [`footer`] has to [`local`], and fitted the same way at the
-/// call site.
+/// [`RAIL`] that [`footer`] has to [`local`].
 pub fn rail_footer() -> String {
     let verbs = items(RAIL)
         .into_iter()
@@ -408,10 +293,8 @@ pub fn rail_footer() -> String {
     format!(" {verbs} ")
 }
 
-/// This screen's own verbs, in keybar order.
-///
-/// Fleet's `s`, `a` and `r` are exactly what they are today. `S` is capital
-/// precisely because lowercase `s` is spoken for there.
+/// This screen's own verbs, in keybar order. Fleet's `S` is capital precisely
+/// because lowercase `s` is spoken for there.
 pub fn local(ws: Workspace) -> &'static [Key] {
     match ws {
         Workspace::Chat => CHAT,
@@ -429,17 +312,15 @@ pub fn local(ws: Workspace) -> &'static [Key] {
 }
 
 /// The keybar's left half: this screen's verbs, as many as fit beside the way
-/// out. See the module header for why the exit wins the argument.
+/// out.
 pub fn keybar(ws: Workspace, width: u16) -> String {
     fit_bar(local(ws), verb_budget(ws, width))
 }
 
 /// The keybar while the decision rail has the keyboard.
 ///
-/// A bar of its own rather than the screen's, because the screen's verbs are
-/// not the ones in force: printing `s stop` while `x` dismisses a card would
-/// teach a key that does something else entirely. Same fitting rule — the way
-/// out is reserved first — for the reason the module header gives.
+/// A bar of its own rather than the screen's, because printing `s stop` while
+/// `x` dismisses a card would teach a key that does something else entirely.
 pub fn rail_keybar(width: u16) -> String {
     fit_bar(RAIL, budget(RAIL_EXIT, width))
 }
@@ -452,10 +333,8 @@ fn fit_bar(bindings: &'static [Key], budget: usize) -> String {
         return whole;
     }
 
-    // The marker's own width comes out of the budget before any verb does.
-    // Adding it afterwards would let the announcement be the thing that
-    // overflowed — the bar would drop the exit hint in order to say it had
-    // dropped a verb.
+    // The marker's own width comes out of the budget before any verb does, or
+    // the bar would drop the exit hint in order to say it had dropped a verb.
     let mut used = MORE.chars().count();
     let mut shown: Vec<String> = Vec::new();
     for verb in verbs {
@@ -472,25 +351,21 @@ fn fit_bar(bindings: &'static [Key], budget: usize) -> String {
 
 /// What the left half may spend before it starts eating the way out.
 ///
-/// Mirrors `ui::two_ends`, which reserves the right half first and hands the
-/// remainder to the verbs: a space of margin at each end and at least one
-/// between the halves, so three columns beyond the exit text itself.
+/// Mirrors `ui::two_ends`, which reserves the right half first: a space of
+/// margin at each end and at least one between the halves, so three columns
+/// beyond the exit text.
 ///
-/// Two files therefore have to agree on that number, and **nothing in this
-/// module can check it**. `the_way_out_fits_beside_the_verbs_at_every_realistic_width`
-/// looks like it does and does not: it measures a bar this function already
-/// budgeted, so it is self-consistent by construction and stays green however
-/// wrong the shared number is. Worse, `keybar` drops *whole* verbs, so it
-/// usually lands well under budget and quietly absorbs a disagreement of a
-/// column or two — until the one screen whose verbs end exactly on the
-/// boundary, which is the day that screen loses its entire left half rather
-/// than one verb.
+/// Two files have to agree on that number and **nothing here can check it**.
+/// `the_way_out_fits_beside_the_verbs_at_every_realistic_width` measures a bar
+/// this function already budgeted, so it is self-consistent however wrong the
+/// shared number is, and `keybar` drops *whole* verbs so it usually lands under
+/// budget and absorbs a disagreement — until the one screen whose verbs end
+/// exactly on the boundary loses its entire left half.
 ///
-/// The real guard is `ui::tests::two_ends_accepts_a_left_half_of_exactly_the_budgeted_width`,
-/// which calls this function, builds a left half of precisely that width, and
-/// asserts `two_ends` prints it. Public for exactly that reason: the number
-/// lives here, and the test that pins it against the renderer calls it rather
-/// than repeating it.
+/// The real guard is
+/// `ui::tests::two_ends_accepts_a_left_half_of_exactly_the_budgeted_width`,
+/// which calls this function and asserts `two_ends` prints a left half of
+/// precisely that width. Public for that reason.
 pub fn verb_budget(ws: Workspace, width: u16) -> usize {
     budget(keybar_exit(ws), width)
 }
@@ -508,9 +383,8 @@ fn items(bindings: &'static [Key]) -> Vec<String> {
 
 const SEP: &str = " · ";
 
-/// What a bar says when it has dropped something. `?` is the overlay, which
-/// leads with this screen's own verbs — so the marker is a destination, not an
-/// apology.
+/// What a bar says when it has dropped something. `?` leads with this screen's
+/// own verbs, so the marker is a destination, not an apology.
 const MORE: &str = "? more";
 
 /// The keybar's right half: the way out, which never changes.

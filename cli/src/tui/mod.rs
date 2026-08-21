@@ -2366,16 +2366,10 @@ fn on_chord(app: &mut App, key: KeyEvent) -> Option<Option<Action>> {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let either = alt || ctrl;
     match key.code {
-        // The leader, and the only way to most of the screens: eleven letters
-        // did not stretch to sixteen verbs.
         KeyCode::Char('g') if either => {
             app.overlay = Overlay::WhichKey;
             handled(None)
         }
-        // The one destination that kept a chord: `Ctrl-B` then `Ctrl-F` is a
-        // single thought. It used to be `Ctrl-A` — tmux's prefix and readline's
-        // start-of-line — which is the one Ctrl collision Jod inflicted on
-        // itself.
         KeyCode::Char('f') if either => {
             app.go(if app.workspace == Workspace::Fleet {
                 Workspace::Chat
@@ -2401,15 +2395,11 @@ fn on_chord(app: &mut App, key: KeyEvent) -> Option<Option<Action>> {
             handled(None)
         }
         // A toggle rather than a hold, because a terminal cannot see a key
-        // released. `v` was the last unspent letter, and dictation has the
-        // strongest claim to a chord: it is *only* useful with your hands off
-        // the keyboard.
+        // released.
         KeyCode::Char('v') if either => handled(Some(Action::Dictate)),
-        // `Ctrl-R` is readline's reverse-search on paper, which Jod never
-        // implemented, so the letter is free. A visibility toggle, separate
-        // from `Ctrl-N`: hiding must not depend on where the cursor is, and it
-        // hands the keyboard back, or the bare keys would still be the rail's
-        // with no rail on screen.
+        // A visibility toggle, separate from `Ctrl-N`: hiding must not depend
+        // on where the cursor is, and it hands the keyboard back, or the bare
+        // keys would still be the rail's with no rail on screen.
         KeyCode::Char('r') if either => {
             app.rail.shown = !app.rail.shown;
             if !app.rail.shown {
@@ -2425,8 +2415,6 @@ fn on_chord(app: &mut App, key: KeyEvent) -> Option<Option<Action>> {
             app.rail.cycle(&ids);
             handled(None)
         }
-        // Copy the last reply. The terminal's own selection stops working the
-        // moment a pane has scrollback and wrapping, which is always.
         KeyCode::Char('y') if either => handled(match yank::from_transcript(&app.transcript) {
             Some(found) => {
                 let sequence = yank::osc52(&found.text);
@@ -2438,9 +2426,6 @@ fn on_chord(app: &mut App, key: KeyEvent) -> Option<Option<Action>> {
                 None
             }
         }),
-        // `p` because it is the picker; `Ctrl-P` is a history motion in every
-        // shell, and Jod's history is on the bare arrows.
-        //
         // The one place this file does I/O: the walk is bounded and happens on
         // an explicit keystroke rather than the tick. Every keystroke after
         // this ranks in memory.
@@ -2448,12 +2433,7 @@ fn on_chord(app: &mut App, key: KeyEvent) -> Option<Option<Action>> {
             open_picker(app, launch_dir());
             handled(None)
         }
-        // Delegate: the typed line becomes an agent that never takes the
-        // screen, which is what makes several jobs at once possible without
-        // leaving the UI.
         KeyCode::Char('b') if either => handled(app.take_input().map(Action::Delegate)),
-        // Ctrl-C is quit, so interrupting a run needs a key of its own or the
-        // only way out is to leave.
         KeyCode::Char('x') if either => handled(match app.watching.clone() {
             Some(id) if app.busy => {
                 // Harsher than `Esc` and asked for the same way, so it is
@@ -2467,8 +2447,6 @@ fn on_chord(app: &mut App, key: KeyEvent) -> Option<Option<Action>> {
                 None
             }
         }),
-        // Ctrl only, both of them: these *are* readline's verbs, not Jod verbs
-        // that happen to sit on readline's keys.
         KeyCode::Char('u') if ctrl => {
             app.clear_line();
             handled(None)
@@ -2477,8 +2455,6 @@ fn on_chord(app: &mut App, key: KeyEvent) -> Option<Option<Action>> {
             app.delete_word();
             handled(None)
         }
-        // Scrolling keeps a modifier at all because the bare arrows now walk
-        // back through what has been sent.
         KeyCode::Up if either => {
             let max = app.transcript.len();
             app.scroll_up(1, max);
@@ -2488,9 +2464,6 @@ fn on_chord(app: &mut App, key: KeyEvent) -> Option<Option<Action>> {
             app.scroll_down(1);
             handled(None)
         }
-        // `Ctrl-Home`/`Ctrl-End` stay because on a list screen bare Home and
-        // End are the first and last *row*. Under a prefix-on-`Ctrl-A` tmux
-        // this wants pressing twice — readline's convention, not Jod's to move.
         KeyCode::Char('a') if ctrl => {
             app.home();
             handled(None)
