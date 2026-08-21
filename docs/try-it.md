@@ -25,8 +25,11 @@ cargo build --release
 `jod` and `jod-run` must both be on `PATH` — the supervisor is not optional, and
 a `jod` that cannot find `jod-run` refuses to spawn rather than pretending.
 
-Everything below assumes the harnesses you want are installed. `jod harnesses`
-says which are usable.
+Everything below assumes the harnesses you want are installed **and signed in**.
+`jod harnesses` says which are usable, and it now answers both halves of that:
+a harness whose binary is on disk but whose account is not there fails every run
+it is given. `jod login` signs in through the harness's own flow.
+→ [harness-config.md](harness-config.md#signing-in)
 
 ## The two automated proofs
 

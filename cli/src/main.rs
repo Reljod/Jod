@@ -123,6 +123,29 @@ enum Command {
     Harnesses {
         #[arg(long)]
         json: bool,
+        /// List the binaries without asking any of them whether it is signed
+        /// in. Cheaper, and the state this command used to report.
+        #[arg(long)]
+        quick: bool,
+    },
+    /// Sign in to a harness, through the harness's own sign-in flow.
+    ///
+    /// Jod holds no credentials of its own and reads none of the harness's.
+    /// What it does is run the right command with the terminal attached, so
+    /// the account lands where the harness Jod spawns will actually look for
+    /// it — which is the failure this command exists for. Signing in through
+    /// a shell alias that sets `CLAUDE_CONFIG_DIR` puts the account in a
+    /// directory Jod never sees, and every run then dies with an
+    /// authentication error against an account nobody logged in to.
+    ///
+    /// With no harness named it works through all of them, skipping any that
+    /// is already signed in.
+    Login {
+        /// Which harness: `claude-code`, `open-code`, `agy`.
+        harness: Option<String>,
+        /// Sign in again even when the harness says it already is.
+        #[arg(long)]
+        force: bool,
     },
     /// Follow a running agent, or replay a finished one.
     ///
@@ -1701,14 +1724,20 @@ async fn main() -> Result<()> {
     let jod = Jod::persistent().context("opening ~/.jod/jod.db")?;
 
     match cli.command {
-        Command::Harnesses { json } => {
-            let list = jod.harnesses();
+        Command::Harnesses { json, quick } => {
+            let list = if quick {
+                jod.harnesses()
+            } else {
+                jod.harnesses_checked()
+            };
             if json {
                 println!("{}", serde_json::to_string_pretty(&list)?);
             } else {
                 render::harnesses(&list);
             }
         }
+
+        Command::Login { harness, force } => login(harness.as_deref(), force)?,
 
         Command::Run {
             prompt,
@@ -4537,6 +4566,90 @@ fn goal_log(store: &Store, goal: &jod_core::schedule::Goal, limit: usize) -> Res
 ///
 /// `jod-run` is what holds a run's output once the caller walks away; without
 /// it a spawn would fail later and less clearly, after the run had a name.
+/// Sign in to one harness, or to each one that needs it.
+///
+/// Jod runs the harness's own command and stays out of the way: it never reads
+/// the credential, never stores it, and never passes it on. The value it adds
+/// is that the sign-in happens in *this* process's environment, which is the
+/// environment a run will be spawned into — so the account lands in the
+/// directory the harness will actually read, rather than in whichever profile
+/// a shell alias would have pointed at.
+fn login(named: Option<&str>, force: bool) -> Result<()> {
+    let targets = match named {
+        Some(name) => vec![jod_core::mcp::parse_harness(name).with_context(|| {
+            format!("`{name}` is not a harness — try claude-code, open-code or agy")
+        })?],
+        None => HarnessKind::ALL.to_vec(),
+    };
+    // Named explicitly or not changes what silence means. Asked for one
+    // harness, every skip is worth a sentence; asked for all three, the two
+    // that are already fine should not drown the one that is not.
+    let explicit = named.is_some();
+
+    for kind in targets {
+        let Some(bin) = kind.locate() else {
+            if explicit {
+                bail!(
+                    "{} is not installed on this machine, so there is nothing to sign in to.",
+                    kind.label()
+                );
+            }
+            continue;
+        };
+        let Some(args) = kind.login_args() else {
+            // Not a failure. AGY has no sign-in command, and saying so is more
+            // use than either pretending or staying silent.
+            println!(
+                "{} has no sign-in command Jod can run — start it once by hand and sign in there.",
+                kind.label()
+            );
+            continue;
+        };
+
+        let before = kind.auth();
+        if !force && matches!(before, jod_core::harness::AuthState::LoggedIn { .. }) {
+            println!("{} — {}", kind.label(), before.describe());
+            render::harness_profile(kind);
+            continue;
+        }
+
+        // The sign-in flows are interactive: they print a URL, wait for a
+        // browser, and read a code back. Started without a terminal — from a
+        // scheduled run, from the API, from a pipe — the harness would sit
+        // there holding a prompt nobody can see, which is a hang rather than a
+        // failure. Refusing is the honest version of the same outcome.
+        if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+            bail!(
+                "signing in to {} needs a terminal — run `jod login {}` yourself, \
+                 in the shell you start Jod from.",
+                kind.label(),
+                kind.id().replace('_', "-"),
+            );
+        }
+
+        render::logging_in(kind);
+        render::harness_profile(kind);
+        let status = std::process::Command::new(&bin)
+            .args(args)
+            .status()
+            .with_context(|| format!("running `{} {}`", bin.display(), args.join(" ")))?;
+        if !status.success() {
+            bail!(
+                "{} ended its sign-in without completing it ({status}).",
+                kind.label()
+            );
+        }
+
+        // Asked again rather than believed. A sign-in flow that exits 0 has
+        // reported on itself, and the question here is whether the *next run*
+        // will get through — which is the same question, asked of the same
+        // command, in the same environment.
+        let after = kind.auth();
+        println!("{} — {}", kind.label(), after.describe());
+    }
+    Ok(())
+}
+
 fn require_supervisor(jod: &Jod) -> Result<()> {
     if !jod.supervisor_available() {
         bail!(

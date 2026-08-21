@@ -98,6 +98,66 @@ own once the wait expires. Until that is fixed —
 — use `auto` with grants for unattended work, and keep `ask` and `edits` for
 runs somebody is actually watching.
 
+## Signing in
+
+Credentials belong to the harness, so Jod holds none, reads none and stores
+none. What it does is ask, and hand you over:
+
+| In the TUI | On the command line | |
+|---|---|---|
+| | `jod harnesses` | which harnesses are installed **and** whether each is signed in |
+| | `jod harnesses --quick` | the same list without asking, when a process per harness is too much |
+| `/login` | `jod login` | sign in, through the harness's own flow |
+| `/login opencode` | `jod login open-code` | sign in to one by name |
+
+The two spellings differ in what "no argument" means, and the difference is
+deliberate. `/login` in the console signs in to **the harness that conversation
+is on** — the one that just refused to run, which is why you are typing it.
+`jod login` at a shell has no conversation in front of it, so it works through
+**every** harness and skips the ones already signed in. `--force` signs in
+again regardless. `/auth` and `/signin` reach the same command, because `auth`
+is the word the harness itself puts in front of you.
+
+Signing in from the console suspends the interface and gives the harness the
+real terminal, the same handover `Ctrl-G e` makes to `$EDITOR` — the flow
+prints a URL and waits for a code, and neither works on a screen Jod is drawing
+over. The interface comes back when the harness exits.
+
+The question is asked with the harness's own command — `claude auth status
+--json`, `opencode auth list` — and both are bounded and given no terminal, so
+an install that does not recognise the subcommand cannot sit there holding a
+prompt. AGY has neither command, so Jod reports that it could not find out
+rather than guessing. **Nothing Jod cannot ask is reported as signed out.** A
+harness that could not be interrogated is left alone, because a sign-in prompt
+put in front of working credentials is worse than no prompt at all.
+
+`jod login` runs the harness's flow **in the environment Jod itself was started
+with**, and that is the entire point of the command.
+
+### Signing in somewhere Jod never looks
+
+Claude Code keeps its account in `$CLAUDE_CONFIG_DIR`, defaulting to
+`~/.claude`. A shell alias that sets that variable — the usual way to keep a
+personal account and a work account apart — signs you in to a directory Jod has
+never heard of. Jod spawns the binary with whatever environment it was given,
+lands in the default directory, finds no account there, and every run dies at
+once:
+
+```
+Failed to authenticate: OAuth session expired and could not be refreshed
+✗ failed · 0 out · $0.0000 · 1s
+```
+
+Nothing is broken, and nothing is expired. You are signed in to a different
+profile. `jod harnesses` now says which directory it will read, so the two can
+be compared, and there are two ways out: run `jod login claude-code` to sign in
+to the directory Jod will use, or export `CLAUDE_CONFIG_DIR` in the shell you
+start Jod from so it uses the profile you already have.
+
+A run that fails this way now says so and names the command that fixes it,
+instead of leaving one line of the harness's prose and a failed status.
+→ [why](decisions.md#a-harness-with-no-account-behind-it-is-not-an-available-harness)
+
 ## Where each harness keeps its own configuration
 
 Verified on this machine; paths are the usual ones but check yours.

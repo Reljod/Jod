@@ -113,6 +113,14 @@ pub struct HarnessInfo {
     pub label: String,
     pub available: bool,
     pub path: Option<String>,
+    /// What the harness says about its own credentials, when anybody asked.
+    ///
+    /// `None` means nobody did. Finding out costs a process per harness, so
+    /// [`Jod::harnesses`] leaves it empty and [`Jod::harnesses_checked`] fills
+    /// it in — the split exists because this type is also an HTTP response
+    /// body, and a `GET` that spawns three CLIs is a `GET` that times out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<crate::harness::AuthState>,
 }
 
 /// The client-facing view of one agent.
@@ -886,6 +894,10 @@ impl Jod {
     }
 
     /// Which harnesses are installed, and where.
+    ///
+    /// Installed, not usable. A binary on disk answers half the question and
+    /// the half it answers is the easy one — see
+    /// [`harnesses_checked`](Jod::harnesses_checked) for the other half.
     pub fn harnesses(&self) -> Vec<HarnessInfo> {
         HarnessKind::ALL
             .iter()
@@ -896,7 +908,30 @@ impl Jod {
                     label: kind.label().to_string(),
                     available: path.is_some(),
                     path: path.map(|p| p.to_string_lossy().to_string()),
+                    auth: None,
                 }
+            })
+            .collect()
+    }
+
+    /// The same list, having asked each harness whether it is signed in.
+    ///
+    /// Kept apart from [`harnesses`](Jod::harnesses) because it costs a
+    /// process per installed harness. That is nothing at a prompt and too much
+    /// on an HTTP handler, so the caller chooses rather than paying by
+    /// accident.
+    ///
+    /// This is the check that was missing when a run went out to a Claude Code
+    /// with no account behind it: the binary was there, the listing said the
+    /// harness was fine, and the failure did not arrive until money and a
+    /// minute had already been spent.
+    pub fn harnesses_checked(&self) -> Vec<HarnessInfo> {
+        HarnessKind::ALL
+            .iter()
+            .zip(self.harnesses())
+            .map(|(kind, info)| HarnessInfo {
+                auth: info.available.then(|| kind.auth()),
+                ..info
             })
             .collect()
     }
