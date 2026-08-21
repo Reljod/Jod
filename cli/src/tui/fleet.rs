@@ -112,13 +112,7 @@ impl TreeState {
         out
     }
 
-    /// Which nodes survive the filter — every hit, **plus every ancestor of a
-    /// hit**.
-    ///
-    /// The ancestors are the point. A tree filter that dropped them would leave
-    /// matching rows floating at a depth with nothing above them, which reads
-    /// as a rendering fault rather than as a filter; and the path to a hit is
-    /// usually what you were looking for anyway.
+    /// The visible rows, as ids. See [`matching`] for what the filter keeps.
     pub fn row_ids(
         &self,
         nodes: &[Node],

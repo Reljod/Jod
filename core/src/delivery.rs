@@ -373,11 +373,8 @@ impl Store {
         self.settle(ids, State::Delivered, run_id, None)
     }
 
-    /// The session ended before it could be told.
-    ///
-    /// Recorded rather than deleted, and the card follows: "nobody ever heard
-    /// this" is the answer to a question somebody asks later, and a queue that
-    /// silently drops is indistinguishable from one that works.
+    /// Recorded rather than deleted, and the card follows — see
+    /// [`crate::cards::Delivery::Undeliverable`].
     pub fn mark_deliveries_undeliverable(&self, ids: &[i64], reason: &str) -> Result<()> {
         self.settle(ids, State::Undeliverable, None, Some(reason))
     }

@@ -3796,8 +3796,6 @@ fn is_run_verb(code: KeyCode) -> bool {
 /// must be decided here instead of inheriting whatever the wildcard gave.
 fn refusal_to_continue(name: &str, status: &str) -> Option<String> {
     match AgentStatus::parse(status) {
-        // The ordinary target of a follow-up, and the run a second instruction
-        // reaches mid-task. Both have a session that means what it says.
         Some(AgentStatus::Completed | AgentStatus::Running) => None,
         Some(AgentStatus::Killed | AgentStatus::Failed) => Some(format!(
             "{name} did not finish cleanly — it is {status}. Continuing it would pick up a \
@@ -3974,14 +3972,10 @@ fn on_fleet_key(app: &mut App, key: KeyEvent) -> Option<Action> {
         KeyCode::Char('U') => Some(Action::Sessions(sessions::Request::Restore(
             app.selected_agent()?.id.clone(),
         ))),
-        // `g` — go to a branch by the `#id` printed beside it.
-        //
-        // `U` takes the newest tip, which is the only case most people ever
-        // have: undo, then change your mind. This is for the rest — three or
-        // more branches set aside, and the one you want is not the last one you
-        // left. Without it those branches are listed, numbered, and
-        // unreachable, which is worse than not listing them: it shows you
-        // something and gives you no way to get to it.
+        // `g` — go to a branch by the `#id` printed beside it. See
+        // [`PromptIntent::Goto`] for why `U` alone is not enough. Without it
+        // those branches are listed, numbered and unreachable, which is worse
+        // than not listing them at all.
         KeyCode::Char('g') => {
             app.selected_agent()?;
             app.overlay = Overlay::Prompt {
@@ -4120,8 +4114,7 @@ fn on_graph_key(app: &mut App, key: KeyEvent) -> Option<Action> {
             app.list_mut(Workspace::Memory).selected = Some(app.graph.focus.clone());
             None
         }
-        // Walking a graph without being able to walk back out of it is how you
-        // get lost in one. An empty stack leaves the graph entirely.
+        // An empty visit stack leaves the graph entirely. See `tui::graph`.
         KeyCode::Backspace => {
             if !app.graph.back() {
                 app.back();
@@ -4219,9 +4212,8 @@ fn on_goal_key(app: &mut App, key: KeyEvent) -> Option<Action> {
         }),
         KeyCode::Char('r') => Some(Action::RunGoal(name)),
         KeyCode::Char('p') => Some(Action::ToggleGoal(name)),
-        // A looping objective that quietly needs you and never says so is worse
-        // than no goal at all. Reading the escalation works — it is on the
-        // screen — but answering it has nowhere to go.
+        // Reading the escalation works — it is on the screen — but answering it
+        // has nowhere to go yet.
         KeyCode::Char('a') => Some(Action::Pending {
             verb: format!("answer {name}'s escalation"),
             needs: "Store::answer_escalation, which does not exist yet",

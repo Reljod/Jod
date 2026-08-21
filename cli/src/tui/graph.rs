@@ -217,8 +217,6 @@ mod tests {
         assert_eq!(rows[0].edge.other, "linear-is-truth");
     }
 
-    /// Walking a graph without being able to walk back out of it is how you get
-    /// lost in one.
     #[test]
     fn re_centring_pushes_the_old_focus_onto_the_visit_stack() {
         let mut view = GraphView::new("a");

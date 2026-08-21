@@ -4,18 +4,18 @@
 //! process that restarts still knows which agents it launched, what they said,
 //! and what it has learned about the person it works for.
 //!
-//! The design is taken from [`research/agent-db-2026`], which benchmarked nine
-//! engines with real concurrent OS processes. Three results drive the code here:
+//! The design comes from [`research/agent-db-2026`], which benchmarked nine
+//! engines with real concurrent processes. Three results drive the code:
 //!
-//! - **SQLite was both fastest and the only engine that never lost a write.**
-//!   Postgres silently discarded 47% of contended updates when used the obvious
-//!   way, LanceDB 51%, Qdrant 46% — every one of them reporting zero errors.
-//! - **`BEGIN IMMEDIATE` is mandatory for writes.** Deferred transactions
-//!   upgrade their lock late and collide; that was a 98% failure rate in the
-//!   benchmark. Every write here goes through [`Store::write`].
-//! - **Never hold a write transaction across a model call.** The whole argument
-//!   rests on write transactions costing microseconds. Nothing in this module
-//!   opens a transaction that outlives a single function call.
+//! - **SQLite was fastest and the only engine that never lost a write.**
+//!   Postgres silently discarded 47% of contended updates on its obvious path,
+//!   LanceDB 51%, Qdrant 46% — all reporting zero errors.
+//! - **`BEGIN IMMEDIATE` is mandatory for writes**; deferred transactions
+//!   upgrade their lock late and collide, a 98% failure rate. Every write goes
+//!   through [`Store::write`].
+//! - **Never hold a write transaction across a model call.** The argument rests
+//!   on writes costing microseconds, so nothing here opens a transaction that
+//!   outlives one function call.
 //!
 //! Markdown stays the source of truth for prose; this database is an index over
 //! it and can be deleted and rebuilt.
@@ -1698,19 +1698,17 @@ impl Store {
     /// Two fields resist being overwritten, because two processes write this
     /// row and only one of them knows the truth about each.
     ///
-    /// `pid`/`pgid` are not overwritten by an update that does not carry them.
-    /// The supervisor records them once, and the process that spawned the run
-    /// may keep saving summaries long afterwards from an in-memory copy that
-    /// never learned them; `COALESCE` keeps the launch facts from being erased
-    /// by a later save that simply did not know.
+    /// `pid`/`pgid` survive an update that does not carry them. The supervisor
+    /// records them once, while the launcher may keep saving summaries from an
+    /// in-memory copy that never learned them, so `COALESCE` stops a later
+    /// ignorant save erasing the launch facts.
     ///
-    /// **A terminal `status` is never overwritten.** Anyone following a run
-    /// derives a status from its events, and the events cannot tell a killed
-    /// run from a completed one — both end in a `Finished` with no exit code.
-    /// Only the supervisor saw the signal, and it records that through
-    /// [`Store::set_run_status`], which is unconditional. Without this guard a
-    /// follower's save landing afterwards reported every killed run as
-    /// `completed`; it did, and that is what this clause is for.
+    /// **A terminal `status` is never overwritten.** A follower derives status
+    /// from events, and events cannot tell a killed run from a completed one —
+    /// both end in `Finished` with no exit code. Only the supervisor saw the
+    /// signal, which it records through the unconditional
+    /// [`Store::set_run_status`]. Without this guard a follower's later save
+    /// reported every killed run as `completed`.
     pub fn save_run(&self, run: &StoredRun) -> Result<()> {
         let summary = serde_json::to_string(&run.summary)?;
         self.write(|tx| {
@@ -2342,15 +2340,13 @@ impl Store {
     ///
     /// `id` is the table's primary key, though — global, not per-team — so an
     /// id that already names a task on a *different* board cannot mean "my
-    /// board too". `ON CONFLICT(id) DO NOTHING` used to swallow that insert
-    /// silently and let the caller print success over a write that never
-    /// happened; this refuses it instead, naming the board that actually
-    /// owns the id.
+    /// board too". `ON CONFLICT(id) DO NOTHING` swallowed that insert and let
+    /// the caller print success over a write that never happened; this refuses
+    /// it, naming the board that owns the id.
     ///
-    /// A blank id is refused for the same reason a duplicate one is: `claim`,
-    /// `done` and `hand over` all key on it, and a blank id names nothing. The
-    /// board's name is refused too, because a task has to land somewhere a
-    /// later `jod team show` can name.
+    /// A blank id is refused for the same reason: `claim`, `done` and
+    /// `hand over` all key on it. The board's name too, since a task has to
+    /// land somewhere `jod team show` can name.
     pub fn add_team_task(&self, team: &str, id: &str, title: &str) -> Result<()> {
         require_a_name("team", team)?;
         require_a_name("task", id)?;
@@ -2656,19 +2652,16 @@ impl Store {
 
     /// Take ownership of every schedule that is due.
     ///
-    /// This is the one contended operation in the scheduler, and the whole
-    /// design rests on it. The benchmark ran sixteen real processes against
-    /// four schedules: a read-then-write claim handed the *same* schedule to
-    /// two winners **41.26% of the time**, while this one produced 0 duplicates
-    /// in 5,408 claims. The difference is that the guard and the write are one
-    /// statement inside one immediate transaction, so there is no window
-    /// between deciding and taking.
+    /// The one contended operation in the scheduler. Measured over sixteen
+    /// processes and four schedules, a read-then-write claim handed the same
+    /// schedule to two winners **41.26% of the time**; this produced 0
+    /// duplicates in 5,408 claims, because the guard and the write are one
+    /// statement in one immediate transaction.
     ///
-    /// A lease alone is not enough. When a claimant dies mid-fire, the next
-    /// claimant overwrites the lease and the original claim disappears with no
-    /// record: 52 of 255 claims (20.4%) ended up accounted for nowhere at all.
-    /// So displacing an expired lease **writes down that it happened** before
-    /// taking it, which brought that to 0 of 270.
+    /// A lease alone is not enough: when a claimant dies mid-fire the next one
+    /// overwrites the lease and the original claim vanishes — 52 of 255 claims
+    /// accounted for nowhere. So displacing an expired lease **writes down that
+    /// it happened** first, which brought that to 0 of 270.
     pub fn claim_due_schedules(
         &self,
         owner: &str,
@@ -2749,22 +2742,19 @@ impl Store {
     /// Let a schedule go, arm it for its next instant, and account for how the
     /// fire went.
     ///
-    /// Failure is counted rather than merely reported: a schedule whose every
-    /// run fails made 288 spawn attempts in a day when nothing counted, so the
+    /// Failure is counted rather than merely reported: an always-failing
+    /// schedule made 288 spawn attempts in a day when nothing counted. The
     /// count drives a backoff and, past [`BREAK_AFTER_FAILURES`], stops the
-    /// schedule outright. Broken is its own state rather than paused, because
-    /// it says why it stopped and resuming it is a different decision.
+    /// schedule. Broken is its own state rather than paused, because it says
+    /// why it stopped and resuming is a different decision.
     ///
-    /// **`spawn_failed` is only half of what failure means, which is why this
-    /// also reads the runs.** It says the tick could not start a process at
-    /// all — a missing harness binary, a write that would not go through — and
-    /// that is the rarer half. The common half is a run that started perfectly
-    /// well and whose harness then died, which the supervisor writes into the
-    /// run's own status a moment after the tick has already let the schedule
-    /// go. So each release settles the runs started since the last one, using
-    /// [`crate::schedule::settle`], and `settled_fire_id` remembers how far it
-    /// got so no failure is counted twice. It costs one tick of lag: the run
-    /// this tick starts is judged by the next.
+    /// **`spawn_failed` is only half of failure, which is why this reads the
+    /// runs too.** It covers the rare half — no process started at all. The
+    /// common half is a run that started and whose harness then died, which the
+    /// supervisor writes after the tick already let the schedule go. So each
+    /// release settles the runs started since the last one via
+    /// [`crate::schedule::settle`], with `settled_fire_id` stopping a double
+    /// count. The cost is one tick of lag.
     pub fn release_schedule(&self, id: &str, at_ms: i64, spawn_failed: bool) -> Result<()> {
         let (cron, timezone, failures, settled_fire_id) = {
             let conn = self.conn.lock().expect("store lock poisoned");
@@ -3193,27 +3183,21 @@ impl Store {
     /// `None` means there was no such goal. Otherwise the report names the run
     /// the goal had in flight, which this deliberately does not stop.
     ///
-    /// The row and the facts go together because they are one thing. A goal's
-    /// progress lives in the fact store rather than in its columns, so
-    /// deleting the row alone leaves the whole episodic record behind with no
-    /// goal left to explain it — rows nothing will ever read again, and, until
-    /// the reads were scoped, rows the next goal of that name read as its own.
-    /// The scope belongs to this goal and to nothing else, so the delete can
-    /// take all of it. `relations` cascades on `fact_id`, which is what keeps
-    /// the graph from outliving the facts it was built from.
+    /// The row and the facts go together because they are one thing: a goal's
+    /// progress lives in the fact store, so deleting the row alone leaves the
+    /// episodic record with no goal to explain it — and, before reads were
+    /// scoped, left rows the next goal of that name read as its own. The scope
+    /// belongs to this goal alone, so the delete can take all of it.
+    /// `relations` cascades on `fact_id`, keeping the graph from outliving its
+    /// facts.
     ///
-    /// **It does not stop the run, and that is a decision rather than an
-    /// omission.** Stopping it is what the words "remove this goal" sound like
-    /// they should mean, and the run does go on spending after the goal that
-    /// justified the spending is gone. Against that: a goal's iteration is a
+    /// **It does not stop the run, deliberately.** A goal's iteration is a
     /// harness working in a real directory, `jod goal rm` asks for no
-    /// confirmation, and terminating a process group mid-edit can leave
-    /// half-written files behind — a hard-to-reverse act performed by a command
-    /// whose contract today is "forget this row". So the delete stays a delete
-    /// and pays what it owes the person in information: the id of the run still
-    /// going and the command that stops it, which is one more keystroke for
-    /// anyone who did mean "and stop it". At most one iteration's cost is at
-    /// stake either way, because a deleted goal starts no more of them.
+    /// confirmation, and killing a process group mid-edit leaves half-written
+    /// files — too hard to reverse for a command whose contract is "forget this
+    /// row". So it reports the run still going and the command that stops it.
+    /// At most one iteration's cost is at stake, since a deleted goal starts no
+    /// more.
     pub fn delete_goal(&self, name: &str) -> Result<Option<GoalForgotten>> {
         // Read before the delete. The goal's row and its facts both go away
         // below, so the in-flight run has to be read while there is still a
@@ -3708,33 +3692,22 @@ const MAX_NEIGHBOURS: i64 = 500;
 
 /// Refuse a name that is blank, before anything is written.
 ///
-/// A goal, a schedule, a webhook rule, a team, a team member and a task on a
-/// board are all addressed by the name they were given, for the rest of their
-/// lives. `pause`, `resume`, `rm`, `enable`, `disable`, `claim` and `done` all
-/// take one, and so do the `goal_create` and `schedule_create` tools and every
-/// piece of mail sent on a team's bus. A blank name still satisfies the
-/// `UNIQUE` index, so the database happily stores it, and every listing then
-/// prints an empty column that reads as terminal padding rather than as a row.
-/// Two of them make all of those commands ambiguous, with no way to say which
-/// one was meant.
+/// Goals, schedules, webhook rules, teams, members and board tasks are all
+/// addressed by name for the rest of their lives. A blank name satisfies the
+/// `UNIQUE` index, so the database stores it and every listing prints an empty
+/// column that reads as padding; two of them make every command ambiguous.
 ///
-/// This lives in the store rather than in the argument parser because the
-/// command line is not the only way in. The MCP server calls
-/// [`Store::add_goal`] and [`Store::add_schedule`] directly, so a check in
-/// `cli/src/main.rs` would still let a model create a nameless goal — and would
-/// pass a command-line test while doing it.
+/// In the store rather than the argument parser because the command line is not
+/// the only way in — the MCP server calls [`Store::add_goal`] directly, so a
+/// check in `cli/src/main.rs` would still let a model create a nameless goal
+/// while passing a command-line test.
 ///
-/// It is `pub(crate)` rather than private because two of the surfaces it guards
-/// live in sibling modules: [`Store::add_webhook_rule`] in `webhook.rs` and
-/// `Store::join_scope` in `team.rs`. Widening it was the alternative to writing
-/// the same three lines a third and a fourth time, which is how the coverage
-/// became uneven in the first place.
+/// `pub(crate)` because two guarded surfaces live in sibling modules:
+/// [`Store::add_webhook_rule`] and `Store::join_scope`.
 ///
-/// The test is `trim`, not `is_empty`. A name of three spaces looks exactly
-/// like no name at all in a listing, so it is the same defect and has to be
-/// refused the same way. `str::trim` cuts Unicode whitespace, which means an
-/// ideographic space is caught too; it leaves every other script alone, so a
-/// name like `夜間トリアージ🌙` passes here exactly as it did before.
+/// The test is `trim`, not `is_empty` — three spaces look exactly like no name
+/// in a listing. `str::trim` catches an ideographic space and leaves every
+/// other script alone, so `夜間トリアージ🌙` passes.
 pub(crate) fn require_a_name(thing: &str, name: &str) -> Result<()> {
     if !name.trim().is_empty() {
         return Ok(());
@@ -3749,26 +3722,20 @@ pub(crate) fn require_a_name(thing: &str, name: &str) -> Result<()> {
 
 /// Turn the database's refusal of a name already in use into a sentence.
 ///
-/// Reusing a name is an ordinary mistake, and until this existed the reader was
-/// handed `UNIQUE constraint failed: schedules.name` and two lines of SQLite
-/// internals for making it. Every other refusal in this area — the `Misfire`
-/// and `Overlap` parsers, `schedule::validate` — answers with a plain
-/// [`JodError::Invalid`], and so does this one now.
+/// Reusing a name is an ordinary mistake, and the reader used to get
+/// `UNIQUE constraint failed: schedules.name` plus two lines of SQLite
+/// internals for making it.
 ///
-/// Translating the database's own refusal, rather than looking the name up
-/// first, is what makes it correct rather than merely usually correct. A
-/// daemon, a TUI and an MCP server all hold this one file open, so between a
-/// lookup and the insert another process can take the name; the check would
-/// pass, the insert would still fail, and the raw error would come back out of
-/// the losing path. The unique index is the thing enforcing the rule, so its
+/// Translating the database's refusal rather than looking the name up first is
+/// what makes it correct rather than usually correct: a daemon, a TUI and an
+/// MCP server all hold this file open, so another process can take the name
+/// between a lookup and the insert. The unique index enforces the rule, so its
 /// refusal is the only report that cannot be overtaken.
 ///
-/// `column` is the qualified column the caller means, and it is checked rather
-/// than assumed. Both of these tables also have a `TEXT PRIMARY KEY`, and an id
-/// that collided would be a different fault entirely; reporting it as a name
-/// somebody else is using would send the reader looking for a schedule that is
-/// not there. Anything this function does not recognise is passed through
-/// untouched.
+/// `column` is checked rather than assumed. These tables also have a
+/// `TEXT PRIMARY KEY`, and a colliding id reported as a name in use would send
+/// the reader looking for a schedule that is not there. Anything unrecognised
+/// passes through untouched.
 fn name_already_taken(err: JodError, thing: &str, name: &str, column: &str) -> JodError {
     match &err {
         JodError::Db(rusqlite::Error::SqliteFailure(code, Some(detail)))

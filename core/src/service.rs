@@ -218,20 +218,18 @@ fn title_from(prompt: &str) -> String {
 /// launches anything.
 /// Turn a directory *name* on a request into the directory a run starts in.
 ///
-/// A caller that names `tetris` means one of the directories this conversation
-/// was pointed at. It has never meant `$HOME/tetris`, which is nonetheless
-/// where a relative name ended up — either as a home-directory project nobody
-/// asked for, or, once the supervisor got hold of it, as a failed `chdir` into
-/// the run's own scratch directory.
+/// A caller naming `tetris` means one of this conversation's directories, never
+/// `$HOME/tetris` — which is where a relative name ended up, either as a
+/// home-directory project nobody asked for or as a failed `chdir` into the
+/// run's scratch directory.
 ///
-/// So: resolve against the declared roots, and when the name answers to none of
-/// them, **refuse**. A blocking card says which directories were on offer, and
-/// the launch does not happen. Guessing is the one option ruled out — see
-/// [`crate::workdir`], and the run this was written for, whose entire output
-/// landed in `$HOME` while the directory the user had added stayed empty.
+/// So: resolve against the declared roots and **refuse** a name that answers to
+/// none of them, with a blocking card naming what was on offer. Guessing is the
+/// one option ruled out — see the run this was written for, whose entire output
+/// landed in `$HOME` while the directory the user added stayed empty.
 ///
-/// An absolute path is left alone, which is every ordinary spawn: it is a
-/// decision somebody made, and roots are a convention rather than a sandbox.
+/// An absolute path is left alone, which is every ordinary spawn: somebody
+/// decided it, and roots are a convention rather than a sandbox.
 fn settle_cwd(store: &Store, req: &mut SpawnRequest, binding: &RunConversation) -> Result<()> {
     if req.cwd.is_absolute() {
         return Ok(());
@@ -361,31 +359,26 @@ fn open_conversation(
 
 /// Let the conversation overrule the request on the two settings it owns.
 ///
-/// **Why the stored value wins outright.** Neither the model nor the permission
-/// mode was ever a property of a process. Jod respawns the harness once per turn
-/// against a resumed session, so `--model` and `--permission-mode` are decided
-/// afresh at every spawn — a choice held in the caller lasts exactly one turn.
-/// That is the bug: the TUI's `/model` set a field on the next request, and
-/// reopening the conversation came back on whatever the client happened to
-/// default to. The only place an answer can live and survive a restart is the
-/// row the spawn is for, and once it lives there, deferring to the request would
-/// mean every client had to remember to read the row first.
+/// **Why the stored value wins outright.** Neither setting was ever a property
+/// of a process: the harness is respawned once per turn, so `--model` and
+/// `--permission-mode` are decided afresh each spawn and a choice held in the
+/// caller lasts exactly one turn. That was the bug — `/model` set a field on
+/// the next request, and reopening the conversation reverted to the client's
+/// default. The only place an answer survives a restart is the row the spawn is
+/// for, and deferring to the request would make every client remember to read
+/// that row first.
 ///
-/// Changing either of them on a live thread is therefore a write —
-/// [`Store::set_conversation_model`], [`Store::set_conversation_permission`] —
-/// not a different argument on the next spawn.
+/// So changing either on a live thread is a write, not a different argument on
+/// the next spawn.
 ///
-/// `None` on the row is not a value; it means "no opinion", which is what every
-/// conversation older than `0011_settings_and_modes` says, and it leaves the
-/// caller's choice exactly where it was.
+/// `None` on the row means "no opinion" rather than a value, and leaves the
+/// caller's choice where it was.
 ///
-/// **`harness` is deliberately not treated this way.** Moving a thread to
-/// another harness has consequences — a session id that means nothing on the
-/// other side, a transcript that has to be replayed, context that has to be
-/// compacted first ([`Store::switch_harness`]) — and none of that can be done by
-/// a spawn quietly reading a column. A handoff lands here as
-/// [`RunConversation::Existing`] naming the *new* conversation, whose harness is
-/// already the one the caller asked for.
+/// **`harness` is deliberately not treated this way.** Moving a thread has
+/// consequences a spawn cannot quietly perform — a meaningless session id, a
+/// transcript to replay, context to compact first
+/// ([`Store::switch_harness`]). A handoff arrives as
+/// [`RunConversation::Existing`] naming the *new* conversation.
 /// Public because "what will this spawn actually use" is a question clients ask
 /// *before* spawning — a status bar that shows the app's own mode while the
 /// conversation's stored one is what the run will get is a status bar that lies.
@@ -401,38 +394,26 @@ pub fn prefer_conversation_settings(req: &mut SpawnRequest, conversation: &Conve
 
 /// Fold one of a run's events into the conversation the run belongs to.
 ///
-/// **Who owns this write:** any process holding a binding for the run — which
-/// in practice means the one that launched it, plus any that
-/// [`Jod::rehydrate`] handed a live run back to. It is deliberately *not* one
-/// owner, because `runner::follow` is not exclusive: a `jod watch` in another
-/// terminal and a daemon that restarted both forward the same rows out of
-/// `events`, and replay from a cursor is the normal case rather than the
-/// exceptional one. Sole ownership would therefore have to be enforced by
-/// discipline, and discipline is not a guard.
+/// **Who owns this write:** any process holding a binding for the run.
+/// Deliberately not one owner — `runner::follow` is not exclusive, and a
+/// `jod watch` in another terminal forwards the same rows. Sole ownership could
+/// only be enforced by discipline, and discipline is not a guard.
 ///
-/// The guard is in the write instead. [`Store::append_envelopes`] carries each
-/// message's `(run_id, seq)` and the schema is unique over the pair, so a
-/// second writer of the same event appends nothing. That is what makes it safe
-/// for the transcript to survive the process that started it.
+/// The guard is in the write: [`Store::append_envelopes`] is unique over
+/// `(run_id, seq)`, so a second writer of the same event appends nothing.
 ///
-/// **This is no longer the writer that matters.** A binding lasts exactly as
-/// long as the process holding it, and the processes that launch runs routinely
-/// exit while the run is still talking — `jod main` without `--wait` returns as
-/// soon as the instruction is handed over, and a session opened through
-/// `open_work` is launched by the MCP server, which exits with its harness.
-/// Everything said after that was never written down, silently, while `events`
-/// stayed complete because the supervisor writes that one. So the supervisor
-/// now projects the transcript as well, and it is the writer that cannot miss
-/// an event — see `EventWriter::record_in_conversation` in `supervisor`. This
-/// one still runs, because it is the same write and the same idempotence key,
-/// and because a live client watching a run should not have to wait on another
-/// process's turn to see the row appear.
+/// **This is no longer the writer that matters.** A binding lasts as long as
+/// the process holding it, and launchers routinely exit while the run is still
+/// talking, so everything said afterwards went unwritten while `events` stayed
+/// complete. The supervisor now projects the transcript too and is the writer
+/// that cannot miss an event. This one still runs, because it is the same write
+/// with the same idempotence key, and a live client should not wait on another
+/// process's turn to see the row.
 ///
 /// Nothing here returns an error. A conversation is a *side effect* of a run,
-/// and the Hermes audit is unambiguous about what happens when a memory side
-/// effect is allowed to fail the work it was watching: a looping write
-/// suppressed the user's own reply (`research/hermes-parity-2026/REPORT.md`
-/// §3.2). So every failure is logged and the event stream carries on.
+/// and the Hermes audit is clear on letting a memory side effect fail the work
+/// it watched: a looping write suppressed the user's own reply
+/// (`research/hermes-parity-2026/REPORT.md` §3.2).
 fn record_in_conversation(store: &Store, conversation_id: &str, envelope: &AgentEnvelope) {
     // The session id belongs on the conversation row, not in the transcript: it
     // is how `Store::resume_for` puts the *next* run back into this thread

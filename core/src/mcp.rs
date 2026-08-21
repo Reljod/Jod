@@ -83,15 +83,14 @@ const ASK_POLL: std::time::Duration = std::time::Duration::from_millis(500);
 /// finish a sentence and turn to the screen; short enough that asking while
 /// nobody is at the desk costs one wait rather than a night of held context.
 ///
-/// **There is deliberately no way to wait without a deadline** (A5). An agent
-/// that can wait for ever hangs when the thing it waits for never comes, and a
-/// human who has gone to bed is exactly that. The card stays open when the
-/// deadline passes — giving up waiting is not withdrawing the question — and
-/// the answer reaches the run later through the ordinary delivery path.
+/// Bounded for the reason [`ASK_DEADLINE_SECS`] gives, and a human who has gone
+/// to bed is the clearest case of it. The card stays open when the deadline
+/// passes — giving up waiting is not withdrawing the question — and the answer
+/// reaches the run later through the ordinary delivery path.
 pub const CARD_ANSWER_DEADLINE_SECS: i64 = 300;
 
-/// The longest wait a caller may ask for. A cap rather than a default, because
-/// the argument is the model's and the bound is not.
+/// The longest wait a caller may ask for, as [`MAX_ASK_DEADLINE_SECS`] is for
+/// a peer.
 pub const MAX_CARD_WAIT_SECS: i64 = 1_800;
 
 // JSON-RPC 2.0 error codes. Spelled out because a wrong one here reads to the

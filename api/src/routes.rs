@@ -449,10 +449,8 @@ pub(crate) fn audit_write(
 
 /// A short, human-recognisable name from the prompt's first words.
 ///
-/// Re-exported rather than defined: this used to be a copy of the CLI's rule
-/// with a comment promising the two matched. Now they are the same function, so
-/// an agent is called the same thing whether it was started here or in a
-/// terminal. → [`jod_core::harness::default_name`]
+/// Re-exported, never copied, so an agent is called the same thing whether it
+/// was started here or in a terminal. → [`jod_core::harness::default_name`]
 pub use jod_core::harness::default_name;
 
 #[cfg(test)]

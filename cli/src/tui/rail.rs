@@ -375,8 +375,6 @@ pub fn delivery_note(card: &Card) -> Option<&'static str> {
     match (card.status, card.delivery) {
         (Status::Answered, Delivery::Queued) => Some("answered, queued"),
         (Status::Answered, Delivery::Delivered) => Some("answered, delivered"),
-        // The session ended before it could be told. Reported rather than
-        // dropped: an answer that vanished is worse than one that failed.
         (_, Delivery::Undeliverable) => Some("undelivered — the session ended"),
         (Status::Answered, Delivery::None) => Some("answered"),
         (Status::Dismissed, _) => Some("dismissed"),

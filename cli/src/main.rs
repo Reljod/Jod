@@ -4922,9 +4922,8 @@ async fn settle_member(
 
 /// A short, human-recognisable name from the prompt's first words.
 ///
-/// `pub(crate)` because the TUI reaches it as `crate::default_name`. It used to
-/// be defined here and copied into the API and into core's MCP tools, each copy
-/// carrying a comment promising it matched the others. → [`jod_core::harness`]
+/// `pub(crate)` because the TUI reaches it as `crate::default_name`.
+/// Re-exported, never copied. → [`jod_core::harness::default_name`]
 pub(crate) use jod_core::harness::default_name;
 
 #[cfg(test)]

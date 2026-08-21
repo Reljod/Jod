@@ -838,9 +838,6 @@ mod tests {
         assert!(score_of("s", "parseSpec") > score_of("s", "parsespec"));
     }
 
-    /// The single most important heuristic in a file picker: people type the
-    /// name of the file they want, and a directory that happens to contain
-    /// those letters is almost never what they meant.
     #[test]
     fn a_match_in_the_filename_outscores_the_same_match_in_a_directory() {
         assert_eq!(

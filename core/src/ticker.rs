@@ -5308,8 +5308,7 @@ mod tests {
         // ---- the way back to the orchestrator ----------------------------
 
         /// A main chat that has already had a turn, and one delegated run with
-        /// a channel back to it. This is the ordinary state: a delegated run
-        /// exists only because the chat ran and delegated it.
+        /// a channel back to it.
         fn a_delegated_run() -> (Arc<Store>, String) {
             let store = Arc::new(Store::in_memory().unwrap());
             let main = store

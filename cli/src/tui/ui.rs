@@ -2244,11 +2244,6 @@ fn draw_keybar(f: &mut Frame, app: &App, area: Rect) {
     );
 }
 
-/// The status bar: where you are on the left, what is waiting on the right.
-///
-/// The permission mode leads it on every screen. What the next turn may do
-/// without asking changes while you are talking, and a setting you have to
-/// press a key to see is one you will be wrong about exactly when it matters.
 /// What the status row says about the microphone.
 ///
 /// The microphone stays on until switched off, so *forgetting it is on* — a
@@ -2302,6 +2297,11 @@ fn meter(level: f32, speaking: bool) -> String {
     out
 }
 
+/// The status bar: where you are on the left, what is waiting on the right.
+///
+/// The permission mode leads it on every screen. What the next turn may do
+/// without asking changes while you are talking, and a setting you have to
+/// press a key to see is one you will be wrong about exactly when it matters.
 fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     if area.height == 0 {
         return;
@@ -6998,9 +6998,6 @@ mod tests {
 
     // ---- the permission mode ----
 
-    /// What the next turn may do without asking changes while you are talking,
-    /// and a setting you have to press a key to see is one you will be wrong
-    /// about exactly when it matters.
     #[test]
     fn the_mode_is_named_on_every_screen() {
         for ws in [Workspace::Chat, Workspace::Fleet, Workspace::Schedules] {
@@ -8674,8 +8671,6 @@ mod tests {
         assert!(screen.contains('☐'), "and one still open:\n{screen}");
     }
 
-    /// A looping objective that quietly needs you and never says so is worse
-    /// than no goal at all.
     #[test]
     fn a_goal_waiting_on_you_says_so_on_the_screen() {
         let a = goals_app();
