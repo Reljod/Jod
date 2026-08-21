@@ -15,15 +15,31 @@
 //! cursor silently points at a different row than the one you were reading when
 //! you pressed enter.
 //!
-//! ## Expansion is a default plus two exceptions
+//! ## The tree is two levels: a project, and the agents in it
 //!
-//! Everything is expanded unless you collapsed it, except a **closed** work,
-//! which is collapsed unless you expanded it. That inversion is E5.S3b: a
-//! closed work is an archive, and a tree that shows every archive by default
-//! becomes a list of everything ever done — which is the state that makes
-//! people stop reading it.
+//! Core's forest is the whole truth — a project holds works, a work holds the
+//! session leading it, that session holds the sessions it spawned, and each of
+//! those holds its runs. Five levels is the right model and the wrong screen.
+//! What you want from the fleet is who is working on this repository right now,
+//! and that question was three expansions deep.
+//!
+//! So [`condense`] folds the middle away before anything is drawn. See its
+//! documentation for what is kept and what is reachable elsewhere.
+//!
+//! ## Expansion is a default plus three exceptions
+//!
+//! Everything is expanded unless you collapsed it, except a **project** and a
+//! **closed** work, which are collapsed unless you expanded them.
+//!
+//! A closed work is an archive, and a tree that shows every archive by default
+//! becomes a list of everything ever done — the state that makes people stop
+//! reading it (E5.S3b). A project is shut for the neighbouring reason: with
+//! every agent in every repository open at once, the screen is a wall of rows
+//! and the one repository you came to look at is somewhere in it. Shut, the
+//! fleet opens as the list of repositories, and one keystroke opens the one you
+//! want.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use jod_core::tree::{Node, NodeId, NodeKind};
 
@@ -74,6 +90,195 @@ pub fn is_loose(id: &NodeId) -> bool {
     id.kind_tag == "loose"
 }
 
+/// The forest folded to a roster, and the works its rows came out of.
+pub struct Condensed {
+    /// The rows the fleet draws: projects, and the agents inside them.
+    pub nodes: Vec<Node>,
+    /// Which work each remaining row belongs to.
+    ///
+    /// The work rows are gone from the tree, so the keys that act on a work —
+    /// `T`, which opens its message bus — can no longer climb to one. This is
+    /// how they still find it, and it is built from the forest *before* the
+    /// fold, where the answer is still written down.
+    pub works: HashMap<NodeId, String>,
+    /// The run each agent's row answers for — the one still going if there is
+    /// one, otherwise the last one it took.
+    ///
+    /// `s`, `a` and `t` act on a process, and the row that held one was the run
+    /// row this fold removes. The agent's own row inherits the verbs, which is
+    /// also the reading that matches the screen: the row says an agent is
+    /// running, so stopping it should stop that.
+    pub run_of: HashMap<NodeId, String>,
+    /// The ids of the runs the fold swallowed.
+    ///
+    /// The pane below the tree holds the runs the tree cannot show, and it used
+    /// to work that out by looking for a run's node. There are no run rows any
+    /// more, so without this list every run in the fleet would read as loose and
+    /// the pane would become a second copy of the whole flat list.
+    pub runs: HashSet<String>,
+}
+
+/// Fold the forest to the two levels the fleet reads as a roster.
+///
+/// A project keeps its manager and gains every session under every one of its
+/// works, all at the same level, in the order the works came back. Works and
+/// runs are dropped, and a session that spawned children sits beside them
+/// rather than above them — the fleet answers "who is on this repository",
+/// which is one list, not a hierarchy.
+///
+/// Nothing on it becomes unreachable. A run is inside the session that started
+/// it, so `⏎` on the session and the transcript has it; the work's bus is still
+/// one `T` away through [`Condensed::works`]; and what a run was *saying* — the
+/// stall, the status of the last one — is carried up onto the session's own
+/// row, because a wedged agent that says so only on a row three levels down is
+/// a wedged agent nobody sees.
+///
+/// Two headings survive the fold:
+///
+/// - A **work with no project**, which becomes a top-level row of its own.
+///   Those are the old ones with a null `project_id`; promoting their sessions
+///   to the top level would leave them loose on the screen with nothing saying
+///   what they belong to.
+/// - A **closed** work, which stays a heading under its project. `z` exists to
+///   show the archives, and flattening them in would leave a project holding a
+///   pile of finished agents with nothing marking which are over.
+pub fn condense(nodes: &[Node], closed: &HashSet<NodeId>) -> Condensed {
+    let mut out: Vec<Node> = Vec::new();
+    let mut works: HashMap<NodeId, String> = HashMap::new();
+    let mut runs: HashSet<String> = HashSet::new();
+    let mut run_of: HashMap<NodeId, String> = HashMap::new();
+    // The sessions whose chosen run is still going, so a finished run that
+    // comes after one does not take the row's verbs off a live process.
+    let mut live: HashSet<NodeId> = HashSet::new();
+    // Ids already emitted. `show_closed` asks core twice and the second forest
+    // repeats every project and manager row of the first, so without this a
+    // repository with one live work and one closed one is drawn twice.
+    let mut seen: HashSet<NodeId> = HashSet::new();
+    let mut project: Option<NodeId> = None;
+    // Where the sessions being read now hang, and how deep that row is.
+    let mut under: Option<(NodeId, usize)> = None;
+    let mut work: Option<String> = None;
+    // The rows a run's news has to reach: its session, by index into `out`.
+    let mut session_at: HashMap<NodeId, usize> = HashMap::new();
+
+    for node in nodes {
+        match node.kind {
+            NodeKind::Project => {
+                project = Some(node.id.clone());
+                under = Some((node.id.clone(), 0));
+                work = None;
+                match out.iter_mut().find(|row| row.id == node.id) {
+                    // The same project from the archive query. Its counts are
+                    // over the *closed* works, so they add to the live ones
+                    // rather than replacing them.
+                    Some(row) => {
+                        row.cards += node.cards;
+                        row.blocked += node.blocked;
+                        row.running |= node.running;
+                    }
+                    None => {
+                        seen.insert(node.id.clone());
+                        out.push(Node {
+                            parent: None,
+                            depth: 0,
+                            ..node.clone()
+                        });
+                    }
+                }
+            }
+            NodeKind::Manager => {
+                if seen.insert(node.id.clone()) {
+                    out.push(Node {
+                        parent: project.clone(),
+                        depth: 1,
+                        ..node.clone()
+                    });
+                }
+            }
+            NodeKind::Work => {
+                work = Some(node.id.id.clone());
+                let heading = project.is_none() || closed.contains(&node.id);
+                if !heading {
+                    under = project.clone().map(|id| (id, 0));
+                    continue;
+                }
+                let depth = usize::from(project.is_some());
+                under = Some((node.id.clone(), depth));
+                if seen.insert(node.id.clone()) {
+                    works.insert(node.id.clone(), node.id.id.clone());
+                    out.push(Node {
+                        parent: project.clone(),
+                        depth,
+                        ..node.clone()
+                    });
+                }
+            }
+            NodeKind::Session => {
+                let Some((parent, depth)) = under.clone() else {
+                    continue;
+                };
+                if !seen.insert(node.id.clone()) {
+                    continue;
+                }
+                if let Some(work) = &work {
+                    works.insert(node.id.clone(), work.clone());
+                }
+                session_at.insert(node.id.clone(), out.len());
+                out.push(Node {
+                    parent: Some(parent),
+                    depth: depth + 1,
+                    ..node.clone()
+                });
+            }
+            // Dropped as a row, and read as news about the session above it.
+            // A stall is the whole reason the fleet is worth looking at, and it
+            // is a fact core only ever writes on a run.
+            NodeKind::Run => {
+                runs.insert(node.id.id.clone());
+                let Some(parent) = node.parent.as_ref().and_then(|id| session_at.get(id)) else {
+                    continue;
+                };
+                let row = &mut out[*parent];
+                // The longest silence, not the newest: an agent with one wedged
+                // run and one chatty one is wedged.
+                if let Some(silent_for) = node.stalled_for_ms {
+                    row.stalled_for_ms = Some(row.stalled_for_ms.unwrap_or(0).max(silent_for));
+                }
+                // The newest run's ending, so a session whose last run failed
+                // wears the failure. Runs arrive oldest first, so the last one
+                // written wins. Only while the session itself is idle — a
+                // session with something running is running, whatever the run
+                // before it did.
+                if !row.running && !node.running {
+                    row.status = node.status.clone();
+                }
+                let session = row.id.clone();
+                if node.running {
+                    run_of.insert(session.clone(), node.id.id.clone());
+                    live.insert(session);
+                } else if !live.contains(&session) {
+                    run_of.insert(session, node.id.id.clone());
+                }
+            }
+        }
+    }
+
+    // The shape that is left, rather than the one core described: a session
+    // that had runs under it is now a leaf, and a project whose only work was
+    // dropped has children it did not have before.
+    for at in 0..out.len() {
+        out[at].has_children = out
+            .get(at + 1)
+            .is_some_and(|next| next.depth > out[at].depth);
+    }
+    Condensed {
+        nodes: out,
+        works,
+        run_of,
+        runs,
+    }
+}
+
 /// Everything the fleet tree remembers between frames.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TreeState {
@@ -95,11 +300,17 @@ impl TreeState {
     /// `closed` is the set of works core returned from its *closed* query, so
     /// "is this an archive" is core's answer rather than something inferred
     /// from a label here.
+    ///
+    /// A project is shut until it is opened, which is what makes the fleet open
+    /// as `main` and a list of repositories rather than as every agent on the
+    /// box at once. The kind is read off the id's own tag rather than off a
+    /// [`Node`], because every caller here holds an id and only some of them
+    /// can reach the node it names.
     pub fn is_expanded(&self, id: &NodeId, closed: &HashSet<NodeId>) -> bool {
         if self.collapsed.contains(id) {
             return false;
         }
-        if closed.contains(id) {
+        if id.kind_tag == "project" || closed.contains(id) {
             return self.opened.contains(id);
         }
         true
@@ -506,6 +717,298 @@ mod tests {
             "write the docs",
         );
         vec![work, first, run, second]
+    }
+
+    /// A repository as core hands it over: a project, its manager, two works,
+    /// the sessions under them, a run, and a session one of them spawned.
+    fn repository() -> Vec<Node> {
+        let mut project = node(NodeId::project("p1"), None, NodeKind::Project, 0, "jod");
+        project.has_children = true;
+        project.cards = 2;
+        project.blocked = 1;
+        let manager = node(
+            NodeId::manager("m1"),
+            Some(NodeId::project("p1")),
+            NodeKind::Manager,
+            1,
+            "manager",
+        );
+
+        let mut parser = node(
+            NodeId::work("w1"),
+            Some(NodeId::project("p1")),
+            NodeKind::Work,
+            1,
+            "the parser",
+        );
+        parser.has_children = true;
+        let mut lead = node(
+            NodeId::session("s1"),
+            Some(NodeId::work("w1")),
+            NodeKind::Session,
+            2,
+            "port the lexer",
+        );
+        lead.has_children = true;
+        lead.running = true;
+        let mut run = node(
+            NodeId::run("r1"),
+            Some(NodeId::session("s1")),
+            NodeKind::Run,
+            3,
+            "run one",
+        );
+        run.running = true;
+        run.status = Some("running".into());
+        // The session `s1` spawned, which is what makes core's tree deeper than
+        // three levels.
+        let helper = node(
+            NodeId::session("s2"),
+            Some(NodeId::session("s1")),
+            NodeKind::Session,
+            3,
+            "write the docs",
+        );
+
+        let mut deploy = node(
+            NodeId::work("w2"),
+            Some(NodeId::project("p1")),
+            NodeKind::Work,
+            1,
+            "the deploy",
+        );
+        deploy.has_children = true;
+        let ci = node(
+            NodeId::session("s3"),
+            Some(NodeId::work("w2")),
+            NodeKind::Session,
+            2,
+            "fix the CI",
+        );
+
+        vec![project, manager, parser, lead, run, helper, deploy, ci]
+    }
+
+    /// Every row as `(kind, depth, label)`, which is the whole claim a fold
+    /// makes.
+    fn shape(nodes: &[Node]) -> Vec<(&'static str, usize, &str)> {
+        nodes
+            .iter()
+            .map(|n| (n.id.kind_tag, n.depth, n.label.as_str()))
+            .collect()
+    }
+
+    /// The shape the fleet asks for: a project, then its manager and every
+    /// agent in it, all at one level. No works, no runs, and no session nested
+    /// under the session that spawned it.
+    #[test]
+    fn a_project_holds_its_manager_and_every_agent_at_the_same_level() {
+        let folded = condense(&repository(), &nothing());
+        assert_eq!(
+            shape(&folded.nodes),
+            [
+                ("project", 0, "jod"),
+                ("manager", 1, "manager"),
+                ("session", 1, "port the lexer"),
+                ("session", 1, "write the docs"),
+                ("session", 1, "fix the CI"),
+            ]
+        );
+        for row in folded.nodes.iter().filter(|n| n.depth == 1) {
+            assert_eq!(
+                row.parent,
+                Some(NodeId::project("p1")),
+                "{} hangs off something other than the project",
+                row.label
+            );
+        }
+        assert!(
+            folded.nodes[0].has_children,
+            "the project is the one row left with anything inside it"
+        );
+        assert!(
+            folded.nodes[1..].iter().all(|n| !n.has_children),
+            "an agent's row is a leaf, so nothing draws an expansion marker"
+        );
+    }
+
+    /// The verbs that acted on a work row have to keep working from the rows
+    /// that replaced it, or `T` becomes a key that says there is no bus.
+    #[test]
+    fn every_agent_still_remembers_the_work_it_came_out_of() {
+        let folded = condense(&repository(), &nothing());
+        assert_eq!(folded.works.get(&NodeId::session("s1")), Some(&"w1".into()));
+        assert_eq!(folded.works.get(&NodeId::session("s2")), Some(&"w1".into()));
+        assert_eq!(folded.works.get(&NodeId::session("s3")), Some(&"w2".into()));
+        assert_eq!(
+            folded.works.get(&NodeId::manager("m1")),
+            None,
+            "a manager belongs to the repository rather than to a job in it"
+        );
+    }
+
+    /// A stall is written on a run and the run rows are gone, so it has to ride
+    /// up — a wedged agent that says so only on a row that is no longer drawn is
+    /// a wedged agent nobody sees.
+    #[test]
+    fn a_stalled_run_marks_the_agent_it_was_running_under() {
+        let mut nodes = repository();
+        let run = nodes
+            .iter_mut()
+            .find(|n| n.kind == NodeKind::Run)
+            .expect("the fixture has a run");
+        run.stalled_for_ms = Some(2_700_000);
+
+        let folded = condense(&nodes, &nothing());
+        let agent = folded
+            .nodes
+            .iter()
+            .find(|n| n.id == NodeId::session("s1"))
+            .expect("the agent that took the run");
+        assert_eq!(agent.stalled_for_ms, Some(2_700_000));
+    }
+
+    /// The row is the agent, so the verbs that stop a process act on the run it
+    /// is holding.
+    #[test]
+    fn an_agents_row_answers_for_the_run_it_is_holding() {
+        let folded = condense(&repository(), &nothing());
+        assert_eq!(
+            folded.run_of.get(&NodeId::session("s1")),
+            Some(&"r1".into())
+        );
+        assert!(
+            folded.runs.contains("r1"),
+            "and the run is accounted for, so the pane of loose runs leaves it alone"
+        );
+    }
+
+    /// A run that ended is the only thing that can say *how*, and its row is
+    /// gone — so the agent wears the ending until it takes another run.
+    #[test]
+    fn the_last_runs_ending_shows_on_the_idle_agent() {
+        let mut nodes = repository();
+        for row in nodes.iter_mut() {
+            if row.kind == NodeKind::Run || row.id == NodeId::session("s1") {
+                row.running = false;
+            }
+            if row.kind == NodeKind::Run {
+                row.status = Some("failed".into());
+            }
+        }
+        let folded = condense(&nodes, &nothing());
+        let agent = folded
+            .nodes
+            .iter()
+            .find(|n| n.id == NodeId::session("s1"))
+            .expect("the agent that took the run");
+        assert_eq!(agent.status.as_deref(), Some("failed"));
+    }
+
+    /// The old works have no project, and promoting their sessions to the top
+    /// level would leave them on screen with nothing saying what they belong to.
+    #[test]
+    fn a_work_with_no_project_stays_a_heading_of_its_own() {
+        let folded = condense(&forest(), &nothing());
+        assert_eq!(
+            shape(&folded.nodes),
+            [
+                ("work", 0, "the parser"),
+                ("session", 1, "port the lexer"),
+                ("session", 1, "write the docs"),
+            ]
+        );
+    }
+
+    /// `z` shows the archives, and an archive flattened into the roster would be
+    /// a finished agent sitting among the working ones with nothing marking it.
+    #[test]
+    fn a_closed_work_keeps_its_heading_under_the_project() {
+        let closed: HashSet<NodeId> = [NodeId::work("w2")].into_iter().collect();
+        let folded = condense(&repository(), &closed);
+        assert_eq!(
+            shape(&folded.nodes),
+            [
+                ("project", 0, "jod"),
+                ("manager", 1, "manager"),
+                ("session", 1, "port the lexer"),
+                ("session", 1, "write the docs"),
+                ("work", 1, "the deploy"),
+                ("session", 2, "fix the CI"),
+            ]
+        );
+    }
+
+    /// `z` asks core a second time, and the second forest repeats every project
+    /// and manager row of the first. Drawn as they arrive, a repository with one
+    /// live work and one closed one appeared twice.
+    #[test]
+    fn a_project_the_archive_query_repeats_is_drawn_once() {
+        let mut nodes = repository();
+        let closed: HashSet<NodeId> = [NodeId::work("w2")].into_iter().collect();
+        // The archive query's own answer for the same project, appended the way
+        // `data::forest` appends it.
+        let archived: Vec<Node> = repository()
+            .into_iter()
+            .filter(|n| {
+                matches!(n.kind, NodeKind::Project | NodeKind::Manager)
+                    || n.id == NodeId::work("w2")
+                    || n.id == NodeId::session("s3")
+            })
+            .collect();
+        nodes.retain(|n| n.id != NodeId::work("w2") && n.id != NodeId::session("s3"));
+        nodes.extend(archived);
+
+        let folded = condense(&nodes, &closed);
+        assert_eq!(
+            folded
+                .nodes
+                .iter()
+                .filter(|n| n.kind == NodeKind::Project)
+                .count(),
+            1,
+            "the repository is one row, whichever query found it: {:?}",
+            shape(&folded.nodes)
+        );
+        assert_eq!(
+            folded
+                .nodes
+                .iter()
+                .filter(|n| n.kind == NodeKind::Manager)
+                .count(),
+            1
+        );
+    }
+
+    /// The fleet opens as the repositories and nothing else, and one keystroke
+    /// opens the one you came for.
+    #[test]
+    fn a_project_is_shut_until_it_is_opened() {
+        let folded = condense(&repository(), &nothing());
+        let mut tree = TreeState::default();
+        assert_eq!(
+            tree.row_ids(&folded.nodes, &nothing(), None),
+            vec![NodeId::project("p1")],
+            "the agents are inside the project, not on the screen beside it"
+        );
+
+        tree.selected = Some(NodeId::project("p1"));
+        tree.toggle(&nothing());
+        assert_eq!(
+            tree.row_ids(&folded.nodes, &nothing(), None).len(),
+            5,
+            "and one keystroke shows the roster"
+        );
+    }
+
+    /// A work with no project has no project row to open, so shutting projects
+    /// by default must not shut it too — that would be a tree whose every row is
+    /// closed and whose top level says nothing.
+    #[test]
+    fn a_work_with_no_project_is_open_the_way_it_always_was() {
+        let folded = condense(&forest(), &nothing());
+        let tree = TreeState::default();
+        assert_eq!(tree.row_ids(&folded.nodes, &nothing(), None).len(), 3);
     }
 
     fn nothing() -> HashSet<NodeId> {

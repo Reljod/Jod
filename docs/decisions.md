@@ -3353,3 +3353,53 @@ The shell keeps its notice. `jod main "<instruction>"` is a one-shot command, an
 starting a summariser and waiting for it is the wrong shape for one — but the
 line it printed named `jod conv compact <id>` without the summary that command
 requires, so it now points at the console instead.
+
+## The fleet is a roster, not the whole tree
+
+Core's forest is five levels deep: a project holds works, a work holds the
+session leading it, that session holds the sessions it spawned, and each of them
+holds its runs. Every level of that is true, and drawing all of it made the
+screen answer a question nobody was asking. What you go to the fleet for is who
+is working on this repository right now, and that was three expansions down.
+
+So `fleet::condense` folds the middle away before anything is drawn: a project
+keeps its manager and gains every session under every one of its works, all at
+one level, in the order the works came back. A session that spawned children
+sits beside them rather than above them. The fold happens once, in
+`data::forest`, so the rows, the cursor, the detail pane and the keys are all
+reading the tree that is on the screen rather than the one behind it.
+
+**Folding a row away is not the same as losing what it said,** and each of the
+three things a run's row used to carry has somewhere to go.
+
+- A **stall** rides up onto the agent that took the run — the longest silence of
+  its runs, because an agent with one wedged run and one chatty one is wedged. A
+  stall that only showed on a row nobody draws is the fault the stall detector
+  was built to fix, restored by a fold.
+- The **ending** of the newest run — completed, failed, killed — shows on the
+  agent while it is idle, so a failure is still visible without opening
+  anything.
+- The **verbs** move to the agent's row. `s`, `a` and `t` act on the run it is
+  holding, which is how the row already reads: it says an agent is running, so
+  stopping it should stop that. The guard that refuses a run verb now asks
+  `selected_agent` whether there is a process rather than asking whether the row
+  is a run, because after the fold there are no run rows for the old test to
+  find.
+
+`Condensed` also carries the work each row came out of, so `T` opens the right
+bus with no work row left to climb to, and the ids of the runs it swallowed, so
+the pane of loose runs below the tree does not decide that every run in the
+fleet is loose and become a second copy of the list.
+
+**Two headings survive.** A work with no project — the old rows whose
+`project_id` is null — stays a top-level row, because promoting its sessions
+would leave them on screen with nothing saying what they belong to. And a closed
+work stays a heading under its project: `z` exists to show the archives, and
+flattening them in would leave a project holding a pile of finished agents with
+nothing marking which are over.
+
+**A project is shut until it is opened,** which is the same rule a closed work
+already had and for a neighbouring reason. Open by default, every agent in every
+repository is on screen at once and the one repository you came to look at is
+somewhere in the middle of it. Shut, the fleet opens as `main` and a list of
+repositories, and one keystroke opens the one you want.

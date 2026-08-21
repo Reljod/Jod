@@ -43,6 +43,7 @@ use jod_core::webhook::{Delivery as StoredDelivery, DeliveryStatus, Rule};
 use jod_core::Jod;
 
 use super::app::{short_duration, Current};
+use super::fleet;
 use super::traffic;
 use super::traffic::Watching;
 use super::workspace::Workspace;
@@ -1422,8 +1423,8 @@ pub fn search(jod: &Arc<Jod>, query: &str, limit: usize) -> Vec<Hit> {
 
 // ---- the fleet tree -----------------------------------------------------
 
-/// The forest, with closed works after the live ones, and the set of works
-/// that are closed.
+/// The forest the fleet draws, with closed works after the live ones, and the
+/// set of works that are closed.
 ///
 /// Two queries rather than one sort. `works()` orders by recency, so closed and
 /// live are interleaved, and E5.S3b wants the archives below — asking core
@@ -1434,9 +1435,20 @@ pub fn search(jod: &Arc<Jod>, query: &str, limit: usize) -> Vec<Hit> {
 ///
 /// `show_closed` off is the cheaper path *and* the default, because a tree that
 /// opens as a list of everything ever done is one people stop reading.
-pub fn forest(jod: &Arc<Jod>, show_closed: bool) -> (Vec<Node>, HashSet<NodeId>) {
+///
+/// What comes back is [`fleet::condense`]d: core answers with the whole forest,
+/// and the fleet screen shows two levels of it. This is the one place the fold
+/// happens, so every reader of `App::forest` — the rows, the cursor, the detail
+/// pane, the keys — is looking at the same tree the screen is.
+pub fn forest(jod: &Arc<Jod>, show_closed: bool) -> Condensed {
     let Some(store) = jod.store() else {
-        return (Vec::new(), HashSet::new());
+        return Condensed {
+            nodes: Vec::new(),
+            works: HashMap::new(),
+            run_of: HashMap::new(),
+            runs: HashSet::new(),
+            closed: HashSet::new(),
+        };
     };
     let mut nodes = store.forest_of(Filter::Live).unwrap_or_default();
     let mut closed = HashSet::new();
@@ -1449,7 +1461,29 @@ pub fn forest(jod: &Arc<Jod>, show_closed: bool) -> (Vec<Node>, HashSet<NodeId>)
         }
         nodes.extend(archived);
     }
-    (nodes, closed)
+    let folded = fleet::condense(&nodes, &closed);
+    Condensed {
+        nodes: folded.nodes,
+        works: folded.works,
+        run_of: folded.run_of,
+        runs: folded.runs,
+        closed,
+    }
+}
+
+/// What one refresh of the fleet tree hands the app.
+pub struct Condensed {
+    pub nodes: Vec<Node>,
+    /// The work each row belongs to, for the keys that act on a work.
+    pub works: HashMap<NodeId, String>,
+    /// The run each agent's row answers for, so the verbs that act on a
+    /// process still have one under the cursor.
+    pub run_of: HashMap<NodeId, String>,
+    /// The runs the tree accounts for, which is what keeps them out of the
+    /// pane of loose runs below it.
+    pub runs: HashSet<String>,
+    /// Which works are closed, which is what makes an archive open shut.
+    pub closed: HashSet<NodeId>,
 }
 
 /// Whether sessions are being watched by nothing.
