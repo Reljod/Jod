@@ -3236,7 +3236,10 @@ fn draw_which_key(f: &mut Frame, app: &App) {
         rows.push((String::new(), String::new()));
         rows.push((
             "n".into(),
-            "new…        n s sched · n g goal · n h hook · n t task".into(),
+            // Every kind the submenu answers to. It listed four of the five,
+            // and `n m memory` was reachable, undocumented, from the one menu
+            // whose job is to document it.
+            "new…        n s sched · n g goal · n h hook · n m memory · n t task".into(),
         ));
         rows.push(("e".into(), "editor      the input in $EDITOR".into()));
         // The verbs that lost their chord to tmux. They are drawn rather than

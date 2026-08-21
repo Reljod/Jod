@@ -4271,7 +4271,12 @@ fn on_which_key(app: &mut App, key: KeyEvent) -> Option<Action> {
         }
         _ => {
             app.overlay = Overlay::None;
-            if let Some(ws) = Workspace::from_letter(c) {
+            // The letter, or the digit printed beside it. Every row of this
+            // menu says "or 4" against its letter, and the digit did nothing
+            // here — it works from inside another workspace, which is the one
+            // place you are not while reading this menu. A hint printed only
+            // where it is false is worse than no hint.
+            if let Some(ws) = Workspace::from_letter(c).or_else(|| Workspace::from_digit(c)) {
                 app.go(ws);
             }
             None
@@ -14736,6 +14741,28 @@ mod tests {
         let mut app = app_on(harness);
         app.discovered = vec![found("create-pr", jod_core::commands::Kind::Command, harness)];
         app
+    }
+
+    /// The digit the menu prints beside each letter is a route it answers to.
+    ///
+    /// Every row reads `schedules … or 4`, and pressing `4` there closed the
+    /// menu and did nothing. The digit works from inside another workspace,
+    /// which is the one place you are not while reading this menu — so the hint
+    /// was printed only where it was false.
+    #[test]
+    fn the_which_key_menu_answers_to_the_digits_it_prints() {
+        for ws in Workspace::MENU {
+            let Some(digit) = ws.digit() else { continue };
+            let mut app = app_on(HarnessKind::ClaudeCode);
+            app.overlay = Overlay::WhichKey;
+            press(&mut app, KeyCode::Char(digit));
+            assert_eq!(
+                app.workspace, ws,
+                "`{digit}` is printed against {} and has to go there",
+                ws.menu_name(),
+            );
+            assert!(matches!(app.overlay, Overlay::None), "and closes the menu");
+        }
     }
 
     /// Escape puts the palette away, and typing brings it back.
