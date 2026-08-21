@@ -423,9 +423,11 @@ pub fn titler_run_name(work_id: &str) -> String {
 /// two cannot drift; a reader that guessed the shape somewhere else is exactly
 /// what that function's own comment warns against.
 ///
-/// This hides them from the fleet only. `jod ls` still lists every run, which
-/// is what it is for: when a titler is the thing going wrong, it has to be
-/// visible somewhere.
+/// This hides them from the fleet only. `jod ls --all` still lists every run —
+/// checked, five titlers in a store the fleet showed none of — which is what it
+/// is for: when a titler is the thing going wrong, it has to be visible
+/// somewhere. Plain `jod ls` pages to the newest and says how many it held
+/// back, so an old titler is behind `--all` rather than gone.
 pub fn is_housekeeping_run(name: &str) -> bool {
     // `title <work-id>`, and nothing else that merely starts with "title" — a
     // work called "title the chapter headings" must not vanish off the fleet.
