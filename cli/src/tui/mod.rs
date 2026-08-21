@@ -3556,6 +3556,28 @@ fn background(app: &mut App) {
     )));
 }
 
+/// Back out of a manager conversation to the fleet, cursor on the row that
+/// opened it.
+///
+/// The inverse of `⏎` on a manager row. Nothing is unbound: the chat box stays
+/// tied to that conversation exactly as it stays tied to the main chat while
+/// you walk the fleet, so typing after coming back in still instructs the same
+/// manager. What changes is only which screen you are looking at, which is why
+/// this asks the supervisor nothing — see [`background`], which leaves a run
+/// alone for the same reason.
+///
+/// The cursor placement is the half that makes it a round trip. Left where it
+/// was, `←` then `⏎` would reopen whatever row the fleet happened to be
+/// pointing at — very likely a run belonging to something else entirely.
+/// [`fleet::TreeState::reveal`] also opens the project above the row, because a
+/// cursor on a hidden row is dropped at the next frame.
+fn leave_manager(app: &mut App, conversation: &str) {
+    let row = jod_core::tree::NodeId::manager(conversation);
+    let forest = app.forest.clone();
+    app.tree.reveal(&forest, &row);
+    app.go(Workspace::Fleet);
+}
+
 /// What `y` on a confirmation actually does.
 ///
 /// Read off the screen the question was asked on rather than carried inside
@@ -3942,6 +3964,23 @@ fn on_tree_key(app: &mut App, key: KeyEvent, viewport: usize) -> Option<Option<A
             handled(None)
         }
         KeyCode::Right => {
+            // A manager row is a conversation, not a branch. Core builds it
+            // with no children — see `tree::forest` — so `expand_or_descend`
+            // has nothing to open and nothing to descend into, and `→` was a
+            // printed key that did nothing.
+            //
+            // It goes *into* the conversation instead, which is the same pair
+            // the pinned chat row makes at the top of this function: `←` backs
+            // out of a conversation, `→` goes into the one under the cursor.
+            // Run and session rows are left alone — those are not conversations
+            // the chat box can bind to, and `⏎` is their key.
+            let manager = app
+                .selected_node()
+                .filter(|node| node.kind == jod_core::tree::NodeKind::Manager)
+                .map(|node| node.id.id.clone());
+            if let Some(conversation) = manager {
+                return handled(Some(Action::EnterManager(conversation)));
+            }
             let (forest, closed) = (app.forest.clone(), app.closed_works.clone());
             app.tree.expand_or_descend(&forest, &closed);
             handled(None)
@@ -5095,6 +5134,28 @@ fn on_chat_key(
         // stop looking at. See [`background`] for why nothing is asked.
         KeyCode::Left if app.input.is_empty() && (app.busy || app.watching.is_some()) => {
             background(app);
+        }
+        // A manager is something to leave even when nothing is running, which
+        // is the difference between it and the main chat. You got here by
+        // pressing `⏎` on a row one screen away, so the way back has to be the
+        // one key that already means "out" — and it was a dead key, because the
+        // arm above only fires while a run is on screen and a manager sitting
+        // idle has none.
+        //
+        // The main chat deliberately keeps the old behaviour. It is home rather
+        // than somewhere you went, so there is nothing to back out *to*.
+        KeyCode::Left
+            if app.input.is_empty()
+                && thread
+                    .conversation
+                    .as_deref()
+                    .is_some_and(|id| app.is_manager_conversation(id)) =>
+        {
+            let conversation = thread
+                .conversation
+                .clone()
+                .expect("the guard just read it");
+            leave_manager(app, &conversation);
         }
         KeyCode::Left => app.left(),
         KeyCode::Right => app.right(),
@@ -11388,19 +11449,14 @@ mod tests {
         assert!(app.here().editing_filter, "the filter line never opened");
     }
 
-    /// Check 16. `⏎` on a manager row goes *into* that conversation, the same
-    /// movement the pinned row makes into the main chat.
+    /// One project and its manager row, built the way core builds them.
     ///
-    /// Not `Watch` and not `Sessions(Open)`. Watching puts a run's output on
-    /// screen and leaves the chat box where it was; `Sessions(Open)` prints a
-    /// conversation's contents as notice lines. Neither binds the chat box, and
-    /// binding it is the whole point — what you type next has to be an
-    /// instruction to that manager.
-    #[test]
-    fn enter_on_a_manager_row_goes_into_that_conversation() {
+    /// `has_children: false` on the manager is copied from `tree::forest` and is
+    /// not incidental: it is the reason `→` needed an arm of its own, because
+    /// `expand_or_descend` returns immediately on a childless row.
+    fn forest_with_a_manager(conversation: &str) -> Vec<jod_core::tree::Node> {
         use jod_core::tree::{Node, NodeId, NodeKind};
-        let mut app = app_on(HarnessKind::ClaudeCode);
-        app.forest = vec![
+        vec![
             Node {
                 id: NodeId::project("p1"),
                 parent: None,
@@ -11418,7 +11474,7 @@ mod tests {
                 has_children: true,
             },
             Node {
-                id: NodeId::manager("conv-9"),
+                id: NodeId::manager(conversation),
                 parent: Some(NodeId::project("p1")),
                 kind: NodeKind::Manager,
                 depth: 1,
@@ -11433,7 +11489,43 @@ mod tests {
                 expanded: true,
                 has_children: false,
             },
-        ];
+        ]
+    }
+
+    /// The console as it stands after `⏎` on a manager row: the chat screen,
+    /// the chat box bound to that conversation, and the row it came from still
+    /// in the forest.
+    fn in_a_manager(conversation: &str) -> (App, Thread) {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.forest = forest_with_a_manager(conversation);
+        app.go(Workspace::Chat);
+        let thread = Thread {
+            conversation: Some(conversation.to_string()),
+            ..Default::default()
+        };
+        (app, thread)
+    }
+
+    /// [`press`], for the handful of tests that care which conversation the chat
+    /// box is bound to. The throwaway `Thread` the ordinary helper mints is
+    /// bound to nothing, which is exactly the state these are contrasting with.
+    fn press_in(app: &mut App, thread: &mut Thread, code: KeyCode) -> Option<Action> {
+        on_key(app, thread, KeyEvent::new(code, KeyModifiers::NONE), 20)
+    }
+
+    /// Check 16. `⏎` on a manager row goes *into* that conversation, the same
+    /// movement the pinned row makes into the main chat.
+    ///
+    /// Not `Watch` and not `Sessions(Open)`. Watching puts a run's output on
+    /// screen and leaves the chat box where it was; `Sessions(Open)` prints a
+    /// conversation's contents as notice lines. Neither binds the chat box, and
+    /// binding it is the whole point — what you type next has to be an
+    /// instruction to that manager.
+    #[test]
+    fn enter_on_a_manager_row_goes_into_that_conversation() {
+        use jod_core::tree::NodeId;
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.forest = forest_with_a_manager("conv-9");
         app.go(Workspace::Fleet);
         app.tree.selected = Some(NodeId::manager("conv-9"));
 
@@ -11442,6 +11534,127 @@ mod tests {
             Some(Action::EnterManager("conv-9".into())),
             "the row has to carry the conversation to bind to"
         );
+    }
+
+    /// `→` on a manager row was a printed key that did nothing. Core builds the
+    /// row with no children, so `expand_or_descend` had nothing to open and
+    /// nothing to descend into — while the pinned chat row one level up has
+    /// always taken `→` as "go into this conversation".
+    #[test]
+    fn right_on_a_manager_row_goes_into_that_conversation() {
+        use jod_core::tree::NodeId;
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.forest = forest_with_a_manager("conv-9");
+        app.go(Workspace::Fleet);
+        app.tree.selected = Some(NodeId::manager("conv-9"));
+
+        assert_eq!(
+            press(&mut app, KeyCode::Right),
+            Some(Action::EnterManager("conv-9".into())),
+            "→ on a manager row is still the dead key it was"
+        );
+    }
+
+    /// And `→` everywhere else is still the tree's own key. A project has
+    /// children, so it opens rather than binding the chat box to anything.
+    #[test]
+    fn right_on_a_project_row_still_opens_the_branch() {
+        use jod_core::tree::NodeId;
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.forest = forest_with_a_manager("conv-9");
+        app.go(Workspace::Fleet);
+        app.tree.selected = Some(NodeId::project("p1"));
+        app.tree.collapsed.insert(NodeId::project("p1"));
+
+        assert_eq!(press(&mut app, KeyCode::Right), None);
+        assert!(
+            app.tree
+                .is_expanded(&NodeId::project("p1"), &app.closed_works),
+            "→ on a branch stopped opening it"
+        );
+    }
+
+    /// The bug. Sitting in a manager with nothing running, `←` did nothing at
+    /// all: the arm above it only fires while a run is on screen, and a manager
+    /// waiting for you to type has none. So the one key that means "out" did not
+    /// go out, from a screen you reached with one keystroke.
+    #[test]
+    fn left_out_of_an_idle_manager_goes_back_to_the_fleet() {
+        let (mut app, mut thread) = in_a_manager("conv-9");
+        assert!(!app.busy);
+        assert_eq!(app.watching, None, "nothing is running to back out of");
+
+        assert_eq!(press_in(&mut app, &mut thread, KeyCode::Left), None);
+        assert_eq!(app.workspace, Workspace::Fleet);
+    }
+
+    /// `←` then `⏎` is a round trip. With the cursor left where it was, `⏎`
+    /// would reopen whichever row the fleet last pointed at — very likely a run
+    /// belonging to something else entirely.
+    #[test]
+    fn left_out_of_a_manager_lands_on_the_row_that_opened_it() {
+        use jod_core::tree::NodeId;
+        let (mut app, mut thread) = in_a_manager("conv-9");
+        press_in(&mut app, &mut thread, KeyCode::Left);
+
+        assert_eq!(app.tree.selected, Some(NodeId::manager("conv-9")));
+        assert_eq!(
+            press_in(&mut app, &mut thread, KeyCode::Enter),
+            Some(Action::EnterManager("conv-9".into())),
+            "⏎ did not reopen what ← left"
+        );
+    }
+
+    /// Pointing at the row is not enough when the project above it is folded
+    /// shut: the row is not drawn, and `reconcile_to` drops a cursor that is on
+    /// nothing at the next refresh. Backing out opens the way back as well as
+    /// pointing at it.
+    #[test]
+    fn backing_out_opens_the_project_folded_over_the_manager() {
+        use jod_core::tree::NodeId;
+        let (mut app, mut thread) = in_a_manager("conv-9");
+        app.tree.collapsed.insert(NodeId::project("p1"));
+
+        press_in(&mut app, &mut thread, KeyCode::Left);
+        app.reconcile();
+
+        assert_eq!(
+            app.tree.selected,
+            Some(NodeId::manager("conv-9")),
+            "the cursor was parked on a row nothing draws"
+        );
+    }
+
+    /// The rule that keeps the shortcut free, in a manager exactly as anywhere
+    /// else: with text in the box, `←` is the cursor. A version of this that
+    /// grabbed the key unconditionally would make the input box unusable.
+    #[test]
+    fn left_with_something_typed_in_a_manager_still_moves_the_cursor() {
+        let (mut app, mut thread) = in_a_manager("conv-9");
+        for c in "hello".chars() {
+            press_in(&mut app, &mut thread, KeyCode::Char(c));
+        }
+
+        press_in(&mut app, &mut thread, KeyCode::Left);
+        assert_eq!(app.workspace, Workspace::Chat, "the box owns the key");
+        assert_eq!(app.cursor, 4, "the cursor moved back over the `o`");
+    }
+
+    /// The main chat keeps the old behaviour, because it is home rather than
+    /// somewhere you went — there is nothing to back out *to*. Only a
+    /// conversation the forest knows as a manager row gets the new arm.
+    #[test]
+    fn left_in_a_conversation_that_is_not_a_manager_stays_put() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.forest = forest_with_a_manager("conv-9");
+        app.go(Workspace::Chat);
+        let mut thread = Thread {
+            conversation: Some("the-main-chat".into()),
+            ..Default::default()
+        };
+
+        assert_eq!(press_in(&mut app, &mut thread, KeyCode::Left), None);
+        assert_eq!(app.workspace, Workspace::Chat);
     }
 
     /// `x` on a project row untracks that repository, and carries the row's own

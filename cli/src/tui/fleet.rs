@@ -323,6 +323,44 @@ impl TreeState {
         }
     }
 
+    /// Put the cursor on one node, opening whatever is closed above it.
+    ///
+    /// What backing out of a conversation needs. The row that opened it may sit
+    /// under a project somebody collapsed, and a cursor set to a hidden row is
+    /// dropped by [`TreeState::reconcile_to`] on the very next frame — so the
+    /// trip out would land nowhere near the trip in. Opening the ancestors is
+    /// what makes `←` and `⏎` a round trip rather than a one-way door.
+    ///
+    /// A node the forest does not hold leaves the cursor alone, so callers may
+    /// offer a row that may or may not exist without checking first.
+    pub fn reveal(&mut self, nodes: &[Node], id: &NodeId) {
+        let Some(node) = nodes.iter().find(|n| n.id == *id) else {
+            return;
+        };
+        // Walked by parent id rather than by scanning back for a shallower row,
+        // for the reason `matching` gives: two works' sessions sit at the same
+        // depth, and the nearest shallower row is not always the ancestor.
+        //
+        // `seen` is the same stop `matching` puts on the same walk. A forest
+        // whose parent links loop would otherwise spin here forever, and this
+        // runs on a keypress — the console would simply stop repainting, which
+        // is the one failure a user cannot report usefully.
+        let mut seen: HashSet<NodeId> = HashSet::new();
+        let mut parent = node.parent.clone();
+        while let Some(up) = parent {
+            if !seen.insert(up.clone()) {
+                break;
+            }
+            parent = nodes
+                .iter()
+                .find(|n| n.id == up)
+                .and_then(|n| n.parent.clone());
+            self.collapsed.remove(&up);
+            self.opened.insert(up);
+        }
+        self.selected = Some(id.clone());
+    }
+
     pub fn expand_all(&mut self, nodes: &[Node]) {
         self.collapsed.clear();
         for node in nodes {
@@ -514,6 +552,66 @@ mod tests {
         tree.selected = Some(NodeId::work("w1"));
         tree.expand_or_descend(&nodes, &closed);
         assert_eq!(tree.row_ids(&nodes, &closed, None).len(), 4, "opened by hand");
+    }
+
+    /// Revealing a row deep in a folded tree opens every ancestor, not only the
+    /// nearest one — a run whose session is open but whose work is shut is still
+    /// off screen.
+    #[test]
+    fn revealing_a_row_opens_every_branch_above_it() {
+        let nodes = forest();
+        let mut tree = TreeState::default();
+        tree.collapsed.insert(NodeId::work("w1"));
+        tree.collapsed.insert(NodeId::session("s1"));
+
+        tree.reveal(&nodes, &NodeId::run("r1"));
+
+        assert_eq!(tree.selected, Some(NodeId::run("r1")));
+        assert!(
+            tree.row_ids(&nodes, &nothing(), None)
+                .contains(&NodeId::run("r1")),
+            "the cursor is on a row nothing draws"
+        );
+    }
+
+    /// A row the forest does not hold leaves the cursor where it was, so a
+    /// caller may offer one that may or may not exist without checking first.
+    #[test]
+    fn revealing_a_row_that_is_not_there_moves_nothing() {
+        let nodes = forest();
+        let mut tree = TreeState {
+            selected: Some(NodeId::work("w1")),
+            ..Default::default()
+        };
+
+        tree.reveal(&nodes, &NodeId::run("gone"));
+        assert_eq!(tree.selected, Some(NodeId::work("w1")));
+    }
+
+    /// The walk runs on a keypress, so a forest whose parent links loop has to
+    /// stop rather than spin: a console that quietly stops repainting is the one
+    /// failure a user cannot report usefully.
+    #[test]
+    fn revealing_a_row_in_a_forest_that_loops_still_returns() {
+        let mut first = node(
+            NodeId::work("w1"),
+            Some(NodeId::work("w2")),
+            NodeKind::Work,
+            0,
+            "the parser",
+        );
+        first.has_children = true;
+        let second = node(
+            NodeId::work("w2"),
+            Some(NodeId::work("w1")),
+            NodeKind::Work,
+            0,
+            "the lexer",
+        );
+        let mut tree = TreeState::default();
+
+        tree.reveal(&[first, second], &NodeId::work("w1"));
+        assert_eq!(tree.selected, Some(NodeId::work("w1")));
     }
 
     /// The cursor follows the *node*, which is the whole reason it is an id.
