@@ -6845,7 +6845,7 @@ mod tests {
                 .to_string()
         };
         let go = label("go into the main chat");
-        let send = label("send it one instruction");
+        let send = label("hand main one instruction");
         assert_ne!(
             go, send,
             "the two /main rows must not read alike:\n{screen}"

@@ -701,9 +701,15 @@ pub const HELP: &[(&str, &str)] = &[
     ("/resume <id>", "continue one of them by its id"),
     ("/delegate <prompt>", "run it in the background (Ctrl-B)"),
     ("/main", "go into the main chat — the pinned one"),
+    // Not "and stay where you are". The reply is watched in this transcript,
+    // which means the chat binds to main for it — `orchestrate` re-asserts the
+    // binding from the run it just started. Harmless from main, and a silent
+    // move when it is typed inside a project manager, where the next sentence
+    // then goes somewhere else entirely. The composer's own title says where it
+    // ended up; this says so before you press Enter.
     (
         "/main <instruction>",
-        "send it one instruction and stay where you are",
+        "hand main one instruction — the chat follows it there",
     ),
     ("/agents", "the fleet (Ctrl-F, Ctrl-G f)"),
     ("/watch <id>", "put an agent's output on screen"),
