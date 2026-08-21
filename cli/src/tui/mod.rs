@@ -1195,14 +1195,32 @@ fn replay(
         entries.push(Entry::Tool {
             name: name.clone(),
             detail: message.tool_input.as_ref().and_then(app::tool_detail),
-            failed: false,
+            step: app::Step::Running,
         });
         if let Some(edit) = message
             .tool_input
             .as_ref()
             .and_then(|i| diff::from_tool(&name, i))
         {
-            entries.push(Entry::Diff(edit));
+            entries.push(Entry::Diff {
+                edit,
+                step: app::Step::Running,
+            });
+        }
+        // The same shell-written files the live path shows — see
+        // `diff::from_shell`. Without it a conversation reopened from the store
+        // loses every file an agent wrote with a heredoc, which is all of them
+        // for an agent that never used the edit tool.
+        for edit in message
+            .tool_input
+            .as_ref()
+            .map(|i| diff::from_shell(&name, i))
+            .unwrap_or_default()
+        {
+            entries.push(Entry::Diff {
+                edit,
+                step: app::Step::Running,
+            });
         }
     }
 
@@ -1222,14 +1240,18 @@ fn replay(
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false);
         let name = message.tool_name.clone().unwrap_or_else(|| "tool".into());
+        // The call this result answers is finished, and says so on its own
+        // line — including the failure, which is why no second bare `✗ Bash`
+        // is pushed under it any more.
+        let settled = app::settle_in(entries, &name, failed);
         // A result needs a call line above it when none was announced: a fast
         // OpenCode tool reports only its completion, and a bare `└ Wrote file
         // successfully.` is an answer with its question missing.
-        if failed || !app::announced_in(entries, &name) {
+        if !settled && (failed || !app::announced_in(entries, &name)) {
             entries.push(Entry::Tool {
                 name,
                 detail: None,
-                failed,
+                step: if failed { app::Step::Failed } else { app::Step::Ok },
             });
         }
         if !message.text.trim().is_empty() {
@@ -7677,7 +7699,7 @@ mod tests {
 
         let entries = replay(&s.live_window(&id).unwrap(), "the main chat", true);
         assert!(
-            matches!(&entries[1], Entry::Tool { name, detail, failed: false }
+            matches!(&entries[1], Entry::Tool { name, detail, step: _ }
                 if name == "Bash" && detail.as_deref() == Some("mkdir -p racing-3d")),
             "the call reads as `⚙ Bash · mkdir -p racing-3d`: {entries:?}"
         );
