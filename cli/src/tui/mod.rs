@@ -1169,17 +1169,15 @@ async fn perform(
         Action::Orchestrate(instruction) => orchestrate(jod, app, opts, thread, instruction).await,
         Action::EnterMain => enter_main(jod, app, opts, thread, false).await,
         Action::Delegate(prompt) => {
-            // Fresh, always: a background job that silently continued the
-            // conversation on screen would inherit context nobody asked it to,
-            // and two agents writing into one session is not a conversation.
+            // Fresh, always: silently continuing the conversation on screen
+            // would inherit context nobody gave it, and two agents writing into
+            // one session is not a conversation.
             //
-            // Read-only rather than nothing, and rather than the orchestrating
-            // set a watched turn gets. Nobody is reading this one's output as
-            // it goes, and the thing you least want unattended is an agent that
-            // can create more unattended agents — see `ToolAccess::unattended`,
-            // whose reasoning this is. Reading is the half that pays for
-            // itself: an agent that can see what else is running can decline to
-            // duplicate it.
+            // Read-only rather than the orchestrating set a watched turn gets —
+            // the thing you least want unattended is an agent that can create
+            // more unattended agents. Reading still pays for itself: an agent
+            // that can see what else is running can decline to duplicate it.
+            // See `ToolAccess::unattended`.
             match spawn(
                 jod,
                 app,
@@ -1243,19 +1241,15 @@ async fn perform(
                 }
             }
         }
-        // The transcript already says the turn ended — `on_chat_key` said so on
-        // the keypress. All that is left is ending the process, and a failure
-        // here is reported without undoing any of it: the conversation is
-        // intact either way, and a harness that outlives its interruption is a
-        // supervisor problem rather than a reason to put the user back into a
-        // turn they have already abandoned.
-        // Straight to stdout, past ratatui: this is a message for the terminal
-        // emulator rather than something to draw, and the next frame repaints
-        // over anything the draw buffer thought was there.
+        // The transcript already says the turn ended. A failure here is
+        // reported without undoing that: the conversation is intact either way,
+        // and a harness outliving its interruption is a supervisor problem, not
+        // a reason to put the user back into a turn they abandoned.
+        // Straight to stdout, past ratatui: a message for the terminal emulator
+        // rather than something to draw, and the next frame repaints over it.
         //
-        // A failure is reported and nothing else — the clipboard cannot be read
-        // back, so there is no state to repair, and the notice has already gone
-        // out saying what was copied.
+        // A failure is only reported — the clipboard cannot be read back, so
+        // there is no state to repair.
         Action::Yank(sequence) => {
             use std::io::Write as _;
             let mut out = io::stdout();
@@ -1628,11 +1622,10 @@ const NO_STORE: &str = "no database is open, so nothing was changed";
 
 /// Run one store verb, say what it did, and re-read the screens.
 ///
-/// The refresh is the point: a row that still says `armed` after `p` reads as a
-/// key that did nothing, and the tick that would eventually correct it is up to
-/// four seconds away. Errors come back as a sentence rather than as a `Result`,
-/// because a locked database must cost the user a notice and not the session —
-/// the same discipline `refresh_team` already keeps.
+/// The refresh is the point: a row still saying `armed` after `p` reads as a
+/// dead key, and the tick that would correct it is up to four seconds away.
+/// Errors come back as a sentence rather than a `Result`, so a locked database
+/// costs a notice and not the session.
 /// What an empty catalog is told, in the transcript's width rather than the
 /// panel's. The panel says the same thing in thirty columns — see
 /// `ui::CATALOG_REMEDY` — and both name the command, because a remedy the
@@ -1786,13 +1779,12 @@ fn crossing(store: Option<&Store>, app: &App, thread: &Thread, to: HarnessKind) 
 /// What to say about a target that cannot be handed structure, if it is one.
 ///
 /// Asked of the store rather than decided here, so "which carriers lose
-/// something" has one answer and not a copy of it in the UI — today that is AGY
-/// alone, and the day a harness grows an import path this line stops warning
-/// about it without being edited.
+/// something" has one answer — and the day a harness grows an import path this
+/// line stops warning without being edited.
 ///
-/// Said *before* the move: it is the one loss a user can still avoid, by
-/// choosing a different target. The compaction's cost is reported after,
-/// because by then it is a fact rather than a choice.
+/// Said *before* the move, because it is the one loss still avoidable by
+/// choosing a different target. The compaction's cost is reported after, when
+/// it is a fact rather than a choice.
 fn lossy_warning(store: &Store, conversation: &str, to: HarnessKind) -> Option<String> {
     store
         .handoff(conversation, to)
@@ -1918,14 +1910,12 @@ async fn begin_crossing(
 
 /// Complete a switch whose summariser has finished.
 ///
-/// Takes the summary as text rather than reading it out of a run, so the part
-/// with the decisions in it is testable without a harness: what happens when the
-/// model says nothing, and what happens when the store refuses.
+/// Takes the summary as text rather than reading it out of a run, so the
+/// decisions are testable without a harness.
 ///
-/// Every failure path leaves the app exactly where it was. A half-completed
-/// switch — new harness, no context — is strictly worse than one that did not
-/// happen, because the conversation is still there and the user no longer has a
-/// way back to it.
+/// Every failure path leaves the app where it was. A half-completed switch —
+/// new harness, no context — is worse than one that did not happen: the
+/// conversation is still there and there is no longer a way back to it.
 fn finish_crossing(
     store: &Store,
     app: &mut App,
@@ -3824,18 +3814,14 @@ fn refusal_to_continue(name: &str, status: &str) -> Option<String> {
 }
 
 fn on_fleet_key(app: &mut App, key: KeyEvent) -> Option<Action> {
-    // With works on the board the fleet is a tree, and the arrows mean the
-    // tree's things — but that half runs in `on_workspace_key`, *above* the
-    // list spine, because the spine owns `↑`/`↓` and would answer them first.
-    // What is left here are the row verbs, which the tree does not know: `s`
-    // still stops a run, `d` still delegates, on a tree row as on a flat one.
+    // The arrows belong to the tree and are answered in `on_workspace_key`,
+    // above the list spine, because the spine owns `↑`/`↓`. What is left here
+    // are the row verbs the tree does not know: `s` stops, `d` delegates.
     //
-    // The tree's pinned chat is the same case as the flat list's pinned row
-    // further down, and it comes first because `selected_node` cannot answer
-    // for it: it is a sentinel, not a node in the forest. Left out, these verbs
-    // fall through to `selected_agent`, which reads the *flat* list's cursor —
-    // so `s` on the main row would stop whichever agent that other, unseen
-    // cursor happened to be on.
+    // The tree's pinned chat comes first because `selected_node` cannot answer
+    // for a sentinel. Left out, these verbs fall through to `selected_agent`,
+    // which reads the *flat* list's cursor — so `s` on the main row would stop
+    // whichever agent that other, unseen cursor was on.
     if app.tree_main_selected() && is_run_verb(key.code) {
         app.push(Entry::Notice(
             "that is the main chat, not an agent — it has no process to stop or attach to, \

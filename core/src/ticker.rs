@@ -18,39 +18,23 @@
 //!
 //! ## The tick is also what speaks to agents, by two roads
 //!
-//! [`Ticker::tick_deliveries`] injects what the queue in [`crate::delivery`]
-//! holds for a conversation — card answers and human nudges — and
-//! [`Ticker::tick_mail`] wakes members holding mail. Both were built before
-//! anything called them, which is why the composite [`crate::daemon::Tick`]
-//! impl is guarded by a test that goes through it rather than through the
-//! steps.
+//! [`Ticker::tick_deliveries`] injects card answers and human nudges queued
+//! against a *conversation*; [`Ticker::tick_mail`] wakes *members* holding
+//! mail. The latter is authoritative for agent-to-agent mail: `wake_order`
+//! decides who may be woken, `claim_wake` rate-limits across ticks, and
+//! `Store::take_mail` records both that mail went and that it may not go twice
+//! in one statement.
 //!
-//! [`Ticker::tick_mail`] is the **authoritative** path for agent-to-agent mail:
-//! [`crate::team::wake_order`] decides who may be woken, `claim_wake` rate-limits
-//! it across ticks, and `Store::take_mail` takes the mail off the bus in one
-//! statement — recording *both* that it went and that it may not go twice, which
-//! the drain-then-mark version it replaced could be, and was, half-done. Card
-//! answers and human nudges travel a different road, [`crate::delivery`], which
-//! queues against a *conversation*.
+//! Two roads is one more than the design wants; the merge needs a schema change,
+//! because an explicit team's member has no stable conversation to address. Full
+//! reasoning at the top of [`crate::delivery`]. Two rules for whoever merges:
 //!
-//! Two roads is one more than the design wants, and they are being merged in
-//! order rather than at once. The full reasoning is at the top of
-//! [`crate::delivery`]; the short of it is that this road addresses a
-//! **member** and that one addresses a **conversation**, an explicit team's
-//! member has no stable conversation to be addressed by, and closing that gap
-//! needs a schema change. The state vocabulary *was* unified, so both tables
-//! now mean the same thing by the same word, and the queue that had no caller
-//! now has one.
-//!
-//! Two rules for whoever does merge them:
-//!
-//! - **`claim_wake` is not `plan_injection`.** One is a rate limit across
-//!   ticks, the other declines only while a turn is in flight. Fold the former
-//!   into the latter and an idle member receiving one message per tick gets one
-//!   turn per tick, which is the cost problem the rate limit exists to prevent.
-//! - **The drain and the queue must settle together.** Today exactly one row
-//!   records what an agent was told. Two records of that, settled in two
-//!   statements, disagree the first time a process dies between them.
+//! - **`claim_wake` is not `plan_injection`.** One rate-limits across ticks,
+//!   the other declines only mid-turn. Folded together, an idle member getting
+//!   one message per tick gets one turn per tick.
+//! - **The drain and the queue must settle together.** One row records what an
+//!   agent was told; two rows settled in two statements disagree the first time
+//!   a process dies between them.
 
 use std::sync::Arc;
 
@@ -87,19 +71,14 @@ fn one_line(text: &str) -> String {
 /// What can honestly be said about a settled iteration whose run cannot be read
 /// back, as a recovered cost and a line for `jod goal log`.
 ///
-/// A real, paid-for run reaches this by two routes that have both been seen.
-/// It can fall outside the daemon's 200-run rehydrate window, so nothing ever
-/// loaded it into memory; or `rehydrate` can skip it because the summary on
-/// disk was written by a build whose `AgentSummary` had a different shape.
-/// Neither route destroys anything. The `runs` row and the run's events are
-/// both still there — the only thing that has failed is turning them back into
-/// a struct this build understands.
+/// A real, paid-for run reaches this either by falling outside the daemon's
+/// 200-run rehydrate window or because the summary on disk has a shape this
+/// build does not understand. Neither destroys anything — the row and the
+/// events are still there.
 ///
-/// So the cost is recovered rather than assumed, and only when both places have
-/// been asked and neither answered does the line say the cost is unknown. That
-/// distinction is the point: an unknown cost written down as unknown can be
-/// chased later, while an unknown cost written down as `$0.00` looks like a
-/// settled fact and nobody ever asks again.
+/// So the cost is recovered rather than assumed, and only says "unknown" once
+/// both places have been asked. An unknown cost recorded as unknown can be
+/// chased later; recorded as `$0.00` it looks settled and nobody asks again.
 fn unreadable_iteration(store: &Store, run_id: &str) -> (Option<f64>, String) {
     let recovered = recorded_cost(store, run_id);
     let outcome = match recovered {
@@ -115,13 +94,11 @@ fn unreadable_iteration(store: &Store, run_id: &str) -> (Option<f64>, String) {
 /// store.
 ///
 /// Two places are asked, because the two ways a run becomes unreadable damage
-/// different things. A run outside the rehydrate window has a perfectly good
-/// summary that nobody loaded, so the row answers. A summary written by an
-/// incompatible build cannot become an `AgentSummary`, but it is still JSON and
-/// the usage it recorded is still in it, so the row usually answers that case
-/// too. The `Finished` event is the fallback for a row whose summary really has
-/// lost its usage: it is the harness's own report of what the turn cost, stored
-/// separately and never rewritten.
+/// different things. A run outside the rehydrate window has a good summary
+/// nobody loaded, so the row answers. A summary from an incompatible build is
+/// still JSON with its usage in it, so the row usually answers that too. The
+/// `Finished` event is the fallback when the summary really has lost its usage:
+/// the harness's own report of the cost, stored separately and never rewritten.
 fn recorded_cost(store: &Store, run_id: &str) -> Option<f64> {
     if let Ok(Some(row)) = store.run(run_id) {
         if let Some(spent) = row
@@ -146,20 +123,16 @@ fn recorded_cost(store: &Store, run_id: &str) -> Option<f64> {
 /// How a goal's ending should read to the person who finds it in
 /// `jod goal log`.
 ///
-/// The state word on its own is not enough. "exhausted" on a goal that ran
-/// twenty times means it did the work and used up what it was given.
-/// "exhausted" on a goal that never started means it was created with a limit
-/// it was already past, so nothing it was asked to do was ever attempted —
-/// that is a mistake in how the goal was written down, not a result. The two
-/// need to read differently, and the reason names the limit and the number it
-/// was compared against so the person does not have to go looking.
+/// The state word alone is not enough. "exhausted" after twenty iterations
+/// means the work was done and the budget used up; "exhausted" at zero means
+/// the goal was written with a limit it was already past, which is a mistake
+/// rather than a result. So the reason names the limit and the number it was
+/// compared against.
 ///
-/// "satisfied" has the same two readings and needs the same treatment. A goal
-/// satisfied after twenty iterations was met by work it did and paid for. A
-/// goal satisfied at iteration zero was already met when it was written down,
-/// and the only reason anyone knows is that the done-when check was run once,
-/// which costs nothing. That is the only way this is called with
-/// [`schedule::GoalState::Satisfied`], so the reason may say so outright.
+/// "satisfied" has the same two readings. Satisfied at iteration zero means it
+/// was already met when written down, discovered by the one free done-when
+/// check — the only way this is called with [`schedule::GoalState::Satisfied`],
+/// so the reason may say so outright.
 fn ending_note(goal: &Goal, stop: schedule::GoalState) -> String {
     let reason = match stop {
         schedule::GoalState::Exhausted => match goal.max_iterations {
@@ -354,24 +327,18 @@ fn spawns(d: &Decision) -> bool {
 
 /// What a `fire_once` catch-up passed over.
 ///
-/// [`decide`] answers a long outage under the default policy with a single
-/// [`Decision::Run`] and nothing else, and that is right: the question after an
-/// outage is whether the inbox got triaged, not whether it got triaged eleven
-/// times. But the instants it passed over still happened, and [`FireOutcome`]
-/// states the rule they fall foul of — every outcome is written down, because a
-/// skip nobody recorded is a silent failure. Before this existed, a six-hour
-/// outage on a fifteen-minute schedule left one ordinary-looking `ran` row and
-/// no trace at all of the twenty-three instants that were dropped to produce
-/// it.
+/// [`decide`] answers a long outage with a single [`Decision::Run`], which is
+/// right — the question after an outage is whether the inbox got triaged, not
+/// whether it got triaged eleven times. But the instants it passed over
+/// happened, and a skip nobody recorded is a silent failure: a six-hour outage
+/// on a fifteen-minute schedule used to leave one ordinary `ran` row and no
+/// trace of the twenty-three dropped instants.
 ///
-/// **One row, not one row per instant, and the difference is the fact being
-/// recorded.** Under `skip`, each missed instant got nothing whatsoever, so
-/// each one is its own outcome and each one earns its own row. Under
-/// `fire_once` they were not discarded one by one — they were folded into the
-/// single run that stands in for all of them, which is one thing that happened
-/// once. Twenty-three rows identical to `skip`'s would tell a person that
-/// nothing ran for those instants, when something did, and would push the run
-/// itself off the ten lines `jod schedule log` shows by default.
+/// **One row, not one per instant.** Under `skip` each missed instant got
+/// nothing, so each is its own outcome. Under `fire_once` they were folded into
+/// the run that stands in for all of them, which is one thing that happened
+/// once. Twenty-three `skip`-shaped rows would claim nothing ran, and would
+/// push the run itself off the ten lines `jod schedule log` shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CaughtUp {
     /// How many instants the catch-up passed over. Never zero.
@@ -419,15 +386,12 @@ fn in_zone(at_ms: i64, timezone: &str) -> String {
 
 /// The instants a tick's catch-up passed over, if it passed over any.
 ///
-/// `steps` is the plan as it will actually be carried out — after [`plan`] has
-/// had its say — because a tick that is going to start nothing has caught
-/// nothing up and must not claim it did. A monitor that suppressed the run, or
-/// an overlap hold because the previous run is still going, each write their
-/// own row saying what really happened to this tick.
+/// `steps` is the plan as it will actually be carried out, after [`plan`] has
+/// had its say: a tick that starts nothing has caught nothing up and must not
+/// claim it did. A monitor suppression or an overlap hold writes its own row.
 ///
-/// Only `fire_once` needs this. `skip` already records every instant it
-/// dropped, one row each, and `fire_all` drops nothing it was not bounded out
-/// of.
+/// Only `fire_once` needs this. `skip` already records every dropped instant,
+/// and `fire_all` drops nothing it was not bounded out of.
 pub fn caught_up(s: &Schedule, missed: &[i64], steps: &[Decision]) -> Option<CaughtUp> {
     if s.misfire != Misfire::FireOnce || missed.len() < 2 || !steps.iter().any(spawns) {
         return None;
@@ -442,19 +406,13 @@ pub fn caught_up(s: &Schedule, missed: &[i64], steps: &[Decision]) -> Option<Cau
 
 /// Fold what a schedule's monitor saw into what the schedule alone decided.
 ///
-/// This is where monitor suppression actually happens, and it is a pure
-/// function of two values so that every branch of it is tested without a
-/// process: the only impure step is producing `watch`, which the caller does
-/// first.
+/// Where monitor suppression happens, as a pure function of two values so every
+/// branch is tested without a process. `watch` is `None` for a schedule with no
+/// monitor, and then nothing here changes anything.
 ///
-/// `watch` is `None` for a schedule with no monitor, and then nothing here
-/// changes anything — a schedule without a monitor fires exactly as it always
-/// did.
-///
-/// Note what is *kept* when a monitor suppresses: the holds. They account for
-/// instants that passed while Jod was down, which is a fact about the clock
-/// rather than about what the monitor saw, and dropping them would lose the
-/// only record that those instants existed.
+/// Note what is *kept* when a monitor suppresses: the holds. They record
+/// instants that passed while Jod was down — a fact about the clock rather than
+/// about what the monitor saw.
 pub fn plan(planned: Vec<Decision>, watch: Option<&monitor::Decision>) -> Vec<Decision> {
     let Some(watch) = watch else {
         return planned;
@@ -544,16 +502,14 @@ fn is_live(status: &str) -> bool {
 
 /// How much of Jod a conversation resumed by [`Ticker::tick_deliveries`] holds.
 ///
-/// `Delegate` for an ordinary session, which is enough to act on what it has
-/// just been told. `Orchestrate` for the main chat, because that is what
-/// [`crate::orchestrator::hand_to_orchestrator`] gives it on every turn a person
-/// starts, and a turn started by an answer coming back from a delegated run is
-/// the same chat doing the same job. A main chat that could arm a schedule when
-/// Reljod typed and not when the answer arrived would be two different
-/// orchestrators depending on who spoke last.
+/// `Delegate` for an ordinary session — enough to act on what it was told.
+/// `Orchestrate` for the main chat, matching what
+/// [`crate::orchestrator::hand_to_orchestrator`] gives every typed turn: a chat
+/// that could arm a schedule when Reljod typed but not when the answer arrived
+/// would be two orchestrators depending on who spoke last.
 ///
-/// A free function rather than a branch inside the loop so the rule is one
-/// decision with one reason, and can be asserted without spawning anything.
+/// A free function rather than a branch in the loop, so the rule is one
+/// decision that can be asserted without spawning anything.
 fn delivery_access(
     conversation_id: &str,
     main_chat: Option<&str>,
@@ -757,33 +713,23 @@ impl Ticker {
     /// an hour.
     ///
     /// `MAX_ROWS` and `RETENTION_MS` were promises nothing kept: `prune_ledger`
-    /// had no caller, so the table grew without limit on the box Jod shares with
-    /// the work.
+    /// had no caller, so the table grew without limit.
     ///
-    /// **Hourly**, and the number comes from which bound can be crossed
-    /// quickly. Retention is a week, so it would be served by a daily pass.
-    /// `MAX_ROWS` is 500 and a chatty day can cross it, so the interval decides
-    /// how far over the bound the table is allowed to sit — an hour of traffic
-    /// rather than a day of it. Against that, the cost is one write transaction
-    /// every sixtieth tick, on the same database the tick needs.
+    /// **Hourly**, set by the bound that can be crossed quickly. Retention is a
+    /// week and would be served daily, but `MAX_ROWS` is 500 and a chatty day
+    /// crosses it — so the interval decides how far over the bound the table
+    /// may sit. The cost is one write transaction every sixtieth tick.
     ///
-    /// **Nothing here is fatal and nothing here is returned.** A ledger that
-    /// cannot be trimmed is a reason to get on with firing schedules, exactly as
-    /// an unreadable history is a reason for the daemon to carry on starting
-    /// runs. The alternative is a full disk stopping the scheduler, which
-    /// trades a bounded problem for an unbounded one.
+    /// **Nothing here is fatal or returned.** A ledger that cannot be trimmed is
+    /// a reason to get on with firing schedules; the alternative is a full disk
+    /// stopping the scheduler, trading a bounded problem for an unbounded one.
     ///
-    /// **It runs before `tick_goals`, and that is deliberate — do not move it.**
-    /// `Tick for Ticker` calls this half first, so a trim technically sits
-    /// between the schedules and the goals of one pass. The analysis has been
-    /// done, so that the next person to notice does not redo it and act on it: a
-    /// single `DELETE` pair over at most [`ledger::MAX_ROWS`] rows, once an
-    /// hour, against a sixty-second tick is sub-millisecond in SQLite, and it
-    /// adds no new contention because schedules already write inside this same
-    /// tick. Fixing it means reordering the most load-bearing loop in the
-    /// system — the one place a mistake is a schedule that never fires — to buy
-    /// microseconds. "Bounded but not zero" is the honest description of
-    /// something that does not matter.
+    /// **It runs before `tick_goals` — do not move it.** The trim technically
+    /// sits between one pass's schedules and its goals. That is deliberate and
+    /// the analysis is done: one `DELETE` pair over at most
+    /// [`ledger::MAX_ROWS`] rows, hourly, is sub-millisecond in SQLite and adds
+    /// no contention schedules do not already create. Reordering the most
+    /// load-bearing loop in the system to buy microseconds is not worth it.
     fn trim_ledger(&self, store: &Store, now_ms: i64) {
         let last = store
             .setting(PRUNED_AT_KEY)
@@ -800,18 +746,15 @@ impl Ticker {
             return;
         }
 
-        // Stamped **before** the work, and persisted rather than held in
-        // memory. Both halves matter and for different reasons.
+        // Stamped **before** the work and **persisted**, for two reasons.
         //
-        // Persisted, because a field on this struct is reset by every restart:
-        // "hourly" would silently become "every startup", and a crash-looping
-        // daemon would prune every minute — the failure mode the interval
-        // exists to prevent, reached by the mechanism meant to prevent it.
+        // Persisted, because a field on this struct resets on restart, so
+        // "hourly" would become "every startup" and a crash-looping daemon
+        // would prune every minute.
         //
         // Before, because a prune that throws must wait its hour like any
-        // other. Stamping afterwards would retry a failing delete every minute
-        // for as long as it kept failing. It is the same shape as a schedule
-        // lease: claim the slot, then do the work.
+        // other; stamping afterwards retries a failing delete every minute.
+        // Same shape as a schedule lease: claim the slot, then do the work.
         if let Err(e) = store.set_setting(PRUNED_AT_KEY, &now_ms.to_string()) {
             eprintln!("[jod/tick] could not record a ledger trim, so skipping it: {e}");
             return;
@@ -977,30 +920,21 @@ impl Ticker {
     /// Ask every watched run whether it is still working, and reap the ones
     /// that are not.
     ///
-    /// **This runs before schedules and goals, and moving it is a bug.**
+    /// **Runs before schedules and goals; moving it is a bug.**
     /// [`Ticker::tick_goals`] settles the previous iteration by reading its
-    /// run's status, and a wedged run's status is `running` — permanently,
-    /// because the only process that ever writes a terminal status is the
-    /// supervisor watching a harness that is never going to exit. Sweeping
-    /// first means the goal asks *after* the stall has been turned into a
-    /// `failed`, so it moves on this tick. Sweeping afterwards would cost a
-    /// whole extra tick in the ordinary case and, in the case this exists for,
-    /// would never resolve at all.
+    /// run's status, and a wedged run reads `running` forever — the only writer
+    /// of a terminal status is a supervisor watching a harness that will never
+    /// exit. Sweeping first means the goal asks after the stall has become
+    /// `failed`; sweeping after costs an extra tick, or never resolves.
     ///
-    /// **Nothing here is fatal.** A run whose reaping fails is logged into the
-    /// goal's memory and skipped; the sweep goes on to the next one. The
-    /// alternative — an early return — would let one unkillable process group
-    /// stop every other watched run from ever being checked, which is the
-    /// failure this module was written to prevent, reintroduced one level up.
+    /// **Nothing here is fatal.** A failed reaping is logged and skipped. An
+    /// early return would let one unkillable process group stop every other
+    /// watched run from being checked.
     ///
-    /// **There is no claim and no lease here, unlike schedules and goals.**
-    /// Those guard a *spawn*: two processes acting on one schedule start two
-    /// harnesses and cost real money. A sweep starts nothing. Its worst case
-    /// under two daemons is that both observe the same stall and both signal
-    /// the same process group, which is idempotent — `terminate_group` treats
-    /// an already-dead group as success — and both write `failed` to a row that
-    /// already says `failed`. Paying for a claim to prevent that would add a
-    /// contended write per tick to buy nothing.
+    /// **No claim and no lease, unlike schedules and goals.** Those guard a
+    /// *spawn*, which costs money. A sweep starts nothing: two daemons
+    /// observing one stall both signal the same group, which is idempotent, and
+    /// both write `failed` to a row that already says it.
     pub async fn tick_heartbeats(&self, now_ms: i64) -> Result<SweepReport> {
         let Some(store) = self.jod.store().cloned() else {
             return Ok(SweepReport::default());
@@ -1121,21 +1055,18 @@ impl Ticker {
 
     /// Advance every goal whose next iteration is due.
     ///
-    /// A goal's progress lives in the fact store rather than in its own
-    /// columns, which is what makes it *memory* rather than a job queue. Three
-    /// things get written, each for a reason:
+    /// A goal's progress lives in the fact store rather than its own columns,
+    /// which is what makes it *memory* rather than a job queue:
     ///
-    /// - **The brief** — `pursuing` — superseded on every iteration, so
-    ///   bitemporal validity answers "what did it think it was doing last
-    ///   month" without a second history table.
-    /// - **The current run** — `current-run` — likewise superseded, so the
-    ///   in-flight run is one lookup and every previous one is still there.
-    /// - **What happened** — `iteration` — appended, never superseded, because
-    ///   that is the episodic record.
+    /// - **`pursuing`** — the brief, superseded each iteration, so bitemporal
+    ///   validity answers "what did it think it was doing last month".
+    /// - **`current-run`** — likewise superseded: the in-flight run is one
+    ///   lookup and every previous one is still there.
+    /// - **`iteration`** — appended, never superseded. The episodic record.
     ///
-    /// All of it lands in the goal's own scope. Scope is a hard filter, and an
-    /// hourly goal running for a month writes far more than a person does, so
-    /// without its own partition it would drown ordinary recall.
+    /// All in the goal's own scope. Scope is a hard filter, and an hourly goal
+    /// writes far more than a person does — without its own partition it would
+    /// drown ordinary recall.
     pub async fn tick_goals(&self, now_ms: i64) -> Result<TickReport> {
         let Some(store) = self.jod.store().cloned() else {
             return Ok(TickReport::default());
@@ -1344,35 +1275,25 @@ impl Ticker {
                 store.release_goal(&goal.id)?;
                 continue;
             }
-            // A goal's objective can already be true the moment it is written
-            // down, and until now nothing ever asked before paying to find
-            // out. The done-when check only ever ran in the block above, which
-            // settles a previous run, so a goal on its very first tick had no
-            // run to settle, skipped that block, and went straight to spawning
-            // an agent. The second tick then settled that agent, found the
-            // check passing, and stopped — one real iteration and one real
-            // bill for an objective that was met before the goal existed.
+            // A goal's objective can already be true when it is written down.
+            // The done-when check only ran in the block above, which settles a
+            // *previous* run — so a first tick skipped it and spawned an agent,
+            // and the second tick found the check passing. One real iteration
+            // and one real bill for an objective met before the goal existed.
             //
-            // So ask first, whenever nothing is in flight. That is a goal which
-            // has never run, and now also a goal that was paused while an
-            // iteration was in flight: settling that iteration retires the
-            // `current-run` pointer, so the first tick after the resume arrives
-            // here. Asking there is right rather than wasteful, because a goal
-            // can sit paused for weeks and something other than the goal itself
-            // can meet its objective in the meantime.
+            // So ask first whenever nothing is in flight: a goal that has never
+            // run, and one resumed after being paused mid-iteration. The second
+            // matters because a goal can sit paused for weeks while something
+            // else meets its objective.
             //
-            // Nothing is recorded that would look like work. There is no
-            // `iteration` fact and no `advance_goal` call, because both would
-            // claim an iteration that never ran and a cost nobody was charged
-            // — the mirror of the bug where a goal denied the iteration that
-            // did satisfy it. The ending itself says which of the two happened.
+            // Nothing is recorded that would look like work — no `iteration`
+            // fact, no `advance_goal` — because both would claim an iteration
+            // that never ran and a cost nobody was charged.
             //
-            // This runs before the exhausted check below, so a goal that is
-            // both already met and already past its limit ends satisfied. The
-            // limit only says how much work the goal was allowed; it has no
-            // bearing on an objective that needed none. Whichever branch is
-            // taken ends the goal and moves on, so exactly one ending is ever
-            // written.
+            // Before the exhausted check below, so a goal both already met and
+            // past its limit ends satisfied: the limit bounds how much work was
+            // allowed and has no bearing on an objective that needed none.
+            // Either branch ends the goal, so exactly one ending is written.
             if in_flight.is_none() && self.check_done(&goal).await.is_some_and(|v| v.satisfied) {
                 let state = crate::schedule::GoalState::Satisfied;
                 store.set_goal_state(&goal.name, state)?;
@@ -1423,30 +1344,23 @@ impl Ticker {
 
     /// Deliver waiting mail by resuming the members holding it.
     ///
-    /// The sibling of [`Ticker::tick_goals`], and the thing that turns the bus
-    /// from something a human operates into something that runs. Until this
-    /// existed, a message sat in an inbox until somebody typed
-    /// `jod team wake` — which is fine for a demonstration and useless for two
-    /// agents working overnight.
+    /// What turns the bus from something a human operates into something that
+    /// runs. Before this, a message sat in an inbox until somebody typed
+    /// `jod team wake`.
     ///
-    /// **The judgement is not here.** [`team::wake_order`] already decides who
-    /// may be woken and with what, and it was already correct and already
-    /// tested; this gives it a caller that is not a person. Everything below it
-    /// is bookkeeping: claim the wake, start the run, take the mail off the bus.
+    /// **The judgement is not here.** [`team::wake_order`] decides who may be
+    /// woken and with what; this gives it a caller that is not a person.
+    /// Everything else is bookkeeping.
     ///
-    /// Three properties worth stating, because each is a bug that would
-    /// otherwise be invisible:
+    /// Three properties, each an otherwise invisible bug:
     ///
     /// - **One wake per interval per member.** Ten messages arriving together
-    ///   become one turn carrying ten, not ten turns. A cost control — every
-    ///   wake is a model call — and a coherence one.
-    /// - **Nothing here waits for a run.** The spawn returns as soon as the
-    ///   supervisor is up and the tick moves on; the run reports through the
-    ///   database whether or not anybody is watching.
-    /// - **Mail that cannot be delivered says so on itself.** A member with no
-    ///   session is left asleep — resuming it would start a fresh context and
-    ///   it would answer having forgotten everything — and the mail is
-    ///   annotated rather than left silently sitting there.
+    ///   become one turn carrying ten. A cost control and a coherence one.
+    /// - **Nothing waits for a run.** The spawn returns once the supervisor is
+    ///   up; the run reports through the database either way.
+    /// - **Undeliverable mail says so on itself.** A member with no session is
+    ///   left asleep — resuming would start a fresh context and it would answer
+    ///   having forgotten everything — and the mail is annotated.
     pub async fn tick_mail(&self, now_ms: i64) -> Result<TickReport> {
         let Some(store) = self.jod.store().cloned() else {
             return Ok(TickReport::default());
@@ -1524,31 +1438,21 @@ impl Ticker {
     /// Fold in the titles of works whose titler nobody was left to hear.
     ///
     /// **The backstop for a launcher that does not outlive what it launched.**
-    /// `orchestrator::start_titler` subscribes to the event stream and folds
-    /// the answer in from a detached task, which is right and is the fast path:
-    /// when the process survives, the title lands the moment the titler
-    /// answers. But on the path that matters most — a work opened through
-    /// Jod's own MCP server, which exits when the harness closes stdin — that
-    /// task dies before the titler replies. Observed, not theorised: a work
-    /// left holding its fallback name and a throwaway conversation nobody
-    /// deleted, contradicting D6.
+    /// `orchestrator::start_titler` folds the answer in from a detached task,
+    /// which is the fast path — but a work opened through Jod's own MCP server
+    /// loses that task when the harness closes stdin, leaving the work on its
+    /// fallback name. Observed, not theorised.
     ///
-    /// Awaiting the titler instead is not the answer and never will be. The
-    /// orchestrator must not block; that is the property the whole design
-    /// exists to protect. So the answer is the same one that worked for the
-    /// mail and the queue: a tick, reading rows that outlive whoever wrote
-    /// them.
+    /// Awaiting the titler is not the answer: the orchestrator must not block.
+    /// So this is a tick reading rows that outlive whoever wrote them.
     ///
     /// Everything it needs is durable by construction — the work id is in the
-    /// titler conversation's title and in its run's name, and the answer is in
-    /// the run's events, which the *supervisor* writes. Nothing here reads a
-    /// message, because messages are written by the process that was following
-    /// the run and that is exactly the process presumed gone.
+    /// titler conversation's title and its run's name, and the answer is in the
+    /// run's events, which the *supervisor* writes. Nothing reads a message,
+    /// because messages come from the process presumed gone.
     ///
-    /// A titler that failed, said nothing, or was never spawned still gets its
-    /// conversation deleted and its work keeps the fallback name.
-    /// [`Store::finish_titling`] has always done that; it just had nobody to
-    /// call it.
+    /// A titler that failed, said nothing, or never spawned still gets its
+    /// conversation deleted and keeps the fallback name.
     pub fn tick_titlers(&self, now_ms: i64) -> Result<TickReport> {
         let Some(store) = self.jod.store().cloned() else {
             return Ok(TickReport::default());
@@ -1616,29 +1520,23 @@ impl Ticker {
     /// Close the works whose boards have emptied, and finish the ones whose
     /// last run has stopped.
     ///
-    /// **D8's other half.** A work opens with a task on its board — that part
-    /// was wired, in `create_work` — but nothing ever asked afterwards whether
-    /// the board had emptied, so the chain the spec describes (last task
-    /// completes → the work closes → the closing card is raised) never ran, and
-    /// [`crate::works::State::Finishing`] was a state nothing could reach. The
-    /// only thing that closed a work was a person typing `jod work close`.
+    /// **D8's other half.** A work opens with a task on its board, but nothing
+    /// asked afterwards whether the board had emptied — so the chain "last task
+    /// completes → work closes → closing card" never ran, and
+    /// [`crate::works::State::Finishing`] was unreachable.
     ///
-    /// **Derived here rather than at the moment a task is ticked off**, and
-    /// that is the design decision worth defending. A task can be completed
-    /// from the board's atomic claim, from an MCP tool, from the CLI, or by an
-    /// agent handing work to a peer — and a rule that lives at *one* of those
-    /// call sites is a rule the other three forget. This asks the question of
-    /// every live work on every tick, so a work closes whoever emptied it.
-    /// It is the same reasoning that put the *whether* of waking in
-    /// [`team::wake_order`] rather than in its callers.
+    /// **Derived here rather than when a task is ticked off.** A task can be
+    /// completed from the board's atomic claim, an MCP tool, the CLI, or a
+    /// handoff, and a rule living at one of those call sites is one the other
+    /// three forget. Same reasoning that put the *whether* of waking in
+    /// [`team::wake_order`] rather than its callers.
     ///
-    /// Both transitions are cheap and neither destroys anything: closing keeps
-    /// the record, the tree and the worktrees, and raises a card summarising
-    /// what came out of the work. Deleting is a separate, explicit act that a
-    /// tick will never perform.
+    /// Neither transition destroys anything: closing keeps the record, the tree
+    /// and the worktrees, and raises a summarising card. Deleting is a separate
+    /// explicit act a tick never performs.
     ///
-    /// The counters read as: `claimed` is works examined, `started` is works
-    /// that changed state, `held` is works with something still open.
+    /// Counters: `claimed` is works examined, `started` is works that changed
+    /// state, `held` is works with something still open.
     pub fn tick_works(&self) -> Result<TickReport> {
         let Some(store) = self.jod.store().cloned() else {
             return Ok(TickReport::default());
@@ -1709,33 +1607,22 @@ impl Ticker {
 
     /// Ask GitHub what became of the pull requests this fleet opened.
     ///
-    /// **The poll half of E6.S3.** The stream half already records a pull
-    /// request the moment a run prints its URL, in the service's event loop —
-    /// but a URL is not a status, and a pull request merged an hour after the
-    /// session ended produces no event anywhere. Nothing except asking the
-    /// forge will ever discover it, which is what this is for. It also
-    /// *discovers*: a pull request opened by hand, or by an agent whose output
-    /// nobody parsed, exists to Jod only if a held lease's branch is asked
-    /// about.
+    /// **The poll half of E6.S3.** The stream half records a pull request when
+    /// a run prints its URL, but a URL is not a status: one merged an hour
+    /// after the session ended produces no event anywhere. This also
+    /// *discovers* — a PR opened by hand exists to Jod only if a held lease's
+    /// branch is asked about.
     ///
-    /// **Not every tick**, unlike everything else here. The tick is a minute
-    /// and this one leaves the machine: every sweep is one `gh` invocation per
-    /// stale row and per held lease, against an API with an hourly budget.
-    /// [`POLL_EVERY_MS`] at [`PR_SWEEP_LIMIT`] each is a couple of hundred
-    /// calls an hour at the worst, against five thousand allowed — and the cost
-    /// of the interval is that a merged pull request can read as open for a few
-    /// minutes, which is a panel being briefly out of date rather than anything
-    /// acting on it.
+    /// **Not every tick**, unlike everything else here, because this leaves the
+    /// machine: one `gh` invocation per stale row and held lease against an
+    /// hourly API budget. The cost of the interval is a merged PR reading as
+    /// open for a few minutes.
     ///
-    /// Stamped **before** the sweep and persisted in `settings`, for both of
-    /// the reasons [`Ticker::trim_ledger`] gives: a field on this struct would
-    /// reset every restart and turn "every few minutes" into "every startup",
-    /// and stamping afterwards would retry a failing sweep every single tick
-    /// for as long as it kept failing.
+    /// Stamped **before** the sweep and persisted in `settings`, for both
+    /// reasons [`Ticker::trim_ledger`] gives.
     ///
-    /// The counters read as: `claimed` is pull requests looked at, `started` is
-    /// ones nobody had seen before, `held` is a sweep that ran into tooling it
-    /// could not use.
+    /// Counters: `claimed` is PRs looked at, `started` is ones nobody had seen
+    /// before, `held` is a sweep that ran into tooling it could not use.
     pub async fn tick_pull_requests(&self, now_ms: i64) -> Result<TickReport> {
         let Some(store) = self.jod.store().cloned() else {
             return Ok(TickReport::default());
@@ -1788,42 +1675,31 @@ impl Ticker {
 
     /// Say to each idle session whatever has been queued for it.
     ///
-    /// **The missing half of E2.S7**, and the reason it was missing is worth
-    /// keeping written down: [`Store::plan_injection`] was built, tested and
-    /// called by nothing, so a card answered from the rail was queued and then
-    /// waited for the agent to happen to ask for it over MCP. An answer nobody
-    /// fetched sat queued for ever, and the rail said *queued* about answers
-    /// the agent already had. The queue was never the missing piece; the caller
-    /// was.
+    /// **The missing half of E2.S7.** [`Store::plan_injection`] was built,
+    /// tested and called by nothing, so a card answered from the rail sat
+    /// queued for ever while the rail said *queued* about answers the agent
+    /// already had. The queue was never missing; the caller was.
     ///
-    /// The shape is deliberately [`Ticker::tick_mail`]'s, because the two
-    /// answer the same question about different addressees — a conversation
-    /// here, a member there:
+    /// Deliberately shaped like [`Ticker::tick_mail`] — the two answer the same
+    /// question about different addressees, a conversation here and a member
+    /// there:
     ///
-    /// - **The judgement is not in this function.** `plan_injection` decides
-    ///   whether to speak and what to say, and returns a value; everything here
-    ///   is the spawn and the bookkeeping.
-    /// - **Nothing is settled until the spawn has worked.** A failed spawn
-    ///   leaves the answers queued for the next tick rather than marking them
-    ///   delivered to a run that never started.
-    /// - **A session with no harness session to resume is left alone**, for the
-    ///   same reason `wake_order` refuses one: delivering into a fresh context
-    ///   would have the agent answer having forgotten the work the card was
-    ///   about.
+    /// - **The judgement is not here.** `plan_injection` decides whether to
+    ///   speak and what to say; this is the spawn and the bookkeeping.
+    /// - **Nothing settles until the spawn works**, so a failed spawn leaves
+    ///   the answers queued rather than delivered to a run that never started.
+    /// - **A session with no harness session is left alone**, for the reason
+    ///   `wake_order` refuses one: a fresh context answers having forgotten the
+    ///   work the card was about.
     ///
-    /// The turn is injected into the conversation the answers belong to
-    /// ([`RunConversation::Existing`]), never a new one. A fresh conversation
-    /// would resume the harness session while forking Jod's record of it, and
-    /// the transcript the human is reading would stop growing.
+    /// Injected into the conversation the answers belong to
+    /// ([`RunConversation::Existing`]). A fresh one would resume the harness
+    /// session while forking Jod's record, and the transcript the human is
+    /// reading would stop growing.
     ///
-    /// There is no rate limit here, and `now_ms` is unused for that reason —
-    /// kept for symmetry with the other three steps, and because a limit would
-    /// need it. `tick_mail` needs `claim_wake` because mail arrives at machine
-    /// speed and one message per tick would otherwise buy one turn per tick.
-    /// This queue fills at the speed a person answers cards, and it empties
-    /// completely into a single turn each time, so the only thing that could
-    /// make it spend twice is a session that is not busy — which is the state
-    /// where speaking is what it is supposed to do.
+    /// No rate limit, which is why `now_ms` is unused. `tick_mail` needs
+    /// `claim_wake` because mail arrives at machine speed; this queue fills at
+    /// the speed a person answers cards and empties into a single turn.
     pub async fn tick_deliveries(&self, _now_ms: i64) -> Result<TickReport> {
         let Some(store) = self.jod.store().cloned() else {
             return Ok(TickReport::default());
@@ -1878,19 +1754,15 @@ impl Ticker {
                 model: None,
                 permission: PermissionPolicy::default(),
                 resume: Resume::Session(session_id),
-                // Enough of Jod to act on what it has just been told. An agent
-                // handed a decision it may not carry out is a turn spent
-                // saying so — the same reasoning that gives a woken teammate
-                // its tools in `tick_mail`.
+                // Enough of Jod to act on what it was just told — an agent
+                // handed a decision it may not carry out spends the turn saying
+                // so.
                 //
-                // The main chat is the exception, and it has to be. It is the
-                // orchestrator, `hand_to_orchestrator` gives it
-                // `ToolAccess::Orchestrate` on every turn a person starts, and
-                // a turn started by an answer coming back from a delegated run
-                // is the same chat with the same job. Handing it a smaller
-                // toolbox because of how the turn began would mean the answer
-                // it delegated for arrives and it can no longer arm the
-                // schedule it was about to arm.
+                // The main chat is the exception: it is the orchestrator, and a
+                // turn started by a delegated run's answer is the same chat
+                // with the same job. A smaller toolbox here would mean the
+                // answer arrives and it can no longer arm the schedule it was
+                // about to arm.
                 tools: Some(delivery_access(&conversation_id, main_chat.as_deref())),
                 ..SpawnRequest::default()
             };
@@ -1932,29 +1804,21 @@ impl Ticker {
 
     /// Put back to `Ready` every member whose run has finished.
     ///
-    /// A member is marked `Busy` the moment it is woken, and nothing marked it
-    /// back. That is not an oversight in the waking — the tick deliberately does
-    /// not wait for the run it starts, because a tick that waited on a model
-    /// would stop being a tick — it is that the run *ending* is a fact only a
-    /// later pass can notice. `jod team wake` gets away without this because it
-    /// blocks until the run finishes and settles the member itself; nothing
-    /// unattended can.
+    /// A member is marked `Busy` when woken and nothing marked it back. The
+    /// tick deliberately does not wait for the run it starts, so the run
+    /// *ending* is a fact only a later pass can notice. `jod team wake` avoids
+    /// this by blocking; nothing unattended can.
     ///
-    /// The consequence, before this existed, was that a member could be woken
-    /// exactly once and then held its mail for ever, and showed as permanently
-    /// busy on every roster — so peers were told not to write to it. Every unit
-    /// test missed it, because none of them has a run that ends; the end-to-end
-    /// suite found it on the second wake.
+    /// Without it a member was woken exactly once, then held its mail for ever
+    /// and showed permanently busy, so peers were told not to write to it.
+    /// Every unit test missed it, because none has a run that ends.
     ///
-    /// The session id is refreshed at the same time and for the same reason
-    /// `jod team wake` refreshes it: a resumed conversation can come back under
-    /// a *new* harness session id, and a member still holding the previous one
-    /// would next be resumed into a conversation that has moved on.
+    /// The session id is refreshed at the same time: a resumed conversation can
+    /// come back under a *new* harness session id, and a member holding the
+    /// previous one would next resume into a conversation that has moved on.
     ///
-    /// **Nothing here is fatal**, on the same reasoning as [`Ticker::trim_ledger`]:
-    /// a member that cannot be reconciled is a reason to get on with delivering
-    /// the mail, not a reason for the tick that runs every schedule on this box
-    /// to fail. Failures are said out loud rather than swallowed.
+    /// **Nothing here is fatal**, as in [`Ticker::trim_ledger`]. Failures are
+    /// said out loud rather than swallowed.
     fn settle_members(&self, store: &Store) {
         let teams = match store.teams() {
             Ok(teams) => teams,
@@ -2017,19 +1881,16 @@ impl Ticker {
     /// Resume one member on its own conversation, carrying its unread mail.
     /// Move mail addressed to the main chat onto the main chat's own queue.
     ///
-    /// The return leg Reljod asked for: a run he delegated something to says
-    /// what the answer is, and the orchestrator takes a turn carrying it. No
-    /// new delivery mechanism — [`crate::delivery`] already turns something
-    /// waiting for a conversation into a resumed turn, batching whatever else
-    /// arrives in the meantime into the same one, and the main chat is the one
-    /// member of any roster that *is* a conversation.
+    /// The return leg: a delegated run says what the answer is and the
+    /// orchestrator takes a turn carrying it. No new mechanism —
+    /// [`crate::delivery`] already turns something waiting for a conversation
+    /// into a resumed turn, and the main chat is the one roster member that
+    /// *is* a conversation.
     ///
-    /// Returns how many messages moved. Zero means there was nothing to hand
-    /// over, or that the chat is not resumable yet — a pinned conversation that
-    /// has never run has no session, and an orchestrator resumed into a fresh
-    /// context would answer having forgotten what it delegated. The mail stays
-    /// on the bus and visible, which is the same choice `wake_order` makes for
-    /// a member with no session.
+    /// Returns how many messages moved. Zero means nothing to hand over, or a
+    /// chat not resumable yet — an orchestrator resumed into a fresh context
+    /// would answer having forgotten what it delegated. The mail stays on the
+    /// bus and visible, as `wake_order` leaves a sessionless member's.
     fn hand_to_main(&self, store: &Store, held: &team::Waiting) -> Result<usize> {
         let Some(conversation) = store.pinned_conversation()? else {
             return Ok(0);
@@ -4024,18 +3885,15 @@ mod tests {
 
         /// A real detached process group that will sit there until it is killed.
         ///
-        /// Built here rather than through `proc::spawn_detached`, and the
-        /// difference is the whole reason this helper exists. That function now
-        /// waits on its own children, so a finished run leaves no corpse on a
-        /// console that stays up for weeks — right for production, and fatal to
-        /// the proof below: an exit status goes to whoever collects it first,
-        /// and `a_stalled_run_is_stopped_marked_failed_and_unwatched` asserts
-        /// the group was *signalled* rather than merely absent. Reaped out from
-        /// under it, its `waitpid` gets `ECHILD` and the test reports a kill
-        /// that did happen as one that never did.
+        /// Built here rather than through `proc::spawn_detached`, which now
+        /// reaps its own children — right for production, fatal to the proof
+        /// below. An exit status goes to whoever collects it first, and
+        /// `a_stalled_run_is_stopped_marked_failed_and_unwatched` asserts the
+        /// group was *signalled* rather than merely absent; reaped out from
+        /// under it, `waitpid` gets `ECHILD` and a real kill reports as none.
         ///
-        /// So this spawns the same shape of process — `setsid`, its own group,
-        /// pid equal to pgid — and leaves it unreaped for the test to wait on.
+        /// So this spawns the same shape — `setsid`, own group, pid equal to
+        /// pgid — and leaves it unreaped for the test to wait on.
         fn a_living_group() -> u32 {
             use std::os::unix::process::CommandExt;
 
