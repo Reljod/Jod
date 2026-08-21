@@ -30,7 +30,7 @@ use super::short;
 /// How many conversations the list asks for. Generous, because the list is the
 /// only way into an old thread and a cap that hides one is a thread you cannot
 /// reach; small enough that the per-row tip query below stays cheap.
-const LIST_LIMIT: usize = 50;
+pub const LIST_LIMIT: usize = 50;
 
 /// How much of a message a row shows. Wide enough that two branches off the
 /// same point read as different, narrow enough that a tool payload cannot own
@@ -40,7 +40,7 @@ const SNIPPET: usize = 64;
 // ---- rows --------------------------------------------------------------
 
 /// One conversation as the list renders it.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionRow {
     pub id: String,
     /// The 8-character handle every other screen uses for an id.
@@ -48,6 +48,15 @@ pub struct SessionRow {
     pub title: String,
     pub harness: String,
     pub model: Option<String>,
+    /// The harness's own id for this thread, once it has reported one.
+    ///
+    /// The thing `/resume` needs, and the reason the list is worth walking with
+    /// a cursor rather than reading: without it, picking a row could only ever
+    /// print the thread back at you. `None` for a conversation the harness has
+    /// not named yet — a fresh fork, or a run that died before its first
+    /// reply — and that is a refusal to say out loud rather than a fresh
+    /// session to start silently.
+    pub session_id: Option<String>,
     /// Messages this conversation minted — not the length of its thread. A fork
     /// reads 0 on the day it is made, which is the honest number.
     pub messages: i64,
@@ -71,6 +80,126 @@ impl SessionRow {
             "⑂"
         } else {
             "●"
+        }
+    }
+
+    /// How wide [`SessionRow::detail`] is, in columns.
+    ///
+    /// A constant rather than a measurement, because the renderer has to size
+    /// the title column *before* it draws any row, and every row's harness,
+    /// count and age have to start in the same place. `detail` pads all three
+    /// to hold it, and a test presses on that.
+    pub const DETAIL: usize = 33;
+
+    /// Everything about the row that is not its title or its badge: which
+    /// harness it is on, how big it is, and how long ago it was touched.
+    ///
+    /// Here rather than in the renderer so the line a user reads can be
+    /// asserted without a terminal — the same seam the rest of this module
+    /// keeps.
+    pub fn detail(&self, now_ms: i64) -> String {
+        // Twelve for the harness, because `claude_code` is eleven and a column
+        // one character too narrow does not truncate the name — it shunts every
+        // column after it one place right on exactly the rows that have the
+        // longest one. The age is right-aligned for the same reason: `2m49s`
+        // and `155h14m` are five characters apart.
+        format!(
+            "{:<12} {:>3} msg  {:>7} ago",
+            self.harness,
+            self.messages,
+            short_duration(now_ms.saturating_sub(self.updated_at_ms)),
+        )
+    }
+
+    /// The glyph, carrying its count when it has one: `⚑2`.
+    ///
+    /// The count, not just the [`SessionRow::glyph`]: "something was abandoned
+    /// here" is a different message from "two things were", and the second is
+    /// the one that makes you open the thread. It rides in the glyph's own
+    /// column rather than trailing the line, so it costs the title nothing and
+    /// does not resize as you scroll past the one row that has it.
+    ///
+    /// Which conversation a fork came out of is deliberately absent — the `⑂`
+    /// already says it is one, and the parent's id is something you read once
+    /// you are inside the thread rather than something you choose a thread by.
+    pub fn badge(&self) -> String {
+        if self.abandoned > 0 {
+            return format!("{}{}", self.glyph(), self.abandoned.min(99));
+        }
+        self.glyph().to_string()
+    }
+}
+
+/// The session list, as something you can walk with a cursor and choose from.
+///
+/// An overlay's state rather than a workspace's, for the reason
+/// `Overlay::Search` already gives: this is a way *to* somewhere. You open it,
+/// find the conversation you left, and carry on inside it. A screen you
+/// navigate to would be a place you then have to leave, and it would need a
+/// digit and a menu letter of its own to be worth having at all.
+///
+/// It exists because the fleet lists **runs** and the chat is one conversation.
+/// Neither of those is the list of every thread you could go back to, so from
+/// either one the only way back into an old session was to already know its id
+/// and type `/resume` — which is not a way in, it is a way in for people who
+/// have memorised eight hex characters.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Browser {
+    /// What has been typed to narrow the list. Matched the same way every list
+    /// filter in the program is matched, so `prsr` finds `port-the-parser`
+    /// here too.
+    pub query: String,
+    /// The cursor, as an index into [`Browser::visible`] rather than into
+    /// `rows` — the filter is what is on screen, and a cursor that counted
+    /// hidden rows would point at a line nobody can see.
+    pub selected: usize,
+    /// Every conversation, newest first. Filled by the loop, which is the only
+    /// layer allowed to touch the store.
+    pub rows: Vec<SessionRow>,
+    /// Whether the loop has answered yet. "Nothing loaded" and "no
+    /// conversations" are different states that would otherwise draw the same
+    /// empty box, and only the second one has a sentence worth printing.
+    pub loaded: bool,
+}
+
+impl Browser {
+    /// The rows the filter leaves on screen.
+    pub fn visible(&self) -> Vec<&SessionRow> {
+        self.rows
+            .iter()
+            .filter(|row| {
+                super::workspace::matches(
+                    &self.query,
+                    &format!("{} {} {}", row.title, row.harness, row.short),
+                )
+            })
+            .collect()
+    }
+
+    /// The row under the cursor, if the filter left one there.
+    pub fn chosen(&self) -> Option<&SessionRow> {
+        self.visible().into_iter().nth(self.selected)
+    }
+
+    /// Typing narrows the list and puts the cursor back on the top row, which
+    /// is the only row guaranteed to still be there after a keystroke.
+    pub fn push(&mut self, c: char) {
+        self.query.push(c);
+        self.selected = 0;
+    }
+
+    pub fn pop(&mut self) {
+        self.query.pop();
+        self.selected = 0;
+    }
+
+    pub fn up(&mut self) {
+        self.selected = self.selected.saturating_sub(1);
+    }
+
+    pub fn down(&mut self) {
+        if self.selected + 1 < self.visible().len() {
+            self.selected += 1;
         }
     }
 }
@@ -190,6 +319,7 @@ fn session_row(store: &Store, c: ConversationSummary) -> SessionRow {
         id: c.id,
         harness: c.harness,
         model: c.model,
+        session_id: c.session_id,
         messages: c.message_count,
         updated_at_ms: c.updated_at_ms,
         forked_from: c.forked_from.as_deref().map(short),
@@ -383,8 +513,6 @@ pub fn resolve(store: &Store, needle: &str) -> Result<String, String> {
 /// refusal — is testable without a terminal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Request {
-    /// Every conversation, newest first.
-    List,
     /// One conversation: its thread, and every branch hanging off it.
     Open(String),
     /// Undo the last turn. Moves the head back; destroys nothing.
@@ -433,12 +561,11 @@ pub enum Request {
 
 /// Carry out one request and say what happened, one line per line of output.
 ///
-/// Multi-line because two of these are listings, and folding a list of
-/// conversations into a single notice would wrap fifty threads into a
+/// Multi-line because one of these is a listing, and folding a thread's turns
+/// and branches into a single notice would wrap a conversation into a
 /// paragraph — the same reason `/config` answers in lines.
 pub fn apply(store: &Store, request: &Request, now_ms: i64) -> Vec<String> {
     match request {
-        Request::List => render_list(&session_rows(store, LIST_LIMIT), now_ms),
         Request::Open(needle) => match resolve(store, needle) {
             Ok(id) => render_open(store, &id),
             Err(said) => vec![said],
@@ -626,41 +753,6 @@ fn fork(store: &Store, id: &str) -> Vec<String> {
 }
 
 // ---- rendering ---------------------------------------------------------
-
-/// The conversation list, one line each plus a heading.
-pub fn render_list(rows: &[SessionRow], now_ms: i64) -> Vec<String> {
-    if rows.is_empty() {
-        return vec!["no conversations yet — every run starts one".to_string()];
-    }
-    let mut out = vec![format!(
-        "{} conversation{}",
-        rows.len(),
-        if rows.len() == 1 { "" } else { "s" }
-    )];
-    for row in rows {
-        let mut line = format!(
-            "  {} {}  {:<40}  {:<12} {:>3} msg  {} ago",
-            row.short,
-            row.glyph(),
-            row.title,
-            row.harness,
-            row.messages,
-            short_duration(now_ms.saturating_sub(row.updated_at_ms)),
-        );
-        if let Some(from) = &row.forked_from {
-            line.push_str(&format!("  ⑂ from {from}"));
-        }
-        // The count, not just the glyph: "something was abandoned here" is a
-        // different message from "two things were", and the second is the one
-        // that makes you open the thread.
-        if row.abandoned > 0 {
-            line.push_str(&format!("  ⚑ {} abandoned", row.abandoned));
-        }
-        out.push(line);
-    }
-    out.push("  b opens the branches of the selected run’s thread".to_string());
-    out
-}
 
 /// One conversation: the live thread, then every branch off it.
 pub fn render_open(store: &Store, id: &str) -> Vec<String> {
@@ -1065,8 +1157,7 @@ mod tests {
 
         assert_eq!(rows[0].abandoned, 2, "both attempts are counted");
         assert_eq!(rows[0].glyph(), "⚑");
-        let listed = render_list(&rows, 0).join("\n");
-        assert!(listed.contains("2 abandoned"), "{listed}");
+        assert_eq!(rows[0].badge(), "⚑2", "{rows:?}");
     }
 
     #[test]
@@ -1275,12 +1366,115 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_database_says_so_instead_of_showing_a_blank_box() {
+    fn an_empty_database_has_no_conversations_to_list() {
         let store = store();
 
+        assert!(session_rows(&store, LIST_LIMIT).is_empty());
+    }
+
+    // ---- the session list ----
+    //
+    // The screen this module was missing: the rows were loadable and none of
+    // them was choosable, so getting back into a thread meant knowing its id.
+
+    /// The whole reason a row is worth a cursor. Without the harness's own id
+    /// there is nothing for `Resume::Session` to carry.
+    #[test]
+    fn a_row_carries_the_harness_session_its_thread_would_resume_from() {
+        let store = store();
+        let id = conversation(&store, "the parser");
+        store
+            .set_conversation_session(&id, Some("sess-abc"))
+            .expect("a harness session");
+
+        let rows = session_rows(&store, LIST_LIMIT);
+
+        assert_eq!(rows[0].session_id.as_deref(), Some("sess-abc"));
+    }
+
+    #[test]
+    fn typing_narrows_the_list_and_the_cursor_follows_what_is_left() {
+        let mut browser = browser(&["port the parser", "rename the store"]);
+        browser.down();
+        assert_eq!(browser.chosen().map(|r| r.title.clone()).as_deref(), Some("rename the store"));
+
+        for c in "prsr".chars() {
+            browser.push(c);
+        }
+
+        assert_eq!(browser.visible().len(), 1);
         assert_eq!(
-            apply(&store, &Request::List, 0),
-            vec!["no conversations yet — every run starts one".to_string()]
+            browser.chosen().map(|r| r.title.clone()).as_deref(),
+            Some("port the parser"),
+            "typing puts the cursor back on the top row, which is the only one \
+             guaranteed to survive a keystroke"
         );
+    }
+
+    /// A cursor that walked past the last visible row would point at a line
+    /// nobody can see, and ⏎ would carry on with a conversation the user was
+    /// not looking at.
+    #[test]
+    fn the_cursor_stops_at_the_end_of_what_the_filter_left() {
+        let mut browser = browser(&["port the parser", "rename the store"]);
+        for _ in 0..5 {
+            browser.down();
+        }
+        assert_eq!(
+            browser.chosen().map(|r| r.title.clone()).as_deref(),
+            Some("rename the store")
+        );
+        for _ in 0..5 {
+            browser.up();
+        }
+        assert_eq!(
+            browser.chosen().map(|r| r.title.clone()).as_deref(),
+            Some("port the parser")
+        );
+    }
+
+    /// The renderer sizes the title column off `DETAIL`, so a detail line that
+    /// outgrew the constant would silently push the harness column right on
+    /// every row rather than failing anywhere.
+    #[test]
+    fn the_fixed_part_of_a_row_is_as_wide_as_the_renderer_is_told() {
+        let store = store();
+        let id = conversation(&store, "the parser");
+        say(&store, &id, Role::User, "one");
+        let row = &session_rows(&store, LIST_LIMIT)[0];
+
+        for age in [0, 60_000, 600_000, 3_600_000, 560_000_000] {
+            let detail = row.detail(row.updated_at_ms + age);
+            assert_eq!(
+                detail.chars().count(),
+                SessionRow::DETAIL,
+                "at {age}ms old: {detail:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_filter_that_matches_nothing_leaves_nothing_to_choose() {
+        let mut browser = browser(&["port the parser"]);
+        browser.push('z');
+
+        assert!(browser.visible().is_empty());
+        assert_eq!(browser.chosen(), None);
+    }
+
+    fn browser(titles: &[&str]) -> Browser {
+        let store = store();
+        for title in titles {
+            conversation(&store, title);
+        }
+        let mut rows = session_rows(&store, LIST_LIMIT);
+        // Newest first is the store's order; the fixture reads better in the
+        // order it was written.
+        rows.reverse();
+        Browser {
+            rows,
+            loaded: true,
+            ..Default::default()
+        }
     }
 }

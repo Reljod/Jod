@@ -34,7 +34,7 @@ mod mention;
 mod picker;
 mod rail;
 mod secret;
-mod sessions;
+pub mod sessions;
 mod text;
 mod todo;
 /// Public for `examples/screens.rs`, which compiles this module in by path and
@@ -773,6 +773,7 @@ async fn event_loop(
                         // almost always.
                         refresh_mention(&jod, &mut app);
                         refresh_search(&jod, &mut app);
+                        refresh_sessions(&jod, &mut app);
                     }
                     // The pointer. The rail claims the events that land on it —
                     // a click answers a card, and the wheel walks the stack or
@@ -3326,6 +3327,43 @@ fn on_overlay_key(app: &mut App, key: KeyEvent) -> Option<Action> {
         }
     }
 
+    // The session list owns every key while it is up, for the same reason
+    // search does: it is a line being typed into plus a cursor, and a bare `s`
+    // in it must narrow the list rather than stop a run. Its rows come from the
+    // loop — `refresh_sessions` — because this function does no I/O.
+    if let Overlay::Sessions(browser) = &mut app.overlay {
+        match key.code {
+            KeyCode::Char(c) => {
+                browser.push(c);
+                return None;
+            }
+            KeyCode::Backspace => {
+                browser.pop();
+                return None;
+            }
+            KeyCode::Up => {
+                browser.up();
+                return None;
+            }
+            KeyCode::Down => {
+                browser.down();
+                return None;
+            }
+            // Go into the conversation, which is the whole point: finding the
+            // thread is not the job, carrying on with it is.
+            KeyCode::Enter => {
+                let chosen = browser.chosen().cloned();
+                app.overlay = Overlay::None;
+                return chosen.and_then(|row| continue_session(app, &row));
+            }
+            KeyCode::Esc => {
+                app.overlay = Overlay::None;
+                return None;
+            }
+            _ => return None,
+        }
+    }
+
     // The full-screen picker, which owns every key while it is up for the same
     // reason the `@` popup does: it is a line being typed into plus a cursor.
     if let Overlay::Picker(p) = &mut app.overlay {
@@ -3447,6 +3485,7 @@ fn on_overlay_key(app: &mut App, key: KeyEvent) -> Option<Action> {
         // falling through keeps an unexpected state from stranding the
         // keyboard in an overlay nothing dismisses.
         Overlay::Search { .. }
+        | Overlay::Sessions(_)
         | Overlay::Picker(_)
         | Overlay::Secret { .. }
         | Overlay::Prompt { .. }
@@ -3455,6 +3494,40 @@ fn on_overlay_key(app: &mut App, key: KeyEvent) -> Option<Action> {
             None
         }
     }
+}
+
+/// Carry on with the conversation picked off the session list.
+///
+/// The same three writes `r` on the fleet makes, because it is the same act
+/// reached from a different handle: the fleet resumes the run under the cursor,
+/// and this resumes a thread that may have no run on screen at all. The harness
+/// is set from the row rather than left alone — a Claude session handed to
+/// OpenCode is not a resume, it is a fresh conversation wearing the wrong id.
+///
+/// A conversation the harness never named is refused out loud. Passing `None`
+/// through would silently start a new session under the title of an old one,
+/// which is the one outcome someone who came here to *go back* to something
+/// cannot check.
+fn continue_session(app: &mut App, row: &sessions::SessionRow) -> Option<Action> {
+    let Some(session) = row.session_id.clone() else {
+        app.push(Entry::Notice(format!(
+            "{} never reported a conversation, so there is nothing to continue — \
+             ⏎ on it would start a fresh one",
+            row.short
+        )));
+        return None;
+    };
+    app.go(Workspace::Chat);
+    app.resume = Resume::Session(session.clone());
+    app.session = Some(session);
+    app.harness_from_label(&row.harness);
+    app.push(Entry::Notice(format!(
+        "next turn continues “{}” — type to carry on",
+        row.title
+    )));
+    // Out of whatever the chat box was bound to, for the reason `/resume` does
+    // the same: the next turn belongs to this thread now.
+    Some(Action::NewThread)
 }
 
 /// Stop looking at what is on screen and go back to the fleet.
@@ -3539,6 +3612,18 @@ fn on_which_key(app: &mut App, key: KeyEvent) -> Option<Action> {
         // you carry on working, and whatever joins it later.
         'j' => {
             app.overlay = Overlay::Jobs;
+            None
+        }
+        // Every conversation you could go back into. `r` for *resume*, which is
+        // the word the command line already uses for this and the word for what
+        // pressing ⏎ on a row does — `s` is schedules and `c` is chat, so the
+        // two letters the subject is named after were both spoken for.
+        //
+        // Behind the leader rather than on a chord because it is a destination,
+        // and that is the rule the eleven free Ctrl letters were spent under.
+        // See `keys.rs`'s module header.
+        'r' => {
+            app.overlay = Overlay::Sessions(sessions::Browser::default());
             None
         }
         // Only meaningful once cron, goals and webhooks report endings while
@@ -4374,8 +4459,18 @@ fn on_fleet_key(app: &mut App, key: KeyEvent) -> Option<Action> {
         // turns one into a thread, and `sessions::resolve` makes that the
         // caller's problem instead of this function's.
         //
-        // `c` lists every conversation.
-        KeyCode::Char('c') => Some(Action::Sessions(sessions::Request::List)),
+        // `c` opens the session list — every conversation, with a cursor on it.
+        //
+        // It used to print the same list into the transcript, which was a list
+        // you could read and not a list you could use: the fleet's rows are
+        // *runs*, so the only way from here back into a thread that no longer
+        // has a run on screen was to read an id off the printout and type
+        // `/resume` at it. The overlay is the same rows with the last step
+        // joined on.
+        KeyCode::Char('c') => {
+            app.overlay = Overlay::Sessions(sessions::Browser::default());
+            None
+        }
         // `b` — the branches of the selected run's thread: the turns, which one
         // the head is on, and every leaf a revert left behind, each named.
         KeyCode::Char('b') => Some(Action::Sessions(sessions::Request::Open(
@@ -5266,14 +5361,11 @@ fn apply_slash(app: &mut App, slash: command::Slash) -> Option<Action> {
                 }
             }
         }
-        Slash::Sessions => {
-            app.go(Workspace::Fleet);
-            app.push(Entry::Notice(
-                "pick an id from the fleet, then /resume <id> — the shown prefix is enough. \
-                 The top row is the main chat; ⏎ goes into it."
-                    .into(),
-            ));
-        }
+        // The session list itself, rather than directions to it. This used to
+        // send you to the fleet with an instruction to read an id off a row and
+        // type it back — which is a way in only for someone who already knows
+        // which of fifty threads they want.
+        Slash::Sessions => app.overlay = Overlay::Sessions(sessions::Browser::default()),
         Slash::Resume(id) => match app.resolve_session(&id) {
             app::Resolved::Session(session) => {
                 app.resume = Resume::Session(session.clone());
@@ -6178,6 +6270,35 @@ fn refresh_search(jod: &Arc<Jod>, app: &mut App) {
 /// How many hits the search screen asks for. The store caps lower than this in
 /// its own right; the number here is what fits on a screen worth reading.
 const SEARCH_HITS: usize = 40;
+
+/// Fill the session list, once, the first time it is opened.
+///
+/// Once rather than on every keystroke, which is the difference between this
+/// and [`refresh_search`]: the search box asks the store a new question with
+/// each letter, while the session list already holds every row and the typing
+/// only narrows what is drawn. Loading again per keystroke would re-run a tip
+/// query per conversation for a filter that needs no database at all.
+///
+/// Left alone entirely while the overlay is shut, which is almost always.
+fn refresh_sessions(jod: &Arc<Jod>, app: &mut App) {
+    let Overlay::Sessions(browser) = &app.overlay else {
+        return;
+    };
+    if browser.loaded {
+        return;
+    }
+    // `LIST_LIMIT` rather than a number of this screen's own: it is also what
+    // `sessions::resolve` matches an id against, and a list that showed a
+    // fifty-first thread would offer a row nothing else in the module can find.
+    let rows = match jod.store() {
+        Some(store) => sessions::session_rows(store.as_ref(), sessions::LIST_LIMIT),
+        None => Vec::new(),
+    };
+    if let Overlay::Sessions(browser) = &mut app.overlay {
+        browser.rows = rows;
+        browser.loaded = true;
+    }
+}
 
 fn refresh_mention(jod: &Arc<Jod>, app: &mut App) {
     if app.mention.is_none() {
@@ -8637,9 +8758,10 @@ mod tests {
         let mut app = app_on(HarnessKind::ClaudeCode);
         app.go(Workspace::Fleet);
         assert!(app.main_selected(), "an empty fleet selects the chat");
-        assert_eq!(
-            press(&mut app, KeyCode::Char('c')),
-            Some(Action::Sessions(sessions::Request::List))
+        assert_eq!(press(&mut app, KeyCode::Char('c')), None);
+        assert!(
+            matches!(app.overlay, Overlay::Sessions(_)),
+            "`c` opens the session list from the pinned row too"
         );
     }
 
@@ -9096,7 +9218,7 @@ mod tests {
     /// while the verb would have nowhere left to go at all.
     #[test]
     fn a_which_key_verb_does_not_shadow_a_screen() {
-        for verb in ['n', 'e', 'j', 'u', 'l', 'd'] {
+        for verb in ['n', 'e', 'j', 'r', 'u', 'l', 'd'] {
             assert!(
                 Workspace::from_letter(verb).is_none(),
                 "the menu spends `{verb}` on a verb, but a workspace now claims it — one of \
@@ -12114,7 +12236,6 @@ mod tests {
     #[test]
     fn the_fleet_keys_reach_the_conversation_graph() {
         for (key, expected) in [
-            ('c', sessions::Request::List),
             ('b', sessions::Request::Open("run-7".into())),
             ('u', sessions::Request::Rewind("run-7".into())),
             ('U', sessions::Request::Restore("run-7".into())),
@@ -12260,10 +12381,130 @@ mod tests {
         }
         let mut app = app_on(HarnessKind::ClaudeCode);
         app.go(Workspace::Fleet);
+        assert_eq!(press(&mut app, KeyCode::Char('c')), None);
+        assert!(matches!(app.overlay, Overlay::Sessions(_)));
+    }
+
+    // ---- the session list ----
+    //
+    // The fleet lists runs and the chat is one conversation, so from either
+    // one there was no way to reach the list of every thread and pick one:
+    // `/sessions` printed directions to the fleet, and the fleet printed ids
+    // to type back into `/resume`. These cover the three routes in and what
+    // choosing a row does.
+
+    fn a_session(title: &str, session: Option<&str>) -> sessions::SessionRow {
+        sessions::SessionRow {
+            id: format!("conv-{title}"),
+            short: format!("conv-{title}"),
+            title: title.to_string(),
+            harness: "claude".to_string(),
+            model: None,
+            session_id: session.map(str::to_string),
+            messages: 4,
+            updated_at_ms: 0,
+            forked_from: None,
+            abandoned: 0,
+        }
+    }
+
+    /// On `ws` with one row loaded and the cursor on it, so `⏎` has something
+    /// to land on without the loop having run.
+    ///
+    /// The workspace is set before the overlay because `App::go` closes
+    /// whatever is open — going somewhere is how you leave an overlay.
+    fn holding(ws: Workspace, row: sessions::SessionRow) -> App {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.go(ws);
+        app.overlay = Overlay::Sessions(sessions::Browser {
+            rows: vec![row],
+            loaded: true,
+            ..Default::default()
+        });
+        app
+    }
+
+    #[test]
+    fn the_session_list_opens_from_the_fleet_the_chat_and_the_menu() {
+        let mut from_fleet = app_on(HarnessKind::ClaudeCode);
+        from_fleet.go(Workspace::Fleet);
+        press(&mut from_fleet, KeyCode::Char('c'));
+        assert!(matches!(from_fleet.overlay, Overlay::Sessions(_)), "`c`");
+
+        let mut typed = app_on(HarnessKind::ClaudeCode);
+        apply_slash(&mut typed, command::Slash::Sessions);
+        assert!(matches!(typed.overlay, Overlay::Sessions(_)), "/sessions");
+
+        // From the chat, where every bare letter is text, so the leader is the
+        // only route that can exist.
+        let mut from_chat = app_on(HarnessKind::ClaudeCode);
+        ctrl(&mut from_chat, KeyCode::Char('g'));
+        press(&mut from_chat, KeyCode::Char('r'));
+        assert!(matches!(from_chat.overlay, Overlay::Sessions(_)), "Ctrl-G r");
+    }
+
+    /// The point of the whole screen: choosing a row aims the next turn at that
+    /// conversation, rather than printing it back at you.
+    #[test]
+    fn choosing_a_session_points_the_next_turn_at_it() {
+        let mut app = holding(Workspace::Fleet, a_session("port the parser", Some("sess-abc")));
+
+        assert_eq!(press(&mut app, KeyCode::Enter), Some(Action::NewThread));
+
+        assert_eq!(app.resume, Resume::Session("sess-abc".into()));
+        assert_eq!(app.session.as_deref(), Some("sess-abc"));
+        assert_eq!(app.workspace, Workspace::Chat, "and it takes you there");
+        assert_eq!(app.overlay, Overlay::None);
+        let said = format!("{:?}", app.transcript);
+        assert!(said.contains("port the parser"), "{said}");
+    }
+
+    /// A fork does not inherit its parent's harness session — `Store` says so
+    /// in as many words — so a row can have no id to resume from. Starting a
+    /// fresh session under the old title would be the one failure the person
+    /// who came here to go back to something could not spot.
+    #[test]
+    fn choosing_a_session_the_harness_never_named_refuses_out_loud() {
+        let mut app = holding(Workspace::Chat, a_session("a fresh fork", None));
+
+        assert_eq!(press(&mut app, KeyCode::Enter), None);
+
+        assert_eq!(app.resume, Resume::Fresh, "nothing was pointed anywhere");
+        let said = format!("{:?}", app.transcript);
+        assert!(said.contains("nothing to continue"), "{said}");
+    }
+
+    /// While the list is up it owns the keyboard, letters and all — otherwise
+    /// typing the name of a thread would stop a run behind it.
+    #[test]
+    fn typing_in_the_session_list_narrows_it_rather_than_running_a_verb() {
+        let mut app = holding(Workspace::Fleet, a_session("port the parser", Some("sess-abc")));
+        app.agents = vec![agent_line("run-7", None)];
+        app.reconcile();
+
+        for key in ['s', 'p', 'o'] {
+            assert_eq!(press(&mut app, KeyCode::Char(key)), None, "`{key}`");
+        }
+
+        let Overlay::Sessions(browser) = &app.overlay else {
+            panic!("the list is still up: {:?}", app.overlay);
+        };
         assert_eq!(
-            press(&mut app, KeyCode::Char('c')),
-            Some(Action::Sessions(sessions::Request::List))
+            browser.query, "spo",
+            "the letters went into the filter, and `s` in particular did not \
+             stop the run behind the list"
         );
+    }
+
+    #[test]
+    fn escape_closes_the_session_list_and_leaves_the_screen_alone() {
+        let mut app = holding(Workspace::Fleet, a_session("port the parser", Some("sess-abc")));
+
+        assert_eq!(press(&mut app, KeyCode::Esc), None);
+
+        assert_eq!(app.overlay, Overlay::None);
+        assert_eq!(app.workspace, Workspace::Fleet);
+        assert_eq!(app.resume, Resume::Fresh);
     }
 
     /// The five letters must stay letters everywhere they are not verbs. `f`

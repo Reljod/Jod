@@ -676,8 +676,8 @@ pub const HELP: &[(&str, &str)] = &[
         "/project [add|untrack]",
         "the repositories an instruction resolves against; `untrack <name>` drops one",
     ),
-    ("/sessions", "conversations you can pick up"),
-    ("/resume <id>", "continue one of them"),
+    ("/sessions", "pick a conversation to carry on with (Ctrl-G r)"),
+    ("/resume <id>", "continue one of them by its id"),
     ("/delegate <prompt>", "run it in the background (Ctrl-B)"),
     ("/main", "go into the main chat — the pinned one"),
     (

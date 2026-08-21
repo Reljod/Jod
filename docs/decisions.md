@@ -3117,3 +3117,32 @@ not disagree about the name of one verb.
 `paused` is deliberately untouched. It means dormant rather than finished and
 sides with `active` on every listing; the fleet is where the two would be
 easiest to conflate, so a test holds them apart.
+## The session list is somewhere you go through, not somewhere you go
+
+Two screens listed things that were not conversations. The fleet lists **runs**,
+and the chat is one conversation at a time. Neither of them is the list of every
+thread you could go back into, and until now that list existed only as printed
+text: `c` on the fleet dumped fifty rows into the transcript, and `/sessions`
+printed directions telling you to read an id off one of those rows and type
+`/resume` at it. Both are lists you can read and neither is a list you can use.
+Getting back into a conversation therefore required already knowing which of
+fifty you wanted, which is the state the search overlay was built to avoid.
+
+It is an overlay rather than a tenth workspace, for the reason `Overlay::Search`
+already gives: it is a way *to* somewhere. You open it, find the thread, and
+carry on inside it. A workspace would be a place you then have to leave, and it
+would have to claim a menu letter and one of the nine digits to be worth having.
+
+Choosing a row does what `r` on the fleet does — sets `Resume::Session`, sets the
+harness from the row, and returns `Action::NewThread` — because it is the same
+act reached from a different handle. A conversation the harness never named is
+refused out loud rather than resumed: `fork_conversation` deliberately does not
+inherit `session_id`, so a fork has none, and quietly starting a fresh session
+under an old thread's title is the one failure the person who came here to go
+*back* to something cannot spot.
+
+`Ctrl-G r` for resume, because `s` is schedules and `c` is chat — both letters
+the subject is actually named after were already spent. It sits behind the
+leader rather than on a chord under the rule the eleven free Ctrl letters were
+spent by: a chord is for a verb you need mid-sentence, and everything else is a
+destination.

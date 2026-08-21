@@ -23,6 +23,7 @@ use super::mention::Mention;
 use super::picker::Picker;
 use super::rail::RailState;
 use super::secret::Typed;
+use super::sessions::Browser;
 use super::traffic;
 use super::workspace::{matches, ListState, Workspace};
 use jod_core::cards::Card;
@@ -191,6 +192,14 @@ pub enum Overlay {
         /// store. Empty until the first keystroke has been searched for.
         hits: Vec<Hit>,
     },
+    /// Every conversation you could go back into, as a list with a cursor.
+    ///
+    /// An overlay for the same reason [`Overlay::Search`] is one: it is a way
+    /// *to* somewhere. The fleet lists runs and the chat is one conversation,
+    /// so neither of them is the place to keep this — and until it existed,
+    /// getting back into an old session from either screen meant already
+    /// knowing its id. See [`super::sessions::Browser`].
+    Sessions(Browser),
 }
 
 /// What a tier-1 prompt is collecting.

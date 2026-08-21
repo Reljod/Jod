@@ -162,6 +162,34 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    // The session list, which is an overlay rather than a workspace and so is
+    // not in the menu above. Worth its own screen for the same reason the
+    // traffic log is: it is the only one whose rows are *conversations*, and
+    // the nine above list runs, memories, schedules and tasks. If this comes
+    // out empty on a database with a chat history, the loader is wrong.
+    if let Some(store) = jod.store() {
+        app.go(Workspace::Chat);
+        app.overlay = tui::Overlay::Sessions(tui::sessions::Browser {
+            rows: tui::sessions::session_rows(store.as_ref(), tui::sessions::LIST_LIMIT),
+            loaded: true,
+            ..Default::default()
+        });
+        println!();
+        println!("── every conversation {}", "─".repeat(52));
+        println!("{}", render(&app));
+        app.overlay = tui::Overlay::None;
+    }
+
+    // The leader menu, which now has a row that is not a workspace: the
+    // session list has no digit and no screen of its own, so the menu is the
+    // only place it is named.
+    app.go(Workspace::Chat);
+    app.overlay = tui::Overlay::WhichKey;
+    println!();
+    println!("── the leader menu {}", "─".repeat(55));
+    println!("{}", render(&app));
+    app.overlay = tui::Overlay::None;
+
     // A chat mid-turn, with the side panel open.
     //
     // Worth a screen of its own because it is the only state in which three

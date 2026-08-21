@@ -309,12 +309,16 @@ back rather than quietly accepted.
 | `/models` listing | No harness lists its models through Jod — `jod models` does not exist, so `/model` can set a name but not offer one. |
 | `/themes` | Colours are constants in `ui.rs`. |
 
-**Half-built:** `/sessions` opens the agents panel and tells you to
-`/resume <id>`; it is not yet a picker you can arrow through. The id it shows
-does now work — `/resume` takes a prefix of either the agent id on screen or
-the harness's own conversation id and resolves it. It refuses an ambiguous
-prefix, and refuses an agent that has never reported a conversation, because
-resuming that would silently start a fresh one instead of continuing anything.
+`/sessions` is now a picker you can arrow through: every conversation, newest
+first, with a filter you type into and `⏎` to carry on with the one under the
+cursor. It is also `c` on the fleet and `Ctrl-G r` from anywhere, because the
+fleet lists runs and the chat is one conversation, so neither of them is the
+list of every thread you could go back into. Typing an id still works —
+`/resume` takes a prefix of either the agent id on screen or the harness's own
+conversation id and resolves it. It refuses an ambiguous prefix, and both it and
+the picker refuse a conversation that has never reported a harness session,
+because resuming that would silently start a fresh one instead of continuing
+anything.
 
 **Blocked on something Jod does not have:**
 
