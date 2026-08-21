@@ -931,9 +931,6 @@ mod tests {
         );
     }
 
-    /// Each policy maps to its own flags, and no two share one.
-    ///
-    /// The property under test — distinct policies produce distinct argv — is
     fn grant(tool: &str, pattern: &str) -> crate::approvals::Grant {
         crate::approvals::Grant {
             id: 1,

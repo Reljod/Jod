@@ -1,57 +1,42 @@
 //! The main chat: the one conversation that is always there.
 //!
 //! Every other conversation is a thread about a task. This one is the desk you
-//! sit at. Instructions arrive here, and **it never does the work** — it
-//! decides who does, hands the job over, and comes straight back to you.
+//! sit at: instructions arrive, and **it never does the work** — it decides who
+//! does, hands the job over, and comes straight back.
 //!
 //! ## Why it is not simply an agent
 //!
-//! Hermes' main chat is a model with tools: it thinks and acts in one loop.
-//! Jod cannot be that, and the charter is explicit about why — `jod-core` has
-//! no model client, no prompt templates and no tools. So the orchestrator is
-//! split along the same seam as everything else here:
+//! Hermes' main chat is a model with tools, thinking and acting in one loop.
+//! Jod cannot be that — `jod-core` has no model client, no prompt templates and
+//! no tools — so the orchestrator splits along the usual seam: **the thinking
+//! is delegated** to a harness, and **the effects are Jod's**, from an MCP tool
+//! call under rules the harness cannot talk its way past.
 //!
-//! - **The thinking is delegated.** Deciding whether "fix the CI failure"
-//!   belongs to the agent already looking at CI, or to a fresh one, is a
-//!   judgement, and judgement happens inside a harness.
-//! - **The effects are Jod's.** Spawning, scheduling, and writing the record of
-//!   what was decided are things Jod does, from an MCP tool call, under rules
-//!   the harness cannot talk its way past.
-//!
-//! That split is what makes the orchestrator's decision *data*. It proposes;
-//! Jod disposes. A tool call asking for a permission Jod would not have granted
-//! is refused by the same code that would refuse it from a webhook payload.
+//! That split makes the orchestrator's decision *data*. It proposes; Jod
+//! disposes.
 //!
 //! **That confinement covers Jod's verbs and not the session.**
 //! [`ToolAccess::Orchestrate`] decides which `mcp__jod__*` tools the server
-//! offers and nothing else; the harness keeps its own. Measured: the main
-//! chat's session comes up holding 58 tools, 26 of them the harness's — a
-//! shell, file editors, a web fetcher — which Jod never asked for and cannot
-//! take away, because `--allowedTools` grants without denying. So this is a
-//! claim about what the orchestrator can do *to Jod*, not to the machine. See
+//! offers; the harness keeps its own. Measured: the main chat comes up holding
+//! 58 tools, 26 of them the harness's, which Jod never asked for and cannot
+//! take away because `--allowedTools` grants without denying. See
 //! `docs/harness-support.md`, "Tools are not a sandbox either".
 //!
 //! ## Non-blocking, which is the whole point
 //!
-//! Sending an instruction returns as soon as the work has been *handed over*,
-//! not when it is finished. A main chat that blocked on the task would be a
-//! chat you cannot use while anything is happening — which is precisely when
-//! you most want it, because that is when you want to ask for something else.
+//! Sending returns as soon as the work is *handed over*. A main chat that
+//! blocked would be unusable exactly when you most want it.
 //!
 //! ## Context, and the two clocks that bound it
 //!
-//! A resident chat grows for ever unless something bounds it, and the two
-//! things that bound it are different clocks:
+//! - **Size.** Past a threshold the transcript costs more than it is worth. The
+//! obvious trigger and the less useful one.
+//! - **Your silence.** A conversation untouched for a day has moved on, and the
+//! moment to summarise is *before* the next thing starts. Measured from
+//! `last_human_ms`, because six agents writing overnight is not you being
+//! present.
 //!
-//! - **Size.** Past a threshold the transcript costs more to carry than it is
-//!   worth. This is the obvious trigger and the less useful one.
-//! - **Your silence.** A conversation you have not touched for a day has
-//!   almost certainly moved on, and the right moment to summarise is *before*
-//!   the next thing starts rather than in the middle of it. Measured from
-//!   `last_human_ms` rather than `updated_at_ms`, because six agents writing
-//!   into the chat overnight is not you being present.
-//!
-//! Compaction itself is a delegated run too, for the same reason routing is.
+//! Compaction is a delegated run too, for the same reason routing is.
 
 use std::path::PathBuf;
 
@@ -135,33 +120,26 @@ pub fn should_compact(
 
 /// The framing that turns a harness run into the orchestrator.
 ///
-/// It gets Jod's tools over MCP, so it delegates by *calling* rather than by
+/// It gets Jod's tools over MCP, so it delegates by *calling* rather than
 /// describing — which is why this says so little about format and so much about
-/// posture. The earlier design asked for a JSON decision and parsed it; that
-/// allowed exactly one decision per turn and could not ask a follow-up question
-/// before choosing. With tools, adding a capability is adding a tool.
+/// posture. The earlier design parsed a JSON decision, which allowed one
+/// decision per turn and no follow-up question.
 ///
 /// ## The branch that used to be missing
 ///
 /// This offered nothing but ways to hand something over, so every instruction
-/// bought an agent. Asked "what does A2A stand for in this project? answer in
-/// one line", a console spawned a child, polled `list_agents`, and after 42
-/// seconds and 39 cents said "Still working". The answer needed no repository
-/// and the chat knew it.
+/// bought an agent. Asked "what does A2A stand for in this project?", a console
+/// spawned a child, polled `list_agents`, and after 42 seconds and 39 cents
+/// said "Still working".
 ///
 /// The old rule was written against a real failure — a main chat that reads a
-/// checkout stops being a main chat — and over-reached into questions touching
-/// no checkout. So the size of the task picks the branch and answering is
-/// considered first. The moment an instruction needs a checkout, a tool beyond
-/// recall, or anything still running at the end of the turn, the routing below
-/// is what it always was.
-///
-/// This is `docs/spec-ceo-and-managers`' shape for main — "it routes and it
-/// answers" — brought forward without the manager tier around it.
+/// checkout stops being one — and over-reached into questions touching no
+/// checkout. So the size of the task picks the branch and answering is
+/// considered first.
 ///
 /// It does **not** fix the separate hole the same run exposed: main delegating
 /// and wanting the result back, with no way for a child to report, so the model
-/// reaches for a `sleep` loop against the non-blocking rule above. Still open.
+/// reaches for a `sleep` loop. Still open.
 pub fn orchestrator_preamble() -> &'static str {
     "You are Jod's main chat: Reljod's orchestrator. You route, and you \
      answer.\n\n\
@@ -267,17 +245,15 @@ pub fn orchestrator_preamble() -> &'static str {
 /// The standing framing a run started by `delegate` gets, and nothing more.
 ///
 /// A delegated run used to get no system prompt at all, on the reasoning that
-/// its whole role arrives in the prompt it was handed. That was right about the
-/// role and wrong about one thing: it has an address for the chat that started
-/// it, and a run that has one without knowing it finishes silently. Reljod's
-/// ask is that the sub-agent reports back when it has an answer or is done, and
-/// a report nobody was told to send is a report nobody sends.
+/// its role arrives in the prompt. That was right about the role and wrong
+/// about one thing: it has an address for the chat that started it, and a run
+/// that has one without knowing it finishes silently.
 ///
-/// Deliberately four sentences. Everything else about this run is in its
-/// prompt, and a long preamble on a one-shot lookup is context spent on nothing.
+/// Deliberately four sentences — a long preamble on a one-shot lookup is
+/// context spent on nothing.
 ///
-/// Only given to a run that holds [`ToolAccess::Delegate`] or better, since
-/// `send_message` is on that line — see [`crate::mcp`]'s `delegate`.
+/// Only given to a run holding [`ToolAccess::Delegate`] or better, since
+/// `send_message` is on that line.
 pub fn delegated_preamble() -> &'static str {
     "You were started by Jod's main chat, which is waiting on you and is not \
      watching you work.\n\n\
@@ -603,14 +579,12 @@ fn bus_lines(brief: &Brief) -> Vec<PreambleLine> {
 
 /// The catalog, and what this instruction was taken to be about.
 ///
-/// Prepended to the orchestrator's framing on every turn, because the thing it
-/// most often needs is the noun the instruction left out and a tool call to
-/// fetch it is a round-trip on the critical path of a dictated sentence.
+/// Prepended on every turn, because the thing the orchestrator most often needs
+/// is the noun the instruction left out, and a tool call to fetch it is a
+/// round-trip on the critical path of a dictated sentence.
 ///
-/// Pure, and takes what it renders rather than reading the store, for the same
-/// reason [`Brief`] does: what the orchestrator is told is a decision worth
-/// testing on its own, and a builder that opened a database could only be
-/// tested by writing to one.
+/// Pure, and takes what it renders rather than reading the store: what the
+/// orchestrator is told is worth testing on its own.
 pub fn project_context(
     catalog: &[crate::projects::Project],
     settled: Option<&crate::projects::Resolution>,
@@ -705,27 +679,20 @@ pub struct Handed {
 ///
 /// **Every way into the main chat comes through here** — `jod main`, the TUI's
 /// `/main`, and the Telegram bridge — because "which conversation, which tools,
-/// which permission mode" has four bugs behind it already
-/// (`tests/e2e/main-chat/REPORT.md`) and a second copy would be a second place
-/// for the fifth to hide. In `core` rather than the CLI because the bridge is
-/// here too.
+/// which permission mode" has four bugs behind it already (`tests/e2e/main-
+/// chat/REPORT.md`). In `core` rather than the CLI because the bridge is here
+/// too.
 ///
 /// `carried` is prior context the harness has no session for: after `/harness`
-/// the pin moves to a conversation the target has never seen, so the summary
-/// travels in the framing or it is lost. `None` on every ordinary turn, and
-/// `None` from the bridge, which holds no thread state of its own.
+/// the pin moves to a conversation the target has never seen. `None` on every
+/// ordinary turn.
 ///
-/// `run_name` is cosmetic — the name a run answers to in `jod ls`. The console
-/// passes `main`; the bridge passes the chat's
-/// [`crate::telegram::session_key`] so a listing says which phone chat started
-/// it. Everything load-bearing is fixed here.
+/// `run_name` is cosmetic — the name a run answers to in `jod ls`.
 ///
-/// `permission` is the operator's chosen mode, and it used to be a constant —
-/// **the top of the chain that made `auto` a lie.** The console showed `auto`,
-/// this span the orchestrator up in `accept_edits` anyway, its MCP server took
-/// that ceiling, and `open_work` capped every background session against it. So
-/// work delegated from an `auto` chat ran two levels down in a mode where
-/// headless Claude Code has nobody to ask, and refused `git init`.
+/// `permission` is the operator's chosen mode, and used to be a constant —
+/// **the top of the chain that made `auto` a lie**, since this span the
+/// orchestrator up in `accept_edits` and `open_work` capped every background
+/// session against it.
 pub async fn hand_to_orchestrator(
     jod: &Jod,
     instruction: &str,
@@ -761,16 +728,13 @@ pub async fn hand_to_orchestrator(
     let projects = project_context(&catalog, settled.as_ref(), current.as_ref());
 
     // The orchestrator is a harness run holding Jod's own tools, so it
-    // delegates by calling them rather than by describing what it would do.
-    // `Resume` keeps it one conversation across restarts.
+    // delegates by calling them. `Resume` keeps it one conversation across
+    // restarts.
     //
     // `spawn_agent_in(.., Existing)` and not `spawn_agent`: the plain form
     // binds `RunConversation::New`, which minted a *second* conversation per
-    // instruction — unpinned, titled with the first line of the preamble, and
-    // holding the entire transcript, while the pinned `main` conversation this
-    // function had just fetched stayed empty. `jod main` read the pinned one
-    // and truthfully reported nothing there. A main chat that does not
-    // accumulate is not a chat.
+    // instruction — unpinned, holding the entire transcript — while the pinned
+    // `main` stayed empty and `jod main` truthfully reported nothing there.
     let agent = jod
         .spawn_agent_in(
             SpawnRequest {
@@ -798,13 +762,11 @@ pub async fn hand_to_orchestrator(
                 //
                 // **The floor is the part with a bug behind it.** Plan mode
                 // refuses every mutation, including the MCP calls that *are*
-                // this run's job: caught live, the orchestrator called
-                // `schedule_list`, reached for `ExitPlanMode`, and wrote a plan
+                // this run's job: caught live, the orchestrator wrote a plan
                 // file instead of arming the schedule. Below `AcceptEdits` the
                 // chat is not cautious, it is inert while appearing to work.
                 //
-                // Above the floor it passes straight through, so a console in
-                // `auto` hands its work to sessions in `auto`. Confinement is
+                // Above the floor it passes straight through. Confinement is
                 // `ToolAccess` either way; the permission axis bounds what it
                 // may do to the *machine*.
                 permission: at_least_acting(permission),
@@ -941,37 +903,31 @@ pub struct Prepared {
 /// Open the work, put a session in it, and point that session at the checkout.
 ///
 /// Split from [`open_work`] at the seam where a *process* becomes necessary, so
-/// the part with all the decisions in it can be tested without a supervisor:
-/// that the work opens with a board, that the session is a node in the tree,
-/// and that the checkout arrives read-only with **no worktree cut**.
+/// the decisions can be tested without a supervisor.
 ///
 /// Three things happen in an order that is not arbitrary:
 ///
 /// 1. The work is created **with a board**, so "every task is complete" is a
-///    state it can actually reach — `create_work` puts the instruction on it.
-/// 2. The session is attached to the work under its parent, which is what makes
-///    it a node in the tree rather than a loose conversation.
-/// 3. The checkout is added as a **read-only** root. Nothing here cuts a
-///    worktree, per D5: a session starts in the real thing and claims a branch
-///    of its own the moment it needs to change something. Cutting one now would
-///    be a worktree per delegation, most of them never written to.
+/// state it can reach. 2. The session is attached under its parent, which makes
+/// it a node in the tree rather than a loose conversation. 3. The checkout is
+/// added **read-only**. Nothing cuts a worktree, per D5: a session starts in
+/// the real thing and claims a branch when it needs to change something.
+/// Cutting now would be a worktree per delegation, most never written to.
 pub fn prepare_work(store: &Store, opening: &Opening) -> Result<Prepared> {
     let work = store.create_work(&opening.instruction)?;
     let checkout = crate::roots::normalise(&opening.checkout);
 
     // The third parameter is the *model*, not a name.
     //
-    // It used to be `Some(&work.title)`, and the cost of that one substitution
-    // was the entire feature: a fresh work's title is the truncated
-    // instruction, `prefer_conversation_settings` copies the conversation's
-    // model onto every request, and so every work session was launched with
-    // `--model "You are checking Jod's own plumbing end to"`. Both harnesses
-    // refused it and exited 1. No work session had ever successfully started.
+    // It used to be `Some(&work.title)`, and that one substitution cost the
+    // entire feature: a fresh work's title is the truncated instruction, and
+    // `prefer_conversation_settings` copies the conversation's model onto every
+    // request — so every work session launched with `--model "You are checking
+    // Jod's own plumbing end to"`. Both harnesses refused it. No work session
+    // had ever started.
     //
-    // It survived because `prepare_work`'s tests inspect the `SpawnRequest` it
-    // returns and never spawn anything — the field was populated, so it looked
-    // right, and nothing asked whether the value was a model. Found by an
-    // end-to-end script that actually launched a harness.
+    // It survived because `prepare_work`'s tests inspect the `SpawnRequest` and
+    // never spawn anything: the field was populated, so it looked right.
     let conversation = store.new_conversation(
         opening.harness,
         &checkout.to_string_lossy(),
@@ -1015,18 +971,17 @@ pub fn prepare_work(store: &Store, opening: &Opening) -> Result<Prepared> {
         permission: opening.permission,
         resume: Resume::Fresh,
         tools: Some(opening.tools),
-        // The same roots and secrets the preamble describes, actually handed
-        // to the run.
+        // The same roots and secrets the preamble describes, actually handed to
+        // the run.
         //
         // These were fetched above and used only to write the prose, so the
-        // brief named a `$STRIPE_API_KEY` nothing put in the environment and
-        // directories no `--add-dir` granted. Every construction site ended
-        // `..SpawnRequest::default()`, handing the supervisor's injection and
-        // redaction an empty list on every real run.
+        // brief named a `$STRIPE_API_KEY` nothing put in the environment. Every
+        // construction site ended `..SpawnRequest::default()`, handing the
+        // supervisor an empty list on every real run.
         //
         // The failure was invisible in the worst way: "the value appears
         // nowhere in the database" passed *trivially*, because no value had
-        // ever been near it.
+        // been near it.
         //
         // Names only, never values — the supervisor resolves them at exec.
         roots: roots.iter().map(|r| r.path.clone()).collect(),
@@ -1234,14 +1189,13 @@ impl Store {
     /// Hang one conversation under another, with no work involved.
     ///
     /// [`crate::works::Store::attach_conversation`] is the richer form and
-    /// needs a work to attach to. A `delegate`d run has none by design, and
-    /// declining to record its parent because there is no work to record it
-    /// *under* is how a delegation ended up leaving no trace anywhere: the run
-    /// existed, and nothing in the database said who had asked for it.
+    /// needs a work. A `delegate`d run has none by design, and declining to
+    /// record its parent for want of a work is how a delegation left no trace
+    /// anywhere.
     ///
-    /// This writes the one column the cascade and the tree both read, and
-    /// nothing else. It does **not** put the conversation in the fleet tree —
-    /// that is keyed on `work_id`, and a loose run is loose on purpose.
+    /// This writes the one column the cascade and the tree read. It does
+    /// **not** put the conversation in the fleet tree — that is keyed on
+    /// `work_id`, and a loose run is loose on purpose.
     pub fn set_conversation_parent(&self, child: &str, parent: &str) -> Result<()> {
         self.write(|tx| {
             tx.execute(
@@ -1324,17 +1278,14 @@ mod tests {
 
     /// **Regression: the console said `auto` and the work ran in `edits`.**
     ///
-    /// Three constants in series threw the operator's mode away — this floor
-    /// when it was `PermissionPolicy::AcceptEdits` outright, the per-run MCP
-    /// server that never received `--max-permission`, and `open_work` capping
-    /// against the ceiling that produced. The visible symptom was two levels
-    /// down: a background session refusing `git init` in a directory it had
-    /// been told to create, while the status bar said everything was
-    /// auto-approved.
+    /// Three constants in series threw the operator's mode away — this floor,
+    /// the per-run MCP server that never received `--max-permission`, and
+    /// `open_work` capping against the ceiling that produced. The symptom was
+    /// two levels down: a background session refusing `git init` in a directory
+    /// it had been told to create.
     ///
     /// Both halves are asserted. Passing the mode through is the fix; keeping
-    /// the floor is what stops the fix turning a cautious mode into an inert
-    /// chat that reads and reasons and never starts anything.
+    /// the floor stops the fix turning a cautious mode into an inert chat.
     #[test]
     fn the_chat_takes_the_operators_mode_but_never_one_that_cannot_delegate() {
         assert_eq!(
@@ -1686,15 +1637,14 @@ mod tests {
 
     /// E4.S4's other half, and the one that went missing.
     ///
-    /// The vocabulary above shipped and this did not: the preamble defined what
-    /// a **work** is and then never named the tool that opens one, so the
-    /// orchestrator knew the noun and had no verb for it and every instruction
-    /// about a repository went to `delegate`. A `delegate`d run has no
-    /// `work_id`, and `Store::forest_of` selects on `work_id IS NOT NULL` —
-    /// so the fleet tree showed nothing, correctly, because there was nothing.
+    /// The preamble defined what a **work** is and never named the tool that
+    /// opens one, so the orchestrator knew the noun and had no verb — and every
+    /// instruction about a repository went to `delegate`. A `delegate`d run has
+    /// no `work_id`, and `forest_of` selects on `work_id IS NOT NULL`, so the
+    /// fleet tree showed nothing.
     ///
     /// The test above passes on a preamble with no `open_work` in it at all,
-    /// which is exactly how the gap stayed green. This one does not.
+    /// which is how the gap stayed green.
     #[test]
     fn the_orchestrator_is_told_which_tool_opens_a_work() {
         let said = orchestrator_preamble();
@@ -1743,17 +1693,15 @@ mod tests {
     }
 
     /// R5: `ToolAccess::Orchestrate` decides which of *Jod's* tools the main
-    /// chat gets and nothing else. The harness hands it a shell, file editors,
-    /// a web fetcher, its own sub-agent spawner and a tool search on top of
-    /// them, and no flag Jod passes takes any of those away — measured, with
-    /// the transcripts, in `docs/harness-support.md` under "Tools are not a
-    /// sandbox either".
+    /// chat gets and nothing else. The harness hands it a shell, file editors
+    /// and its own sub-agent spawner, and no flag Jod passes takes any away —
+    /// measured in `docs/harness-support.md` under "Tools are not a sandbox
+    /// either".
     ///
-    /// So the only thing Jod can say about the boundary today is *said*, in the
-    /// preamble. That is guidance rather than a wall, and this test is the
-    /// least it has to keep saying: a main chat that is never told the Jod
-    /// tools are all of them will reach for the shell the moment it wants
-    /// something they do not cover, which is exactly what it did.
+    /// So the only thing Jod can say about the boundary is *said*, in the
+    /// preamble. That is guidance rather than a wall, and this asserts the
+    /// least it must keep saying: a main chat never told that Jod's tools are
+    /// not the whole toolbox will assume they are.
     #[test]
     fn the_orchestrator_is_told_that_jods_tools_are_the_whole_toolbox() {
         let said = orchestrator_preamble();
