@@ -1363,7 +1363,7 @@ impl App {
     /// yet — which keeps the guarantee it was added for without ever doubling
     /// the row it guarantees. The real node is preferred because it is the one
     /// carrying a conversation id, its runs, and its liveness.
-    fn forest_holds_main(&self) -> bool {
+    pub fn forest_holds_main(&self) -> bool {
         self.forest.iter().any(|n| n.kind == NodeKind::Main)
     }
 

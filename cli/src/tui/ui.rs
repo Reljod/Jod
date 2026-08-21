@@ -3551,7 +3551,12 @@ fn draw_tree(f: &mut Frame, app: &App, area: Rect) {
     // stays parked on its own last row rather than scrolling to a position it
     // does not have.
     let cursor = app.tree.index(&ids);
-    let mine = rows.len() + 1;
+    // The sentinel pinned row, and whether this pane draws one at all. It is
+    // the fallback for a store whose forest has no `Main` node, exactly as
+    // `App::tree_rows` treats it — the two counts have to be derived from the
+    // same question or the cursor and the highlight drift apart.
+    let lead = usize::from(!app.forest_holds_main());
+    let mine = rows.len() + lead;
     let in_tree = cursor < mine;
     let selected = if in_tree {
         cursor
@@ -3570,15 +3575,23 @@ fn draw_tree(f: &mut Frame, app: &App, area: Rect) {
     let show_id = width >= 35;
     let show_harness = width >= 31;
 
-    // One longer than the forest: position 0 is the pinned chat and everything
-    // below it reads its node at `at - 1`. This ordering and `tree_rows`' have
-    // to agree, or the cursor lands one row off its own highlight — the same
-    // trap the flat list documents, and the same reason it is said twice.
+    // Position 0 is the pinned chat *only when the forest has no row of its
+    // own for it*, and everything below reads its node at `at - lead`. This
+    // ordering and `tree_rows`' have to agree, or the cursor lands one row off
+    // its own highlight — the same trap the flat list documents, and the same
+    // reason it is said twice.
+    //
+    // `tree_rows` already drops the sentinel once `forest_of` emits a
+    // `NodeKind::Main` row, and drawing it anyway is how the two fell out of
+    // step: the pane drew one more row than the cursor had ids, so from the
+    // second row down the highlight sat above the row every verb acted on.
+    // Pressing `x` on what looked like Jod's own row untracked the project
+    // under it.
     let (start, height) = window(area, selected, mine);
     let mut items: Vec<ListItem> = Vec::new();
     for at in start..(start + height).min(mine) {
         let here = in_tree && at == selected;
-        if at == 0 {
+        if lead == 1 && at == 0 {
             items.push(ListItem::new(Line::from(main_line(
                 app,
                 here,
@@ -3588,14 +3601,14 @@ fn draw_tree(f: &mut Frame, app: &App, area: Rect) {
             ))));
             continue;
         }
-        let node = rows[at - 1];
+        let node = rows[at - lead];
         let expanded = app.tree.is_expanded(&node.id, &app.closed_works);
         let mut spans = vec![
             Span::styled(if here { "▸ " } else { "  " }.to_string(), bold(USER)),
             // The guides describe the forest, so they are indexed into it —
-            // the pinned row sits above the tree rather than in it, and an
-            // elbow measured past it would point one row off.
-            Span::styled(fleet::guides(&rows, at - 1, ascii), fg(MUTED)),
+            // a sentinel pinned row sits above the tree rather than in it, and
+            // an elbow measured past it would point one row off.
+            Span::styled(fleet::guides(&rows, at - lead, ascii), fg(MUTED)),
             Span::styled(fleet::marker(node, expanded).to_string(), fg(MUTED)),
             Span::styled(
                 format!("{} ", fleet::kind_glyph(node.kind)),
@@ -11640,6 +11653,87 @@ mod tests {
             frame.contains("hello-agent"),
             "and it is named, not just numbered:\n{frame}"
         );
+    }
+
+    /// Every row the cursor can be on must be the row the highlight is on.
+    ///
+    /// `forest_of` emits a `NodeKind::Main` row for the pinned chat, and
+    /// `App::tree_rows` drops the older sentinel id when it does — but the pane
+    /// drew the sentinel anyway. That is one more drawn row than there were
+    /// ids, so from the second position down the `▸` sat one row above the node
+    /// every verb acted on: `⏎` opened the wrong thing and `x` untracked the
+    /// project under the row that looked like Jod's own.
+    ///
+    /// The assertion walks every cursor position rather than checking one,
+    /// because the two lists agreeing at position 0 is exactly how the bug hid.
+    #[test]
+    fn the_highlighted_row_is_the_row_the_cursor_is_on() {
+        use jod_core::projects::NewProject;
+
+        let store = RealStore::in_memory().expect("an in-memory store");
+        // The pinned chat, so the forest carries its own `Main` row — the case
+        // the sentinel was supposed to stand in for and no longer must.
+        store
+            .main_conversation(HarnessKind::ClaudeCode, "/tmp")
+            .expect("a main chat");
+        // A real directory, because the catalog refuses a path that is not
+        // there — and rightly so: a project is somewhere a session is started.
+        let dir = std::env::temp_dir().join(format!("jod-tree-cursor-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a directory to catalog");
+        let project = store.add_project(NewProject::at(&dir)).expect("a project");
+        let work = store
+            .create_work_in("port the parser", Some(&project.id))
+            .expect("a work");
+        store
+            .set_work_title(&work.id, "the parser")
+            .expect("a work title");
+
+        let mut a = app();
+        a.forest = store.forest().expect("a forest");
+        a.go(Workspace::Fleet);
+        a.reconcile();
+        assert!(
+            a.forest_holds_main(),
+            "the forest carries the pinned chat, which is what this is about",
+        );
+
+        // Everything open, so the walk covers a project's children too rather
+        // than stopping at the two top-level rows.
+        a.tree.expand_all(&a.forest);
+        let ids = a.tree_rows();
+        assert!(
+            ids.len() >= 3,
+            "main, the project, its manager-less work: three rows to walk: {ids:?}",
+        );
+        a.tree.first(&ids);
+        for (at, id) in ids.iter().enumerate() {
+            if at > 0 {
+                a.tree.step(1, &ids);
+            }
+            assert_eq!(a.tree.index(&ids), at, "the cursor walks one row at a time");
+            let frame = rendered(&a, 150, 30);
+            // The cursor is the first cell inside a pane's left border, which
+            // is what tells it apart from the `▸` a collapsed node draws in
+            // the marker column further along the same row.
+            let cursor: Vec<&str> = frame
+                .lines()
+                .filter(|line| {
+                    line.split('│')
+                        .nth(1)
+                        .is_some_and(|cell| cell.starts_with('▸'))
+                })
+                .collect();
+            let label = a
+                .forest
+                .iter()
+                .find(|n| &n.id == id)
+                .map(|n| n.label.clone())
+                .unwrap_or_default();
+            assert!(
+                cursor.iter().any(|line| line.contains(label.as_str())),
+                "row {at} is `{label}`, and the ▸ must be on it, not above it:\n{frame}",
+            );
+        }
     }
 
     /// The pane was drawn and could not be reached: no row in it was ever
