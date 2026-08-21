@@ -6236,7 +6236,14 @@ fn apply_slash(app: &mut App, slash: command::Slash) -> Option<Action> {
         Slash::Reload => return Some(Action::Reload),
         Slash::Exit => app.should_quit = true,
         Slash::NeedsArgument(usage) => {
-            app.push(Entry::Notice(format!("usage: {usage}")));
+            // A sentence, not a usage line. Every other refusal in the console
+            // explains itself in plain English — "no agent starts with x",
+            // "that row is a project, not a run" — and this one answered a
+            // person with a synopsis. The form still leads, because it is the
+            // concrete thing; what it means follows.
+            app.push(Entry::Notice(format!(
+                "{usage} — that needs an argument, so nothing was run"
+            )));
         }
         Slash::Unknown(what) => {
             app.push(Entry::Notice(format!(
@@ -9339,9 +9346,17 @@ mod tests {
 
         assert_eq!(app.input, "", "the line must be consumed");
         let last = last_notice(&app);
+        // What the reader needs is the form and the reason, in that order. The
+        // assertion used to pin the word "usage", which was the one thing about
+        // the sentence worth changing — every other refusal in the console is
+        // plain English and this one answered a person with a synopsis.
         assert!(
-            last.contains("usage"),
-            "expected a usage notice, got {last}"
+            last.contains("/resume"),
+            "the notice has to name the command's form, got {last}"
+        );
+        assert!(
+            last.contains("needs an argument"),
+            "and say why nothing happened, got {last}"
         );
     }
 
