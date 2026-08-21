@@ -1822,12 +1822,19 @@ async fn perform(
                                 .to_string(),
                         ]
                     } else {
+                        // Spelled out, as `jod root ls` already does. `ro` was
+                        // two letters nothing on the screen explained, and it
+                        // is the one fact on the line worth reading: a checkout
+                        // is read-only, which is *why* an agent's edits land in
+                        // a worktree rather than where you are looking. Someone
+                        // who does not know what `ro` means is exactly the
+                        // person that surprises.
                         roots
                             .iter()
                             .map(|r| {
                                 format!(
                                     "{}  {}  {}",
-                                    if r.writable { "rw" } else { "ro" },
+                                    if r.writable { "writable " } else { "read-only" },
                                     r.label(),
                                     r.path.display()
                                 )
@@ -13161,6 +13168,14 @@ mod tests {
         assert!(
             !after.contains("an orchestrator, not a chat window"),
             "and the splash has to have got out of the way:\n{after}"
+        );
+        // Spelled out, as `jod root ls` already does. `ro` was two letters
+        // nothing on screen explained, and it is the one fact on the line worth
+        // reading: a checkout is read-only, which is *why* an agent's edits
+        // land in a worktree rather than where the person is looking.
+        assert!(
+            after.contains("read-only") || after.contains("writable"),
+            "the line says what it means rather than abbreviating it:\n{after}"
         );
     }
 
