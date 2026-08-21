@@ -331,6 +331,48 @@ impl Harness for ClaudeCode {
                 vec![]
             }
             Some("rate_limit_event") => vec![],
+            // The only sign of life a long tool call gives.
+            //
+            // Read off claude 2.1.231 rather than guessed: a foreground `Bash`
+            // left to run for two minutes puts one of these on the wire every
+            // thirty seconds and nothing else —
+            // `{type:"tool_progress", tool_use_id:"…-heartbeat-0",
+            //   tool_name:"Bash", parent_tool_use_id:"…",
+            //   elapsed_time_seconds:30, heartbeat:true, session_id, uuid}`.
+            // This is the third silent window, after the two already handled
+            // above: `Progress` covers a long think and `Delta` covers a long
+            // write, and here the model is doing neither — it is waiting on a
+            // command that has not come back.
+            //
+            // It has to be its own arm rather than a fall-through. Without one
+            // every frame reached the catch-all below, became
+            // `AgentEvent::Raw`, and put a full line of harness JSON into the
+            // transcript and the persisted event log twice a minute. Turning
+            // details off did not help and could not: `Raw` is not one of the
+            // steps that setting folds, by design, because it is how an
+            // unrecognised line degrades to "shown verbatim" instead of being
+            // swallowed. The fix belongs here, where the line stops being
+            // unrecognised.
+            //
+            // Every frame becomes the same bare tick, whether or not it says
+            // `heartbeat`. Two runs against 2.1.231 — one command silent for a
+            // hundred seconds, one printing a line a second for two minutes —
+            // produced heartbeats and nothing else, so that is all this arm has
+            // been seen to catch. The binary names three further shapes for
+            // this type (`bash_progress`, `repl_call`, `subagent_retry`), and
+            // matching on the type alone is deliberate: each of them is a
+            // partial view of a tool call whose complete result Jod already
+            // renders once from the `user`/`tool_result` line that follows, so
+            // a build that starts emitting them ticks rather than reopening
+            // this bug.
+            //
+            // No count is carried up. `elapsed_time_seconds` times a single
+            // tool call rather than the turn, so putting it in a field named
+            // for reasoning tokens would make the status bar restart its count
+            // every time a command started.
+            Some("tool_progress") => vec![AgentEvent::Progress {
+                thinking_tokens: None,
+            }],
             _ => vec![AgentEvent::Raw {
                 line: strip_ansi(line),
             }],
@@ -1226,6 +1268,59 @@ mod tests {
                 thinking_tokens: None
             }]
         );
+    }
+
+    /// A `tool_progress` heartbeat is a tick, not something to read.
+    ///
+    /// The line below is captured, not written: claude 2.1.231 was asked to run
+    /// a hundred-second command in the foreground and emitted exactly this
+    /// three times, thirty seconds apart. Every one of them used to reach the
+    /// catch-all and land in `Raw`, which is what put a wrapped line of harness
+    /// JSON into the transcript twice a minute — the failure this arm removes,
+    /// and the one the assertion below names.
+    #[test]
+    fn a_tool_heartbeat_is_a_tick_rather_than_a_line_of_json() {
+        let mut h = ClaudeCode::default();
+        let out = h.parse_line(
+            r#"{"type":"tool_progress","tool_use_id":"toolu_01Px-heartbeat-0",
+                "tool_name":"Bash","parent_tool_use_id":"toolu_01Px",
+                "elapsed_time_seconds":30,"heartbeat":true,
+                "session_id":"s1","uuid":"u1"}"#,
+        );
+        assert!(
+            !out.iter().any(|e| matches!(e, AgentEvent::Raw { .. })),
+            "a heartbeat that lands in Raw dumps harness JSON into the transcript"
+        );
+        assert_eq!(
+            out,
+            vec![AgentEvent::Progress {
+                thinking_tokens: None
+            }],
+            "the only thing on the wire during a long command has to say \
+             'still working'"
+        );
+    }
+
+    /// The tick does not depend on the frame saying `heartbeat`. This type also
+    /// carries a running command's partial output and a subagent's retry
+    /// notice, and neither belongs in a transcript that already renders the
+    /// finished `tool_result` — but neither may fall through to `Raw` either.
+    #[test]
+    fn every_tool_progress_shape_is_a_tick() {
+        let mut h = ClaudeCode::default();
+        for line in [
+            r#"{"type":"tool_progress","tool_use_id":"t1","tool_name":"Bash","stdout":"tick 41\n"}"#,
+            r#"{"type":"tool_progress","tool_use_id":"t2","tool_name":"Task","retry":true}"#,
+            r#"{"type":"tool_progress"}"#,
+        ] {
+            assert_eq!(
+                h.parse_line(line),
+                vec![AgentEvent::Progress {
+                    thinking_tokens: None
+                }],
+                "{line} did not become a tick"
+            );
+        }
     }
 
     /// Hooks and rate-limit notices stay silent — and silent means *dropped*,
