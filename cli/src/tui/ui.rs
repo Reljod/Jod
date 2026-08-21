@@ -3681,11 +3681,11 @@ fn draw_tree(f: &mut Frame, app: &App, area: Rect) {
         }));
     }
 
-    let blocked: usize = rows
-        .iter()
-        .filter(|n| n.kind == jod_core::tree::NodeKind::Work)
-        .map(|n| n.blocked)
-        .sum();
+    // Summed over the top-level rows, each of which already holds the blocked
+    // count of everything under it. Counting every row instead would count a
+    // card once on the agent that raised it and again on the project above it,
+    // and the title would say twice the number the tree can show.
+    let blocked: usize = rows.iter().filter(|n| n.depth == 0).map(|n| n.blocked).sum();
     let title = if blocked > 0 {
         format!(" fleet · {blocked} blocked ")
     } else {
@@ -11352,6 +11352,98 @@ mod tests {
         );
         // Guides, so the shape reads as a tree rather than as an indented list.
         assert!(frame.contains('├') || frame.contains('└'), "{frame}");
+    }
+
+    /// The screen the fleet is meant to open on: `main`, the repositories, and
+    /// nothing else — then one keystroke and the repository's roster is a flat
+    /// list of its manager and its agents.
+    ///
+    /// Built off a real store and folded the way a refresh folds it, because
+    /// the claim is about the whole path from the query to the pane and a
+    /// hand-made forest would only test the drawing.
+    #[test]
+    fn the_fleet_opens_on_the_projects_and_expands_to_their_agents() {
+        use jod_core::works::Origin;
+
+        let store = RealStore::in_memory().expect("an in-memory store");
+        // A real directory, because cataloguing a repository checks that one is
+        // there — a project is somewhere a session gets started.
+        let checkout = std::env::temp_dir().join(format!("jod-fleet-{}", std::process::id()));
+        std::fs::create_dir_all(&checkout).expect("a scratch checkout");
+        let project = store
+            .add_project(jod_core::projects::NewProject::at(&checkout).named("jod"))
+            .expect("a catalogued repository");
+        let (manager, _) = store
+            .manager_conversation(&project.id, HarnessKind::ClaudeCode)
+            .expect("a manager");
+        store
+            .set_conversation_title(&manager, "jod")
+            .expect("a manager title");
+
+        for (title, session) in [("the parser", "port the lexer"), ("the deploy", "fix the CI")] {
+            let work = store
+                .create_work_in(title, Some(&project.id))
+                .expect("a work");
+            store.set_work_title(&work.id, title).expect("a work title");
+            let lead = store
+                .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
+                .expect("a conversation")
+                .id;
+            store
+                .set_conversation_title(&lead, session)
+                .expect("a session title");
+            store
+                .attach_conversation(&lead, &work.id, None, Origin::Agent)
+                .expect("a session under the work");
+        }
+
+        let mut a = app();
+        let folded = crate::tui::fleet::condense(
+            &store.forest().expect("a forest"),
+            &std::collections::HashSet::new(),
+        );
+        a.forest = folded.nodes;
+        a.work_of = folded.works;
+        a.run_of = folded.run_of;
+        a.tree_runs = folded.runs;
+        a.go(Workspace::Fleet);
+        a.reconcile();
+
+        let shut = rendered(&a, 150, 30);
+        assert!(shut.contains("jod"), "the repository is on screen:\n{shut}");
+        for hidden in ["the parser", "the deploy", "port the lexer", "fix the CI"] {
+            assert!(
+                !shut.contains(hidden),
+                "`{hidden}` should be inside the shut project:\n{shut}"
+            );
+        }
+
+        // `→` on the project, which is what a person presses.
+        a.tree.selected = Some(jod_core::tree::NodeId::project(&project.id));
+        let (forest, closed) = (a.forest.clone(), a.closed_works.clone());
+        a.tree.expand_or_descend(&forest, &closed);
+        let open = rendered(&a, 150, 30);
+
+        for agent in ["manager", "port the lexer", "fix the CI"] {
+            assert!(open.contains(agent), "`{agent}` is missing:\n{open}");
+        }
+        for gone in ["the parser", "the deploy"] {
+            assert!(
+                !open.contains(gone),
+                "a work is not a row any more, and `{gone}` is one:\n{open}"
+            );
+        }
+        // The manager and the engineers are siblings, so their rows start at the
+        // same column — which is the whole shape being asked for.
+        let indent = |needle: &str| -> usize {
+            let line = open
+                .lines()
+                .find(|line| line.contains(needle))
+                .unwrap_or_else(|| panic!("{needle} is not on screen:\n{open}"));
+            line.find(needle).expect("the needle is in the line")
+        };
+        assert_eq!(indent("manager"), indent("port the lexer"), "{open}");
+        assert_eq!(indent("manager"), indent("fix the CI"), "{open}");
     }
 
     /// The pinned chat is the tree's first row, as it is the flat list's.

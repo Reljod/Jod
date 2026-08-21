@@ -162,6 +162,24 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    // The fleet with a repository opened, which is the screen the tree exists
+    // for: a plain render shows every project shut, and shut projects say
+    // nothing about whether the roster inside them is right.
+    if let Some(project) = app
+        .forest
+        .iter()
+        .find(|n| n.kind == jod_core::tree::NodeKind::Project && n.has_children)
+        .map(|n| n.id.clone())
+    {
+        app.go(Workspace::Fleet);
+        app.tree.selected = Some(project);
+        let (forest, closed) = (app.forest.clone(), app.closed_works.clone());
+        app.tree.expand_or_descend(&forest, &closed);
+        println!();
+        println!("── fleet · a project opened {}", "─".repeat(46));
+        println!("{}", render(&app));
+    }
+
     // The fleet with the cursor walked down into the loose pane, which is the
     // half of that screen a workspace render never shows: the tree's cursor
     // starts in the tree, so a plain render of the fleet cannot say whether the
@@ -286,9 +304,12 @@ async fn load(jod: &Arc<Jod>, filter: Option<String>) -> anyhow::Result<App> {
     // full catalog in it — the one claim the example exists to make, failing on
     // the one box a reader would check it against.
     app.projects = tui::data::projects(jod);
-    let (forest, closed) = tui::data::forest(jod, app.tree.show_closed);
-    app.forest = forest;
-    app.closed_works = closed;
+    let tree = tui::data::forest(jod, app.tree.show_closed);
+    app.forest = tree.nodes;
+    app.closed_works = tree.closed;
+    app.work_of = tree.works;
+    app.tree_runs = tree.runs;
+    app.run_of = tree.run_of;
     // The tree's cursor is an id, so it has to be put back on a row that
     // exists before anything is drawn — the same two lines, in the same order,
     // that `refresh_workspaces` runs.
@@ -440,16 +461,19 @@ mod tests {
         render(&app)
     }
 
+    /// The run is not named here, and that is the fold rather than a gap: the
+    /// tree draws agents, and a run is folded onto the agent that took it — its
+    /// status, its stall, and the last thing it said all ride up onto that row.
     #[tokio::test]
-    async fn the_fleet_screen_shows_the_work_and_the_run_in_the_database() {
+    async fn the_fleet_screen_shows_the_work_and_the_agent_in_the_database() {
         let screen = fleet_screen(&seeded()).await;
         assert!(
             screen.contains(WORK),
-            "the work is the root of the tree this screen exists to draw:\n{screen}"
+            "the work has no project, so it is the root of this tree:\n{screen}"
         );
         assert!(
-            screen.contains(RUN),
-            "the run is in the database and has a node, so it belongs on screen:\n{screen}"
+            screen.contains(SESSION),
+            "the agent under it is what the tree draws:\n{screen}"
         );
     }
 

@@ -4680,18 +4680,14 @@ fn on_tree_key(app: &mut App, key: KeyEvent, viewport: usize) -> Option<Option<A
 
 /// The work the cursor is inside, whichever level of the tree it is on.
 ///
-/// Climbs by parent id rather than by scanning back for a shallower row: two
-/// works' sessions sit at the same depth, and the nearest shallower row is not
-/// always the ancestor — the same trap `fleet::matching` walks around.
+/// Read out of `work_of` rather than climbed to. The tree no longer *has* work
+/// rows to climb to — `fleet::condense` folds them away and hangs their
+/// sessions straight off the project — so the answer comes from the map built
+/// while the fold still knew it. A project row and the pinned chat belong to no
+/// work and answer `None`, which is what the caller reports.
 fn work_above(app: &App) -> Option<String> {
-    let mut node = app.selected_node()?;
-    loop {
-        if node.kind == jod_core::tree::NodeKind::Work {
-            return Some(node.id.id.clone());
-        }
-        let parent = node.parent.clone()?;
-        node = app.forest.iter().find(|n| n.id == parent)?;
-    }
+    let id = app.tree.selected.as_ref()?;
+    app.work_of.get(id).cloned()
 }
 
 /// The screens where editing and deleting mean something.
@@ -4921,20 +4917,28 @@ fn on_fleet_key(app: &mut App, key: KeyEvent) -> Option<Action> {
         ));
         return None;
     }
-    // A tree row that is not a run is the same case again, and answered for the
-    // same reason: these verbs are all `selected_agent()?`, which on a work
-    // heading is a printed key that does nothing and says nothing. `⏎` is named
-    // because it is what the row *does* answer — a work toggles, a session
-    // opens.
+    // A tree row with no process on it is the same case again, and answered for
+    // the same reason: these verbs are all `selected_agent()?`, which on a
+    // project heading is a printed key that does nothing and says nothing. `⏎`
+    // is named because it is what the row *does* answer — a heading toggles, an
+    // agent's row opens its conversation.
+    //
+    // Asked of `selected_agent` rather than of the row's kind. An agent's row
+    // now answers for the run underneath it, so "is there a process here" is no
+    // longer the same question as "is this a run row" — and after the fold there
+    // are no run rows left for the old test to find.
     if let Some(node) = app.selected_node().filter(|_| app.has_tree()) {
-        if node.kind != jod_core::tree::NodeKind::Run && is_run_verb(key.code) {
+        if is_run_verb(key.code) && app.selected_agent().is_none() {
             let what = match node.kind {
+                jod_core::tree::NodeKind::Project => "a project",
                 jod_core::tree::NodeKind::Work => "a work",
-                _ => "a session",
+                jod_core::tree::NodeKind::Manager => "a manager's chat",
+                _ => "a session with nothing running on it",
             };
             app.push(Entry::Notice(format!(
                 "that row is {what}, not a run — there is no process on it to act on. \
-                 Move onto a run under it, or press ⏎ to open what this row does hold"
+                 Move onto an agent that is running, or press ⏎ to open what this row \
+                 does hold"
             )));
             return None;
         }
@@ -6732,9 +6736,12 @@ fn refresh_workspaces(jod: &Arc<Jod>, app: &mut App) {
     // untracked from the fleet, or archived by another session, leaves the
     // cursor naming a project nothing draws.
     app.reconcile_catalog();
-    let (forest, closed) = data::forest(jod, app.tree.show_closed);
-    app.forest = forest;
-    app.closed_works = closed;
+    let tree = data::forest(jod, app.tree.show_closed);
+    app.forest = tree.nodes;
+    app.closed_works = tree.closed;
+    app.work_of = tree.works;
+    app.tree_runs = tree.runs;
+    app.run_of = tree.run_of;
     let rows = app.tree_rows();
     app.tree.reconcile(&rows);
     // The bus a work's agents are talking on. Loaded here rather than when `T`
@@ -11935,9 +11942,20 @@ mod tests {
         vec![work, session, run]
     }
 
+    /// The app as a refresh leaves it, with the forest folded the way the
+    /// screen folds it.
+    ///
+    /// Through `fleet::condense` rather than straight onto `app.forest`,
+    /// because these tests press keys on rows: the work rows and the run rows
+    /// are gone by the time anything is drawn, and a test that put them back
+    /// would be pressing keys on a tree nobody can see.
     fn on_the_tree(selected: jod_core::tree::NodeId) -> App {
         let mut app = app_on(HarnessKind::ClaudeCode);
-        app.forest = forest_of_one_work();
+        let folded = fleet::condense(&forest_of_one_work(), &std::collections::HashSet::new());
+        app.forest = folded.nodes;
+        app.work_of = folded.works;
+        app.tree_runs = folded.runs;
+        app.run_of = folded.run_of;
         app.go(Workspace::Fleet);
         app.tree.selected = Some(selected);
         app
@@ -11962,12 +11980,10 @@ mod tests {
                 Some(NodeId::session("s1")),
                 "{down:?} did not move the tree cursor"
             );
-            press(&mut app, down);
-            assert_eq!(app.tree.selected, Some(NodeId::run("r1")));
             press(&mut app, up);
             assert_eq!(
                 app.tree.selected,
-                Some(NodeId::session("s1")),
+                Some(NodeId::work("w1")),
                 "{up:?} did not move the tree cursor"
             );
         }
@@ -11985,8 +12001,9 @@ mod tests {
     /// the loose pane.
     fn with_a_loose_run() -> App {
         let mut app = on_the_tree(jod_core::tree::NodeId::work("w1"));
-        // `r1` is the run the forest holds, so it is *not* loose; `r2` has no
-        // node and is what the pane below the tree draws.
+        // `r1` is a run the forest accounted for — folded onto the session that
+        // started it — so it is *not* loose; `r2` reached no session and is what
+        // the pane below the tree draws.
         app.agents = vec![agent_line("r1", None), agent_line("r2", Some("sess-2"))];
         app.reconcile();
         app
@@ -12001,7 +12018,7 @@ mod tests {
             "the fixture has exactly one row in the lower pane"
         );
 
-        // Down through main · work · session · run, and then one more.
+        // Down through main · work · session, and then one more.
         let rows = app.tree_rows();
         app.tree.selected = rows.get(rows.len() - 2).cloned();
         assert_eq!(app.loose_selected(), None, "still in the tree");
@@ -12085,13 +12102,18 @@ mod tests {
     fn home_end_and_the_page_keys_move_the_tree_too() {
         use jod_core::tree::NodeId;
         let main = crate::tui::fleet::main_id();
+        let last = NodeId::session("s1");
         let mut app = on_the_tree(NodeId::work("w1"));
         press(&mut app, KeyCode::End);
-        assert_eq!(app.tree.selected, Some(NodeId::run("r1")));
+        assert_eq!(app.tree.selected, Some(last.clone()));
         press(&mut app, KeyCode::Home);
         assert_eq!(app.tree.selected, Some(main.clone()));
         press(&mut app, KeyCode::PageDown);
-        assert_eq!(app.tree.selected, Some(NodeId::run("r1")), "a page past the end clamps");
+        assert_eq!(
+            app.tree.selected,
+            Some(last),
+            "a page past the end clamps"
+        );
         press(&mut app, KeyCode::PageUp);
         assert_eq!(app.tree.selected, Some(main));
     }
@@ -12099,6 +12121,10 @@ mod tests {
     /// The other half of the same fault: a moving cursor is no use if the verbs
     /// act on a different row. `s` stops the run the highlight is on, which on
     /// a tree is the tree's row and not the flat list's.
+    ///
+    /// The row is the *agent's* now rather than a run's. The fold puts the run
+    /// away and hands its verbs to the session that took it, so this is also the
+    /// check that an agent's row still stops the process it is showing.
     #[test]
     fn the_run_verbs_act_on_the_row_the_tree_cursor_is_on() {
         use jod_core::tree::NodeId;
@@ -12109,8 +12135,11 @@ mod tests {
         app.list_mut(Workspace::Fleet).selected = Some("other".into());
 
         press(&mut app, KeyCode::Down);
-        press(&mut app, KeyCode::Down);
-        assert_eq!(app.tree.selected, Some(NodeId::run("r1")), "on the run row");
+        assert_eq!(
+            app.tree.selected,
+            Some(NodeId::session("s1")),
+            "on the agent's row"
+        );
         assert_eq!(
             press(&mut app, KeyCode::Char('s')),
             Some(Action::Stop("r1".into())),
@@ -12122,17 +12151,35 @@ mod tests {
         );
     }
 
-    /// A work is a heading and a session is a conversation; neither is a
-    /// process. The verbs say so rather than going quiet, the way the pinned
+    /// A heading is not a process, and neither is an agent that has never taken
+    /// a run. The verbs say so rather than going quiet, the way the pinned
     /// chat's do.
+    ///
+    /// An agent that *has* a run is the other case, and it is
+    /// `the_run_verbs_act_on_the_row_the_tree_cursor_is_on`: the fold hands a
+    /// run's verbs to the row showing it, so "no process here" is now a claim
+    /// about the row rather than about its kind.
     #[test]
     fn a_run_verb_on_a_row_that_holds_no_run_says_why() {
         use jod_core::tree::NodeId;
-        for (row, word) in [
-            (NodeId::work("w1"), "a work"),
-            (NodeId::session("s1"), "a session"),
+        // The same work and session, with the run taken out — an agent that has
+        // been opened and has not been given anything to do yet.
+        let idle: Vec<jod_core::tree::Node> = forest_of_one_work()
+            .into_iter()
+            .filter(|n| n.kind != jod_core::tree::NodeKind::Run)
+            .collect();
+        for (row, word, forest) in [
+            (NodeId::work("w1"), "a work", forest_of_one_work()),
+            (NodeId::session("s1"), "a session", idle),
         ] {
-            let mut app = on_the_tree(row.clone());
+            let mut app = app_on(HarnessKind::ClaudeCode);
+            let folded = fleet::condense(&forest, &std::collections::HashSet::new());
+            app.forest = folded.nodes;
+            app.work_of = folded.works;
+            app.tree_runs = folded.runs;
+            app.run_of = folded.run_of;
+            app.go(Workspace::Fleet);
+            app.tree.selected = Some(row.clone());
             app.agents = vec![running("r1", "run one")];
             assert_eq!(press(&mut app, KeyCode::Char('s')), None, "from {row:?}");
             let said = last_notice(&app);
@@ -12562,19 +12609,22 @@ mod tests {
         );
     }
 
-    /// From a session or a run as well, and it is the *work's* bus in each
-    /// case: a session's half of a conversation is not a conversation.
+    /// From an agent's row as well, and it is the *work's* bus: a session's
+    /// half of a conversation is not a conversation.
+    ///
+    /// The tree has no work row above it to climb to any more, so this is also
+    /// the check that the fold remembered which work the agent came out of.
     #[test]
-    fn t_on_a_session_or_a_run_opens_the_work_above_it() {
-        for row in [
-            jod_core::tree::NodeId::session("s1"),
-            jod_core::tree::NodeId::run("r1"),
-        ] {
-            let mut app = on_the_tree(row.clone());
-            press(&mut app, KeyCode::Char('T'));
-            assert_eq!(app.workspace, Workspace::Traffic, "from {row:?}");
-            assert_eq!(app.traffic_of, Some(traffic::Watching::work("w1")), "from {row:?}");
-        }
+    fn t_on_a_session_opens_the_bus_of_the_work_it_came_out_of() {
+        let row = jod_core::tree::NodeId::session("s1");
+        let mut app = on_the_tree(row.clone());
+        press(&mut app, KeyCode::Char('T'));
+        assert_eq!(app.workspace, Workspace::Traffic, "from {row:?}");
+        assert_eq!(
+            app.traffic_of,
+            Some(traffic::Watching::work("w1")),
+            "from {row:?}"
+        );
     }
 
     /// Drilled rather than jumped to, so `Esc` comes back to the tree you were

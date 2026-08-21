@@ -32,7 +32,7 @@ use jod_core::projects::{How, Project};
 use jod_core::roots::Root;
 use jod_core::secrets::Scope;
 use jod_core::tree::{Node, NodeId, NodeKind};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -711,13 +711,28 @@ pub struct App {
     pub stop_listening_requested: bool,
 
     // ---- the fleet tree -------------------------------------------------
-    /// Works, their sessions and their runs, flattened by core in one pass.
-    /// Empty until a work exists, which is what keeps the fleet's older flat
-    /// list meaningful for a session that belongs to no work.
+    /// The projects and the agents in them, as the fleet draws them.
+    ///
+    /// Core flattens the whole forest in one pass and `fleet::condense` folds
+    /// it to those two levels before it lands here, so everything that reads
+    /// this field is reading the tree that is on the screen. Empty until a work
+    /// exists, which is what keeps the fleet's older flat list meaningful for a
+    /// session that belongs to no work.
     pub forest: Vec<Node>,
     /// Which of those works are closed. Core's answer, not an inference: a
     /// [`Node`] carries no state.
     pub closed_works: HashSet<NodeId>,
+    /// The work each row of the forest came out of.
+    ///
+    /// The fold leaves no work rows to climb to, so this is how `T` still finds
+    /// the bus belonging to the agent under the cursor.
+    pub work_of: HashMap<NodeId, String>,
+    /// The runs the tree accounts for, folded onto the sessions that started
+    /// them. What is *not* in here is what the loose pane below the tree draws.
+    pub tree_runs: HashSet<String>,
+    /// The run each agent's row answers for. The fold leaves no run rows, so
+    /// this is where `s`, `a` and `t` find the process to act on.
+    pub run_of: HashMap<NodeId, String>,
     pub tree: TreeState,
 
     // ---- the traffic log ------------------------------------------------
@@ -1288,6 +1303,9 @@ impl App {
             stop_listening_requested: false,
             forest: Vec::new(),
             closed_works: HashSet::new(),
+            work_of: HashMap::new(),
+            tree_runs: HashSet::new(),
+            run_of: HashMap::new(),
             tree: TreeState::default(),
             traffic_of: None,
             traffic: traffic::Log::default(),
@@ -2157,18 +2175,17 @@ impl App {
     /// cannot draw, and the fleet shows them beside it rather than dropping
     /// them: a run nothing on screen accounts for is a run nobody stops.
     ///
+    /// Asked of [`App::tree_runs`] rather than of the rows on screen. The tree
+    /// draws no run rows any more — a run is folded onto the session that
+    /// started it — so looking for one would find nothing and call every run in
+    /// the fleet loose, which would make this pane a second copy of the list.
+    ///
     /// Reads the same [`App::fleet_rows`] the flat list does, so the fleet's
     /// filter and sort apply here too.
     pub fn loose_rows(&self) -> Vec<&AgentLine> {
-        let held: std::collections::HashSet<&str> = self
-            .forest
-            .iter()
-            .filter(|n| n.kind == jod_core::tree::NodeKind::Run)
-            .map(|n| n.id.id.as_str())
-            .collect();
         self.fleet_rows()
             .into_iter()
-            .filter(|a| !held.contains(a.id.as_str()))
+            .filter(|a| !self.tree_runs.contains(&a.id))
             .collect()
     }
 
@@ -2335,10 +2352,16 @@ impl App {
                 return self.agents.iter().find(|a| a.id == id.id);
             }
             let node = self.selected_node()?;
-            if node.kind != NodeKind::Run {
-                return None;
-            }
-            return self.agents.iter().find(|a| a.id == node.id.id);
+            // An agent's row *is* its process now. The fold takes the run rows
+            // away, so a session that has a run answers for it — which is also
+            // how the row reads: it says an agent is running, and `s` on a row
+            // that says that should stop it.
+            let run = match node.kind {
+                NodeKind::Run => node.id.id.clone(),
+                NodeKind::Session => self.run_of.get(&node.id)?.clone(),
+                _ => return None,
+            };
+            return self.agents.iter().find(|a| a.id == run);
         }
         let id = self.list(Workspace::Fleet).selected.as_deref()?;
         self.agents.iter().find(|a| a.id == id)
