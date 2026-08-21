@@ -11923,6 +11923,35 @@ mod tests {
         }
     }
 
+    /// The fleet's caption describes the fleet, not only its processes.
+    ///
+    /// It counted runs, so a tree holding projects, managers and works whose
+    /// agents had all finished was captioned "nothing delegated yet" — a line
+    /// contradicting the rows directly above it.
+    #[test]
+    fn a_fleet_with_no_running_process_still_counts_what_is_on_it() {
+        let mut a = two_works();
+        a.agents = Vec::new();
+        a.reconcile();
+
+        let caption = a.count_for(Workspace::Fleet);
+        assert!(
+            !caption.contains("nothing delegated yet"),
+            "there are works on the screen: {caption}"
+        );
+        assert!(caption.contains("work"), "it says what is there: {caption}");
+        assert!(
+            caption.contains("nothing running"),
+            "and that none of it is moving: {caption}"
+        );
+
+        // A genuinely empty fleet keeps the sentence written for it.
+        let mut empty = app();
+        empty.go(Workspace::Fleet);
+        empty.reconcile();
+        assert_eq!(empty.count_for(Workspace::Fleet), "nothing delegated yet");
+    }
+
     /// A filter on the fleet says so, on the tree as well as the flat list.
     ///
     /// The flat list has drawn this line since it had one; the tree never did.

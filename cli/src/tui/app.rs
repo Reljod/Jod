@@ -2500,7 +2500,29 @@ impl App {
             Workspace::Chat => "the conversation".to_string(),
             Workspace::Fleet => {
                 if self.agents.is_empty() {
-                    return "nothing delegated yet".into();
+                    // No *runs* is not an empty fleet. A tree can hold
+                    // projects, managers and works with no process alive in
+                    // any of them — every agent finished — and "nothing
+                    // delegated yet" printed under those rows is a caption
+                    // contradicting the screen it labels.
+                    let projects = self
+                        .forest
+                        .iter()
+                        .filter(|n| n.kind == NodeKind::Project)
+                        .count();
+                    let works = self
+                        .forest
+                        .iter()
+                        .filter(|n| n.kind == NodeKind::Work)
+                        .count();
+                    if projects == 0 && works == 0 {
+                        return "nothing delegated yet".into();
+                    }
+                    return format!(
+                        "{} · {} · nothing running",
+                        plural(projects, "project"),
+                        plural(works, "work"),
+                    );
                 }
                 let failed = self.agents.iter().filter(|a| a.status == "failed").count();
                 format!(
