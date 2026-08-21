@@ -35,7 +35,7 @@ use crate::schedule::{Fire, FireOutcome, Goal, GoalState, Schedule, ScheduleStat
 use crate::team::{Member, MemberStatus, Message, TeamTask};
 
 /// Applied in order; each is recorded so it runs exactly once.
-const MIGRATIONS: &[(&str, &str)] = &[
+pub(crate) const MIGRATIONS: &[(&str, &str)] = &[
     (
     "0001_initial",
     r#"
@@ -1566,6 +1566,47 @@ const MIGRATIONS: &[(&str, &str)] = &[
        AND id IN (SELECT manager_conversation_id FROM projects
                    WHERE manager_conversation_id IS NOT NULL)
        AND EXISTS (SELECT 1 FROM conversations m WHERE COALESCE(m.pinned, 0) = 1);
+    "#,
+    ),
+    (
+    "0025_a_bus_follows_the_main_chat_it_was_joined_to",
+    r#"
+    -- The backfill for buses stranded by a compaction.
+    --
+    -- `Store::is_main_chat_member` decides whether mail addressed to `main` is
+    -- handed to the main chat by comparing the member row's conversation
+    -- against the *currently pinned* one. When main's context fills it compacts
+    -- through `continue_as_new`, which opens a fresh conversation and moves the
+    -- pin onto it — correctly, or the summary would be stranded in a thread
+    -- nobody opens again. Every team joined before that keeps naming the old
+    -- conversation, so its `main` matches nothing: the mail is never diverted,
+    -- falls through to a wake that cannot happen — a member never gets a
+    -- `session_id` — and waits for ever.
+    --
+    -- Seen on a live daemon, once per tick and indefinitely:
+    -- "1 message(s) waiting: `main` has no session to resume". `carry_forward`
+    -- moves these rows now; this is for the consoles that have already
+    -- compacted, which is every console that has been up long enough.
+    --
+    -- Only rows on the pinned chat's *own* ancestry are touched.
+    -- `carry_forward` records the edge as `forked_from`, so walking it back
+    -- from the pinned row gives exactly the conversations that used to be main
+    -- and nothing else. A member pointing somewhere off that chain is pointing
+    -- at a conversation that was never this chat, and moving it would deliver
+    -- somebody's mail to the wrong reader.
+    WITH RECURSIVE main_chain(id) AS (
+      SELECT id FROM conversations WHERE COALESCE(pinned, 0) = 1
+      UNION
+      SELECT c.forked_from FROM conversations c
+        JOIN main_chain m ON c.id = m.id
+       WHERE c.forked_from IS NOT NULL
+    )
+    UPDATE team_members
+       SET conversation_id = (SELECT id FROM conversations WHERE COALESCE(pinned, 0) = 1)
+     WHERE lower(name) = 'main'
+       AND conversation_id IN (SELECT id FROM main_chain)
+       AND conversation_id <> (SELECT id FROM conversations WHERE COALESCE(pinned, 0) = 1)
+       AND EXISTS (SELECT 1 FROM conversations WHERE COALESCE(pinned, 0) = 1);
     "#,
     ),
 ];

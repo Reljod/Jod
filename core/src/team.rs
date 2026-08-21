@@ -3700,6 +3700,83 @@ mod tests {
         );
     }
 
+    /// The backfill for buses already stranded by a compaction.
+    ///
+    /// `carry_forward` moves these rows now, but every console that has been up
+    /// long enough has already compacted at least once, and those rows point at
+    /// a conversation that stopped being main. Driven through
+    /// `is_main_chat_member` rather than by reading the column, because the
+    /// column being right is not the claim — the claim is that mail arrives.
+    #[test]
+    fn the_backfill_repoints_a_bus_left_on_an_old_main_chat() {
+        let (s, main) = with_a_main_chat();
+        s.open_return_channel("run-1", "reporter", HarnessKind::ClaudeCode)
+            .unwrap();
+        for turn in 0..4 {
+            s.append_prompt(&main, &format!("run-{turn}"), "go").unwrap();
+        }
+        s.continue_as_new(&main, "what happened so far", "full")
+            .unwrap();
+
+        // Put it back the way the old code left it: naming the conversation
+        // that used to be main.
+        s.write(|tx| {
+            tx.execute(
+                "UPDATE team_members SET conversation_id = ?1 WHERE lower(name) = 'main'",
+                rusqlite::params![main],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        assert!(
+            !s.is_main_chat_member(Scope::Team, "run-1", MAIN).unwrap(),
+            "the bug, reproduced: the bus names a chat that is no longer main",
+        );
+
+        let (_, sql) = crate::store::MIGRATIONS
+            .iter()
+            .find(|(name, _)| name.starts_with("0025"))
+            .expect("the backfill migration");
+        s.write(|tx| {
+            tx.execute_batch(sql)?;
+            Ok(())
+        })
+        .unwrap();
+
+        assert!(
+            s.is_main_chat_member(Scope::Team, "run-1", MAIN).unwrap(),
+            "after the backfill the bus reaches the chat again",
+        );
+
+        // A member on a conversation that was never this chat is left alone —
+        // moving it would hand somebody's mail to the wrong reader.
+        let stranger = s
+            .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
+            .unwrap()
+            .id;
+        s.write(|tx| {
+            tx.execute(
+                "INSERT INTO team_members
+                   (team, name, harness, role, status, joined_at_ms, scope, conversation_id)
+                 VALUES ('other', 'main', 'claude_code', '', 'ready', 1, 'team', ?1)",
+                rusqlite::params![stranger],
+            )?;
+            tx.execute_batch(sql)?;
+            Ok(())
+        })
+        .unwrap();
+        let left: String = {
+            let conn = s.conn.lock().expect("store lock poisoned");
+            conn.query_row(
+                "SELECT conversation_id FROM team_members WHERE team = 'other'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(left, stranger, "a bus off the chain is not moved");
+    }
+
     /// The two reserved names are refused on both join paths. The gap was real:
     /// `jod team join` calls [`Store::join_team`], which had neither guard.
     #[test]
