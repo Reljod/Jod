@@ -104,7 +104,7 @@ pub enum Slash {
     /// a run you are looking at, and this is for one you are going to walk away
     /// from for a few hours.
     Heartbeat { which: String, on: bool },
-    /// Say how to attach to an agent's tmux session.
+    /// Say what to run to follow an agent from another terminal.
     Attach(String),
     /// Put a task on the watched team's board.
     Todo(String),
@@ -669,7 +669,7 @@ pub const HELP: &[(&str, &str)] = &[
         "reap it if it goes silent — for runs you leave alone for hours",
     ),
     ("/stop <id>", "stop an agent and close its session"),
-    ("/attach <id>", "how to attach to its tmux session"),
+    ("/attach <id>", "the command to follow it from another terminal"),
     ("/memory [query]", "what Jod remembers (Ctrl-G m)"),
     ("/schedules", "cron-triggered runs (Ctrl-G s)"),
     ("/schedule <name>", "open one of them"),

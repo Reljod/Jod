@@ -34,13 +34,10 @@
 //! rows, keeps its parent edge, and stays reachable through [`Store::tips`].
 //! Compaction sets `active = 0` and stops; the text stays in `messages_fts`.
 //!
-//! Both follow the same finding. Git's `reflog` — 90 days of where the ref has
-//! been — is the reason a bad `reset` is survivable at all, and Pro Git names
-//! `reset --hard` as "one of the very few cases where Git will actually destroy
-//! data". OpenCode reaches the same place from the other side: `revert()`
-//! deletes zero rows and `unrevert()` exists precisely because they don't.
-//! Destroying on revert buys nothing — the rows are small — and it is the one
-//! mistake a user cannot undo.
+//! Both follow the same finding: git's `reflog` is why a bad `reset` is
+//! survivable, and OpenCode's `revert()` deletes zero rows so that `unrevert()`
+//! can exist. Destroying on revert buys nothing — the rows are small — and it
+//! is the one mistake a user cannot undo.
 
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -188,32 +185,26 @@ impl NewMessage {
     /// Project one normalised event into a message, or `None` when the event
     /// is not a turn.
     ///
-    /// **Keep this pure and cheap.** It is also used as a predicate — asked
-    /// whether an event is a turn at all, so a `Raw` line, of which there are
-    /// as many as the harness is chatty, does not cost a write transaction to
-    /// find out it was nothing. Giving this a store lookup would put that
-    /// lookup on every event of every run.
+    /// **Keep this pure and cheap.** It doubles as a predicate, so a store
+    /// lookup here would land on every event of every run — including each
+    /// `Raw` line, of which a chatty harness emits many.
     ///
     /// Five kinds deliberately produce nothing:
     ///
-    /// - `Progress` is a liveness tick with no content — the thing a long
-    ///   silent think emits so a UI can show it is still working. It belongs in
-    ///   a status line, never in a transcript replayed into another harness.
-    /// - `Delta` is a fragment of a block that reappears complete, moments
-    ///   later, as the `Message`/`ToolCall` this same function already turns
-    ///   into a row. Keeping both would duplicate every streamed turn — once
-    ///   as fragments, once whole — and a thread replayed into another harness
-    ///   must not replay the first harness's streaming pace along with it.
-    /// - `Started` is metadata. It carries the session id and model, which
-    ///   belong on the conversation row — see [`Store::set_conversation_session`].
-    /// - `Finished.text` is always a repeat: every harness adapter fills it
-    ///   from the last `Message` it already emitted (`Accumulator::note_text`),
-    ///   so appending it would double the final assistant turn.
-    /// - `Raw` is a line we could not classify. The event log keeps it so a
-    ///   harness upgrade degrades to "shown verbatim"; a transcript meant for
-    ///   replay into a *different* harness is the one place it does not belong.
-    /// - `ToolResult`/`ToolCall` do map — listed here only to say they are not
-    ///   among the exclusions.
+    /// - `Progress` is a contentless liveness tick. It belongs in a status
+    ///   line, never in a transcript replayed into another harness.
+    /// - `Delta` is a fragment of a block that reappears complete as the
+    ///   `Message`/`ToolCall` this function already maps. Keeping both would
+    ///   replay the first harness's streaming pace into the second.
+    /// - `Started` is metadata: the session id and model belong on the
+    ///   conversation row — see [`Store::set_conversation_session`].
+    /// - `Finished.text` is always a repeat of the last `Message`, so
+    ///   appending it would double the final assistant turn.
+    /// - `Raw` is an unclassified line. The event log keeps it so a harness
+    ///   upgrade degrades to "shown verbatim", but a transcript meant for
+    ///   another harness is the one place it does not belong.
+    /// - `ToolResult`/`ToolCall` do map — listed only to say they are not
+    ///   exclusions.
     pub fn from_event(event: &AgentEvent) -> Option<NewMessage> {
         match event {
             AgentEvent::Message { text } => Some(NewMessage::new(Role::Assistant, text.clone())),
@@ -438,21 +429,18 @@ impl Store {
 
     /// The conversation a run wrote into, if it wrote anything.
     ///
-    /// The inverse of [`Message::run_id`], and the join every client wants the
-    /// moment runs start populating the graph: a run id is what the CLI, the
-    /// TUI and the API all already hold, and "show me the thread this produced"
-    /// is the next question after "show me this run".
+    /// The inverse of [`Message::run_id`]: a run id is what every client
+    /// already holds, and "show me the thread this produced" is the next
+    /// question after "show me this run".
     ///
-    /// `None` covers two different situations that look alike and are not: a
-    /// run that produced no message at all — every event was a `Started`, a
-    /// `Raw` or a `Finished` — and a run nobody wired to a conversation. Both
-    /// mean "there is no thread to show", which is what a caller needs.
+    /// `None` covers two situations that look alike — a run that minted no
+    /// message, and a run nobody wired to a conversation — and both mean "there
+    /// is no thread to show".
     ///
-    /// Reads the first message the run minted rather than the last, so the
-    /// answer does not change as the run goes on. Note it scans: `messages` is
-    /// indexed on `(conversation_id, id)` and on `parent_id`, not on `run_id`.
-    /// Fine at the size a single machine's history reaches, and an index worth
-    /// adding in a later migration if this ever lands in a hot path.
+    /// Reads the *first* message the run minted, so the answer does not change
+    /// as the run goes on. It scans: `messages` is indexed on
+    /// `(conversation_id, id)` and `parent_id`, not `run_id`. Fine at one
+    /// machine's history; worth an index if it ever lands in a hot path.
     pub fn conversation_for_run(&self, run_id: &str) -> Result<Option<String>> {
         let conn = self.conn.lock().expect("store lock poisoned");
         Ok(conn
@@ -507,21 +495,16 @@ impl Store {
 
     /// Remove a conversation and everything hanging off it.
     ///
-    /// New with the throwaway titler, which is the case it exists for: a cheap
-    /// one-turn conversation that names a work and is then gone. Nothing else
-    /// in Jod had ever needed to delete one, and it stays deliberately narrow.
+    /// Exists for the throwaway titler: a one-turn conversation that names a
+    /// work and is then gone. Deliberately narrow — nothing else needs it.
     ///
-    /// Two conversations are refused, and neither refusal may be widened into
-    /// a flag:
+    /// Two refusals, neither of which may be widened into a flag:
     ///
-    /// - **The pinned main chat.** It is the desk instructions arrive at.
-    ///   Deleting it does not free anything; it loses the thread every other
-    ///   thread was opened from.
-    /// - **Any conversation that belongs to a work.** Deleting the *work* is
-    ///   the only sanctioned way to remove those, so that a session cannot be
-    ///   quietly cut out of a tree that still points at it — its siblings still
-    ///   name it as a parent, its cards still carry its work, and its member
-    ///   row is still addressable.
+    /// - **The pinned main chat**, the desk instructions arrive at. Deleting it
+    ///   frees nothing and loses the thread every other was opened from.
+    /// - **Any conversation belonging to a work.** Deleting the *work* is the
+    ///   only sanctioned route, so a session cannot be cut out of a tree that
+    ///   still points at it.
     ///
     /// Messages, cards, roots, delegations and queued deliveries all cascade
     /// from the row, so one statement takes the lot.
@@ -581,18 +564,13 @@ impl Store {
     /// one write.
     ///
     /// The pair moves together or not at all. A session id is the *harness's*
-    /// handle on a conversation, meaningless to any other harness, so a row
-    /// holding one harness's id under another harness's name is not a stale
-    /// field — it is an id that will be handed to a program guaranteed to
-    /// reject it. That is not hypothetical: a `/harness agy` switch left the
-    /// pinned main chat naming `agy` while the console came back up on Claude
-    /// Code, and every turn after it spawned `claude --resume <agy-session>` and
-    /// died in a second with "No conversation found with session ID".
+    /// handle, so a row holding one harness's id under another's name is not a
+    /// stale field — it is an id destined for a program guaranteed to reject
+    /// it. See [`Store::resume_for`] for the failure this caused.
     ///
     /// So the harness is written from the run that reported the session rather
-    /// than left as whatever the row said before. A thread whose harness changed
-    /// under it starts fresh once — see [`Store::resume_for`] — and accumulates
-    /// normally from the next turn, instead of restarting on every one.
+    /// than left as whatever the row said. A thread whose harness changed under
+    /// it starts fresh once and accumulates normally from the next turn.
     pub fn record_session(&self, id: &str, on: HarnessKind, session_id: &str) -> Result<bool> {
         self.write(|tx| {
             Ok(tx.execute(
@@ -652,19 +630,16 @@ impl Store {
     /// the harness's guess, and once Jod owns the graph it does not need to
     /// guess.
     ///
-    /// **`on` is not decoration.** A session id belongs to the harness that
-    /// minted it and means nothing to any other, so asking how to resume a
-    /// Claude Code thread *on AGY* has one honest answer — start fresh — and the
-    /// caller's job is to replay the transcript into it. Answering with the id
-    /// anyway is how the main chat broke: the pin sat on a conversation left
-    /// naming `agy` by an old `/harness` switch while the console ran Claude
-    /// Code, and `claude --resume <agy-session>` failed in a second, every turn,
-    /// having produced nothing. The mismatch was invisible because nothing
-    /// compared the two.
+    /// **`on` is not decoration.** Asking how to resume a Claude Code thread
+    /// *on AGY* has one honest answer — start fresh, and replay the transcript
+    /// into it. Answering with the id anyway is how the main chat broke: an old
+    /// `/harness` switch left the pin naming `agy` while the console ran Claude
+    /// Code, so `claude --resume <agy-session>` failed in a second, every turn,
+    /// invisibly, because nothing compared the two.
     ///
-    /// A harness this build does not recognise reads as a mismatch and starts
-    /// fresh, which is the safe direction: an id Jod cannot attribute is an id
-    /// it must not hand to a program that might reject it.
+    /// An unrecognised harness reads as a mismatch and starts fresh, which is
+    /// the safe direction: an id Jod cannot attribute must not be handed to a
+    /// program that might reject it.
     pub fn resume_for(&self, conversation_id: &str, on: HarnessKind) -> Result<Resume> {
         let Some(conversation) = self.conversation(conversation_id)? else {
             return Ok(Resume::Fresh);
@@ -1145,24 +1120,19 @@ impl Store {
 
     /// [`Store::compact`] with the loss guard set explicitly.
     ///
-    /// The guard is OpenClaw's `maxPriorEntryLossFraction`, which the memory
-    /// study called "the single most important line in the design: it's what
-    /// stops an LLM rewrite from quietly deleting your memory". A summary is
-    /// written by a model, from a span chosen by a model, and neither is
-    /// checkable after the fact — so the one thing worth checking before the
-    /// write is *how much* it is allowed to take.
+    /// The guard is OpenClaw's `maxPriorEntryLossFraction` — "what stops an LLM
+    /// rewrite from quietly deleting your memory". A summary is written by a
+    /// model from a span chosen by a model, neither checkable afterwards, so
+    /// the one thing worth checking first is *how much* it may take.
     ///
-    /// The constant is not OpenClaw's 0.25, and the difference is deliberate.
-    /// Theirs governs a curated `MEMORY.md` where a rewrite is supposed to
-    /// preserve almost everything, so losing a quarter is already alarming.
-    /// A transcript compaction is expected to drop the bulk — the real
-    /// `compact_boundary` in the prior-art transcript went 516,172 tokens to
-    /// 11,046 — so the same mechanism takes a looser number. Its job here is to
-    /// catch the compaction that would erase the entire live thread in one
-    /// move, not to forbid compaction from working.
+    /// Deliberately looser than OpenClaw's 0.25, which governs a curated
+    /// `MEMORY.md` where a rewrite should preserve almost everything. A
+    /// transcript compaction is expected to drop the bulk — the prior-art
+    /// transcript went 516,172 tokens to 11,046 — so this catches the pass that
+    /// would erase the whole live thread, not compaction working.
     ///
-    /// Pass `1.0` to authorise a full continue-as-new deliberately. A caller
-    /// that means it can say so; a runaway automatic pass cannot.
+    /// Pass `1.0` to authorise a continue-as-new deliberately. A caller that
+    /// means it can say so; a runaway automatic pass cannot.
     pub fn compact_with_limit(
         &self,
         conversation_id: &str,
@@ -1315,21 +1285,19 @@ impl Store {
     /// The transcript in the form the target harness will actually take.
     ///
     /// [`Store::transcript`] answers "what is in this thread"; this answers
-    /// "how do I get it into *that* program", and the three answers are not
-    /// alike. Claude Code reads a stream of Messages-API envelopes on stdin,
-    /// OpenCode reads one import document, and AGY reads nothing at all — so
-    /// its context has to travel inside the prompt like any other text. The
-    /// asymmetry is the finding, not an implementation detail: a caller that
-    /// assumes handoff is uniform will silently lose a transcript on AGY.
+    /// "how do I get it into *that* program", and the three differ. Claude Code
+    /// reads Messages-API envelopes on stdin, OpenCode reads one import
+    /// document, and AGY reads nothing — its context travels inside the prompt.
+    /// The asymmetry is the finding: a caller assuming handoff is uniform
+    /// silently loses a transcript on AGY.
     ///
-    /// Two things are dropped from every carrier, deliberately:
+    /// Two things are dropped from every carrier:
     ///
     /// - **Thinking.** Reasoning blocks are signed by the model that produced
-    ///   them and validated on the way back in, so replaying another model's
-    ///   thinking is the one part guaranteed to be rejected rather than merely
-    ///   lossy. [`Role::Thinking`] exists so this projection can drop it.
-    /// - **Ids.** Nothing Jod-side crosses the seam, for the same reason
-    ///   [`PortableMessage`] carries none.
+    ///   them and validated on the way in, so another model's is guaranteed to
+    ///   be rejected. [`Role::Thinking`] exists so this can drop it.
+    /// - **Ids.** Nothing Jod-side crosses the seam, as [`PortableMessage`]
+    ///   carries none.
     ///
     /// Produces the payload only. Spawning is [`crate::runner`]'s job.
     pub fn handoff(&self, conversation_id: &str, to: HarnessKind) -> Result<Handoff> {
@@ -1357,48 +1325,33 @@ impl Store {
     /// Move a thread to another harness: compact what it has said into one
     /// summary, and open a *new* conversation on the target seeded with it.
     ///
-    /// [`Store::handoff`] answers "what would this transcript look like to that
-    /// program". This is the verb on top of it — the one `/harness` in a UI
-    /// should call — and the difference is that this one writes. Before it, the
-    /// only thing switching harness could do was throw the conversation away:
-    /// fresh resume, no session, no model. The context was right there in the
-    /// graph and simply went unused.
+    /// The writing verb on top of [`Store::handoff`] — what `/harness` should
+    /// call. Before it, switching harness could only throw the conversation
+    /// away, leaving context sitting unused in the graph.
     ///
     /// A *new* conversation rather than a mutated row, because the old one is
-    /// still resumable on its own harness and its `session_id` still names a
-    /// live transcript there. Rewriting `harness` in place would leave that
-    /// session id pointing at a program that has never heard of it.
+    /// still resumable on its own harness. Rewriting `harness` in place would
+    /// leave its `session_id` pointing at a program that never heard of it.
     ///
     /// # Why the caller supplies the summary
     ///
-    /// Jod has no model client and never will — see [`crate::mcp`]. So there is
-    /// no honest way for this function to *write* a summary; the only thing it
-    /// can do is refuse to invent one. The text has to come from somewhere that
-    /// has a model: a harness run asked to summarise the thread, or whatever a
-    /// caller already holds. [`Store::compact`] is fed exactly this way for the
-    /// same reason, and this reuses it rather than inventing a second path.
+    /// Jod has no model client, so it cannot write one and must refuse to
+    /// invent one. The text comes from a harness run asked to summarise, as
+    /// [`Store::compact`] is fed for the same reason.
     ///
-    /// A thread with live messages and an empty summary is therefore an error,
-    /// not a silent truncation. Compacting a whole thread into nothing is how
-    /// you lose a conversation.
+    /// A thread with live messages and an empty summary is an error, not a
+    /// silent truncation.
     ///
     /// # What is lost
     ///
-    /// Three things, and [`HarnessSwitch`] reports all of them rather than
-    /// letting a screen claim the move was free:
+    /// [`HarnessSwitch`] reports all three rather than letting a screen claim
+    /// the move was free: **the transcript**, replaced by the summary;
+    /// **thinking**, always, since signed reasoning cannot be replayed; and
+    /// **structure**, when the target is AGY.
     ///
-    /// - **The transcript**, replaced by the summary — [`HarnessSwitch::compaction`]
-    ///   carries the before/after character counts.
-    /// - **Thinking**, always: reasoning blocks are signed by the model that
-    ///   produced them, so another model's cannot be replayed. Dropped by
-    ///   [`Store::handoff`] before it ever reaches a carrier.
-    /// - **Structure**, when the target is AGY —
-    ///   [`HarnessSwitch::is_lossy`].
-    ///
-    /// The compaction is authorised at a loss fraction of `1.0`, which is the
-    /// deliberate continue-as-new [`Store::compact_with_limit`] documents. A
-    /// guard against a runaway automatic pass is not a guard against a person
-    /// asking for exactly this.
+    /// Compaction is authorised at a loss fraction of `1.0` — the deliberate
+    /// continue-as-new [`Store::compact_with_limit`] documents. A guard against
+    /// a runaway automatic pass is not a guard against a person asking for it.
     pub fn switch_harness(
         &self,
         conversation_id: &str,
@@ -1582,24 +1535,18 @@ impl Store {
     /// The prior context as text, for a caller that can only put it in a
     /// prompt.
     ///
-    /// [`Store::handoff`] gives each harness the best carrier it has, and two of
-    /// the three are structured. **Jod cannot currently deliver either of them.**
-    /// [`Handoff::StreamJson`] needs the harness started with
-    /// `--input-format stream-json`, and [`crate::runner`] does not start Claude
-    /// Code that way; [`Handoff::Import`] needs somebody to run
-    /// `opencode import`, and nothing does. Until a launch path exists for them,
-    /// the only carrier that actually *arrives* is the prompt one — so a caller
-    /// wiring a real handoff today needs this rather than a carrier it cannot
-    /// use.
+    /// Two of [`Store::handoff`]'s three carriers are structured, and **Jod
+    /// cannot currently deliver either**: [`Handoff::StreamJson`] needs
+    /// `--input-format stream-json`, which [`crate::runner`] does not pass, and
+    /// [`Handoff::Import`] needs an `opencode import` nothing runs. So the
+    /// prompt carrier is the only one that arrives.
     ///
     /// Deliberately the AGY rendering for every target, framing included: the
-    /// text says the block is a record of prior work and not instructions, which
-    /// matters more, not less, when the receiving harness is one that would have
-    /// accepted structure. Empty when the conversation has nothing live.
+    /// text says the block is a record of prior work rather than instructions,
+    /// which matters more when the receiver would have accepted structure.
     ///
-    /// Delete this the day the runner can stream a transcript in. It is a
-    /// statement about what Jod can deliver, not about what the harnesses
-    /// accept.
+    /// Delete this the day the runner can stream a transcript in. It states
+    /// what Jod can deliver, not what the harnesses accept.
     pub fn handoff_text(&self, conversation_id: &str) -> Result<String> {
         match self.handoff(conversation_id, HarnessKind::Agy)? {
             Handoff::PromptPrefix { text } => Ok(text),
@@ -1834,12 +1781,9 @@ fn insert_message(
 /// Two things in this query are load-bearing.
 ///
 /// `CROSS JOIN` rather than `JOIN` pins the join order. A recursive CTE carries
-/// no statistics, so the planner guesses, and `Store::neighbourhood` documents
-/// what that guess cost when it was measured: the outer table became the one
-/// with the loose predicate, the frontier got scanned inside it, and a 2-hop
-/// walk went from 14 ms to 903 ms. Same schema, same indexes, 64x. The shape
-/// here is the same — a frontier of one row that should drive a primary-key
-/// probe into `messages` — so it needs the same pin.
+/// no statistics, so the planner guesses — measured at 64x in
+/// `Store::neighbourhood`, where a 2-hop walk went from 14 ms to 903 ms. The
+/// shape here is the same, so it needs the same pin.
 ///
 /// `UNION` rather than `UNION ALL` terminates without a visited table. Parent
 /// ids are always smaller than their children, so a cycle cannot occur through

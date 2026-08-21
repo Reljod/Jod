@@ -120,7 +120,7 @@ pub enum Action {
     /// no instruction. Distinct from [`Action::Orchestrate`], which hands over a
     /// single instruction from wherever you already are and leaves you there.
     EnterMain,
-    /// Stop an agent and close its tmux session.
+    /// Stop an agent and close its session.
     Stop(String),
     /// Run a command this repository offers, in the spelling its harness takes.
     ///
@@ -153,7 +153,7 @@ pub enum Action {
     Watch(String),
     /// Arm or disarm a run's heartbeat — see [`command::Slash::Heartbeat`].
     Heartbeat { id: String, on: bool },
-    /// Say how to attach to an agent's tmux session.
+    /// Say what to run to follow an agent from another terminal.
     Attach(String),
     /// Put a task on the watched team's board.
     AddTask(String),
@@ -3888,8 +3888,8 @@ fn on_fleet_key(app: &mut App, key: KeyEvent) -> Option<Action> {
             let (id, running, status) =
                 (agent.id.clone(), agent.is_running(), agent.status.clone());
             if !running {
-                // Killing a finished run only reclaims its tmux session, which
-                // is not what "s" looks like it does. Say so instead.
+                // Signalling a finished run's process group does nothing, which
+                // is not what `s` looks like it does. Say so instead.
                 app.push(Entry::Notice(format!(
                     "{} is already {status} — nothing to stop",
                     short(&id)
@@ -7981,8 +7981,6 @@ mod tests {
         );
     }
 
-    /// Killing a finished run only reclaims its tmux session, which is not what
-    /// the key looks like it does.
     #[test]
     fn s_on_a_finished_agent_explains_itself_instead() {
         let mut app = panel_with_agents();

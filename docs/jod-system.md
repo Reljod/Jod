@@ -329,8 +329,8 @@ work is what opening this list means, and the chat is one `k` away.
 
 It is the widest screen in the program, because it is the only one that is both
 a list of runs and a handle on the conversation graph behind them. `s r d a` act
-on the run under the cursor — stop, resume, delegate, and the `tmux attach`
-line. `c b u U g f t` act on its thread: list conversations, open the branches
+on the run under the cursor — stop, resume, delegate, and the `jod watch` line
+for following it from another terminal. `c b u U g f t` act on its thread: list conversations, open the branches
 of one, undo and redo, go to a numbered branch, fork it, retry the run. `T`
 opens that work's agent-to-agent traffic, which is the only way to answer what a
 group of agents are saying to each other rather than merely watching them spend

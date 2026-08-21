@@ -60,7 +60,7 @@ enum Command {
         prompt: Option<String>,
         #[arg(short = 'H', long, value_enum, default_value_t = HarnessArg::Claude)]
         harness: HarnessArg,
-        /// Name for this agent, shown in listings and the tmux session.
+        /// Name for this agent, shown in listings.
         #[arg(short, long)]
         name: Option<String>,
         /// Working directory for the agent.

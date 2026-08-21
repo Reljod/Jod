@@ -171,9 +171,9 @@ pub const REPLY_PROTOCOL: &str = "To answer any of the messages above, call \
 
 /// Decide whether a member should be woken, and with what.
 ///
-/// Separated from the spawning on purpose: *when to wake* is the part with all
-/// the judgement in it, and keeping it pure means it can be tested without a
-/// tmux server, a harness binary, or a running agent.
+/// Separated from the spawning on purpose: *when to wake* is the part with the
+/// judgement in it, and keeping it pure means it can be tested without a
+/// supervisor, a harness binary, or a running agent.
 ///
 /// Returns `None` — deliberately, in each case — when:
 ///
@@ -1207,22 +1207,19 @@ impl Store {
 
     /// Put the person on this scope's roster.
     ///
-    /// The human is the one participant who is definitely present, and until
-    /// this existed an agent that answered a question it had been asked was
-    /// told `\`reljod\` is not a member of this team` and its reply was
-    /// recorded undeliverable. Observed in a real run: mail went *to* the
-    /// agents and could not come back.
+    /// The human is the one participant definitely present, and without this an
+    /// agent answering a question it had been asked was told ``reljod` is not a
+    /// member of this team` and its reply recorded undeliverable. Observed in a
+    /// real run: mail went *to* the agents and could not come back.
     ///
-    /// A real row rather than a special case in the send path, and the choice
-    /// matters. `post` already refuses a recipient who is not a member, and
-    /// [`Store::roster`] already lists members — so a row makes the person
-    /// addressable and visible through the code that is already there, with no
-    /// second notion of who is here. The alternative would have been a branch
-    /// in both, and a third in anything that asks the same question later.
+    /// **A real row rather than a special case in the send path.**
+    /// [`Store::post`] already refuses a non-member and [`Store::roster`]
+    /// already lists members, so a row makes the person addressable through
+    /// code that exists, with no second notion of who is here. The alternative
+    /// is a branch in both, and a third in whatever asks next.
     ///
-    /// What the row deliberately is not: something that can be woken. It holds
-    /// no session and no run, and every delivery path asks [`is_human`] before
-    /// it considers waking anybody.
+    /// What the row is not: something that can be woken. It holds no session
+    /// and no run, and every delivery path asks [`is_human`] first.
     ///
     /// Idempotent, and it never overwrites a session or a run onto the person.
     pub fn ensure_human_member(&self, scope: Scope, team: &str) -> Result<()> {
@@ -1270,11 +1267,8 @@ impl Store {
     /// roster with the person on it and nothing else, so `send_message` to
     /// `main` was written down as undeliverable.
     ///
-    /// A real row rather than a special case in the send path, for the same
-    /// reason the person gets one: [`Store::post`] already refuses a recipient
-    /// who is not a member and [`Store::roster`] already lists members, so a row
-    /// makes the chat addressable and visible through code that is already
-    /// there.
+    /// A real row rather than a special case in the send path, for the reason
+    /// [`Store::ensure_human_member`] gives.
     ///
     /// Returns `false` when there is no main chat yet — a work opened from the
     /// command line before anybody has ever typed into `jod main` — because a
