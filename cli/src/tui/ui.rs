@@ -1176,8 +1176,13 @@ fn draw_mention(f: &mut Frame, app: &App, input: Rect) {
             .collect()
     };
 
+    // Two rows of headroom, not one. A popup ending at `input.y - 1` puts its
+    // bottom border exactly on the transcript's, and `Clear` only covers the
+    // popup's own width — so the two borders join into one line of doubled
+    // corners, `└──└──popup──┘──┘`, which reads as a half-drawn box rather
+    // than as a panel floating over the transcript.
     let h = ((rows.len() + 2) as u16)
-        .min(input.y.saturating_sub(1))
+        .min(input.y.saturating_sub(2))
         .max(3);
     // Anchored on the `@` itself, then pulled back inside the box: a popup that
     // hangs off the right edge of the terminal is drawn over nothing. The
@@ -1197,7 +1202,7 @@ fn draw_mention(f: &mut Frame, app: &App, input: Rect) {
     );
     let panel = Rect {
         x,
-        y: input.y.saturating_sub(h),
+        y: input.y.saturating_sub(h + 1),
         width: w,
         height: h,
     };
@@ -2774,12 +2779,15 @@ fn draw_completions(f: &mut Frame, app: &App, input: Rect) {
     // sentence that stops never reads as a sentence that ended.
     let hint_room = (w as usize).saturating_sub(widest_name + 6);
     // Only as tall as it needs to be, and never taller than the space above.
+    // The headroom `draw_mention` documents, for the same reason. This popup
+    // is usually as wide as the transcript, so the seam is hidden — but it is
+    // the same seam, and two placements that only differ by accident drift.
     let h = ((suggestions.len() + 2) as u16)
-        .min(input.y.saturating_sub(1))
+        .min(input.y.saturating_sub(2))
         .max(3);
     let panel = Rect {
         x: input.x,
-        y: input.y.saturating_sub(h),
+        y: input.y.saturating_sub(h + 1),
         width: w,
         height: h,
     };
@@ -12008,6 +12016,65 @@ mod tests {
     /// and `★ jod` — with nothing anywhere saying a filter was on, so the
     /// screen read as a fleet that had lost them.
     #[test]
+    /// A popup floats over the transcript; it does not merge with its border.
+    ///
+    /// Both popups were anchored at `input.y - h`, which puts their bottom
+    /// border on exactly the row the transcript's bottom border occupies. The
+    /// `Clear` covers only the popup's own width, so the two joined into one
+    /// line of doubled corners —
+    ///
+    /// ```text
+    /// └───────────└──────── @ · ⏎ inserts ────────┘─────────────┘
+    /// ```
+    ///
+    /// — which reads as a half-drawn box. The `/` palette hid it by usually
+    /// being as wide as the transcript; the `@` picker is 56 columns and showed
+    /// it every time.
+    #[test]
+    fn a_popup_leaves_the_transcripts_border_whole() {
+        let mut a = app();
+        // A transcript with something in it, or the console draws the splash
+        // instead of a transcript box — and the border this is about is the
+        // transcript's. An empty console passes whatever the anchor does.
+        for n in 0..6 {
+            a.push(Entry::Notice(format!("something happened, number {n}")));
+        }
+        a.cwd = std::env::current_dir().expect("a working directory");
+        a.roots = vec![jod_core::roots::Root {
+            id: 1,
+            conversation_id: "c".into(),
+            path: a.cwd.clone(),
+            writable: false,
+            position: 0,
+            origin: jod_core::roots::Origin::Human,
+            added_at_ms: 0,
+        }];
+        a.input = "look at @".into();
+        a.cursor = a.input.len();
+        a.open_mention(a.input.len() - 1);
+
+        let frame = rendered(&a, 150, 30);
+        let lines: Vec<&str> = frame.lines().collect();
+        let composer = lines
+            .iter()
+            .position(|l| l.contains("┌ you"))
+            .expect("the composer box is drawn");
+        let border = lines[composer - 1];
+
+        assert!(
+            border.matches('└').count() <= 1 && border.matches('┘').count() <= 1,
+            "the row above the composer is one unbroken border, not two boxes \
+             sharing a line:\n{border}\n\n{frame}"
+        );
+        assert!(
+            !border.contains('┌') && !border.contains('┐'),
+            "and nothing opens a box on it:\n{border}"
+        );
+        // Still on screen: the point is where it sits, not that it was hidden
+        // in order to pass this.
+        assert!(frame.contains("⏎ inserts"), "the picker is drawn:\n{frame}");
+    }
+
     fn a_filtered_tree_says_it_is_filtered() {
         let mut a = two_works();
         a.reconcile();
