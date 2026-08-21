@@ -580,6 +580,33 @@ pub fn catalogue() -> Vec<Tool> {
             ),
         },
         Tool {
+            name: "project_untrack",
+            description:
+                "Stop tracking a repository. Use it when Reljod says he is done with a project, \
+                 or that it should not be on the fleet any more.\n\n\
+                 It comes off the fleet along with its manager and every work under it, off the \
+                 catalog `project_list` returns, and out of inference — so an instruction that \
+                 names no project can no longer land there. Nothing is deleted: the works, the \
+                 sessions and the transcripts all stay, an agent still running in there still \
+                 shows up in `list_agents`, and naming the project outright still finds it. \
+                 `jod project restore <name>` puts the whole thing back.\n\n\
+                 This is a repository leaving Reljod's working set, which is his call and not \
+                 yours. Ask before calling it unless he has just said so.",
+            // Delegate, on the same line as `project_switch` and `project_add`
+            // and for the reason given there: it changes what a *later*
+            // instruction resolves to. An untracked project is not inferrable,
+            // so the quiet failure is the next vague sentence about that
+            // repository landing somewhere else entirely.
+            needs: ToolAccess::Delegate,
+            schema: obj(
+                // Only the name. A `reason` field would have nowhere to go —
+                // this answers the model, not Reljod, and the catalog has no
+                // column for why an entry left it.
+                json!({ "project": text("The project's name, or any name he calls it.") }),
+                &["project"],
+            ),
+        },
+        Tool {
             name: "claim_worktree",
             description:
                 "Claim somewhere to write, before you change anything. Your roots start \
@@ -1040,6 +1067,7 @@ impl Server {
             "project_current" => self.project_current(),
             "project_switch" => self.project_switch(args),
             "project_add" => self.project_add(args),
+            "project_untrack" => self.project_untrack(args),
             "ask_manager" => self.ask_manager(args).await,
             "claim_worktree" => self.claim_worktree(args),
             "release_worktree" => self.release_worktree(args),
@@ -2206,41 +2234,13 @@ impl Server {
         };
         let store = self.store()?;
 
-        let found = store
-            .projects_by_name(&wanted)
-            .map_err(|e| ToolError::Refused(format!("could not search the catalog: {e}")))?;
-        let project = match found.as_slice() {
-            [only] => only.clone(),
-            [] => {
-                let known: Vec<String> = store
-                    .projects(false)
-                    .map_err(|e| ToolError::Refused(format!("could not read the catalog: {e}")))?
-                    .into_iter()
-                    .map(|p| p.name)
-                    .collect();
-                return Err(ToolError::Refused(format!(
-                    "no project called `{wanted}`, so there is no manager to ask. The catalog \
-                     has: {}. Use project_add if this is somewhere new.",
-                    if known.is_empty() {
-                        "(nothing yet)".to_string()
-                    } else {
-                        known.join(", ")
-                    }
-                )));
-            }
-            several => {
-                let candidates = several
-                    .iter()
-                    .map(|p| format!("{} ({})", p.name, p.path.display()))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                return Err(ToolError::Refused(format!(
-                    "`{wanted}` is the name of {} projects — {candidates}. Each has its own \
-                     manager, so ask Reljod which one he means rather than picking.",
-                    several.len()
-                )));
-            }
-        };
+        let project = named_project(
+            store,
+            &wanted,
+            ", so there is no manager to ask",
+            "Each has its own manager, so ask Reljod which one he means rather \
+             than picking.",
+        )?;
 
         if !self.jod.supervisor_available() {
             return Err(ToolError::Refused(
@@ -2285,49 +2285,13 @@ impl Server {
         let reason = opt_str(args, "reason").unwrap_or_default();
         let store = self.store()?;
 
-        let found = store
-            .projects_by_name(&wanted)
-            .map_err(|e| ToolError::Refused(format!("could not search the catalog: {e}")))?;
-        let project = match found.as_slice() {
-            [only] => only.clone(),
-            [] => {
-                // Listing what does exist, because the usual cause is a name
-                // that is nearly right, and a bare "not found" makes the model
-                // guess again rather than pick from what is there.
-                let known: Vec<String> = store
-                    .projects(false)
-                    .map_err(|e| ToolError::Refused(format!("could not read the catalog: {e}")))?
-                    .into_iter()
-                    .map(|p| p.name)
-                    .collect();
-                return Err(ToolError::Refused(format!(
-                    "no project called `{wanted}`. The catalog has: {}. \
-                     Use project_add if this is somewhere new.",
-                    if known.is_empty() {
-                        "(nothing yet)".to_string()
-                    } else {
-                        known.join(", ")
-                    }
-                )));
-            }
-            // Two projects answer to this name, so the tool cannot know which
-            // one was meant. Refusing with both paths is what lets the model
-            // ask Reljod or name one exactly; picking would point the
-            // conversation at a repository nobody chose.
-            several => {
-                let candidates = several
-                    .iter()
-                    .map(|p| format!("{} ({})", p.name, p.path.display()))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                return Err(ToolError::Refused(format!(
-                    "`{wanted}` is the name of {} projects — {candidates}. \
-                     Ask Reljod which one he means, or call project_switch \
-                     again with the exact name of one of them.",
-                    several.len()
-                )));
-            }
-        };
+        let project = named_project(
+            store,
+            &wanted,
+            "",
+            "Ask Reljod which one he means, or call project_switch again with \
+             the exact name of one of them.",
+        )?;
 
         // A switch away from an inferred project is Reljod's correction
         // arriving late, so the guess it replaces is marked as taken back.
@@ -2384,6 +2348,54 @@ impl Server {
             "name": project.name,
             "path": project.path.to_string_lossy(),
             "also_called": project.spoken_forms(),
+        }))
+    }
+
+    /// Take a repository out of the working set.
+    ///
+    /// The state it moves to is `archived`, which already meant exactly this
+    /// everywhere except the fleet — see [`crate::projects::State`] and the
+    /// filter in [`crate::tree::Store::forest_of`], which is the half that had
+    /// to be written for the verb to be true.
+    ///
+    /// Untracking something already untracked answers rather than refusing.
+    /// The state after the call is the state that was asked for, so a refusal
+    /// would report a failure where nothing failed and invite a retry that
+    /// cannot go better. It says which of the two happened, because a model
+    /// relaying "done" for a no-op is how Reljod ends up believing he untracked
+    /// the other checkout of the same name.
+    fn project_untrack(&self, args: &Value) -> Result<String, ToolError> {
+        let wanted = required_str(args, "project")?;
+        let store = self.store()?;
+        let project = named_project(
+            store,
+            &wanted,
+            ", so there is nothing to untrack",
+            "Untracking either would take a repository off the fleet, so ask \
+             Reljod which one he means rather than picking.",
+        )?;
+
+        let already = project.state == crate::projects::State::Archived;
+        if !already {
+            store
+                .set_project_state(&project.id, crate::projects::State::Archived)
+                .map_err(|e| ToolError::Refused(format!("could not untrack the project: {e}")))?;
+        }
+
+        as_json(&json!({
+            "name": project.name,
+            "path": project.path.to_string_lossy(),
+            "already_untracked": already,
+            "said": if already {
+                format!("{} was already untracked — nothing changed", project.name)
+            } else {
+                format!(
+                    "{} is no longer tracked. It is off the fleet with its manager and its \
+                     works, out of the catalog, and will not be inferred. Nothing was \
+                     deleted — `jod project restore {}` puts it back.",
+                    project.name, project.name
+                )
+            },
         }))
     }
 
@@ -3468,6 +3480,71 @@ fn as_json<T: Serialize>(value: &T) -> Result<String, ToolError> {
         .map_err(|e| ToolError::Refused(format!("could not render the answer: {e}")))
 }
 
+/// The one project a `project` argument names, or a refusal that says what to
+/// do instead.
+///
+/// Three tools take a repository by name — `project_switch`, `ask_manager` and
+/// `project_untrack` — and every one of them has to answer the same two
+/// awkward cases. A name that matches nothing gets the catalog back, because
+/// the usual cause is a name that is nearly right and a bare "not found" makes
+/// the model guess again rather than pick from what is there. A name that
+/// matches two checkouts is refused with both paths, because picking would act
+/// on a repository nobody chose, and which one was meant is a question only
+/// Reljod can answer.
+///
+/// The consequence of getting it wrong differs per tool, so each one supplies
+/// its own last sentence: `absent_because` finishes "no project called `x`",
+/// and `ambiguous_advice` finishes the list of candidates. Everything before
+/// those is the same sentence three times over, which is the reason this is one
+/// function.
+///
+/// It searches archived entries too, by way of [`Store::projects_by_name`].
+/// Naming a project outright is an instruction, not a guess, and refusing to
+/// find the one just named because it is untracked would be obtuse — it is also
+/// the only way `project_untrack` could report "already untracked" rather than
+/// "no such project".
+fn named_project(
+    store: &Store,
+    wanted: &str,
+    absent_because: &str,
+    ambiguous_advice: &str,
+) -> Result<crate::projects::Project, ToolError> {
+    let found = store
+        .projects_by_name(wanted)
+        .map_err(|e| ToolError::Refused(format!("could not search the catalog: {e}")))?;
+    match found.as_slice() {
+        [only] => Ok(only.clone()),
+        [] => {
+            let known: Vec<String> = store
+                .projects(false)
+                .map_err(|e| ToolError::Refused(format!("could not read the catalog: {e}")))?
+                .into_iter()
+                .map(|p| p.name)
+                .collect();
+            Err(ToolError::Refused(format!(
+                "no project called `{wanted}`{absent_because}. The catalog has: {}. \
+                 Use project_add if this is somewhere new.",
+                if known.is_empty() {
+                    "(nothing yet)".to_string()
+                } else {
+                    known.join(", ")
+                }
+            )))
+        }
+        several => {
+            let candidates = several
+                .iter()
+                .map(|p| format!("{} ({})", p.name, p.path.display()))
+                .collect::<Vec<_>>()
+                .join(", ");
+            Err(ToolError::Refused(format!(
+                "`{wanted}` is the name of {} projects — {candidates}. {ambiguous_advice}",
+                several.len()
+            )))
+        }
+    }
+}
+
 fn required_str(args: &Value, key: &str) -> Result<String, ToolError> {
     match args.get(key) {
         Some(Value::String(s)) => Ok(s.clone()),
@@ -3918,7 +3995,7 @@ mod tests {
     // Writing to a peer spends a turn of theirs, which is money now — the same
     // line `delegate` sits on. What stops it running away is not the access
     // level but the bounds in `team`: depth, budget, and a deadline on a wait.
-    const DELEGATE_TOOLS: [&str; 13] = [
+    const DELEGATE_TOOLS: [&str; 14] = [
         "delegate",
         // Resuming a manager starts an agent, so it sits on the same line as
         // every other tool that does. It is main's usual verb, and main runs at
@@ -3943,6 +4020,10 @@ mod tests {
         // sends the next thing Reljod says to the wrong repository.
         "project_switch",
         "project_add",
+        // The third of the same kind, and the one with the largest quiet
+        // consequence: an untracked project is not inferrable, so the next
+        // vague sentence about that repository resolves somewhere else.
+        "project_untrack",
     ];
     const ORCHESTRATE_TOOLS: [&str; 5] = [
         "schedule_create",
@@ -4229,6 +4310,135 @@ mod tests {
             stale[0]["name"], "ephemeral-proj",
             "the entry was removed rather than flagged: {stale}"
         );
+    }
+
+    /// Untracking is the whole loop: the tool changes the state, and the two
+    /// surfaces that decide what Reljod sees agree that it did.
+    ///
+    /// Asserted through `project_list` and `forest` rather than by reading the
+    /// column, because the column was already right before any of this — what
+    /// was missing was a caller that could set it and a fleet that honoured it.
+    #[tokio::test]
+    async fn untracking_a_project_takes_it_off_the_catalog_and_off_the_fleet() {
+        let dir = std::env::temp_dir().join(format!("jod-mcp-untrack-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let store = Arc::new(Store::in_memory().unwrap());
+        let project = store
+            .add_project(crate::projects::NewProject::at(&dir).named("tetris"))
+            .unwrap();
+        store
+            .create_work_in("port the parser", Some(&project.id))
+            .unwrap();
+        let server = Server::new(Jod::with_store(store.clone())).with_access(ToolAccess::Delegate);
+
+        assert_eq!(store.projects(false).unwrap().len(), 1);
+        assert!(!store.forest().unwrap().is_empty(), "nothing to untrack yet");
+
+        let answer = call(&server, "project_untrack", json!({ "project": "tetris" })).await;
+        assert!(!is_error_result(&answer), "{answer}");
+        let said: Value = serde_json::from_str(&said(&answer)).unwrap();
+        assert_eq!(said["already_untracked"], json!(false), "{said}");
+        assert!(
+            said["said"].as_str().unwrap().contains("jod project restore"),
+            "the answer does not say how to put it back: {said}"
+        );
+
+        assert!(
+            store.projects(false).unwrap().is_empty(),
+            "still in the catalog after being untracked"
+        );
+        assert!(
+            store.forest().unwrap().is_empty(),
+            "still on the fleet after being untracked: {:?}",
+            store.forest().unwrap()
+        );
+        assert_eq!(
+            store.projects_by_name("tetris").unwrap().len(),
+            1,
+            "the row was deleted rather than untracked — naming it must still find it"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Untracking something already untracked is an answer, not a refusal. The
+    /// state after the call is the state that was asked for, and reporting a
+    /// failure would invite a retry that cannot go better — but it has to say
+    /// which of the two happened, or a model relaying "done" for a no-op is how
+    /// the wrong checkout ends up believed untracked.
+    #[tokio::test]
+    async fn untracking_an_already_untracked_project_says_so_rather_than_refusing() {
+        let dir = std::env::temp_dir().join(format!("jod-mcp-untrack-twice-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let store = Arc::new(Store::in_memory().unwrap());
+        store
+            .add_project(crate::projects::NewProject::at(&dir).named("tetris"))
+            .unwrap();
+        let server = Server::new(Jod::with_store(store.clone())).with_access(ToolAccess::Delegate);
+
+        call(&server, "project_untrack", json!({ "project": "tetris" })).await;
+        let answer = call(&server, "project_untrack", json!({ "project": "tetris" })).await;
+
+        assert!(!is_error_result(&answer), "a no-op was reported as a failure: {answer}");
+        let said: Value = serde_json::from_str(&said(&answer)).unwrap();
+        assert_eq!(said["already_untracked"], json!(true), "{said}");
+        assert!(
+            said["said"].as_str().unwrap().contains("already"),
+            "the answer reads as a fresh untrack: {said}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Two checkouts answering to one name is the case where picking is worse
+    /// than refusing: untracking either takes a repository off the fleet, and
+    /// which one was meant is a question only Reljod can answer.
+    #[tokio::test]
+    async fn untracking_a_name_two_projects_answer_to_refuses_and_names_both() {
+        let root = std::env::temp_dir().join(format!("jod-mcp-untrack-ambig-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (one, two) = (root.join("a/proj"), root.join("b/proj"));
+        std::fs::create_dir_all(&one).unwrap();
+        std::fs::create_dir_all(&two).unwrap();
+
+        let store = Arc::new(Store::in_memory().unwrap());
+        store.add_project(crate::projects::NewProject::at(&one).named("proj")).unwrap();
+        store.add_project(crate::projects::NewProject::at(&two).named("proj")).unwrap();
+        let server = Server::new(Jod::with_store(store.clone())).with_access(ToolAccess::Delegate);
+
+        let answer = call(&server, "project_untrack", json!({ "project": "proj" })).await;
+        assert!(is_error_result(&answer), "one of the two was picked: {answer}");
+        let text = said(&answer);
+        assert!(text.contains(&one.display().to_string()), "{text}");
+        assert!(text.contains(&two.display().to_string()), "{text}");
+        assert_eq!(
+            store.projects(false).unwrap().len(),
+            2,
+            "a refused call still untracked something"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A read-only agent cannot take a repository off Reljod's fleet. The tool
+    /// sits on `delegate` with `project_switch` and `project_add`, and the gate
+    /// is the dispatcher rather than the advertised list.
+    #[tokio::test]
+    async fn untracking_is_refused_below_delegate() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let server = Server::new(Jod::with_store(store)).with_access(ToolAccess::ReadOnly);
+
+        // A forbidden call is a protocol error rather than a tool result, so
+        // there is no `content` to read — the refusal is the whole answer.
+        let answer = call(&server, "project_untrack", json!({ "project": "tetris" })).await;
+        let refusal = answer["error"]["message"]
+            .as_str()
+            .unwrap_or_else(|| panic!("a read-only agent untracked a project: {answer}"));
+        assert!(refusal.contains("delegate"), "{refusal}");
     }
 
     /// **Regression: `open_work` opened everything in `accept_edits`.**

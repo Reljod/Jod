@@ -320,9 +320,25 @@ const FLEET: &[Key] = &[
     // spine's and means the same thing on every screen.
     k("→←", "in / out"),
     k("space", "expand / collapse"),
-    k("E", "expand all"),
-    k("C", "collapse all"),
+    // One row for the pair, the way `uU` and `→←` above are. Both keys still
+    // fire and both are still advertised; what it buys is the row that `x`
+    // needed. The `?` overlay promises to be complete at 100×30 and was exactly
+    // at that limit — see the note on `uU` — so a new verb here had to come
+    // from somewhere, and expand-all with its inverse is the same trade that
+    // note describes: a row given up without a verb given up.
+    k("EC", "expand / collapse all"),
     k("z", "closed works"),
+    // Last of the tree's own verbs, and the only one on this screen that
+    // changes the catalog rather than the shape of what is drawn from it.
+    //
+    // `x` because it is what the letter already means on memory, schedules,
+    // goals and hooks — take this row off this list. Those four go through the
+    // shared `x` and its "this cannot be undone" confirmation; this one does
+    // not, and deliberately: untracking deletes nothing and `jod project
+    // restore` puts the whole subtree back, so the notice naming that command
+    // is the friction that fits. A confirmation titled "cannot be undone" in
+    // front of something that can is how people learn to dismiss them.
+    k("x", "untrack project"),
     k("/", "filter"),
 ];
 
