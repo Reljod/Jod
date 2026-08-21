@@ -162,7 +162,8 @@ enum Command {
     /// down and stops it separately, all the way to the bottom.
     ///
     /// The main chat is the exception and stops alone, because it hands work
-    /// out rather than owning any.
+    /// out rather than owning any. Continuing a stopped agent starts its
+    /// workers again.
     Kill { id: String },
     /// Counts and total spend across all agents.
     Report {
@@ -1287,20 +1288,18 @@ enum GoalCommand {
     },
     /// Stop starting new iterations of this goal.
     ///
-    /// It does not stop the iteration in flight: that run carries on working
-    /// and being billed until it finishes. If you paused to stop it spending,
-    /// stop the run too with `jod kill <RUN>`. Its cost is still added to the
-    /// goal.
+    /// It does not stop the iteration already in flight: that run is billed
+    /// until it finishes, so stop it too with `jod kill <RUN>`. Its cost still
+    /// lands on the goal.
     Pause {
         /// The goal to pause, as `jod goal ls` names it.
         name: String,
     },
     /// Put this goal back on its schedule.
     ///
-    /// The first tick after this starts the next iteration. An iteration left
-    /// running when the goal was paused has already been settled. Resuming also
-    /// clears the no-progress counter, so a goal close to being called stalled
-    /// gets a full allowance again.
+    /// The first tick starts the next iteration; one left running when the goal
+    /// was paused has already been settled. Resuming clears the no-progress
+    /// counter.
     Resume {
         /// The goal to resume, as `jod goal ls` names it.
         name: String,
@@ -1309,9 +1308,8 @@ enum GoalCommand {
     Run { name: String },
     /// Forget a goal, so nothing starts another iteration of it.
     ///
-    /// It does not stop the iteration in flight, for the reason pausing does
-    /// not. What the goal learned is not deleted either — its facts stay in
-    /// memory and `jod recall` still finds them.
+    /// It does not stop the iteration already in flight, and what the goal
+    /// learned stays in memory — `jod recall` still finds it.
     Rm {
         /// The goal to remove, as `jod goal ls` names it.
         name: String,
