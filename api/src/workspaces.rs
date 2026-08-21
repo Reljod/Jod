@@ -552,13 +552,34 @@ pub struct FleetQuery {
     pub filter: Option<String>,
 }
 
-/// The fleet tree: every work, its sessions and their runs, already flattened.
+/// One answer from `/v1/fleet`: the rows, and the run each one acts on.
 ///
-/// **The same forest the TUI draws.** `Store::forest_of` is one function in
-/// `jod-core`, and this route hands its output over HTTP unchanged — no second
-/// flatten, no API-side notion of what a work is. That is the whole point: the
-/// fleet screen was terminal-only not because a browser could not draw a tree,
-/// but because the tree was never on the wire.
+/// An object rather than the bare array this route used to return, because the
+/// fold that produced the rows also decided something a row can no longer say
+/// for itself. Run rows are gone, so "open this agent" and "stop this agent"
+/// have no run node to reach for; `run_of` is where that went.
+#[derive(Debug, serde::Serialize)]
+pub struct FleetPage {
+    pub nodes: Vec<jod_core::tree::Node>,
+    /// The run each row's verbs act on, keyed `"<kind_tag>:<id>"` — the same
+    /// key a client already builds to hold a selection across a rebuild.
+    /// Absent for a row that has never run anything.
+    pub run_of: std::collections::BTreeMap<String, String>,
+}
+
+/// The fleet tree: the repositories, and the agents inside them.
+///
+/// **The same tree the TUI draws.** `Store::fleet` is one function in
+/// `jod-core` — it reads the forest and folds it — and this route hands the
+/// result over HTTP unchanged. No second flatten, no second fold, no API-side
+/// notion of what a work is. That is the whole point: the fleet screen was
+/// terminal-only not because a browser could not draw a tree, but because the
+/// tree was never on the wire.
+///
+/// What arrives is **two levels**: a repository, and its manager and agents.
+/// The forest underneath is still five deep, and the fold is what stands
+/// between them — see `jod_core::tree::condense` for what it keeps and where
+/// everything it drops is still reachable.
 ///
 /// It is a **query against the store**, so it says the same thing whichever
 /// process asks and whoever started the runs. Unlike `/v1/agents` — which is
@@ -571,9 +592,16 @@ pub async fn fleet(
 ) -> ApiResult<impl IntoResponse> {
     identity.require(Scope::Read)?;
     let Some(store) = store_of(&state) else {
-        return Ok(Json(Vec::new()));
+        return Ok(Json(FleetPage {
+            nodes: Vec::new(),
+            run_of: Default::default(),
+        }));
     };
-    store.forest_of(filter_of(q.filter.as_deref())).map(Json).map_err(internal)
+    let (folded, _) = store.fleet(filter_of(q.filter.as_deref())).map_err(internal)?;
+    Ok(Json(FleetPage {
+        run_of: folded.run_by_key(),
+        nodes: folded.nodes,
+    }))
 }
 
 /// Read a filter off the query string, defaulting rather than refusing.

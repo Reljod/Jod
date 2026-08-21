@@ -45,6 +45,28 @@ export interface WorkDoomed {
 }
 
 /**
+ * One read of the fleet: the rows, and the run each one stands for.
+ *
+ * Mirrors `FleetPage` in `api/src/workspaces.rs`. It is an object rather than a
+ * bare list of rows because the fold that produced them also decided something
+ * a row can no longer say for itself — with no run rows left, "open this agent"
+ * has nothing to reach for, and this is where that went.
+ */
+export interface Fleet {
+  nodes: FleetNode[];
+  /**
+   * The run a row's verbs act on, keyed by [`fleetKey`] — the live one if there
+   * is one, otherwise the last one it took. Absent for a row that has never run
+   * anything, which is a real state and not a missing answer: a manager nobody
+   * has given an instruction to has no run to open.
+   */
+  runOf: ReadonlyMap<string, string>;
+}
+
+/** An empty fleet, for the drivers and the states that have nothing to show. */
+export const NO_FLEET: Fleet = { nodes: [], runOf: new Map() };
+
+/**
  * The answer to a work delete, whichever way it went.
  *
  * `deleted` is the only thing that says which. A caller must never infer it
@@ -121,16 +143,21 @@ export interface Transport {
   harnesses(): Promise<HarnessInfo[]>;
   history(limit: number): Promise<StoredRun[]>;
   /**
-   * The fleet tree — works, their sessions, and the runs under those.
+   * The fleet tree — the repositories, and the agents inside them.
    *
    * A **query**, not a subscription, and deliberately so: the server builds it
    * from the database rather than from the answering process's memory, which is
    * why it shows runs this daemon never launched. `/v1/agents` cannot say that.
    *
-   * Returns `[]` rather than throwing when a driver has no fleet to offer, so a
-   * panel renders "no work yet" instead of an error.
+   * Two levels, because `jod_core::tree::condense` folds it before it goes on
+   * the wire — the same fold `jod tui` draws, done once in Rust rather than
+   * again here. Works and runs are not rows. A run is still reachable: the
+   * conversation that owns it answers for it through [`Fleet.runOf`].
+   *
+   * Returns an empty fleet rather than throwing when a driver has none to
+   * offer, so a panel renders "no work yet" instead of an error.
    */
-  fleet(): Promise<FleetNode[]>;
+  fleet(): Promise<Fleet>;
   /**
    * Recent conversations, newest first.
    *

@@ -23,8 +23,11 @@
 //! What you want from the fleet is who is working on this repository right now,
 //! and that question was three expansions deep.
 //!
-//! So [`condense`] folds the middle away before anything is drawn. See its
-//! documentation for what is kept and what is reachable elsewhere.
+//! So [`jod_core::tree::condense`] folds the middle away before anything is
+//! drawn, and it does that in core rather than here because the browser draws
+//! the same two levels — see its documentation for what is kept and what is
+//! reachable elsewhere. What is left in this module is the part that genuinely
+//! needs a screen: which rows are on it, where the cursor is, and the guides.
 //!
 //! ## Expansion is a default plus three exceptions
 //!
@@ -39,21 +42,32 @@
 //! fleet opens as the list of repositories, and one keystroke opens the one you
 //! want.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use jod_core::tree::{Node, NodeId, NodeKind};
 
-/// The pinned main chat, as a row the tree's cursor can sit on.
+/// The pinned main chat, as a row the tree's cursor can sit on — **when core
+/// has not already given it one**.
 ///
-/// A sentinel rather than a node, because there is no node to be had: the
-/// forest is works and what hangs off them — core's query is
+/// A sentinel rather than a node, because for a long time there was no node to
+/// be had: the forest was works and what hangs off them — core's query is
 /// `WHERE c.work_id IS NOT NULL` — and the main chat belongs to no work. The
 /// flat list has pinned it above the agents since it existed; without the same
 /// row here, the fleet becomes a screen you can walk into and not back out of
 /// the moment a single work exists, because the tree replaces the list whole.
 ///
-/// Its own `kind_tag`, so it can collide with nothing: [`NodeId`] compares on
-/// the tag as well as the id, and `main` is not a kind core mints.
+/// `forest_of` emits a real [`NodeKind::Main`] row now, carrying the
+/// conversation id, its runs and its liveness — none of which a sentinel has.
+/// So this became the fallback rather than the answer, and
+/// `App::forest_holds_main` is what chooses: the real row when there is one,
+/// this when there is not. Two rows for one chat would be worse than the
+/// problem the sentinel was added to solve.
+///
+/// It keeps its own `kind_tag`, and it is no longer true that nothing else
+/// mints one — `NodeId::main` uses the same tag with a conversation id where
+/// this uses `MAIN_ROW`. They do not collide, because [`NodeId`] compares on
+/// the id as well as the tag and no conversation is called `main`, and they
+/// never appear together anyway.
 pub fn main_id() -> NodeId {
     NodeId {
         kind_tag: "main",
@@ -88,195 +102,6 @@ pub fn loose_id(run: &str) -> NodeId {
 /// Is this row one of the runs drawn below the tree?
 pub fn is_loose(id: &NodeId) -> bool {
     id.kind_tag == "loose"
-}
-
-/// The forest folded to a roster, and the works its rows came out of.
-pub struct Condensed {
-    /// The rows the fleet draws: projects, and the agents inside them.
-    pub nodes: Vec<Node>,
-    /// Which work each remaining row belongs to.
-    ///
-    /// The work rows are gone from the tree, so the keys that act on a work —
-    /// `T`, which opens its message bus — can no longer climb to one. This is
-    /// how they still find it, and it is built from the forest *before* the
-    /// fold, where the answer is still written down.
-    pub works: HashMap<NodeId, String>,
-    /// The run each agent's row answers for — the one still going if there is
-    /// one, otherwise the last one it took.
-    ///
-    /// `s`, `a` and `t` act on a process, and the row that held one was the run
-    /// row this fold removes. The agent's own row inherits the verbs, which is
-    /// also the reading that matches the screen: the row says an agent is
-    /// running, so stopping it should stop that.
-    pub run_of: HashMap<NodeId, String>,
-    /// The ids of the runs the fold swallowed.
-    ///
-    /// The pane below the tree holds the runs the tree cannot show, and it used
-    /// to work that out by looking for a run's node. There are no run rows any
-    /// more, so without this list every run in the fleet would read as loose and
-    /// the pane would become a second copy of the whole flat list.
-    pub runs: HashSet<String>,
-}
-
-/// Fold the forest to the two levels the fleet reads as a roster.
-///
-/// A project keeps its manager and gains every session under every one of its
-/// works, all at the same level, in the order the works came back. Works and
-/// runs are dropped, and a session that spawned children sits beside them
-/// rather than above them — the fleet answers "who is on this repository",
-/// which is one list, not a hierarchy.
-///
-/// Nothing on it becomes unreachable. A run is inside the session that started
-/// it, so `⏎` on the session and the transcript has it; the work's bus is still
-/// one `T` away through [`Condensed::works`]; and what a run was *saying* — the
-/// stall, the status of the last one — is carried up onto the session's own
-/// row, because a wedged agent that says so only on a row three levels down is
-/// a wedged agent nobody sees.
-///
-/// Two headings survive the fold:
-///
-/// - A **work with no project**, which becomes a top-level row of its own.
-///   Those are the old ones with a null `project_id`; promoting their sessions
-///   to the top level would leave them loose on the screen with nothing saying
-///   what they belong to.
-/// - A **closed** work, which stays a heading under its project. `z` exists to
-///   show the archives, and flattening them in would leave a project holding a
-///   pile of finished agents with nothing marking which are over.
-pub fn condense(nodes: &[Node], closed: &HashSet<NodeId>) -> Condensed {
-    let mut out: Vec<Node> = Vec::new();
-    let mut works: HashMap<NodeId, String> = HashMap::new();
-    let mut runs: HashSet<String> = HashSet::new();
-    let mut run_of: HashMap<NodeId, String> = HashMap::new();
-    // The sessions whose chosen run is still going, so a finished run that
-    // comes after one does not take the row's verbs off a live process.
-    let mut live: HashSet<NodeId> = HashSet::new();
-    // Ids already emitted. `show_closed` asks core twice and the second forest
-    // repeats every project and manager row of the first, so without this a
-    // repository with one live work and one closed one is drawn twice.
-    let mut seen: HashSet<NodeId> = HashSet::new();
-    let mut project: Option<NodeId> = None;
-    // Where the sessions being read now hang, and how deep that row is.
-    let mut under: Option<(NodeId, usize)> = None;
-    let mut work: Option<String> = None;
-    // The rows a run's news has to reach: its session, by index into `out`.
-    let mut session_at: HashMap<NodeId, usize> = HashMap::new();
-
-    for node in nodes {
-        match node.kind {
-            NodeKind::Project => {
-                project = Some(node.id.clone());
-                under = Some((node.id.clone(), 0));
-                work = None;
-                match out.iter_mut().find(|row| row.id == node.id) {
-                    // The same project from the archive query. Its counts are
-                    // over the *closed* works, so they add to the live ones
-                    // rather than replacing them.
-                    Some(row) => {
-                        row.cards += node.cards;
-                        row.blocked += node.blocked;
-                        row.running |= node.running;
-                    }
-                    None => {
-                        seen.insert(node.id.clone());
-                        out.push(Node {
-                            parent: None,
-                            depth: 0,
-                            ..node.clone()
-                        });
-                    }
-                }
-            }
-            NodeKind::Manager => {
-                if seen.insert(node.id.clone()) {
-                    out.push(Node {
-                        parent: project.clone(),
-                        depth: 1,
-                        ..node.clone()
-                    });
-                }
-            }
-            NodeKind::Work => {
-                work = Some(node.id.id.clone());
-                let heading = project.is_none() || closed.contains(&node.id);
-                if !heading {
-                    under = project.clone().map(|id| (id, 0));
-                    continue;
-                }
-                let depth = usize::from(project.is_some());
-                under = Some((node.id.clone(), depth));
-                if seen.insert(node.id.clone()) {
-                    works.insert(node.id.clone(), node.id.id.clone());
-                    out.push(Node {
-                        parent: project.clone(),
-                        depth,
-                        ..node.clone()
-                    });
-                }
-            }
-            NodeKind::Session => {
-                let Some((parent, depth)) = under.clone() else {
-                    continue;
-                };
-                if !seen.insert(node.id.clone()) {
-                    continue;
-                }
-                if let Some(work) = &work {
-                    works.insert(node.id.clone(), work.clone());
-                }
-                session_at.insert(node.id.clone(), out.len());
-                out.push(Node {
-                    parent: Some(parent),
-                    depth: depth + 1,
-                    ..node.clone()
-                });
-            }
-            // Dropped as a row, and read as news about the session above it.
-            // A stall is the whole reason the fleet is worth looking at, and it
-            // is a fact core only ever writes on a run.
-            NodeKind::Run => {
-                runs.insert(node.id.id.clone());
-                let Some(parent) = node.parent.as_ref().and_then(|id| session_at.get(id)) else {
-                    continue;
-                };
-                let row = &mut out[*parent];
-                // The longest silence, not the newest: an agent with one wedged
-                // run and one chatty one is wedged.
-                if let Some(silent_for) = node.stalled_for_ms {
-                    row.stalled_for_ms = Some(row.stalled_for_ms.unwrap_or(0).max(silent_for));
-                }
-                // The newest run's ending, so a session whose last run failed
-                // wears the failure. Runs arrive oldest first, so the last one
-                // written wins. Only while the session itself is idle — a
-                // session with something running is running, whatever the run
-                // before it did.
-                if !row.running && !node.running {
-                    row.status = node.status.clone();
-                }
-                let session = row.id.clone();
-                if node.running {
-                    run_of.insert(session.clone(), node.id.id.clone());
-                    live.insert(session);
-                } else if !live.contains(&session) {
-                    run_of.insert(session, node.id.id.clone());
-                }
-            }
-        }
-    }
-
-    // The shape that is left, rather than the one core described: a session
-    // that had runs under it is now a leaf, and a project whose only work was
-    // dropped has children it did not have before.
-    for at in 0..out.len() {
-        out[at].has_children = out
-            .get(at + 1)
-            .is_some_and(|next| next.depth > out[at].depth);
-    }
-    Condensed {
-        nodes: out,
-        works,
-        run_of,
-        runs,
-    }
 }
 
 /// Everything the fleet tree remembers between frames.
@@ -655,6 +480,10 @@ pub fn marker(node: &Node, expanded: bool) -> &'static str {
 /// colour.
 pub fn kind_glyph(kind: NodeKind) -> &'static str {
     match kind {
+        // Jod's own row, and the only glyph that is not a block or a diamond.
+        // He sits above the repositories rather than being one of them, so the
+        // gutter says that before any colour does.
+        NodeKind::Main => "★",
         // Solid, and the widest of the set: a project is the outermost group,
         // and the gutter is what says so on a screen with no colour.
         NodeKind::Project => "▪",
@@ -670,6 +499,7 @@ pub fn kind_glyph(kind: NodeKind) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use jod_core::tree::condense;
 
     fn node(id: NodeId, parent: Option<NodeId>, kind: NodeKind, depth: usize, label: &str) -> Node {
         Node {

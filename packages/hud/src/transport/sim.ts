@@ -14,7 +14,9 @@ import type {
   StoredRun,
   Usage,
 } from "../types";
-import type { Transport, TransportHandlers, WorkDeletion, WorkDoomed } from "./index";
+import { fleetKey } from "../types";
+import { NO_FLEET } from "./index";
+import type { Fleet, Transport, TransportHandlers, WorkDeletion, WorkDoomed } from "./index";
 import { makeRng } from "../util/rng";
 
 /**
@@ -543,41 +545,100 @@ export class SimTransport implements Transport {
    * which is the one grouping its blueprints actually express, and it exercises
    * the same nesting the panel has to draw. It is not pretending to be the real
    * shape, only to be a shape with more than one level in it.
+   *
+   * Two levels, the shape `jod_core::tree::condense` folds a real forest to: a
+   * repository, and the agents in it. The work rows and the run rows a real
+   * forest has in between are not drawn there either, so a simulation with
+   * them would be exercising a shape the panel never receives.
+   *
+   * The chain of command above them is drawn too — Jod, and each project's
+   * manager — because those rows are most of what the fleet panel now has to
+   * render and this driver is what somebody sees with no orchestrator running.
+   * The managers hold no runs: a simulated manager has genuinely never been
+   * asked anything, and inventing one would hand the panel an id that opens an
+   * empty trajectory.
    */
-  async fleet(): Promise<FleetNode[]> {
+  async fleet(): Promise<Fleet> {
     const byCwd = new Map<string, AgentSummary[]>();
     for (const a of this.agents.values()) {
       const bucket = byCwd.get(a.cwd);
       if (bucket) bucket.push(a);
       else byCwd.set(a.cwd, [a]);
     }
+    // Before the staggered blueprints land there is nothing to head — and a
+    // lone `jod` row over an empty tree reads as a fleet that failed to load
+    // rather than one that has not started.
+    if (byCwd.size === 0) return NO_FLEET;
 
     const nodes: FleetNode[] = [];
+    const runOf = new Map<string, string>();
+    nodes.push({
+      id: { kind_tag: "main", id: "sim-main" },
+      parent: null,
+      kind: "main",
+      depth: 0,
+      label: "jod",
+      summary: "simulated",
+      running: false,
+      status: null,
+      stalled_for_ms: null,
+      cards: 0,
+      blocked: 0,
+      colour: "cyan",
+      has_children: false,
+    });
+
     for (const [cwd, agents] of byCwd) {
-      const work: FleetNodeId = { kind_tag: "work", id: cwd };
-      const running = agents.filter((a) => a.status === "running").length;
+      const name = cwd.split("/").filter(Boolean).pop() ?? cwd;
+      const project: FleetNodeId = { kind_tag: "project", id: cwd };
+      const running = agents.some((a) => a.status === "running");
+
       nodes.push({
-        id: work,
+        id: project,
         parent: null,
-        kind: "work",
+        kind: "project",
         depth: 0,
-        label: cwd.split("/").filter(Boolean).pop() ?? cwd,
-        summary: `${agents.length} run(s)`,
-        running: running > 0,
+        label: name,
+        summary: cwd,
+        running,
+        status: null,
+        stalled_for_ms: null,
         cards: 0,
         blocked: 0,
         colour: "cyan",
         has_children: true,
       });
+      nodes.push({
+        id: { kind_tag: "manager", id: `${cwd}#manager` },
+        parent: project,
+        kind: "manager",
+        depth: 1,
+        label: "manager",
+        summary: "",
+        running: false,
+        status: null,
+        stalled_for_ms: null,
+        cards: 0,
+        blocked: 0,
+        colour: "cyan",
+        has_children: false,
+      });
+      // The agents, beside the manager rather than under a work. One run each
+      // here, so the row and the run it answers for are the same thing — a real
+      // session may hold several, and `condense` picks the live one.
       for (const a of agents) {
+        const id: FleetNodeId = { kind_tag: "session", id: a.id };
+        runOf.set(fleetKey(id), a.id);
         nodes.push({
-          id: { kind_tag: "run", id: a.id },
-          parent: work,
-          kind: "run",
+          id,
+          parent: project,
+          kind: "session",
           depth: 1,
           label: a.name,
           summary: a.last_message ?? "",
           running: a.status === "running",
+          status: a.status,
+          stalled_for_ms: null,
           cards: 0,
           blocked: 0,
           colour: "cyan",
@@ -585,7 +646,7 @@ export class SimTransport implements Transport {
         });
       }
     }
-    return nodes;
+    return { nodes, runOf };
   }
 
   /**

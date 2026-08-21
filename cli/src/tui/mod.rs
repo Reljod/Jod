@@ -4667,6 +4667,9 @@ fn on_tree_key(app: &mut App, key: KeyEvent, viewport: usize) -> Option<Option<A
                 jod_core::tree::NodeKind::Manager => {
                     handled(Some(Action::EnterManager(node.id.id)))
                 }
+                // Jod's row *is* the pinned row, so it makes the movement the
+                // pinned row already makes rather than binding by id.
+                jod_core::tree::NodeKind::Main => handled(Some(Action::EnterMain)),
                 jod_core::tree::NodeKind::Work | jod_core::tree::NodeKind::Project => {
                     let closed = app.closed_works.clone();
                     app.tree.toggle(&closed);
@@ -11951,7 +11954,7 @@ mod tests {
     /// would be pressing keys on a tree nobody can see.
     fn on_the_tree(selected: jod_core::tree::NodeId) -> App {
         let mut app = app_on(HarnessKind::ClaudeCode);
-        let folded = fleet::condense(&forest_of_one_work(), &std::collections::HashSet::new());
+        let folded = jod_core::tree::condense(&forest_of_one_work(), &std::collections::HashSet::new());
         app.forest = folded.nodes;
         app.work_of = folded.works;
         app.tree_runs = folded.runs;
@@ -12173,7 +12176,7 @@ mod tests {
             (NodeId::session("s1"), "a session", idle),
         ] {
             let mut app = app_on(HarnessKind::ClaudeCode);
-            let folded = fleet::condense(&forest, &std::collections::HashSet::new());
+            let folded = jod_core::tree::condense(&forest, &std::collections::HashSet::new());
             app.forest = folded.nodes;
             app.work_of = folded.works;
             app.tree_runs = folded.runs;

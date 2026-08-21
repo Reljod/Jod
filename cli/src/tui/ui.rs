@@ -3765,6 +3765,7 @@ fn draw_tree_detail(f: &mut Frame, app: &App, area: Rect) {
             lines.push(detail(
                 "kind",
                 match node.kind {
+                    jod_core::tree::NodeKind::Main => "jod",
                     jod_core::tree::NodeKind::Project => "project",
                     jod_core::tree::NodeKind::Manager => "manager",
                     jod_core::tree::NodeKind::Work => "work",
@@ -11398,7 +11399,7 @@ mod tests {
         }
 
         let mut a = app();
-        let folded = crate::tui::fleet::condense(
+        let folded = jod_core::tree::condense(
             &store.forest().expect("a forest"),
             &std::collections::HashSet::new(),
         );

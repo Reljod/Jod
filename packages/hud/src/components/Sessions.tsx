@@ -1,7 +1,7 @@
 import { useMemo } from "react";
 import type { AgentNode, World } from "../state/world";
 import { statusRank } from "../state/world";
-import { harnessCode, totalTokens } from "../types";
+import { TIER_LABEL, harnessCode, totalTokens, type Tier } from "../types";
 import { shortPath } from "../render/renderer";
 import { useSelection } from "../hooks/useSelection";
 import { SelectionBar } from "./SelectionBar";
@@ -9,6 +9,17 @@ import { SelectionBar } from "./SelectionBar";
 interface Props {
   world: World;
   selectedId: string | null;
+  /**
+   * Which rank each run belongs to, by run id, from the fleet tree.
+   *
+   * This panel lists the daemon's roster, and neither a roster entry nor an
+   * `AgentEnvelope` carries a conversation, a work or a project — a run's rank
+   * is not on that wire at all. The fleet is where the answer lives, so it is
+   * borrowed rather than guessed from the run's name. A run the tree has not
+   * caught up with yet simply has no entry and draws untiered, which is the
+   * right answer for the half-second before the next query lands.
+   */
+  tiers: ReadonlyMap<string, Tier>;
   /** Select a session *and* open it — one click, both. */
   onOpen(id: string): void;
   onDelete(ids: string[]): void;
@@ -47,7 +58,14 @@ interface Props {
  * click from reaching the row. A single click target doing both would mean
  * every attempt to read a session is one mis-aim away from arming a delete.
  */
-export function Sessions({ world, selectedId, onOpen, onDelete, canWrite }: Props) {
+export function Sessions({
+  world,
+  selectedId,
+  tiers,
+  onOpen,
+  onDelete,
+  canWrite,
+}: Props) {
   const nodes = useMemo(() => {
     const list: AgentNode[] = [];
     for (const id of world.order) {
@@ -92,12 +110,14 @@ export function Sessions({ world, selectedId, onOpen, onDelete, canWrite }: Prop
           const s = n.summary;
           const live = s.status === "running";
           const picked = selection.has(s.id);
+          const tier = tiers.get(s.id);
           return (
             <div
               key={s.id}
               className={[
                 "session-row",
                 `st-${s.status}`,
+                tier ? `t-${tier}` : "",
                 selectedId === s.id ? "sel" : "",
                 picked ? "picked" : "",
               ].join(" ")}
@@ -122,6 +142,7 @@ export function Sessions({ world, selectedId, onOpen, onDelete, canWrite }: Prop
                   )}
                 </span>
                 <span className="sr-bot">
+                  {tier && <span className={`rank t-${tier}`}>{TIER_LABEL[tier]}</span>}
                   <span className="cwd">{shortPath(s.cwd)}</span>
                   <span className="hxq">{harnessCode(s.harness)}</span>
                 </span>

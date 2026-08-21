@@ -876,6 +876,61 @@ button { cursor: pointer; background: none; border: none; }
 .fleet-row.k-work { color: var(--text); letter-spacing: 0.04em; }
 .fleet-row.k-session { font-style: italic; }
 
+/* Jod and a project are the two outermost headings, and they are the only rows
+   that are never a piece of work in progress. Both read as headings; only Jod
+   takes a rank colour, because a project is the repository being argued about
+   rather than one of the parties arguing. */
+/* Not uppercased: these carry repository names, and `agy-adapter` shouted back
+   as `AGY-ADAPTER` is harder to match against the checkout it stands for. The
+   heading reads as one from its weight, its rank badge — or lack of one — and
+   its place at the top of the tree. */
+.fleet-row.k-main,
+.fleet-row.k-project {
+  color: var(--text);
+  letter-spacing: 0.08em;
+}
+.fleet-row.k-manager { letter-spacing: 0.06em; }
+
+/* ── rank ───────────────────────────────────────────────────────────────────
+
+   The one place in the HUD where hue means rank instead of harness, because
+   this is the one panel that draws the chain of command. Jod hands an
+   instruction to a manager; the manager puts an engineer on it. Three hues,
+   picked so the tiers separate at a glance in the order they delegate —
+   amber at the top, violet in the middle, cyan doing the work.
+
+   The canvas keeps hue = harness. Two meanings for colour would be one too
+   many if they shared a surface, and they do not: the tactical view draws
+   agents, these two panels draw the hierarchy above them. */
+.fleet-row.t-jod .fleet-label,
+.session-row.t-jod .sr-name { color: var(--amber); }
+.fleet-row.t-manager .fleet-label,
+.session-row.t-manager .sr-name { color: var(--violet); }
+
+.fleet-row .dot.t-jod { background: var(--amber); }
+.fleet-row .dot.t-manager { background: var(--violet); }
+.fleet-row .dot.t-engineer { background: var(--cyan); }
+
+/* The word, for anyone who cannot separate the hues — colour is never the only
+   carrier of a fact here. Held to the same 8px as the other row chrome. */
+.rank {
+  flex: none;
+  font-size: 8px;
+  letter-spacing: 0.1em;
+  padding: 1px 3px;
+  border: 1px solid currentColor;
+  border-radius: 2px;
+  line-height: 1;
+  opacity: 0.75;
+}
+.rank.t-jod { color: var(--amber); }
+.rank.t-manager { color: var(--violet); }
+.rank.t-engineer { color: var(--cyan); }
+
+/* Holds the checkbox column on a row that has no checkbox, so the tree does not
+   step sideways under its headings. → `Fleet.deletable` */
+.pick-gap { flex: none; width: 22px; }
+
 .fleet-row .twisty {
   width: 12px;
   flex: none;
@@ -903,7 +958,30 @@ button { cursor: pointer; background: none; border: none; }
 .fleet-row .dot { width: 5px; height: 5px; flex: none; background: var(--steel); }
 .fleet-row .dot.k-work { background: var(--cyan); }
 .fleet-row .dot.k-session { background: var(--mint); border-radius: 50%; }
-.fleet-row.live .dot { background: var(--cyan); box-shadow: 0 0 6px var(--cyan); }
+.fleet-row .dot.k-main,
+.fleet-row .dot.k-manager { border-radius: 50%; }
+
+/* A live row pulses in its own rank's colour, and keeps it.
+   `currentColor` would be wrong here: the dot sits inside a row whose text is
+   dimmed until it is live, so the mark that says "this is going" would be the
+   faintest thing on it. The rank rules above set the hue; this animates it and
+   halos it, so the tier survives the one state that most needs reading. */
+.fleet-row.live .dot { box-shadow: 0 0 6px currentColor; animation: blip 2.4s infinite; }
+.fleet-row.live .dot.t-jod { background: var(--amber); box-shadow: 0 0 7px var(--amber); }
+.fleet-row.live .dot.t-manager { background: var(--violet); box-shadow: 0 0 7px var(--violet); }
+.fleet-row.live .dot.t-engineer { background: var(--cyan); box-shadow: 0 0 7px var(--cyan); }
+
+/* A stall overrides liveness, exactly as it does in the TUI's row and in
+   `tree::render`. A wedged run is still `running` — that is the whole problem —
+   so drawing the reassuring state next to the alarming one lets the eye take
+   the wrong one. The pulse stops and the colour changes. */
+.fleet-row.stalled .dot,
+.fleet-row.stalled.live .dot {
+  background: var(--amber);
+  box-shadow: none;
+  animation: none;
+}
+.badge.st-stalled { color: var(--amber); }
 
 .fleet-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 

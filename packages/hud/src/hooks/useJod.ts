@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { WorldStore } from "../state/world";
-import type { Transport, TransportFactory, WorkDeletion } from "../transport";
+import type { Fleet, Transport, TransportFactory, WorkDeletion } from "../transport";
 import { createTransport, modeFromLocation } from "../transport/factory";
-import type { AgentSummary, FleetNode, HarnessInfo, SpawnRequest } from "../types";
+import { NO_FLEET } from "../transport";
+import type { AgentSummary, HarnessInfo, SpawnRequest } from "../types";
 
 /** How often the DOM panels re-render. The canvas is independent, at 60fps. */
 const PANEL_HZ = 10;
@@ -18,14 +19,29 @@ const PANEL_HZ = 10;
  */
 const FLEET_POLL_MS = 4000;
 
+/**
+ * How long a lifecycle event waits before it re-queries the tree.
+ *
+ * A run starting or finishing reshapes the forest, and waiting up to a full
+ * poll to redraw it is what made the fleet look asleep while three agents were
+ * working. Debounced because a burst — a manager finishing and the four
+ * engineers it stopped finishing with it — is one reshape, not five, and the
+ * same 400ms the transport already uses to reconcile the roster.
+ */
+const FLEET_SETTLE_MS = 400;
+
 export interface JodApi {
   store: WorldStore;
   /** Bumped whenever the world changed; panels read through this. */
   revision: number;
   transportLabel: string;
   harnesses: HarnessInfo[];
-  /** The fleet tree — works, sessions, runs. Empty until the first query. */
-  fleet: FleetNode[];
+  /**
+   * The fleet tree — the repositories and the agents in them, already folded
+   * by the server, plus the run each row stands for. Empty until the first
+   * query. → [`Fleet`]
+   */
+  fleet: Fleet;
   /**
    * The live driver, or null until it has been chosen.
    *
@@ -113,8 +129,11 @@ export function useJod(makeTransport?: TransportFactory): JodApi {
   const [transport, setTransport] = useState<Transport | null>(null);
   const [transportLabel, setTransportLabel] = useState("…");
   const [harnesses, setHarnesses] = useState<HarnessInfo[]>([]);
-  const [fleet, setFleet] = useState<FleetNode[]>([]);
+  const [fleet, setFleet] = useState<Fleet>(NO_FLEET);
   const [lastError, setLastError] = useState<string | null>(null);
+  // Held in a ref rather than state: it is cleared and re-armed from inside the
+  // envelope handler, which must not re-render for every event on the stream.
+  const settleRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Pinned on first render. A shell that passes an inline arrow would otherwise
   // change this every paint, and the effect below would tear the connection
@@ -130,12 +149,30 @@ export function useJod(makeTransport?: TransportFactory): JodApi {
    */
   const pullFleet = useCallback(async () => {
     try {
-      const nodes = await transportRef.current?.fleet();
-      if (nodes) setFleet(nodes);
+      const next = await transportRef.current?.fleet();
+      if (next) setFleet(next);
     } catch {
       /* the tree keeps its last good shape; the next tick retries */
     }
   }, []);
+
+  /**
+   * Re-read the tree shortly, because something on the stream reshaped it.
+   *
+   * Deliberately a nudge to the existing query rather than a second way of
+   * knowing the tree. The forest is assembled from works, conversations and
+   * runs in the database and changes for reasons this HUD's stream never
+   * mentions, so the poll below stays as the floor — see its comment. What an
+   * envelope adds is *promptness* for the subset it does describe, which is the
+   * subset somebody is usually watching for.
+   */
+  const settleFleet = useCallback(() => {
+    if (settleRef.current) return;
+    settleRef.current = setTimeout(() => {
+      settleRef.current = null;
+      void pullFleet();
+    }, FLEET_SETTLE_MS);
+  }, [pullFleet]);
 
   useEffect(() => {
     let disposed = false;
@@ -151,7 +188,17 @@ export function useJod(makeTransport?: TransportFactory): JodApi {
       setTransportLabel(transport.label);
 
       transport.start({
-        onEnvelope: (env) => store.ingest(env),
+        onEnvelope: (env) => {
+          store.ingest(env);
+          // The three kinds that change the *shape* of the tree rather than
+          // what a row says. A `started` is a run appearing under a session
+          // that may itself be new; a `finished` retires it. Text events are
+          // deliberately not in this list — a manager narrating for four
+          // minutes must not re-query the forest on every sentence.
+          if (env.kind === "started" || env.kind === "finished" || env.kind === "error") {
+            settleFleet();
+          }
+        },
         onReport: (report) => store.setReport(report),
         onLink: (link) => store.setLink(link),
       });
@@ -169,8 +216,10 @@ export function useJod(makeTransport?: TransportFactory): JodApi {
       active?.stop();
       transportRef.current = null;
       setTransport(null);
+      if (settleRef.current) clearTimeout(settleRef.current);
+      settleRef.current = null;
     };
-  }, [store]);
+  }, [store, settleFleet]);
 
   // Publish to the panels on a fixed cadence rather than per event.
   useEffect(() => {
