@@ -1640,6 +1640,22 @@ impl Store {
                       WHERE parent_conversation_id = ?1 AND id <> ?2",
                     params![conversation_id, new_id],
                 )?;
+                // An answer still owed follows the chat it is owed to.
+                //
+                // `Ticker::tick_deliveries` reads `pending_deliveries` and
+                // injects into the conversation named there. A card answered
+                // just before a compaction was owed to the thread that has
+                // since been compacted away, so the reply would be injected
+                // into a conversation the console no longer shows — and Reljod
+                // would never see the answer to his own question.
+                //
+                // Queued rows only: a delivered one is a record of where it
+                // actually went, and moving it would make the ledger lie.
+                tx.execute(
+                    "UPDATE pending_deliveries SET conversation_id = ?2
+                      WHERE conversation_id = ?1 AND state = 'queued'",
+                    params![conversation_id, new_id],
+                )?;
                 // Every bus that has a `main` on its roster follows the pin.
                 //
                 // `Store::is_main_chat_member` decides whether mail addressed

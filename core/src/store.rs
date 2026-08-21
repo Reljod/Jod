@@ -1646,6 +1646,37 @@ pub(crate) const MIGRATIONS: &[(&str, &str)] = &[
        AND EXISTS (SELECT 1 FROM conversations WHERE COALESCE(pinned, 0) = 1);
     "#,
     ),
+    (
+    "0027_an_answer_still_owed_follows_the_main_chat",
+    r#"
+    -- The last of the four things left holding a stale conversation id when
+    -- main compacts, and the same walk as `0025` and `0026`.
+    --
+    -- `Ticker::tick_deliveries` injects into the conversation named on the row.
+    -- A card answered just before a compaction was owed to the thread that has
+    -- since been compacted away, so the reply lands in a conversation the
+    -- console no longer shows and Reljod never sees the answer to his own
+    -- question. It stays stranded: nothing retries it against a different
+    -- conversation.
+    --
+    -- Queued rows only. A delivered row records where the message actually
+    -- went, and rewriting it would make the ledger lie about history — which is
+    -- the one thing `pending_deliveries` exists to be honest about.
+    WITH RECURSIVE main_chain(id) AS (
+      SELECT id FROM conversations WHERE COALESCE(pinned, 0) = 1
+      UNION
+      SELECT c.forked_from FROM conversations c
+        JOIN main_chain m ON c.id = m.id
+       WHERE c.forked_from IS NOT NULL
+    )
+    UPDATE pending_deliveries
+       SET conversation_id = (SELECT id FROM conversations WHERE COALESCE(pinned, 0) = 1)
+     WHERE state = 'queued'
+       AND conversation_id IN (SELECT id FROM main_chain)
+       AND conversation_id <> (SELECT id FROM conversations WHERE COALESCE(pinned, 0) = 1)
+       AND EXISTS (SELECT 1 FROM conversations WHERE COALESCE(pinned, 0) = 1);
+    "#,
+    ),
 ];
 
 /// What one run belongs to, for the fleet views that group by it.
