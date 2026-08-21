@@ -2050,8 +2050,18 @@ fn draw_projects(f: &mut Frame, app: &App, area: Rect) -> PanelHits {
                 Span::styled(" ▸ ", fg(MUTED)),
                 Span::styled(cut(&c.name, inner.saturating_sub(3)), bold(GOOD)),
             ]),
-            None => Line::from(Span::styled(
+            // Two different emptinesses, and the box used to say the same
+            // sentence for both. Collapsed, this line is about the *current*
+            // project — but "nothing set — /project add" beside a fleet drawing
+            // four repositories reads as "you have no repositories", and its
+            // remedy tells you to add one you already have. Pressing Ctrl-P
+            // twice was enough to produce it.
+            None if app.projects.is_empty() => Line::from(Span::styled(
                 format!(" ▸ nothing set — {CATALOG_REMEDY}"),
+                fg(MUTED),
+            )),
+            None => Line::from(Span::styled(
+                format!(" ▸ none set · {} catalogued — Ctrl-P", app.projects.len()),
                 fg(MUTED),
             )),
         };
@@ -3739,6 +3749,14 @@ fn draw_tree(f: &mut Frame, app: &App, area: Rect) {
         } else {
             "  no works yet"
         }));
+    }
+    // The flat list has always drawn this and the tree never did — so once the
+    // fleet had a tree, which it now always does, a filter hid rows with
+    // nothing anywhere saying one was on. `★ jod` and whole projects vanished
+    // and the screen looked like a fleet that had lost them.
+    if let Some(line) = filter_line(app) {
+        items.push(ListItem::new(Line::from("")));
+        items.push(ListItem::new(line));
     }
 
     // Summed over the top-level rows, each of which already holds the blocked
@@ -7945,6 +7963,36 @@ mod tests {
         assert!(screen.contains("jod"), "{screen}");
     }
 
+    /// A collapsed catalog must not claim the catalog is empty.
+    ///
+    /// Collapsed, the box shows the *current* project — and with none set it
+    /// said "nothing set — /project add" beside a fleet drawing four
+    /// repositories, with a remedy telling you to add one you already have.
+    /// Two presses of `Ctrl-P` were enough to get there.
+    #[test]
+    fn a_collapsed_catalog_with_nothing_current_still_admits_it_has_projects() {
+        let mut a = with_catalog(&["alpha", "beta"], None);
+        a.projects_open = false;
+
+        let screen = rendered(&a, 140, 30);
+        assert!(
+            screen.contains("2 catalogued"),
+            "it says how many it has:\n{screen}"
+        );
+        assert!(
+            !screen.contains("nothing set"),
+            "and does not claim to have none:\n{screen}"
+        );
+
+        // A genuinely empty catalog keeps the sentence that fits it, remedy and
+        // all — that case is the one `/project add` is the answer to.
+        let mut empty = with_catalog(&[], None);
+        empty.projects_open = false;
+        let screen = rendered(&empty, 140, 30);
+        assert!(screen.contains("nothing set"), "{screen}");
+        assert!(screen.contains(CATALOG_REMEDY), "{screen}");
+    }
+
     /// Two checkouts whose directories share a name are two rows, and the
     /// panel has to say which is which.
     ///
@@ -11864,6 +11912,36 @@ mod tests {
                 "row {at} is `{label}`, and the ▸ must be on it, not above it:\n{frame}",
             );
         }
+    }
+
+    /// A filter on the fleet says so, on the tree as well as the flat list.
+    ///
+    /// The flat list has drawn this line since it had one; the tree never did.
+    /// Once the fleet always had a tree, filtering hid rows — whole projects,
+    /// and `★ jod` — with nothing anywhere saying a filter was on, so the
+    /// screen read as a fleet that had lost them.
+    #[test]
+    fn a_filtered_tree_says_it_is_filtered() {
+        let mut a = two_works();
+        a.reconcile();
+        assert!(a.has_tree(), "the case is the tree, not the flat list");
+
+        let unfiltered = rendered(&a, 150, 30);
+        assert!(
+            !unfiltered.contains("filter"),
+            "nothing is claimed when nothing is filtered:\n{unfiltered}"
+        );
+
+        a.here_mut().filter = Some("parser".into());
+        let frame = rendered(&a, 150, 30);
+        assert!(
+            frame.contains("/parser"),
+            "the typed filter is on screen:\n{frame}"
+        );
+        assert!(
+            frame.contains("match"),
+            "and how much it is hiding:\n{frame}"
+        );
     }
 
     /// The fleet says when nothing is marking stalls.

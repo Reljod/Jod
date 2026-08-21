@@ -918,6 +918,54 @@ impl Condensed {
 /// - A **closed** work, which stays a heading under its project. `z` exists to
 ///   show the archives, and flattening them in would leave a project holding a
 ///   pile of finished agents with nothing marking which are over.
+/// Put every row directly after the row it hangs from.
+///
+/// The tree is flattened by array order: the guides, the indent, and which rows
+/// a collapsed row hides are all read off position, not off `parent`. So a row
+/// whose parent is correct and whose *place* is not is drawn under whatever
+/// happened to come before it, and collapsing that row hides it.
+///
+/// [`Store::fleet`] is where this bites. It reads the live forest and then
+/// appends a second, closed one, so every closed work landed after the last
+/// live row on the screen — a repository's finished work drawn under an
+/// unrelated one, and hidden when that one was folded away.
+///
+/// Depth-first over the existing order, so within one parent the rows keep the
+/// order they already had; only rows that were in the wrong group move.
+///
+/// A row whose parent is not on screen becomes a root rather than disappearing,
+/// and anything the walk cannot place — which would mean a cycle, and should be
+/// impossible — leaves the original order untouched. Losing a row from the
+/// fleet is worse than drawing one in an odd place.
+fn in_tree_order(nodes: Vec<Node>) -> Vec<Node> {
+    let present: HashSet<NodeId> = nodes.iter().map(|n| n.id.clone()).collect();
+    let mut children: HashMap<Option<NodeId>, Vec<usize>> = HashMap::new();
+    for (at, node) in nodes.iter().enumerate() {
+        let key = node.parent.clone().filter(|p| present.contains(p));
+        children.entry(key).or_default().push(at);
+    }
+    let mut out: Vec<Node> = Vec::with_capacity(nodes.len());
+    let mut seen: HashSet<usize> = HashSet::new();
+    let mut stack: Vec<usize> = children.get(&None).cloned().unwrap_or_default();
+    stack.reverse();
+    while let Some(at) = stack.pop() {
+        if !seen.insert(at) {
+            continue;
+        }
+        out.push(nodes[at].clone());
+        if let Some(kids) = children.get(&Some(nodes[at].id.clone())) {
+            for kid in kids.iter().rev() {
+                stack.push(*kid);
+            }
+        }
+    }
+    if out.len() == nodes.len() {
+        out
+    } else {
+        nodes
+    }
+}
+
 pub fn condense(nodes: &[Node], closed: &HashSet<NodeId>) -> Condensed {
     let mut out: Vec<Node> = Vec::new();
     let mut works: HashMap<NodeId, String> = HashMap::new();
@@ -1067,6 +1115,12 @@ pub fn condense(nodes: &[Node], closed: &HashSet<NodeId>) -> Condensed {
         }
     }
 
+    // Every row into its own group before anything is read off position.
+    // `has_children` just below, and the guides and folding in the renderer,
+    // all ask "what comes next" rather than "what hangs from this" — so this
+    // has to happen first or they answer about the wrong rows.
+    let mut out = in_tree_order(out);
+
     // The shape that is left, rather than the one core described: a session
     // that had runs under it is now a leaf, and a project whose only work was
     // dropped has children it did not have before.
@@ -1193,6 +1247,109 @@ mod tests {
     #[test]
     fn an_empty_forest_has_no_rows() {
         assert!(store().forest().unwrap().is_empty());
+    }
+
+    /// A closed work belongs to its own repository, not to whatever row the
+    /// live pass happened to leave the cursor on.
+    ///
+    /// `fleet(All)` reads the live forest and then appends a second, closed
+    /// one, and `condense` walks the concatenation with running state — the
+    /// project it is inside, and the row sessions hang from. A loose work in
+    /// the first pass clears that state, so anything the second pass emitted
+    /// before its own project row inherited it.
+    #[test]
+    fn a_closed_work_is_drawn_under_its_own_project() {
+        use crate::projects::NewProject;
+
+        fn shape(nodes: &[Node]) -> Vec<(usize, &str)> {
+            nodes.iter().map(|n| (n.depth, n.label.as_str())).collect()
+        }
+
+        let s = store();
+        let base = format!("/tmp/jod-closed-parent-{}", std::process::id());
+        let dir = format!("{base}/alpha");
+        std::fs::create_dir_all(&dir).unwrap();
+        let project = s.add_project(NewProject::at(&dir)).unwrap();
+
+        // A closed work in the repository.
+        let done = s.create_work_in("ship the docs", Some(&project.id)).unwrap();
+        s.set_work_title(&done.id, "ship the docs").unwrap();
+        session(&s, &done.id, None, "writer");
+        s.close_work(&done.id).unwrap();
+
+        // A second repository, with live work in it as well as closed — the
+        // live pass therefore ends somewhere else entirely.
+        let other_dir = format!("{base}/beta");
+        std::fs::create_dir_all(&other_dir).unwrap();
+        let other = s.add_project(NewProject::at(&other_dir)).unwrap();
+        let live = s.create_work_in("make the parser faster", Some(&other.id)).unwrap();
+        s.set_work_title(&live.id, "make the parser faster").unwrap();
+        session(&s, &live.id, None, "engineer");
+        let done2 = s.create_work_in("archive the logs", Some(&other.id)).unwrap();
+        s.set_work_title(&done2.id, "archive the logs").unwrap();
+        session(&s, &done2.id, None, "keeper");
+        s.close_work(&done2.id).unwrap();
+
+        // And an open work belonging to no repository at all, which is the row
+        // the live pass ends on — `forest_of` emits loose works last.
+        let loose = s.create_work("tidy the dotfiles").unwrap();
+        s.set_work_title(&loose.id, "tidy the dotfiles").unwrap();
+        session(&s, &loose.id, None, "tidier");
+
+        let (folded, closed) = s.fleet(Filter::All).unwrap();
+        assert!(closed.contains(&NodeId::work(&done.id)), "the work is closed");
+
+        let row = folded
+            .nodes
+            .iter()
+            .find(|n| n.id == NodeId::work(&done.id))
+            .expect("the closed work is drawn");
+        assert_eq!(
+            row.parent,
+            Some(NodeId::project(&project.id)),
+            "a closed work hangs from its repository: {:?}",
+            folded
+                .nodes
+                .iter()
+                .map(|n| (n.kind, n.label.as_str(), n.depth, n.parent.clone()))
+                .collect::<Vec<_>>(),
+        );
+
+        let other_row = folded
+            .nodes
+            .iter()
+            .find(|n| n.id == NodeId::work(&done2.id))
+            .expect("the second closed work is drawn");
+        assert_eq!(
+            other_row.parent,
+            Some(NodeId::project(&other.id)),
+            "and so does the one in the repository that also had live work: {:?}",
+            shape(&folded.nodes),
+        );
+
+        // And it has to be drawn *there*, not merely say so. The tree is
+        // flattened by array order — the guides, the indent, and which rows a
+        // collapsed row hides are all positional — so a row whose parent is
+        // correct but whose position is not is drawn under whatever came
+        // before it. `fleet(All)` appends a whole second forest, which put
+        // every closed work after the last live row on the screen.
+        for (at, node) in folded.nodes.iter().enumerate() {
+            let Some(parent) = &node.parent else { continue };
+            let above = folded.nodes[..at]
+                .iter()
+                .rev()
+                .find(|n| n.depth < node.depth)
+                .map(|n| n.id.clone());
+            assert_eq!(
+                above.as_ref(),
+                Some(parent),
+                "`{}` is drawn under the wrong row: {:?}",
+                node.label,
+                shape(&folded.nodes),
+            );
+        }
+
+        std::fs::remove_dir_all(&base).ok();
     }
 
     /// A stall is visible on a collapsed fleet, which is the fleet people read.
