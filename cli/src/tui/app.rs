@@ -50,7 +50,7 @@ pub enum Entry {
     Tool {
         name: String,
         detail: Option<String>,
-        failed: bool,
+        step: Step,
     },
     /// What a tool gave back. Shown when details are on, which is the point of
     /// watching a harness work rather than waiting for its conclusion.
@@ -91,7 +91,11 @@ pub enum Entry {
     /// summarised to one line on purpose; an edit summarised to one line is the
     /// difference between watching an agent work and being able to trust it
     /// afterwards.
-    Diff(diff::Edit),
+    ///
+    /// The body folds behind `Ctrl-O`; the summary line does not. Collapsed,
+    /// this is the file-change list — `± edited  ui.rs  +1 -0` — and that is
+    /// the level most reading happens at. Expanded, it is the review.
+    Diff { edit: diff::Edit, step: Step },
     /// The agent's plan, updating in place.
     ///
     /// One block per turn, not one per revision — see `todo.rs`. `App::apply`
@@ -855,7 +859,7 @@ pub(super) fn tool_detail(input: &serde_json::Value) -> Option<String> {
                 }
                 if let Some(v) = value.as_str() {
                     if !v.trim().is_empty() {
-                        return Some(one_line(v, 90));
+                        return Some(one_line(without_heredoc_bodies(v), 90));
                     }
                 }
             }
@@ -873,6 +877,25 @@ pub(super) fn tool_detail(input: &serde_json::Value) -> Option<String> {
 }
 
 /// Collapse to one line and truncate, so a payload cannot own the transcript.
+/// A command with the *contents* of its heredocs left off.
+///
+/// `cat > src/car.js <<'EOF'` followed by two hundred lines of JavaScript is
+/// one shell command, and flattening it whole spends the summary line — and
+/// often a second wrapped one — on the first ninety characters of a file that
+/// is already rendered underneath as a diff. The interesting part of such a
+/// command is its first line; the body has a better place to be.
+fn without_heredoc_bodies(command: &str) -> &str {
+    match command.find("<<") {
+        // Keep the redirect and the delimiter, which is where the line stops
+        // being about the shell and starts being about the file.
+        Some(at) => match command[at..].find('\n') {
+            Some(nl) => &command[..at + nl],
+            None => command,
+        },
+        None => command,
+    }
+}
+
 pub fn one_line(s: &str, max: usize) -> String {
     let flat = s.split_whitespace().collect::<Vec<_>>().join(" ");
     if flat.chars().count() <= max {
@@ -979,8 +1002,73 @@ fn is_plumbing(entry: &Entry) -> bool {
 fn failed(entry: &Entry) -> bool {
     matches!(
         entry,
-        Entry::Tool { failed: true, .. } | Entry::ToolOut { failed: true, .. }
+        Entry::Tool {
+            step: Step::Failed,
+            ..
+        } | Entry::ToolOut { failed: true, .. }
+            | Entry::Diff {
+                step: Step::Failed,
+                ..
+            }
     )
+}
+
+/// Whether a step has not come back yet.
+///
+/// The one thing that must never fold. A step still running is the answer to
+/// "what is it doing right now", which is the question a reader asks *while*
+/// waiting — and folding it away leaves a screen that has gone quiet for two
+/// minutes with nothing on it to say why.
+fn running(entry: &Entry) -> bool {
+    matches!(
+        entry,
+        Entry::Tool {
+            step: Step::Running,
+            ..
+        } | Entry::Diff {
+            step: Step::Running,
+            ..
+        }
+    )
+}
+
+/// Mark the call a result belongs to as finished, in any entry list.
+///
+/// Free rather than a method so the replay path — which rebuilds a transcript
+/// from stored rows before there is an `App` to hold it — settles calls by
+/// exactly the rule the live path uses. Two copies of this would drift, and the
+/// symptom would be a replayed conversation whose steps spin forever.
+pub fn settle_in(entries: &mut [Entry], name: &str, failed: bool) -> bool {
+    let step = if failed { Step::Failed } else { Step::Ok };
+    let at = entries
+        .iter()
+        .rposition(|e| matches!(e, Entry::Tool { name: n, step: Step::Running, .. } if n == name));
+    let Some(at) = at else {
+        return false;
+    };
+    for entry in entries[at..].iter_mut() {
+        match entry {
+            Entry::Tool { step: s, .. } | Entry::Diff { step: s, .. } if *s == Step::Running => {
+                *s = step
+            }
+            _ => {}
+        }
+    }
+    true
+}
+
+/// How far a step has got.
+///
+/// Replaces the plain `failed: bool` a tool line used to carry, because that
+/// flag could only tell two of the three states apart: it said nothing about
+/// whether the call had come back at all, so a command still running and a
+/// command that had just succeeded rendered identically.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Step {
+    /// Called, with no result yet.
+    Running,
+    Ok,
+    Failed,
 }
 
 /// Whether this tool's call already has a line among `entries`, so its result
@@ -1009,7 +1097,7 @@ pub(super) fn announced_in(entries: &[Entry], name: &str) -> bool {
         .iter()
         .rev()
         // Step over what the call pushed *below* its own line.
-        .find(|e| !matches!(e, Entry::Diff(_)))
+        .find(|e| !matches!(e, Entry::Diff { .. }))
         .is_some_and(|e| matches!(e, Entry::Tool { name: n, .. } if n == name))
 }
 
@@ -1481,6 +1569,23 @@ impl App {
     /// result does not need to add one. See [`announced_in`] for the rule.
     fn announced(&self, name: &str) -> bool {
         announced_in(&self.transcript, name)
+    }
+
+    /// Mark the call this result belongs to as finished, and report whether one
+    /// was found.
+    ///
+    /// Matched by name, walking back from the end to the nearest call of that
+    /// name still in flight. A result carries no call id — none of the three
+    /// harnesses sends one on the normalised event — so "the most recent
+    /// unfinished call with this name" is the whole of the available evidence.
+    /// It is right whenever calls of one name settle in order, which is the
+    /// only case a transcript can depict anyway.
+    ///
+    /// Every diff pushed *after* that call settles with it: one `Bash` writing
+    /// four files produces four diffs under one call line, and they all become
+    /// real at the moment the command returns.
+    fn settle(&mut self, name: &str, failed: bool) -> bool {
+        settle_in(&mut self.transcript, name, failed)
     }
 
     pub fn push(&mut self, entry: Entry) {
@@ -2343,8 +2448,10 @@ impl App {
         };
         // A failure is the reason the answer is about to be wrong, so it stays
         // on screen under every setting — the same rule that already decides a
-        // failed tool result is recorded whether or not details are on.
-        if !is_plumbing(entry) || failed(entry) {
+        // failed tool result is recorded whether or not details are on. A step
+        // that has not come back yet stays for the opposite reason: it is the
+        // only thing on screen saying what is happening now.
+        if !is_plumbing(entry) || failed(entry) || running(entry) {
             return false;
         }
         if self.expand_details {
@@ -2423,10 +2530,23 @@ impl App {
                 self.push(Entry::Tool {
                     name: name.clone(),
                     detail: input.as_ref().and_then(tool_detail),
-                    failed: false,
+                    step: Step::Running,
                 });
                 if let Some(edit) = input.as_ref().and_then(|i| diff::from_tool(name, i)) {
-                    self.push(Entry::Diff(edit));
+                    self.push(Entry::Diff {
+                        edit,
+                        step: Step::Running,
+                    });
+                }
+                // A shell can write files without ever touching the edit tool,
+                // and agents that build a project out of `cat > f <<'EOF'` do
+                // exactly that. Without this the file-change list is empty for
+                // a whole run that wrote fifty files. See `diff::from_shell`.
+                for edit in input.as_ref().map(|i| diff::from_shell(name, i)).unwrap_or_default() {
+                    self.push(Entry::Diff {
+                        edit,
+                        step: Step::Running,
+                    });
                 }
             }
             AgentEvent::ToolResult {
@@ -2443,11 +2563,20 @@ impl App {
                 // rendered as a bare `└ Wrote file successfully.` — an answer
                 // with its question missing.
                 let announced = self.announced(name);
-                if *is_error || !announced {
+                // The call that is coming back stops being "in flight" here.
+                // Done before the fallback below so a harness that never
+                // announced the call does not settle some older one by name.
+                let settled = self.settle(name, *is_error);
+                if *is_error && settled {
+                    // The failure is already on the call's own line, which is
+                    // still on screen because a failed step never folds. A
+                    // second, detail-less `✗ Bash` under it says nothing the
+                    // first did not, and loses the argument in the process.
+                } else if *is_error || !announced {
                     self.push(Entry::Tool {
                         name: name.clone(),
                         detail: None,
-                        failed: *is_error,
+                        step: if *is_error { Step::Failed } else { Step::Ok },
                     });
                 }
                 if let Some(text) = summary.as_ref().filter(|s| !s.trim().is_empty()) {
@@ -2503,6 +2632,27 @@ impl App {
                         text: bits.join(" · "),
                         failed: *is_error,
                     });
+                }
+                // Nothing is in flight once the run has ended, so any step
+                // still marked as running is a result that never arrived —
+                // a killed run, or a harness that simply does not report one.
+                // Left alone it would spin on screen for the rest of the
+                // session and, because a running step never folds, would keep
+                // a finished turn's plumbing permanently open.
+                //
+                // Settled as `Ok` rather than `Failed`: a missing result is not
+                // evidence that the tool went wrong, and the turn's own ending
+                // is printed directly above to carry the bad news when there is
+                // any.
+                for entry in self.transcript.iter_mut() {
+                    match entry {
+                        Entry::Tool { step, .. } | Entry::Diff { step, .. }
+                            if *step == Step::Running =>
+                        {
+                            *step = Step::Ok
+                        }
+                        _ => {}
+                    }
                 }
                 self.busy = false;
                 self.turn_started_ms = None;
@@ -2667,10 +2817,58 @@ impl App {
         if background > 0 {
             parts.push(format!("{background} in background"));
         }
+        // Somebody has stopped and is waiting on an answer. This is the one
+        // state that costs real time to miss: a blocked agent is not working
+        // and will not start again on its own, and until now the only place
+        // that said so was the rail — a panel that is closed by default, so the
+        // news reached exactly the readers who already knew to go looking.
+        if let Some(waiting) = self.waiting_on_you() {
+            parts.push(waiting);
+        }
         if !self.queued.is_empty() {
             parts.push(format!("{} queued", self.queued.len()));
         }
         parts.join(" · ")
+    }
+
+    /// Who has stopped and is waiting for an answer, if anyone.
+    ///
+    /// A manager is named rather than counted, because "a manager is waiting"
+    /// and "something is waiting" prompt different actions: the manager is the
+    /// one that has a project's work queued behind it. Managers are recognised
+    /// by their conversation, which is the only thing that makes a manager a
+    /// manager — there is no manager record to consult.
+    pub fn waiting_on_you(&self) -> Option<String> {
+        let blocked: Vec<&Card> = self
+            .cards
+            .iter()
+            .filter(|c| c.blocking && c.is_open())
+            .collect();
+        if blocked.is_empty() {
+            return None;
+        }
+        let managers = blocked
+            .iter()
+            .filter(|c| self.is_manager_conversation(&c.conversation_id))
+            .count();
+        Some(match (managers, blocked.len()) {
+            (0, n) => format!("{n} waiting on you"),
+            (1, 1) => "a manager is waiting on you".to_string(),
+            (m, n) if m == n => format!("{m} managers waiting on you"),
+            (_, n) => format!("{n} waiting on you, one a manager"),
+        })
+    }
+
+    /// Whether this conversation is some project's manager.
+    ///
+    /// Asked of the forest rather than the store: a manager row is already
+    /// keyed by the conversation it stands for — see [`NodeId::manager`] — so
+    /// the answer is here, and a second query would be a slower way to learn
+    /// what the screen already knows.
+    fn is_manager_conversation(&self, conversation_id: &str) -> bool {
+        self.forest
+            .iter()
+            .any(|n| n.id == NodeId::manager(conversation_id))
     }
 }
 
@@ -2681,6 +2879,111 @@ mod tests {
 
     fn app() -> App {
         App::new(HarnessKind::ClaudeCode, None, Resume::Fresh)
+    }
+
+    fn blocking_card(conversation: &str) -> Card {
+        use jod_core::cards::{CardKind, Delivery, Importance, Source, Status};
+        Card {
+            id: 1,
+            conversation_id: conversation.into(),
+            work_id: None,
+            run_id: None,
+            kind: CardKind::Question,
+            importance: Importance::Normal,
+            blocking: true,
+            status: Status::Open,
+            delivery: Delivery::None,
+            title: "which database?".into(),
+            body: String::new(),
+            options: vec![],
+            chosen: None,
+            answer: None,
+            secret_name: None,
+            secret_scope: None,
+            source: Source::Mcp,
+            created_at_ms: 0,
+            updated_at_ms: 0,
+            answered_at_ms: None,
+            delivered_at_ms: None,
+            dedupe_key: None,
+        }
+    }
+
+    fn manager_node(conversation: &str) -> Node {
+        Node {
+            id: NodeId::manager(conversation),
+            parent: None,
+            kind: NodeKind::Manager,
+            depth: 1,
+            label: "manager".into(),
+            summary: String::new(),
+            running: false,
+            status: None,
+            stalled_for_ms: None,
+            cards: 1,
+            blocked: 1,
+            colour: String::new(),
+            expanded: false,
+            has_children: false,
+        }
+    }
+
+    /// A heredoc body is a file, and it already has a place to be — the diff
+    /// underneath. Flattened into the summary it spent the line, and often a
+    /// second wrapped one, on the first ninety characters of that file.
+    #[test]
+    fn a_summary_line_leaves_out_what_a_heredoc_was_filled_with() {
+        let detail = tool_detail(&serde_json::json!({
+            "command": "cat > src/car.js <<'EOF'\nexport const DRAG = 0.98;\nexport const GRIP = 1.2;\nEOF",
+        }))
+        .unwrap();
+        assert_eq!(detail, "cat > src/car.js <<'EOF'");
+    }
+
+    /// A command with no heredoc is untouched.
+    #[test]
+    fn an_ordinary_command_keeps_its_summary() {
+        let detail = tool_detail(&serde_json::json!({ "command": "pnpm test --run" })).unwrap();
+        assert_eq!(detail, "pnpm test --run");
+    }
+
+    /// A blocked agent is not working and will not start again on its own, and
+    /// the only place that said so was a panel closed by default.
+    #[test]
+    fn a_blocked_agent_says_so_on_the_line_that_is_always_visible() {
+        let mut a = app();
+        assert!(a.waiting_on_you().is_none(), "nothing is blocked yet");
+
+        a.cards = vec![blocking_card("c-1")];
+        assert_eq!(a.waiting_on_you().as_deref(), Some("1 waiting on you"));
+        assert!(
+            a.activity().contains("waiting on you"),
+            "and it reaches the status line: {}",
+            a.activity()
+        );
+    }
+
+    /// "A manager is waiting" and "something is waiting" prompt different
+    /// actions: a manager has a project's work queued behind it.
+    #[test]
+    fn a_waiting_manager_is_named_rather_than_counted() {
+        let mut a = app();
+        a.cards = vec![blocking_card("c-1")];
+        a.forest = vec![manager_node("c-1")];
+        assert_eq!(
+            a.waiting_on_you().as_deref(),
+            Some("a manager is waiting on you")
+        );
+    }
+
+    /// An answered card is not still waiting for anybody.
+    #[test]
+    fn a_card_that_has_been_answered_stops_counting_as_waiting() {
+        let mut a = app();
+        let mut card = blocking_card("c-1");
+        card.status = jod_core::cards::Status::Answered;
+        a.cards = vec![card];
+        assert!(a.waiting_on_you().is_none());
     }
 
     /// The memory list holds the most-connected few hundred, so the count says
@@ -3091,7 +3394,7 @@ mod tests {
             vec![Entry::Tool {
                 name: "read".into(),
                 detail: None,
-                failed: false
+                step: Step::Ok
             }],
             "the result must not repeat the call line"
         );
@@ -3102,7 +3405,13 @@ mod tests {
             is_error: true,
         });
         assert_eq!(a.transcript.len(), 2);
-        assert!(matches!(a.transcript[1], Entry::Tool { failed: true, .. }));
+        assert!(matches!(
+            a.transcript[1],
+            Entry::Tool {
+                step: Step::Failed,
+                ..
+            }
+        ));
     }
 
     /// OpenCode reports a fast tool as already `completed`, so no call is ever
@@ -3122,7 +3431,7 @@ mod tests {
                 Entry::Tool {
                     name: "write".into(),
                     detail: None,
-                    failed: false
+                    step: Step::Ok
                 },
                 Entry::ToolOut {
                     text: "Wrote file successfully.".into(),
@@ -3160,7 +3469,7 @@ mod tests {
             a.transcript
         );
         assert!(matches!(a.transcript[0], Entry::Tool { .. }));
-        assert!(matches!(a.transcript[1], Entry::Diff(_)));
+        assert!(matches!(a.transcript[1], Entry::Diff { .. }));
     }
 
     /// The same blindness, one step further back: a plan call is folded into the
@@ -3220,7 +3529,7 @@ mod tests {
             vec![Entry::Tool {
                 name: "Bash".into(),
                 detail: Some("cargo test --workspace".into()),
-                failed: false
+                step: Step::Running
             }]
         );
     }

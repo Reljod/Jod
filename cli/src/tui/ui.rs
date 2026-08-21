@@ -23,7 +23,8 @@ use jod_core::team::MemberStatus;
 use jod_core::PermissionPolicy;
 
 use super::app::{
-    absolute, plural, short_duration, since, until, App, Dictation, Entry, JobState, Overlay,
+    absolute, plural, short_duration, since, until, AgentLine, App, Dictation, Entry, JobState,
+    Overlay, Step,
 };
 use super::data::{Outcome, Source};
 use super::diff;
@@ -5296,7 +5297,15 @@ fn draw_transcript(f: &mut Frame, app: &App, area: Rect) -> usize {
         }
         lines.extend(fold_marker(app, folded, width));
         folded = 0;
-        lines.extend(render(entry, width));
+        lines.extend(render(
+            entry,
+            &Ctx {
+                width,
+                expanded: app.expand_details,
+                frame: app.spinner(),
+                agents: &app.agents,
+            },
+        ));
     }
     lines.extend(fold_marker(app, folded, width));
 
@@ -5359,31 +5368,55 @@ fn fold_marker(app: &App, folded: usize, width: u16) -> Vec<Line<'static>> {
 }
 
 /// One transcript entry as styled lines, already wrapped to `width`.
-fn render(entry: &Entry, width: u16) -> Vec<Line<'static>> {
+/// What an entry needs to know about the screen around it.
+///
+/// Bundled rather than passed as four arguments because every one of them is
+/// needed by exactly one arm, and threading them individually through `render`
+/// made its signature longer than most of the arms it dispatches to.
+pub struct Ctx<'a> {
+    pub width: u16,
+    /// Whether `Ctrl-O` is currently holding the steps open.
+    pub expanded: bool,
+    /// This tick's spinner frame, for anything still running.
+    pub frame: &'a str,
+    /// The fleet, so a delegation can say whether the agent it started is still
+    /// going.
+    pub agents: &'a [AgentLine],
+}
+
+fn render(entry: &Entry, ctx: &Ctx) -> Vec<Line<'static>> {
+    let width = ctx.width;
+    let frame = ctx.frame;
+    let expanded = ctx.expanded;
     let (prefix, style, body) = match entry {
         // Returns from inside the match rather than before it: the other
         // entries share a prefix/style/body shape that makes one-line entries
         // uniform, and a diff is the one entry whose whole point is that it is
         // not one line. An arm keeps the match exhaustive, so a new `Entry`
         // still fails the build here rather than falling through to a default.
-        Entry::Diff(edit) => return render_diff(edit, width),
+        Entry::Diff { edit, step } => return render_diff(edit, *step, width, expanded, frame),
         Entry::Plan(items) => return render_plan(items, width),
-        Entry::Delegated { id, prompt, dir } => return render_delegated(id, prompt, dir, width),
+        Entry::Delegated { id, prompt, dir } => {
+            return render_delegated(id, prompt, dir, ctx)
+        }
         Entry::You(t) => ("› ", bold(USER), t.clone()),
         Entry::Agent(t) => ("", fg(AGENT), t.clone()),
         Entry::Thinking(t) => ("  ", fg(MUTED).add_modifier(Modifier::ITALIC), t.clone()),
-        Entry::Tool {
-            name,
-            detail,
-            failed,
-        } => {
-            let mark = if *failed { "✗ " } else { "⚙ " };
-            let style = fg(if *failed { BAD } else { MUTED });
+        Entry::Tool { name, detail, step } => {
+            // The spinner is the whole point of the running state: a command
+            // that takes four minutes used to look exactly like one that had
+            // already finished, so the only way to tell whether anything was
+            // happening was to watch the clock in the header.
+            let (mark, colour) = match step {
+                Step::Running => (format!("{frame} "), WARN),
+                Step::Failed => ("✗ ".to_string(), BAD),
+                Step::Ok => ("⚙ ".to_string(), MUTED),
+            };
             let body = match detail {
                 Some(d) => format!("{name} · {d}"),
                 None => name.clone(),
             };
-            (mark, style, body)
+            return laid_out(&mark, fg(colour), &body, width);
         }
         // Indented under its call, so output reads as belonging to the tool
         // above it rather than as the agent speaking.
@@ -5409,7 +5442,16 @@ fn render(entry: &Entry, width: u16) -> Vec<Line<'static>> {
         Entry::Raw(t) => ("", fg(MUTED), t.clone()),
     };
 
-    wrap(&body, width as usize, prefix.chars().count())
+    laid_out(prefix, style, &body, width)
+}
+
+/// One entry's text, wrapped and hung under its own marker.
+///
+/// Split out of [`render`] so an arm whose marker is built at runtime — a
+/// spinner frame changes four times a second — can use the same layout as the
+/// arms whose marker is a literal.
+fn laid_out(prefix: &str, style: Style, body: &str, width: u16) -> Vec<Line<'static>> {
+    wrap(body, width as usize, prefix.chars().count())
         .into_iter()
         .enumerate()
         .map(|(i, text)| {
@@ -5459,15 +5501,39 @@ fn render_plan(items: &[todo::Item], width: u16) -> Vec<Line<'static>> {
 /// which directory it was pointed at. Both the prompt and the path are wrapped
 /// rather than cut: a confirmation you cannot read the end of is the thing
 /// being fixed here, not a smaller version of it.
-fn render_delegated(id: &str, prompt: &str, dir: &str, width: u16) -> Vec<Line<'static>> {
+fn render_delegated(id: &str, prompt: &str, dir: &str, ctx: &Ctx) -> Vec<Line<'static>> {
+    let width = ctx.width;
+    // Whether the agent this block started is still going. The block used to
+    // say "in the background, Ctrl-F to watch" for the rest of the session, no
+    // matter what became of the run — so the transcript's account of a
+    // delegation was frozen at the moment it was made, and the only way to find
+    // out whether the work had finished was to leave the conversation.
+    let agent = ctx.agents.iter().find(|a| a.id == id);
+    let (mark, note, colour) = match agent {
+        Some(a) if a.is_running() => (
+            format!("  {} ", ctx.frame),
+            " · running in the background, Ctrl-F to watch".to_string(),
+            WARN,
+        ),
+        Some(a) => match a.status.as_str() {
+            "completed" => ("  ✓ ".to_string(), " · finished".to_string(), GOOD),
+            "failed" => ("  ✗ ".to_string(), " · failed".to_string(), BAD),
+            "killed" => ("  ✗ ".to_string(), " · stopped".to_string(), BAD),
+            other => ("  ⇢ ".to_string(), format!(" · {other}"), MUTED),
+        },
+        // Not in the fleet: the list is trimmed to the recent runs, so an old
+        // delegation says nothing rather than guessing it is still going.
+        None => (
+            "  ⇢ ".to_string(),
+            " · in the background, Ctrl-F to watch".to_string(),
+            GOOD,
+        ),
+    };
     let mut lines = vec![Line::from(vec![
-        Span::styled("  ⇢ ".to_string(), fg(GOOD)),
+        Span::styled(mark, fg(colour)),
         Span::styled("delegated ".to_string(), bold(AGENT)),
         Span::styled(short(id), bold(USER)),
-        Span::styled(
-            " · in the background, Ctrl-F to watch".to_string(),
-            fg(MUTED),
-        ),
+        Span::styled(note, fg(MUTED)),
     ])];
     let indent = 6usize;
     let pad = " ".repeat(indent);
@@ -5495,26 +5561,50 @@ fn render_delegated(id: &str, prompt: &str, dir: &str, width: u16) -> Vec<Line<'
 /// The path is a header rather than a prefix on every line: repeated down forty
 /// rows it would cost the width the code needs, and it is the same file
 /// throughout by construction.
-fn render_diff(edit: &diff::Edit, width: u16) -> Vec<Line<'static>> {
+fn render_diff(
+    edit: &diff::Edit,
+    step: Step,
+    width: u16,
+    expanded: bool,
+    frame: &str,
+) -> Vec<Line<'static>> {
     let room = (width as usize).saturating_sub(6);
     // The counts are reserved before the path is laid out, not appended after
     // it and hoped for: `room` used to be computed and then applied only to the
     // body, so an absolute path — every path, in a worktree — ran to the right
     // edge and pushed both the filename and the `+6 -0` off the screen.
-    let marker = "  ± ";
-    let counts = format!("  +{} -{}", edit.added(), edit.removed());
+    //
+    // The verb is what turns a list of paths into a report: `created` and
+    // `edited` are different facts about the same `+12 -0`, and while the call
+    // is still out it reads `creating`, so the summary is a live account of the
+    // work rather than a record written afterwards.
+    let (marker, verb, colour) = match step {
+        Step::Running => (format!("  {frame} "), edit.verb.doing(), WARN),
+        Step::Failed => ("  ✗ ".to_string(), edit.verb.done(), BAD),
+        Step::Ok => ("  ± ".to_string(), edit.verb.done(), GOOD),
+    };
+    let counts = format!("  +{} -{}", edit.added, edit.removed);
+    let label = format!("{verb} ");
     let mut lines = vec![Line::from(vec![
-        Span::styled(marker.to_string(), fg(WARN)),
+        Span::styled(marker.clone(), fg(colour)),
+        Span::styled(label.clone(), fg(MUTED)),
         Span::styled(
             text::path_beside(
                 &edit.path,
                 room,
-                marker.chars().count() + counts.chars().count(),
+                marker.chars().count() + label.chars().count() + counts.chars().count(),
             ),
             bold(AGENT),
         ),
         Span::styled(counts, fg(MUTED)),
     ])];
+    // Collapsed, the summary line *is* the entry. That is the level most
+    // reading happens at — "which files changed, and how much" — and forty rows
+    // of diff per edit buries the conversation the transcript exists to show.
+    // `Ctrl-O` opens the body, the same key that opens every other step.
+    if !expanded {
+        return lines;
+    }
     for line in &edit.lines {
         let colour = match line {
             diff::Line::Added(_) => GOOD,
@@ -6648,7 +6738,7 @@ mod tests {
         a.push(Entry::Tool {
             name: "project_switch".into(),
             detail: Some("{\"project\":\"zuma\"}".into()),
-            failed: false,
+            step: Step::Ok,
         });
         a.push(Entry::ToolOut {
             text: "switched to zuma".into(),
@@ -10241,7 +10331,12 @@ mod tests {
     // ---- diffs render as diffs ----
 
     /// **E7's check, the second half**: a rendered frame shows a file edit as a
-    /// diff rather than as a one-line summary.
+    /// diff rather than as a one-line summary — once it is asked to.
+    ///
+    /// Collapsed, the entry is the file-change summary: which file, what was
+    /// done to it, and how big the change was. The body is what `Ctrl-O` opens,
+    /// the same key that opens every other step, because forty rows of diff per
+    /// edit buries the conversation the transcript exists to show.
     #[test]
     fn a_file_edit_renders_as_a_diff_with_the_path_as_a_header() {
         let mut a = app();
@@ -10253,10 +10348,23 @@ mod tests {
                 "new_string": "let width = 100;\nlet height = 24;\n",
             })),
         });
-        let frame = rendered(&a, 120, 30);
 
-        assert!(frame.contains("cli/src/tui/ui.rs"), "the path is a header:\n{frame}");
-        assert!(frame.contains("+1 -1"), "and the shape of the change:\n{frame}");
+        let collapsed = rendered(&a, 120, 30);
+        assert!(
+            collapsed.contains("cli/src/tui/ui.rs"),
+            "the path is a header:\n{collapsed}"
+        );
+        assert!(
+            collapsed.contains("+1 -1"),
+            "and the shape of the change:\n{collapsed}"
+        );
+        assert!(
+            !collapsed.contains("-let width = 80;"),
+            "but not the body, which is what Ctrl-O is for:\n{collapsed}"
+        );
+
+        a.expand_details = true;
+        let frame = rendered(&a, 120, 30);
         assert!(
             frame.contains("-let width = 80;"),
             "the removed line, signed:\n{frame}"
@@ -10268,6 +10376,66 @@ mod tests {
         assert!(
             frame.contains(" let height = 24;"),
             "and unchanged context around it:\n{frame}"
+        );
+    }
+
+    /// The delegation block used to read "in the background, Ctrl-F to watch"
+    /// for the rest of the session however the run ended, so the transcript's
+    /// account of a delegation was frozen at the moment it was made.
+    #[test]
+    fn a_delegation_says_whether_its_agent_is_still_running() {
+        let mut a = app();
+        a.push(Entry::Delegated {
+            id: "run-7".into(),
+            prompt: "build the engine".into(),
+            dir: "/tmp/racing".into(),
+        });
+
+        a.agents = vec![agent_line("run-7", "engine", "running")];
+        let live = rendered(&a, 120, 30);
+        assert!(live.contains("running in the background"), "live:\n{live}");
+
+        a.agents = vec![agent_line("run-7", "engine", "completed")];
+        let done = rendered(&a, 120, 30);
+        assert!(done.contains("finished"), "finished:\n{done}");
+        assert!(
+            !done.contains("running in the background"),
+            "and it stops claiming to be running:\n{done}"
+        );
+
+        a.agents = vec![agent_line("run-7", "engine", "failed")];
+        let failed = rendered(&a, 120, 30);
+        assert!(failed.contains("failed"), "failed:\n{failed}");
+    }
+
+    /// A file being written says so while it is being written, and changes
+    /// tense when it lands. The collapsed summary is the only account of a file
+    /// most readers see, so "is this happening or did it happen" has to be
+    /// legible without opening anything.
+    #[test]
+    fn a_file_change_reads_as_in_flight_until_its_call_comes_back() {
+        let mut a = app();
+        a.begin_turn("run-1", 0);
+        a.apply(&jod_core::AgentEvent::ToolCall {
+            name: "Write".into(),
+            input: Some(serde_json::json!({
+                "file_path": "src/car.js",
+                "content": "export const car = 1;\n",
+            })),
+        });
+        let during = rendered(&a, 120, 30);
+        assert!(during.contains("creating"), "while it runs:\n{during}");
+
+        a.apply(&jod_core::AgentEvent::ToolResult {
+            name: "Write".into(),
+            summary: None,
+            is_error: false,
+        });
+        let after = rendered(&a, 120, 30);
+        assert!(after.contains("created"), "once it lands:\n{after}");
+        assert!(
+            !after.contains("creating"),
+            "and it stops claiming to still be working:\n{after}"
         );
     }
 
@@ -10287,6 +10455,13 @@ mod tests {
                 "file_path": deep,
                 "content": "# Tetris\n",
             })),
+        });
+        // Settled, so the header carries its finished marker rather than a
+        // spinner frame — this test is about how the path is laid out.
+        a.apply(&jod_core::AgentEvent::ToolResult {
+            name: "Write".into(),
+            summary: None,
+            is_error: false,
         });
         let frame = rendered(&a, 100, 30);
         let header = frame
@@ -11609,3 +11784,4 @@ mod tests {
         assert!(whole.ends_with("rank.rs"), "{whole}");
     }
 }
+
