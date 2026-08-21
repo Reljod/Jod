@@ -1,36 +1,23 @@
-//! The decision rail's state: what it is showing, what the cursor is on, and
+//! The decision rail's state: what it is showing, where the cursor is, and
 //! which stack of cards is on screen.
 //!
-//! Everything here is a pure transformation, in the same spirit as
-//! [`super::workspace::ListState`] — the rail is the one part of the TUI whose
-//! wrong behaviour would be *invisible* rather than merely ugly, so it has to
-//! be testable without a terminal.
+//! Pure transformations throughout, like [`super::workspace::ListState`],
+//! because the rail is the one part of the TUI whose wrong behaviour would be
+//! *invisible* rather than merely ugly.
 //!
-//! ## The rail shows two facts about every card, never one
+//! It shows two facts about every card, never one. [`jod_core::cards::Status`]
+//! is what the human did; [`Delivery`] is whether the agent has heard yet.
+//! Collapsing them into "done" would be a lie the reader acts on — answering
+//! during a turn queues the answer and the turn carries on, so ten cards can
+//! sit at `answered, queued` until it comes up for air. See
+//! `core/src/delivery.rs` and D2.
 //!
-//! [`jod_core::cards::Status`] is what the human did; [`Delivery`] is whether
-//! the agent has heard about it yet. They are independent, and collapsing them
-//! into a single "done" would be a lie the reader acts on: answering a card
-//! while a turn is in flight *queues* the answer, and the turn carries on
-//! untouched. Reljod can answer ten cards during one turn and all ten sit at
-//! `answered, queued` until it comes up for air. See `core/src/delivery.rs` and
-//! decision D2.
-//!
-//! ## Why the rail has a focus rather than a pair of bare cycle keys
-//!
-//! The chat input owns every bare letter, so a rail verb on `j` would type a
-//! `j` into the sentence being written. Two ways out exist and the rail uses
-//! both, at different costs:
-//!
-//! - `Ctrl-R` shows or hides it, and `Ctrl-N` steps to the next card. Both are
-//!   chords, so both are safe mid-sentence — that is the property E2.S3 asks
-//!   for by name.
-//! - `Ctrl-N` also *focuses* the rail, after which the bare keys are the rail's:
-//!   `↑↓`/`jk` move, `⏎` expands, a digit answers, `x` dismisses, `Esc` hands
-//!   the keyboard back with the typed line exactly as it was.
-//!
-//! The focus is what makes answering a card cheap once you are in it, and the
-//! chord is what makes getting in free. Neither ever touches `App::input`.
+//! The rail has a focus rather than bare cycle keys because the chat input owns
+//! every bare letter, so `j` would type a `j` into the sentence being written.
+//! `Ctrl-R` toggles it and `Ctrl-N` steps to the next card — chords, safe
+//! mid-sentence, which is what E2.S3 asks for. `Ctrl-N` also *focuses* the
+//! rail, after which bare keys are the rail's and `Esc` hands the keyboard back
+//! with the typed line untouched.
 
 use jod_core::cards::{Card, CardKind, Delivery, Query, Sort, Status};
 

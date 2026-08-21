@@ -269,23 +269,17 @@ pub struct SpawnRequest {
     pub env: Vec<(String, String)>,
     /// A repository command to invoke, named rather than pasted.
     ///
-    /// Only OpenCode needs this: alone of the three it does *not* expand
-    /// `/name` written into the message, handing the literal text to the model
-    /// instead. The run that found this went looking with `ls` and `cat`, found
-    /// the file by luck, and answered correctly — right answer, wrong
-    /// mechanism. `opencode run --command <name>` resolves it in one step.
+    /// Only OpenCode needs this: alone of the three it hands literal `/name`
+    /// text to the model instead of expanding it. `opencode run --command
+    /// <name>` resolves it in one step. Claude Code and AGY leave this `None`;
+    /// [`crate::commands::Discovered::invoke`] picks the spelling.
     ///
-    /// Claude Code and AGY leave this `None` and expand `/name` themselves, so
-    /// this is one harness's spelling rather than a general "run a command"
-    /// verb. [`crate::commands::Discovered::invoke`] picks the spelling.
-    ///
-    /// **With a command set, `prompt` is the command's *arguments*.** Measured:
-    /// `--command jodargs "hello world"` arrived as `$ARGUMENTS`. That collides
-    /// with [`system`](Self::system), whose framing the runner prepends to the
-    /// prompt for any harness answering `false` to
-    /// [`Harness::takes_system_prompt`] — under a command it would arrive as
-    /// argument text. Setting both on one OpenCode spawn is a caller error;
-    /// nothing at the type level stops it.
+    /// **With a command set, `prompt` is the command's *arguments*** —
+    /// measured: `--command jodargs "hello world"` arrived as `$ARGUMENTS`.
+    /// That collides with [`system`](Self::system), which the runner prepends
+    /// to the prompt for any harness answering `false` to
+    /// [`Harness::takes_system_prompt`], so setting both on one OpenCode spawn
+    /// is a caller error nothing at the type level stops.
     #[serde(default)]
     pub command: Option<String>,
     /// Names of secrets to inject, and *only* the names.
@@ -420,19 +414,15 @@ impl ToolAccess {
 
     /// What an agent nobody is watching gets.
     ///
-    /// Read-only, and the reason is compounding rather than caution. A
-    /// scheduled run that could schedule is a schedule that can multiply
-    /// while you sleep; a goal that could set goals has no bound at all, and
-    /// the stall detector counts iterations of *one* goal, so it would not
-    /// even notice. The failure is not one expensive night — it is that
-    /// nothing in the design says when it stops.
+    /// Read-only, because the risk compounds rather than merely costs: a
+    /// scheduled run that could schedule multiplies while you sleep, a goal
+    /// that could set goals has no bound, and the stall detector counts
+    /// iterations of *one* goal so it would not notice. Reading pays for itself
+    /// anyway — the point of tools on an unattended run is seeing what else is
+    /// running and declining to duplicate it, which needs `list_agents` and
+    /// nothing more.
     ///
-    /// Reading is the half that pays for itself anyway: the point of tools on
-    /// an unattended run is that it can see what else is going on and decline
-    /// to duplicate it, which needs `list_agents` and nothing more.
-    ///
-    /// Raising this for a specific schedule is a per-schedule setting worth
-    /// having, and deliberately not a default worth inheriting.
+    /// Raising this per schedule is worth having; raising the default is not.
     pub fn unattended() -> ToolAccess {
         ToolAccess::ReadOnly
     }

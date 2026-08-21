@@ -1,13 +1,11 @@
 //! Scheduled work, and the objectives that outlive a single run.
 //!
-//! Two things live here, and they differ in one way that decides everything
-//! else: a **schedule** fires on the clock and does not care what happened last
-//! time, while a **goal** is pursued until it is satisfied and therefore has to
-//! remember what it already tried.
+//! A **schedule** fires on the clock and does not care what happened last time;
+//! a **goal** is pursued until satisfied and therefore has to remember what it
+//! already tried. That difference decides everything else here.
 //!
-//! The policies are not preferences. Each one is here because a simulation over
-//! a fake clock measured what happens without it
-//! ([`research/scheduling-2026/out/design-sim.txt`]):
+//! The policies are not preferences. Each was measured against a fake clock in
+//! [`research/scheduling-2026/out/design-sim.txt`]:
 //!
 //! - Without a **misfire** policy, six hours of downtime launched **73 runs in
 //!   the first minute back**.
@@ -15,11 +13,10 @@
 //!   minutes reached two concurrent runs and kept climbing.
 //! - Without **backoff and a circuit breaker**, a schedule whose every run
 //!   fails made **288 spawn attempts in 24 hours**.
-//! - **Jitter, which sounds prudent, is off by default**: a 300 s spread
-//!   against a 150 s grace window *lost 34 of 72 fires*, and operator
-//!   predictability scored 5 → 3. It is the one addition that made things
-//!   worse, so it defaults to nothing and is refused when it would exceed the
-//!   grace window.
+//! - **Jitter is off by default**: a 300 s spread against a 150 s grace window
+//!   *lost 34 of 72 fires*. It is the one addition that made things worse, so
+//!   it defaults to nothing and is refused when it would exceed the grace
+//!   window.
 
 use std::str::FromStr;
 
@@ -349,31 +346,24 @@ pub struct Settlement {
 
 /// A schedule's failure count, once the runs it started have ended.
 ///
-/// This exists because the failure that matters is not known at the moment the
-/// tick lets the schedule go. Starting the harness process nearly always
-/// succeeds; what fails is the harness itself a second later — a working
-/// directory that has been deleted, an agent that crashes, a model that cannot
-/// be reached — and the supervisor writes that into the run's own status long
-/// after the tick has moved on. While only the synchronous spawn error was
-/// counted, the breaker never tripped for the ordinary way a schedule breaks: a
-/// schedule pointed at a deleted directory failed every run and sat at zero
-/// failures, still `armed`, for ever.
+/// The failure that matters is not known when the tick lets the schedule go.
+/// Starting the process nearly always succeeds; what fails is the harness a
+/// second later — a deleted working directory, a crash, an unreachable model —
+/// and the supervisor writes that into the run's status long afterwards. While
+/// only the synchronous spawn error was counted, a schedule pointed at a
+/// deleted directory failed every run and sat at zero failures, still `armed`,
+/// for ever.
 ///
-/// `ended` is `runs.status` for each run this schedule started and has not yet
-/// been judged on, oldest first. `spawn_failed` is the old signal, unchanged:
-/// this tick could not start a run at all.
+/// `ended` is `runs.status` for each run this schedule started and has not been
+/// judged on, oldest first. `spawn_failed` is the old signal: this tick could
+/// not start a run at all.
 ///
-/// Two rules here matter more than the arithmetic:
-///
-/// - **A run that has not finished is not a failure.** The walk stops at the
-///   first `running` row rather than guessing, so a long run that is going to
-///   succeed cannot trip the breaker, and runs started after it are judged on a
-///   later tick instead of out of order.
-/// - **A tick that learned nothing resets the count to zero**, which is what
-///   every release without a spawn error did before this function existed. The
-///   one exception is a tick still waiting on a run it started: that leaves the
-///   count where it was, so failures are not forgotten every time a slow run is
-///   in flight.
+/// Two rules matter more than the arithmetic. **A run that has not finished is
+/// not a failure** — the walk stops at the first `running` row, so a long run
+/// that will succeed cannot trip the breaker. And **a tick that learned nothing
+/// resets the count to zero**, except a tick still waiting on a run it started,
+/// which leaves the count alone so failures are not forgotten during a slow
+/// run.
 pub fn settle(previous: i64, ended: &[&str], spawn_failed: bool) -> Settlement {
     let mut failures = previous;
     let mut settled = 0;

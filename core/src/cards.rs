@@ -1,19 +1,15 @@
 //! The left rail's contents: what an agent decided, what it wants to ask, and
 //! what credential it is missing.
 //!
-//! This module owns the *shape* of a card. Three separate consumers read it —
-//! the terminal rail, the CLI, and Jod's MCP tools — and the whole reason they
-//! share one type and one query builder is that a card answered on a phone and
-//! a card answered in the terminal must be the same card, sorted the same way.
+//! This module owns the *shape* of a card. The terminal rail, the CLI and Jod's
+//! MCP tools all read it, and they share one type and one query builder so that
+//! a card answered on a phone and one answered in the terminal are the same
+//! card in the same order.
 //!
-//! ## Nothing here blocks a run
-//!
-//! Raising a card is a write and a return. Answering one is a write and a
-//! *queue* — see [`crate::delivery`]. A turn already in flight had its prompt
-//! assembled before the answer existed, so splicing one in mid-turn produces
-//! either a silent no-op or a double action. The rail therefore has two
-//! independent facts about every card: what the human did ([`Status`]) and
-//! whether the agent has heard about it yet ([`Delivery`]).
+//! Nothing here blocks a run: raising a card is a write, answering one is a
+//! write and a *queue* (see [`crate::delivery`]). So the rail carries two
+//! independent facts about every card — what the human did ([`Status`]) and
+//! whether the agent has heard yet ([`Delivery`]).
 
 use rusqlite::types::Value;
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
@@ -266,20 +262,17 @@ impl Card {
 
     /// How an answer is put to the agent that raised the card.
     ///
-    /// Rendered at answer time and stored on the queued row, never re-rendered
-    /// at delivery: what the human answered is a fact about the moment they
-    /// answered it.
+    /// Rendered at answer time and stored on the queued row, never re-rendered:
+    /// what the human answered is a fact about the moment they answered it.
     ///
-    /// This is the *content* of one queued item; the line that says an answer
-    /// is what this is belongs to [`crate::delivery::Kind::label`], which frames
-    /// every item in a batch the same way whatever its source. So the body
-    /// starts with the card's own identity instead: the agent may have raised
-    /// several, and on a resumed session may have compacted away the turn it
-    /// raised them in, so a bare "sqlite" arriving with no anchor is an answer
-    /// to nothing.
+    /// This is the item's *content*; the line saying it is an answer belongs to
+    /// [`crate::delivery::Kind::label`]. So the body leads with the card's own
+    /// identity instead — the agent may have raised several, and on a resumed
+    /// session may have compacted away the turn that raised them, leaving a
+    /// bare "sqlite" an answer to nothing.
     ///
     /// Never carries a credential: a secret card's `answer` holds a
-    /// confirmation, and the value lives outside this database entirely.
+    /// confirmation.
     pub fn answer_body(&self) -> String {
         let mut out = format!("card #{} — {}", self.id, self.title);
         if let Some(chosen) = &self.chosen {
@@ -544,23 +537,16 @@ impl Store {
 
     /// Answer a card: record what the human said, and *queue* it.
     ///
-    /// The queue is the point. A turn's prompt is assembled once, at spawn, so
-    /// an answer spliced into a running turn arrives in a context assembled
-    /// before it existed — the agent either ignores it or acts on it twice.
-    /// Both are worse than waiting. See [`crate::delivery`].
+    /// The queue is the point — see [`crate::delivery`].
     ///
-    /// The update and the queued row are written in one transaction, because
-    /// the state this must never reach is an answered card with nothing waiting
-    /// to carry it: the rail would show *queued* forever and the agent would
-    /// never be told.
+    /// The update and the queued row share one transaction, because an answered
+    /// card with nothing waiting would read *queued* in the rail for ever and
+    /// the agent would never be told.
     ///
-    /// Answering twice is refused rather than queued twice. A second delivery
-    /// of the same decision reads to the agent as a second instruction, and the
-    /// work gets done again.
+    /// Answering twice is refused rather than queued twice; a second delivery
+    /// reads to the agent as a second instruction and the work gets done again.
     ///
-    /// For a secret card, what is passed here is a confirmation — the value
-    /// goes to the secret store and never through this function. Nothing in
-    /// this database ever holds one.
+    /// For a secret card this takes a confirmation, never the value.
     pub fn answer_card(&self, id: i64, chosen: Option<&str>, answer: Option<&str>) -> Result<Card> {
         let chosen = chosen.map(str::trim).filter(|s| !s.is_empty());
         let answer = answer.map(str::trim).filter(|s| !s.is_empty());

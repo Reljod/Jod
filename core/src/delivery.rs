@@ -1,62 +1,30 @@
 //! The one place that decides when an agent is spoken to.
 //!
-//! Three different things want to interrupt a session: an answer to a card, a
-//! message from another agent, and a nudge typed by a human. None of them may
-//! be spliced into a turn already in flight — a prompt is assembled once, at
-//! spawn, so anything arriving afterwards is either ignored or acted on twice.
+//! Card answers, agent mail and human nudges all want to interrupt a session,
+//! and none of them may be spliced into a turn already in flight: a prompt is
+//! assembled once, at spawn, so anything arriving later is ignored or acted on
+//! twice. They enqueue here instead, and one handler drains the queue into a
+//! synthetic user turn on the session's next prompt — which works on every
+//! harness, since all of them resume a session by id.
 //!
-//! So all three enqueue here, and one handler decides when the queue is
-//! drained into a real turn. Delivery itself stays what the bus already does:
-//! a synthetic user turn in the session's next prompt, which works on every
-//! harness because every harness can resume a session by id and none of them
-//! has to know Jod has a queue at all.
+//! One queue rather than three because "is this session ready to be spoken to"
+//! is the same question whoever is asking, and it is already answered in
+//! [`crate::team::wake_order`].
 //!
-//! ## Why one queue and not three
+//! Batching is deliberate. Ten answers queued during one turn arrive as one
+//! turn carrying ten, which is cheaper and also reads better.
 //!
-//! "Is this session ready to be spoken to" is the same question regardless of
-//! who is speaking, and it is already written down once, correctly, in
-//! [`crate::team::wake_order`]. A second copy of that judgement is a second
-//! thing to keep right.
+//! **Agent mail does not come through here**, and a reader who assumes it does
+//! will hunt a bug that is not there. Mail goes through
+//! [`crate::ticker::Ticker::tick_mail`] and [`crate::team::wake_order`]. This
+//! module is authoritative for card answers and human nudges only.
 //!
-//! ## Batching is a feature, not an optimisation
-//!
-//! Ten answers queued during one turn arrive as one turn carrying ten, not ten
-//! turns. That is a cost control, and it is also the better answer: an agent
-//! reading everything that changed in one go responds more coherently than one
-//! woken ten times with a line each.
-//!
-//! ## What comes through here, and what does not
-//!
-//! Card answers and human nudges do: [`Ticker::tick_deliveries`] walks this
-//! queue on every tick and injects what is waiting as one turn. **Agent mail
-//! does not**, and a reader who assumes otherwise will look for a bug that is
-//! not there. Mail reaches an agent through [`crate::ticker::Ticker::tick_mail`],
-//! which asks [`crate::team::wake_order`] who may be woken and takes the mail
-//! off the bus with [`Store::take_mail`]. This module is authoritative for
-//! **card answers and human nudges**; [`crate::team`] is authoritative for
-//! **agent mail**, including whether the recipient may be woken at all.
-//!
-//! Two things still block the merge, both cheap to state and expensive to
-//! discover:
-//!
-//! 1. **This queue addresses a conversation; a team member has not got one.**
-//!    A member joined through `jod team join` holds a run and a harness-side
-//!    session, and every wake mints a *fresh* Jod conversation, so there is no
-//!    stable id to key a queue on. Mail to a member that has never run has no
-//!    conversation at all; today it waits on the bus, visibly, which is what A8
-//!    asks for. Fixing it means letting the queue address a *member* — a schema
-//!    change, and therefore a stop-and-ask.
-//! 2. **`wake_order` asks a question this module cannot.** `plan_injection`
-//!    knows only whether a turn is in flight; `wake_order` also refuses a
-//!    member shutting down, or with no session to resume. Merging before that
-//!    judgement moves would leave two decisions in two modules and only look
-//!    unified.
-//!
-//! Both queues already speak one [`State`], so `pending_deliveries.state` and
-//! `team_messages.state` cannot mean different things by the same word.
-//!
-//! The order for the rest: move `wake_order`'s eligibility here, then let the
-//! queue address a member. Mail moves last — it is the path that works.
+//! Merging the two is blocked on two things. The queue addresses a conversation
+//! and a team member has not got a stable one — every wake mints a fresh
+//! conversation — so keying a queue on a member is a schema change. And
+//! `wake_order` also refuses a member that is shutting down or has no session
+//! to resume, which `plan_injection` cannot see. Order: move eligibility here,
+//! then let the queue address a member, then move mail last.
 
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -216,20 +184,13 @@ impl Injection {
 
 /// The synthetic user turn a batch becomes.
 ///
-/// One block per item, in the order they were queued, separated by a blank
-/// line, each opened by [`Kind::label`] and followed by the body frozen at
-/// enqueue.
+/// One block per item, queue order, blank line between, each opened by
+/// [`Kind::label`] and followed by the body frozen at enqueue.
 ///
-/// The framing is per item rather than per batch because a batch is *mixed* in
-/// the ordinary case: three answers to the agent's own cards and two questions
-/// from a peer session arrive together, and they call for different responses.
-/// A wrapper around the whole turn — "5 updates" — would say nothing about
-/// which is which, and the agent would have to infer the source from the prose,
-/// which is exactly the inference that goes wrong.
-///
-/// No count, header or footer around the blocks otherwise. A batch of one reads
-/// like one framed message, which is what `wake_order` already delivers for
-/// mail on its own.
+/// Framing is per item because a batch is mixed in the ordinary case — own
+/// cards plus peer questions — and one wrapper saying "5 updates" would leave
+/// the agent inferring each item's source from its prose. No count, header or
+/// footer.
 pub fn render_injection(items: &[Pending]) -> String {
     let body = items
         .iter()
@@ -272,20 +233,17 @@ fn protocol_for(items: &[Pending]) -> Option<&'static str> {
 impl Store {
     /// Queue something to be said to a session at the next safe moment.
     ///
-    /// `body` is the item's *content*, not its framing: the line saying where
-    /// it came from is added at render time from `kind`. `ref_id` identifies
-    /// the thing on the caller's side — a card id, a message id — kept as text
-    /// because those sources number themselves independently.
+    /// `body` is content, not framing; the source line is added at render time
+    /// from `kind`. `ref_id` is the caller's own id, kept as text because those
+    /// sources number themselves independently.
     ///
-    /// **The entry point for a caller with no transaction of its own.** One
-    /// that has a transaction — [`Store::answer_card`] queues inside the one
-    /// that answers the card — goes through [`insert_pending`], and must: an
+    /// The entry point for a caller with no transaction of its own; one that
+    /// has a transaction goes through [`insert_pending`], and must, because an
     /// answered card with nothing queued would read *queued* in the rail for
-    /// ever. Not two front doors; one insert, reachable either way.
+    /// ever.
     ///
-    /// No production caller yet, because its two sources do not exist:
-    /// [`Kind::Human`] waits on "nudge a session mid-turn" and [`Kind::Mail`]
-    /// on the queue learning to address a member.
+    /// No production caller yet: [`Kind::Human`] waits on mid-turn nudges and
+    /// [`Kind::Mail`] on the queue learning to address a member.
     pub fn enqueue_delivery(
         &self,
         conversation_id: &str,
@@ -463,22 +421,15 @@ impl Store {
 
     /// Decide what, if anything, to say to this conversation now.
     ///
-    /// A value rather than an action, the same shape and for the same reason as
-    /// [`crate::team::wake_order`]: *when* to speak holds the judgement, and
-    /// keeping it out of the spawning means it can be tested without a harness
-    /// binary or a running agent.
+    /// A value rather than an action, for the reason
+    /// [`crate::team::wake_order`] is: *when* to speak holds the judgement, and
+    /// keeping it out of the spawning means it is testable without a harness
+    /// binary.
     ///
-    /// Returns `None`, deliberately, when:
-    ///
-    /// - **A turn is in flight** — the rule the module exists for. The running
-    ///   prompt was assembled before any of this arrived, so splicing it in
-    ///   answers a question the agent has moved past. It waits; nothing is
-    ///   lost.
-    /// - **Nothing is queued.** Waking an agent to tell it nothing burns a
-    ///   turn.
-    ///
-    /// Everything queued goes into **one** injection, for the reason the module
-    /// header gives.
+    /// `None` when a turn is in flight — the running prompt predates everything
+    /// queued, so splicing answers a question the agent has moved past — or
+    /// when nothing is queued, since waking an agent to tell it nothing burns a
+    /// turn. Everything queued goes into one injection.
     pub fn plan_injection(&self, conversation_id: &str, busy: bool) -> Result<Option<Injection>> {
         if busy {
             return Ok(None);
