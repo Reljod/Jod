@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { summariseFailures, useJod } from "./hooks/useJod";
 import { TacticalView } from "./components/TacticalView";
 import { TopBar, type ViewMode } from "./components/TopBar";
@@ -13,7 +13,7 @@ import { AuthGate } from "./components/AuthGate";
 import { DeleteDialog, type DeleteRequest } from "./components/DeleteDialog";
 import type { AgentNode } from "./state/world";
 import type { TransportFactory } from "./transport";
-import type { HarnessKind, Resume, SpawnRequest } from "./types";
+import { tiersOf, type HarnessKind, type Resume, type SpawnRequest } from "./types";
 
 type Seed = { resume: Resume; cwd: string; harness: HarnessKind; name: string } | null;
 
@@ -41,6 +41,34 @@ export default function App({ makeTransport }: HudProps = {}) {
   const canWrite =
     world.link.phase === "simulated" ||
     (world.link.phase === "live" && world.link.scope === "write");
+
+  /**
+   * The runs the roster currently believes are going.
+   *
+   * The fleet tree is a poll and the roster is reconciled off the event stream,
+   * so this is the fresher of the two answers by up to a full poll interval —
+   * which is exactly the interval during which somebody watching a manager pick
+   * up a job sees nothing happen. Recomputed on `revision`, the same tick every
+   * other panel redraws on.
+   */
+  /**
+   * The chain of command, derived once and shared by the panels that draw it.
+   *
+   * Computed here rather than inside each panel because both need it and the
+   * fleet is the only source: a roster entry says nothing about rank, so the
+   * sessions list borrows the tree's answer through `tiers.run`.
+   */
+  const tiers = useMemo(() => tiersOf(jod.fleet), [jod.fleet]);
+
+  const liveRuns = useMemo(() => {
+    const ids = new Set<string>();
+    for (const [id, node] of world.agents) {
+      if (node.summary.status === "running") ids.add(id);
+    }
+    return ids;
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `world` is a
+    // mutable store; `revision` is what says it changed.
+  }, [world, jod.revision]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -145,25 +173,44 @@ export default function App({ makeTransport }: HudProps = {}) {
     }
   }, [jod, pending]);
 
-  /** A fleet row's key is `kind:id`, so the split is by what was selected. */
-  const deleteFleetRows = useCallback((keys: string[]) => {
-    const request: DeleteRequest = {
-      runs: [],
-      conversations: [],
-      works: [],
-      notice: null,
-      armed: false,
-    };
-    for (const key of keys) {
-      const cut = key.indexOf(":");
-      const kind = key.slice(0, cut);
-      const id = key.slice(cut + 1);
-      if (kind === "run") request.runs.push(id);
-      else if (kind === "session") request.conversations.push(id);
-      else if (kind === "work") request.works.push(id);
-    }
-    setPending(request);
-  }, []);
+  /**
+   * A fleet row's key is `kind:id`, so the split is by what was selected.
+   *
+   * Only three kinds reach here — `Fleet.deletable` is what decides that, and
+   * it is deliberately the same three this switch handles. A `main`, `manager`
+   * or `project` key arriving would mean those two have drifted apart, so it is
+   * reported rather than dropped: the old behaviour was to ignore the key
+   * silently, which showed a confirmation and then a success for a delete that
+   * never happened.
+   */
+  const deleteFleetRows = useCallback(
+    (keys: string[]) => {
+      const request: DeleteRequest = {
+        runs: [],
+        conversations: [],
+        works: [],
+        notice: null,
+        armed: false,
+      };
+      const refused: string[] = [];
+      for (const key of keys) {
+        const cut = key.indexOf(":");
+        const kind = key.slice(0, cut);
+        const id = key.slice(cut + 1);
+        if (kind === "run") request.runs.push(id);
+        else if (kind === "session") request.conversations.push(id);
+        else if (kind === "work") request.works.push(id);
+        else refused.push(kind);
+      }
+      if (refused.length > 0) {
+        jod.reportError(`a ${refused[0]} row cannot be deleted from the fleet`);
+      }
+      if (request.runs.length + request.conversations.length + request.works.length > 0) {
+        setPending(request);
+      }
+    },
+    [jod],
+  );
 
   const deleteSessions = useCallback((ids: string[]) => {
     setPending({ runs: ids, conversations: [], works: [], notice: null, armed: false });
@@ -187,6 +234,7 @@ export default function App({ makeTransport }: HudProps = {}) {
         <Sessions
           world={world}
           selectedId={selectedId}
+          tiers={tiers.run}
           onOpen={open}
           onDelete={deleteSessions}
           canWrite={canWrite}
@@ -215,6 +263,7 @@ export default function App({ makeTransport }: HudProps = {}) {
           <Fleet
             nodes={jod.fleet}
             selectedId={selectedId}
+            liveRuns={liveRuns}
             onOpen={open}
             onDelete={deleteFleetRows}
             canWrite={canWrite}

@@ -3403,3 +3403,85 @@ already had and for a neighbouring reason. Open by default, every agent in every
 repository is on screen at once and the one repository you came to look at is
 somewhere in the middle of it. Shut, the fleet opens as `main` and a list of
 repositories, and one keystroke opens the one you want.
+
+## A row you can see and cannot click is worse than no row at all
+
+The fleet drew a `manager` under every project and the row did nothing. Clicking
+it did nothing, and it reported `running: false` however hard the manager was
+working, so a manager mid-instruction and one nobody had ever spoken to were the
+same three pixels on the screen.
+
+The cause was not in the panel that drew it. `Store::forest_of` emitted the
+manager as a permanent leaf: a run belongs to the conversation it wrote into,
+and the walk that turns runs into rows only ever ran over the sessions inside a
+work. A manager's conversation is not inside a work, so nothing reached it —
+and the panel's rule for "which run does clicking this row open", which is the
+newest run anywhere beneath it, correctly found none.
+
+So the three rows that own a conversation — Jod, a manager, a session — now all
+get their runs the same way, through one function rather than a loop that only
+one of them was inside. That is the whole fix for both halves: the row is
+clickable because there is something under it, and it says it is running
+because something under it is.
+
+The general shape: when a row is inert, look at what fills it before you look at
+what draws it.
+
+## Jod gets a row, beside the repositories rather than above them
+
+The tree started at the projects, so the thing that hands out all the work was
+the one party to it you could not see. He sits at depth 0 with the projects, not
+above them: he owns no checkout and does none of the work, and drawing every
+repository as his child would state a containment that is not true. What is true
+is that he is where every instruction arrives, and that is worth one row.
+
+His row arrives folded. Every instruction he has ever been given is a run in
+that one conversation — a real fleet had twenty-six — and unfolded they push
+every repository off the top of the panel. Folded is not capped: the row still
+aggregates their liveness and still pulses while he works, the twisty says there
+is more inside, and one click shows all of them. A cap would have been the
+tempting fix and it would have lied about what was there.
+
+## In the fleet, colour means rank; everywhere else it means harness
+
+The HUD had one rule — hue is which harness is running the agent — and it was a
+good rule until there was a hierarchy to draw. Jod, a manager and an engineer
+are three different kinds of thing to be doing, and "something is running" is a
+much less useful sentence than "the manager picked it up and has not delegated
+yet".
+
+So the two panels that draw the chain of command colour by rank: amber for Jod,
+violet for a manager, cyan for an engineer. The tactical canvas keeps hue =
+harness. Two meanings for colour would be one too many if they shared a surface,
+and they do not — the canvas draws agents, these panels draw the hierarchy above
+them. A project takes no rank colour at all, because it is the repository being
+argued about rather than one of the parties arguing.
+
+Colour is never the only carrier: each row also spells the rank out, because a
+fact you can only get from a hue is a fact some readers cannot get.
+
+Rank is read off the tree and never off a run's name. `<project>-manager` is a
+naming convention, not a type, and an `AgentEnvelope` carries only `agent_id` —
+no conversation, no work, no project. The fleet is the one place on the wire
+that says which rank a run belongs to, so the sessions list borrows the answer
+from it and draws a run the tree has not caught up with as untiered rather than
+guessing.
+
+## A tree on a four-second timer is not a live tree
+
+The fleet is a query, and it has to stay one: it is built from the database, so
+it shows work started by any process, and no event on this HUD's stream
+announces that a work was created in the TUI. The poll is the floor and stays.
+
+What the event stream adds is promptness for the part it does describe. A
+`started`, `finished` or `error` reshapes the tree, so it nudges the same query
+— debounced, because a manager finishing and the four engineers it stopped
+finishing with it are one reshape, not five. Text events deliberately do not:
+a manager narrating for four minutes must not re-query the forest per sentence.
+
+Liveness itself does not wait even for that. A run row believes either the tree
+or the roster, and the roster is reconciled off the stream. Rows that are not
+runs keep taking the tree's word alone — a closed work deliberately stops
+claiming to be running with something alive underneath it, and the roster cannot
+see that. Second-guessing it in the browser would put the two surfaces into
+disagreement about a fact only one of them can compute.

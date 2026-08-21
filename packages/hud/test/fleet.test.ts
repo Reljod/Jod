@@ -1,22 +1,29 @@
 import { describe, expect, it } from "vitest";
 
-import { hideUnder } from "../src/components/Fleet";
+import { deletable, hint, hideUnder, isLiveRow, openable } from "../src/components/Fleet";
 import { SimTransport } from "../src/transport/sim";
-import { fleetKey, type FleetNode, type FleetNodeKind } from "../src/types";
+import { fleetKey, tiersOf, type FleetNode, type FleetNodeKind } from "../src/types";
 
 /**
  * A row of the fleet tree. Only the fields the collapse walk reads are
  * meaningful; the rest exist because the type requires them.
  */
-function node(kind: FleetNodeKind, id: string, depth: number): FleetNode {
+function node(
+  kind: FleetNodeKind,
+  id: string,
+  depth: number,
+  parent: FleetNode | null = null,
+): FleetNode {
   return {
     id: { kind_tag: kind, id },
-    parent: null,
+    parent: parent ? parent.id : null,
     kind,
     depth,
     label: id,
     summary: "",
     running: false,
+    status: kind === "run" ? "completed" : null,
+    stalled_for_ms: null,
     cards: 0,
     blocked: 0,
     colour: "cyan",
@@ -112,6 +119,166 @@ describe("hideUnder", () => {
 
   it("is a no-op on an empty forest", () => {
     expect(hideUnder([], new Set([fleetKey({ kind_tag: "work", id: "gone" })]))).toEqual([]);
+  });
+});
+
+/**
+ * The whole chain of command, as `Store::forest_of` emits it.
+ *
+ *   jod                        ← main, and his own run under him
+ *     jod-run
+ *   tetris                     ← project: a heading, holding no rank
+ *     manager                  ← the row that owns the repository
+ *       mgr-run
+ *     port the parser          ← work
+ *       lead                   ← session
+ *         eng-run
+ */
+function chain(): FleetNode[] {
+  const main = node("main", "main-conv", 0);
+  const mainRun = node("run", "jod-run", 1, main);
+  const project = node("project", "tetris", 0);
+  const manager = node("manager", "mgr-conv", 1, project);
+  const managerRun = node("run", "mgr-run", 2, manager);
+  const work = node("work", "work-a", 1, project);
+  const session = node("session", "lead", 2, work);
+  const engineerRun = node("run", "eng-run", 3, session);
+  return [main, mainRun, project, manager, managerRun, work, session, engineerRun];
+}
+
+describe("tiersOf", () => {
+  it("ranks each row by who owns it", () => {
+    const { row } = tiersOf(chain());
+    expect(row.get("main:main-conv")).toBe("jod");
+    expect(row.get("manager:mgr-conv")).toBe("manager");
+    expect(row.get("work:work-a")).toBe("engineer");
+    expect(row.get("session:lead")).toBe("engineer");
+  });
+
+  it("gives a run the rank of whatever owns it", () => {
+    // The point of the whole exercise: three runs, three ranks, and nothing
+    // about a run itself says which. Only the tree does.
+    const { run } = tiersOf(chain());
+    expect(run.get("jod-run")).toBe("jod");
+    expect(run.get("mgr-run")).toBe("manager");
+    expect(run.get("eng-run")).toBe("engineer");
+  });
+
+  it("leaves a project unranked — it is the repository, not a party in it", () => {
+    expect(tiersOf(chain()).row.has("project:tetris")).toBe(false);
+  });
+
+  it("ranks a loose work and its runs as engineers", () => {
+    // A work opened before projects were recorded sits at the top level with no
+    // project above it. It is still somebody doing the work.
+    const work = node("work", "work-a", 0);
+    const session = node("session", "lead", 1, work);
+    const run = node("run", "run-1", 2, session);
+    const tiers = tiersOf([work, session, run]);
+    expect(tiers.row.get("work:work-a")).toBe("engineer");
+    expect(tiers.run.get("run-1")).toBe("engineer");
+  });
+
+  it("leaves a row whose parent link is missing unranked, rather than guessing", () => {
+    // Rank is read off `parent`, and `Store::forest_of` sets it on every row
+    // below the top level. A row without one is a forest that did not come from
+    // there, and inventing a rank for it would draw a confident colour over an
+    // answer nobody knows.
+    const orphan = node("run", "run-1", 2);
+    expect(tiersOf([orphan]).run.has("run-1")).toBe(false);
+  });
+
+  it("is empty rather than broken on an empty forest", () => {
+    const { row, run } = tiersOf([]);
+    expect(row.size).toBe(0);
+    expect(run.size).toBe(0);
+  });
+});
+
+describe("openable", () => {
+  it("opens a manager on the run beneath it", () => {
+    // The bug this whole change exists for. The manager row was a permanent
+    // leaf, so this returned null and the button rendered disabled — a row that
+    // was visibly there and could not be clicked.
+    const all = chain();
+    const manager = all.find((n) => n.kind === "manager")!;
+    expect(openable(all, manager)).toBe("mgr-run");
+  });
+
+  it("opens jod on his own run and not on a manager's", () => {
+    const all = chain();
+    const main = all.find((n) => n.kind === "main")!;
+    expect(openable(all, main)).toBe("jod-run");
+  });
+
+  it("does not reach past a row's own subtree", () => {
+    // `mgr-run` is the last run under the manager; `eng-run` lives under the
+    // work beside it and must not be what clicking the manager opens.
+    const all = chain();
+    const project = all.find((n) => n.kind === "project")!;
+    expect(openable(all, project)).toBe("eng-run");
+  });
+
+  it("is null for a manager nobody has asked anything", () => {
+    const project = node("project", "tetris", 0);
+    const manager = node("manager", "mgr-conv", 1, project);
+    manager.has_children = false;
+    expect(openable([project, manager], manager)).toBeNull();
+  });
+
+  it("a run is itself", () => {
+    const all = chain();
+    const run = all.find((n) => n.id.id === "eng-run")!;
+    expect(openable(all, run)).toBe("eng-run");
+  });
+});
+
+describe("hint", () => {
+  it("says why a manager with no run cannot be opened", () => {
+    const manager = node("manager", "mgr-conv", 1);
+    expect(hint(manager, null)).toMatch(/not been asked anything/);
+  });
+
+  it("shows what the row last said once there is something to open", () => {
+    const manager = node("manager", "mgr-conv", 1);
+    manager.summary = "Bash…";
+    expect(hint(manager, "mgr-run")).toBe("Bash…");
+  });
+});
+
+describe("deletable", () => {
+  it("covers exactly the three kinds the delete can route", () => {
+    // Pinned against `App.deleteFleetRows`'s switch. When these disagree, a
+    // selected row is silently dropped and the delete reports success over
+    // having done nothing — which is how it behaved before.
+    const kinds = chain().filter(deletable).map((n) => n.kind);
+    expect(new Set(kinds)).toEqual(new Set(["run", "work", "session"]));
+  });
+
+  it("refuses jod, a project and a manager", () => {
+    for (const kind of ["main", "project", "manager"] as const) {
+      expect(deletable(node(kind, "x", 0))).toBe(false);
+    }
+  });
+});
+
+describe("isLiveRow", () => {
+  it("believes the event stream about a run the tree has not caught up with", () => {
+    // The fleet is a four-second poll. A run that started 200ms ago is running,
+    // and a panel that waits for the next query to say so is the panel somebody
+    // is complaining looks asleep.
+    const run = node("run", "eng-run", 1);
+    expect(isLiveRow(run, new Set())).toBe(false);
+    expect(isLiveRow(run, new Set(["eng-run"]))).toBe(true);
+  });
+
+  it("takes the tree's word for every row that is not a run", () => {
+    // A closed work deliberately stops claiming to be running even with
+    // something alive under it, and the roster cannot see that.
+    const work = node("work", "work-a", 0);
+    expect(isLiveRow(work, new Set(["work-a"]))).toBe(false);
+    work.running = true;
+    expect(isLiveRow(work, new Set())).toBe(true);
   });
 });
 

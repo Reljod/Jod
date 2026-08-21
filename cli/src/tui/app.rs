@@ -1341,12 +1341,30 @@ impl App {
             return Vec::new();
         }
         std::iter::once(main_id())
+            .filter(|_| !self.forest_holds_main())
             .chain(
                 self.tree
                     .row_ids(&self.forest, &self.closed_works, self.tree_filter()),
             )
             .chain(self.loose_rows().iter().map(|a| loose_id(&a.id)))
             .collect()
+    }
+
+    /// Whether core's forest already carries the pinned chat's row.
+    ///
+    /// [`fleet::main_id`] was minted when it could not: the forest was works and
+    /// what hangs off them, so the chat had no node to be and the fleet needed a
+    /// sentinel or it became a screen you could walk into and not back out of.
+    /// `forest_of` emits a [`NodeKind::Main`] row now, and two rows for one chat
+    /// is worse than the problem the sentinel solved.
+    ///
+    /// So the sentinel became the fallback rather than the answer. It still
+    /// appears when the forest has no such row — a store with nothing pinned
+    /// yet — which keeps the guarantee it was added for without ever doubling
+    /// the row it guarantees. The real node is preferred because it is the one
+    /// carrying a conversation id, its runs, and its liveness.
+    fn forest_holds_main(&self) -> bool {
+        self.forest.iter().any(|n| n.kind == NodeKind::Main)
     }
 
     /// Where the cursor is within the pane below the tree, if it is in there.
@@ -1370,7 +1388,20 @@ impl App {
     /// cursor: the two screens keep separate selections, and the fleet draws
     /// only one of them at a time.
     pub fn tree_main_selected(&self) -> bool {
-        self.has_tree() && self.tree.selected.as_ref() == Some(&main_id())
+        if !self.has_tree() {
+            return false;
+        }
+        let Some(id) = self.tree.selected.as_ref() else {
+            return false;
+        };
+        // Either row means the same place. Which of the two is on screen depends
+        // on whether core minted one — see [`App::forest_holds_main`] — and a
+        // caller asking "is the cursor on the chat" must not have to know.
+        *id == main_id()
+            || self
+                .forest
+                .iter()
+                .any(|n| n.kind == NodeKind::Main && n.id == *id)
     }
 
     /// What the fleet's `/` line currently holds.
@@ -3339,6 +3370,74 @@ mod tests {
         assert!(a.flash.is_some());
         a.go(Workspace::Memory);
         assert!(a.flash.is_none());
+    }
+
+    fn main_node(conversation: &str) -> Node {
+        Node {
+            id: NodeId::main(conversation),
+            parent: None,
+            kind: NodeKind::Main,
+            depth: 0,
+            label: "jod".into(),
+            summary: String::new(),
+            running: false,
+            status: None,
+            stalled_for_ms: None,
+            cards: 0,
+            blocked: 0,
+            colour: String::new(),
+            expanded: true,
+            has_children: false,
+        }
+    }
+
+    /// One row for the chat, whichever of the two provides it.
+    ///
+    /// `fleet::main_id` is a sentinel from when core's forest could not carry
+    /// the pinned chat. It can now, and prepending the sentinel unconditionally
+    /// put two rows for one conversation at the top of the fleet.
+    #[test]
+    fn the_pinned_chat_gets_one_row_when_core_already_minted_it() {
+        let mut a = app();
+        a.forest = vec![main_node("conv-1")];
+
+        let rows = a.tree_rows();
+        assert_eq!(
+            rows.iter().filter(|id| id.kind_tag == "main").count(),
+            1,
+            "one chat, one row: {rows:?}"
+        );
+        assert_eq!(rows[0], NodeId::main("conv-1"), "core's row, not the sentinel");
+    }
+
+    /// And the sentinel is still there when core has nothing pinned to offer,
+    /// which is the guarantee it was added for: a fleet with no row for the
+    /// chat is a screen you can walk into and not back out of.
+    #[test]
+    fn the_pinned_chat_falls_back_to_the_sentinel_when_core_has_no_row() {
+        let mut a = app();
+        a.forest = vec![manager_node("c-1")];
+
+        let rows = a.tree_rows();
+        assert_eq!(rows[0], main_id(), "{rows:?}");
+    }
+
+    /// Either row means the same place, so the cursor test has to accept both —
+    /// otherwise every verb keyed off "is the cursor on the chat" goes quiet the
+    /// moment core starts minting the row.
+    #[test]
+    fn the_cursor_is_on_the_chat_on_either_of_its_two_rows() {
+        let mut a = app();
+        a.forest = vec![main_node("conv-1")];
+
+        a.tree.selected = Some(NodeId::main("conv-1"));
+        assert!(a.tree_main_selected(), "core's row");
+
+        a.tree.selected = Some(main_id());
+        assert!(a.tree_main_selected(), "the sentinel");
+
+        a.tree.selected = Some(NodeId::manager("c-1"));
+        assert!(!a.tree_main_selected(), "and nothing else is");
     }
 
     /// A heredoc body is a file, and it already has a place to be — the diff

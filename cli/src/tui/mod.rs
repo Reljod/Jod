@@ -4667,6 +4667,9 @@ fn on_tree_key(app: &mut App, key: KeyEvent, viewport: usize) -> Option<Option<A
                 jod_core::tree::NodeKind::Manager => {
                     handled(Some(Action::EnterManager(node.id.id)))
                 }
+                // Jod's row *is* the pinned row, so it makes the movement the
+                // pinned row already makes rather than binding by id.
+                jod_core::tree::NodeKind::Main => handled(Some(Action::EnterMain)),
                 jod_core::tree::NodeKind::Work | jod_core::tree::NodeKind::Project => {
                     let closed = app.closed_works.clone();
                     app.tree.toggle(&closed);

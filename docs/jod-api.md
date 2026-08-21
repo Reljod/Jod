@@ -522,10 +522,29 @@ opposite turns a forgotten config line into an open shell.
 ### `/v1/fleet` — the tree, not the roster
 
 `/v1/agents` is a flat list built from the answering process's memory.
-`/v1/fleet` is the **work → session → run tree**, built by `Store::forest_of`
-in `jod-core` — the same function `jod tui`'s fleet screen renders, serialised
-and handed over unchanged. There is no second flatten on the API side and none
-in the browser; `depth` arrives with the rows and the client only indents.
+`/v1/fleet` is the **jod → project → manager → work → session → run tree**,
+built by `Store::forest_of` in `jod-core` — the same function `jod tui`'s fleet
+screen renders, serialised and handed over unchanged. There is no second
+flatten on the API side and none in the browser; `depth` arrives with the rows
+and the client only indents.
+
+Every row carries a `kind`, and there are **five** of them — `main`, `project`,
+`manager`, `work`, `session`, `run`. A client that switches over `kind` has to
+handle all of them. The first three arrived after the other three, and a client
+that knew only the originals did not fail loudly: it composed class names no
+stylesheet defined, so a manager drew as an anonymous grey row nothing
+explained, and a delete routed by `kind` dropped it without a word.
+
+The three rows that own a conversation — `main`, `manager` and `session` — each
+carry the runs that wrote into it as their children. That is what makes them
+openable and what makes their `running` mean anything. A manager used to be a
+permanent leaf that reported `running: false` whatever it was doing, so a
+manager mid-instruction and one nobody had ever spoken to drew identically.
+
+A project appears once it has works **or** a manager. A repository that has
+been catalogued but never discussed has no chain to draw and stays off the
+tree; one whose manager is mid-instruction appears immediately, which is
+precisely the stretch somebody is watching to see whether the job was picked up.
 
 Two consequences worth stating, because they are the reason the route exists:
 

@@ -310,8 +310,18 @@ export function taskIsClaimed(task: TeamTask): boolean {
 
 // ─── the fleet tree ──────────────────────────────────────────────────────────
 
-/** Mirrors `tree::NodeKind` in `core/src/tree.rs`. */
-export type FleetNodeKind = "work" | "session" | "run";
+/**
+ * Mirrors `tree::NodeKind` in `core/src/tree.rs`. **All five of them.**
+ *
+ * The first three are the chain of command — Jod takes the instruction, hands
+ * anything touching a repository to that repository's manager, and the manager
+ * puts an engineer on it. `project` and `manager` were on the wire for two
+ * releases before they were in this union, and the failure was quiet in the
+ * specific way an unknown variant always is here: `k-${node.kind}` produced
+ * class names no stylesheet defined, so a manager drew as an anonymous grey row
+ * and the bulk-delete switch dropped it without saying so.
+ */
+export type FleetNodeKind = "main" | "project" | "manager" | "work" | "session" | "run";
 
 /**
  * Mirrors `tree::NodeId` — a row's identity, stable across a rebuild.
@@ -340,6 +350,23 @@ export interface FleetNode {
   /** Newest message or tool call. Already one line. */
   summary: string;
   running: boolean;
+  /**
+   * How a run ended, straight from `runs.status` — `completed`, `failed`,
+   * `killed`, or `running` while it is still going. Null on every row that is
+   * not a run, which have no status of their own.
+   *
+   * `running` alone cannot say this: it is false for a clean finish, for a
+   * failure and for a kill, so a row drawn from that bool alone shows all three
+   * identically and a person cannot see that something broke.
+   */
+  status: string | null;
+  /**
+   * How long this run has been silent, or null if it is healthy.
+   *
+   * A duration rather than an instant, so every surface drawing this forest
+   * agrees on the age instead of each subtracting its own clock.
+   */
+  stalled_for_ms: number | null;
   /** Open cards anywhere in this row's subtree. */
   cards: number;
   /** Of those, the ones blocking. */
@@ -352,3 +379,86 @@ export interface FleetNode {
 export function fleetKey(id: FleetNodeId): string {
   return `${id.kind_tag}:${id.id}`;
 }
+
+// ─── the chain of command ────────────────────────────────────────────────────
+
+/**
+ * Which rank of Jod's chain of command a row belongs to.
+ *
+ * Jod takes the instruction and does none of the work. Anything touching a
+ * repository goes to that repository's manager, which owns it and remembers
+ * every instruction about it. The manager does none of the work either — it
+ * puts an engineer on it. Three ranks, and telling them apart is most of what
+ * makes the fleet readable: "something is running" is a much less useful fact
+ * than "the manager picked it up and has not delegated yet".
+ *
+ * A project has no tier. It is a heading — the repository the other three are
+ * arguing about — not a rank within them.
+ */
+export type Tier = "jod" | "manager" | "engineer";
+
+/** Tiers, by row and by run. */
+export interface FleetTiers {
+  /** One entry per tiered row, keyed by [`fleetKey`]. */
+  row: Map<string, Tier>;
+  /**
+   * The same, keyed by bare run id.
+   *
+   * For the panels that list runs without the tree — `Sessions` reads the
+   * daemon's roster, and an `AgentEnvelope` carries only `agent_id`, no
+   * conversation and no project. The fleet is the only place on the wire that
+   * says which rank a given run belongs to, so it is where the answer is
+   * borrowed from.
+   */
+  run: Map<string, Tier>;
+}
+
+/** The rank a row holds on its own, before inheriting one. */
+function ownTier(kind: FleetNodeKind): Tier | undefined {
+  switch (kind) {
+    case "main":
+      return "jod";
+    case "manager":
+      return "manager";
+    case "work":
+    case "session":
+      return "engineer";
+    // A run takes its rank from whatever owns it — Jod's runs are Jod's, a
+    // manager's are the manager's. A project is a heading and holds no rank.
+    case "run":
+    case "project":
+      return undefined;
+  }
+}
+
+/**
+ * Work out every row's rank in one pass over the flattened forest.
+ *
+ * Follows `parent` rather than `depth`. Both would work on a well-formed
+ * forest, but a session whose parent sits outside its work is re-pointed at the
+ * work itself by `Store::forest_of`, and depth arithmetic cannot see that the
+ * link moved. Document order is what makes one pass enough: `forest_of` emits
+ * every parent before its children, so the parent's rank is always already
+ * known by the time a child asks for it.
+ */
+export function tiersOf(nodes: readonly FleetNode[]): FleetTiers {
+  const row = new Map<string, Tier>();
+  const run = new Map<string, Tier>();
+
+  for (const node of nodes) {
+    const inherited = node.parent ? row.get(fleetKey(node.parent)) : undefined;
+    const tier = ownTier(node.kind) ?? inherited;
+    if (!tier) continue;
+    row.set(fleetKey(node.id), tier);
+    if (node.kind === "run") run.set(node.id.id, tier);
+  }
+
+  return { row, run };
+}
+
+/** What a tier is called in the chrome. Short, because the rail is narrow. */
+export const TIER_LABEL: Record<Tier, string> = {
+  jod: "JOD",
+  manager: "MGR",
+  engineer: "ENG",
+};

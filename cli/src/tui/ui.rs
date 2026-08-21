@@ -3765,6 +3765,7 @@ fn draw_tree_detail(f: &mut Frame, app: &App, area: Rect) {
             lines.push(detail(
                 "kind",
                 match node.kind {
+                    jod_core::tree::NodeKind::Main => "jod",
                     jod_core::tree::NodeKind::Project => "project",
                     jod_core::tree::NodeKind::Manager => "manager",
                     jod_core::tree::NodeKind::Work => "work",

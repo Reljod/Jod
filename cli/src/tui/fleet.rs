@@ -43,17 +43,28 @@ use std::collections::{HashMap, HashSet};
 
 use jod_core::tree::{Node, NodeId, NodeKind};
 
-/// The pinned main chat, as a row the tree's cursor can sit on.
+/// The pinned main chat, as a row the tree's cursor can sit on — **when core
+/// has not already given it one**.
 ///
-/// A sentinel rather than a node, because there is no node to be had: the
-/// forest is works and what hangs off them — core's query is
+/// A sentinel rather than a node, because for a long time there was no node to
+/// be had: the forest was works and what hangs off them — core's query is
 /// `WHERE c.work_id IS NOT NULL` — and the main chat belongs to no work. The
 /// flat list has pinned it above the agents since it existed; without the same
 /// row here, the fleet becomes a screen you can walk into and not back out of
 /// the moment a single work exists, because the tree replaces the list whole.
 ///
-/// Its own `kind_tag`, so it can collide with nothing: [`NodeId`] compares on
-/// the tag as well as the id, and `main` is not a kind core mints.
+/// `forest_of` emits a real [`NodeKind::Main`] row now, carrying the
+/// conversation id, its runs and its liveness — none of which a sentinel has.
+/// So this became the fallback rather than the answer, and
+/// `App::forest_holds_main` is what chooses: the real row when there is one,
+/// this when there is not. Two rows for one chat would be worse than the
+/// problem the sentinel was added to solve.
+///
+/// It keeps its own `kind_tag`, and it is no longer true that nothing else
+/// mints one — `NodeId::main` uses the same tag with a conversation id where
+/// this uses `MAIN_ROW`. They do not collide, because [`NodeId`] compares on
+/// the id as well as the tag and no conversation is called `main`, and they
+/// never appear together anyway.
 pub fn main_id() -> NodeId {
     NodeId {
         kind_tag: "main",
@@ -655,6 +666,10 @@ pub fn marker(node: &Node, expanded: bool) -> &'static str {
 /// colour.
 pub fn kind_glyph(kind: NodeKind) -> &'static str {
     match kind {
+        // Jod's own row, and the only glyph that is not a block or a diamond.
+        // He sits above the repositories rather than being one of them, so the
+        // gutter says that before any colour does.
+        NodeKind::Main => "★",
         // Solid, and the widest of the set: a project is the outermost group,
         // and the gutter is what says so on a screen with no colour.
         NodeKind::Project => "▪",

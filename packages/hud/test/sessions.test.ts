@@ -59,6 +59,8 @@ function node(kind: FleetNodeKind, id: string, depth: number): FleetNode {
     label: id,
     summary: "",
     running: false,
+    status: kind === "run" ? "completed" : null,
+    stalled_for_ms: null,
     cards: 0,
     blocked: 0,
     colour: "cyan",
