@@ -3,37 +3,30 @@
 //! Owned by the memory-extraction track. `jod-core` has no model client, so
 //! extraction is itself a harness run whose output is written back as facts.
 //!
-//! Until now `facts` had no writer except a person typing `jod remember`, and a
-//! memory nobody writes is not a memory system. This module gives it one
-//! *without* giving Jod a model: a [`Consolidation`] builds the
-//! [`SpawnRequest`] that asks an agent to read some material and answer in JSON
-//! lines, and then reads those lines back. Jod owns the prompt, the parse and
-//! every trust decision; the agent owns only the judgement about what is worth
-//! remembering.
+//! `facts` had no writer except a person typing `jod remember`, and a memory
+//! nobody writes is not a memory system. This gives it one *without* giving Jod
+//! a model: a [`Consolidation`] builds the [`SpawnRequest`] asking an agent to
+//! answer in JSON lines, then reads those lines back. Jod owns the prompt, the
+//! parse and every trust decision; the agent owns only the judgement.
 //!
-//! Four rules shape the whole module, and each one is here because of a
-//! measured failure rather than a preference
+//! Four rules shape the module, each from a measured failure
 //! ([`research/harness-agents-research/RECOMMENDATION.md`]):
 //!
-//! - **The parse is the contract.** The agent's output is untrusted text that
-//!   happens to be shaped like data. Every line is validated in isolation and a
-//!   bad line is dropped, never escalated into a failed batch — otherwise one
-//!   stray sentence of prose costs the whole extraction.
-//! - **Jod assigns trust from the *source* of the material, never from its
-//!   content.** [`Provenance`] is stated by the caller, and a line that tries
-//!   to name its own `origin` is discarded outright. Write-time trust admission
-//!   took attack success from 0.17–0.25 to 0.00 in the experiments, and it only
-//!   works if the label cannot be forged from inside the text.
+//! - **The parse is the contract.** The output is untrusted text shaped like
+//!   data. Every line is validated in isolation and a bad one dropped, never
+//!   escalated into a failed batch — one stray sentence must not cost the whole
+//!   extraction.
+//! - **Trust comes from the *source*, never the content.** [`Provenance`] is
+//!   stated by the caller and a line naming its own `origin` is discarded.
+//!   Write-time trust admission took attack success from 0.17–0.25 to 0.00, and
+//!   only works if the label cannot be forged from inside the text.
 //! - **A rewrite may not quietly lose what was known.** OpenClaw's
-//!   `maxPriorEntryLossFraction` — see
-//!   [`research/harness-agents-research/OPENCLAW-MEMORY.md`] — refuses a
-//!   consolidation that would retire more than a quarter of a subject's
-//!   beliefs.
+//!   `maxPriorEntryLossFraction` refuses a consolidation retiring more than a
+//!   quarter of a subject's beliefs.
 //! - **A failed extraction must never block the conversation that produced
-//!   it.** Hermes learned this the hard way: a looping memory side effect
-//!   suppressed the user's own reply, and the fix was a circuit breaker
-//!   (`research/hermes-parity-2026/REPORT.md` §3.2). [`Consolidation::apply`]
-//!   therefore cannot fail — every problem comes back as a field of
+//!   it.** Hermes' looping memory side effect suppressed the user's own reply
+//!   (`research/hermes-parity-2026/REPORT.md` §3.2), so
+//!   [`Consolidation::apply`] cannot fail — every problem is a field of
 //!   [`Outcome`].
 
 use std::collections::HashMap;

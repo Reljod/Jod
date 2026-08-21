@@ -6,25 +6,21 @@
 //!
 //! ## Forwarded, not reimplemented
 //!
-//! The measurement D7 asked for has been taken, against the real binaries, and
-//! it is written up with its commands and their output in
-//! [`docs/harness-support.md`](../../docs/harness-support.md). The answer:
-//! **every harness expands its own commands, so Jod never substitutes a body.**
-//! Claude Code and AGY resolve `/name` written straight into a print-mode
-//! prompt; OpenCode does not, but expands the same command natively when it is
-//! named by `run --command <name>` instead.
+//! Measured against the real binaries, written up in
+//! [`docs/harness-support.md`](../../docs/harness-support.md): **every harness
+//! expands its own commands, so Jod never substitutes a body.** Claude Code and
+//! AGY resolve `/name` in a print-mode prompt; OpenCode does not, but expands
+//! the same command natively under `run --command <name>`.
 //!
-//! So the inlining branch is deleted rather than kept just in case, exactly as
-//! D7 said it should be. What survives is the distinction between the two
-//! spellings that were actually observed — see [`Expansion`] — and the
-//! `Unmeasured` value for a harness nobody has run yet.
+//! So the inlining branch is deleted rather than kept just in case. What
+//! survives is the distinction between the two observed spellings — see
+//! [`Expansion`] — and `Unmeasured` for a harness nobody has run.
 //!
-//! The one thing Jod deliberately does not do is forward a command across
-//! conventions. Handing a `.claude/commands/foo.md` to OpenCode would find no
-//! `.opencode/command/foo.md` to resolve, and inlining the body to cover that
-//! would rebuild the branch this measurement just removed, for a case D7 never
-//! asked about. Every [`Discovered`] therefore records the harness whose
-//! convention it follows, and the palette offers it to that harness.
+//! Jod deliberately does not forward a command *across* conventions: handing a
+//! `.claude/commands/foo.md` to OpenCode would find nothing to resolve, and
+//! inlining the body to cover that would rebuild the branch this measurement
+//! removed. So every [`Discovered`] records the harness whose convention it
+//! follows, and the palette offers it to that harness.
 
 use std::path::{Path, PathBuf};
 

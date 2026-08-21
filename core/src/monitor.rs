@@ -2,16 +2,13 @@
 //!
 //! Schema is migration `0008_monitors_and_ledger` in [`crate::store`].
 //!
-//! A schedule today always spawns a harness. That is the right shape for
-//! "triage my inbox at eight" and the wrong shape for the far more common
-//! "tell me when this page changes", where the honest answer on almost every
-//! tick is *nothing happened*. Hermes' `monitor_script`/`monitor_url` and
-//! `no_agent` fields exist for exactly that, and they are the single most
-//! transferable idea in the audit
-//! ([`research/hermes-parity-2026/REPORT.md`] §4.2): **most scheduled work
-//! should not wake a model.** A watchdog is a script and a hash. For an agent
-//! Reljod pays per token to run around the clock, that is the difference
-//! between a scheduler and a bill.
+//! A schedule always spawns a harness, which is right for "triage my inbox at
+//! eight" and wrong for the commoner "tell me when this page changes", where
+//! the honest answer on almost every tick is *nothing happened*. The audit's
+//! most transferable idea ([`research/hermes-parity-2026/REPORT.md`] §4.2):
+//! **most scheduled work should not wake a model.** A watchdog is a script and
+//! a hash, and for an agent paid per token around the clock that is the
+//! difference between a scheduler and a bill.
 //!
 //! Two modes, and they are deliberately not combined — see [`Mode`]:
 //!

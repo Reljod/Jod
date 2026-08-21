@@ -9,17 +9,14 @@
 //!
 //! ## Why it lives in core
 //!
-//! It used to live twice: `cli/src/tui/data.rs::activity` for the terminal and
-//! `api/src/workspaces.rs::list_activity` for HTTP. Both handlers said in
-//! comments that this was debt awaiting a home in core, and the drift they
-//! predicted had already happened — the HTTP feed was missing webhook deliveries
-//! entirely, so a browser or a phone could not see a rejected signature or a
-//! rule that failed to start its run. Those are exactly the silences
-//! [`Item::needs_you`] exists to surface, and they were visible only to whoever
-//! happened to be sitting at the terminal.
+//! It used to live twice, once for the terminal and once for HTTP, and the
+//! drift both handlers predicted had already happened: the HTTP feed was
+//! missing webhook deliveries entirely, so a phone could not see a rejected
+//! signature or a rule that failed to start its run — exactly the silences
+//! [`Item::needs_you`] exists to surface.
 //!
 //! So the *rule* — what counts as activity, what its line says, which outcomes
-//! want a human, and what order it all comes back in — is settled here, once.
+//! want a human, and what order it comes back in — is settled here, once.
 //!
 //! ## What is deliberately not here
 //!

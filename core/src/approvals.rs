@@ -2,31 +2,27 @@
 //!
 //! ## The hole this fills
 //!
-//! Under `claude -p` there is nobody to answer a permission prompt. Jod's
+//! Under `claude -p` there is nobody to answer a permission prompt, so
 //! [`PermissionPolicy::Ask`](crate::harness::PermissionPolicy::Ask) and
-//! [`AcceptEdits`](crate::harness::PermissionPolicy::AcceptEdits) therefore did
-//! not mean "check with me" and "edits are fine" — they meant *deny*, silently,
-//! with the refusal arriving as a failed tool call the model reads as its own
-//! mistake. A session in `edits` mode refused `git init`, tried `git init -b
-//! main`, refused that, and gave up on a repository it had been told to create.
+//! [`AcceptEdits`](crate::harness::PermissionPolicy::AcceptEdits) meant *deny*,
+//! silently, with the refusal arriving as a failed tool call the model read as
+//! its own mistake. A session in `edits` refused `git init`, then
+//! `git init -b main`, and gave up on a repository it had been told to create.
 //!
-//! The missing piece was never the mode. It was that Jod had no channel to
-//! carry the question to a person and the answer back, and no memory of an
-//! answer once given — so the same question could not be asked once and settled
-//! for good.
+//! The missing piece was never the mode: Jod had no channel to carry the
+//! question to a person and the answer back, and no memory of an answer once
+//! given.
 //!
 //! ## The shape
 //!
-//! A [`Grant`] is one standing answer: this tool, this pattern, allowed. Grants
-//! are **global on purpose** — the point of answering "always" is that the next
-//! session does not ask, and a grant scoped to the session that earned it would
-//! ask again every time. They are the only thing here that persists.
+//! A [`Grant`] is one standing answer: this tool, this pattern, allowed.
+//! **Global on purpose** — the point of answering "always" is that the next
+//! session does not ask. They are the only thing here that persists.
 //!
 //! Everything else is decided per call by [`decide`], which is deliberately
-//! boring: a grant matches, or it does not. What happens when it does not is
-//! the caller's business — `jod approve-hook` raises a card and waits, and a
-//! run with nobody watching falls back to the harness's own refusal, which is
-//! exactly the behaviour that existed before this module.
+//! boring: a grant matches or it does not. What happens when it does not is the
+//! caller's business — `jod approve-hook` raises a card and waits, and a run
+//! with nobody watching falls back to the harness's own refusal.
 //!
 //! ## Why matching is conservative
 //!
