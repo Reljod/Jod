@@ -8,38 +8,27 @@
 //! ## One way in, and this is not a second one
 //!
 //! [`jod_core::orchestrator::hand_to_orchestrator`] is the only function that
-//! speaks to the main chat. `jod main`, the TUI's `/main` and the Telegram
-//! bridge all call it, and its own documentation says why: *"which
-//! conversation, which tools, which permission mode is a set of decisions with
-//! four bugs already behind it, and a second copy would be a second place for
-//! the fifth to hide."*
+//! speaks to the main chat, and its own documentation says why.
 //!
-//! So [`send_to_main`] calls it too. It does not assemble a `SpawnRequest`, it
-//! does not resolve the pinned conversation itself, and it does not decide the
-//! tool access. Everything this module adds is the part that is genuinely the
-//! API's: who is allowed, from where, how often, and what gets written down.
+//! So [`send_to_main`] calls it too: it assembles no `SpawnRequest`, resolves
+//! no conversation and decides no tool access. What this module adds is the
+//! part that is genuinely the API's — who is allowed, from where, how often,
+//! and what gets written down.
 //!
 //! ## The permission subtlety, which is the reason this file has a long note
 //!
-//! `hand_to_orchestrator` fixes `PermissionPolicy::AcceptEdits` internally and
-//! explains at length that it must: `Ask` is plan mode, plan mode refuses every
-//! mutation including the MCP calls that *are* the orchestrator's job, and the
-//! run once wrote a plan file instead of arming the schedule it was asked for.
+//! `hand_to_orchestrator` floors the mode at `AcceptEdits`, and explains why it
+//! must. That reasoning is sound in a terminal, where the caller is the person
+//! sitting at it, and does not carry across a socket: [`crate::routes`] refuses
+//! rather than downgrades when `config.permits` says no. Calling through
+//! without that check would let a daemon configured for `Ask` alone hand
+//! `AcceptEdits` to anyone with a write token — a ceiling with a hole only this
+//! path could find.
 //!
-//! That reasoning is sound in the terminal, where the caller is the person
-//! sitting at it. It does not carry itself across a socket. [`crate::routes`]
-//! is careful that a remote caller can never obtain a permission the operator
-//! has not allowed remotely — it checks `config.permits` and refuses rather
-//! than downgrading. If this route called through without that check, a daemon
-//! configured to allow only `Ask` would hand `AcceptEdits` to anyone with a
-//! write token, and the ceiling would be a ceiling with a hole in it that only
-//! this one path could find.
-//!
-//! So the check is made here explicitly, against the policy the orchestrator is
-//! known to use, and the refusal names it. The cost is that this module knows a
-//! constant core also knows; the test below pins them together so the day core
-//! changes its mind is the day this fails rather than the day the ceiling
-//! quietly stops meaning anything.
+//! So the check is made here explicitly and the refusal names it. The cost is
+//! that this module knows a constant core also knows; the test below pins them
+//! together, so core changing its mind fails here rather than silently emptying
+//! the ceiling.
 //!
 //! ## Reads never create
 //!

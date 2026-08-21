@@ -2,79 +2,59 @@
 //!
 //! Schema is migration `0013_heartbeats` in [`crate::store`].
 //!
-//! Jod could already answer *is there a process* — [`crate::proc::group_alive`]
-//! asks the kernel and never lies. What it could not answer is **is that
-//! process still working**, and those come apart precisely in the case this
-//! module exists for: a harness blocked on a socket that will never answer, a
-//! tool waiting on input that cannot arrive, a model call retrying for ever.
-//! The process group is alive, the pgid probe says so, and nothing has happened
-//! for two hours.
+//! [`crate::proc::group_alive`] already answers *is there a process*. What it
+//! cannot answer is **is that process still working**, and the two come apart
+//! in exactly the case this exists for: a harness blocked on a socket that will
+//! never answer, a model call retrying for ever. The group is alive and nothing
+//! has happened for two hours.
 //!
-//! That gap was not theoretical. [`crate::ticker::Ticker::tick_goals`] settles
-//! the previous iteration before starting the next, and it settles it by asking
-//! the run's status. A wedged run's status is `running` and stays `running`,
-//! because the only process that ever writes a terminal status is the
-//! supervisor watching the harness exit — and the harness never exits. So the
-//! goal waits. Not for an iteration, not for a day: for ever, silently, still
-//! listed as `running` in `jod ls`. A heartbeat is what turns that into a
-//! failure somebody can see.
+//! The gap was not theoretical. [`crate::ticker::Ticker::tick_goals`] settles
+//! the previous iteration by asking the run's status, and a wedged run reads
+//! `running` for ever — the only writer of a terminal status is the supervisor
+//! watching a harness that never exits. So the goal waits for ever, silently.
 //!
 //! ## Two questions, both required
 //!
-//! - **Is the process there?** `kill(pgid, 0)`. Cheap, certain, and passed by
+//! - **Is the process there?** `kill(pgid, 0)` — cheap, certain, and passed by
 //!   every wedged run in existence.
-//! - **Is it producing events?** The high-water `seq` in `events` for this run,
-//!   compared with what the last beat saw. A harness that is working writes —
-//!   tool calls, output, thinking. One that is not, does not.
+//! - **Is it producing events?** The high-water `seq` in `events`, against what
+//!   the last beat saw. A harness that is working writes.
 //!
-//! Either alone is a liveness check that misses half the failures. The
-//! interesting part is the second, and it is worth being clear about what it
-//! measures: not whether the agent is doing anything *useful*, only whether it
-//! is doing anything at all. Judging usefulness is what a goal's `done_when`
-//! and stall counter are for. This is the floor beneath them.
+//! Either alone misses half the failures. The second measures whether the agent
+//! is doing anything *at all*, not anything useful — judging usefulness is what
+//! a goal's `done_when` is for. This is the floor beneath it.
 //!
 //! ## What is pure, and why it matters
 //!
-//! [`decide`] is a function from a stored heartbeat and three observed facts
-//! ([`Observed`]) to one [`Verdict`]. No clock, no database, no process — so "a
-//! run that stalls exactly on the boundary", "a run that finished in the same
-//! tick it would have been declared stalled" and "a clock that went backwards"
-//! are all tested from values. Gathering the three facts and carrying the
-//! verdict out is [`crate::ticker::Ticker::tick_heartbeats`], and that half
-//! holds no policy at all.
+//! [`decide`] maps a stored heartbeat and three [`Observed`] facts to one
+//! [`Verdict`], with no clock, database or process — so a stall exactly on the
+//! boundary, a run that finished in the same tick, and a clock that went
+//! backwards are all tested from values.
+//! [`crate::ticker::Ticker::tick_heartbeats`] gathers the facts and holds no
+//! policy.
 //!
 //! ## Cleanup is the schema's job, not a code path
 //!
-//! The charter's requirement is that a heartbeat goes away when its session is
-//! deleted, fails, or finishes. Two of those are enforced by the table rather
-//! than by remembering to call something:
+//! A heartbeat must go when its session is deleted, fails, or finishes. Two are
+//! enforced by the table rather than by remembering to call something:
+//! `ON DELETE CASCADE` covers deletion, and [`Verdict::Ended`] — which
+//! [`decide`] reaches first — drops the row on a clean ending.
 //!
-//! - **Deleted** — `run_id` is `REFERENCES runs(id) ON DELETE CASCADE`, and the
-//!   store runs with `PRAGMA foreign_keys = ON`. Deleting the run deletes the
-//!   heartbeat, including deletions written by code that has never heard of
-//!   this module.
-//! - **Finished or failed** — [`Verdict::Ended`], which [`decide`] reaches
-//!   before it looks at anything else, and which drops the row.
+//! Only the third needs code, because a wedged run never reports its own
+//! ending. That asymmetry is the design.
 //!
-//! Only the third case needs code, and it needs it because a wedged run never
-//! reports its own ending. That asymmetry is the whole design: the paths that
-//! can be made automatic are, and the one that cannot is the one the tick runs.
+//! A retired heartbeat is *deleted*, not parked in a terminal state; a table of
+//! tombstones is not cleanup. The reason is written to the memory layer on the
+//! way out.
 //!
-//! A retired heartbeat is *deleted*, not parked in a terminal state — cleanup
-//! is the requirement, and a table of tombstones is not cleanup. The reason it
-//! retired is written to the memory layer on the way out, so nothing is lost.
-//!
-//! **Not to the run's event stream, and that is not an oversight.** `events` is
-//! `UNIQUE(run_id, seq)` and [`crate::store::Store::append_event`] ignores a
-//! duplicate, while the supervisor allocates `seq` from a counter it holds in
-//! its own memory. A watchdog writing `last_seq + 1` would therefore be racing
-//! the one process that owns that sequence — and losing that race is *silent*,
-//! costing either the watchdog's explanation or the supervisor's `Finished`.
-//! For a stalled run those writes are near-simultaneous by construction: the
-//! sweep signals the group, and the supervisor's own final event follows
-//! milliseconds later. A fact has no such contention, and for a goal it lands
-//! in the scope the *next iteration's prompt is built from*, so a stall is not
-//! merely recorded — it is told to whatever runs next.
+//! **Not to the run's event stream, and that is not an oversight.** The
+//! supervisor allocates `seq` from a counter in its own memory, and `events` is
+//! `UNIQUE(run_id, seq)` with duplicates ignored — so a watchdog writing
+//! `last_seq + 1` races the one process that owns that sequence, and loses
+//! *silently*, costing either its explanation or the supervisor's `Finished`.
+//! For a stalled run those writes are near-simultaneous by construction. A fact
+//! has no such contention, and for a goal it lands in the scope the *next
+//! iteration's prompt is built from*.
 
 use serde::{Deserialize, Serialize};
 

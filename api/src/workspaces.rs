@@ -8,30 +8,25 @@
 //!
 //! ## Store-faithful, not screen-faithful
 //!
-//! Every handler here is a read of [`jod_core::store::Store`] serialised more or
-//! less as the store holds it. That is a deliberate line, and it is worth saying
-//! why, because the TUI already has richer types.
+//! Every handler is a read of [`jod_core::store::Store`], serialised roughly as
+//! the store holds it — a deliberate line, because the TUI has richer types.
 //!
-//! `cli/src/tui/data.rs` builds `ScheduleRow`, `GoalRow`, `HookRow` and friends,
-//! which carry things like `gloss: "02:00 every day"`, `secret: "✓ verified 2m
-//! ago"` and a seven-slot outcome sparkline. Those are *presentation*: a cron
-//! gloss is a sentence in English, and a relative timestamp is only true for the
-//! second in which it was rendered. Serving them over HTTP would push one
-//! client's rendering choices onto every other client, and would stale the
-//! moment the response sat in a cache. So the API sends `cron`, `timezone` and
+//! `cli/src/tui/data.rs` builds rows carrying `gloss: "02:00 every day"` and
+//! relative timestamps. Those are *presentation*: a gloss is a sentence in
+//! English and a relative timestamp is true only for the second it rendered in.
+//! Serving them would push one client's rendering onto every other, and stale
+//! the moment the response was cached. So the API sends `cron`, `timezone` and
 //! `next_fire_at_ms`, and each client writes its own gloss.
 //!
-//! The rule this follows is the crate's own: *this crate adds no orchestration
-//! logic of its own*. Where a screen needs two tables joined, the join belongs
-//! in core and this module calls it — [`fleet`] hands back `Store::forest_of`
-//! unchanged, and [`list_activity`] is a passthrough to `jod_core::activity`.
-//! The activity feed is why that rule is worth stating twice: it used to be
-//! composed here, in parallel with the terminal's copy, and the two had already
-//! drifted far enough that this route was missing an entire source.
+//! This follows the crate's own rule: *no orchestration logic of its own*. A
+//! join two tables need belongs in core — [`fleet`] returns `Store::forest_of`
+//! unchanged and [`list_activity`] passes through to `jod_core::activity`. The
+//! activity feed is why that is worth stating: it was once composed here in
+//! parallel with the terminal's copy, and the two had drifted far enough that
+//! this route was missing an entire source.
 //!
-//! What is still assembled here is only the shaping a single response needs —
-//! [`crate::routes::TeamView`]'s argument, that one screen should not cost two
-//! round trips that can tear against each other.
+//! What is still assembled here is only the shaping one response needs — see
+//! [`crate::routes::TeamView`].
 //!
 //! ## Everything is `Scope::Read`
 //!

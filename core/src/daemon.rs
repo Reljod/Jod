@@ -69,11 +69,8 @@ impl Tick for Ticker {
     /// and a failure in one must not stop the others. A goal whose harness is
     /// wedged should not silently stop the nightly backup.
     ///
-    /// **The sweep goes first, and the order is load-bearing.**
-    /// [`Ticker::tick_goals`] settles the previous iteration by reading its
-    /// run's status, and a wedged run's status is `running` for ever: the only
-    /// process that writes a terminal status is the supervisor watching a
-    /// harness that is never going to exit. Reaping before the goals are asked
+    /// **The sweep goes first, and the order is load-bearing** — see
+    /// [`Ticker::tick_heartbeats`]. Reaping before the goals are asked
     /// is what turns a hang into a `failed` the same tick, so the objective
     /// moves on instead of waiting on a run that will never end.
     ///

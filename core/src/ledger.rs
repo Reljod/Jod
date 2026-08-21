@@ -47,27 +47,20 @@
 //!
 //! ## Who may invoke the sweep
 //!
-//! **Only a process that can actually send**, and this is a rule about the
-//! caller rather than about the ledger — which is why it needs saying here.
-//! Everything above describes *when* a row may be recovered and says nothing
-//! about *who* may recover it, and the obvious startup hook is the daemon,
-//! which holds no transport at all.
+//! **Only a process that can actually send.** A rule about the caller rather
+//! than the ledger, and worth stating because the obvious startup hook is the
+//! daemon, which holds no transport.
 //!
-//! Claiming is a write. `sweep_recoverable` rewrites the owner in the same
-//! transaction that selects the rows, precisely so two Jods starting together
-//! cannot both redeliver. So a caller that claims a row it cannot send has not
-//! merely failed to help: it now *owns* the row, it is alive, and every later
-//! sweep therefore skips that row correctly for as long as it runs. A
-//! recoverable message becomes an unrecoverable one, and the ledger is left
-//! asserting that a live process is answerable for something nothing will ever
-//! send — the exact lie this module exists to prevent, told by the machinery
-//! meant to prevent it.
+//! Claiming is a write: `sweep_recoverable` rewrites the owner in the same
+//! transaction that selects, so two Jods starting together cannot both
+//! redeliver. A caller that claims a row it cannot send therefore *owns* it
+//! while alive, and every later sweep correctly skips it — turning a
+//! recoverable message into an unrecoverable one.
 //!
-//! The same argument decides the `channel` argument: a sweep is per-transport
-//! because *claiming* is, and rows belonging to a channel this caller cannot
-//! address must be left orphaned so the process that can address them finds
-//! them. There is no way to hand one back — [`Store::mark_failed`] means "this
-//! attempt failed, try again", not "I can never send this".
+//! The same argument decides the `channel` parameter: rows for a channel this
+//! caller cannot address are left orphaned, so the process that can address
+//! them finds them. There is no handing one back — [`Store::mark_failed`] means
+//! "this attempt failed, try again".
 
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -486,34 +479,20 @@ impl Store {
     /// `obligation.body`; the distinction between the two is the reason this
     /// module exists.
     ///
-    /// `channel` is not a convenience filter — it is a safety one, and the
-    /// sweep is unsound without it. Claiming is a write: a row this caller takes
-    /// belongs to this caller, and this caller is alive, so every later sweep
-    /// correctly leaves it alone. A process that claims a row it has no
-    /// transport for therefore strands it permanently, which is the exact
-    /// failure the ledger exists to prevent, arrived at by the machinery meant
-    /// to prevent it. Rows for other channels are left unclaimed and still
-    /// orphaned, so whichever process can actually address them finds them.
-    ///
-    /// It cannot be handled after the fact. `mark_failed` means "this attempt
-    /// failed, try again" and returns the row to `pending`; there is no verb for
-    /// "I can never send this", and inventing one would be a worse answer than
-    /// not taking the row.
+    /// `channel` is a safety filter, not a convenience one — the sweep is
+    /// unsound without it, for the reason the module header gives.
     ///
     /// **"It settles eventually anyway" is the objection to expect from whoever
-    /// next tries to remove this parameter, and it is true and it is the reason
-    /// to keep it.** Measured, not reasoned: a `cli` row in front of a telegram
-    /// bridge is **`failed` after three restarts** — [`MAX_ATTEMPTS`] — because
-    /// the redelivery path spends an attempt on every sweep before it discovers
-    /// it cannot address the row. No elapsed time is needed and
-    /// [`STALE_AFTER_MS`] never comes into it.
+    /// next tries to remove it, and it is the reason to keep it.** Measured: a
+    /// `cli` row in front of a telegram bridge is **`failed` after three
+    /// restarts** ([`MAX_ATTEMPTS`]), because the redelivery path spends an
+    /// attempt on every sweep before discovering it cannot address the row. No
+    /// elapsed time is involved.
     ///
-    /// So the row is not stranded, it is **destroyed**, and quickly. The record
-    /// that existed to prove somebody was owed something becomes the record that
-    /// they were written off — by a process that never attempted delivery and
-    /// never could have. That is the same class of lie as sweeping from a
-    /// process with no transport at all, and it is the harder one to spot: a
-    /// row that cycled for ever would at least look wrong.
+    /// So the row is not stranded, it is **destroyed** — the record that proved
+    /// somebody was owed something becomes the record that they were written
+    /// off, by a process that never could have delivered. Harder to spot than a
+    /// row cycling for ever, which would at least look wrong.
     pub fn sweep_recoverable(
         &self,
         me: &Owner,
