@@ -1,25 +1,20 @@
 //! Conversations, branches, and the work a revert left behind.
 //!
-//! `core::conversation` already holds a full message DAG — a head pointer, real
-//! parent edges, forks that share a prefix instead of copying it — and none of
-//! it reached a user. The wiring audit said so plainly: `tips`, `branch_at`,
-//! `children` and `sibling_pager` had no production call site at all. A graph
-//! nobody can see is a graph nobody can use, and the specific thing it was
-//! failing to deliver is the promise `Store::revert_to` makes in its own doc
-//! comment — *"destroy nothing"*. Nothing was destroyed, and nothing was
-//! findable either, which to the person who reverted is the same outcome.
+//! `core::conversation` holds a full message DAG — head pointer, real parent
+//! edges, forks that share a prefix — and none of it reached a user: `tips`,
+//! `branch_at`, `children` and `sibling_pager` had no production call site at
+//! all. A graph nobody can see is a graph nobody can use, and what it failed to
+//! deliver is the promise `Store::revert_to` makes in its own doc — *"destroy
+//! nothing"*. Nothing was destroyed and nothing was findable, which to the
+//! person who reverted is the same outcome.
 //!
 //! So the rule this module is written to: **after a revert, the abandoned work
-//! is on screen with a name.** Not an integer to remember, not "it's still in
-//! the database" — a line that says what that branch was about and how to get
-//! back onto it. That is what [`tip_rows`] is for, and it is why every listing
-//! here carries its abandoned count rather than making you open a conversation
-//! to discover it has one.
+//! is on screen with a name.** Not an integer to remember — a line saying what
+//! that branch was about and how to get back onto it. That is [`tip_rows`], and
+//! why every listing carries its abandoned count.
 //!
-//! Everything below is either a plain function over `&Store` or a pure function
-//! over rows. Nothing here touches the terminal, so all of it is testable
-//! against `Store::in_memory()` — the same seam `data.rs` keeps, and the same
-//! reason: the screens have to be provable without a TTY.
+//! Everything below is a plain function over `&Store` or a pure function over
+//! rows, so all of it is testable against `Store::in_memory()`.
 
 use jod_core::conversation::{ConversationSummary, Message, NewMessage, Role};
 use jod_core::store::Store;

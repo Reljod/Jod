@@ -2,65 +2,58 @@
 //!
 //! Schema is migration `0008_monitors_and_ledger` in [`crate::store`].
 //!
-//! Jod's stated rule is that a failed run must never look like a successful
-//! one. A notification that was never delivered is exactly that failure wearing
-//! the wrong face: the run finished, the store says `done`, and the person it
-//! was for heard nothing. Today nothing anywhere records the difference, and
-//! the whole of this module is the answer — a durable row per outbound message,
-//! written *before* the send and closed only when the send is known to have
-//! landed. Modelled on Hermes' `gateway/delivery_ledger.py`
-//! ([`research/hermes-parity-2026/REPORT.md`] §4.6).
+//! A failed run must never look like a successful one, and a notification never
+//! delivered is that failure wearing the wrong face: the run finished, the
+//! store says `done`, and the person heard nothing. So there is a durable row
+//! per outbound message, written *before* the send and closed only once the
+//! send is known to have landed. Modelled on Hermes'
+//! `gateway/delivery_ledger.py` ([`research/hermes-parity-2026/REPORT.md`]
+//! §4.6).
 //!
 //! ## Three checkpoints, because two would not be enough
 //!
-//! [`Store::record_obligation`] → `pending`, [`Store::mark_attempting`] →
-//! `attempting`, then [`Store::mark_delivered`] or [`Store::mark_failed`]. The
-//! middle one is the only reason the ledger is worth having. A crash is not one
-//! situation but two, and they demand opposite behaviour:
+//! `pending` → `attempting` → `delivered` or `failed`. The middle one is the
+//! only reason the ledger is worth having, because a crash is two situations
+//! that demand opposite behaviour:
 //!
-//! - A **`pending`** row never reached the transport. Nothing was sent, so it
-//!   is redelivered plainly — a duplicate is impossible.
-//! - An **`attempting`** row was in flight. It may have arrived and it may not,
-//!   and nothing Jod can inspect afterwards will say which. It is redelivered
-//!   **with [`RECOVERED_MARKER`] in front of it**.
+//! - A **`pending`** row never reached the transport, so it is redelivered
+//!   plainly and a duplicate is impossible.
+//! - An **`attempting`** row was in flight. It may have arrived and nothing Jod
+//!   can inspect will say which, so it is redelivered **with
+//!   [`RECOVERED_MARKER`] in front of it**.
 //!
-//! That marker is the entire ethic of the module: delivery is honestly
-//! at-least-once, and **ambiguity is labelled rather than silently resent**.
-//! Dropping the message would be a lie of omission; resending it unmarked would
-//! be a lie of commission; saying "this may be a duplicate" is neither.
+//! That marker is the ethic of the module: delivery is honestly at-least-once,
+//! and **ambiguity is labelled rather than silently resent**. Dropping the
+//! message would be a lie of omission; resending it unmarked a lie of
+//! commission.
 //!
-//! The same honesty has to outlive the send, which is what
-//! [`Obligation::recovered_at_ms`] is for. A recovered message ends `delivered`
-//! like any other, so for a while the ledger could label a duplicate on its way
-//! out and had no answer at all for the person who asked afterwards — and
-//! afterwards is when people ask, because holding two copies is how they find
-//! out. The row now remembers that it was resent, in every state it can reach.
+//! [`Obligation::recovered_at_ms`] makes that honesty outlive the send. A
+//! recovered message ends `delivered` like any other, so the ledger could label
+//! a duplicate on the way out and had no answer for the person asking
+//! afterwards — which is when people ask, because holding two copies is how
+//! they find out.
 //!
 //! ## Which process may recover a row
 //!
-//! [`Store::sweep_recoverable`] runs at startup and claims only rows whose
-//! owning process is gone. Ownership is a machine *and* a pid, because a pid
-//! means nothing without the machine that issued it, and a Jod on one box has
-//! no way to tell whether a pid on another is still running. Rows belonging to
-//! a live process — or to any process on a machine that is not this one — are
-//! left exactly where they are.
+//! [`Store::sweep_recoverable`] claims only rows whose owning process is gone.
+//! Ownership is a machine *and* a pid, because a pid means nothing without the
+//! machine that issued it.
 //!
 //! ## Who may invoke the sweep
 //!
-//! **Only a process that can actually send.** A rule about the caller rather
-//! than the ledger, and worth stating because the obvious startup hook is the
-//! daemon, which holds no transport.
+//! **Only a process that can actually send** — a rule about the caller, worth
+//! stating because the obvious startup hook is the daemon, which holds no
+//! transport.
 //!
-//! Claiming is a write: `sweep_recoverable` rewrites the owner in the same
-//! transaction that selects, so two Jods starting together cannot both
-//! redeliver. A caller that claims a row it cannot send therefore *owns* it
-//! while alive, and every later sweep correctly skips it — turning a
-//! recoverable message into an unrecoverable one.
+//! Claiming is a write: the owner is rewritten in the same transaction that
+//! selects, so two Jods starting together cannot both redeliver. A caller that
+//! claims a row it cannot send therefore *owns* it while alive, and every later
+//! sweep correctly skips it — turning a recoverable message into an
+//! unrecoverable one.
 //!
 //! The same argument decides the `channel` parameter: rows for a channel this
-//! caller cannot address are left orphaned, so the process that can address
-//! them finds them. There is no handing one back — [`Store::mark_failed`] means
-//! "this attempt failed, try again".
+//! caller cannot address are left orphaned. There is no handing one back —
+//! [`Store::mark_failed`] means "this attempt failed, try again".
 
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -291,19 +284,18 @@ pub trait Processes {
     fn is_alive(&self, owner: &Owner) -> bool;
 }
 
-/// This machine's name, as it is written into `owner_machine`.
+/// This machine's name, as written into `owner_machine`.
 ///
-/// One function so that the name a row is *written* with and the name the sweep
-/// *judges* it against cannot drift. They have to be the same string or
-/// [`LocalProcesses::is_alive`] silently reports every local row as belonging to
-/// another machine, and the sweep then recovers nothing at all — a failure that
-/// looks exactly like having no orphaned rows.
+/// One function so the name a row is *written* with and the name the sweep
+/// *judges* it against cannot drift. They must be the same string, or
+/// [`LocalProcesses::is_alive`] reports every local row as another machine's
+/// and the sweep recovers nothing — a failure that looks exactly like having no
+/// orphaned rows.
 ///
-/// Deliberately not shared with `ticker`'s own hostname helper even though the
-/// two agree today. That one builds a schedule lease owner, `pid@host`, which is
-/// compared only against other lease owners; this one is half of an identity the
-/// sweep makes life-and-death decisions with. Merging them would make a change
-/// to either format a change to both.
+/// Deliberately not shared with `ticker`'s hostname helper even though the two
+/// agree today: that builds a schedule lease owner compared only against other
+/// lease owners, while this is half of an identity the sweep makes
+/// life-and-death decisions with.
 pub fn machine() -> String {
     std::env::var("HOSTNAME").unwrap_or_else(|_| "local".into())
 }
@@ -322,19 +314,14 @@ impl Default for LocalProcesses {
 }
 
 impl Processes for LocalProcesses {
-    /// A process on another machine is reported **alive**, which is to say
-    /// "not mine to recover".
+    /// A process on another machine is reported **alive**, meaning "not mine to
+    /// recover".
     ///
-    /// That is the conservative direction and the only defensible one: this
-    /// process cannot see that machine's process table, so declaring its rows
-    /// dead would mean redelivering messages another live Jod is at that moment
-    /// sending. Better a message stranded until its own box restarts than one
-    /// delivered twice by a Jod that had no way of knowing.
-    ///
-    /// Pids are recycled, so a dead owner whose number was reissued reads as
-    /// alive and its row waits for the next sweep instead. That is the same
-    /// trade [`crate::proc::group_alive`] already documents, and it errs the
-    /// same way — towards not sending twice.
+    /// The conservative direction and the only defensible one: this process
+    /// cannot see that machine's process table, so declaring its rows dead
+    /// would redeliver messages another live Jod is at that moment sending.
+    /// Better a message stranded until its own box restarts than one delivered
+    /// twice.
     fn is_alive(&self, owner: &Owner) -> bool {
         owner.machine != self.machine || crate::proc::group_alive(owner.pid)
     }

@@ -1,22 +1,18 @@
 //! Fuzzy matching, in-process, with the positions needed to highlight it.
 //!
-//! Jod builds fzf's *feel* and depends on no picker binary. The target is the
-//! interaction: type a few scattered letters, see ranked matches update on
-//! every keystroke with the matched characters highlighted, move with the
-//! arrows, accept with enter.
+//! Jod builds fzf's *feel* and depends on no picker binary: type a few
+//! scattered letters, see ranked matches update on every keystroke with the
+//! matches highlighted.
 //!
-//! Shelling out to `fzf` would actively prevent the good version of that.
-//! `fzf` owns a whole terminal, so every `@` would tear down and restore the
-//! screen, and an inline popup drawn under the cursor is not something an
-//! external full-screen program can draw at all. So the matching lives here,
-//! over a candidate list enumerated by ripgrep with a walker fallback, and no
-//! picker binary is required, preferred, or supported.
+//! Shelling out to `fzf` would prevent the good version of that. `fzf` owns a
+//! whole terminal, so every `@` would tear down and restore the screen, and an
+//! inline popup under the cursor is not something an external full-screen
+//! program can draw at all.
 //!
 //! ## Why this is in core and not in the terminal
 //!
-//! Ranking is logic, not drawing. Everything here is testable without a
-//! terminal, which is the rule that keeps the one-lane-owns-the-TUI split from
-//! making the terminal a bottleneck — and it is a better shape regardless.
+//! Ranking is logic, not drawing, so everything here is testable without a
+//! terminal.
 //!
 //! ## The bar this is measured against
 //!
@@ -541,22 +537,16 @@ fn is_upper(c: u32) -> bool {
 /// usually gets there first anyway.
 const CACHE_TTL: Duration = Duration::from_secs(5);
 
-/// Directory names that are never worth offering — the one definition of
-/// noise in this program.
+/// Directory names never worth offering — the one definition of noise here.
 ///
-/// It used to be three copies: this list, the fallback walker's, and the
-/// `/add-dir` picker's. They disagreed, and the disagreement was visible —
-/// `/add-dir ~/tetris` offered `src`, while `@` in the same tree offered
-/// `dist` and `node_modules`. One list, three consumers: the ripgrep call
-/// below turns it into `--glob` exclusions, [`walk`] refuses to descend into
-/// it, and the picker imports it.
+/// It used to be three copies, and they disagreed visibly: `/add-dir ~/tetris`
+/// offered `src` while `@` in the same tree offered `dist` and `node_modules`.
+/// One list, three consumers — ripgrep exclusions, [`walk`], and the picker.
 ///
 /// `.venv` is here as well as `venv` because the mention path passes
-/// `--hidden`; without it, `--hidden` is exactly what drags a Python
-/// environment into the list.
+/// `--hidden`, which is exactly what drags a Python environment into the list.
 ///
-/// Not a security measure. A root can still *point* at any of these — this is
-/// only about what gets offered before you have typed anything.
+/// Not a security measure: a root can still *point* at any of these.
 pub const NOISE: [&str; 7] = [
     ".git",
     "node_modules",

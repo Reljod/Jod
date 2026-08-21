@@ -1,26 +1,24 @@
 //! Slash commands and skills a repository already defines.
 //!
 //! Reljod should not have to remember which harness knows about which command.
-//! Jod scans every root and the user's own config, and offers what it finds in
-//! its own palette, marked with where it came from.
+//! Jod scans every root and the user's config, and offers what it finds marked
+//! with where it came from.
 //!
 //! ## Forwarded, not reimplemented
 //!
 //! Measured against the real binaries, written up in
 //! [`docs/harness-support.md`](../../docs/harness-support.md): **every harness
 //! expands its own commands, so Jod never substitutes a body.** Claude Code and
-//! AGY resolve `/name` in a print-mode prompt; OpenCode does not, but expands
-//! the same command natively under `run --command <name>`.
+//! AGY resolve `/name` in a print-mode prompt; OpenCode expands it natively
+//! under `run --command <name>`.
 //!
 //! So the inlining branch is deleted rather than kept just in case. What
-//! survives is the distinction between the two observed spellings — see
-//! [`Expansion`] — and `Unmeasured` for a harness nobody has run.
+//! survives is the distinction between the two observed spellings, and
+//! `Unmeasured` for a harness nobody has run.
 //!
-//! Jod deliberately does not forward a command *across* conventions: handing a
-//! `.claude/commands/foo.md` to OpenCode would find nothing to resolve, and
-//! inlining the body to cover that would rebuild the branch this measurement
-//! removed. So every [`Discovered`] records the harness whose convention it
-//! follows, and the palette offers it to that harness.
+//! Jod does not forward a command *across* conventions: a
+//! `.claude/commands/foo.md` handed to OpenCode has nothing to resolve, and
+//! inlining the body would rebuild the branch this measurement removed.
 
 use std::path::{Path, PathBuf};
 
@@ -179,18 +177,15 @@ impl Discovered {
     /// How to send this command to `harness`.
     ///
     /// Refuses when the harness is not the one whose convention this command
-    /// follows, and that refusal is the point rather than a nicety. A
-    /// `.claude/commands/foo.md` handed to OpenCode has no
-    /// `.opencode/command/foo.md` for it to resolve, so the honest answers are
-    /// "don't offer it" or "paste the body in" — and pasting the body is
-    /// exactly the inlining branch the D7 measurement deleted. Rebuilding it
-    /// here, one call site at a time, is how it would grow back.
+    /// follows, and the refusal is the point. A `.claude/commands/foo.md`
+    /// handed to OpenCode has nothing to resolve, so the honest answers are
+    /// "don't offer it" or "paste the body in" — and pasting is the inlining
+    /// branch D7 deleted.
     ///
-    /// So the palette filters by harness and this refuses anything that slips
-    /// through. An error beats the alternative: forwarding `/foo` to OpenCode
-    /// would put literal text in front of the model, which — measured — may
-    /// well go and find the file itself and answer correctly, leaving a bug
-    /// that only shows up when the file is somewhere less convenient.
+    /// An error beats the alternative: forwarding `/foo` puts literal text in
+    /// front of the model, which — measured — may go and find the file itself
+    /// and answer correctly, leaving a bug that only shows up when the file
+    /// moves.
     pub fn invoke(&self, harness: HarnessKind, args: &str) -> Result<Invocation> {
         if self.harness != harness.id() {
             return Err(JodError::Invalid(format!(
@@ -429,26 +424,23 @@ fn describe(text: &str) -> String {
 
 /// `description:` from a leading `---` block, if there is one.
 ///
-/// Deliberately a scan of the block's own lines rather than a YAML parse: the
-/// front matter of a skill is hand-written and frequently not valid YAML, and a
-/// parser that rejects the whole file over an unquoted colon somewhere else
-/// would lose a description that is sitting right there in plain sight.
+/// A scan of the block's own lines rather than a YAML parse: skill front matter
+/// is hand-written and frequently not valid YAML, and a parser that rejected
+/// the file over an unquoted colon would lose a description sitting in plain
+/// sight.
 ///
-/// It has to understand block scalars, though, because *this repository's own
-/// skills* are written with them:
+/// It has to understand block scalars, because this repository's own skills use
+/// them:
 ///
 /// ```yaml
 /// description: >
 ///   Use before opening or creating a pull request…
 /// ```
 ///
-/// Taking whatever follows the colon gave every one of them the description
-/// `>`, which is worse than no description at all — the palette's one
-/// distinguishing column, identical on every row. It survived review and a full
-/// green suite, and was noticed the first time a caller ran `jod commands ls`
-/// against a real repository. That is the third defect in this build to hide in
-/// code nothing called yet, and the reason the entry point matters as much as
-/// the parser does.
+/// Taking whatever follows the colon gave every one of them the description `>`
+/// — the palette's one distinguishing column, identical on every row. It
+/// survived review and a green suite, and was noticed the first time somebody
+/// ran `jod commands ls` against a real repository.
 fn front_matter_description(text: &str) -> Option<String> {
     let block = front_matter(text)?;
     let lines: Vec<&str> = block.lines().collect();
@@ -608,17 +600,13 @@ impl Store {
     /// Rescan one conversation's roots and the user's config, and cache it.
     ///
     /// The entry point everything else goes through: [`scan`] reads the disk
-    /// and knows nothing about conversations, and a palette holding a
-    /// conversation id should not have to assemble root paths itself.
+    /// and knows nothing about conversations.
     ///
     /// **This touches the filesystem every time, so it is not what a keystroke
-    /// calls.** Reading the cache is [`commands_for`](Store::commands_for), and
-    /// the split is deliberate rather than an optimisation deferred: one
+    /// calls.** Reading the cache is [`commands_for`](Store::commands_for). One
     /// function that sometimes scanned would be one whose cost nobody could
-    /// predict from the call site, which is how the mention popup would have
-    /// ended up walking a hundred-thousand-file repository between two
-    /// keypresses. Refresh when the palette opens or someone asks; read on
-    /// every frame after that.
+    /// predict from the call site — which is how the mention popup would have
+    /// walked a hundred-thousand-file repository between two keypresses.
     pub fn refresh_commands(&self, conversation_id: &str) -> Result<Vec<Discovered>> {
         let roots: Vec<PathBuf> = self.roots(conversation_id)?.into_iter().map(|r| r.path).collect();
         let found = scan(&roots)?;
@@ -726,21 +714,17 @@ mod tests {
 
     /// Point `HOME` at an empty directory for the length of one test.
     ///
-    /// [`scan`] reads user-scope commands out of the real home on purpose, so a
-    /// developer who has `~/.claude/commands` of their own — which is to say
-    /// anybody who uses the tool — had those rows counted by every assertion
-    /// about what a *root* contains. It passed on CI, whose home is bare, and
-    /// failed on the machine of the person most likely to run the suite: the
-    /// worst way round for a test to be wrong.
+    /// [`scan`] reads user-scope commands out of the real home on purpose, so
+    /// anybody with a `~/.claude/commands` of their own had those rows counted
+    /// by every assertion about what a *root* contains. It passed on CI, whose
+    /// home is bare, and failed on the machine of the person most likely to run
+    /// the suite.
     ///
-    /// The sibling tests here dodge it by filtering to [`Scope::Root`], which
-    /// is right when the assertion is about names. It is not enough when the
-    /// assertion is a *count*, because the point of the count is that nothing
-    /// else is there.
+    /// The sibling tests dodge it by filtering to [`Scope::Root`], which is
+    /// right when the assertion is about names and not enough when it is a
+    /// *count*.
     ///
-    /// Holds [`crate::ENV_LOCK`] and restores the previous value on drop, so a
-    /// panicking test cannot leave the rest of the suite resolving a scratch
-    /// directory as home.
+    /// Holds [`crate::ENV_LOCK`] and restores the previous value on drop.
     struct Home {
         previous: Option<std::ffi::OsString>,
         _guard: std::sync::MutexGuard<'static, ()>,
