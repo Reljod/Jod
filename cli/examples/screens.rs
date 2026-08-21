@@ -162,6 +162,20 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    // The fleet with the cursor walked down into the loose pane, which is the
+    // half of that screen a workspace render never shows: the tree's cursor
+    // starts in the tree, so a plain render of the fleet cannot say whether the
+    // pane below it can be reached at all.
+    if !app.loose_rows().is_empty() {
+        app.go(Workspace::Fleet);
+        let rows = app.tree_rows();
+        app.tree.last(&rows);
+        println!();
+        println!("── fleet · cursor in the loose pane {}", "─".repeat(38));
+        println!("{}", render(&app));
+        app.tree.first(&rows);
+    }
+
     // The session list, which is an overlay rather than a workspace and so is
     // not in the menu above. Worth its own screen for the same reason the
     // traffic log is: it is the only one whose rows are *conversations*, and

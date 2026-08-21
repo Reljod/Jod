@@ -45,6 +45,35 @@ pub fn main_id() -> NodeId {
     }
 }
 
+/// A run that belongs to no work, as a row the tree's cursor can sit on.
+///
+/// The same trick as [`main_id`] and for the same reason: core's forest is
+/// `WHERE c.work_id IS NOT NULL`, so a run started by `delegate` has no node to
+/// be, and the pane below the tree draws it anyway because a run nothing on
+/// screen accounts for is a run nobody stops.
+///
+/// Giving it an id makes it *reachable*. Before this the pane was drawn and
+/// nothing else: `↓` stopped at the last node of the tree, no row in it could
+/// ever be highlighted, and every verb the keybar advertises — watch, stop,
+/// attach — read the cursor, found no node, and did nothing without saying so.
+/// One cursor over both panes is what makes the lower one a list rather than a
+/// picture of a list.
+///
+/// Its own `kind_tag`, so it can collide with nothing: [`NodeId`] compares on
+/// the tag as well as the id, and a loose run's id is also the id of the run
+/// node it *would* have had if its conversation had belonged to a work.
+pub fn loose_id(run: &str) -> NodeId {
+    NodeId {
+        kind_tag: "loose",
+        id: run.to_string(),
+    }
+}
+
+/// Is this row one of the runs drawn below the tree?
+pub fn is_loose(id: &NodeId) -> bool {
+    id.kind_tag == "loose"
+}
+
 /// Everything the fleet tree remembers between frames.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TreeState {

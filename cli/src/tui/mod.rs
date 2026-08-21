@@ -4055,6 +4055,21 @@ fn on_tree_key(app: &mut App, key: KeyEvent, viewport: usize) -> Option<Option<A
         // go *into* the way the pinned row is; a work and a project are
         // headings, so they toggle rather than pretending to open something.
         KeyCode::Enter => {
+            // A row from the pane below the tree, which is a run with no node
+            // to be. Answered here rather than left to fall through, because
+            // `selected_node` says `None` for it and the arm below would take
+            // that for "nothing is selected" on a row that is plainly
+            // highlighted.
+            if let Some(run) = app
+                .tree
+                .selected
+                .as_ref()
+                .filter(|id| fleet::is_loose(id))
+                .map(|id| id.id.clone())
+            {
+                app.go(Workspace::Chat);
+                return handled(Some(Action::Watch(run)));
+            }
             let Some(node) = app.selected_node().cloned() else {
                 return handled(None);
             };
@@ -4360,7 +4375,16 @@ fn on_fleet_key(app: &mut App, key: KeyEvent) -> Option<Action> {
     // run are answered rather than attempted. Without this branch every one of
     // them is `selected_agent()?` — a silent `None`, which on the top row of
     // the list is a key that looks broken.
-    if app.main_selected() {
+    //
+    // **Only when the flat list is the thing on screen.** `main_selected` reads
+    // that list's cursor, and a fleet drawing the tree keeps two: the tree's is
+    // the one highlighted, and the flat one sits wherever the last reconcile
+    // left it — the pinned row, on any fleet whose first refresh happened
+    // before an agent existed. Ungated, this refused every run verb on the tree
+    // with a sentence about the main chat while the cursor was plainly
+    // somewhere else. `tree_main_selected` above is the same guard for the
+    // cursor that *is* drawn.
+    if !app.has_tree() && app.main_selected() {
         match key.code {
             // The verb the pinned chat never had: not "watch it", which is what
             // ⏎ does to a run, but *go into it* — the chat box binds and the
@@ -11122,6 +11146,101 @@ mod tests {
                 "{up:?} did not move the tree cursor"
             );
         }
+    }
+
+    // ---- the pane below the tree ----
+    //
+    // `Store::forest_of` only reads conversations that belong to a work, so a
+    // run started by `delegate` has no node and is drawn in a second pane under
+    // the tree. That pane was a picture of a list: no row in it could be
+    // highlighted, `↓` stopped at the last node above it, and every verb the
+    // keybar advertises read the cursor, found no node, and did nothing.
+
+    /// A tree plus one run that belongs to no work, which is what puts a row in
+    /// the loose pane.
+    fn with_a_loose_run() -> App {
+        let mut app = on_the_tree(jod_core::tree::NodeId::work("w1"));
+        // `r1` is the run the forest holds, so it is *not* loose; `r2` has no
+        // node and is what the pane below the tree draws.
+        app.agents = vec![agent_line("r1", None), agent_line("r2", Some("sess-2"))];
+        app.reconcile();
+        app
+    }
+
+    #[test]
+    fn the_cursor_walks_out_of_the_bottom_of_the_tree_into_the_loose_pane() {
+        let mut app = with_a_loose_run();
+        assert_eq!(
+            app.loose_rows().iter().map(|a| a.id.as_str()).collect::<Vec<_>>(),
+            vec!["r2"],
+            "the fixture has exactly one row in the lower pane"
+        );
+
+        // Down through main · work · session · run, and then one more.
+        let rows = app.tree_rows();
+        app.tree.selected = rows.get(rows.len() - 2).cloned();
+        assert_eq!(app.loose_selected(), None, "still in the tree");
+
+        press(&mut app, KeyCode::Down);
+
+        assert_eq!(
+            app.loose_selected(),
+            Some(0),
+            "one press past the last node lands in the pane below it"
+        );
+        press(&mut app, KeyCode::Up);
+        assert_eq!(app.loose_selected(), None, "and comes back out");
+    }
+
+    #[test]
+    fn end_reaches_the_loose_pane_rather_than_the_last_node() {
+        let mut app = with_a_loose_run();
+        press(&mut app, KeyCode::End);
+        assert_eq!(app.loose_selected(), Some(0));
+    }
+
+    /// The half that makes the pane worth reaching. Every one of these reads
+    /// `selected_agent`, which answered `None` on a loose row — so the keys the
+    /// bar prints were all silent there.
+    #[test]
+    fn the_run_verbs_act_on_the_loose_row_under_the_cursor() {
+        for (key, expected) in [
+            (KeyCode::Char('a'), Action::Attach("r2".into())),
+            (KeyCode::Enter, Action::Watch("r2".into())),
+        ] {
+            let mut app = with_a_loose_run();
+            press(&mut app, KeyCode::End);
+            assert_eq!(press(&mut app, key), Some(expected), "{key:?}");
+        }
+    }
+
+    /// `s` on a finished run answers with a sentence rather than an action, and
+    /// that sentence is the proof the key found the row: silence is what it did
+    /// before, and silence is indistinguishable from a dead key.
+    #[test]
+    fn stopping_a_finished_loose_run_names_the_run_it_found() {
+        let mut app = with_a_loose_run();
+        press(&mut app, KeyCode::End);
+
+        assert_eq!(press(&mut app, KeyCode::Char('s')), None);
+
+        let said = format!("{:?}", app.transcript);
+        assert!(said.contains("nothing to stop"), "{said}");
+        assert!(said.contains("r2"), "and it names the loose run: {said}");
+    }
+
+    /// The guard that refuses a run verb on a work heading must not catch these:
+    /// a loose row *is* a run, it just has no node.
+    #[test]
+    fn a_loose_row_is_not_refused_as_a_row_with_no_process_on_it() {
+        let mut app = with_a_loose_run();
+        press(&mut app, KeyCode::End);
+        press(&mut app, KeyCode::Char('s'));
+        let said = format!("{:?}", app.transcript);
+        assert!(
+            !said.contains("not a run"),
+            "the loose row was refused as if it were a heading: {said}"
+        );
     }
 
     /// The rest of the cursor set, which the same routing swallowed: a tree
