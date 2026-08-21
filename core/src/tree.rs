@@ -18,12 +18,19 @@ use std::collections::HashMap;
 
 use crate::error::Result;
 use crate::store::Store;
-use crate::works::{Filter, State};
+use crate::works::{Filter, State, Work};
 
 /// What a row in the tree is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NodeKind {
+    /// A repository. The level above works, so the tree groups by the thing
+    /// that outlives every work and every session.
+    Project,
+    /// The conversation that owns a project over time. Always the first child
+    /// of its project, and always the same row — entering it is how you say
+    /// something about the repository rather than about one job in it.
+    Manager,
     Work,
     /// A conversation. A session that spawned children has them beneath it,
     /// which is what makes the tree deeper than two levels.
@@ -47,6 +54,17 @@ impl NodeId {
     }
     pub fn run(id: impl Into<String>) -> NodeId {
         NodeId { kind_tag: "run", id: id.into() }
+    }
+    pub fn project(id: impl Into<String>) -> NodeId {
+        NodeId { kind_tag: "project", id: id.into() }
+    }
+    /// Carries the *conversation* id, not the project's.
+    ///
+    /// A manager row exists to be entered, and what you enter is a
+    /// conversation. Keying it by project would make every reader look the
+    /// conversation up again from a row that already knew it.
+    pub fn manager(conversation_id: impl Into<String>) -> NodeId {
+        NodeId { kind_tag: "manager", id: conversation_id.into() }
     }
 }
 
@@ -148,6 +166,164 @@ struct RawSession {
     blocked: usize,
 }
 
+/// Everything a work's rows are built out of, read once for the whole forest.
+///
+/// Gathered into one value rather than passed as four arguments, because
+/// [`push_work`] already needs a depth and a parent on top of them and the pile
+/// was over clippy's limit. Bundling the *reads* is also the honest grouping:
+/// these four are the query results, and the other two say where the work goes.
+///
+/// The maps are `&mut` because the walk drains them — a session belongs to one
+/// work, so taking it out is both cheaper than cloning and a guard against
+/// emitting it twice.
+struct Flatten<'a> {
+    sessions: &'a mut HashMap<String, Vec<RawSession>>,
+    runs: &'a mut HashMap<String, Vec<RawRun>>,
+    stalled: &'a HashMap<String, i64>,
+    now_ms: i64,
+}
+
+/// Emit one work, its sessions and their runs, and say what cascaded up.
+///
+/// Extracted so a work can hang from a project row as easily as from the top
+/// level — `base_depth` and `parent` are the only difference between the two,
+/// and duplicating the walk to get them would be duplicating the part most
+/// likely to drift.
+///
+/// Returns the work's own cards, blocked cards and whether anything under it is
+/// running, so a project row can add them up the same way a work adds up its
+/// sessions.
+fn push_work(
+    out: &mut Vec<Node>,
+    work: &Work,
+    from: &mut Flatten<'_>,
+    base_depth: usize,
+    parent: Option<NodeId>,
+) -> (usize, usize, bool) {
+    let own = from.sessions.remove(&work.id).unwrap_or_default();
+    // A session whose parent is outside this work — the main chat is the usual
+    // one — hangs from the work itself. Otherwise the whole subtree would be
+    // dropped for pointing at a row that is not here.
+    let ids: std::collections::HashSet<&str> = own.iter().map(|s| s.id.as_str()).collect();
+    let mut children: HashMap<Option<String>, Vec<&RawSession>> = HashMap::new();
+    for session in &own {
+        let key = session
+            .parent
+            .as_deref()
+            .filter(|p| ids.contains(p))
+            .map(str::to_string);
+        children.entry(key).or_default().push(session);
+    }
+
+    let work_node = out.len();
+    out.push(Node {
+        id: NodeId::work(&work.id),
+        parent,
+        kind: NodeKind::Work,
+        depth: base_depth,
+        label: if work.title.is_empty() {
+            work.instruction.clone()
+        } else {
+            work.title.clone()
+        },
+        summary: work.summary.clone(),
+        running: false,
+        status: None,
+        stalled_for_ms: None,
+        cards: 0,
+        blocked: 0,
+        colour: work.colour.clone(),
+        expanded: true,
+        has_children: !own.is_empty(),
+    });
+
+    // Depth-first, oldest first, so a session always appears directly below the
+    // session that spawned it — pushed in reverse because this is a stack and
+    // the tree is read top-down.
+    let mut stack: Vec<(&RawSession, usize, Option<String>)> = children
+        .get(&None)
+        .map(|top| {
+            top.iter()
+                .rev()
+                .map(|s| (*s, base_depth + 1, None))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let mut work_cards = 0usize;
+    let mut work_blocked = 0usize;
+    let mut work_running = false;
+    while let Some((session, depth, session_parent)) = stack.pop() {
+        if let Some(kids) = children.get(&Some(session.id.clone())) {
+            for kid in kids.iter().rev() {
+                stack.push((kid, depth + 1, Some(session.id.clone())));
+            }
+        }
+        let session_runs = from.runs.remove(&session.id).unwrap_or_default();
+        let has_children = !session_runs.is_empty()
+            || children.get(&Some(session.id.clone())).is_some_and(|c| !c.is_empty());
+        work_cards += session.cards;
+        work_blocked += session.blocked;
+        work_running |= session.running;
+        out.push(Node {
+            id: NodeId::session(&session.id),
+            parent: Some(match session_parent {
+                Some(p) => NodeId::session(p),
+                None => NodeId::work(&work.id),
+            }),
+            kind: NodeKind::Session,
+            depth,
+            label: if session.title.is_empty() {
+                session.id.chars().take(8).collect()
+            } else {
+                session.title.clone()
+            },
+            summary: session.summary.clone(),
+            running: session.running,
+            status: None,
+            stalled_for_ms: None,
+            cards: session.cards,
+            blocked: session.blocked,
+            colour: work.colour.clone(),
+            expanded: true,
+            has_children,
+        });
+        for run in session_runs {
+            out.push(Node {
+                id: NodeId::run(&run.id),
+                parent: Some(NodeId::session(&session.id)),
+                kind: NodeKind::Run,
+                depth: depth + 1,
+                label: run.label,
+                summary: run.summary,
+                running: run.status == "running",
+                // Only for a run that still claims to be running. A finished
+                // run's leftover mark, if a sweep has not yet retired the row,
+                // would draw a badge on something that has already stopped.
+                stalled_for_ms: from
+                    .stalled
+                    .get(&run.id)
+                    .filter(|_| run.status == "running")
+                    .map(|since| from.now_ms.saturating_sub(*since).max(0)),
+                status: Some(run.status),
+                cards: 0,
+                blocked: 0,
+                colour: work.colour.clone(),
+                expanded: true,
+                has_children: false,
+            });
+        }
+    }
+    // Cards cascade upward only, so the work's counts are its sessions' — which
+    // is what makes the tree say where the questions are without being
+    // expanded.
+    out[work_node].cards = work_cards;
+    out[work_node].blocked = work_blocked;
+    let running = work_running && work.state != State::Closed;
+    out[work_node].running = running;
+    (work_cards, work_blocked, running)
+}
+
 /// One run under a session.
 struct RawRun {
     id: String,
@@ -188,6 +364,10 @@ impl Store {
         let mut cards: HashMap<String, (usize, usize)> = HashMap::new();
         let mut sessions: HashMap<String, Vec<RawSession>> = HashMap::new();
         let mut runs: HashMap<String, Vec<RawRun>> = HashMap::new();
+        // Declared out here because a manager's row wants it too, and a manager
+        // is not a session inside a work — it hangs from its project, so it is
+        // not reached by the walk below.
+        let mut latest: HashMap<String, String> = HashMap::new();
         {
             let conn = self.conn.lock().expect("store lock poisoned");
 
@@ -210,7 +390,6 @@ impl Store {
             // from the transcript rather than asked of a model: a tree that
             // costs a model call per row is a tree nobody can afford to leave
             // open.
-            let mut latest: HashMap<String, String> = HashMap::new();
             let mut stmt = conn.prepare(
                 "SELECT m.conversation_id, m.text, m.tool_name FROM messages m
                    JOIN (SELECT conversation_id, MAX(id) AS id FROM messages
@@ -297,130 +476,111 @@ impl Store {
             }
         }
 
-        let mut out = Vec::new();
+        // Grouped by project, in the order the works themselves came back, so
+        // the most recently touched repository stays at the top and the tree
+        // does not reorder itself against `works`' own sort.
+        //
+        // Works with no project sit at the top level exactly as they did
+        // before. Old ones have a null and are not going to be given one:
+        // backfilling them is its own task, and hiding them under an invented
+        // project would be worse than leaving them loose.
+        let mut order: Vec<String> = Vec::new();
+        let mut by_project: HashMap<String, Vec<Work>> = HashMap::new();
+        let mut loose: Vec<Work> = Vec::new();
         for work in works {
-            let own = sessions.remove(&work.id).unwrap_or_default();
-            // A session whose parent is outside this work — the main chat is
-            // the usual one — hangs from the work itself. Otherwise the whole
-            // subtree would be dropped for pointing at a row that is not here.
-            let ids: std::collections::HashSet<&str> =
-                own.iter().map(|s| s.id.as_str()).collect();
-            let mut children: HashMap<Option<String>, Vec<&RawSession>> = HashMap::new();
-            for session in &own {
-                let key = session
-                    .parent
-                    .as_deref()
-                    .filter(|p| ids.contains(p))
-                    .map(str::to_string);
-                children.entry(key).or_default().push(session);
+            match work.project_id.clone() {
+                Some(project_id) => {
+                    if !by_project.contains_key(&project_id) {
+                        order.push(project_id.clone());
+                    }
+                    by_project.entry(project_id).or_default().push(work);
+                }
+                None => loose.push(work),
             }
+        }
 
-            let work_node = out.len();
+        let mut from = Flatten {
+            sessions: &mut sessions,
+            runs: &mut runs,
+            stalled: &stalled,
+            now_ms,
+        };
+
+        let mut out = Vec::new();
+        for project_id in order {
+            let Some(project) = self.project(&project_id)? else {
+                // Catalogued once, deleted since. `works.project_id` is
+                // `ON DELETE SET NULL`, so this is only reachable on a database
+                // mid-repair — and dropping the works would be the wrong
+                // remedy. They fall through to the loose list instead.
+                loose.extend(by_project.remove(&project_id).unwrap_or_default());
+                continue;
+            };
+            let project_node = out.len();
             out.push(Node {
-                id: NodeId::work(&work.id),
+                id: NodeId::project(&project.id),
                 parent: None,
-                kind: NodeKind::Work,
+                kind: NodeKind::Project,
                 depth: 0,
-                label: if work.title.is_empty() {
-                    work.instruction.clone()
-                } else {
-                    work.title.clone()
-                },
-                summary: work.summary.clone(),
+                label: project.name.clone(),
+                summary: project.notes.clone(),
                 running: false,
                 status: None,
                 stalled_for_ms: None,
                 cards: 0,
                 blocked: 0,
-                colour: work.colour.clone(),
+                colour: project.colour.clone(),
                 expanded: true,
-                has_children: !own.is_empty(),
+                has_children: true,
             });
 
-            // Depth-first, oldest first, so a session always appears directly
-            // below the session that spawned it — pushed in reverse because
-            // this is a stack and the tree is read top-down.
-            let mut stack: Vec<(&RawSession, usize, Option<String>)> = children
-                .get(&None)
-                .map(|top| {
-                    top.iter()
-                        .rev()
-                        .map(|s| (*s, 1usize, None))
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
-
-            let mut work_cards = 0usize;
-            let mut work_blocked = 0usize;
-            let mut work_running = false;
-            while let Some((session, depth, parent)) = stack.pop() {
-                if let Some(kids) = children.get(&Some(session.id.clone())) {
-                    for kid in kids.iter().rev() {
-                        stack.push((kid, depth + 1, Some(session.id.clone())));
-                    }
-                }
-                let session_runs = runs.remove(&session.id).unwrap_or_default();
-                let has_children = !session_runs.is_empty()
-                    || children.get(&Some(session.id.clone())).is_some_and(|c| !c.is_empty());
-                work_cards += session.cards;
-                work_blocked += session.blocked;
-                work_running |= session.running;
+            // The manager first, then the works. First because it is the row
+            // you go to when you want to say something about this repository
+            // rather than about one job in it — and because it is the one row
+            // under a project that is always the same row.
+            if let Some(manager) = &project.manager_conversation_id {
                 out.push(Node {
-                    id: NodeId::session(&session.id),
-                    parent: Some(match parent {
-                        Some(p) => NodeId::session(p),
-                        None => NodeId::work(&work.id),
-                    }),
-                    kind: NodeKind::Session,
-                    depth,
-                    label: if session.title.is_empty() {
-                        session.id.chars().take(8).collect()
-                    } else {
-                        session.title.clone()
-                    },
-                    summary: session.summary.clone(),
-                    running: session.running,
+                    id: NodeId::manager(manager),
+                    parent: Some(NodeId::project(&project.id)),
+                    kind: NodeKind::Manager,
+                    depth: 1,
+                    label: "manager".to_string(),
+                    summary: latest.get(manager).cloned().unwrap_or_default(),
+                    running: false,
                     status: None,
                     stalled_for_ms: None,
-                    cards: session.cards,
-                    blocked: session.blocked,
-                    colour: work.colour.clone(),
+                    cards: 0,
+                    blocked: 0,
+                    colour: project.colour.clone(),
                     expanded: true,
-                    has_children,
+                    has_children: false,
                 });
-                for run in session_runs {
-                    out.push(Node {
-                        id: NodeId::run(&run.id),
-                        parent: Some(NodeId::session(&session.id)),
-                        kind: NodeKind::Run,
-                        depth: depth + 1,
-                        label: run.label,
-                        summary: run.summary,
-                        running: run.status == "running",
-                        // Only for a run that still claims to be running. A
-                        // finished run's leftover mark, if a sweep has not yet
-                        // retired the row, would draw a badge on something that
-                        // has already stopped.
-                        stalled_for_ms: stalled
-                            .get(&run.id)
-                            .filter(|_| run.status == "running")
-                            .map(|since| now_ms.saturating_sub(*since).max(0)),
-                        status: Some(run.status),
-                        cards: 0,
-                        blocked: 0,
-                        colour: work.colour.clone(),
-                        expanded: true,
-                        has_children: false,
-                    });
-                }
             }
-            // Cards cascade upward only, so the work's counts are its sessions'
-            // — which is what makes the tree say where the questions are
-            // without being expanded.
-            out[work_node].cards = work_cards;
-            out[work_node].blocked = work_blocked;
-            out[work_node].running = work_running && work.state != State::Closed;
+
+            let mut project_cards = 0usize;
+            let mut project_blocked = 0usize;
+            let mut project_running = false;
+            for work in by_project.remove(&project.id).unwrap_or_default() {
+                let (cards, blocked, running) = push_work(
+                    &mut out,
+                    &work,
+                    &mut from,
+                    1,
+                    Some(NodeId::project(&project.id)),
+                );
+                project_cards += cards;
+                project_blocked += blocked;
+                project_running |= running;
+            }
+            out[project_node].cards = project_cards;
+            out[project_node].blocked = project_blocked;
+            out[project_node].running = project_running;
         }
+
+        for work in loose {
+            push_work(&mut out, &work, &mut from, 0, None);
+        }
+
         Ok(out)
     }
 }
@@ -735,6 +895,125 @@ mod tests {
             },
         ];
         assert_eq!(render(&nodes), "the parser [1 blocked]\n  lead [running]\n");
+    }
+
+    /// Check 15. The level above works, so the tree groups by the thing that
+    /// outlives every work and every session.
+    #[test]
+    fn a_project_holds_its_manager_first_and_then_its_works() {
+        let s = store();
+        let dir = format!("/tmp/jod-tree-{}", std::process::id());
+        std::fs::create_dir_all(&dir).unwrap();
+        let project = s
+            .add_project(crate::projects::NewProject::at(&dir).named("tetris"))
+            .unwrap();
+        let (manager, _) = s
+            .manager_conversation(&project.id, HarnessKind::ClaudeCode)
+            .unwrap();
+        let work = s
+            .create_work_in("port the parser", Some(&project.id))
+            .unwrap();
+        session(&s, &work.id, None, "engineer");
+
+        let nodes = s.forest().unwrap();
+
+        assert_eq!(nodes[0].kind, NodeKind::Project, "{nodes:?}");
+        assert_eq!(nodes[0].label, "tetris");
+        assert_eq!(nodes[0].depth, 0);
+        assert_eq!(nodes[0].parent, None);
+
+        assert_eq!(nodes[1].kind, NodeKind::Manager, "{nodes:?}");
+        assert_eq!(nodes[1].depth, 1);
+        assert_eq!(
+            nodes[1].parent,
+            Some(NodeId::project(&project.id)),
+            "the manager has to hang from its project"
+        );
+        assert_eq!(
+            nodes[1].id,
+            NodeId::manager(&manager),
+            "the row carries the conversation to enter, not the project"
+        );
+
+        assert_eq!(nodes[2].kind, NodeKind::Work, "{nodes:?}");
+        assert_eq!(nodes[2].depth, 1, "a project's works sit beside its manager");
+        assert_eq!(nodes[2].parent, Some(NodeId::project(&project.id)));
+        assert_eq!(nodes[3].kind, NodeKind::Session);
+        assert_eq!(nodes[3].depth, 2, "and the whole subtree shifts down with it");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A work opened before projects were recorded keeps its null and stays at
+    /// the top level. Backfilling is its own task, and hiding old works under
+    /// an invented project would be worse than leaving them loose.
+    #[test]
+    fn a_work_with_no_project_stays_at_the_top_level() {
+        let s = store();
+        let work = s.create_work("port the parser").unwrap();
+        session(&s, &work.id, None, "engineer");
+
+        let nodes = s.forest().unwrap();
+        assert_eq!(nodes[0].kind, NodeKind::Work, "{nodes:?}");
+        assert_eq!(nodes[0].depth, 0);
+        assert_eq!(nodes[0].parent, None);
+    }
+
+    /// A project with no manager yet is still a project. It gets one on the
+    /// first instruction routed to it, and until then the row would otherwise
+    /// have to invent a child that does not exist.
+    #[test]
+    fn a_project_whose_manager_has_not_been_started_yet_still_holds_its_works() {
+        let s = store();
+        let dir = format!("/tmp/jod-tree-nomgr-{}", std::process::id());
+        std::fs::create_dir_all(&dir).unwrap();
+        let project = s
+            .add_project(crate::projects::NewProject::at(&dir).named("tetris"))
+            .unwrap();
+        let work = s
+            .create_work_in("port the parser", Some(&project.id))
+            .unwrap();
+        session(&s, &work.id, None, "engineer");
+
+        let nodes = s.forest().unwrap();
+        assert_eq!(nodes[0].kind, NodeKind::Project);
+        assert_eq!(nodes[1].kind, NodeKind::Work, "{nodes:?}");
+        assert_eq!(nodes[1].depth, 1);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Cards cascade to the project row too, or the level added to make the
+    /// fleet readable would be the one level that hides where the questions
+    /// are.
+    #[test]
+    fn a_projects_row_counts_the_cards_under_it() {
+        let s = store();
+        let dir = format!("/tmp/jod-tree-cards-{}", std::process::id());
+        std::fs::create_dir_all(&dir).unwrap();
+        let project = s
+            .add_project(crate::projects::NewProject::at(&dir).named("tetris"))
+            .unwrap();
+        let work = s
+            .create_work_in("port the parser", Some(&project.id))
+            .unwrap();
+        let engineer = session(&s, &work.id, None, "engineer");
+        s.raise_card(NewCard {
+            conversation_id: engineer,
+            work_id: Some(work.id.clone()),
+            blocking: true,
+            title: "which parser".into(),
+            ..Default::default()
+        })
+        .unwrap();
+
+        let nodes = s.forest().unwrap();
+        let project_row = &nodes[0];
+        assert_eq!(project_row.kind, NodeKind::Project);
+        assert_eq!(project_row.cards, 1, "{nodes:?}");
+        assert_eq!(project_row.blocked, 1, "{nodes:?}");
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// A stalled run must not also read as running. It *is* still running —

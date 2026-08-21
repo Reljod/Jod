@@ -163,10 +163,11 @@ pub fn should_compact(
 /// or anything still running when the turn ends, the routing below is exactly
 /// what it always was.
 ///
-/// This is the shape `docs/spec-ceo-and-managers` settles on for main — "it
-/// routes and it answers", and "main may route and may run repo-less one-shots"
-/// — brought forward on its own, without the manager tier that spec adds around
-/// it.
+/// This is the shape `docs/spec-ceo-and-managers.md` settles on for main — "it
+/// routes and it answers", and "main may route and may run repo-less one-shots".
+/// The manager tier that spec adds around it has since shipped too, which is
+/// why the tool list below names `ask_manager` and says `open_work` is not
+/// main's to call.
 ///
 /// It fixes instructions that never needed a child. It does **not** fix the
 /// separate hole the same live run exposed: main delegating and then wanting
@@ -179,9 +180,10 @@ pub fn orchestrator_preamble() -> &'static str {
      answer.\n\n\
      **Decide by the task.** A quick question you can answer in one turn, you \
      answer. Something that will still be running when this turn ends, you \
-     hand to an agent, and the agent reports back. Something that is really a \
-     project, you open a work for. Check them in that order, because the \
-     first is the cheapest and it is the one this chat used to skip.\n\n\
+     hand to an agent, and the agent reports back. Anything that touches a \
+     repository goes to that project's manager. Check them in that order, \
+     because the first is the cheapest and it is the one this chat used to \
+     skip.\n\n\
      Only the first of those three is new. Once you have ruled it out, the \
      tool list below decides which verb you reach for, and this paragraph \
      does not override it — an instruction that says *keep* or *until* is \
@@ -215,16 +217,23 @@ pub fn orchestrator_preamble() -> &'static str {
      - `list_agents` **first**, almost always. Reusing an agent that is already \
        holding the context beats starting one that has to rebuild it, and it is \
        the decision that matters most.\n\
-     - `continue_agent` when the instruction carries on what a run is already \
-       doing.\n\
-     - `open_work` when it does not and the instruction touches a repository, or \
-       will outlast a single session. This is the usual answer for anything \
-       about code. It opens the work, puts the first session on the checkout \
-       read-only, and gives Reljod a node in the fleet tree to watch it from.\n\
+     - `ask_manager` for **anything that touches a repository**. Every project \
+       has a manager that owns it, remembers every instruction about it, and \
+       runs its own engineers. You hand the instruction over and come straight \
+       back; it decides whether to continue an agent or open new work, and it \
+       raises a card on your rail saying what it did. This is the usual answer \
+       for anything about code.\n\
+     - `continue_agent` when the instruction carries on what a run you started \
+       is already doing.\n\
      - `delegate` only for a one-shot that needs no repository and no board — a \
        lookup, a question, a script. A delegated run belongs to no work, so it \
-       is **not** a node in the tree: reach for it when that is what you want, \
-       and reach for `open_work` when it is not.\n\
+       is **not** a node in the tree.\n\
+     - `open_work` is **not yours to call**, and the tool will refuse you. \
+       Anything needing a checkout goes through that project's manager. \
+       Neither is `delegate` a way around it: pointing one at a checkout is \
+       refused too, and correctly — a manager exists so that one conversation \
+       has seen everything that ever happened in its repository, and work \
+       started around it is work that conversation does not know about.\n\
      - `schedule_create` when the instruction says *when*. `goal_create` when it \
        says *keep* or *until*.\n\
      - `recall` and `related` before asking Reljod something he has already told \
@@ -271,9 +280,155 @@ pub fn orchestrator_preamble() -> &'static str {
      Call `project_switch` the moment you conclude it is a different \
      repository — including when you had to reason to get there — because the \
      next thing he says will inherit whatever you leave set.\n\n\
+     **When you genuinely cannot tell which repository he means, ask.** Two \
+     projects named in one breath, or none named and nothing set yet, are the \
+     two cases: use `ask_question`, and wait. Do not fall back to whichever \
+     project was touched most recently. You can no longer open the work and \
+     sort it out afterwards, and guessing here does not produce a visible \
+     mistake — it produces an invisible one, where an instruction lands in \
+     another repository's manager and reads as perfectly ordinary there.\n\n\
      Answer in one or two sentences: what you did with it, and who has it now. \
      Say plainly when you delegated to an existing run rather than a new one, \
      and why — a routing decision nobody can see is one nobody can correct."
+}
+
+/// What handing an instruction to a manager produced.
+#[derive(Debug, Clone)]
+pub struct Managed {
+    /// The run now carrying the instruction.
+    pub run_id: String,
+    /// The manager's conversation, stable across every instruction about this
+    /// project.
+    pub conversation_id: String,
+    /// The project it was routed to, by name. Returned rather than assumed,
+    /// because a routing decision nobody can see is one nobody can correct.
+    pub project: String,
+    /// Whether this project had no manager until now.
+    pub started_fresh: bool,
+}
+
+/// Resume a project's manager with one instruction, and come straight back.
+///
+/// Non-blocking, like everything main does. The manager answers into its own
+/// transcript and raises a card, which is how the answer reaches Reljod's rail
+/// — see [`manager_preamble`]. Waiting here would make main sit through a model
+/// call on every instruction about a repository.
+///
+/// Mirrors [`hand_to_orchestrator`]: get-or-create the conversation, resume it
+/// on the harness being used, append the instruction as its user turn. It does
+/// *not* settle a project against the instruction, because the caller has
+/// already decided which project this is — that is what `ask_manager`'s
+/// `project` argument means.
+pub async fn hand_to_manager(
+    jod: &Jod,
+    project_id: &str,
+    instruction: &str,
+    kind: HarnessKind,
+    permission: PermissionPolicy,
+) -> Result<Managed> {
+    let store = jod.store().ok_or(JodError::StoreRequired)?;
+    let project = store
+        .project(project_id)?
+        .ok_or_else(|| JodError::Invalid(format!("no project `{project_id}`")))?;
+    let (conversation_id, started_fresh) = store.manager_conversation(&project.id, kind)?;
+    let now = chrono::Utc::now().timestamp_millis();
+
+    let agent = jod
+        .spawn_agent_in(
+            SpawnRequest {
+                name: format!("{}-manager", project.name),
+                harness: kind,
+                prompt: instruction.to_string(),
+                system: Some(manager_preamble(&project.name)),
+                cwd: project.path.clone(),
+                model: None,
+                // The same floor main runs under, and for the same reason: a
+                // manager below `AcceptEdits` cannot call the tools that are
+                // its entire job, so it would look like it was working and be
+                // inert.
+                permission: at_least_acting(permission),
+                resume: store.resume_for(&conversation_id, kind)?,
+                // It starts agents, so it needs to be able to. Not
+                // `Orchestrate`: arming a schedule or a goal spends money at 2am
+                // with nobody watching, and that power stays with main rather
+                // than being multiplied by the number of repositories Reljod
+                // owns.
+                tools: Some(ToolAccess::Delegate),
+                ..SpawnRequest::default()
+            },
+            RunConversation::Existing(conversation_id.clone()),
+        )
+        .await?;
+
+    store.append_prompt(&conversation_id, &agent.id, instruction)?;
+    store.touch_human(&conversation_id, now)?;
+
+    Ok(Managed {
+        run_id: agent.id,
+        conversation_id,
+        project: project.name,
+        started_fresh,
+    })
+}
+
+/// The framing a project manager gets.
+///
+/// A manager owns one repository and everything happening in it. Main routes an
+/// instruction here and comes straight back; this run decides who does the
+/// work.
+///
+/// It is a *resumed conversation*, not a resident process. It answers and the
+/// process exits, so its context is the transcript rather than anything held in
+/// memory — which is why the brief tells it to look at `list_agents` first
+/// rather than assuming it remembers what is running.
+///
+/// Takes the project's name because a manager that has to work out which
+/// repository it owns can get that wrong, and everything it does afterwards
+/// inherits the mistake.
+pub fn manager_preamble(project: &str) -> String {
+    format!(
+        "You are the project manager for **{project}**. You own this repository \
+         and everything happening in it. Reljod's main chat routes anything \
+         about {project} to you and comes straight back; deciding who does it \
+         is your job.\n\n\
+         **You do not do the work either.** You are a manager, not an \
+         engineer. If you catch yourself reading a file to answer a question \
+         about this repository, you have taken one of your own agents' \
+         jobs.\n\n\
+         **Call `list_agents` with `project: \"{project}\"` first, every \
+         time.** That is the decision that matters most, and you cannot \
+         remember the answer between instructions — you are resumed for each \
+         one. What you are looking for:\n\
+         - An agent already doing this. `continue_agent` beats starting a cold \
+           one that has to rebuild the context.\n\
+         - An agent that is **stalled**. `stalled_for_ms` says so, and a \
+           stalled agent *cannot be continued* — it is still `running` because \
+           it is, but it has produced nothing for that long and it will not \
+           answer you. Say so out loud, start a fresh session beside it, and \
+           leave the stalled one alone. Stopping it is Reljod's call, not \
+           yours. `busy` is the field that means working-and-not-stuck.\n\
+         - Nothing relevant. Then open something new.\n\n\
+         Your tools:\n\
+         - `list_agents`, scoped to {project}, before anything else.\n\
+         - `continue_agent` when the instruction carries on what a run is \
+           already doing.\n\
+         - `open_work` when the intent is new and touches the repository. This \
+           is the usual answer for anything about code, and unlike main you \
+           may call it.\n\
+         - `delegate` for a one-shot that needs no board — a lookup, a check, \
+           a script.\n\
+         - `stop_agent` for something you started that should not be running.\n\
+         - `recall`, `related`, `remember` and `record_decision` for what this \
+           project has learned. Memory is most of why a manager is worth \
+           having: you are the one conversation that has seen every instruction \
+           about {project}.\n\n\
+         **Finish by raising a card.** `record_decision` with what you did and \
+         who has it now, in one or two sentences. Reljod is looking at the main \
+         chat, not at this transcript — a card cascades up to his rail and is \
+         the only way your answer reaches him. A routing decision nobody can \
+         see is one nobody can correct.\n\n\
+         Then say the same one or two sentences as your reply."
+    )
 }
 
 /// The standing framing a run started by `delegate` gets, and nothing more.
@@ -979,8 +1134,20 @@ pub struct Prepared {
 ///    of its own the moment it needs to change something. Cutting one now would
 ///    be a worktree per delegation, most of them never written to.
 pub fn prepare_work(store: &Store, opening: &Opening) -> Result<Prepared> {
-    let work = store.create_work(&opening.instruction)?;
     let checkout = crate::roots::normalise(&opening.checkout);
+
+    // Which repository this is, decided from the checkout rather than asked
+    // for. `open_work` used to touch the catalog not at all: it took a path,
+    // never called `project_for_path`, never set `current_project_id` on the
+    // conversation it created, and never wrote a resolution row. So the work
+    // could not be grouped by repository and the child session did not inherit
+    // the project either — it had to re-derive it from whatever it was told.
+    //
+    // Not an error when it finds nothing. A directory nobody catalogued is
+    // still somewhere to work, and refusing here would make the catalog a
+    // gate rather than a convenience.
+    let project = store.project_for_path(&checkout).unwrap_or(None);
+    let work = store.create_work_in(&opening.instruction, project.as_ref().map(|p| p.id.as_str()))?;
 
     // The third parameter is the *model*, not a name.
     //
@@ -1013,6 +1180,23 @@ pub fn prepare_work(store: &Store, opening: &Opening) -> Result<Prepared> {
         },
     )?;
     store.add_root(&conversation.id, NewRoot::reading(&checkout))?;
+
+    // The session inherits the project, so everything it starts does too and
+    // nothing below it has to guess. `How::Inferred` because the checkout said
+    // so — this is not Reljod naming a repository, and it is not a sticky
+    // pointer carrying; it is a path resolving, and the resolution row is what
+    // makes a wrong one auditable.
+    if let Some(project) = &project {
+        if let Err(e) = store.set_current_project(
+            &conversation.id,
+            Some(&project.id),
+            &opening.instruction,
+            crate::projects::How::Inferred,
+            &format!("the work was opened in `{}`", checkout.display()),
+        ) {
+            eprintln!("[jod] could not record the work's project: {e}");
+        }
+    }
 
     let roots = store.roots(&conversation.id)?;
     let secrets = store.secrets_for(Some(&conversation.id), Some(&work.id))?;
@@ -1202,6 +1386,75 @@ impl Store {
         let id = created.id.clone();
         self.set_pinned_conversation(&id)?;
         Ok(id)
+    }
+
+    /// The conversation that owns one project, created the first time it is
+    /// asked for. Says whether it had to create it.
+    ///
+    /// Get-or-create for the same reason [`Store::main_conversation`] is: a
+    /// manager that has to be set up is one that is missing exactly when you
+    /// first need it.
+    ///
+    /// **It mirrors `main_conversation`'s shape and deliberately not its
+    /// mechanism.** Main is found through `pinned = 1`, and
+    /// [`Store::pinned_conversation`] is a `query_row` with no `LIMIT` and no
+    /// ordering — so a manager row carrying that flag would not fail loudly, it
+    /// would make which conversation counts as "main" depend on the order
+    /// SQLite happens to return, and [`hand_to_orchestrator`] would start
+    /// appending Reljod's instructions to a project manager's transcript. A
+    /// manager is found through `projects.manager_conversation_id`, and its
+    /// `pinned` stays 0.
+    ///
+    /// One manager per project, not one per project per harness. Its value is
+    /// that it remembers the repository, and splitting it by harness would
+    /// split that memory for a reason that has nothing to do with the
+    /// repository. Moving it to another harness is [`Store::resume_for`]'s job,
+    /// exactly as it is for main.
+    ///
+    /// The `harness` argument is therefore only used when creating one, and
+    /// `cwd` comes from the project rather than the caller: a manager that owns
+    /// a repository and sits in some other directory is one whose sessions
+    /// start in the wrong place.
+    pub fn manager_conversation(
+        &self,
+        project_id: &str,
+        harness: crate::harness::HarnessKind,
+    ) -> Result<(String, bool)> {
+        let project = self
+            .project(project_id)?
+            .ok_or_else(|| JodError::Invalid(format!("no project `{project_id}`")))?;
+
+        // Checked against `conversations` rather than trusted, because
+        // `ON DELETE SET NULL` covers a deleted conversation but a database
+        // restored from a partial backup would not. A dangling id here would
+        // resume a transcript that is not there.
+        if let Some(existing) = &project.manager_conversation_id {
+            if self.conversation(existing)?.is_some() {
+                return Ok((existing.clone(), false));
+            }
+        }
+
+        let created = self.new_conversation(harness, &project.path.to_string_lossy(), None)?;
+        self.set_conversation_title(&created.id, &project.name)?;
+        // Set here rather than left for the first instruction to resolve, so
+        // everything the manager starts inherits the right project and nothing
+        // below it has to guess. `How::Human` because this conversation exists
+        // *because of* that project — there is nothing inferred about it.
+        self.set_current_project(
+            &created.id,
+            Some(&project.id),
+            "",
+            crate::projects::How::Human,
+            &format!("this is {}'s manager", project.name),
+        )?;
+        self.write(|tx| {
+            tx.execute(
+                "UPDATE projects SET manager_conversation_id = ?2 WHERE id = ?1",
+                rusqlite::params![project.id, created.id],
+            )?;
+            Ok(())
+        })?;
+        Ok((created.id, true))
     }
 
     /// Make this the main chat, and the only one.
@@ -1720,21 +1973,46 @@ mod tests {
     /// `work_id`, and `Store::forest_of` selects on `work_id IS NOT NULL` —
     /// so the fleet tree showed nothing, correctly, because there was nothing.
     ///
-    /// The test above passes on a preamble with no `open_work` in it at all,
-    /// which is exactly how the gap stayed green. This one does not.
+    /// The test above passes on a preamble that names no verb for repository
+    /// work at all, which is exactly how the gap stayed green. This one does
+    /// not.
+    ///
+    /// The verb used to be `open_work`. Main may no longer call it — anything
+    /// touching a repository goes through that project's manager — so what this
+    /// pins now is `ask_manager`, on the same two counts: it is named, and it is
+    /// named before the cheaper, less visible alternative.
     #[test]
-    fn the_orchestrator_is_told_which_tool_opens_a_work() {
+    fn the_orchestrator_is_told_which_tool_reaches_a_repository() {
         let said = orchestrator_preamble();
         assert!(
-            said.contains("`open_work`"),
-            "the orchestrator is taught what a work is and not how to open one"
+            said.contains("`ask_manager`"),
+            "the orchestrator is taught what a project is and not how to reach one"
         );
-        let opens = said.find("`open_work`").expect("checked above");
+        let asks = said.find("`ask_manager`").expect("checked above");
         let delegates = said.find("`delegate` only").expect("delegate is still offered");
         assert!(
-            opens < delegates,
-            "`delegate` is offered before `open_work`, so the cheaper and less \
+            asks < delegates,
+            "`delegate` is offered before `ask_manager`, so the cheaper and less \
              visible of the two reads as the default"
+        );
+    }
+
+    /// And it is told plainly that the verb it used to reach for is gone.
+    ///
+    /// The tool boundary refuses it whatever the preamble says — that is the
+    /// enforcement — but a model that reaches for a tool and is refused has
+    /// spent a turn discovering a rule it could have been told. Worth pinning
+    /// because it is the paragraph most likely to be dropped as redundant.
+    #[test]
+    fn the_orchestrator_is_told_open_work_is_not_its_to_call() {
+        let said = orchestrator_preamble();
+        assert!(
+            said.contains("`open_work` is **not yours to call**"),
+            "nothing tells main that its old verb is gone: {said}"
+        );
+        assert!(
+            said.contains("refused too"),
+            "and nothing closes the `delegate`-at-a-checkout route around it: {said}"
         );
     }
 
@@ -1832,7 +2110,12 @@ mod tests {
         assert!(said.contains("**Decide by the task.**"), "{said}");
         assert!(said.contains("answer in one turn"), "{said}");
         assert!(said.contains("still be running when this turn ends"), "{said}");
-        assert!(said.contains("really a project, you open a work for"), "{said}");
+        // Was "really a project, you open a work for". The third size is
+        // unchanged in kind — repository work — and changed in who receives it.
+        assert!(
+            said.contains("touches a repository goes to that project's manager"),
+            "{said}"
+        );
     }
 
     /// The summary of the three sizes is a way in, not a routing table, and on
@@ -1908,6 +2191,7 @@ mod tests {
             notes: notes.into(),
             created_at_ms: 0,
             last_touched_ms: 0,
+            manager_conversation_id: None,
         }
     }
 
@@ -1977,6 +2261,160 @@ mod tests {
     fn an_empty_catalog_says_how_to_fill_it() {
         let said = project_context(&[], None, None);
         assert!(said.contains("project_add"), "{said}");
+    }
+
+    // ---- a project's manager ----
+
+    mod managers {
+        use super::*;
+        use crate::projects::NewProject;
+
+        fn catalogued_at(store: &Store, dir: &str, name: &str) -> crate::projects::Project {
+            std::fs::create_dir_all(dir).unwrap();
+            store.add_project(NewProject::at(dir).named(name)).unwrap()
+        }
+
+        /// Check 10. Get-or-create, for the same reason the main chat is: a
+        /// manager that has to be set up is one that is missing exactly when
+        /// you first need it.
+        #[test]
+        fn a_projects_manager_is_created_once_and_found_again() {
+            let s = store();
+            let dir = format!("/tmp/jod-mc-{}-a", std::process::id());
+            let project = catalogued_at(&s, &dir, "tetris");
+
+            let (first, fresh) = s
+                .manager_conversation(&project.id, HarnessKind::ClaudeCode)
+                .unwrap();
+            assert!(fresh, "the first call has to say it created one");
+
+            let (again, fresh_again) = s
+                .manager_conversation(&project.id, HarnessKind::ClaudeCode)
+                .unwrap();
+            assert_eq!(first, again, "a second call minted a second manager");
+            assert!(!fresh_again, "and it must not claim to have created one");
+
+            // Asked on a different harness, it is still the same manager. Its
+            // value is that it remembers the repository, and splitting it by
+            // harness would split that memory for a reason that has nothing to
+            // do with the repository.
+            let (on_codex, _) = s
+                .manager_conversation(&project.id, HarnessKind::OpenCode)
+                .unwrap();
+            assert_eq!(first, on_codex, "the manager was split by harness");
+
+            std::fs::remove_dir_all(&dir).ok();
+        }
+
+        #[test]
+        fn two_projects_get_two_managers() {
+            let s = store();
+            let base = format!("/tmp/jod-mc-{}-b", std::process::id());
+            let one = catalogued_at(&s, &format!("{base}/tetris"), "tetris");
+            let two = catalogued_at(&s, &format!("{base}/pacman"), "pacman");
+
+            let (a, _) = s.manager_conversation(&one.id, HarnessKind::ClaudeCode).unwrap();
+            let (b, _) = s.manager_conversation(&two.id, HarnessKind::ClaudeCode).unwrap();
+            assert_ne!(a, b, "both projects share one manager");
+
+            std::fs::remove_dir_all(&base).ok();
+        }
+
+        /// The correction that would otherwise have broken the main chat.
+        ///
+        /// A manager mirrors `main_conversation`'s *shape* and not its
+        /// mechanism. `pinned_conversation` is a `query_row` with no `LIMIT`
+        /// and no ordering and does not error on a second row, so a manager
+        /// carrying `pinned = 1` would not fail loudly — it would make which
+        /// conversation is "main" depend on SQLite's row order, and
+        /// `hand_to_orchestrator` would start appending Reljod's instructions
+        /// to a project manager's transcript.
+        #[test]
+        fn creating_a_manager_does_not_disturb_the_main_chat() {
+            let s = store();
+            let dir = format!("/tmp/jod-mc-{}-c", std::process::id());
+            let project = catalogued_at(&s, &dir, "tetris");
+            let main = s.main_conversation(HarnessKind::ClaudeCode, "/tmp").unwrap();
+
+            let (manager, _) = s
+                .manager_conversation(&project.id, HarnessKind::ClaudeCode)
+                .unwrap();
+
+            assert_ne!(manager, main);
+            assert_eq!(
+                s.pinned_conversation().unwrap(),
+                Some(main.clone()),
+                "the main chat moved when a manager was created"
+            );
+            // And it stays put however many managers exist.
+            let other = catalogued_at(&s, &format!("{dir}-2"), "pacman");
+            s.manager_conversation(&other.id, HarnessKind::ClaudeCode).unwrap();
+            assert_eq!(s.pinned_conversation().unwrap(), Some(main));
+
+            std::fs::remove_dir_all(&dir).ok();
+            std::fs::remove_dir_all(format!("{dir}-2")).ok();
+        }
+
+        /// A manager knows which project it owns from the moment it exists, so
+        /// everything it starts inherits it and nothing below has to guess.
+        #[test]
+        fn a_manager_is_titled_and_pointed_at_its_own_project() {
+            let s = store();
+            let dir = format!("/tmp/jod-mc-{}-d", std::process::id());
+            let project = catalogued_at(&s, &dir, "tetris");
+
+            let (manager, _) = s
+                .manager_conversation(&project.id, HarnessKind::ClaudeCode)
+                .unwrap();
+
+            let conversation = s.conversation(&manager).unwrap().unwrap();
+            assert_eq!(conversation.title, "tetris");
+            assert_eq!(conversation.cwd, dir, "a manager sits in its own checkout");
+            assert_eq!(
+                s.current_project(&manager).unwrap().map(|p| p.id),
+                Some(project.id),
+                "a manager that does not know its own project is one whose \
+                 sessions have to be told"
+            );
+
+            std::fs::remove_dir_all(&dir).ok();
+        }
+
+        /// Check 9. `open_work` used to touch the catalog not at all, so
+        /// "which works are on Jod?" was unanswerable and the child session did
+        /// not inherit the project either.
+        #[test]
+        fn a_work_opened_in_a_catalogued_checkout_records_its_project() {
+            let s = store();
+            let dir = format!("/tmp/jod-mc-{}-e", std::process::id());
+            let project = catalogued_at(&s, &dir, "tetris");
+
+            let opened = prepare_work(&s, &Opening::new("port the parser", &dir)).unwrap();
+
+            assert_eq!(
+                opened.work.project_id.as_deref(),
+                Some(project.id.as_str()),
+                "the work does not know which repository it is about"
+            );
+            assert_eq!(
+                s.current_project(&opened.conversation_id).unwrap().map(|p| p.id),
+                Some(project.id),
+                "the session did not inherit the project, so everything it \
+                 starts will have to guess"
+            );
+
+            std::fs::remove_dir_all(&dir).ok();
+        }
+
+        /// And an uncatalogued directory is still somewhere to work. Refusing
+        /// here would make the catalog a gate rather than a convenience.
+        #[test]
+        fn a_work_opened_somewhere_uncatalogued_still_opens() {
+            let s = store();
+            let opened = prepare_work(&s, &Opening::new("port the parser", "/tmp")).unwrap();
+            assert_eq!(opened.work.project_id, None);
+            assert_eq!(s.current_project(&opened.conversation_id).unwrap(), None);
+        }
     }
 
     // ---- opening a work ----

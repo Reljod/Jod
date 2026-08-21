@@ -133,6 +133,12 @@ pub enum Action {
     /// no instruction. Distinct from [`Action::Orchestrate`], which hands over a
     /// single instruction from wherever you already are and leaves you there.
     EnterMain,
+    /// Put the chat box into a project's manager conversation.
+    ///
+    /// `⏎` on a manager row in the fleet, the same movement `EnterMain` is for
+    /// the pinned row. Carries the conversation id, which the tree row already
+    /// holds — a project id here would make this look it up again.
+    EnterManager(String),
     /// Stop an agent and close its tmux session.
     Stop(String),
     /// Run a command this repository offers, in the spelling its harness takes.
@@ -1026,24 +1032,43 @@ async fn enter_main(
             return;
         }
     };
+    enter_conversation(&store, app, thread, &id, "the main chat", at_launch);
+}
+
+/// Move the screen to one conversation and bind the chat box to it.
+///
+/// What `⏎` on the pinned row has always done, with the conversation as an
+/// argument — because a manager row does exactly the same thing to a different
+/// conversation, and the second copy of this is where the two would drift.
+///
+/// `what` names the conversation in the two sentences this can produce, so
+/// "already in the main chat" and "already in tetris's manager" come out of one
+/// function rather than two.
+fn enter_conversation(
+    store: &Store,
+    app: &mut App,
+    thread: &mut Thread,
+    id: &str,
+    what: &str,
+    at_launch: bool,
+) {
     // "Already there" is bound *and* looking at it, not merely bound. The chat
-    // box stays bound to the main conversation while you walk the fleet or
-    // watch somebody's run — and since the console now launches in the main
-    // chat, bound is the ordinary state rather than the rare one. Tested on the
-    // binding alone, `⏎` on the fleet's pinned row would answer "already in the
-    // main chat" from a screen that is plainly not it, which is the dead key
-    // that row exists to stop being.
-    if thread.conversation.as_deref() == Some(id.as_str())
+    // box stays bound while you walk the fleet or watch somebody's run — and
+    // since the console launches in the main chat, bound is the ordinary state
+    // rather than the rare one. Tested on the binding alone, `⏎` on the fleet's
+    // row would answer "already there" from a screen that is plainly not it,
+    // which is the dead key that row exists to stop being.
+    if thread.conversation.as_deref() == Some(id)
         && app.workspace == Workspace::Chat
         && app.watching.is_none()
     {
-        app.push(Entry::Notice("already in the main chat".into()));
+        app.push(Entry::Notice(format!("already in {what}")));
         return;
     }
-    thread.conversation = Some(id.clone());
+    thread.conversation = Some(id.to_string());
     // Not carried. `carried` is a summary owed to a harness that has never seen
     // this thread, and it belongs to the conversation being *left* — sending it
-    // into the main chat would paste another conversation's history here.
+    // in here would paste another conversation's history into this one.
     thread.carried = None;
     // Stop following whatever run was on screen. The transcript is about to be
     // replaced with this conversation's, and a run still being watched would
@@ -1055,7 +1080,7 @@ async fn enter_main(
     // Replayed from Jod's own record rather than from a run's events: the chat
     // spans many runs, one per instruction, and any single one of them holds
     // only a slice.
-    match store.live_window(&id) {
+    match store.live_window(id) {
         Ok(live) if at_launch && live.is_empty() => {}
         Ok(live) => {
             for entry in replay(&live, app.show_thinking) {
@@ -1063,7 +1088,7 @@ async fn enter_main(
             }
         }
         Err(e) => app.push(Entry::Notice(format!(
-            "in the main chat, but could not read it back: {e}"
+            "in {what}, but could not read it back: {e}"
         ))),
     }
     app.scroll_to_bottom();
@@ -1221,6 +1246,21 @@ async fn perform(
         }
         Action::Orchestrate(instruction) => orchestrate(jod, app, opts, thread, instruction).await,
         Action::EnterMain => enter_main(jod, app, opts, thread, false).await,
+        Action::EnterManager(conversation) => match jod.store() {
+            None => app.push(Entry::Notice(format!("{NO_STORE} — there are no managers"))),
+            Some(store) => {
+                // Named by its project rather than by its id, because "already
+                // in 7f3a2b1c" is a sentence about a row and "already in
+                // tetris's manager" is a sentence about a repository.
+                let what = store
+                    .current_project(&conversation)
+                    .ok()
+                    .flatten()
+                    .map(|p| format!("{}'s manager", p.name))
+                    .unwrap_or_else(|| "that manager".to_string());
+                enter_conversation(&store, app, thread, &conversation, &what, false);
+            }
+        },
         Action::Delegate(prompt) => {
             // Fresh, always: a background job that silently continued the
             // conversation on screen would inherit context nobody asked it to,
@@ -3704,8 +3744,9 @@ fn on_tree_key(app: &mut App, key: KeyEvent, viewport: usize) -> Option<Option<A
             handled(None)
         }
         // `⏎` opens whatever the row stands for. A run is something to watch; a
-        // session is a conversation to go into; a work is a heading, so it
-        // toggles rather than pretending to open something.
+        // session is a conversation to go into; a manager is a conversation to
+        // go *into* the way the pinned row is; a work and a project are
+        // headings, so they toggle rather than pretending to open something.
         KeyCode::Enter => {
             let Some(node) = app.selected_node().cloned() else {
                 return handled(None);
@@ -3718,7 +3759,12 @@ fn on_tree_key(app: &mut App, key: KeyEvent, viewport: usize) -> Option<Option<A
                 jod_core::tree::NodeKind::Session => {
                     handled(Some(Action::Sessions(sessions::Request::Open(node.id.id))))
                 }
-                jod_core::tree::NodeKind::Work => {
+                // The row carries the conversation id, so this is the id to
+                // bind to — the same movement `⏎` on the pinned row makes.
+                jod_core::tree::NodeKind::Manager => {
+                    handled(Some(Action::EnterManager(node.id.id)))
+                }
+                jod_core::tree::NodeKind::Work | jod_core::tree::NodeKind::Project => {
                     let closed = app.closed_works.clone();
                     app.tree.toggle(&closed);
                     handled(None)
@@ -10691,6 +10737,90 @@ mod tests {
         let mut app = on_the_tree(jod_core::tree::NodeId::work("w1"));
         press(&mut app, KeyCode::Char('/'));
         assert!(app.here().editing_filter, "the filter line never opened");
+    }
+
+    /// Check 16. `⏎` on a manager row goes *into* that conversation, the same
+    /// movement the pinned row makes into the main chat.
+    ///
+    /// Not `Watch` and not `Sessions(Open)`. Watching puts a run's output on
+    /// screen and leaves the chat box where it was; `Sessions(Open)` prints a
+    /// conversation's contents as notice lines. Neither binds the chat box, and
+    /// binding it is the whole point — what you type next has to be an
+    /// instruction to that manager.
+    #[test]
+    fn enter_on_a_manager_row_goes_into_that_conversation() {
+        use jod_core::tree::{Node, NodeId, NodeKind};
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.forest = vec![
+            Node {
+                id: NodeId::project("p1"),
+                parent: None,
+                kind: NodeKind::Project,
+                depth: 0,
+                label: "tetris".into(),
+                summary: String::new(),
+                running: false,
+                status: None,
+                stalled_for_ms: None,
+                cards: 0,
+                blocked: 0,
+                colour: "cyan".into(),
+                expanded: true,
+                has_children: true,
+            },
+            Node {
+                id: NodeId::manager("conv-9"),
+                parent: Some(NodeId::project("p1")),
+                kind: NodeKind::Manager,
+                depth: 1,
+                label: "manager".into(),
+                summary: String::new(),
+                running: false,
+                status: None,
+                stalled_for_ms: None,
+                cards: 0,
+                blocked: 0,
+                colour: "cyan".into(),
+                expanded: true,
+                has_children: false,
+            },
+        ];
+        app.go(Workspace::Fleet);
+        app.tree.selected = Some(NodeId::manager("conv-9"));
+
+        assert_eq!(
+            press(&mut app, KeyCode::Enter),
+            Some(Action::EnterManager("conv-9".into())),
+            "the row has to carry the conversation to bind to"
+        );
+    }
+
+    /// And a project row is a heading, so it folds rather than pretending to
+    /// open something — the same thing a work row does.
+    #[test]
+    fn enter_on_a_project_row_folds_it() {
+        use jod_core::tree::{Node, NodeId, NodeKind};
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.forest = vec![Node {
+            id: NodeId::project("p1"),
+            parent: None,
+            kind: NodeKind::Project,
+            depth: 0,
+            label: "tetris".into(),
+            summary: String::new(),
+            running: false,
+            status: None,
+            stalled_for_ms: None,
+            cards: 0,
+            blocked: 0,
+            colour: "cyan".into(),
+            expanded: true,
+            has_children: true,
+        }];
+        app.go(Workspace::Fleet);
+        app.tree.selected = Some(NodeId::project("p1"));
+
+        assert_eq!(press(&mut app, KeyCode::Enter), None, "a heading opens nothing");
     }
 
     /// **G5.S2.** The screen is opened from the tree, through the router — not

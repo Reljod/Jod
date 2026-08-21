@@ -20,14 +20,14 @@ area file over this table and correct the table when you notice it drifting.
 | Orchestration scenarios | [`tasks/10-orchestration.md`](tasks/10-orchestration.md) | O1–O10, **one critical** | 2 | 8 | — |
 | Orchestration edge cases and bad input | [`tasks/11-orchestration-edge-cases.md`](tasks/11-orchestration-edge-cases.md) | E1 + 14 scenarios | 1 | 0 | — |
 | Fleets and the tree | [`tasks/20-fleets.md`](tasks/20-fleets.md) | F1–F9 | 5 | 4 | — |
-| Project managers | [`tasks/30-project-managers.md`](tasks/30-project-managers.md) | P1–P5 + spec tasks T1–T7 | 4 | 1, and T1–T7 unstarted | — |
+| Project managers | [`tasks/30-project-managers.md`](tasks/30-project-managers.md) | P1–P5; T1–T7 **shipped** | 4 + T1–T7 | 1 | — |
 | Scheduling | [`tasks/40-scheduling.md`](tasks/40-scheduling.md) | S1–S6 | 5 | 1 | — |
 | Goals | [`tasks/50-goals.md`](tasks/50-goals.md) | G1–G14 | 9 | 6 | — |
 
-That is **36 findings closed, 26 open and one blocked**, plus the seven
-project-manager tasks nobody has started. The largest pile of open work is
-orchestration, and the manager tasks are the largest piece of unbuilt design —
-nothing in the tree implements a project manager today.
+That is **36 findings closed, 26 open and one blocked**. The seven
+project-manager tasks T1–T7 have since shipped, so the largest pile of open work
+is orchestration. What is left under project managers is P4, a decision about
+`State::Paused` that is Reljod's to make rather than anybody's to build.
 
 Every file ends with a "Scenarios run" table listing what was tried, what was
 expected, and what happened — passes included. A clean pass is worth recording;
@@ -287,22 +287,31 @@ has not been run, and should be run before it is built against.
 
 ## Context worth reading before you design anything
 
-`docs/spec-ceo-and-managers` holds a `SPEC.md` designing most of what Reljod
-asked for: main behaves like a CEO, every project gets a manager conversation,
-main loses `open_work` and gains `ask_manager`, and a stalled session is marked
-rather than killed.
+**The manager spec has shipped.** It is
+[`docs/spec-ceo-and-managers.md`](docs/spec-ceo-and-managers.md), marked shipped,
+with a section at the end recording what was built, how its four corrections were
+applied, and how its seven open questions were answered. Read it as a record
+rather than as work to pick up.
 
-Pull request #120 reviewed that spec claim by claim against `origin/main` and
-found it executable, with four corrections. Two of them matter to anyone working
-here:
+What landed: every session is watched and a stalled one is marked rather than
+killed; `works.project_id` and a wider `AgentView` carrying project, work,
+`stalled_for_ms` and `busy`; a manager conversation per project, reached by
+`ask_manager`; `open_work` and repository-pointed `delegate` refused from main at
+the tool boundary; two preambles instead of one; and project and manager levels
+in the fleet tree.
 
-- **A manager must not use `pinned = 1`.** `Store::pinned_conversation`
-  (`core/src/orchestrator.rs:1312`) is a `query_row` with no `LIMIT` and no
-  ordering, so a second pinned row makes "which conversation is main" depend on
-  SQLite's row order — and Reljod's instructions would start landing in a
-  manager's transcript.
+Two things from the review that anyone working near this still needs:
+
+- **A manager must not use `pinned = 1`.** `Store::pinned_conversation` is a
+  `query_row` with no `LIMIT` and no ordering, so a second pinned row makes
+  "which conversation is main" depend on SQLite's row order — and Reljod's
+  instructions would start landing in a manager's transcript. Managers live on
+  `projects.manager_conversation_id`, and
+  `creating_a_manager_does_not_disturb_the_main_chat` holds it.
 - **Routing to a manager is already deterministic.** `settle_project` runs on
-  the raw instruction before the model turn
-  (`core/src/orchestrator.rs:875`), so `ask_manager` is wiring, not reasoning.
+  the raw instruction before the model turn, so `ask_manager` is wiring, not
+  reasoning. Anything here treating the choice of manager as a judgement call is
+  overbuilt.
 
-So most of the manager work is "execute the spec", not "work out what to do".
+The catalog findings P1–P5 below are separate from the manager work and are
+tracked on their own.

@@ -3424,6 +3424,8 @@ fn draw_tree_detail(f: &mut Frame, app: &App, area: Rect) {
             lines.push(detail(
                 "kind",
                 match node.kind {
+                    jod_core::tree::NodeKind::Project => "project",
+                    jod_core::tree::NodeKind::Manager => "manager",
                     jod_core::tree::NodeKind::Work => "work",
                     jod_core::tree::NodeKind::Session => "session",
                     jod_core::tree::NodeKind::Run => "run",
@@ -7273,6 +7275,7 @@ mod tests {
             notes: String::new(),
             created_at_ms: 0,
             last_touched_ms: 0,
+            manager_conversation_id: None,
         }
     }
 

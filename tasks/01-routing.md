@@ -24,7 +24,7 @@ repeats the same rule ("It never does the work itself", `jod main --help`). So
 every instruction — including "what does A2A stand for" — costs a spawned
 agent, a conversation row and a round trip.
 
-The unmerged `docs/spec-ceo-and-managers` branch already decides the shape of
+The shipped `docs/spec-ceo-and-managers.md` spec already decides the shape of
 the fix: *"Main may route and may run repo-less one-shots. Nothing else."* and
 *"It routes and it answers."* Read that spec's Change 3d before rewriting the
 preamble; it lists main's exact tool set.

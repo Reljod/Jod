@@ -12,8 +12,8 @@ which replays a run's own event log independently of the conversation
 transcript. A few of the harder edge cases were read off the code instead,
 and are marked `needs confirming`.
 
-Read first, so as not to refile them: `git show
-docs/spec-ceo-and-managers:SPEC.md`, `tasks/00-launch-and-roots.md`,
+Read first, so as not to refile them:
+`docs/spec-ceo-and-managers.md`, `tasks/00-launch-and-roots.md`,
 `tasks/01-routing.md` (including its live addenda R4–R6). Nothing below
 repeats L1–L6 or R1–R6; several findings corroborate them instead, and say so.
 
@@ -283,7 +283,7 @@ Fix: refuse `continue_agent` on a `killed` or `failed` run at the tool
 boundary, the same way the permission ceiling is enforced now, and name
 `delegate`/`open_work` as the way to start fresh beside it — this is close to
 what the unmerged CEO/manager spec already prescribes for *stalled* runs
-(`docs/spec-ceo-and-managers:SPEC.md`, Decisions section: "A stalled session
+(`docs/spec-ceo-and-managers.md`, Decisions section: "A stalled session
 is... never continued"); a killed one deserves the same treatment and today
 gets none.
 

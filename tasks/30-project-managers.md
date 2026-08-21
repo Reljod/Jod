@@ -1,26 +1,26 @@
-# Project managers — the catalog that exists, and the manager that doesn't
+# Project managers — the catalog, and the manager that now exists
 
-> **How this file sits next to pull request #120.** It sits *under* it, not over
-> it. #120 ("docs: review the project-manager spec against main") is the
-> authority on whether the `docs/spec-ceo-and-managers` spec is executable; its
-> answer is yes, with four corrections. Nothing here overrides that.
+> **The manager work in Part 2 has shipped.** What is still live in this file is
+> Part 1: findings about the project catalog itself, four of them fixed and one
+> waiting on a decision from Reljod.
 >
-> Part 1 below is new material #120 does not have: bugs in the project catalog
-> that exists today, found by running it. Part 2 breaks the spec's Change 3 into
-> claimable tasks, and where the two disagree, **#120 wins** — it was checked
-> claim by claim against `origin/main`.
+> Part 1 is material pull request #120 did not have — bugs found by running the
+> catalog rather than by reading it. Part 2 broke the spec's Change 3 into
+> claimable tasks; those tasks are done, and the record of what landed is at the
+> end of [`docs/spec-ceo-and-managers.md`](../docs/spec-ceo-and-managers.md).
 >
-> Two things from #120 that anyone working here needs, and that Part 2 predates:
+> Two things from #120 that anyone working near managers still needs:
 >
-> - **A manager must not use `pinned = 1`.** `Store::pinned_conversation`
->   (`core/src/orchestrator.rs:1312`) is a `query_row` with no `LIMIT` and no
->   ordering, so a second pinned row makes "which conversation is main" depend
->   on SQLite's row order, and Reljod's instructions would start landing in a
->   manager's transcript.
+> - **A manager must not use `pinned = 1`.** `Store::pinned_conversation` is a
+>   `query_row` with no `LIMIT` and no ordering, so a second pinned row makes
+>   "which conversation is main" depend on SQLite's row order, and Reljod's
+>   instructions would start landing in a manager's transcript. Managers live on
+>   `projects.manager_conversation_id`, and
+>   `creating_a_manager_does_not_disturb_the_main_chat` holds it.
 > - **Routing to a manager is already deterministic.** `settle_project` runs on
->   the raw instruction before the model turn (`core/src/orchestrator.rs:875`),
->   so `ask_manager` is wiring, not reasoning. Any task here that treats picking
->   the manager as a judgement call is overbuilt.
+>   the raw instruction before the model turn, so `ask_manager` is wiring, not
+>   reasoning. Anything treating the choice of manager as a judgement call is
+>   overbuilt.
 
 Tested by running the built binary (`target/debug/jod`) against two throwaway
 `JOD_HOME`s (`/home/reljod/.claude/jobs/cd76af0f/tmp/jodhome-pm` and
@@ -31,12 +31,11 @@ databases. Scratch repos live under
 `/home/reljod/.claude/jobs/cd76af0f/tmp/pm-scratch/`. Everything below is
 observed, not guessed, except where marked `needs confirming`.
 
-Confirmed first, so nobody re-derives it: `grep -rin "project manager"` over
-the whole repo returns nothing but this task file itself and one mention in
-`tasks/01-routing.md`. Nothing implements a manager today. The catalog
-(`core/src/projects.rs`, table `projects`, MCP tools `project_add`,
-`project_list`, `project_switch`, `project_current`) is real and mostly
-works, and that's what Part 1 is about.
+Written when nothing implemented a manager, which is no longer true — the
+findings below are about the **catalog** (`core/src/projects.rs`, table
+`projects`, MCP tools `project_add`, `project_list`, `project_switch`,
+`project_current`), which was real and mostly working then and still is. That is
+what Part 1 is about, and it is unaffected by the manager work.
 
 Already filed, not re-filed here: `jod project current` is missing from the
 CLI (`tasks/00-launch-and-roots.md`, L5); `jod team ls` is spelled `list`
@@ -433,13 +432,28 @@ for free: `current_project_id` is already a per-conversation-row column.
 
 ## Part 2 — the manager work, as claimable tasks
 
+> **All shipped. Nothing here is claimable.** T1–T7 below were built together
+> with the rest of the spec; the record of what landed, including how the four
+> corrections were applied and the seven open questions answered, is at the end
+> of [`docs/spec-ceo-and-managers.md`](../docs/spec-ceo-and-managers.md).
+>
+> Kept because the task descriptions name the files and the traps, and because
+> each one says which numbered check it was there to make possible — which is
+> still the fastest way to find the test that holds it.
+>
+> Two things the descriptions below got wrong, worth reading before trusting
+> them: the manager lives on `projects.manager_conversation_id` and is keyed by
+> **project alone, not by project and harness** (splitting it by harness would
+> split the memory that is its whole reason to exist — `resume_for` moves it
+> between harnesses the way it does for main); and T3's worry about inheriting
+> P3's ambiguity bug did not apply, because `ask_manager` resolves an explicit
+> name through `projects_by_name` and refuses when it matches more than one.
+
 Source for everything below:
-`git show docs/spec-ceo-and-managers:SPEC.md`, **Change 3 — a manager per
-project**. Nothing in this part exists yet; confirmed by
-`grep -rn "manager_conversation\|ask_manager\|NodeKind::Manager"` returning
-nothing anywhere in the tree.
+`docs/spec-ceo-and-managers.md`, **Change 3 — a manager per project**.
 
 ### T1. `manager_conversation_id` column + migration
+Status: **shipped** — migration `0022_a_project_gets_a_manager`.
 Spec section: 3a, "Migrations" (migration 3).
 Files: `core/src/store.rs`.
 What exists today: nothing. `projects` has no such column; confirmed by
@@ -448,6 +462,7 @@ Proves: check 10 (get-or-create is idempotent per project, distinct across
 projects) needs this column to exist before it can even compile against.
 
 ### T2. `Store::manager_conversation(project_id, harness)`
+Status: **shipped** — `core/src/orchestrator.rs`, keyed by project alone.
 Spec section: 3a.
 Files: `core/src/store.rs` (or `core/src/orchestrator.rs`, next to
 `main_conversation` which it explicitly mirrors — `main_conversation` is at
@@ -462,6 +477,7 @@ Proves: check 10, check 11 (first `ask_manager` call creates and says so, the
 second resumes and reports the same conversation id).
 
 ### T3. New MCP tool `ask_manager`
+Status: **shipped** — `core/src/mcp.rs`, at `ToolAccess::Delegate`.
 Spec section: 3b.
 Files: `core/src/mcp.rs` (alongside the other project tools at
 `core/src/mcp.rs:459-522`, `ToolAccess::Delegate` like `project_switch` and
@@ -474,6 +490,7 @@ this is the same pattern `project_switch` already uses at
 `core/src/mcp.rs:1865-1883`, worth copying verbatim rather than re-inventing).
 
 ### T4. Refuse `open_work` from main at the tool boundary
+Status: **shipped** — and `delegate` at a known checkout with it.
 Spec section: 3c.
 Files: `core/src/mcp.rs`, near `open_work`'s existing refusal for "no roots to
 inherit a checkout from" (`core/src/mcp.rs:2149`, per
@@ -488,6 +505,7 @@ manager's run still succeeds — needs T2/T5 to exist first so there's a
 manager conversation to call from).
 
 ### T5. Two preambles instead of one
+Status: **shipped** — `orchestrator_preamble` and `manager_preamble`.
 Spec section: 3d.
 Files: `core/src/orchestrator.rs`, splitting `orchestrator_preamble()`
 (`core/src/orchestrator.rs:353`) into main's version and a new manager
@@ -503,6 +521,7 @@ checks assumes the tool sets in the spec's table are actually wired to the
 right role, and nothing currently enforces that split.
 
 ### T6. Project and manager nodes in the fleet tree
+Status: **shipped** — `NodeKind::Project` and `NodeKind::Manager`.
 Spec section: 3e.
 Files: `core/src/tree.rs` (new `NodeKind::Project`, `NodeKind::Manager`),
 `cli/src/tui/mod.rs` (entering a manager row — the shape to copy is
@@ -514,6 +533,7 @@ dependency rather than duplicating that investigation.
 Proves: check 15, check 16.
 
 ### T7. `works.project_id` (Change 2, but Change 3 depends on it)
+Status: **shipped** — migration `0021_a_work_knows_its_project`.
 Spec section: Change 2, "Add `project_id` to the `works` table" — listed
 under Change 2 in the spec but load-bearing for T6's "that project's works
 under it," so noting it here too.

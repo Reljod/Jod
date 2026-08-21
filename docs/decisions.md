@@ -3001,3 +3001,87 @@ one line is the difference between watching an agent work and being able to
 trust it afterwards. And with `/details` off not even the marker is drawn: that
 setting is the answer to "I do not want to see the steps", and a row per turn
 counting them is still seeing them.
+
+## A stalled goal iteration is reaped; a stalled session is only marked
+
+The same verdict, two responses, and the difference is what else would notice.
+
+A goal fires on a cron and settles the previous iteration by asking its status.
+A wedged run's status is `running` and stays `running`, because the only process
+that writes a terminal status is the supervisor watching a harness that never
+exits — so the goal waits for ever, silently, still listed as working. Nothing
+else is coming to look. Reaping it is the only thing that turns that into a
+failure somebody can see.
+
+A session Reljod is watching is not blocking a loop. Killing it destroys a
+transcript and possibly a checkout mid-edit, to fix a problem he can see on his
+own screen and decide about himself. So it is marked, surfaced on the rail and
+in the fleet, and left running.
+
+`decide` stayed pure and unchanged — a silent run is stalled whoever is watching
+it — and the split went into a second function, `respond`, that takes the
+verdict and what the heartbeat watches. Putting it inside `decide` would have
+made the *verdict* depend on the audience, which is a different and worse claim.
+
+`Vanished` is deliberately not part of the split. There is no process left, so
+the row is lying, and a mark would leave `jod ls` claiming a process is running
+when the kernel says otherwise.
+
+The general shape: when one signal needs two responses, split the response and
+leave the observation alone.
+
+## A stalled row loses the spinner rather than gaining a badge
+
+A stalled run is still `running` — that is the entire problem — so the fleet
+initially drew it as running *and* stalled. An animation is the strongest "this
+is fine" signal on a screen, and putting the reassuring word beside the alarming
+one lets the eye take the wrong one. The badge replaces the spinner.
+
+The same rule reaches the detail pane, where `runs.status` still truthfully says
+`running` and that is the least useful true thing to tell somebody looking at a
+wedged agent, and `list_agents`, which gained `busy` — running and not stalled —
+because "running" and "busy" came apart the moment a stall could be marked, and
+every reader recomputing the difference is a reader that can get it wrong.
+
+Three messages that promised a reap were corrected at the same time. A promise
+of a kill that never comes is what somebody decides not to intervene on.
+
+## A rule the model can talk itself out of is not a rule
+
+Main may not call `open_work`; anything touching a repository goes through that
+project's manager. Stating that in the preamble is not enforcement — it is
+advice, and this is advice a model will be tempted to route around, because
+routing around it always feels helpful in the moment.
+
+So it is refused at the tool boundary. The MCP server resolves the calling run
+against its own process group, so the caller cannot argue about its identity.
+
+The refusal on its own was not enough. `delegate` takes a `cwd`, so a model just
+refused `open_work` and still wanting to help reaches for `delegate` pointed at
+the checkout, and that is the rule routed around silently. A `cwd` inside a
+catalogued project is refused too. `delegate` somewhere uncatalogued still
+works, because removing it outright would leave main unable to answer "what's
+the weather in Manila" without opening a work.
+
+Both refusals name `ask_manager`. A rule that only says no leaves the model
+spending a turn discovering what yes is.
+
+## A manager is found by its project, never by a pinned flag
+
+A project's manager mirrors the main chat's get-or-create shape and deliberately
+not its mechanism. Main is found through `conversations.pinned = 1`, and
+`pinned_conversation` is a `query_row` with no `LIMIT` and no ordering that does
+not error on a second row. A manager carrying that flag would not fail loudly —
+it would make which conversation counts as "main" depend on SQLite's row order,
+and Reljod's instructions would start landing in a project manager's transcript.
+
+So a manager lives on `projects.manager_conversation_id` and its `pinned` stays
+0, and a test creates managers around the main chat and asserts it has not moved.
+
+One manager per project, not one per project per harness. Its value is that it
+remembers the repository; splitting it by harness would split that memory for a
+reason that has nothing to do with the repository. `resume_for` moves it between
+harnesses exactly as it does for main.
+
+The general shape: copying a pattern's shape is usually right, and copying its
+mechanism inherits its bugs.
