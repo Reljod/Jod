@@ -2203,6 +2203,7 @@ fn meter(level: f32, speaking: bool) -> String {
 /// The permission mode leads it on every screen: what the next turn may do
 /// without asking changes while you are talking, and a setting you must press a
 /// key to see is one you will be wrong about when it matters.
+fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     if area.height == 0 {
         return;
     }
