@@ -1031,7 +1031,26 @@ async fn event_loop(
                 // panel that only refreshes when the watched agent finishes
                 // shows a fleet that stopped moving minutes ago.
                 if app.tick.is_multiple_of(4) {
-                    app.agents = list_agents(&jod).await;
+                    // Read the store back first, or the refresh below is only
+                    // ever about runs *this* process started.
+                    //
+                    // `Jod::agents` reads an in-memory map, and every agent a
+                    // project manager starts is spawned by an MCP server in
+                    // another process. `rehydrate` at launch is what put the
+                    // fleet's runs there, and nothing called it again — so a
+                    // manager's engineer appeared in the tree, which is built
+                    // from SQL, and was absent from the agent list, which is
+                    // not. `selected_agent` therefore answered `None` for a row
+                    // visibly spinning, and every run verb on it — `s`, `r`,
+                    // `a`, `d`, and the thread keys — refused with "that row is
+                    // a session with nothing running on it". There was no way
+                    // to stop an agent a manager had started.
+                    //
+                    // Cheap to repeat by design: `rehydrate` checks the map
+                    // before replaying anything, and its own comment says the
+                    // check is there because a full replay would be "ruinous on
+                    // a two-second timer". Only genuinely new runs cost.
+                    refresh_fleet(&jod, &mut app).await;
                     // Before the refresh, because the chat box may have been
                     // rebound since the last one — `/resume`, a harness switch,
                     // entering the main chat — and the rail would otherwise
@@ -7587,6 +7606,36 @@ fn reload(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) 
 /// way the tick does. It called none of this and drew an empty fleet on a
 /// database full of runs, which is worse than an error because it looks like
 /// an answer.
+/// Re-read the fleet, including the runs this process did not start.
+///
+/// `Jod::agents` reads an in-memory map, and every agent a project manager
+/// starts is spawned by an MCP server in **another process**. `rehydrate` at
+/// launch is what put the existing runs in that map, and nothing called it
+/// again — so a manager's engineer appeared in the tree, which is built from
+/// SQL, and was absent from the agent list, which is not.
+///
+/// The consequence was not cosmetic. `App::selected_agent` resolves a session
+/// row through that list, so it answered `None` for a row visibly spinning, and
+/// every run verb on it — `s`, `r`, `a`, `d` and the thread keys — refused with
+/// "that row is a session with nothing running on it". There was no way to stop
+/// an agent a manager had started, which is nearly every agent in the fleet.
+///
+/// Cheap to repeat by design: `rehydrate` checks the map before replaying
+/// anything, and its own comment says that check exists because a full replay
+/// would be "ruinous on a two-second timer". Only genuinely new runs cost.
+///
+/// A store that cannot be read leaves the list as it was and says so, rather
+/// than emptying a fleet that is still out there working.
+pub async fn refresh_fleet(jod: &Arc<Jod>, app: &mut App) {
+    if let Err(e) = jod.rehydrate(200).await {
+        app.push(Entry::Notice(format!(
+            "could not read the fleet back from the store: {e}"
+        )));
+        return;
+    }
+    app.agents = list_agents(jod).await;
+}
+
 pub async fn list_agents(jod: &Arc<Jod>) -> Vec<AgentLine> {
     // Read once for the whole listing rather than per row. Without a store
     // every run reads as `Nothing`, which is the honest answer: with no ledger
@@ -11664,6 +11713,74 @@ mod tests {
 
     fn jod_with(store: RealStore) -> Arc<Jod> {
         Jod::with_store(Arc::new(store))
+    }
+
+    /// The console has to see the agents it did not start.
+    ///
+    /// `Jod::agents` reads an in-memory map, and every engineer a project
+    /// manager hires is spawned by an MCP server in another process, which
+    /// never touches this one's map. `rehydrate` ran once at launch and was
+    /// never called again, so those runs were in the tree — built from SQL —
+    /// and missing from the agent list. `selected_agent` resolves a session row
+    /// through that list, so it answered `None` for a row visibly spinning and
+    /// every run verb refused: there was no way to stop an agent a manager had
+    /// started.
+    ///
+    /// The run here is written straight to the store and never announced,
+    /// because that is exactly what another process looks like from in here.
+    #[tokio::test]
+    async fn the_console_picks_up_a_run_another_process_started() {
+        let store = RealStore::in_memory().expect("an in-memory store");
+        let summary = jod_core::service::AgentSummary {
+            id: "run-elsewhere".into(),
+            name: "gamma-engineer".into(),
+            harness: HarnessKind::ClaudeCode,
+            harness_label: "claude-code".into(),
+            status: jod_core::service::AgentStatus::Running,
+            cwd: "/tmp".into(),
+            model: None,
+            permission: jod_core::PermissionPolicy::AcceptEdits,
+            pid: None,
+            pgid: None,
+            process_alive: true,
+            watch_command: String::new(),
+            created_at_ms: 1,
+            session_id: Some("a-session".into()),
+            usage: Default::default(),
+            event_count: 0,
+            last_message: None,
+        };
+        store
+            .save_run(&jod_core::store::StoredRun {
+                id: "run-elsewhere".into(),
+                name: "gamma-engineer".into(),
+                harness: "claude-code".into(),
+                status: "running".into(),
+                cwd: "/tmp".into(),
+                session_id: Some("a-session".into()),
+                pid: None,
+                pgid: None,
+                created_at_ms: 1,
+                summary: serde_json::to_value(&summary).unwrap(),
+            })
+            .expect("a run written by somebody else");
+
+        let jod = jod_with(store);
+        let mut app = app_on(HarnessKind::ClaudeCode);
+
+        // The bug, stated: asking this process what it knows finds nothing.
+        app.agents = list_agents(&jod).await;
+        assert!(
+            !app.agents.iter().any(|a| a.id == "run-elsewhere"),
+            "the premise: the map holds only what this process started",
+        );
+
+        refresh_fleet(&jod, &mut app).await;
+        assert!(
+            app.agents.iter().any(|a| a.id == "run-elsewhere"),
+            "the console has to see it to be able to stop it: {:?}",
+            app.agents.iter().map(|a| &a.id).collect::<Vec<_>>(),
+        );
     }
 
     // ---- the model and the mode are written down ----
