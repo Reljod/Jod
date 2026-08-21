@@ -3595,8 +3595,14 @@ fn body<'a>(ws: Workspace, items: Vec<ListItem<'a>>, width: u16) -> List<'a> {
     )
 }
 
-fn empty(what: &str) -> Vec<ListItem<'static>> {
-    vec![ListItem::new(Span::styled(what.to_string(), fg(MUTED)))]
+fn empty(what: &str, width: u16) -> Vec<ListItem<'static>> {
+    // Fitted, not left to the widget to clip. A silently cut sentence is not a
+    // shorter sentence, it is a different one: at a hundred columns the memory
+    // screen read "nothing remembered yet — /remember writes on", which is
+    // both wrong and, being a grammatical phrase, not obviously truncated. An
+    // ellipsis at least says something is missing.
+    let inner = width.saturating_sub(2) as usize;
+    vec![ListItem::new(Span::styled(cut(what, inner), fg(MUTED)))]
 }
 
 /// The fleet: every delegation this process knows about, and the cursor that
@@ -3777,11 +3783,14 @@ fn draw_tree(f: &mut Frame, app: &App, area: Rect) {
     // tree is no longer empty — the chat is always its first row, and "no works
     // yet" as the only line would now be a claim the row above it contradicts.
     if rows.is_empty() {
-        items.extend(empty(if app.here().filtering() {
-            "  nothing matches"
-        } else {
-            "  no works yet"
-        }));
+        items.extend(empty(
+            if app.here().filtering() {
+                "  nothing matches"
+            } else {
+                "  no works yet"
+            },
+            area.width,
+        ));
     }
     // The flat list has always drawn this and the tree never did — so once the
     // fleet had a tree, which it now always does, a filter hid rows with
@@ -4194,7 +4203,7 @@ fn draw_fleet(f: &mut Frame, app: &App, area: Rect) {
     if rows.is_empty() {
         // Short enough to survive the master pane at the design width, which is
         // 44 cells inside its border — the longer form was clipped mid-word.
-        items.extend(empty("  nothing delegated yet — Ctrl-B starts one"));
+        items.extend(empty("  nothing delegated yet — Ctrl-B starts one", left.width));
     }
     if let Some(line) = filter_line(app) {
         items.push(ListItem::new(Line::from("")));
@@ -4506,7 +4515,7 @@ fn draw_memory(f: &mut Frame, app: &App, area: Rect) {
     let show_conf = inner >= 34;
 
     let mut items: Vec<ListItem> = if rows.is_empty() {
-        empty("nothing remembered yet — /remember writes one")
+        empty("nothing remembered yet — /remember writes one", left.width)
     } else {
         rows.iter()
             .enumerate()
@@ -5349,13 +5358,16 @@ fn draw_traffic_log(f: &mut Frame, app: &App, area: Rect) {
     items.push(ListItem::new(traffic_header(app, width)));
 
     if app.traffic_of.is_none() {
-        items.extend(empty("  no work chosen — T on a fleet row opens its bus"));
+        items.extend(empty("  no work chosen — T on a fleet row opens its bus", area.width));
     } else if rows.is_empty() {
-        items.extend(empty(if app.here().filtering() {
-            "  nothing matches — Esc clears the filter"
-        } else {
-            "  nothing has been said on this bus yet"
-        }));
+        items.extend(empty(
+            if app.here().filtering() {
+                "  nothing matches — Esc clears the filter"
+            } else {
+                "  nothing has been said on this bus yet"
+            },
+            area.width,
+        ));
     }
 
     // One row shorter than the other lists, because the header above is drawn
@@ -12016,6 +12028,41 @@ mod tests {
     /// and `★ jod` — with nothing anywhere saying a filter was on, so the
     /// screen read as a fleet that had lost them.
     #[test]
+    /// An empty state that does not fit says so, rather than becoming a
+    /// different sentence.
+    ///
+    /// The line was handed to the widget whole and clipped in silence. At a
+    /// hundred columns the memory screen read "nothing remembered yet —
+    /// /remember writes on", which is wrong *and* grammatical, so nothing about
+    /// it looks truncated — the reader has no reason to doubt it.
+    #[test]
+    fn an_empty_state_too_wide_for_its_pane_is_marked_as_cut() {
+        let mut a = app();
+        a.go(Workspace::Memory);
+        a.reconcile();
+
+        let narrow = rendered(&a, 100, 30);
+        let line = narrow
+            .lines()
+            .find(|l| l.contains("nothing remembered yet"))
+            .expect("the empty state is drawn");
+        assert!(
+            line.contains('…'),
+            "a clipped sentence has to say it was clipped:\n{line}"
+        );
+        assert!(
+            !line.contains("writes one"),
+            "the premise: it does not fit at this width:\n{line}"
+        );
+
+        // Given the room, it is left exactly as written.
+        let wide = rendered(&a, 200, 30);
+        assert!(
+            wide.contains("nothing remembered yet — /remember writes one"),
+            "nothing is cut when nothing needs to be:\n{wide}"
+        );
+    }
+
     /// A popup floats over the transcript; it does not merge with its border.
     ///
     /// Both popups were anchored at `input.y - h`, which puts their bottom
