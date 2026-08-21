@@ -2971,3 +2971,33 @@ to the run being *watched*: `/clear` while reading somebody else's agent would
 have reached in and forgotten that agent's session. And it does not take the
 screen-only behaviour away — `Ctrl-G l` still empties the transcript and touches
 nothing, which is what that key was always for.
+
+## The steps of a finished turn fold away
+
+A transcript kept every line of plumbing for as long as the conversation lived.
+Every tool call, everything a tool returned, and a routing line per turn saying
+which run the message had been handed to — all of it stayed on screen forever,
+so scrolling back through a day of work meant reading a log rather than reading
+the conversation. The screenshot that started this had two lines above an
+answer, and neither of them was the answer.
+
+The rule is now that plumbing is worth watching while it happens and is clutter
+once it is over. `/details` still decides whether the steps of the turn in
+flight are streamed at all, and nothing about a live run changed. What changed
+is what happens at the ending: the last `Entry::Done` is the boundary, so when
+the run stops there is no live turn left and the steps above fold themselves
+away without anything having to walk back and mark them. One dim line stands in
+their place — `⋯ 3 steps · Ctrl-O` — because steps that vanished silently would
+read as a transcript that had lost them, and `Ctrl-O` opens every fold in the
+conversation at once.
+
+`Ctrl-O` used to be a second, unremembered way to toggle `/details`, which is
+the thing it is now the complement of: one setting says how much of a live turn
+to show, the key says whether the record of finished turns can be read back.
+Three things are deliberately never folded. A failed call and its output stay,
+for the same reason a failure is recorded whether or not details are on — it is
+the reason the answer is about to be wrong. Diffs stay, because an edit shown as
+one line is the difference between watching an agent work and being able to
+trust it afterwards. And with `/details` off not even the marker is drawn: that
+setting is the answer to "I do not want to see the steps", and a row per turn
+counting them is still seeing them.
