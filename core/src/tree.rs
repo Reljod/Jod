@@ -516,6 +516,31 @@ impl Store {
                 loose.extend(by_project.remove(&project_id).unwrap_or_default());
                 continue;
             };
+            // Untracked, and untracked means gone from here. `Archived` was
+            // already off every everyday listing — `Store::projects` filters on
+            // it — and the fleet was the one surface that never asked, because
+            // it builds from `works` and only reads the project afterwards to
+            // find a heading for them. So archiving a repository took it out of
+            // the catalog panel and left the tree drawing it, its manager, and
+            // every work under it exactly as before, which reads as the archive
+            // having silently failed.
+            //
+            // The works go with it rather than falling through to `loose`. They
+            // are the subtree the heading was hiding, and promoting them to the
+            // top level would move the rows up a level instead of taking them
+            // off the screen — a louder version of the thing being asked to
+            // stop. Nothing is deleted and nothing is lost: the rows stay in the
+            // database, the sessions screen and `list_agents` still show any
+            // agent still running in there, and `jod project restore` puts the
+            // whole subtree back.
+            //
+            // `Paused` deliberately stays. It is the state that means dormant
+            // rather than finished, and it sides with `Active` on every listing
+            // — see `projects::State`.
+            if project.state == crate::projects::State::Archived {
+                by_project.remove(&project.id);
+                continue;
+            }
             let project_node = out.len();
             out.push(Node {
                 id: NodeId::project(&project.id),
@@ -979,6 +1004,75 @@ mod tests {
         assert_eq!(nodes[0].kind, NodeKind::Project);
         assert_eq!(nodes[1].kind, NodeKind::Work, "{nodes:?}");
         assert_eq!(nodes[1].depth, 1);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Untracking a project takes it and everything under it off the fleet.
+    ///
+    /// The whole point of the verb. Before this, archiving took a repository
+    /// off the catalog panel and left the tree drawing it unchanged, because
+    /// the tree builds from `works` and reads the project afterwards only to
+    /// find a heading — so the one screen you would look at to check it had
+    /// worked was the one screen that said it had not.
+    #[test]
+    fn an_untracked_project_takes_its_whole_subtree_off_the_fleet() {
+        let s = store();
+        let dir = format!("/tmp/jod-tree-untrack-{}", std::process::id());
+        std::fs::create_dir_all(&dir).unwrap();
+        let project = s
+            .add_project(crate::projects::NewProject::at(&dir).named("tetris"))
+            .unwrap();
+        s.manager_conversation(&project.id, HarnessKind::ClaudeCode)
+            .unwrap();
+        let work = s
+            .create_work_in("port the parser", Some(&project.id))
+            .unwrap();
+        session(&s, &work.id, None, "engineer");
+
+        assert_eq!(s.forest().unwrap().len(), 4, "project, manager, work, session");
+
+        s.set_project_state(&project.id, crate::projects::State::Archived)
+            .unwrap();
+
+        assert!(
+            s.forest().unwrap().is_empty(),
+            "the works go with the heading rather than being promoted to the top \
+             level, which would move the rows up rather than take them off: {:?}",
+            s.forest().unwrap()
+        );
+
+        // Nothing was deleted, so putting it back is one call and the subtree
+        // returns whole.
+        s.set_project_state(&project.id, crate::projects::State::Active)
+            .unwrap();
+        assert_eq!(s.forest().unwrap().len(), 4, "restore brings the subtree back");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Pausing is not untracking, and the fleet is where the two would be
+    /// easiest to conflate. `Paused` means dormant, and it sides with `Active`
+    /// on every listing — only `Archived` comes off them.
+    #[test]
+    fn a_paused_project_stays_on_the_fleet() {
+        let s = store();
+        let dir = format!("/tmp/jod-tree-paused-{}", std::process::id());
+        std::fs::create_dir_all(&dir).unwrap();
+        let project = s
+            .add_project(crate::projects::NewProject::at(&dir).named("tetris"))
+            .unwrap();
+        let work = s
+            .create_work_in("port the parser", Some(&project.id))
+            .unwrap();
+        session(&s, &work.id, None, "engineer");
+
+        s.set_project_state(&project.id, crate::projects::State::Paused)
+            .unwrap();
+
+        let nodes = s.forest().unwrap();
+        assert_eq!(nodes[0].kind, NodeKind::Project, "{nodes:?}");
+        assert_eq!(nodes[0].label, "tetris");
 
         std::fs::remove_dir_all(&dir).ok();
     }

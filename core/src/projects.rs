@@ -66,8 +66,17 @@ pub const MAX_NAME_CHARS: usize = 60;
 /// is whether the project shows up when nobody asked for the whole catalog,
 /// and there `Paused` sides with `Active`: [`Store::projects`] filters on
 /// `state != 'archived'`, so pausing a project leaves it on every everyday
-/// surface while archiving takes it off them. Naming a project outright works
-/// in all three states, through [`Store::projects_by_name`].
+/// surface while archiving takes it off them. That includes the fleet, which is
+/// the surface Reljod means when he says a project should stop showing up:
+/// [`crate::tree::Store::forest_of`] drops an archived project along with its
+/// manager and every work under it. Naming a project outright works in all
+/// three states, through [`Store::projects_by_name`].
+///
+/// `Archived` is what "untrack" means, and both words are in use on purpose.
+/// This one names the state the row is in, and every doc comment down here uses
+/// it; "untrack" names what it does to the screens, and it is the word the
+/// console's `x`, `/project untrack` and the `project_untrack` tool all print,
+/// because the screens are what the person is looking at.
 ///
 /// **Nothing can reach `Paused` yet.** There is no `jod project pause` and no
 /// MCP tool that sets it, so today it is a state the code understands and no

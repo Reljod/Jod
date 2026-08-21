@@ -991,11 +991,20 @@ enum ProjectCommand {
         #[arg(short, long)]
         conversation: Option<String>,
     },
-    /// Stop a project being inferred, without forgetting it.
+    /// Stop tracking a project, without forgetting it.
     ///
-    /// A paused or archived project can still be named explicitly; it just
-    /// stops competing for an offhand mention. Nothing is deleted — the point
-    /// of a catalog is to still answer "what was that repo called" later.
+    /// It comes off the fleet along with its manager and every work under it,
+    /// off the catalog, and out of inference. It can still be named explicitly;
+    /// it just stops competing for an offhand mention. Nothing is deleted — the
+    /// point of a catalog is to still answer "what was that repo called" later,
+    /// and `restore` brings the whole subtree back.
+    ///
+    /// Spelled both ways on purpose. `archive` is the state the row moves to
+    /// and the word every doc comment under `projects` uses; `untrack` is what
+    /// it does to the screens, and it is the word the console's own `x` and
+    /// `/project untrack` print. One verb answering to both is better than the
+    /// shell and the console disagreeing about its name.
+    #[command(alias = "untrack")]
     Archive { name: String },
     /// Put an archived or paused project back in play.
     Restore { name: String },
@@ -3351,14 +3360,16 @@ fn project_command(jod: &Jod, what: ProjectCommand) -> Result<()> {
             let project = find(&name)?;
             store.set_project_state(&project.id, State::Archived)?;
             println!(
-                "{} archived — it can still be named, but will not be inferred",
-                project.name
+                "{} untracked — off the fleet with its works, and it will not be \
+                 inferred. It can still be named, and `jod project restore {}` \
+                 puts it back",
+                project.name, project.name
             );
         }
         ProjectCommand::Restore { name } => {
             let project = find(&name)?;
             store.set_project_state(&project.id, State::Active)?;
-            println!("{} is back in play", project.name);
+            println!("{} is back in play, and back on the fleet", project.name);
         }
     }
     Ok(())

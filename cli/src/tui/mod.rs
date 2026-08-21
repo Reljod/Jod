@@ -315,6 +315,24 @@ pub enum Action {
     /// `apply_slash`, which refuses one that is not a directory rather than
     /// writing a row nothing will ever match.
     AddProject(PathBuf),
+    /// Take a repository out of the working set — `x` on a fleet project row,
+    /// or `/project untrack <name>`.
+    ///
+    /// The two routes know different things, and the difference is the whole
+    /// reason both fields are here. The fleet row carries the project's id, so
+    /// there is nothing to resolve and nothing to be ambiguous about — the
+    /// cursor was on exactly one repository. A typed name carries no id, so it
+    /// has to be looked up, and two checkouts called `proj` is the case where
+    /// picking one is worse than refusing.
+    ///
+    /// Collapsing this to a name would have made `x` on a row refuse because
+    /// some *other* row shares its name, which is the console arguing with a
+    /// finger already pointing at the answer. The name comes along either way,
+    /// because every sentence about what happened has to say it.
+    UntrackProject {
+        id: Option<String>,
+        name: String,
+    },
     /// Print the catalog, and put it on screen.
     ListProjects,
     /// Print this conversation's roots, in the user's own order, saying which
@@ -1610,6 +1628,62 @@ async fn perform(
                     Err(e) => format!("{} not catalogued: {e}", path.display()),
                 }
             })
+        }
+        // The catalog comes out for the same reason `AddProject` brings it out:
+        // the panel is where the effect is visible, and a row leaving it is as
+        // worth seeing as one arriving.
+        //
+        // No `Overlay::Confirm`. That overlay is titled "this cannot be undone"
+        // and means it, and this can: nothing is deleted, the works and
+        // transcripts stay, and one command puts the whole subtree back. The
+        // notice names that command, which is the friction that fits a
+        // reversible verb — see the charter's "reversible by default".
+        Action::UntrackProject { id, name } => {
+            reveal_catalog(app);
+            on_store(jod, app, move |store| {
+                // An id means a row was pointed at. Resolving it back through
+                // the name would reintroduce exactly the ambiguity the row had
+                // already settled.
+                let found = match &id {
+                    Some(id) => store.project(id).unwrap_or_default().into_iter().collect(),
+                    None => store.projects_by_name(&name).unwrap_or_default(),
+                };
+                match found.as_slice() {
+                    [only] if only.state == jod_core::projects::State::Archived => {
+                        format!("{} was already untracked — nothing changed", only.name)
+                    }
+                    [only] => match store
+                        .set_project_state(&only.id, jod_core::projects::State::Archived)
+                    {
+                        Ok(()) => format!(
+                            "{} untracked — off the fleet with its works, and out of \
+                             inference. `jod project restore {}` puts it back",
+                            only.name, only.name
+                        ),
+                        Err(e) => format!("{} not untracked: {e}", only.name),
+                    },
+                    [] => format!(
+                        "no project called `{name}` — `/project ls` says what is catalogued"
+                    ),
+                    // Untracking either takes a repository off the fleet, so
+                    // the tie is broken by the person, not by row order. This
+                    // is the trap `jod project archive proj` has: it archives
+                    // whichever row came back first and says nothing about the
+                    // other. The fleet's `x` never lands here, which is what
+                    // makes "go and press it there" a real instruction.
+                    several => format!(
+                        "`{name}` is the name of {} projects — {}. Press `x` on the one \
+                         you mean on the fleet, which knows which row you are on",
+                        several.len(),
+                        several
+                            .iter()
+                            .map(|p| p.path.display().to_string())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                }
+            });
+            refresh_workspaces(jod, app);
         }
         // Multi-line, like `/root` and `/sessions`: a catalog folded into one
         // notice is a paragraph of directories.
@@ -3714,6 +3788,37 @@ fn on_tree_key(app: &mut App, key: KeyEvent, viewport: usize) -> Option<Option<A
             ));
             handled(None)
         }
+        // `x` — stop tracking the repository the cursor is on.
+        //
+        // The same letter that forgets a memory and deletes a schedule, because
+        // it means the same thing on all three: take this row off this list.
+        // Fleet is not in `is_editable`, so the shared `x` above never fires
+        // here and this arm is reached.
+        //
+        // **The cursor has to be on the project row itself.** `T` climbs to the
+        // work above it and that is right for a key that navigates; climbing
+        // here would mean `x` on a run — one row inside a session inside a work
+        // — untracked the whole repository, which is a lot of screen to lose
+        // for one keystroke aimed at something small. So it refuses, and the
+        // refusal says which row to go to rather than only that this one is
+        // wrong.
+        KeyCode::Char('x') => {
+            let Some(node) = app.selected_node().cloned() else {
+                return handled(None);
+            };
+            if node.kind != jod_core::tree::NodeKind::Project {
+                app.push(Entry::Notice(
+                    "untracking is a repository's, so `x` works on a project row — \
+                     the top row of the group this one is in"
+                        .into(),
+                ));
+                return handled(None);
+            }
+            handled(Some(Action::UntrackProject {
+                id: Some(node.id.id.clone()),
+                name: node.label.clone(),
+            }))
+        }
         // `T` — what these agents are saying to each other.
         //
         // From a session or a run as well as from a work, and it opens the
@@ -5022,6 +5127,13 @@ fn apply_slash(app: &mut App, slash: command::Slash) -> Option<Action> {
                         None
                     }
                 },
+                // A name, and not run through the picker: this one names a row
+                // that is already catalogued, so a path on disk is neither
+                // needed nor a good check — the checkout of an untracked
+                // project is often the one that has already been deleted.
+                command::ProjectCmd::Untrack(name) => {
+                    Some(Action::UntrackProject { id: None, name })
+                }
             }
         }
         Slash::Sessions => {
@@ -10793,6 +10905,72 @@ mod tests {
             Some(Action::EnterManager("conv-9".into())),
             "the row has to carry the conversation to bind to"
         );
+    }
+
+    /// `x` on a project row untracks that repository, and carries the row's own
+    /// id rather than only its name.
+    ///
+    /// The id is the point. Two checkouts called `proj` make a name ambiguous
+    /// and the typed route refuses on it, but the cursor is already on exactly
+    /// one of them — a console that answered "which one did you mean" to a
+    /// finger pointing at the answer would be arguing with the user.
+    #[test]
+    fn x_on_a_project_row_untracks_that_repository() {
+        use jod_core::tree::{Node, NodeId, NodeKind};
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.forest = vec![
+            Node {
+                id: NodeId::project("p1"),
+                parent: None,
+                kind: NodeKind::Project,
+                depth: 0,
+                label: "tetris".into(),
+                summary: String::new(),
+                running: false,
+                status: None,
+                stalled_for_ms: None,
+                cards: 0,
+                blocked: 0,
+                colour: "cyan".into(),
+                expanded: true,
+                has_children: true,
+            },
+            Node {
+                id: NodeId::work("w1"),
+                parent: Some(NodeId::project("p1")),
+                kind: NodeKind::Work,
+                depth: 1,
+                label: "port the parser".into(),
+                summary: String::new(),
+                running: false,
+                status: None,
+                stalled_for_ms: None,
+                cards: 0,
+                blocked: 0,
+                colour: "cyan".into(),
+                expanded: true,
+                has_children: false,
+            },
+        ];
+        app.go(Workspace::Fleet);
+        app.tree.selected = Some(NodeId::project("p1"));
+
+        assert_eq!(
+            press(&mut app, KeyCode::Char('x')),
+            Some(Action::UntrackProject {
+                id: Some("p1".into()),
+                name: "tetris".into(),
+            }),
+        );
+
+        // On a work row it refuses and says where to press it instead. `T`
+        // climbs to the work above the cursor and that is right for a key that
+        // navigates; a mutating verb that climbed would untrack a whole
+        // repository from a keystroke aimed at one job inside it.
+        app.tree.selected = Some(NodeId::work("w1"));
+        assert_eq!(press(&mut app, KeyCode::Char('x')), None);
+        let said = format!("{:?}", app.transcript.last().unwrap());
+        assert!(said.contains("project row"), "{said}");
     }
 
     /// And a project row is a heading, so it folds rather than pretending to

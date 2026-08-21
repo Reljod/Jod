@@ -3085,3 +3085,35 @@ harnesses exactly as it does for main.
 
 The general shape: copying a pattern's shape is usually right, and copying its
 mechanism inherits its bugs.
+
+## A verb the fleet does not obey is a verb nobody believes
+
+Archiving a project already took it off the catalog, out of inference, and off
+`project_list`. It did not take it off the fleet. The fleet tree is built from
+`works` and reads the project afterwards only to find a heading for them, so it
+never asked what state that project was in — and the one screen you would look
+at to check the archive had worked was the one screen saying it had not.
+
+So `forest_of` drops an archived project, and its manager and works go with it.
+Not down to the top level as loose works: that moves the rows up a level instead
+of taking them off the screen, which is a louder version of the thing being
+asked to stop.
+
+Nothing is deleted. The rows stay, the transcripts stay, `list_agents` still
+shows an agent still running in there, naming the project outright still finds
+it, and `jod project restore` puts the whole subtree back. That is what makes
+one keystroke on the fleet the right amount of friction: `x` untracks without a
+confirmation, and the notice names the command that undoes it. `Overlay::Confirm`
+is titled "this cannot be undone" and means it — putting it in front of
+something that can is how people learn to dismiss the ones that matter.
+
+Two words for one state, on purpose. `archived` is what the row is and what
+every doc comment under `projects` says; "untrack" is what it does to the
+screens, and it is what the console's `x`, `/project untrack` and the
+`project_untrack` tool print. The person typing it is looking at a screen.
+`jod project archive` answers to `untrack` too, so the shell and the console do
+not disagree about the name of one verb.
+
+`paused` is deliberately untouched. It means dormant rather than finished and
+sides with `active` on every listing; the fleet is where the two would be
+easiest to conflate, so a test holds them apart.

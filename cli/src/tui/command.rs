@@ -188,20 +188,29 @@ pub enum RootCmd {
 
 /// What `/project` was asked to do.
 ///
-/// Two verbs where `jod project` has four. `archive` and `restore` are catalog
-/// housekeeping — they need a name you can only have got by listing first, and
-/// neither is what stops an instruction resolving. The gap this closes is that
-/// a catalog cannot be *started* from the console, so the two verbs that fill
-/// it are the two that are here; the rest stay at the shell, where the flags
-/// they take (`--name`, `--alias`, `--notes`, `--json`) belong. Prose
-/// arguments only, for the reason `/heartbeat` takes `off` rather than
-/// `--off`: a single flag in a set that has none is a spelling nobody guesses.
+/// Three verbs where `jod project` has five. `restore` stays at the shell: it
+/// is catalog housekeeping, it needs a name you can only have got by listing
+/// with `--all`, and it is not what stops an instruction resolving. The rest
+/// stay there too, where the flags they take (`--name`, `--alias`, `--notes`,
+/// `--json`) belong. Prose arguments only, for the reason `/heartbeat` takes
+/// `off` rather than `--off`: a single flag in a set that has none is a
+/// spelling nobody guesses.
+///
+/// `untrack` is here rather than at the shell because it is the inverse of
+/// `add`, and a verb whose opposite lives somewhere else is one people stop
+/// believing in. It is `jod project archive` under a different name — the state
+/// is still `archived` — because "untrack" says what happens to the screens and
+/// "archive" says what happens to the row, and the person typing it is looking
+/// at a screen.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProjectCmd {
     List,
     /// `None` catalogs the directory the console was launched in, exactly as
     /// `jod project add` with no path catalogs the shell's working directory.
     Add(Option<String>),
+    /// Take a repository out of the working set: off the fleet, off the
+    /// catalog, and out of inference. Reversible with `jod project restore`.
+    Untrack(String),
 }
 
 pub fn parse(line: &str) -> Option<Slash> {
@@ -311,6 +320,19 @@ pub fn parse(line: &str) -> Option<Slash> {
                 Some("add") => {
                     let path = words.collect::<Vec<_>>().join(" ");
                     Slash::Project(ProjectCmd::Add((!path.is_empty()).then_some(path)))
+                }
+                // A name rather than a path, because this one acts on a row
+                // that is already in the catalog. Named rather than taken from
+                // the cursor for the same reason `/root rm` takes one: the
+                // console is not always on the fleet, and the fleet's own `x`
+                // is the cursor-shaped way to do this.
+                Some("untrack") => {
+                    let name = words.collect::<Vec<_>>().join(" ");
+                    if name.is_empty() {
+                        Slash::NeedsArgument("/project untrack <name>")
+                    } else {
+                        Slash::Project(ProjectCmd::Untrack(name))
+                    }
                 }
                 Some(other) => Slash::Unknown(format!("/project {other}")),
             }
@@ -651,8 +673,8 @@ pub const HELP: &[(&str, &str)] = &[
         "the directories this session works in (Ctrl-P picks one)",
     ),
     (
-        "/project [add]",
-        "the repositories an instruction resolves against; `add [path]` catalogs one",
+        "/project [add|untrack]",
+        "the repositories an instruction resolves against; `untrack <name>` drops one",
     ),
     ("/sessions", "conversations you can pick up"),
     ("/resume <id>", "continue one of them"),
@@ -948,16 +970,20 @@ pub fn completions(input: &str, app: &crate::tui::App) -> Vec<Completion> {
             );
             out
         }
-        // The two verbs, offered rather than remembered. Without this the only
-        // way to learn that `/project` takes `add` is the one-line hint in
-        // `/help`, which scrolls — and a catalog you cannot start is the whole
-        // of the bug this command exists to close.
+        // The verbs, offered rather than remembered. Without this the only way
+        // to learn that `/project` takes `add` is the one-line hint in `/help`,
+        // which scrolls — and a catalog you cannot start is the whole of the
+        // bug this command exists to close.
         "project" | "projects" | "repo" | "repos" => [
             (
                 "add ",
                 "catalog a repository — no path means the one Jod was launched in",
             ),
             ("ls", "the catalog, most recently worked in first"),
+            (
+                "untrack ",
+                "take one off the fleet and out of inference — `jod project restore` undoes it",
+            ),
         ]
         .into_iter()
         .filter(|(verb, _)| verb.trim_end().starts_with(&typed))
@@ -1946,7 +1972,7 @@ mod tests {
     /// Typeable is not the same as findable, and the complaint was that `/`
     /// offered no route to the catalog at all.
     #[test]
-    fn the_slash_list_offers_project_and_both_its_verbs() {
+    fn the_slash_list_offers_project_and_all_its_verbs() {
         assert!(
             lines("/").contains(&"/project".to_string()),
             "{:?}",
@@ -1955,17 +1981,52 @@ mod tests {
         assert_eq!(lines("/proj"), vec!["/project".to_string()]);
 
         let offered = lines("/project ");
-        assert_eq!(offered, vec!["/project add ", "/project ls"]);
+        assert_eq!(
+            offered,
+            vec!["/project add ", "/project ls", "/project untrack "]
+        );
         // Nothing may be offered that the parser then calls unknown — the rule
         // `/harness`, `/mode` and `/config` each keep.
+        //
+        // `NeedsArgument` satisfies it and `Unknown` does not, which is the
+        // whole distinction that variant exists for: `/project untrack` on its
+        // own is a real command halfway typed, and it answers by printing the
+        // form it wants rather than by denying the verb exists. The trailing
+        // space in the completion is what says so before you press anything.
         for line in offered {
             let parsed = parse(line.trim_end());
             assert!(
-                matches!(parsed, Some(Slash::Project(_))),
+                matches!(
+                    parsed,
+                    Some(Slash::Project(_)) | Some(Slash::NeedsArgument(_))
+                ),
                 "{line} was suggested but parses as {parsed:?}"
             );
         }
         assert_eq!(lines("/project a"), vec!["/project add "], "typing narrows");
+        assert_eq!(lines("/project u"), vec!["/project untrack "]);
+    }
+
+    /// The verb and what it takes. A bare `untrack` is the halfway-typed
+    /// command, not an unknown one, so it says which form it wants.
+    #[test]
+    fn untrack_takes_a_name_and_says_so_when_it_is_missing() {
+        assert_eq!(
+            parse("/project untrack tetris"),
+            Some(Slash::Project(ProjectCmd::Untrack("tetris".into())))
+        );
+        // Multi-word names survive, the way `/root rm` keeps a path with spaces.
+        assert_eq!(
+            parse("/project untrack the tetris thing"),
+            Some(Slash::Project(ProjectCmd::Untrack("the tetris thing".into())))
+        );
+        assert!(
+            matches!(parse("/project untrack"), Some(Slash::NeedsArgument(_))),
+            "{:?}",
+            parse("/project untrack")
+        );
+        // The aliases carry it too, for the reason `/repos ls` works.
+        assert_eq!(parse("/repo untrack tetris"), parse("/project untrack tetris"));
     }
 
     /// The console is where the sign-in failure is met — a run dies
